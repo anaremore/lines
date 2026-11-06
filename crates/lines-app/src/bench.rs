@@ -2,10 +2,17 @@
 //! 6 charts + 2 DOMs open while their feeds run.
 //!
 //! `lines --bench SECONDS [--workspace NAME] [--source …] [--size WxH]` opens the workspace
-//! (default `6c2d`) in a hidden window and draws a frame every 8 ms (the UI poll period) for
-//! the given time, after a 2 s warm-up. Each frame is `Window::draw`: layout, every pane that
-//! changed since the last frame repaints (cached panes replay), scene built. That is the CPU
-//! side of a frame; GPU time and presentation are not included (the window is never shown).
+//! (default `6c2d`) in a hidden window for the given time, after a 2 s warm-up. Frames are
+//! demand-driven, as GPUI draws a shown window: every 8 ms (a 120 Hz vsync) a frame is drawn
+//! only if some view notified since the last one (a pane, or the window itself). Each frame
+//! is `Window::draw`: layout, every pane that changed since the last frame repaints (cached
+//! panes replay), scene built. That is the CPU side of a frame; GPU time and presentation are
+//! not included (the window is never shown). The report gives frames drawn per second, paints
+//! per pane kind and the process's CPU time (all threads: feeds, indicators, UI).
+//!
+//! `--bench-expect-idle` asserts nothing redraws without new data or input: with a replay
+//! that has finished (`--source replay --speed 0`), no frame may be drawn after the warm-up
+//! (exit 3 otherwise).
 //!
 //! On the mock source the six charts are on two contracts (ES front month and the next), three
 //! each, and the DOMs one per contract: two feeds at the mock's rate (default 5,000
@@ -20,6 +27,8 @@
 //! Memory is the process's resident set (working set on Windows) at start (before the UI
 //! and the feeds) and at the end. Use a release build for numbers worth comparing.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -45,6 +54,7 @@ pub fn run(
     size: (f32, f32),
     seconds: u64,
     hide_doms: bool,
+    expect_idle: bool,
 ) -> Result<i32> {
     let mock = matches!(ws.env.base.source, Source::CqgMock(_));
     if mock && doc.name == "6c2d" {
@@ -98,13 +108,46 @@ pub fn run(
                 std::process::exit(1);
             }
         };
+        // Frame demand: a pane or the window itself notified since the last frame.
+        let demand = Rc::new(Cell::new(1u64));
+        let mut subscriptions = Vec::new();
+        if let Ok(root) = handle.entity(cx) {
+            let d = demand.clone();
+            subscriptions.push(cx.observe(&root, move |_, _| d.set(d.get() + 1)));
+        }
+        let panes: Vec<workspace::PaneHandle> = handle
+            .read(cx)
+            .map(|wv| wv.panes_by_state().into_iter().map(|p| p.2).collect())
+            .unwrap_or_default();
+        for p in &panes {
+            let d = demand.clone();
+            subscriptions.push(p.on_notify(cx, move || d.set(d.get() + 1)));
+        }
         cx.spawn(async move |cx| {
+            let _subscriptions = subscriptions;
             let mut times: Vec<Duration> = Vec::new();
+            let mut drawn_at = 0u64;
+            let mut vsyncs = 0u64;
+            let mut paints_at_start: Option<Vec<u64>> = None;
+            let mut cpu_at_start = None;
             let start = Instant::now();
-            let end = start + WARMUP + Duration::from_secs(seconds);
+            let measure_from = start + WARMUP;
+            let end = measure_from + Duration::from_secs(seconds);
             while Instant::now() < end {
                 cx.background_executor().timer(FRAME).await;
-                let measuring = start.elapsed() >= WARMUP;
+                let measuring = Instant::now() >= measure_from;
+                if measuring && paints_at_start.is_none() {
+                    cpu_at_start = cpu_time();
+                    paints_at_start =
+                        Some(cx.update(|cx| panes.iter().map(|p| p.paints(cx)).collect()));
+                }
+                if measuring {
+                    vsyncs += 1;
+                }
+                if demand.get() == drawn_at {
+                    continue; // nothing asked for a frame: GPUI draws nothing either
+                }
+                drawn_at = demand.get();
                 let r = cx.update_window(handle.into(), |_, window, cx| {
                     let t = Instant::now();
                     window.draw(cx).clear(cx);
@@ -117,6 +160,46 @@ pub fn run(
                         eprintln!("benchmark failed: {e:#}");
                         std::process::exit(1);
                     }
+                }
+            }
+            let cpu = cpu_at_start.zip(cpu_time()).map(|(a, b)| b.saturating_sub(a));
+            let measured = measure_from.elapsed().as_secs_f64();
+            let start_paints = paints_at_start.unwrap_or_default();
+            let mut by_kind: Vec<(PaneKind, u64)> = Vec::new();
+            cx.update(|cx| {
+                for (i, p) in panes.iter().enumerate() {
+                    let n = p.paints(cx) - start_paints.get(i).copied().unwrap_or(0);
+                    match by_kind.iter_mut().find(|k| k.0 == p.kind()) {
+                        Some(k) => k.1 += n,
+                        None => by_kind.push((p.kind(), n)),
+                    }
+                }
+            });
+            let frames = times.len();
+            println!(
+                "frames drawn (demand-driven, 8 ms vsync): {frames} of {vsyncs} = {:.1} frames/s; pane paints/s: {}; process CPU: {}",
+                frames as f64 / measured,
+                by_kind
+                    .iter()
+                    .map(|(k, n)| format!("{k:?} {:.1}", *n as f64 / measured))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                cpu.map_or_else(
+                    || "n/a".to_owned(),
+                    |c| format!("{:.1}% of one core", c.as_secs_f64() / measured * 100.0)
+                ),
+            );
+            if expect_idle {
+                println!(
+                    "idle check: {}",
+                    if frames == 0 {
+                        "ok: no frame drawn without new data or input"
+                    } else {
+                        "FAIL: frames drawn while idle"
+                    }
+                );
+                if frames > 0 {
+                    std::process::exit(3);
                 }
             }
             // (tab, state, paints) for every pane.
@@ -295,6 +378,27 @@ fn report(
     );
 }
 
+/// CPU time used by the whole process so far (user + kernel, all threads).
+pub fn cpu_time() -> Option<Duration> {
+    #[cfg(windows)]
+    {
+        win::cpu_time()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // utime and stime: fields 14 and 15 of /proc/self/stat, in clock ticks (100 Hz).
+        let s = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let rest = &s[s.rfind(')')? + 2..];
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        let ticks = f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?;
+        Some(Duration::from_millis(ticks * 10))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
+}
+
 /// The process's resident memory in bytes, if the platform tells us.
 pub fn resident_bytes() -> Option<u64> {
     #[cfg(windows)]
@@ -347,6 +451,22 @@ mod win {
     unsafe extern "system" {
         fn GetCurrentProcess() -> isize;
         fn K32GetProcessMemoryInfo(process: isize, counters: *mut Counters, cb: u32) -> i32;
+        fn GetProcessTimes(
+            process: isize,
+            creation: *mut u64,
+            exit: *mut u64,
+            kernel: *mut u64,
+            user: *mut u64,
+        ) -> i32;
+    }
+
+    /// Kernel + user time of every thread so far.
+    pub fn cpu_time() -> Option<std::time::Duration> {
+        let (mut c, mut e, mut k, mut u) = (0u64, 0u64, 0u64, 0u64);
+        // SAFETY: four writable FILETIMEs (u64, 100 ns units, same layout); the pseudo-handle
+        // from GetCurrentProcess needs no closing.
+        let ok = unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+        (ok != 0).then(|| std::time::Duration::from_nanos((k + u) * 100))
     }
 
     pub fn working_set() -> Option<u64> {
@@ -364,6 +484,13 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_cpu_time() {
+        if cfg!(any(windows, target_os = "linux")) {
+            assert!(cpu_time().is_some());
+        }
+    }
 
     #[test]
     fn reads_resident_memory() {
