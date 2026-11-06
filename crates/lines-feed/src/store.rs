@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lines_core::{
-    BarSeries, Capabilities, ContractKey, OrderBook, Price, Print, Product, Stitcher, Tape,
-    UtcMillis, VolumeAtPrice,
+    BarSeries, Capabilities, ContractKey, OrderBook, Price, Print, Product, SessionProfiles,
+    Stitcher, Tape, UtcMillis, VolumeAtPrice,
 };
 use parking_lot::{Mutex, MutexGuard};
 
@@ -122,6 +122,9 @@ pub struct ChartData {
     /// modelled yet). Only trades the stitch counts as new, so a re-delivered trade is never
     /// counted twice.
     pub vap: VolumeAtPrice,
+    /// Volume profiles per ETH/RTH session (the product's session calendar) and per bar, from
+    /// the same counted trades as `vap`, split by aggressor (`lines_core::profile`).
+    pub profiles: SessionProfiles,
     /// Stitches history snapshots and live trades (`lines_core::stitch`).
     pub stitch: Stitcher,
     pub history: HistoryState,
@@ -174,6 +177,7 @@ impl ChartData {
                             aggressor,
                         });
                         self.vap.add(price, qty);
+                        self.profiles.add(time, price, qty, aggressor);
                     }
                     self.last_trade = Some(price);
                     self.stats.trades_in += 1;
@@ -274,6 +278,7 @@ impl ChartData {
         self.book.clear();
         self.tape.clear();
         self.vap.clear();
+        self.profiles.clear();
     }
 
     fn bump_time(&mut self, t: UtcMillis) {
@@ -342,6 +347,7 @@ impl ChartStore {
                 book: OrderBook::default(),
                 tape: Tape::new(TAPE_PRINTS),
                 vap: VolumeAtPrice::default(),
+                profiles: SessionProfiles::new(calendar, period_ms, max_bars),
                 // Journal cap: ~ one busy hour of trades while history is outstanding.
                 stitch: Stitcher::new(period_ms, 500_000),
                 history: if capabilities.history {
@@ -503,5 +509,37 @@ mod tests {
             Price(600_000),
             "old bars kept, unadjusted"
         );
+    }
+
+    #[test]
+    fn trades_feed_the_session_profiles_and_a_roll_clears_them() {
+        use lines_core::{Aggressor, SessionKind};
+        let es = catalog::get(catalog::ES).unwrap();
+        let z26 = ContractKey::monthly(es.id, 2026, Month::new(12).unwrap());
+        let h27 = ContractKey::monthly(es.id, 2027, Month::new(3).unwrap());
+        let store = ChartStore::new(es, Some(z26), Capabilities::default(), "test", 60_000, 100);
+        let mut d = store.read();
+        let trade = |at: &str, p, q, aggressor| MarketEvent::Trade {
+            time: UtcMillis::parse_iso(at).unwrap(),
+            price: Price(p),
+            qty: Qty(q),
+            aggressor,
+        };
+        // 13:00 UTC = 07:00 CT (ETH only); 15:00 UTC = 09:00 CT (RTH too).
+        d.apply(&[
+            trade("2026-11-05T13:00:00", 600_000, 2, Some(Aggressor::Sell)),
+            trade("2026-11-05T15:00:00", 600_025, 3, Some(Aggressor::Buy)),
+        ]);
+        let eth = &d.profiles.sessions(SessionKind::Eth)[0];
+        assert_eq!(eth.volume.total(), Qty(5));
+        assert_eq!(eth.volume.get(Price(600_000)).sell, Qty(2));
+        assert_eq!(
+            d.profiles.sessions(SessionKind::Rth)[0].volume.total(),
+            Qty(3)
+        );
+        assert_eq!(d.vap.total(), Qty(5));
+        d.apply(&[MarketEvent::ContractChanged(h27)]);
+        assert!(d.profiles.sessions(SessionKind::Eth).is_empty());
+        assert_eq!(d.profiles.data_start(), None);
     }
 }

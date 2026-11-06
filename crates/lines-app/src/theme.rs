@@ -93,6 +93,17 @@ pub struct Theme {
     pub link: [Hsla; 4],
     /// Study lines (VWAP, …), picked per instance. Never up/down or the accent.
     pub study: [Hsla; 4],
+    /// Chart volume profile: rows inside the value area (rows outside it use `volume_bar`),
+    /// the point of control, and the value-area edges. Neutral and translucent, drawn behind
+    /// the candles; never the accent, the up/down or the study colours.
+    pub profile_va: Hsla,
+    pub profile_poc: Hsla,
+    pub profile_edge: Hsla,
+    /// Volume profile split by aggressor: buyer- and seller-initiated volume (direction
+    /// colours, translucent; the two are also told apart by position: sells are always
+    /// drawn from the profile's base edge).
+    pub profile_buy: Hsla,
+    pub profile_sell: Hsla,
 }
 
 fn c(hex: u32) -> Hsla {
@@ -136,6 +147,11 @@ impl Theme {
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
             // sand, teal, silver, orchid
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
+            profile_va: c(0x9a9fb2).opacity(0.30),
+            profile_poc: c(brand::PAPER).opacity(0.70),
+            profile_edge: c(brand::PAPER).opacity(0.30),
+            profile_buy: c(up).opacity(0.38),
+            profile_sell: c(down).opacity(0.38),
         }
     }
 
@@ -174,6 +190,11 @@ impl Theme {
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
+            profile_va: c(0x565b6e).opacity(0.24),
+            profile_poc: c(brand::INK).opacity(0.65),
+            profile_edge: c(brand::INK).opacity(0.30),
+            profile_buy: c(up).opacity(0.32),
+            profile_sell: c(down).opacity(0.32),
         }
     }
 
@@ -405,6 +426,7 @@ mod tests {
         // docs/design.md §5: all colours come from theme tokens.
         for (file, src) in [
             ("chart_view.rs", include_str!("chart_view.rs")),
+            ("profile.rs", include_str!("profile.rs")),
             ("dom_view.rs", include_str!("dom_view.rs")),
             ("tape_view.rs", include_str!("tape_view.rs")),
             ("workspace.rs", include_str!("workspace.rs")),

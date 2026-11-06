@@ -343,9 +343,12 @@ mod tests {
     #[test]
     fn pane_keys_stay_with_the_panes() {
         // Letters open the picker, C/G drive the DOM, Home resets the chart, Ctrl+K opens the
-        // picker, Ctrl+D and Alt+M work inside it: none of them is a workspace command.
+        // picker, Ctrl+D and Alt+M work inside it, Alt+V/R/B/G drive the chart's volume
+        // profile: none of them is a workspace command.
         for k in [
             "a", "c", "g", "shift-g", "home", "left", "escape", "enter", "alt-m", "0",
+            // Chart volume profile: Alt+V/R/B/G.
+            "alt-v", "alt-r", "alt-b", "alt-g",
         ] {
             assert_eq!(cmd(k), None, "{k}");
         }
