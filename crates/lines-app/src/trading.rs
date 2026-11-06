@@ -63,9 +63,31 @@ pub struct AccountInfo {
     pub rules: Option<RulePreset>,
 }
 
-/// A rejection shown inline where it happened.
+/// Whose refusal a flash reports (docs/inspiration.md: denied is not rejected).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    /// Refused by the trading core (validation, risk, prop rules): never sent.
+    Denied,
+    /// Sent, refused by the broker.
+    Rejected,
+    /// Something the broker did that shouldn't happen (an overfill).
+    Warning,
+}
+
+impl FlashKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            FlashKind::Denied => "DENIED",
+            FlashKind::Rejected => "REJECTED",
+            FlashKind::Warning => "WARNING",
+        }
+    }
+}
+
+/// A refusal shown inline where it happened.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Flash {
+    pub kind: FlashKind,
     pub account: AccountId,
     pub contract: Option<ContractKey>,
     /// The order's price, to show it on its row (none: the header).
@@ -87,6 +109,9 @@ struct Note {
 pub struct TradeState {
     /// Open orders.
     orders: BTreeMap<OrderId, Order>,
+    /// Sent with no known outcome (after a restart or reconnect): listed, never drawn as
+    /// working.
+    unresolved: BTreeMap<OrderId, Order>,
     finished: VecDeque<Order>,
     positions: HashMap<(AccountId, ContractKey), PositionView>,
     accounts: HashMap<AccountId, AccountView>,
@@ -105,6 +130,7 @@ impl TradeState {
                 let note = self.notes.remove(&id);
                 if let (Err(r), Some(n)) = (&result, &note) {
                     self.flashes.push_back(Flash {
+                        kind: FlashKind::Denied,
                         account: n.account.clone(),
                         contract: n.contract,
                         price: n.price,
@@ -122,6 +148,7 @@ impl TradeState {
                 let account = o.account.clone();
                 if let lines_trading::OrderState::Rejected { reason } = &o.state {
                     self.flashes.push_back(Flash {
+                        kind: FlashKind::Rejected,
                         account: o.account.clone(),
                         contract: Some(o.contract),
                         price: crate::dom_trade::order_price(&o),
@@ -129,9 +156,14 @@ impl TradeState {
                         at: now,
                     });
                 }
-                if o.is_open() {
+                if o.state == lines_trading::OrderState::Unresolved {
+                    self.orders.remove(&o.id);
+                    self.unresolved.insert(o.id, o);
+                } else if o.is_open() {
+                    self.unresolved.remove(&o.id);
                     self.orders.insert(o.id, o);
                 } else {
+                    self.unresolved.remove(&o.id);
                     self.orders.remove(&o.id);
                     if self.finished.len() == KEEP_FINISHED {
                         self.finished.pop_front();
@@ -156,6 +188,27 @@ impl TradeState {
                 self.rebuilds += 1;
                 None
             }
+            Event::Overfill {
+                account,
+                order,
+                excess,
+                recorded,
+            } => {
+                self.flashes.push_back(Flash {
+                    kind: FlashKind::Warning,
+                    account: account.clone(),
+                    contract: None,
+                    price: None,
+                    message: format!(
+                        "order {} filled {} more than its quantity ({})",
+                        order.0,
+                        excess.0,
+                        if recorded { "recorded" } else { "refused" }
+                    ),
+                    at: now,
+                });
+                Some(account)
+            }
         }
     }
 
@@ -166,6 +219,7 @@ impl TradeState {
             Some(Err(r)) => {
                 let message = r.message.clone();
                 self.flashes.push_back(Flash {
+                    kind: FlashKind::Denied,
                     account: n.account,
                     contract: n.contract,
                     price: n.price,
@@ -213,6 +267,14 @@ impl TradeState {
         self.positions
             .get(&(account.clone(), contract))
             .filter(|p| p.qty != 0)
+    }
+
+    /// How many of the account's orders have no known outcome.
+    pub fn unresolved(&self, account: &AccountId) -> usize {
+        self.unresolved
+            .values()
+            .filter(|o| &o.account == account)
+            .count()
     }
 
     pub fn account(&self, account: &AccountId) -> Option<&AccountView> {
@@ -410,6 +472,8 @@ impl Trading {
                     core.add_account(a.config, Some(a.tracker));
                 }
                 core.set_next_order_id(f.next_order_id);
+                // Sent before the app stopped, no answer: unresolved until the broker says.
+                core.restore_in_flight(f.in_flight);
                 (core, f.paper)
             }
             None => {

@@ -23,6 +23,15 @@ pub struct RiskLimits {
     /// Whole currency units of loss today (realised + unrealised, fees included).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_loss: Option<i64>,
+    /// Largest notional per order (price × quantity × point value), whole currency units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_notional: Option<i64>,
+    /// New orders per second (a runaway script or a stuck key can't flood the broker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_submits_per_sec: Option<u32>,
+    /// Modifies per second, counted separately (dragging an order sends many).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_modifies_per_sec: Option<u32>,
 }
 
 /// What the check needs to know about the account and market.
@@ -36,6 +45,8 @@ pub struct RiskContext {
     pub reference: Option<Price>,
     /// Today's P&L (realised + unrealised − fees).
     pub day_pnl: Money,
+    /// New orders in the last second, this one excluded.
+    pub recent_submits: u32,
 }
 
 fn risk(msg: String) -> Reject {
@@ -57,6 +68,25 @@ pub fn check(
             "daily loss limit reached ({} today, limit {loss}); only Flatten and Cancel All",
             ctx.day_pnl
         )));
+    }
+    if let Some(max) = limits.max_submits_per_sec
+        && ctx.recent_submits >= max
+    {
+        return Err(risk(format!(
+            "more than {max} new orders in a second; slow down (Flatten and Cancel All still work)"
+        )));
+    }
+    if let Some(max) = limits.max_notional {
+        // Market orders are valued at the market.
+        let price = kind.prices().next().or(ctx.reference);
+        if let Some(p) = price {
+            let notional = spec.money(p.0.unsigned_abs() as i128, qty.0 as i128);
+            if notional > Money::whole(max) {
+                return Err(risk(format!(
+                    "order value {notional} is over the maximum {max}.00"
+                )));
+            }
+        }
     }
     if let Some(max) = limits.max_order_qty
         && qty.0 > max

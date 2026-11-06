@@ -409,6 +409,9 @@ impl PaperBroker {
         if qty.0 <= 0 {
             return;
         }
+        // A stable execution id: the order and how much it had filled before (unique per
+        // fill, the same if the broker's history is replayed).
+        let trade_id = format!("paper-{}-{}", id.0, po.order.filled.0);
         po.order.apply_fill(price, qty, now);
         let o = po.order.clone();
         if !o.is_open() {
@@ -430,23 +433,70 @@ impl PaperBroker {
             }
         };
         let realised = pos.apply_fill(o.side, price, qty);
+        let position = pos.qty();
         acct.balance += spec.money(realised, 1) - fee;
         acct.positions.retain(|p| !p.position.is_flat());
         self.out.push(BrokerEvent::Fill {
             id,
+            trade_id,
             price,
             qty,
             fee,
             at: now,
         });
         self.after_fill(now, &o, qty);
+        self.shrink_reduce_only(now, &o.account, o.contract, position);
     }
 
-    /// Bracket bookkeeping after a fill (server-side OCO).
-    fn after_fill(&mut self, now: UtcMillis, o: &Order, _qty: Qty) {
+    /// Reduce-only orders never close more than the position: shrink them as it shrinks,
+    /// cancel them when it is flat (or on their side).
+    fn shrink_reduce_only(
+        &mut self,
+        now: UtcMillis,
+        account: &AccountId,
+        contract: ContractKey,
+        position: i64,
+    ) {
+        let ids: Vec<OrderId> = self
+            .orders
+            .values()
+            .filter(|p| {
+                p.order.reduce_only && &p.order.account == account && p.order.contract == contract
+            })
+            .map(|p| p.order.id)
+            .collect();
+        // What the position lets reduce-only orders close, oldest first.
+        let mut closable = position.abs();
+        for id in ids {
+            let Some(po) = self.orders.get_mut(&id) else {
+                continue;
+            };
+            let opposes = position != 0 && po.order.side.sign() == -position.signum();
+            let allowed = if opposes { closable } else { 0 };
+            let left = po.order.remaining().0;
+            if allowed == 0 {
+                self.cancel(now, id, "reduce-only: nothing left to close");
+            } else if left > allowed {
+                po.order.qty = Qty(po.order.filled.0 + allowed);
+                let order = po.order.clone();
+                self.out.push(BrokerEvent::Modified { order });
+                closable -= allowed;
+            } else {
+                closable -= left;
+            }
+        }
+    }
+
+    /// Bracket bookkeeping after a fill (server-side OCO, one-updates-other).
+    ///
+    /// Every live exit's remaining quantity is the bracket's **open** quantity: what the entry
+    /// has filled less what the exits have closed. An entry fill grows each exit by the fill;
+    /// an exit fill shrinks its sibling by the fill. When nothing is open: with the entry
+    /// finished, the sibling is cancelled (OCO done); with the entry still working, the
+    /// sibling is held (inactive, nothing to close) until the entry fills again.
+    fn after_fill(&mut self, now: UtcMillis, o: &Order, qty: Qty) {
         match o.role {
             Role::Entry => {
-                // Exits follow the entry's filled quantity and go live.
                 let exits: Vec<OrderId> = self
                     .orders
                     .values()
@@ -457,11 +507,15 @@ impl PaperBroker {
                     let Some(po) = self.orders.get_mut(&x) else {
                         continue;
                     };
-                    if po.order.qty != o.filled {
-                        po.order.qty = o.filled;
-                        let order = po.order.clone();
-                        self.out.push(BrokerEvent::Modified { order });
-                    }
+                    // Never activated yet: its quantity is still the bracket's request.
+                    let fresh = po.held && po.order.state == OrderState::Acked;
+                    po.order.qty = if fresh {
+                        qty
+                    } else {
+                        Qty(po.order.qty.0 + qty.0)
+                    };
+                    let order = po.order.clone();
+                    self.out.push(BrokerEvent::Modified { order });
                     if po.held {
                         po.held = false;
                         self.activate(now, x);
@@ -470,22 +524,24 @@ impl PaperBroker {
             }
             Role::TakeProfit | Role::StopLoss => {
                 let Some(sib) = o.oco else { return };
-                let entry_filled = o
+                let entry_open = o
                     .parent
-                    .and_then(|p| self.orders.get(&p).map(|e| e.order.filled))
-                    .unwrap_or(o.qty);
+                    .and_then(|p| self.orders.get(&p))
+                    .is_some_and(|e| e.order.is_open());
                 let Some(sp) = self.orders.get_mut(&sib) else {
                     return;
                 };
-                // The sibling now only has to close what this exit hasn't.
-                let open = (entry_filled.0 - o.filled.0).max(0);
-                if open == 0 {
+                let left = (sp.order.remaining().0 - qty.0).max(0);
+                if left == 0 && !entry_open {
                     self.cancel(now, sib, "OCO: the other exit filled");
-                } else if sp.order.remaining().0 > open {
-                    sp.order.qty = Qty(sp.order.filled.0 + open);
-                    let order = sp.order.clone();
-                    self.out.push(BrokerEvent::Modified { order });
+                    return;
                 }
+                sp.order.qty = Qty(sp.order.filled.0 + left);
+                if left == 0 {
+                    sp.held = true; // nothing to close until the entry fills again
+                }
+                let order = sp.order.clone();
+                self.out.push(BrokerEvent::Modified { order });
             }
             _ => {}
         }
@@ -550,12 +606,14 @@ impl PaperBroker {
             reason: reason.into(),
             at: now,
         });
-        // An entry cancelled before any fill takes its held exits with it.
-        if po.order.role == Role::Entry && po.order.filled.0 == 0 {
+        // An entry cancelled takes with it the exits that have nothing to close: all of them
+        // before any fill, else those held with nothing open.
+        if po.order.role == Role::Entry {
             let exits: Vec<OrderId> = self
                 .orders
                 .values()
                 .filter(|p| p.order.parent == Some(id))
+                .filter(|p| po.order.filled.0 == 0 || p.order.remaining().0 == 0)
                 .map(|p| p.order.id)
                 .collect();
             for x in exits {

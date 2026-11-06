@@ -73,6 +73,44 @@ pub struct RulePreset {
     /// Flatten the account (as a rule command) when the drawdown or daily loss is breached.
     #[serde(default)]
     pub liquidate_on_breach: bool,
+    /// What the account may still do after each breach.
+    #[serde(default)]
+    pub on_breach: BreachStates,
+}
+
+/// An account's trading state (decision 0006). After a prop breach an account is not simply
+/// "blocked": it may still close what it holds, or nothing at all. Cancels, Cancel All and
+/// Flatten work in every state.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TradingState {
+    /// Any order the risk layer allows.
+    #[default]
+    Active,
+    /// Only orders that reduce an open position (never open, add or flip).
+    ReducingOnly,
+    /// No new orders.
+    Halted,
+}
+
+/// The trading state each breach puts the account in (data, like the rest of the preset).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BreachStates {
+    /// Daily loss reached: until the next trade date.
+    pub daily_loss: TradingState,
+    /// Trailing drawdown breached: final.
+    pub trailing_drawdown: TradingState,
+}
+
+impl Default for BreachStates {
+    fn default() -> Self {
+        BreachStates {
+            daily_loss: TradingState::ReducingOnly,
+            trailing_drawdown: TradingState::Halted,
+        }
+    }
 }
 
 pub const APPROXIMATION: &str =
@@ -94,6 +132,7 @@ pub fn presets() -> Vec<RulePreset> {
         profit_target: Some(target),
         consistency: None,
         liquidate_on_breach: true,
+        on_breach: BreachStates::default(),
     };
     vec![
         base(
@@ -278,7 +317,19 @@ impl RuleTracker {
         new
     }
 
-    /// New orders are blocked (Flatten and Cancel All never are).
+    /// The account's trading state under `preset`: the most restrictive of its breaches'.
+    pub fn trading_state(&self, preset: &RulePreset) -> TradingState {
+        let mut s = TradingState::Active;
+        if self.daily_breached {
+            s = s.max(preset.on_breach.daily_loss);
+        }
+        if self.drawdown_breached {
+            s = s.max(preset.on_breach.trailing_drawdown);
+        }
+        s
+    }
+
+    /// The breach that restricts the account, if any (the drawdown before the daily loss).
     pub fn blocked(&self) -> Option<Breach> {
         if self.drawdown_breached {
             Some(Breach::TrailingDrawdown)
@@ -350,6 +401,7 @@ mod tests {
                 max_best_day_pct: 50,
             }),
             liquidate_on_breach: false,
+            on_breach: BreachStates::default(),
         }
     }
 

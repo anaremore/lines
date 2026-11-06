@@ -105,6 +105,9 @@ impl OrdersLayer {
         for f in s.flashes(account, Some(contract), now) {
             if let Some(price) = f.price {
                 let start = self.text.len();
+                // Whose refusal: the core's (denied, never sent) or the broker's (rejected).
+                self.text.push_str(f.kind.label());
+                self.text.push_str(": ");
                 self.text.push_str(&f.message);
                 self.flashes.push(RowFlash {
                     price,

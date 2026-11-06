@@ -25,7 +25,13 @@ pub enum OrderState {
     PartiallyFilled,
     Filled,
     Cancelled,
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
+    /// Sent, but no outcome is known: the app stopped or reconnected before the broker
+    /// answered, and the broker's snapshot doesn't list it. Never assumed working (or
+    /// cancelled): shown as unresolved until the broker reports it, or the trader checks.
+    Unresolved,
 }
 
 impl OrderState {
@@ -48,6 +54,11 @@ impl OrderState {
                 )
                 | (Working, PartiallyFilled | Filled | Cancelled)
                 | (PartiallyFilled, PartiallyFilled | Filled | Cancelled)
+                | (Submitted, Unresolved)
+                | (
+                    Unresolved,
+                    Acked | Working | PartiallyFilled | Filled | Cancelled | Rejected { .. }
+                )
         )
     }
 
@@ -60,6 +71,7 @@ impl OrderState {
             OrderState::Filled => "filled",
             OrderState::Cancelled => "cancelled",
             OrderState::Rejected { .. } => "rejected",
+            OrderState::Unresolved => "unresolved",
         }
     }
 }
@@ -105,6 +117,18 @@ pub struct Order {
     pub created: UtcMillis,
     #[serde(with = "time_serde")]
     pub updated: UtcMillis,
+    /// Only ever closes the position (Flatten's orders; any order placed while the account is
+    /// reducing only). The broker shrinks it as the position shrinks and cancels it when the
+    /// position is flat; it never opens, adds or flips.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reduce_only: bool,
+    /// Filled beyond the order's quantity (an overfill the core recorded; normally 0).
+    #[serde(default, skip_serializing_if = "is_zero", with = "qty_serde")]
+    pub overfill: Qty,
+}
+
+fn is_zero(q: &Qty) -> bool {
+    q.0 == 0
 }
 
 impl Order {
@@ -117,14 +141,17 @@ impl Order {
         (self.filled.0 > 0).then(|| self.fill_value as f64 / self.filled.0 as f64)
     }
 
+    /// At the broker or on its way (submitted, acked, working, partially filled). Not
+    /// terminal and not unresolved.
     pub fn is_open(&self) -> bool {
-        !self.state.is_terminal()
+        !self.state.is_terminal() && self.state != OrderState::Unresolved
     }
 
     /// Record a fill and move to partially filled / filled.
     pub fn apply_fill(&mut self, price: Price, qty: Qty, at: UtcMillis) {
         self.filled = Qty(self.filled.0 + qty.0);
         self.fill_value += price.0 as i128 * qty.0 as i128;
+        self.overfill = Qty((self.filled.0 - self.qty.0).max(0));
         self.state = if self.filled.0 >= self.qty.0 {
             OrderState::Filled
         } else {

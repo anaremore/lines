@@ -35,6 +35,10 @@ pub struct TradingFile {
     pub broker: PaperState,
     pub accounts: Vec<SavedAccount>,
     pub next_order_id: u64,
+    /// Orders sent without a known outcome when the file was written (they come back
+    /// unresolved, never assumed working). Optional: older files have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_flight: Vec<crate::order::Order>,
 }
 
 /// Bring any older layout up to the current one.

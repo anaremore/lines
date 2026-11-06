@@ -69,8 +69,12 @@ pub enum BrokerEvent {
         #[serde(with = "time_serde")]
         at: UtcMillis,
     },
+    /// An execution. `trade_id` is the broker's stable id for it (the core drops a repeat:
+    /// brokers re-send executions after a reconnect).
     Fill {
         id: OrderId,
+        #[serde(default)]
+        trade_id: String,
         #[serde(with = "price_serde")]
         price: Price,
         #[serde(with = "qty_serde")]

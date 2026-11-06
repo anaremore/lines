@@ -297,8 +297,11 @@ struct BarData {
     day_pnl: Option<Money>,
     /// (label, left, limit) per rule.
     rules: Vec<(&'static str, Money, Money)>,
-    blocked: Option<&'static str>,
-    flashes: Vec<String>,
+    /// The account's trading state, as words, when it isn't active.
+    blocked: Option<String>,
+    /// (label, text): DENIED / REJECTED / WARNING / NOT SENT.
+    flashes: Vec<(&'static str, String)>,
+    unresolved: usize,
     working: usize,
 }
 
@@ -317,6 +320,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         rules: Vec::new(),
         blocked: None,
         flashes: Vec::new(),
+        unresolved: 0,
         working: 0,
     };
     if let Some(s) = t.cache.try_read() {
@@ -350,22 +354,37 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
                     data.rules.push(("drawdown", left, Money::whole(dd.amount)));
                 }
             }
-            data.blocked = a.blocked.map(|b| match b {
+            let why = a.blocked.map_or("", |b| match b {
                 lines_trading::rules::Breach::TrailingDrawdown => "trailing drawdown breached",
                 lines_trading::rules::Breach::DailyLoss => "daily loss limit reached",
             });
+            data.blocked = match a.trading {
+                lines_trading::rules::TradingState::Active => None,
+                lines_trading::rules::TradingState::ReducingOnly => Some(format!(
+                    "REDUCING ONLY · {why} · orders may only close the position"
+                )),
+                lines_trading::rules::TradingState::Halted => {
+                    Some(format!("HALTED · {why} · no new orders"))
+                }
+            };
         }
         let now = Instant::now();
         data.flashes = s
             .flashes(account, contract, now)
-            .map(|f| match f.price {
-                Some(p) => format!("{}: {}", product.price.format::<32>(p).as_str(), f.message),
-                None => f.message.clone(),
+            .map(|f| {
+                let text = match f.price {
+                    Some(p) => {
+                        format!("{}: {}", product.price.format::<32>(p).as_str(), f.message)
+                    }
+                    None => f.message.clone(),
+                };
+                (f.kind.label(), text)
             })
             .collect();
+        data.unresolved = s.unresolved(account);
     }
     if let Some(m) = pt.local_flash() {
-        data.flashes.push(m.to_owned());
+        data.flashes.push(("NOT SENT", m.to_owned()));
     }
     Some(data)
 }
@@ -476,6 +495,17 @@ pub fn dom_bar<V: TradePane>(
     }
     if let Some(n) = data.as_ref().map(|d| d.working).filter(|&n| n > 0) {
         r1 = r1.child(div().text_color(t.text_dim).child(format!("{n} open")));
+    }
+    // Sent before a restart or reconnect with no answer: listed, never shown as working.
+    if let Some(n) = data.as_ref().map(|d| d.unresolved).filter(|&n| n > 0) {
+        r1 = r1.child(
+            div()
+                .px_1()
+                .bg(t.warn)
+                .text_color(t.on_warn)
+                .font_weight(FontWeight::BOLD)
+                .child(format!("{n} UNRESOLVED · check the broker")),
+        );
     }
     r1 = r1.child(div().flex_1());
     // Together and never squeezed out: both always visible (decision 0006).
@@ -598,7 +628,7 @@ pub fn dom_bar<V: TradePane>(
     }
     // Refusals and rejections, inline and brief.
     if let Some(d) = &data {
-        for f in d.flashes.iter().rev().take(2) {
+        for (label, f) in d.flashes.iter().rev().take(2) {
             rows = rows.child(
                 div()
                     .px_2()
@@ -612,7 +642,7 @@ pub fn dom_bar<V: TradePane>(
                             .bg(t.warn)
                             .text_color(t.on_warn)
                             .font_weight(FontWeight::BOLD)
-                            .child("REJECTED"),
+                            .child(*label),
                     )
                     .child(
                         div()
@@ -628,14 +658,14 @@ pub fn dom_bar<V: TradePane>(
 
 fn rule_strip(d: &BarData, t: &Theme) -> gpui::Div {
     let mut strip = div().flex().flex_row().flex_wrap().gap_2().px_2().pb_1();
-    if let Some(b) = d.blocked {
+    if let Some(b) = &d.blocked {
         strip = strip.child(
             div()
                 .px_1()
                 .bg(t.warn)
                 .text_color(t.on_warn)
                 .font_weight(FontWeight::BOLD)
-                .child(format!("BLOCKED · {b} · Flatten and Cancel all still work")),
+                .child(format!("{b} · Flatten and Cancel all still work")),
         );
     }
     for (label, left, limit) in &d.rules {
@@ -816,6 +846,7 @@ pub fn chart_chip<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option
         rules: Vec::new(),
         blocked: None,
         flashes: Vec::new(),
+        unresolved: 0,
         working: 0,
     };
     Some(account_chip(v, Some(&data), t, cx))

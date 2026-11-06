@@ -305,7 +305,19 @@ pub fn order_mark(o: &Order) -> Option<OrderMark> {
         OrderState::Acked => MarkStyle::Held,
         OrderState::Working => MarkStyle::Working,
         OrderState::PartiallyFilled => MarkStyle::Partial,
-        OrderState::Filled | OrderState::Cancelled | OrderState::Rejected { .. } => return None,
+        // Terminal, or unresolved (sent with no known outcome: listed in the header, never
+        // drawn as working).
+        OrderState::Filled
+        | OrderState::Cancelled
+        | OrderState::Rejected { .. }
+        | OrderState::Unresolved => return None,
+    };
+    // A bracket exit with nothing open to close (its sibling closed it while the entry still
+    // works) is inactive at the broker: drawn held.
+    let style = if o.remaining().0 == 0 {
+        MarkStyle::Held
+    } else {
+        style
     };
     Some(OrderMark {
         id: o.id,
@@ -686,6 +698,8 @@ mod tests {
             triggered: false,
             created: UtcMillis(0),
             updated: UtcMillis(0),
+            reduce_only: false,
+            overfill: Qty(0),
         }
     }
 
@@ -703,8 +717,13 @@ mod tests {
             OrderState::Filled,
             OrderState::Cancelled,
             OrderState::Rejected { reason: "x".into() },
+            OrderState::Unresolved,
         ] {
-            assert_eq!(style(s), None, "terminal orders aren't drawn");
+            assert_eq!(
+                style(s),
+                None,
+                "terminal and unresolved orders aren't drawn"
+            );
         }
         // Every drawn state looks different.
         let all = [
