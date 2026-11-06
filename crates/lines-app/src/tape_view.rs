@@ -237,6 +237,9 @@ impl TapeView {
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.picker.is_open() && pane::unavailable_key(self, ev, cx) {
+            return;
+        }
         let k = &ev.keystroke;
         let m = k.modifiers;
         if self.picker.is_open() {
@@ -442,6 +445,9 @@ impl TapeView {
         let mut right = String::with_capacity(32);
         let mut q = FixedStr::<32>::new();
         let _ = self.product.qty.write(self.large, &mut q);
+        if let Some(n) = pane::adopted_note(&self.feed) {
+            let _ = write!(right, "{n}  ·  ");
+        }
         let _ = write!(right, "large ≥ {q}");
         div()
             .flex()
@@ -485,7 +491,8 @@ impl Render for TapeView {
         let overlay =
             self.picker
                 .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
-        let body = match pane::unavailable_body(&self.feed, &t) {
+        let offer = self.common.offer_switch;
+        let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),
             None => {
                 let e = entity.clone();
