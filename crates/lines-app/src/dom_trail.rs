@@ -9,8 +9,8 @@
 //!   on only while the feed is live), never the wall clock, so replays and screenshots are
 //!   deterministic and a finished replay is a still picture.
 //! - **Frames**: while some visible cell is above the visibility threshold and the feed clock
-//!   moves, the pane asks for a frame at most every [`FRAME_EVERY`] (about 30 Hz); then it
-//!   stops. Hidden and minimised panes never get here (their poll doesn't run).
+//!   moves, the pane asks for a frame when it hasn't painted for [`FRAME_EVERY`] (about
+//!   30 Hz, counting paints for new data too, so the trail only fills gaps); then it stops. Hidden and minimised panes never get here (their poll doesn't run).
 //! - **Paint**: fill only, no text. Net bought rows use the up colour, net sold rows the down
 //!   colour, mixed rows blend toward a neutral grey; a chevron on the newest trade's row points
 //!   the way the last price moved (direction by shape too, docs/design.md §4). No allocation.
@@ -63,7 +63,8 @@ pub struct DomTrail {
     seen: Option<u64>,
     /// The feed clock at the last paint.
     painted: Option<UtcMillis>,
-    /// When the last animation frame was asked for (rate cap only; never affects values).
+    /// When the DOM last painted or the trail last asked for a frame (rate cap only; never
+    /// affects values): the trail only fills gaps between data frames.
     asked: Option<Instant>,
 }
 
@@ -160,6 +161,8 @@ impl DomTrail {
             self.model.advance(c);
         }
         self.painted = clock;
+        // A paint for new data counts against the frame cap too.
+        self.asked = Some(Instant::now());
     }
 
     /// The pane's poll (every 8 ms, visible panes only): ask for a frame while the trail is
@@ -358,8 +361,13 @@ mod tests {
         assert!(!t.wants_frame(&s, true));
         s.set_status(FeedStatus::Live);
         std::thread::sleep(Duration::from_millis(5));
+        t.asked = None; // as if the last paint were more than 33 ms ago
         assert!(t.wants_frame(&s, true));
         assert!(!t.wants_frame(&s, true), "rate capped");
+        // A data paint counts against the cap as well.
+        t.asked = None;
+        t.prepare(&s.read(), 25, Some(UtcMillis(10_001)));
+        assert!(!t.wants_frame(&s, true), "just painted for new data");
         assert!(!t.wants_frame(&s, false), "column hidden");
         // About ten half-lives later on the feed's clock: faded, no more frames.
         s.set_frame_time(UtcMillis(10_000 + 11 * 1_500));
