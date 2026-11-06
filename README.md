@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/anaremore/lines/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/anaremore/lines/actions/workflows/ci.yml)
 
-![Lines charting synthetic mock data in the dark theme, with the crosshair and OHLCV readout](assets/readme/lines-dark.png)
+![Lines in the dark theme with synthetic mock data: candlestick chart with the crosshair and OHLCV readout, beside a DOM price ladder and time & sales](assets/readme/lines-dark.png)
 
 <sub>Synthetic mock data, rendered with Lines' screenshot mode.</sub>
 
@@ -20,13 +20,15 @@ Lines is early. Nothing here is ready for trading.
 
 - Data feeds: an in-process mock, the Coinbase public feed (BTC/USD, ETH/USD, free and 24/7), and replay of recorded sessions. Every feed can be recorded and replayed deterministically.
 - Candlestick chart with pan, zoom and axis scaling, a crosshair with an OHLCV readout, and device-pixel-sharp drawing.
+- Read-only DOM: a tick-indexed price ladder with depth bars, exact price grouping, traded volume per price, and auto-centring that never moves while the pointer is over it. Time & sales with the aggressor side shown by colour and a marker, and large prints highlighted.
+- Independent panes (chart, DOM, time & sales) that share one feed per contract. The default window puts the chart beside the DOM, with time & sales under it.
 - Exact prices and quantities (integer units, never floating point), and a futures product/contract model with front-month resolution.
 - Dark and light themes, a colourblind-safe palette, and hollow vs filled candles so direction never depends on colour alone.
 
 **Not yet**
 
 - No live trading and no order entry. Public builds cannot route orders.
-- No DOM yet. That is the next major piece.
+- No custom layouts, tabs or extra windows yet (next: workspaces).
 - No live futures data in public builds. Vendor connections are kept out of the public code (decision 0014).
 
 See [ROADMAP.md](ROADMAP.md) for what comes next.

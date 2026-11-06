@@ -13,6 +13,7 @@ pub mod cqg;
 pub mod native;
 pub mod provider;
 pub mod recording;
+pub mod registry;
 pub mod store;
 pub mod transport;
 
@@ -212,6 +213,14 @@ fn plan(config: &FeedConfig) -> Result<Plan> {
         contract,
         follow_front,
     })
+}
+
+/// The product, contract and front-month following a config resolves to (validated).
+pub(crate) fn resolve(
+    config: &FeedConfig,
+) -> Result<(lines_core::ProductId, Option<ContractKey>, bool)> {
+    let p = plan(config)?;
+    Ok((p.product.id, p.contract, p.follow_front))
 }
 
 /// Owns the feed thread. Dropping it shuts the feed down and joins the thread.

@@ -1,4 +1,8 @@
-//! The chart window: header + candlestick canvas with pan/zoom/scaling and a crosshair.
+//! The chart pane: header + candlestick canvas with pan/zoom/scaling and a crosshair.
+//!
+//! A pane (`crate::pane`): given a [`PaneFeed`] and a theme, it owns its view state and knows
+//! nothing about other panes or the layout. Switching symbol emits [`FeedChanged`]; the
+//! workspace forwards it to linked panes.
 //!
 //! Frame flow (decision 0001): a UI-thread timer compares the store's atomic revision and
 //! calls `cx.notify()` only when data changed (so 5k msgs/s never means 5k redraws). In
@@ -19,30 +23,36 @@
 //!
 //! Symbol picker (roadmap 4b): any letter or Ctrl+K opens it over the chart. Its logic lives in
 //! `crate::picker` (pure, tested); this file only renders it and routes keys. Picking a symbol
-//! starts a new feed for the same source with a new target and stops the old one on a
-//! background thread (its `Drop` joins the feed thread; decision 0001: never on the UI thread).
-//! While closed it costs nothing per frame.
+//! subscribes to the same source with a new target through the shared registry; the old
+//! subscription is dropped, and if no other pane watches it the registry stops that feed on a
+//! background thread (decision 0001: never on the UI thread). While closed it costs nothing
+//! per frame.
+//!
+//! Layers (seam for the volume profile and other studies): a [`ChartLayer`] is prepared under
+//! the store lock with this frame's data and viewport, then painted inside the plot after the
+//! candles. Both steps must not allocate (docs/design.md §2).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{
-    App, Bounds, ContentMask, Context, FocusHandle, Font, FontFeatures, FontWeight, Hsla,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, Font, FontFeatures, FontWeight,
+    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
     Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::geometry::{Crosshair, crosshair, snap, write_ohlcv};
 use lines_core::viewport::{ScaleDrag, ScaleMode};
 use lines_core::{Bar, CivilDate, FixedStr, Price, Product, Scene, Viewport};
-use lines_feed::availability::{Availability, availability};
+use lines_feed::ChartData;
 use lines_feed::catalog::{self, Target};
 use lines_feed::store::{ChartStore, FeedStatus};
-use lines_feed::{FeedConfig, FeedHandle};
 
+use crate::feeds::{Feeds, PaneFeed};
+use crate::pane::{self, FeedChanged, Pane};
 use crate::picker::{self, Picker, Settings};
 use crate::theme::Theme;
 
@@ -76,24 +86,21 @@ enum Region {
     TimeAxis,
 }
 
-/// The running feed plus what switching it needs (symbol picker).
-pub struct Feed {
-    pub handle: FeedHandle,
-    /// The config it started with; switching keeps the source and changes the target.
-    pub config: FeedConfig,
-    /// What the source can serve; drives the picker's disabled rows.
-    pub availability: Availability,
-}
-
-impl Feed {
-    pub fn start(config: FeedConfig) -> anyhow::Result<Feed> {
-        let availability = availability(&config.source)?;
-        Ok(Feed {
-            handle: lines_feed::spawn(config.clone())?,
-            config,
-            availability,
-        })
-    }
+/// A study drawn over the plot (e.g. the volume profile). Implementations keep their own
+/// buffers; neither method may allocate in steady state.
+pub trait ChartLayer: 'static {
+    /// Under the store lock, after this frame's viewport update: copy what `paint` needs.
+    fn prepare(&mut self, data: &ChartData, vp: &Viewport);
+    /// Inside the plot's content mask, after the candles. `plot` is the plot's bounds; the
+    /// viewport maps prices/bars to plot-local coordinates.
+    fn paint(
+        &mut self,
+        plot: Bounds<Pixels>,
+        vp: &Viewport,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut App,
+    );
 }
 
 /// Deterministic input for screenshot mode (decision 0009), standing in for the mouse.
@@ -123,9 +130,9 @@ struct Rates {
 }
 
 pub struct ChartView {
-    feed: FeedHandle,
-    config: FeedConfig,
-    availability: Availability,
+    feed: PaneFeed,
+    /// Studies over the plot, painted in order.
+    layers: Vec<Box<dyn ChartLayer>>,
     entries: Vec<picker::Entry>,
     settings: Settings,
     /// `None` in screenshot mode: no user settings are read or written there.
@@ -173,18 +180,13 @@ pub struct ChartView {
 
 impl ChartView {
     pub fn new(
-        feed: Feed,
+        feed: PaneFeed,
         theme: Theme,
         frozen: bool,
         fixture: Fixture,
         cx: &mut Context<Self>,
     ) -> Self {
-        let Feed {
-            handle: feed,
-            config,
-            availability,
-        } = feed;
-        let store = feed.store.clone();
+        let store = feed.sub.store().clone();
         let instrument = store.read().product.clone();
         // Screenshots must not depend on (or change) the user's recents and favourites.
         let settings_path = if frozen {
@@ -208,30 +210,11 @@ impl ChartView {
             .map(|q| Picker::open(q, &entries, &settings));
         // Poll the lock-free revision counter at ~120 Hz; redraw only on change. Reads the
         // view's current store, which changes when the picker switches symbols.
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(8))
-                    .await;
-                let alive = this.update(cx, |view, cx| {
-                    view.update_rates();
-                    let rev = view.store.revision();
-                    if rev != view.seen_revision {
-                        view.seen_revision = rev;
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
+        pane::watch_store(cx);
 
         ChartView {
             feed,
-            config,
-            availability,
+            layers: Vec::new(),
             entries,
             settings,
             settings_path,
@@ -272,6 +255,12 @@ impl ChartView {
             },
             paint_time_ewma_us: 0.0,
         }
+    }
+
+    /// Add a study layer (volume profile, …), painted above earlier layers.
+    #[allow(dead_code)] // the seam for the volume profile milestone
+    pub fn add_layer(&mut self, layer: Box<dyn ChartLayer>) {
+        self.layers.push(layer);
     }
 
     fn update_rates(&mut self) {
@@ -405,7 +394,7 @@ impl ChartView {
         self.picker_error = None;
         match k.key.as_str() {
             "escape" => self.picker = None,
-            "enter" => self.confirm_picker(),
+            "enter" => self.confirm_picker(cx),
             "up" => p.move_selection(-1),
             "down" => p.move_selection(1),
             "tab" => p.cycle_contract(if m.shift { -1 } else { 1 }, entries, today),
@@ -439,14 +428,14 @@ impl ChartView {
                 p.selected = row;
                 p.offset = 0;
             }
-            self.confirm_picker();
+            self.confirm_picker(cx);
             cx.notify();
         }
     }
 
     /// Enter: switch to the selected row's product (front month) or contract. Disabled rows
     /// stay open and say why; nothing is started that the source can't serve.
-    fn confirm_picker(&mut self) {
+    fn confirm_picker(&mut self, cx: &mut Context<Self>) {
         let today = self.today();
         let Some(row) = self
             .picker
@@ -455,11 +444,11 @@ impl ChartView {
         else {
             return;
         };
-        if let Err(reason) = self.availability.check(&row.target) {
+        if let Err(reason) = self.feed.availability.check(&row.target) {
             self.picker_error = Some(reason);
             return;
         }
-        match self.switch_to(row.target) {
+        match self.switch_to(row.target, cx) {
             Ok(()) => {
                 self.picker = None;
                 self.settings.push_recent(row.contract.product);
@@ -469,22 +458,18 @@ impl ChartView {
         }
     }
 
-    /// Start a feed for `target` on the same source and swap it in. The old feed stops on a
-    /// background thread.
-    fn switch_to(&mut self, target: Target) -> anyhow::Result<()> {
-        let mut config = self.config.clone();
-        config.target = Some(target);
-        if config.record.take().is_some() {
-            // A recording holds exactly one contract (format v3); don't overwrite it.
-            tracing::warn!("recording stopped: switching symbol does not continue the recording");
-        }
-        let handle = lines_feed::spawn(config.clone())?;
-        let old = std::mem::replace(&mut self.feed, handle);
-        let _ = std::thread::Builder::new()
-            .name("lines-feed-stop".into())
-            .spawn(move || drop(old));
-        self.config = config;
-        self.store = self.feed.store.clone();
+    /// Subscribe to `target` on the same source, swap it in and tell linked panes. The old
+    /// subscription is dropped (the registry stops its feed in the background if unused).
+    fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        self.apply_feed(feed.clone());
+        cx.emit(FeedChanged(feed));
+        Ok(())
+    }
+
+    fn apply_feed(&mut self, feed: PaneFeed) {
+        self.store = feed.sub.store().clone();
+        self.feed = feed;
         self.instrument = self.store.read().product.clone();
         // A fresh view for the new series; price labels belong to the old product's format.
         self.vp = Viewport::default();
@@ -497,7 +482,6 @@ impl ChartView {
         self.cross_bar = None;
         self.readout = None;
         self.labels.clear();
-        Ok(())
     }
 
     /// Persist recents/favourites off the UI thread. Saves can finish out of order, so each
@@ -657,6 +641,9 @@ impl ChartView {
                 )
             });
             self.cross_bar = self.cross.and_then(|c| c.bar).map(|i| bars[i]);
+            for l in &mut self.layers {
+                l.prepare(&d, &self.vp);
+            }
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -746,6 +733,9 @@ impl ChartView {
                     ));
                     window.paint_quad(fill(rect(bx, c.body_top, bw, bh), color));
                 }
+            }
+            for l in &mut self.layers {
+                l.paint(plot, &self.vp, &t, window, cx);
             }
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
@@ -1072,7 +1062,7 @@ impl ChartView {
             let selected = i == p.selected;
             let row = picker::contract_row(&e.product, today, if selected { p.offset } else { 0 });
             let unavailable = match &row {
-                Some(r) => self.availability.check(&r.target).err(),
+                Some(r) => self.feed.availability.check(&r.target).err(),
                 None => Some("no listed contract".to_owned()),
             };
             let fg = if unavailable.is_some() {
@@ -1290,9 +1280,33 @@ impl ChartView {
     }
 }
 
+impl EventEmitter<FeedChanged> for ChartView {}
+
+impl Pane for ChartView {
+    fn store(&self) -> &Arc<ChartStore> {
+        &self.store
+    }
+
+    fn seen_revision(&mut self) -> &mut u64 {
+        &mut self.seen_revision
+    }
+
+    fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.apply_feed(feed);
+        cx.notify();
+    }
+
+    fn on_tick(&mut self) {
+        self.update_rates();
+    }
+}
+
+/// Key and mouse hints for the chart, shown once per window by the workspace.
+pub const HINTS: &str = "drag: pan  ·  wheel: zoom time  ·  shift+wheel: scroll  ·  ctrl+wheel, ctrl+drag or drag an axis: scale  ·  double-click price axis: auto-scale  ·  Home: latest  ·  type a symbol or Ctrl+K: switch";
+
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = &self.feed; // the view owns the feed; dropping the view stops it
         if !self.focus_requested {
             // Keyboard shortcuts (Home) work without clicking the chart first.
             self.focus_requested = true;
@@ -1330,8 +1344,5 @@ impl Render for ChartView {
                     )
                     .when_some(self.picker_overlay(cx), |d, overlay| d.child(overlay)),
             )
-            .child(div().px_3().py_1().text_xs().text_color(t.text_dim).bg(t.panel).child(
-                "drag: pan   ·   wheel: zoom time   ·   shift+wheel: scroll   ·   ctrl+wheel, ctrl+drag or drag an axis: scale   ·   double-click price axis: auto-scale   ·   double-click / Home: latest   ·   type a symbol or Ctrl+K: switch",
-            ))
     }
 }

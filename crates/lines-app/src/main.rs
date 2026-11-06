@@ -1,8 +1,15 @@
 mod chart_view;
+mod dom_view;
+mod feeds;
+mod layout;
+mod pane;
 mod picker;
 #[cfg(feature = "screenshot")]
 mod screenshot;
+mod tape_view;
+mod text;
 mod theme;
+mod workspace;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,8 +21,12 @@ use lines_core::UtcMillis;
 use lines_feed::cqg::mock::MockConfig;
 use lines_feed::{FeedConfig, Source, catalog};
 
-use crate::chart_view::ChartView;
+use crate::dom_view::DomOptions;
+use crate::feeds::{Feeds, PaneFeed};
+use crate::layout::Layout;
+use crate::tape_view::TapeOptions;
 use crate::theme::{HollowBodies, Palette, Theme};
+use crate::workspace::{PaneSetup, WorkspaceView};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum SourceKind {
@@ -45,6 +56,15 @@ pub enum PaletteKind {
 pub enum HollowKind {
     Up,
     Down,
+}
+
+/// Window layout (the workspace milestone adds custom grids, tabs and windows).
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum LayoutKind {
+    /// Chart beside the DOM, time & sales under the DOM.
+    Trading,
+    /// The chart alone.
+    Chart,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -108,6 +128,16 @@ struct Cli {
     /// Which direction's candle bodies are hollow (the other is filled).
     #[arg(long, value_enum, default_value_t = HollowKind::Up)]
     hollow: HollowKind,
+    /// Window layout.
+    #[arg(long, value_enum, default_value_t = LayoutKind::Trading)]
+    layout: LayoutKind,
+    /// DOM price grouping in ticks per row (G cycles 1, 2, 5, 10, 25 in the app).
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+    dom_grouping: u32,
+    /// Time & sales: highlight prints of at least this size (in the product's units, e.g.
+    /// 20 or 0.5). Default: 10 contracts, or 1 unit of a fractional product.
+    #[arg(long)]
+    large_print: Option<String>,
     /// Window size in logical pixels, WIDTHxHEIGHT.
     #[arg(long, default_value = "1280x800", value_parser = parse_size)]
     size: (f32, f32),
@@ -262,6 +292,36 @@ fn main() -> Result<()> {
         HollowKind::Down => HollowBodies::Down,
     };
 
+    let registry = lines_feed::registry::FeedRegistry::new();
+    let feed = PaneFeed::subscribe(&registry, config)?;
+    let large_print = match &cli.large_print {
+        Some(s) => {
+            let product = feed.sub.store().read().product.clone();
+            Some(product.qty.parse_decimal(s).map_err(|e| {
+                anyhow::anyhow!("--large-print {s:?} is not a {} size: {e}", product.symbol)
+            })?)
+        }
+        None => None,
+    };
+    let layout = match cli.layout {
+        LayoutKind::Trading => Layout::trading(),
+        LayoutKind::Chart => Layout::chart_only(),
+    };
+    let setup = PaneSetup {
+        feed,
+        theme,
+        frozen: cli.screenshot.is_some(),
+        fixture: chart_view::Fixture {
+            cursor: cli.cursor,
+            price_zoom: cli.price_zoom,
+            picker: cli.picker.clone(),
+        },
+        dom: DomOptions {
+            grouping: cli.dom_grouping,
+        },
+        tape: TapeOptions { large_print },
+    };
+
     if let Some(out) = cli.screenshot.clone() {
         #[cfg(feature = "screenshot")]
         {
@@ -269,28 +329,24 @@ fn main() -> Result<()> {
                 out,
                 size: cli.size,
                 scale: cli.scale,
-                theme,
-                fixture: chart_view::Fixture {
-                    cursor: cli.cursor,
-                    price_zoom: cli.price_zoom,
-                    picker: cli.picker.clone(),
-                },
+                layout,
+                setup,
             };
-            let code = screenshot::run(config, shot)?;
+            let code = screenshot::run(registry, shot)?;
             std::process::exit(code);
         }
         #[cfg(not(feature = "screenshot"))]
         {
-            let _ = out;
+            let _ = (out, layout, setup);
             bail!(
                 "this build has no screenshot support; rebuild with `cargo run -p lines-app --features screenshot`"
             );
         }
     }
 
-    let feed = chart_view::Feed::start(config)?;
     let (w, h) = cli.size;
     gpui_platform::application().run(move |cx: &mut App| {
+        cx.set_global(Feeds(registry));
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -308,7 +364,7 @@ fn main() -> Result<()> {
                 icon: window_icon(),
                 ..Default::default()
             },
-            move |_, cx| cx.new(|cx| ChartView::new(feed, theme, false, Default::default(), cx)),
+            move |_, cx| cx.new(|cx| WorkspaceView::new(layout, setup, cx)),
         );
         if let Err(e) = opened {
             tracing::error!("failed to open window: {e:#}");

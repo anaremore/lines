@@ -6,6 +6,12 @@
 //!
 //! Market state lives in [`MockMarket`] (shared across reconnects), so a forced disconnect
 //! followed by a reconnect exercises gap back-fill.
+//!
+//! Depth (roadmap 5): a one-tick-wide book of [`DEPTH`] levels per side around the walk's
+//! price, sent with CQG's DOM quotes (`TYPE_BID` / `TYPE_ASK`, volume = new total, 0 removes).
+//! The subscription snapshot carries the whole book; when the price moves, the book shifts and
+//! the levels that changed side or fell off are sent in the same frame, so the book is never
+//! crossed at a frame boundary. Trades carry CQG sales conditions (aggressor side).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -97,6 +103,8 @@ const SCALE: f64 = 0.01; // E-mini S&P style: scaled units are cents
 const TICK: i64 = 25; // 0.25 index points
 /// Live trades move the price rarely; most trades print at the same level.
 const LIVE_MOVE_PPM: u64 = 500;
+/// Book levels per side.
+pub const DEPTH: usize = 10;
 
 /// Deterministic xorshift64* (no `rand` dependency; reproducible streams).
 #[derive(Clone, Debug)]
@@ -118,7 +126,12 @@ impl Rng {
 /// The simulated market, shared by successive mock connections.
 pub struct MockMarket {
     rng: Rng,
+    /// Best bid; the best ask is one tick above.
     price: i64,
+    /// Sizes by distance from the inside: `bids[k]` at `price - k ticks`, `asks[k]` at
+    /// `price + (k + 1) ticks`.
+    bids: [i64; DEPTH],
+    asks: [i64; DEPTH],
     bars: BarSeries,
     created: Instant,
     /// Newest trade time stamped so far.
@@ -149,6 +162,8 @@ impl MockMarket {
         let mut m = MockMarket {
             rng: Rng(cfg.seed | 1),
             price: 600_000, // 6000.00
+            bids: [0; DEPTH],
+            asks: [0; DEPTH],
             bars: BarSeries::new(UtcMillis::MINUTE, cfg.history_bars + 10_000),
             created: Instant::now(),
             last_trade: UtcMillis(i64::MIN),
@@ -158,7 +173,74 @@ impl MockMarket {
         let first = UtcMillis(now.0 - cfg.history_bars as i64 * UtcMillis::MINUTE)
             .floor_to(UtcMillis::MINUTE);
         m.fill_bars(first, now.floor_to(UtcMillis::MINUTE));
+        for k in 0..DEPTH {
+            m.bids[k] = m.size(k);
+            m.asks[k] = m.size(k);
+        }
         m
+    }
+
+    /// A plausible resting size, growing away from the inside.
+    fn size(&mut self, k: usize) -> i64 {
+        5 + self.rng.below(40 + 30 * k as u64) as i64
+    }
+
+    fn bid_price(&self, k: usize) -> i64 {
+        self.price - k as i64 * TICK
+    }
+
+    fn ask_price(&self, k: usize) -> i64 {
+        self.price + (k as i64 + 1) * TICK
+    }
+
+    /// The whole book as DOM quotes, plus the best bid/ask.
+    fn book_quotes(&self, out: &mut Vec<market_data_2::Quote>) {
+        use market_data_2::quote::Type;
+        out.push(quote(Type::Bestbid, None, self.bid_price(0), self.bids[0]));
+        out.push(quote(Type::Bestask, None, self.ask_price(0), self.asks[0]));
+        for k in 0..DEPTH {
+            out.push(quote(Type::Bid, None, self.bid_price(k), self.bids[k]));
+            out.push(quote(Type::Ask, None, self.ask_price(k), self.asks[k]));
+        }
+    }
+
+    /// The price just moved one tick (`up` or down; `self.price` is already the new best
+    /// bid): shift the book and emit every level that changed.
+    fn shift_book(&mut self, up: bool, out: &mut Vec<market_data_2::Quote>) {
+        use market_data_2::quote::Type;
+        if up {
+            // The old best ask is now the best bid; the farthest bid falls off.
+            out.push(quote(Type::Ask, None, self.bid_price(0), 0));
+            out.push(quote(Type::Bid, None, self.bid_price(DEPTH), 0));
+            self.bids.rotate_right(1);
+            self.bids[0] = self.size(0);
+            self.asks.rotate_left(1);
+            self.asks[DEPTH - 1] = self.size(DEPTH - 1);
+            out.push(quote(Type::Bid, None, self.bid_price(0), self.bids[0]));
+            out.push(quote(
+                Type::Ask,
+                None,
+                self.ask_price(DEPTH - 1),
+                self.asks[DEPTH - 1],
+            ));
+        } else {
+            // The old best bid is now the best ask; the farthest ask falls off.
+            out.push(quote(Type::Bid, None, self.ask_price(0), 0));
+            out.push(quote(Type::Ask, None, self.ask_price(DEPTH), 0));
+            self.asks.rotate_right(1);
+            self.asks[0] = self.size(0);
+            self.bids.rotate_left(1);
+            self.bids[DEPTH - 1] = self.size(DEPTH - 1);
+            out.push(quote(Type::Ask, None, self.ask_price(0), self.asks[0]));
+            out.push(quote(
+                Type::Bid,
+                None,
+                self.bid_price(DEPTH - 1),
+                self.bids[DEPTH - 1],
+            ));
+        }
+        out.push(quote(Type::Bestbid, None, self.bid_price(0), self.bids[0]));
+        out.push(quote(Type::Bestask, None, self.ask_price(0), self.asks[0]));
     }
 
     /// Random walk on the tick grid, gently pulled back toward 6000. `move_ppm` is the chance
@@ -384,21 +466,25 @@ impl MockTransport {
                 ],
                 ..Default::default()
             });
-            let price = self.market.lock().price;
+            let mut quotes = Vec::with_capacity(2 * DEPTH + 3);
+            {
+                let m = self.market.lock();
+                quotes.push(quote(
+                    market_data_2::quote::Type::Trade,
+                    Some(self.off(now)),
+                    m.price,
+                    1,
+                ));
+                let dom = market_data_2::market_data_subscription::Level::TradesBbaDom as u32;
+                if sub.level == dom {
+                    m.book_quotes(&mut quotes);
+                }
+            }
             self.push(web_api_2::ServerMsg {
                 real_time_market_data: vec![market_data_2::RealTimeMarketData {
                     contract_id: MOCK_CONTRACT_ID,
                     is_snapshot: Some(true),
-                    quotes: vec![
-                        quote(
-                            market_data_2::quote::Type::Trade,
-                            Some(self.off(now)),
-                            price,
-                            1,
-                        ),
-                        quote(market_data_2::quote::Type::Bestbid, None, price - TICK, 10),
-                        quote(market_data_2::quote::Type::Bestask, None, price, 10),
-                    ],
+                    quotes,
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -452,26 +538,39 @@ impl MockTransport {
                     let kind = m.rng.below(10);
                     if kind < 6 {
                         // ~1 tick move per 2000 trades: realistic 1-minute ranges at 3k trades/s.
-                        let p = m.step(LIVE_MOVE_PPM);
+                        let old = m.price;
+                        let bid = m.step(LIVE_MOVE_PPM);
+                        if bid != old {
+                            m.shift_book(bid > old, &mut quotes);
+                        }
+                        // Buyers lift the offer, sellers hit the bid.
+                        let buy = m.rng.below(2) == 0;
+                        let p = if buy { bid + TICK } else { bid };
                         let v = 1 + m.rng.below(9);
                         m.bars.apply_trade(now, Price(p), Qty(v as i64));
-                        quotes.push(quote(market_data_2::quote::Type::Trade, time, p, v as i64));
-                    } else if kind < 8 {
-                        let p = m.price - TICK;
-                        quotes.push(quote(
-                            market_data_2::quote::Type::Bestbid,
-                            time,
-                            p,
-                            1 + m.rng.below(50) as i64,
-                        ));
+                        let mut q = quote(market_data_2::quote::Type::Trade, time, p, v as i64);
+                        q.sales_condition = Some(if buy {
+                            market_data_2::quote::SalesCondition::BuySideAggressor
+                        } else {
+                            market_data_2::quote::SalesCondition::SellSideAggressor
+                        } as u32);
+                        quotes.push(q);
                     } else {
-                        let p = m.price + TICK;
-                        quotes.push(quote(
-                            market_data_2::quote::Type::Bestask,
-                            time,
-                            p,
-                            1 + m.rng.below(50) as i64,
-                        ));
+                        // A resting size changes somewhere in the book.
+                        use market_data_2::quote::Type;
+                        let k = m.rng.below(DEPTH as u64) as usize;
+                        let size = m.size(k);
+                        let (kind, best, price) = if m.rng.below(2) == 0 {
+                            m.bids[k] = size;
+                            (Type::Bid, Type::Bestbid, m.bid_price(k))
+                        } else {
+                            m.asks[k] = size;
+                            (Type::Ask, Type::Bestask, m.ask_price(k))
+                        };
+                        quotes.push(quote(kind, time, price, size));
+                        if k == 0 {
+                            quotes.push(quote(best, None, price, size));
+                        }
                     }
                 }
             }

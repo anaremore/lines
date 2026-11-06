@@ -153,3 +153,89 @@ fn counter_detects_allocations() {
     });
     assert!(n >= 1, "allocation counter is not working");
 }
+
+/// The DOM and time & sales paint paths: ladder rows (grouping, centring, volume), the tape's
+/// visible rows, and their number/time formatting. The book, tape and volume are set up first
+/// (that is the feed side); every frame after that must not allocate.
+#[test]
+fn dom_and_tape_paint_paths_do_not_allocate() {
+    use lines_core::ladder::{LadderView, build_ladder, inside_row};
+    use lines_core::tape::write_tape_time;
+    use lines_core::{Aggressor, OrderBook, Print, Side, Tape, VolumeAtPrice};
+
+    let fmt = PriceFormat::new(
+        PriceScale::decimal(2),
+        DisplayStyle::Decimal { digits: 2 },
+        25,
+    );
+    let qf = QtyFormat { decimals: 8 };
+    let mut book = OrderBook::default();
+    let mut vap = VolumeAtPrice::default();
+    let mut tape = Tape::new(4096);
+    for k in 0..2_000i64 {
+        book.set(Side::Bid, Price(600_000 - k * 25), Qty(1 + k % 37), 0);
+        book.set(Side::Ask, Price(600_025 + k * 25), Qty(1 + k % 41), 0);
+        vap.add(Price(600_000 + (k % 80 - 40) * 25), Qty(k + 1));
+    }
+    for i in 0..5_000i64 {
+        tape.push(Print {
+            time: UtcMillis(i),
+            price: Price(600_000),
+            qty: Qty(i % 9 + 1),
+            aggressor: Some(Aggressor::Buy),
+        });
+    }
+    let mut rows = Vec::with_capacity(256);
+    let mut visible = Vec::with_capacity(256);
+    let mut view = LadderView::default();
+    let mut s = FixedStr::<48>::new();
+
+    let n = allocs_during(|| {
+        for frame in 0..500i64 {
+            // Feed-side mutations of existing levels (no new map nodes) between frames.
+            book.set(
+                Side::Bid,
+                Price(600_000 - (frame % 50) * 25),
+                Qty(frame + 1),
+                0,
+            );
+            let grouping = [1i64, 2, 5, 10, 25][frame as usize % 5];
+            let units = grouping * 25;
+            let n_rows = 40 + (frame as usize % 200);
+            let inside = inside_row(&book, Some(Price(600_000)), units);
+            view.follow(inside, n_rows, frame % 3 == 0);
+            if frame % 7 == 0 {
+                view.scroll(if frame % 2 == 0 { 3 } else { -3 });
+            }
+            let top = view.top_row(n_rows).unwrap();
+            let st = build_ladder(
+                &book,
+                &vap,
+                Some(Price(600_000)),
+                units,
+                top,
+                n_rows,
+                &mut rows,
+            );
+            for r in &rows {
+                for q in [r.bid, r.ask, r.volume] {
+                    s.clear();
+                    qf.write(q, &mut s).unwrap();
+                }
+                s.clear();
+                fmt.write(r.price, &mut s).unwrap();
+            }
+            visible.clear();
+            for p in tape.iter_newest().take(n_rows) {
+                visible.push(*p);
+            }
+            for p in &visible {
+                s.clear();
+                write_tape_time(p.time, &mut s).unwrap();
+            }
+            std::hint::black_box((&st, &s, &visible));
+        }
+    });
+    assert!(!rows.is_empty() && !visible.is_empty());
+    assert_eq!(n, 0, "DOM/T&S paint path allocated {n} times");
+}

@@ -11,8 +11,12 @@
 //!    oldest first. A candle bucket is closed at its end, so each page is a history snapshot
 //!    with `as_of = page end - 1 ms`: every trade before the page end is included, none after.
 //! 2. **Trades** (`/products/{id}/trades`, newest first, paged back with `after=`) until they
-//!    reach `cutoff`. They rebuild the forming bar exactly; trades before `cutoff` are already
-//!    in the candles and are skipped.
+//!    reach `cutoff`. They rebuild the forming bar exactly, delivered as a closed snapshot:
+//!    with `t_n` the newest REST trade time, the bar holds every REST trade in
+//!    `[cutoff, t_n)` and `as_of = t_n - 1 ms` (REST holds *every* trade up to its newest, so
+//!    the snapshot is closed; trades sharing `t_n` may still be arriving and are sent as
+//!    trades). As a snapshot it replaces whatever the store had for that bar, so a reconnect
+//!    inside the same minute never counts the bar's earlier trades twice.
 //! 3. **Websocket** matches stream from subscription. REST and websocket trades overlap; they
 //!    are de-duplicated here by `trade_id` (exact, unlike timestamps, which Coinbase repeats
 //!    within a microsecond), before reaching the store's timestamp-based stitch.
@@ -24,6 +28,10 @@
 //!    lags, and reported as a history gap if it never closes. History is complete only once
 //!    the REST-to-websocket hole is closed.
 //!
+//! Depth comes from the public `level2_batch` channel (`level2` needs authentication): a full
+//! `snapshot`, then `l2update` batches every 50 ms with new totals per price (0 removes).
+//! Coinbase reports the *maker's* side of a match, so the aggressor is the opposite side.
+//!
 //! Requests are issued one at a time. Each HTTP frame carries its request URL, so a response
 //! is interpreted from the URL, not from this session's own request plan: a replay decodes it
 //! the same way whatever history window the replaying build is configured with (0011). Anything that can't be back-filled is
@@ -31,7 +39,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use lines_core::{Bar, Price, Product, Qty, UtcMillis};
+use lines_core::{Aggressor, Bar, Price, Product, Qty, Side, UtcMillis};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -108,12 +116,26 @@ pub struct CoinbaseSession {
     last_ws_time: UtcMillis,
     /// The queue head has been sent.
     head_issued: bool,
+    /// REST trades in the forming bar, collected across pages.
+    forming: Vec<RestFill>,
+}
+
+/// A REST trade inside the forming bar.
+#[derive(Copy, Clone, Debug)]
+struct RestFill {
+    id: u64,
+    time: UtcMillis,
+    price: Price,
+    qty: Qty,
+    aggressor: Option<Aggressor>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsMsg {
     Subscriptions {},
+    Snapshot(L2Snapshot),
+    L2update(L2Update),
     Match(MatchMsg),
     LastMatch(MatchMsg),
     Ticker(TickerMsg),
@@ -133,6 +155,9 @@ struct MatchMsg {
     time: String,
     price: String,
     size: String,
+    /// The maker's side.
+    #[serde(default)]
+    side: Option<String>,
 }
 
 /// One REST trade (`/products/{id}/trades`).
@@ -142,6 +167,31 @@ struct RestTrade {
     time: String,
     price: String,
     size: String,
+    /// The maker's side.
+    #[serde(default)]
+    side: Option<String>,
+}
+
+/// `level2_batch` snapshot: the whole book as `[price, size]`.
+#[derive(Deserialize)]
+struct L2Snapshot {
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
+}
+
+/// `level2_batch` update: `[side, price, new size]`.
+#[derive(Deserialize)]
+struct L2Update {
+    changes: Vec<[String; 3]>,
+}
+
+/// Coinbase reports the maker's side; the aggressor took the other side.
+fn aggressor(maker_side: Option<&str>) -> Option<Aggressor> {
+    match maker_side? {
+        "buy" => Some(Aggressor::Sell),
+        "sell" => Some(Aggressor::Buy),
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -180,6 +230,7 @@ impl CoinbaseSession {
             complete_sent: false,
             last_ws_time: UtcMillis(i64::MIN),
             head_issued: false,
+            forming: Vec::new(),
         }
     }
 
@@ -321,7 +372,12 @@ impl CoinbaseSession {
                 ) {
                     (Some(time), Some(price), Some(qty)) => {
                         self.last_ws_time = time;
-                        events.push(MarketEvent::Trade { time, price, qty })
+                        events.push(MarketEvent::Trade {
+                            time,
+                            price,
+                            qty,
+                            aggressor: aggressor(m.side.as_deref()),
+                        })
                     }
                     _ => events.push(MarketEvent::Rejected { count: 1 }),
                 }
@@ -337,6 +393,51 @@ impl CoinbaseSession {
                 match self.price(&m.price) {
                     Some(p) => events.push(MarketEvent::LastPrice(p)),
                     None => events.push(MarketEvent::Rejected { count: 1 }),
+                }
+            }
+            WsMsg::Snapshot(b) => {
+                events.push(MarketEvent::BookClear);
+                let mut rejected = 0;
+                for (side, levels) in [(Side::Bid, &b.bids), (Side::Ask, &b.asks)] {
+                    for [p, q] in levels {
+                        match (self.price(p), self.qty(q)) {
+                            (Some(price), Some(qty)) => events.push(MarketEvent::BookLevel {
+                                side,
+                                price,
+                                qty,
+                                orders: 0,
+                            }),
+                            _ => rejected += 1,
+                        }
+                    }
+                }
+                if rejected > 0 {
+                    events.push(MarketEvent::Rejected { count: rejected });
+                }
+            }
+            WsMsg::L2update(u) => {
+                let mut rejected = 0;
+                for [side, p, q] in &u.changes {
+                    let side = match side.as_str() {
+                        "buy" => Side::Bid,
+                        "sell" => Side::Ask,
+                        _ => {
+                            rejected += 1;
+                            continue;
+                        }
+                    };
+                    match (self.price(p), self.qty(q)) {
+                        (Some(price), Some(qty)) => events.push(MarketEvent::BookLevel {
+                            side,
+                            price,
+                            qty,
+                            orders: 0,
+                        }),
+                        _ => rejected += 1,
+                    }
+                }
+                if rejected > 0 {
+                    events.push(MarketEvent::Rejected { count: rejected });
                 }
             }
             WsMsg::Ticker(t) => {
@@ -438,7 +539,6 @@ impl CoinbaseSession {
             self.rest_newest_seen.get_or_insert(newest.trade_id);
         }
         let mut reached_cutoff = false;
-        let mut fresh = Vec::with_capacity(trades.len());
         let mut rejected = 0;
         for t in &trades {
             match (
@@ -447,16 +547,16 @@ impl CoinbaseSession {
                 self.qty(&t.size),
             ) {
                 (Some(time), _, _) if time < self.cutoff => reached_cutoff = true,
-                // Already delivered by the websocket.
-                _ if self.ws_ids.contains(&t.trade_id) => {}
-                (Some(time), Some(price), Some(qty)) => {
-                    fresh.push((t.trade_id, MarketEvent::Trade { time, price, qty }))
-                }
+                (Some(time), Some(price), Some(qty)) => self.forming.push(RestFill {
+                    id: t.trade_id,
+                    time,
+                    price,
+                    qty,
+                    aggressor: aggressor(t.side.as_deref()),
+                }),
                 _ => rejected += 1,
             }
         }
-        fresh.sort_by_key(|(id, _)| *id);
-        events.extend(fresh.into_iter().map(|(_, e)| e));
         if rejected > 0 {
             events.push(MarketEvent::Rejected { count: rejected });
         }
@@ -477,6 +577,7 @@ impl CoinbaseSession {
                 to,
             });
         }
+        self.emit_forming_bar(events);
         // Back-fill done. Websocket trades at or below this id are duplicates from now on.
         let max_id = self
             .rest_newest_seen
@@ -495,6 +596,53 @@ impl CoinbaseSession {
         self.check_boundary(events, out);
         self.maybe_fill(out);
         Ok(())
+    }
+
+    /// The forming bar from REST trades, as a closed snapshot (module docs, step 2). Trades at
+    /// the newest REST millisecond follow as trades, minus those the websocket already sent.
+    fn emit_forming_bar(&mut self, events: &mut Vec<MarketEvent>) {
+        let mut trades = std::mem::take(&mut self.forming);
+        let Some(newest) = trades.iter().map(|t| t.time).max() else {
+            return;
+        };
+        trades.sort_by_key(|t| (t.time, t.id));
+        let mut bar: Option<Bar> = None;
+        for t in trades.iter().filter(|t| t.time < newest) {
+            match &mut bar {
+                None => {
+                    bar = Some(Bar {
+                        time: t.time.floor_to(self.period_ms),
+                        open: t.price,
+                        high: t.price,
+                        low: t.price,
+                        close: t.price,
+                        volume: t.qty,
+                    })
+                }
+                Some(b) => {
+                    b.high = b.high.max(t.price);
+                    b.low = b.low.min(t.price);
+                    b.close = t.price;
+                    b.volume = b.volume.saturating_add(t.qty);
+                }
+            }
+        }
+        if let Some(b) = bar {
+            events.push(MarketEvent::History {
+                bars: vec![b],
+                as_of: Some(UtcMillis(newest.0 - 1)),
+            });
+        }
+        for t in trades.iter().filter(|t| t.time == newest) {
+            if !self.ws_ids.contains(&t.id) {
+                events.push(MarketEvent::Trade {
+                    time: t.time,
+                    price: t.price,
+                    qty: t.qty,
+                    aggressor: t.aggressor,
+                });
+            }
+        }
     }
 
     /// A hole fill (`after = hi + 1`, newest first): emit the trades inside holes, shrink the
@@ -526,9 +674,15 @@ impl CoinbaseSession {
             ) {
                 // Before the forming bar: already in the candles.
                 (Some(time), _, _) if time < self.cutoff => {}
-                (Some(time), Some(price), Some(qty)) => {
-                    fresh.push((t.trade_id, MarketEvent::Trade { time, price, qty }))
-                }
+                (Some(time), Some(price), Some(qty)) => fresh.push((
+                    t.trade_id,
+                    MarketEvent::Trade {
+                        time,
+                        price,
+                        qty,
+                        aggressor: aggressor(t.side.as_deref()),
+                    },
+                )),
                 _ => rejected += 1,
             }
         }
@@ -603,7 +757,7 @@ impl ProviderSession for CoinbaseSession {
     fn start(&mut self, ctx: StartContext, out: &mut Vec<Outgoing>) {
         let product = &self.product;
         out.push(Outgoing::Frame(Frame::text(format!(
-            r#"{{"type":"subscribe","product_ids":["{product}"],"channels":["matches","ticker","heartbeat"]}}"#
+            r#"{{"type":"subscribe","product_ids":["{product}"],"channels":["matches","ticker","heartbeat","level2_batch"]}}"#
         ))));
         let p = ctx.bar_period_ms;
         self.period_ms = p;
@@ -808,18 +962,26 @@ mod tests {
         let f = reply(&s, rest);
         let (ev, out) = feed(&mut s, f);
         assert!(out.is_empty());
-        let trades: Vec<_> = ev
-            .iter()
-            .filter_map(|e| match e {
-                MarketEvent::Trade { time, .. } => Some(*time),
-                _ => None,
-            })
-            .collect();
-        // 103 came via websocket; 100 is before the cutoff (in the candles). 101 sits exactly
-        // on the bar boundary and belongs to the forming bar.
+        // The forming bar as a closed snapshot: 101 (exactly on the bar boundary, so in the
+        // forming bar) and 102; 100 is before the cutoff (in the candles). 103 is at the newest
+        // REST millisecond and came via the websocket, so nothing is sent as a trade.
+        assert!(
+            !ev.iter().any(|e| matches!(e, MarketEvent::Trade { .. })),
+            "{ev:?}"
+        );
         assert_eq!(
-            trades,
-            vec![iso("2026-11-06T14:05:00Z"), iso("2026-11-06T14:05:10Z")]
+            ev[0],
+            MarketEvent::History {
+                bars: vec![Bar {
+                    time: iso("2026-11-06T14:05:00Z"),
+                    open: Price(300),
+                    high: Price(400),
+                    low: Price(300),
+                    close: Price(400),
+                    volume: Qty(5_0000_0000),
+                }],
+                as_of: Some(UtcMillis(iso("2026-11-06T14:05:31Z").0 - 1)),
+            }
         );
         assert_eq!(ev.last(), Some(&MarketEvent::HistoryComplete));
         // A late websocket duplicate of a REST trade is dropped.
@@ -978,6 +1140,43 @@ mod tests {
     }
 
     #[test]
+    fn level2_batch_snapshot_and_updates_are_exact() {
+        let mut s = session();
+        let ev = text(
+            &mut s,
+            r#"{"type":"snapshot","product_id":"BTC-USD","bids":[["75415.71","0.5"],["75415.70","1.25"]],"asks":[["75415.72","0.00000001"]]}"#,
+        );
+        let lvl = |side, p, q| MarketEvent::BookLevel {
+            side,
+            price: Price(p),
+            qty: Qty(q),
+            orders: 0,
+        };
+        assert_eq!(
+            ev,
+            vec![
+                MarketEvent::BookClear,
+                lvl(Side::Bid, 7_541_571, 50_000_000),
+                lvl(Side::Bid, 7_541_570, 125_000_000),
+                lvl(Side::Ask, 7_541_572, 1),
+            ]
+        );
+        let ev = text(
+            &mut s,
+            r#"{"type":"l2update","product_id":"BTC-USD","time":"2026-11-06T14:05:31.1Z","changes":[["buy","75415.71","0"],["sell","75415.73","2"],["sell","75415.735","1"]]}"#,
+        );
+        assert_eq!(
+            ev,
+            vec![
+                lvl(Side::Bid, 7_541_571, 0),
+                lvl(Side::Ask, 7_541_573, 200_000_000),
+                MarketEvent::Rejected { count: 1 },
+            ],
+            "half a cent is not representable: counted, never rounded"
+        );
+    }
+
+    #[test]
     fn matches_are_exact_and_sequenced() {
         let mut s = session();
         let ev = text(
@@ -990,6 +1189,8 @@ mod tests {
                 time: iso("2026-11-06T14:05:31.123Z"),
                 price: Price(7_541_572),
                 qty: Qty(123_456),
+                // The maker was buying: a seller hit the bid.
+                aggressor: Some(Aggressor::Sell),
             }]
         );
         assert!(text(&mut s, r#"{"type":"match","trade_id":100,"size":"1","price":"1","time":"2026-11-06T14:05:31Z"}"#).is_empty());

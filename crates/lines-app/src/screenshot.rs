@@ -7,6 +7,9 @@
 //! `Window::render_to_image` (DirectX staging-texture copy on Windows), so the window is
 //! never shown.
 //!
+//! The window holds the same workspace as the app (`--layout`): chart, DOM and time & sales
+//! by default. `--dom-grouping` and `--large-print` pin the DOM and tape options.
+//!
 //! `--cursor X,Y` places a fixed pointer (logical px from the plot's top-left corner) so the
 //! crosshair, its axis tags and the OHLCV readout appear in the image. No OS pointer is
 //! involved: the position is handed straight to the view.
@@ -22,11 +25,12 @@ use anyhow::{Result, anyhow, bail};
 use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
-use lines_feed::FeedConfig;
+use lines_feed::registry::FeedRegistry;
 use lines_feed::store::FeedStatus;
 
-use crate::chart_view::{ChartView, Feed, Fixture};
-use crate::theme::Theme;
+use crate::feeds::Feeds;
+use crate::layout::Layout;
+use crate::workspace::{PaneSetup, WorkspaceView};
 
 /// Everything besides the data that determines the image.
 pub struct Shot {
@@ -35,18 +39,18 @@ pub struct Shot {
     pub size: (f32, f32),
     /// Required DPI scale (asserted, not forced).
     pub scale: Option<f32>,
-    pub theme: Theme,
-    /// Fixed pointer position and other stand-ins for input.
-    pub fixture: Fixture,
+    pub layout: Layout,
+    /// The replay feed, theme, fixed pointer and pane options.
+    pub setup: PaneSetup,
 }
 
-pub fn run(config: FeedConfig, shot: Shot) -> Result<i32> {
-    let feed = Feed::start(config)?;
+pub fn run(registry: FeedRegistry, shot: Shot) -> Result<i32> {
+    let store = shot.setup.feed.sub.store().clone();
 
     // 1. Replay to the cut-off before any UI exists: the frame depends only on the data.
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        match feed.handle.store.read().status.clone() {
+        match store.read().status.clone() {
             FeedStatus::ReplayFinished => break,
             FeedStatus::Failed(e) => bail!("replay failed: {e}"),
             _ if Instant::now() > deadline => bail!("replay did not finish within 120 s"),
@@ -59,7 +63,8 @@ pub fn run(config: FeedConfig, shot: Shot) -> Result<i32> {
     // inside the app with its own exit code: quitting the app is not enough, because on
     // macOS it terminates the process with status 0 before `run` returns.
     gpui_platform::application().run(move |cx: &mut App| {
-        if let Err(e) = capture(cx, feed, shot) {
+        cx.set_global(Feeds(registry));
+        if let Err(e) = capture(cx, shot) {
             fail(&e);
         }
     });
@@ -79,13 +84,13 @@ fn exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
-fn capture(cx: &mut App, feed: Feed, shot: Shot) -> Result<()> {
+fn capture(cx: &mut App, shot: Shot) -> Result<()> {
     let Shot {
         out,
         size: (w, h),
         scale,
-        theme,
-        fixture,
+        layout,
+        setup,
     } = shot;
     let bounds = Bounds {
         origin: point(px(0.0), px(0.0)),
@@ -102,7 +107,7 @@ fn capture(cx: &mut App, feed: Feed, shot: Shot) -> Result<()> {
             focus: false,
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| ChartView::new(feed, theme, true, fixture, cx)),
+        move |_, cx| cx.new(|cx| WorkspaceView::new(layout, setup, cx)),
     )?;
     cx.spawn(async move |cx| {
         // A hidden window's DirectX render target is only sized on WM_SIZE, which a window
