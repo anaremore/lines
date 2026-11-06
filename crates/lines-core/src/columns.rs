@@ -9,9 +9,14 @@
 //! if it is hidden) takes the space that is left. Everything here is plain arithmetic on fixed
 //! arrays, so it can run in paint and during live updates without allocating.
 //!
-//! Dividers sit at the right edge of every shown column but the last. Dragging one resizes
-//! the column on its left, or the one on its right when the left one is the fill column
-//! (whose width is whatever is left over).
+//! Dividers sit at the right edge of every shown column but the last, and follow the pointer.
+//! Columns on the far side of the fill column don't move when one is resized, so a divider
+//! is *anchored* on the side away from the fill column: left of it, a divider is the right
+//! edge of a left-anchored column (that column is resized, growing as the pointer moves
+//! right); right of it, the left edge of a right-anchored column (that column is resized,
+//! shrinking as the pointer moves right). A column grows only as far as the fill column can
+//! give way (down to its own minimum), so a divider stops at a limit rather than pushing
+//! columns past the table's edge.
 
 /// Most columns a table has.
 pub const MAX_COLS: usize = 8;
@@ -200,12 +205,38 @@ impl ColumnSet {
     }
 
     /// The column a drag (or double-click) on divider `d` resizes, and whether it grows with
-    /// the pointer moving right (`true`) or left.
+    /// the pointer moving right (`true`) or left: the column on the divider's anchored side
+    /// (see the module docs), so the divider follows the pointer.
     pub fn divider_column(&self, d: usize) -> Option<(usize, bool)> {
-        if Some(d) == self.fill_index() {
-            self.next_shown(d).map(|j| (j, false))
+        let right = self.next_shown(d)?;
+        if !self.is_shown(d) {
+            return None;
+        }
+        if self.fill_index()? <= d {
+            // Right of the fill column: right-anchored columns; resize the right neighbour.
+            Some((right, false))
         } else {
+            // Left of the fill column: left-anchored columns; resize the left one.
             Some((d, true))
+        }
+    }
+
+    /// The widest column `i` may become in a drag: what it has plus what the fill column can
+    /// give up without going below its own width (minimum or content). Past this the divider
+    /// would stop following the pointer and push columns off the table.
+    pub fn grow_limit(
+        &self,
+        specs: &[ColumnSpec],
+        cells: &[Cell; MAX_COLS],
+        i: usize,
+        needed: &[f32; MAX_COLS],
+    ) -> f32 {
+        match self.fill_index() {
+            Some(f) if f != i && i < self.n => {
+                let slack = (cells[f].w - self.base_width(specs, f, needed)).max(0.0);
+                (cells[i].w + slack).min(MAX_WIDTH)
+            }
+            _ => MAX_WIDTH,
         }
     }
 
@@ -240,6 +271,7 @@ impl ColumnSet {
     ) -> Option<(usize, f32)> {
         let (i, grows) = self.divider_column(d)?;
         let w = cells[i].w + if grows { dx } else { -dx };
+        let w = w.min(self.grow_limit(specs, cells, i, needed));
         Some((i, self.set_width(specs, i, w, needed)))
     }
 
@@ -361,6 +393,114 @@ mod tests {
         assert_eq!(set.drag(&t, &c, 0, -30.0, &need), Some((1, 106.0)));
         set.layout(&t, &need, 300.0, &mut c);
         assert_eq!((c[0].w, c[1].w), (194.0, 106.0));
+    }
+
+    /// Like time & sales: time (fill, on the left), price, size, side.
+    fn tape_specs() -> [ColumnSpec; 4] {
+        let c = |min_w, default_w, hideable| ColumnSpec {
+            min_w,
+            default_w,
+            hideable,
+            shown_by_default: true,
+        };
+        [
+            c(48.0, 96.0, true),
+            c(48.0, 76.0, false),
+            c(28.0, 52.0, true),
+            c(16.0, 40.0, true),
+        ]
+    }
+
+    /// Drag every divider of `set` both ways by `dx` from a fresh layout `total` px wide and
+    /// check the divider ends under the pointer.
+    fn every_divider_follows(specs: &[ColumnSpec], set: &ColumnSet, total: f32, dx: f32) {
+        let need = needed(&[]);
+        let mut cells = [Cell::default(); MAX_COLS];
+        set.layout(specs, &need, total, &mut cells);
+        let last = (0..set.len()).rev().find(|&i| set.is_shown(i)).unwrap();
+        for d in (0..set.len()).filter(|&d| set.is_shown(d) && d != last) {
+            for dx in [-dx, dx] {
+                let mut s = *set;
+                let x0 = cells[d].right();
+                s.drag(specs, &cells, d, dx, &need).unwrap();
+                let mut after = [Cell::default(); MAX_COLS];
+                s.layout(specs, &need, total, &mut after);
+                assert!(
+                    (after[d].right() - (x0 + dx)).abs() < 1e-3,
+                    "divider {d} dragged {dx}: at {}, pointer at {}",
+                    after[d].right(),
+                    x0 + dx
+                );
+                // Nothing pushed past the table's edge.
+                assert!((after[last].right() - total).abs() < 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn dividers_follow_the_pointer_left_anchored() {
+        // DOM-like: the fill column (volume) is last: every column is left-anchored.
+        let s = specs();
+        let mut set = ColumnSet::new(&s, 4);
+        every_divider_follows(&s, &set, 600.0, 20.0);
+        // With the orders column shown and volume hidden (ask fills, still last).
+        set.set_shown(&s, 0, true);
+        set.set_shown(&s, 4, false);
+        every_divider_follows(&s, &set, 600.0, 4.0);
+    }
+
+    #[test]
+    fn dividers_follow_the_pointer_right_anchored() {
+        // T&S-like: the fill column (time) is first: every column after it is right-anchored.
+        // This is the owner's bug: these dividers moved against the pointer.
+        let s = tape_specs();
+        let mut set = ColumnSet::new(&s, 0);
+        every_divider_follows(&s, &set, 500.0, 20.0);
+        // Fill in the middle (time hidden: side fills, last; then size hidden too).
+        set.set_shown(&s, 0, false);
+        every_divider_follows(&s, &set, 500.0, 10.0);
+    }
+
+    #[test]
+    fn a_fill_in_the_middle_anchors_each_side() {
+        // Fill is column 2 of 4: column 0|1 is left-anchored, 2|3 right-anchored.
+        let c = |min_w, default_w| ColumnSpec {
+            min_w,
+            default_w,
+            hideable: true,
+            shown_by_default: true,
+        };
+        let s = [c(30.0, 80.0), c(30.0, 80.0), c(30.0, 80.0), c(30.0, 80.0)];
+        let set = ColumnSet::new(&s, 2);
+        assert_eq!(set.divider_column(0), Some((0, true)));
+        assert_eq!(set.divider_column(1), Some((1, true)));
+        assert_eq!(set.divider_column(2), Some((3, false)));
+        every_divider_follows(&s, &set, 500.0, 15.0);
+    }
+
+    #[test]
+    fn dragging_stops_at_a_limit_instead_of_running_away() {
+        let s = tape_specs();
+        let mut set = ColumnSet::new(&s, 0);
+        let need = needed(&[0.0, 70.0]); // a price needs 70 px
+        let mut c = [Cell::default(); MAX_COLS];
+        set.layout(&s, &need, 400.0, &mut c);
+        // price|size dragged far right: size shrinks to its minimum, then the divider stops.
+        let (i, w) = set.drag(&s, &c, 1, 500.0, &need).unwrap();
+        assert_eq!((i, w), (2, 28.0));
+        // time|price dragged far right: price shrinks to what its numbers need (70), never less.
+        let (i, w) = set.drag(&s, &c, 0, 500.0, &need).unwrap();
+        assert_eq!((i, w), (1, 70.0));
+        // price|size dragged far left: size grows only as far as time can give way (to 96).
+        set.reset(&s);
+        set.layout(&s, &need, 400.0, &mut c);
+        let (i, w) = set.drag(&s, &c, 1, -500.0, &need).unwrap();
+        assert_eq!(i, 2);
+        let mut after = [Cell::default(); MAX_COLS];
+        set.layout(&s, &need, 400.0, &mut after);
+        assert_eq!(after[0].w, 96.0, "time at its own width");
+        assert_eq!(after[3].right(), 400.0, "nothing pushed off the table");
+        assert_eq!(w, c[2].w + (c[0].w - 96.0));
     }
 
     #[test]

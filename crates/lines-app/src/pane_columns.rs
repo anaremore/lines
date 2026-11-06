@@ -210,6 +210,8 @@ pub struct Drag {
     grows: bool,
     start_x: f32,
     start_w: f32,
+    /// How wide the column may get before the fill column would have to go below its width.
+    max_w: f32,
 }
 
 /// What a press on the column header row means.
@@ -345,11 +347,13 @@ impl Columns {
 
     /// Grab divider `d` with the pointer at table x `x`.
     pub fn start_drag(&mut self, d: usize, x: f32) {
+        let specs = self.specs();
         self.drag = self.set.divider_column(d).map(|(col, grows)| Drag {
             col,
             grows,
             start_x: x,
             start_w: self.cells[col].w,
+            max_w: self.set.grow_limit(specs, &self.cells, col, &self.needed),
         });
     }
 
@@ -357,7 +361,7 @@ impl Columns {
     pub fn drag_to(&self, x: f32) -> Option<ColumnCmd> {
         let d = self.drag?;
         let dx = x - d.start_x;
-        let w = d.start_w + if d.grows { dx } else { -dx };
+        let w = (d.start_w + if d.grows { dx } else { -dx }).min(d.max_w);
         Some(ColumnCmd::Width(
             self.column(d.col)?,
             w.round().clamp(0.0, f32::from(u16::MAX)) as u16,
@@ -612,6 +616,61 @@ mod tests {
         );
         assert_eq!(c.hit(5.0, 5.0, 1), HeaderHit::Row);
         assert_eq!(c.hit(5.0, 40.0, 1), HeaderHit::Outside);
+    }
+
+    /// The owner's bug: dragging time & sales dividers moved them against the pointer. Every
+    /// divider of both real tables, both ways, through the same path the panes use (hit,
+    /// start_drag, drag_to, apply, layout): it ends under the pointer, or at a limit, and
+    /// never on the wrong side of where it started.
+    #[test]
+    fn real_tables_dividers_follow_the_pointer() {
+        for table in [Table::Dom, Table::Tape] {
+            for width in [420.0, 700.0] {
+                let mut fresh = Columns::new(table);
+                fresh.layout(width);
+                let last = (0..fresh.set.len())
+                    .rev()
+                    .find(|&i| fresh.set.is_shown(i))
+                    .unwrap();
+                for d in (0..fresh.set.len()).filter(|&d| fresh.set.is_shown(d) && d != last) {
+                    for dx in [-12.0f32, 12.0, -400.0, 400.0] {
+                        let mut c = fresh.clone();
+                        let x0 = c.cells[d].right();
+                        assert_eq!(c.hit(x0, 5.0, 1), HeaderHit::Divider(d), "{table:?} {d}");
+                        c.start_drag(d, x0);
+                        c.apply(c.drag_to(x0 + dx).unwrap()).unwrap();
+                        c.drag = None;
+                        c.layout(width);
+                        let x = c.cells[d].right();
+                        let moved = x - x0;
+                        assert!(
+                            moved * dx >= 0.0,
+                            "{table:?} divider {d} dragged {dx} moved {moved} (wrong way)"
+                        );
+                        // Under the pointer, unless the resized column stopped at its
+                        // minimum (or what its numbers need) or at the fill column's limit.
+                        let (col, _) = fresh.set.divider_column(d).unwrap();
+                        let specs = fresh.specs();
+                        let lo = specs[col].min_w.max(fresh.needed[col]);
+                        let hi = fresh
+                            .set
+                            .grow_limit(specs, &fresh.cells, col, &fresh.needed);
+                        let w = c.set.width(col).unwrap();
+                        let at_limit = (w - lo).abs() < 0.51 || (w - hi).abs() < 0.51;
+                        assert!(
+                            (x - (x0 + dx)).abs() < 0.51 || at_limit,
+                            "{table:?} divider {d} dragged {dx}: at {x}, pointer at {}",
+                            x0 + dx
+                        );
+                        if dx.abs() < 20.0 && !at_limit {
+                            assert!((x - (x0 + dx)).abs() < 0.51);
+                        }
+                        let edge = c.cells[last].right();
+                        assert!(edge <= width + 0.51, "{table:?}: pushed off the table");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
