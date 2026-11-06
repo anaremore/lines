@@ -20,7 +20,8 @@ struct Fixed {
 
 impl ChartPrices for Fixed {
     fn price_at(&self, at: UtcMillis, tol: i64) -> Option<Price> {
-        lines_core::levels::price_at(&self.bars, at, tol)
+        // Through the public re-export adapters use.
+        super::price_at(&self.bars, at, tol)
     }
     fn now(&self) -> Option<UtcMillis> {
         self.now
@@ -49,6 +50,12 @@ fn bar_at(at: &str, open: i64) -> Bar {
         close: Price(open),
         volume: Qty(1),
     }
+}
+
+/// Adapters can implement the trait under its `PriceAtTime` name.
+#[allow(dead_code)]
+fn takes_price_at_time(p: &dyn PriceAtTime) -> Option<Price> {
+    p.price_at(UtcMillis(0), 0)
 }
 
 fn frames() -> Vec<LevelFrame> {
@@ -130,9 +137,14 @@ fn demo_decode_translates_the_anchor_only_where_the_chart_has_a_price() {
         .unwrap();
     assert_eq!(m.source, "demo");
     assert_eq!(m.as_of, t("2026-11-05T13:00:00"));
-    assert_eq!(m.kinds, ["pivot", "resist", "support", "zone", "anchor"]);
+    assert_eq!(
+        m.kinds,
+        ["pivot", "resist", "support", "zone", "band", "anchor"]
+    );
+    let band = m.levels.iter().find(|l| l.is_vwap_relative()).unwrap();
+    assert_eq!(band.vwap_offsets(), Some((-750.0, 750.0)));
     let anchor = m.levels.last().unwrap();
-    assert_eq!(anchor.span().0, 600_850.0); // 6001.00 + 7.50
+    assert_eq!(anchor.span_at(None).unwrap().0, 600_850.0); // 6001.00 + 7.50
     // No bar at the anchor time: the anchored level is withheld, the rest shown.
     let bare = Fixed {
         bars: vec![],

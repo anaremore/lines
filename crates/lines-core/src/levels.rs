@@ -37,14 +37,32 @@ pub enum LevelValue {
     Tick(Price),
     /// The source's value in catalog price units, not necessarily on the grid.
     Raw(f64),
+    /// The chart's own **ETH-session VWAP** plus this offset (catalog price units; negative
+    /// below). Moves with the VWAP: drawn bar by bar along it, like σ bands (e.g. a band of
+    /// VWAP ± k × a source statistic). Withheld while the chart has no VWAP value.
+    VwapOffset(f64),
 }
 
 impl LevelValue {
-    /// The value in catalog price units (for drawing).
-    pub fn units(&self) -> f64 {
+    /// The value in catalog price units given the chart's current ETH VWAP (`None` for a
+    /// VWAP-relative value when there is no VWAP).
+    pub fn resolve(&self, vwap: Option<f64>) -> Option<f64> {
+        match *self {
+            LevelValue::Tick(p) => Some(p.0 as f64),
+            LevelValue::Raw(v) => Some(v),
+            LevelValue::VwapOffset(d) => vwap.map(|v| v + d),
+        }
+    }
+
+    pub fn is_vwap_relative(&self) -> bool {
+        matches!(self, LevelValue::VwapOffset(_))
+    }
+
+    /// The number the value carries: the price, or the offset for a VWAP-relative value.
+    fn raw(&self) -> f64 {
         match *self {
             LevelValue::Tick(p) => p.0 as f64,
-            LevelValue::Raw(v) => v,
+            LevelValue::Raw(v) | LevelValue::VwapOffset(v) => v,
         }
     }
 }
@@ -102,11 +120,32 @@ pub struct Level {
 }
 
 impl Level {
-    /// `(low, high)` in catalog price units.
-    pub fn span(&self) -> (f64, f64) {
+    /// `(low, high)` in catalog price units at the chart's current ETH VWAP (`None`: a
+    /// VWAP-relative level while there is no VWAP).
+    pub fn span_at(&self, vwap: Option<f64>) -> Option<(f64, f64)> {
         match self.shape {
-            LevelShape::Line(v) => (v.units(), v.units()),
-            LevelShape::Zone { lower, upper } => (lower.units(), upper.units()),
+            LevelShape::Line(v) => v.resolve(vwap).map(|x| (x, x)),
+            LevelShape::Zone { lower, upper } => Some((lower.resolve(vwap)?, upper.resolve(vwap)?)),
+        }
+    }
+
+    /// Moves with the chart's VWAP (drawn along it, bar by bar).
+    pub fn is_vwap_relative(&self) -> bool {
+        match self.shape {
+            LevelShape::Line(v) => v.is_vwap_relative(),
+            LevelShape::Zone { lower, .. } => lower.is_vwap_relative(),
+        }
+    }
+
+    /// `(low, high)` offsets from the VWAP of a VWAP-relative level.
+    pub fn vwap_offsets(&self) -> Option<(f64, f64)> {
+        match self.shape {
+            LevelShape::Line(LevelValue::VwapOffset(d)) => Some((d, d)),
+            LevelShape::Zone {
+                lower: LevelValue::VwapOffset(a),
+                upper: LevelValue::VwapOffset(b),
+            } => Some((a, b)),
+            _ => None,
         }
     }
 }
@@ -159,6 +198,8 @@ pub enum LevelError {
     OffTick(Price),
     /// A zone with `lower > upper`.
     Inverted,
+    /// A zone with one bound relative to the VWAP and the other absolute.
+    MixedAnchors,
     BadWeight(u8),
 }
 
@@ -173,6 +214,9 @@ impl fmt::Display for LevelError {
             LevelError::NotFinite => write!(f, "a level value is not a finite number"),
             LevelError::OffTick(p) => write!(f, "level {} is not on the tick grid", p.0),
             LevelError::Inverted => write!(f, "a zone's lower bound is above its upper bound"),
+            LevelError::MixedAnchors => {
+                write!(f, "a zone mixes a VWAP-relative bound with an absolute one")
+            }
             LevelError::BadWeight(w) => write!(f, "line weight {w} (use 1-4)"),
         }
     }
@@ -282,7 +326,11 @@ impl LevelMapBuilder {
         let tick = tick.max(1);
         let check = |v: LevelValue| match v {
             LevelValue::Tick(p) if p.0 % tick != 0 => Err(LevelError::OffTick(p)),
-            LevelValue::Raw(x) if !x.is_finite() || x.abs() > 9.0e15 => Err(LevelError::NotFinite),
+            LevelValue::Raw(x) | LevelValue::VwapOffset(x)
+                if !x.is_finite() || x.abs() > 9.0e15 =>
+            {
+                Err(LevelError::NotFinite)
+            }
             _ => Ok(()),
         };
         let meta_ok = |m: &LevelMeta| {
@@ -301,7 +349,10 @@ impl LevelMapBuilder {
                     LevelShape::Zone { lower, upper } => {
                         check(lower)?;
                         check(upper)?;
-                        if lower.units() > upper.units() {
+                        if lower.is_vwap_relative() != upper.is_vwap_relative() {
+                            return Err(LevelError::MixedAnchors);
+                        }
+                        if lower.raw() > upper.raw() {
                             return Err(LevelError::Inverted);
                         }
                     }
@@ -343,11 +394,21 @@ pub struct Placed {
     pub bottom: f32,
     /// Where its label goes (centre y), after [`place_labels`]; `None`: no label shown.
     pub label_y: Option<f32>,
+    /// Moves with the VWAP: `top`/`bottom` are at the current VWAP (for the label and
+    /// culling); the layer draws it along the VWAP bar by bar.
+    pub vwap_relative: bool,
 }
 
 /// Place the visible levels of `map` that intersect the plot into `out` (cleared first; at
-/// most `out.capacity()`, so this never allocates). `visible(kind)` filters by kind.
-pub fn place(map: &LevelMap, vp: &Viewport, visible: impl Fn(u16) -> bool, out: &mut Vec<Placed>) {
+/// most `out.capacity()`, so this never allocates). `visible(kind)` filters by kind; `vwap` is
+/// the chart's current ETH VWAP (VWAP-relative levels are placed at it, or skipped without).
+pub fn place(
+    map: &LevelMap,
+    vp: &Viewport,
+    vwap: Option<f64>,
+    visible: impl Fn(u16) -> bool,
+    out: &mut Vec<Placed>,
+) {
     out.clear();
     let (lo, hi) = (vp.price_lo.min(vp.price_hi), vp.price_lo.max(vp.price_hi));
     for (i, l) in map.levels.iter().enumerate() {
@@ -357,7 +418,9 @@ pub fn place(map: &LevelMap, vp: &Viewport, visible: impl Fn(u16) -> bool, out: 
         if !visible(l.kind) {
             continue;
         }
-        let (a, b) = l.span();
+        let Some((a, b)) = l.span_at(vwap) else {
+            continue; // VWAP-relative, no VWAP yet: withheld
+        };
         if b < lo || a > hi {
             continue; // entirely off screen
         }
@@ -366,6 +429,7 @@ pub fn place(map: &LevelMap, vp: &Viewport, visible: impl Fn(u16) -> bool, out: 
             top: vp.price_to_y(b) as f32,
             bottom: vp.price_to_y(a) as f32,
             label_y: None,
+            vwap_relative: l.is_vwap_relative(),
         });
     }
 }

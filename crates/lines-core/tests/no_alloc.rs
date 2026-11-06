@@ -351,11 +351,17 @@ fn level_placement_does_not_allocate() {
     vp.set_size(1200.0, 700.0);
     (vp.price_lo, vp.price_hi) = (596_000.0, 604_000.0);
     let mut out = Vec::with_capacity(1024);
-    place(&map, &vp, |_| true, &mut out); // warm
+    place(&map, &vp, Some(600_000.0), |_| true, &mut out); // warm
     let n = allocs_during(|| {
         for i in 0..50 {
             vp.price_hi = 604_000.0 + i as f64 * 25.0;
-            place(&map, &vp, |k| k != 1 || i % 2 == 0, &mut out);
+            place(
+                &map,
+                &vp,
+                Some(600_000.0),
+                |k| k != 1 || i % 2 == 0,
+                &mut out,
+            );
             place_labels(&mut out, &map, 17.6, 700.0, Some(350.0));
         }
     });

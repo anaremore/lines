@@ -87,9 +87,13 @@ fn layer_places_filters_and_reports_freshness() {
     };
     prepare(&mut layer, None);
     // 3 lines + 2 zones + the anchored line (the chart has the 14:30 bar): all on screen.
+    // The VWAP band waits for a VWAP (this store has no indicator feed): withheld.
     assert_eq!(layer.placed_per_source()[i], 6);
     let (_, _, kinds) = &layer.sources()[i];
-    assert_eq!(kinds, &["pivot", "resist", "support", "zone", "anchor"]);
+    assert_eq!(
+        kinds,
+        &["pivot", "resist", "support", "zone", "band", "anchor"]
+    );
     let rows = layer.legend();
     assert_eq!(rows[i].text, "as of 13:00Z");
     assert!(!rows[i].warn);
