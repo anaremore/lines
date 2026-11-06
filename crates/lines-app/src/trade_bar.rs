@@ -60,6 +60,8 @@ pub struct PaneTrade {
     local_flash: Option<(String, Instant)>,
     cache: Option<Arc<TradeCache>>,
     seen: u64,
+    /// The P&L display setting's epoch last drawn.
+    seen_display: u64,
     /// The window the focus/activation subscriptions belong to.
     watched: Option<(gpui::WindowId, Subscription, Subscription)>,
 }
@@ -82,6 +84,7 @@ impl PaneTrade {
             local_flash: None,
             cache: trading.map(|t| t.cache.clone()),
             seen: u64::MAX,
+            seen_display: crate::pnl::display_epoch(),
             watched: None,
         }
     }
@@ -98,6 +101,11 @@ impl PaneTrade {
     /// The trading state moved for this pane's account (or a local flash expired).
     pub fn changed(&mut self) -> bool {
         let mut changed = false;
+        let e = crate::pnl::display_epoch();
+        if e != self.seen_display {
+            self.seen_display = e;
+            changed = true;
+        }
         if let (Some(c), Some(a)) = (&self.cache, &self.account) {
             let r = c.revision(a);
             if r != self.seen {
@@ -292,9 +300,12 @@ pub fn qty_key<V: TradePane>(v: &mut V, key: &str, cx: &mut Context<V>) -> bool 
 struct BarData {
     account_name: String,
     paper: bool,
-    /// Signed qty, average price text, open P&L text.
-    position: Option<(i64, String, String)>,
+    /// Signed qty, average price text, open P&L in ticks (when the mark is known) and money.
+    position: Option<(i64, String, Option<f64>, Money)>,
+    /// Realised + open P&L for the session trade date (the account's).
     day_pnl: Option<Money>,
+    /// How P&L shows (app setting); off: no amounts anywhere in the header.
+    mode: crate::pnl::PnlDisplay,
     /// (label, left, limit) per rule.
     rules: Vec<(&'static str, Money, Money)>,
     /// The account's trading state, as words, when it isn't active.
@@ -317,6 +328,10 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         paper: info.paper,
         position: None,
         day_pnl: None,
+        mode: cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.pnl_display)
+            .unwrap_or_default(),
         rules: Vec::new(),
         blocked: None,
         flashes: Vec::new(),
@@ -331,17 +346,10 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
                     .avg_price
                     .map_or_else(String::new, |a| avg_text(product, a));
                 let ticks = match (p.avg_price, last) {
-                    (Some(a), Some(m)) => {
-                        open_ticks(p.qty, a, m, product.price.tick).map(|t| format!("{t:+.1} t  "))
-                    }
+                    (Some(a), Some(m)) => open_ticks(p.qty, a, m, product.price.tick),
                     _ => None,
                 };
-                let pnl = format!(
-                    "{}{}",
-                    ticks.unwrap_or_default(),
-                    signed_money(p.unrealised)
-                );
-                data.position = Some((p.qty, avg, pnl));
+                data.position = Some((p.qty, avg, ticks, p.unrealised));
             }
         }
         if let Some(a) = s.account(account) {
@@ -372,11 +380,15 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         data.flashes = s
             .flashes(account, contract, now)
             .map(|f| {
+                // P&L off: refusals keep their reason, never an amount.
+                let message = if data.mode.shown() {
+                    std::borrow::Cow::Borrowed(f.message.as_str())
+                } else {
+                    crate::pnl::redact_amounts(&f.message)
+                };
                 let text = match f.price {
-                    Some(p) => {
-                        format!("{}: {}", product.price.format::<32>(p).as_str(), f.message)
-                    }
-                    None => f.message.clone(),
+                    Some(p) => format!("{}: {message}", product.price.format::<32>(p).as_str()),
+                    None => message.into_owned(),
                 };
                 (f.kind.label(), text)
             })
@@ -399,27 +411,24 @@ pub fn flash_line(flashes: &[(&'static str, String)]) -> Option<(&'static str, S
     })
 }
 
-/// `+125.00` / `-4.00`, with the currency sign.
-pub fn signed_money(m: Money) -> String {
-    let s = m.to_string();
-    match s.strip_prefix('-') {
-        Some(abs) => format!("-${abs}"),
-        None if m == Money::ZERO => format!("${s}"),
-        None => format!("+${s}"),
-    }
-}
-
 /// An average price: exact on the tick grid, else one more decimal than the product shows.
 pub fn avg_text(product: &Product, avg: f64) -> String {
+    let mut s = String::new();
+    let _ = write_avg(&mut s, product, avg);
+    s
+}
+
+/// [`avg_text`] into a caller's buffer (paint paths: no allocation).
+pub fn write_avg(out: &mut impl std::fmt::Write, product: &Product, avg: f64) -> std::fmt::Result {
     let fmt = product.price;
     let r = avg.round();
     if (avg - r).abs() < 1e-9 {
-        return fmt.format::<32>(Price(r as i64)).as_str().to_owned();
+        return fmt.write(Price(r as i64), out);
     }
     let shown = fmt.format::<32>(Price(r as i64));
     let decimals = shown.as_str().split('.').nth(1).map_or(0, str::len) + 1;
     let v = avg * fmt.scale.num() as f64 / fmt.scale.den() as f64;
-    format!("{v:.decimals$}")
+    write!(out, "{v:.decimals$}")
 }
 
 fn chip(text: impl Into<gpui::SharedString>, t: &Theme) -> gpui::Div {
@@ -483,8 +492,16 @@ pub fn dom_bar<V: TradePane>(
         .px_2()
         .py_1();
     r1 = r1.child(account_chip(v, data.as_ref(), t, cx));
+    let mode = data.as_ref().map(|d| d.mode).unwrap_or_default();
+    // P&L in the up/down colour, always with its sign (never colour alone).
+    let tone = |m: Money| match crate::pnl::tone(m) {
+        crate::pnl::Tone::Up => t.up,
+        crate::pnl::Tone::Down => t.down,
+        crate::pnl::Tone::Flat => t.text_main,
+    };
     match data.as_ref().and_then(|d| d.position.clone()) {
-        Some((q, avg, pnl)) => {
+        Some((q, avg, ticks, money)) => {
+            // Side, quantity and average always show: P&L off hides only the P&L.
             let side = if q > 0 { "LONG" } else { "SHORT" };
             r1 = r1.child(
                 div()
@@ -492,15 +509,25 @@ pub fn dom_bar<V: TradePane>(
                     .text_color(t.text_main)
                     .child(format!("{side} {} @ {avg}", q.abs())),
             );
-            r1 = r1.child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(t.text_main)
-                    .child(pnl),
-            );
+            let mut pnl = String::new();
+            if crate::pnl::write_pnl(&mut pnl, mode, ticks, money).unwrap_or(false) {
+                r1 = r1.child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(tone(money))
+                        .child(pnl),
+                );
+            }
         }
         None => {
             r1 = r1.child(div().text_color(t.text_dim).child("flat"));
+        }
+    }
+    // The account's day P&L (realised + open, session trade date): currency modes only.
+    if let Some(day) = data.as_ref().and_then(|d| d.day_pnl) {
+        let mut text = String::new();
+        if crate::pnl::write_day(&mut text, mode, day).unwrap_or(false) {
+            r1 = r1.child(div().text_color(tone(day)).child(text));
         }
     }
     if let Some(n) = data.as_ref().map(|d| d.working).filter(|&n| n > 0) {
@@ -634,7 +661,7 @@ pub fn dom_bar<V: TradePane>(
     if let Some(d) = &data
         && (!d.rules.is_empty() || d.blocked.is_some())
     {
-        rows = rows.child(rule_strip(d, t));
+        rows = rows.child(rule_strip(d, t, mode));
     }
     // Refusals and rejections, inline and brief: one line, the newest, with a count.
     if let Some(d) = &data
@@ -661,7 +688,10 @@ pub fn dom_bar<V: TradePane>(
     Some(rows.into_any_element())
 }
 
-fn rule_strip(d: &BarData, t: &Theme) -> gpui::Div {
+/// Prop-rule progress. Amounts are currency, so they show only when the P&L display shows
+/// currency; otherwise (ticks, off) states without amounts (`daily loss: ok`, `NEAR LIMIT ·
+/// daily loss`, `daily loss: LIMIT REACHED`).
+fn rule_strip(d: &BarData, t: &Theme, mode: crate::pnl::PnlDisplay) -> gpui::Div {
     let mut strip = div().flex().flex_row().flex_wrap().gap_2().px_2().pb_1();
     if let Some(b) = &d.blocked {
         strip = strip.child(
@@ -676,12 +706,16 @@ fn rule_strip(d: &BarData, t: &Theme) -> gpui::Div {
     for (label, left, limit) in &d.rules {
         let level = rule_level(left.0, limit.0);
         let mut text = String::new();
-        let _ = write!(
-            text,
-            "{label}: ${} left of ${}",
-            money_abs(*left),
-            money_abs(*limit)
-        );
+        if mode.money() {
+            let _ = write!(
+                text,
+                "{label}: ${} left of ${}",
+                money_abs(*left),
+                money_abs(*limit)
+            );
+        } else {
+            let _ = write!(text, "{label}: ok");
+        }
         let cell = div().px_1().rounded_sm();
         strip = strip.child(match level {
             RuleLevel::Ok => cell.text_color(t.text_dim).child(text),
@@ -690,20 +724,17 @@ fn rule_strip(d: &BarData, t: &Theme) -> gpui::Div {
                 .bg(t.warn)
                 .text_color(t.on_warn)
                 .font_weight(FontWeight::BOLD)
-                .child(format!("NEAR LIMIT · {text}")),
+                .child(if mode.money() {
+                    format!("NEAR LIMIT · {text}")
+                } else {
+                    format!("NEAR LIMIT · {label}")
+                }),
             RuleLevel::Breached => cell
                 .bg(t.warn)
                 .text_color(t.on_warn)
                 .font_weight(FontWeight::BOLD)
                 .child(format!("{label}: LIMIT REACHED")),
         });
-    }
-    if let Some(p) = d.day_pnl {
-        strip = strip.child(
-            div()
-                .text_color(t.text_dim)
-                .child(format!("today {}", signed_money(p))),
-        );
     }
     strip
 }
@@ -848,6 +879,7 @@ pub fn chart_chip<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option
         paper: info.paper,
         position: None,
         day_pnl: None,
+        mode: crate::pnl::PnlDisplay::default(),
         rules: Vec::new(),
         blocked: None,
         flashes: Vec::new(),
@@ -868,9 +900,6 @@ mod tests {
 
     #[test]
     fn money_and_average_text() {
-        assert_eq!(signed_money(Money::whole(125)), "+$125.00");
-        assert_eq!(signed_money(-Money::whole(4)), "-$4.00");
-        assert_eq!(signed_money(Money::ZERO), "$0.00");
         let es = lines_feed::catalog::get(lines_feed::catalog::ES).unwrap();
         assert_eq!(avg_text(&es, 599_950.0), "5999.50");
         // Between ticks: one more decimal than the product shows.

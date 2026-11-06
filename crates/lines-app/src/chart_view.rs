@@ -67,6 +67,7 @@ use crate::feeds::{Feeds, PaneFeed};
 use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
+use crate::pnl::PnlDisplay;
 use crate::profile::{ProfileConfig, VolumeProfileLayer};
 use crate::study_menu::{
     Item, MenuCmd, MenuInput, SourceInfo, StudyAction, StudyMenu, StudyRef, StudySet, anchor_at,
@@ -267,6 +268,8 @@ pub struct ChartView {
     rates_changed: bool,
     /// The chart's account (chart trading is roadmap 8; Flatten/Cancel All hotkeys work now).
     trade: crate::trade_bar::PaneTrade,
+    /// The position tag's text (glyphs shaped once).
+    pos_glyphs: crate::text::Glyphs,
 }
 
 impl crate::trade_bar::TradePane for ChartView {
@@ -379,6 +382,7 @@ impl ChartView {
             perf_stats: false,
             rates_changed: false,
             trade,
+            pos_glyphs: crate::text::Glyphs::new(LABEL_PX),
         };
         if let Some(set) = fixture_studies {
             view.set_study_set(set);
@@ -1149,8 +1153,108 @@ impl ChartView {
         };
     }
 
+    /// The chart's open position in its account (side and quantity signed, average price,
+    /// open P&L, the P&L display mode), copied for this frame; `None` when flat, without an
+    /// account, or while the trading cache is busy.
+    fn position_for_draw(&self, cx: &App) -> Option<(i64, f64, lines_trading::Money, PnlDisplay)> {
+        let trading = crate::trading::Trading::try_global(cx)?;
+        let account = self.trade.account.as_ref()?;
+        let contract = crate::trade_bar::contract_of(&self.store)?;
+        let s = trading.cache.try_read()?;
+        let p = s.position(account, contract)?;
+        let mode = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.pnl_display)
+            .unwrap_or_default();
+        Some((p.qty, p.avg_price?, p.unrealised, mode))
+    }
+
+    /// The position line's tag at plot-local `y`: `LONG 2 @ 6000.25` and, unless P&L is off,
+    /// the open P&L in the up/down colour with its sign (`+2.5 t  +$125.00`). Allocation-free
+    /// (fixed buffers, cached glyphs).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_position_tag(
+        &mut self,
+        (qty, avg, pnl, mode): (i64, f64, lines_trading::Money, PnlDisplay),
+        y: f32,
+        (ox, oy): (f32, f32),
+        hair: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        let mut head = FixedStr::<64>::new();
+        let _ = write!(
+            head,
+            "{} {} @ ",
+            if qty > 0 { "LONG" } else { "SHORT" },
+            qty.abs()
+        );
+        let _ = crate::trade_bar::write_avg(&mut head, &self.instrument, avg);
+        let mut money = FixedStr::<64>::new();
+        let ticks = self
+            .last_trade
+            .and_then(|m| crate::dom_trade::open_ticks(qty, avg, m, self.instrument.price.tick));
+        let shown = crate::pnl::write_pnl(&mut money, mode, ticks, pnl).unwrap_or(false);
+        let tone = match crate::pnl::tone(pnl) {
+            crate::pnl::Tone::Up => t.up,
+            crate::pnl::Tone::Down => t.down,
+            crate::pnl::Tone::Flat => t.text_main,
+        };
+        let w_head = self
+            .pos_glyphs
+            .width(head.as_str(), t.text_main, true, window);
+        let w_money = if shown {
+            8.0 + self.pos_glyphs.width(money.as_str(), tone, true, window)
+        } else {
+            0.0
+        };
+        let (x, h) = (ox + 4.0, TAG_H);
+        let top = oy + y - h * 0.5;
+        let w = w_head + w_money + 12.0;
+        window.paint_quad(fill(
+            Bounds::new(point(px(x), px(top)), size(px(w), px(h))),
+            t.label_bg,
+        ));
+        // Outlined, so the tag reads as the position's even over candles.
+        for (bx, by, bw, bh) in [
+            (x, top, w, hair),
+            (x, top + h - hair, w, hair),
+            (x, top, hair, h),
+            (x + w - hair, top, hair, h),
+        ] {
+            window.paint_quad(fill(
+                Bounds::new(point(px(bx), px(by)), size(px(bw), px(bh))),
+                t.text_dim,
+            ));
+        }
+        self.pos_glyphs.paint(
+            head.as_str(),
+            x + 6.0,
+            top,
+            h,
+            t.text_main,
+            true,
+            window,
+            cx,
+        );
+        if shown {
+            self.pos_glyphs.paint(
+                money.as_str(),
+                x + 6.0 + w_head + 8.0,
+                top,
+                h,
+                tone,
+                true,
+                window,
+                cx,
+            );
+        }
+    }
+
     fn draw(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let t = self.theme;
+        let position = self.position_for_draw(cx);
         let scale = window.scale_factor();
         let hair = 1.0 / scale; // one device pixel
         let ox = f32::from(bounds.origin.x);
@@ -1239,6 +1343,16 @@ impl ChartView {
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
                 window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
+            }
+            // The open position: a dashed line at its average price (never the last price's
+            // solid violet).
+            if let Some((_, avg, _, _)) = position {
+                let y = self.vp.price_to_y(avg) as f32;
+                let mut x = 0.0;
+                while x < pw {
+                    window.paint_quad(fill(rect(x, y, 6.0_f32.min(pw - x), hair), t.text_dim));
+                    x += 10.0;
+                }
             }
             if self.cross.is_none()
                 && let Some((x, _)) = self.sync_marker
@@ -1354,6 +1468,12 @@ impl ChartView {
                     let _ = fmt.write(p, s);
                 },
             );
+        }
+        if let Some(pos) = position {
+            let y = self.vp.price_to_y(pos.1) as f32;
+            if (0.0..=ph).contains(&y) {
+                self.draw_position_tag(pos, y, (ox, oy), hair, window, cx);
+            }
         }
         if !self.vp.auto_price {
             self.draw_manual_scale_indicator(bounds, window, cx);
@@ -1839,7 +1959,7 @@ impl Pane for ChartView {
     /// New indicator values (they arrive from the indicator thread after the store's), or new
     /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
-        let rates = std::mem::take(&mut self.rates_changed);
+        let rates = std::mem::take(&mut self.rates_changed) | self.trade.changed();
         if !self.visibility.draws_studies() {
             return rates;
         }
