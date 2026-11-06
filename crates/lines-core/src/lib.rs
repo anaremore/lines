@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod instrument;
 pub mod ladder;
 pub mod price;
+pub mod profile;
 pub mod qty;
 pub mod roll;
 pub mod sessions;
@@ -31,6 +32,7 @@ pub use instrument::{
     Product, ProductId, ProductKind, Ratio, RollRule,
 };
 pub use price::{DisplayStyle, Price, PriceFormat, PriceScale, UnitConverter, UnitError};
+pub use profile::{ProfileRows, SessionProfiles, SideVolume};
 pub use qty::{Qty, QtyFormat};
 pub use sessions::{
     HolidayData, HolidayTable, LocalTime, Session, SessionCalendar, SessionKind, SessionSpec,

@@ -239,3 +239,40 @@ fn dom_and_tape_paint_paths_do_not_allocate() {
     assert!(!rows.is_empty() && !visible.is_empty());
     assert_eq!(n, 0, "DOM/T&S paint path allocated {n} times");
 }
+
+/// The volume profile's per-frame work: grouping a session, a composite of sessions and a
+/// visible range of bars into rows with POC and value area, into a reused buffer.
+#[test]
+fn volume_profile_rows_do_not_allocate() {
+    use lines_core::profile::{Footprint, PriceVolume};
+    use lines_core::{Aggressor, ProfileRows};
+
+    let mut sessions: Vec<PriceVolume> = (0..5).map(|_| PriceVolume::default()).collect();
+    let mut fp = Footprint::new(60_000, 10_000);
+    for k in 0..50_000i64 {
+        let price = Price(600_000 + (k * 37 % 400 - 200) * 25);
+        let side = if k % 2 == 0 {
+            Some(Aggressor::Buy)
+        } else {
+            Some(Aggressor::Sell)
+        };
+        sessions[(k % 5) as usize].add(price, Qty(k % 7 + 1), side);
+        fp.add(UtcMillis(k * 1_000), price, Qty(1), side);
+    }
+    let mut rows = ProfileRows::with_capacity(4096);
+    // Warm up (the buffer is already large enough; this only exercises the code once).
+    rows.build(25, 70, || sessions[4].iter());
+    let n = allocs_during(|| {
+        for g in [1i64, 2, 5, 10, 25] {
+            rows.build(g * 25, 70, || sessions[4].iter());
+            assert!(rows.poc.is_some());
+            rows.build(g * 25, 68, || sessions.iter().flat_map(|s| s.iter()));
+            assert!(rows.value_area.is_some());
+            rows.build(g * 25, 70, || {
+                fp.range(UtcMillis(1_000_000), UtcMillis(20_000_000))
+            });
+            assert!(rows.total.0 > 0);
+        }
+    });
+    assert_eq!(n, 0, "volume profile rows allocated {n} times");
+}

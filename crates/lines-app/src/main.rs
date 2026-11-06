@@ -10,6 +10,7 @@ mod pane_window;
 mod persist;
 mod picker;
 mod picker_view;
+mod profile;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 mod studies;
@@ -31,6 +32,7 @@ use lines_core::UtcMillis;
 use lines_feed::cqg::mock::MockConfig;
 use lines_feed::registry::FeedRegistry;
 use lines_feed::{FeedConfig, Source, catalog};
+use profile::{ProfileConfig, ProfileMode, ProfileSession};
 
 use crate::dom_view::DomOptions;
 use crate::feeds::Feeds;
@@ -185,6 +187,25 @@ struct Cli {
     /// 1280x800; the app: saved per window, else 85% of the primary display).
     #[arg(long, value_parser = parse_size)]
     size: Option<(f32, f32)>,
+    /// Chart volume profile (Alt+V cycles it in the app): the current session, the visible
+    /// range of bars, or a composite of the last --profile-sessions sessions.
+    #[arg(long, value_enum, default_value_t = ProfileModeArg::Off)]
+    profile: ProfileModeArg,
+    /// Volume profile session type (Alt+R): full electronic session or regular hours.
+    #[arg(long, value_enum, default_value_t = ProfileSessionArg::Eth)]
+    profile_session: ProfileSessionArg,
+    /// Sessions in a composite volume profile.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(2..=30))]
+    profile_sessions: u8,
+    /// Value area, percent of the profile's volume.
+    #[arg(long, default_value_t = 70, value_parser = clap::value_parser!(u8).range(1..=100))]
+    profile_va: u8,
+    /// Split volume profile rows by aggressor side (Alt+B).
+    #[arg(long)]
+    profile_split: bool,
+    /// Volume profile grouping in ticks per row (Alt+G); default: automatic.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+    profile_grouping: Option<u32>,
     /// Screenshot mode (decision 0009): replay --replay up to --at at full speed, render one
     /// frame at --size/--theme with a frozen clock, write this PNG, exit.
     /// Requires building with `--features screenshot`.
@@ -205,6 +226,15 @@ struct Cli {
     /// Screenshot: render with the symbol picker open on this query (e.g. "nq").
     #[arg(long, requires = "screenshot")]
     picker: Option<String>,
+    /// Screenshot: the chart without study legends and tags (Ctrl+Shift+L in the app).
+    #[arg(long, requires = "screenshot")]
+    hide_study_labels: bool,
+    /// Screenshot: the chart with its studies hidden (Ctrl+Shift+H in the app).
+    #[arg(long, requires = "screenshot")]
+    hide_studies: bool,
+    /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
+    #[arg(long, requires = "screenshot")]
+    hide_hints: bool,
     /// Add a VWAP to the first chart (repeatable): eth (default reset), rth, week, month or
     /// anchor@2026-11-06T14:30:00Z, optionally with σ bands after a slash: eth/1,2,3 (quote it
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
@@ -251,6 +281,20 @@ fn parse_vwap(s: &str) -> Result<lines_indicators::VwapSpec, String> {
         reset,
         bands: Bands(mask),
     })
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ProfileModeArg {
+    Off,
+    Session,
+    Visible,
+    Composite,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ProfileSessionArg {
+    Eth,
+    Rth,
 }
 
 fn parse_time(s: &str) -> Result<UtcMillis, String> {
@@ -458,6 +502,27 @@ fn main() -> Result<()> {
                     color: (i % 4) as u8,
                 })
                 .collect(),
+            profile: ProfileConfig {
+                mode: match cli.profile {
+                    ProfileModeArg::Off => ProfileMode::Off,
+                    ProfileModeArg::Session => ProfileMode::Session,
+                    ProfileModeArg::Visible => ProfileMode::VisibleRange,
+                    ProfileModeArg::Composite => ProfileMode::Composite,
+                },
+                session: match cli.profile_session {
+                    ProfileSessionArg::Eth => ProfileSession::Eth,
+                    ProfileSessionArg::Rth => ProfileSession::Rth,
+                },
+                composite_sessions: cli.profile_sessions,
+                value_area_percent: cli.profile_va,
+                split: cli.profile_split,
+                grouping: cli.profile_grouping,
+                ..ProfileConfig::default()
+            },
+            visibility: wsdoc::StudyVisibility {
+                hide_study_labels: cli.hide_study_labels,
+                hide_studies: cli.hide_studies,
+            },
         })),
         default_size: cli.size,
     };
@@ -474,6 +539,7 @@ fn main() -> Result<()> {
         if instrument.is_some() {
             doc.retarget_all(instrument.clone());
         }
+        doc.hide_hints |= cli.hide_hints;
         doc.normalise().map_err(|e| anyhow!("--workspace: {e}"))?;
         let size = cli.size.unwrap_or((1280.0, 800.0));
         if let Some(secs) = cli.bench {

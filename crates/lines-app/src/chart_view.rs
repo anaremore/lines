@@ -58,8 +58,9 @@ use lines_feed::store::{ChartStore, FeedStatus};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
+use crate::profile::{ProfileConfig, VolumeProfileLayer};
 use crate::theme::Theme;
-use crate::wsdoc::{ChartState, PaneDoc};
+use crate::wsdoc::{ChartState, PaneDoc, StudyVisibility};
 
 const AXIS_W: f32 = 78.0;
 const AXIS_H: f32 = 24.0;
@@ -116,6 +117,11 @@ pub struct Fixture {
     pub picker: Option<String>,
     /// Indicators to start with (screenshots, `--vwap`).
     pub indicators: Vec<lines_indicators::IndicatorConfig>,
+    /// Initial volume profile settings (CLI). A profile saved with the pane in the workspace
+    /// file (`ChartState::profile`) takes precedence.
+    pub profile: ProfileConfig,
+    /// Study labels / studies hidden from the start (screenshots of a clean chart).
+    pub visibility: StudyVisibility,
 }
 
 enum Drag {
@@ -140,12 +146,19 @@ pub struct CrosshairTime(pub Option<UtcMillis>);
 pub struct ChartView {
     feed: PaneFeed,
     common: PaneCommon,
+    /// The volume profile, painted first (under other studies). Kept typed, not in `layers`,
+    /// so its settings can be read and changed.
+    profile: VolumeProfileLayer,
     /// Studies over the plot, painted in order.
     layers: Vec<Box<dyn ChartLayer>>,
     /// Indicators (VWAP …) from the shared engine (`crate::studies`), saved with the pane.
     studies: crate::studies::Studies,
     /// `studies.revision()` last drawn.
     seen_studies: u64,
+    /// Study legends/tags or all studies hidden (saved with the pane). Hidden studies keep
+    /// their configuration and engine nodes, so showing them again is exact and immediate,
+    /// but cost no prepare or paint work while hidden.
+    visibility: StudyVisibility,
     picker: PickerUi,
     store: Arc<ChartStore>,
     theme: Theme,
@@ -205,9 +218,11 @@ impl ChartView {
         ChartView {
             feed,
             common: PaneCommon::default(),
+            profile: VolumeProfileLayer::new(fixture.profile),
             layers: Vec::new(),
             studies,
             seen_studies: u64::MAX,
+            visibility: fixture.visibility,
             picker,
             store,
             theme,
@@ -353,6 +368,15 @@ impl ChartView {
             self.open_picker("", cx);
         } else if k.key == "home" {
             self.vp.reset(self.series_len);
+        } else if m.alt && !m.control && !m.platform && {
+            let mut c = self.profile.config();
+            let changed = c.on_alt_key(&k.key);
+            if changed {
+                self.profile.set_config(c);
+            }
+            changed
+        } {
+            // Volume profile keys (`crate::profile`).
         } else if let Some(letter) = k.key_char.as_deref().filter(|c| {
             !m.control
                 && !m.alt
@@ -435,6 +459,13 @@ impl ChartView {
         if state.bar_px.is_finite() {
             self.vp.bar_px = state.bar_px.clamp(MIN_BAR_PX, MAX_BAR_PX);
         }
+        if state.visibility != StudyVisibility::default() {
+            self.visibility = state.visibility;
+        }
+        // A saved profile wins; a pane without one keeps its initial (CLI) settings.
+        if !state.profile.is_default() {
+            self.profile.set_config(state.profile);
+        }
         // Saved indicators, then any given on the command line (`--vwap`) not among them.
         let mut configs = state.indicators.clone();
         for c in self.studies.configs() {
@@ -443,6 +474,21 @@ impl ChartView {
             }
         }
         self.set_indicator_configs(configs);
+    }
+
+    /// What this chart draws of its studies.
+    pub fn visibility(&self) -> StudyVisibility {
+        self.visibility
+    }
+
+    /// Hide or show study labels / studies (commands `ToggleStudyLabels`, `ToggleStudies`,
+    /// `CleanChart`). Configurations are untouched.
+    pub fn set_visibility(&mut self, v: StudyVisibility, cx: &mut Context<Self>) {
+        if v != self.visibility {
+            self.visibility = v;
+            self.seen_studies = u64::MAX; // studies shown again: draw their latest values
+            cx.notify();
+        }
     }
 
     /// This chart's indicators, as the workspace saves them.
@@ -610,11 +656,16 @@ impl ChartView {
                 let x = slot_x(&self.vp, slot as f64, scale);
                 (x >= 0.0 && f64::from(x) < self.vp.width).then_some((x, t))
             });
-            for l in &mut self.layers {
-                l.prepare(&d, &self.vp);
-            }
             let max_columns = crate::studies::Studies::max_columns(self.plot.size.width);
-            self.studies.prepare(&d, &self.vp, max_columns);
+            prepare_studies(
+                self.visibility,
+                &mut self.profile,
+                &mut self.layers,
+                &mut self.studies,
+                &d,
+                &self.vp,
+                max_columns,
+            );
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -672,6 +723,16 @@ impl ChartView {
             for l in &self.scene.time_lines {
                 window.paint_quad(fill(rect(l.x, 0.0, hair, ph), t.grid));
             }
+            // Paint order inside the plot: grid, volume profile (behind the candles), candles,
+            // `layers`, indicator studies (VWAP lines above), the profile's label, last-price
+            // line, crosshair.
+            let (studies, labels) = (
+                self.visibility.draws_studies(),
+                self.visibility.draws_labels(),
+            );
+            if studies {
+                self.profile.paint(plot, &self.vp, &t, window, cx);
+            }
             for c in &self.scene.candles {
                 let color = if c.up { t.up } else { t.down };
                 let (bx, bw) = (c.x - c.half_width, c.half_width * 2.0);
@@ -712,10 +773,15 @@ impl ChartView {
                     window.paint_quad(fill(rect(bx, c.body_top, bw, bh), color));
                 }
             }
-            for l in &mut self.layers {
-                l.paint(plot, &self.vp, &t, window, cx);
+            if studies {
+                for l in &mut self.layers {
+                    l.paint(plot, &self.vp, &t, window, cx);
+                }
+                self.studies.paint((ox, oy), &t, window);
             }
-            self.studies.paint((ox, oy), &t, window);
+            if labels {
+                self.profile.paint_label(plot, &t, window, cx);
+            }
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
                 window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
@@ -1091,20 +1157,24 @@ impl ChartView {
         };
         let i = &d.product;
         let f = i.price;
-        let fp = |p: Option<Price>| p.map(|p| f.format::<32>(p)).unwrap_or_default();
         // The active contract is always shown (decision 0013); unknown is labelled, not hidden.
         let _ = match d.contract_label() {
-            Some(c) => write!(left, "{c}  {}    last {}", i.description, fp(d.last_trade)),
-            None => write!(
-                left,
-                "{} (contract unknown)  {}    last {}",
-                i.symbol,
-                i.description,
-                fp(d.last_trade)
-            ),
+            Some(c) => write!(left, "{c}  {}", i.description),
+            None => write!(left, "{} (contract unknown)  {}", i.symbol, i.description),
         };
+        // Last, bid, ask: a missing value shows as a dimmed dash (docs/design.md §7), never as
+        // a bare label that reads like a layout bug.
+        let quote = |label: &str, p: Option<Price>| {
+            let (text, missing) = quote_text(label, p, &f);
+            div()
+                .ml_2()
+                .text_color(if missing { t.text_dim } else { t.text_main })
+                .child(text)
+        };
+        let mut quotes = vec![quote("last", d.last_trade)];
         if d.capabilities.bbo {
-            let _ = write!(left, "   bid {}   ask {}", fp(d.bid), fp(d.ask));
+            quotes.push(quote("bid", d.bid));
+            quotes.push(quote("ask", d.ask));
         }
         let _ = write!(right, "{}  ·  {}", d.provider, d.status.label());
         // History back-fill is shown as state, not a spinner (docs/design.md).
@@ -1146,6 +1216,7 @@ impl ChartView {
                     .flex_shrink_0()
                     .children(chip)
                     .child(div().text_color(t.text_main).child(left))
+                    .children(quotes)
                     .children(pane::stale_badge(&self.store, &t)),
             )
             .child(
@@ -1183,6 +1254,8 @@ impl Pane for ChartView {
         doc.chart = Some(ChartState {
             bar_px: self.vp.bar_px,
             indicators: self.indicator_configs(),
+            profile: self.profile.config(),
+            visibility: self.visibility,
         });
     }
 
@@ -1201,12 +1274,46 @@ impl Pane for ChartView {
     }
 
     /// New indicator values (they arrive from the indicator thread after the store's).
+    /// Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
+        if !self.visibility.draws_studies() {
+            return false;
+        }
         let r = self.studies.revision();
         let changed = r != self.seen_studies;
         self.seen_studies = r;
         changed
     }
+}
+
+/// A header quote: `bid 6005.25`, or `bid —` (and `true`: show it dimmed) without a value.
+fn quote_text(label: &str, p: Option<Price>, f: &lines_core::PriceFormat) -> (String, bool) {
+    match p {
+        Some(p) => (format!("{label} {}", f.format::<32>(p)), false),
+        None => (format!("{label} —"), true),
+    }
+}
+
+/// Under the store lock: this frame's study data, unless the chart hides its studies (then
+/// no study does any work; their state stays as it was for when they are shown again).
+#[allow(clippy::too_many_arguments)]
+fn prepare_studies(
+    visibility: StudyVisibility,
+    profile: &mut VolumeProfileLayer,
+    layers: &mut [Box<dyn ChartLayer>],
+    studies: &mut crate::studies::Studies,
+    d: &ChartData,
+    vp: &Viewport,
+    max_columns: usize,
+) {
+    if !visibility.draws_studies() {
+        return;
+    }
+    profile.prepare(d, vp);
+    for l in layers {
+        l.prepare(d, vp);
+    }
+    studies.prepare(d, vp, max_columns);
 }
 
 /// The indicator engine's view of a chart store's feed.
@@ -1221,7 +1328,7 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
 }
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I indicators";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I indicators  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1278,9 +1385,88 @@ impl Render for ChartView {
                         )
                         .size_full(),
                     )
-                    .when_some(self.studies.legend(&t, &self.instrument), |d, l| d.child(l))
+                    .when_some(
+                        self.visibility
+                            .draws_labels()
+                            .then(|| self.studies.legend(&t, &self.instrument))
+                            .flatten(),
+                        |d, l| d.child(l),
+                    )
                     .when_some(self.studies.menu_overlay(&t, cx), |d, m| d.child(m))
                     .when_some(overlay, |d, overlay| d.child(overlay)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lines_core::{Aggressor, Capabilities, Month, Qty};
+    use lines_feed::catalog;
+    use lines_feed::provider::MarketEvent;
+
+    use crate::profile::{ProfileConfig, ProfileMode};
+
+    /// Hidden studies do no work: no profile rows are built, no study columns prepared.
+    /// Showing them again prepares from the same configuration.
+    #[test]
+    fn hidden_studies_skip_prepare() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let z26 = lines_core::ContractKey::monthly(es.id, 2026, Month::new(12).unwrap());
+        let store = ChartStore::new(es, Some(z26), Capabilities::default(), "test", 60_000, 100);
+        let mut d = store.read();
+        d.apply(&[MarketEvent::Trade {
+            time: UtcMillis::parse_iso("2026-11-05T15:00:00").unwrap(),
+            price: Price(600_000),
+            qty: Qty(3),
+            aggressor: Some(Aggressor::Buy),
+        }]);
+        let mut vp = Viewport::default();
+        vp.set_size(800.0, 600.0);
+        (vp.price_lo, vp.price_hi) = (599_000.0, 601_000.0);
+        let mut profile = VolumeProfileLayer::new(ProfileConfig {
+            mode: ProfileMode::Session,
+            ..ProfileConfig::default()
+        });
+        let mut studies =
+            crate::studies::Studies::new(vec![lines_indicators::IndicatorConfig::Vwap {
+                spec: lines_indicators::VwapSpec::default(),
+                color: 0,
+            }]);
+        let hidden = StudyVisibility {
+            hide_studies: true,
+            ..StudyVisibility::default()
+        };
+        for _ in 0..3 {
+            prepare_studies(hidden, &mut profile, &mut [], &mut studies, &d, &vp, 256);
+        }
+        assert!(!profile.has_built());
+        assert_eq!(studies.reserved_columns(), 0);
+        // Labels hidden only: the studies themselves are still prepared (and drawn).
+        let labels_only = StudyVisibility {
+            hide_study_labels: true,
+            ..StudyVisibility::default()
+        };
+        prepare_studies(
+            labels_only,
+            &mut profile,
+            &mut [],
+            &mut studies,
+            &d,
+            &vp,
+            256,
+        );
+        assert!(profile.has_built());
+        assert!(studies.reserved_columns() >= 256);
+    }
+
+    #[test]
+    fn missing_quotes_show_a_dimmed_dash() {
+        let f = catalog::get(catalog::ES).unwrap().price;
+        assert_eq!(quote_text("bid", None, &f), ("bid —".to_owned(), true));
+        assert_eq!(
+            quote_text("ask", Some(Price(600_025)), &f),
+            ("ask 6000.25".to_owned(), false)
+        );
     }
 }

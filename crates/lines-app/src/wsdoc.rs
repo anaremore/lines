@@ -20,6 +20,7 @@ use lines_feed::catalog::{self, Target};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{Axis, Layout, LinkGroup, PaneKind, Preset, Rect, trading_group};
+use crate::profile::ProfileConfig;
 use crate::tabstate::PaneState;
 use crate::versioned::{Format, Migration};
 
@@ -78,6 +79,10 @@ pub struct WorkspaceDoc {
     /// Charts mark the time under the pointer of any other chart (opt-in).
     #[serde(default)]
     pub crosshair_sync: bool,
+    /// The key-hint bar at the bottom of each window is hidden (shown by default, for new
+    /// users; written only when hidden).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_hints: bool,
     pub windows: Vec<WindowDoc>,
 }
 
@@ -212,6 +217,58 @@ pub struct ChartState {
     /// The chart's indicators (roadmap 5c). Optional: files without it load with none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indicators: Vec<lines_indicators::IndicatorConfig>,
+    /// Volume profile settings. Optional in the file: absent (older files, or a chart that
+    /// never changed them) means the defaults, so the field is written only when it differs.
+    #[serde(default, skip_serializing_if = "ProfileConfig::is_default")]
+    pub profile: ProfileConfig,
+    /// Study labels and studies hidden (kept in the file as flat `hide_*` keys, written only
+    /// when set).
+    #[serde(flatten)]
+    pub visibility: StudyVisibility,
+}
+
+/// What a chart draws of its studies (VWAP lines and bands, the volume profile). Hiding
+/// keeps every study's configuration: showing again restores them exactly.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StudyVisibility {
+    /// No legends or study tags (the studies stay drawn).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_study_labels: bool,
+    /// No studies at all (and no work for them in paint).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_studies: bool,
+}
+
+impl StudyVisibility {
+    pub fn draws_studies(self) -> bool {
+        !self.hide_studies
+    }
+
+    pub fn draws_labels(self) -> bool {
+        !self.hide_studies && !self.hide_study_labels
+    }
+
+    /// Whether a window's footer (key hints + workspace status) is shown: always, unless the
+    /// key hints are hidden *and* the status has nothing to say beyond the workspace name
+    /// (hidden or popped-out panes, crosshair sync and reports always show; docs/design.md
+    /// §3 and §7: state is never hidden by a cosmetic preference).
+    pub fn footer_shown(hide_hints: bool, status_has_state: bool) -> bool {
+        !hide_hints || status_has_state
+    }
+
+    /// The `CleanChart` command: a chart without legends or study tags and the key-hint bar
+    /// hidden. Run on a chart that is already clean, it restores both. Studies stay drawn
+    /// (and hidden studies stay hidden): clean is about text, not data.
+    pub fn clean_chart(self, hints_hidden: bool) -> (StudyVisibility, bool) {
+        let clean = self.hide_study_labels && hints_hidden;
+        (
+            StudyVisibility {
+                hide_study_labels: !clean,
+                ..self
+            },
+            !clean,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +354,7 @@ impl WorkspaceDoc {
         WorkspaceDoc {
             name: name.to_owned(),
             crosshair_sync: false,
+            hide_hints: false,
             windows: vec![WindowDoc {
                 placement: None,
                 active_tab: 0,
@@ -527,6 +585,7 @@ mod tests {
         assert!(old.indicators.is_empty());
         let state = ChartState {
             bar_px: 7.0,
+            visibility: StudyVisibility::default(),
             indicators: vec![lines_indicators::IndicatorConfig::Vwap {
                 spec: lines_indicators::VwapSpec {
                     reset: lines_indicators::Reset::Rth,
@@ -534,6 +593,7 @@ mod tests {
                 },
                 color: 1,
             }],
+            profile: ProfileConfig::default(),
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""indicators""#), "{json}");
@@ -541,7 +601,9 @@ mod tests {
         // None saved: the field is left out, so the file stays as before.
         let none = serde_json::to_string(&ChartState {
             bar_px: 7.0,
+            visibility: StudyVisibility::default(),
             indicators: vec![],
+            profile: ProfileConfig::default(),
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -616,7 +678,9 @@ mod tests {
                     layout: Layout::Pane(PaneDoc {
                         chart: Some(ChartState {
                             bar_px: 9.5,
+                            visibility: StudyVisibility::default(),
                             indicators: vec![],
+                            profile: ProfileConfig::default(),
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -654,6 +718,144 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains(r#""version": 2"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
+    }
+
+    #[test]
+    fn study_visibility_and_hint_bar_round_trip_and_default_to_shown() {
+        // Older files (no fields) show everything.
+        let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
+        assert_eq!(old.visibility, StudyVisibility::default());
+        assert!(old.visibility.draws_studies() && old.visibility.draws_labels());
+        // Set: flat keys, round-trip; unset: not written.
+        let hidden = ChartState {
+            bar_px: 7.0,
+            visibility: StudyVisibility {
+                hide_study_labels: true,
+                hide_studies: true,
+            },
+            indicators: vec![lines_indicators::IndicatorConfig::Vwap {
+                spec: lines_indicators::VwapSpec::default(),
+                color: 1,
+            }],
+            profile: ProfileConfig {
+                mode: crate::profile::ProfileMode::Session,
+                ..ProfileConfig::default()
+            },
+        };
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert!(
+            json.contains(r#""hide_study_labels":true"#) && json.contains(r#""hide_studies":true"#),
+            "{json}"
+        );
+        // Hiding keeps every study's configuration.
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
+        let shown = ChartState {
+            visibility: StudyVisibility::default(),
+            ..hidden.clone()
+        };
+        let json = serde_json::to_string(&shown).unwrap();
+        assert!(!json.contains("hide_"), "{json}");
+        // Workspace preference: hint bar shown unless saved hidden.
+        let mut w = WorkspaceDoc::pair();
+        assert!(!w.hide_hints);
+        let text = String::from_utf8(encode(&FORMAT, &w).unwrap()).unwrap();
+        assert!(!text.contains("hide_hints"), "{text}");
+        w.hide_hints = true;
+        let bytes = encode(&FORMAT, &w).unwrap();
+        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, &bytes) else {
+            panic!("round trip")
+        };
+        assert!(value.hide_hints);
+    }
+
+    #[test]
+    fn toggles_and_clean_chart() {
+        let v = StudyVisibility::default();
+        // Hidden studies hide their labels too; labels alone leave the studies drawn.
+        let labels = StudyVisibility {
+            hide_study_labels: true,
+            ..v
+        };
+        assert!(labels.draws_studies() && !labels.draws_labels());
+        let studies = StudyVisibility {
+            hide_studies: true,
+            ..v
+        };
+        assert!(!studies.draws_studies() && !studies.draws_labels());
+        // Clean chart: labels and hint bar off; again: both back.
+        let (c, hints_hidden) = v.clean_chart(false);
+        assert_eq!((c, hints_hidden), (labels, true));
+        assert_eq!(c.clean_chart(hints_hidden), (v, false));
+        // Partly clean (labels hidden, bar shown): cleans fully rather than restoring.
+        assert_eq!(labels.clean_chart(false), (labels, true));
+        // Hidden studies stay hidden either way.
+        let (c, _) = studies.clean_chart(false);
+        assert!(c.hide_studies && c.hide_study_labels);
+        assert!(c.clean_chart(true).0.hide_studies);
+        // The footer goes only when hints are hidden and there is no state to show.
+        assert!(StudyVisibility::footer_shown(false, false));
+        assert!(!StudyVisibility::footer_shown(true, false));
+        assert!(StudyVisibility::footer_shown(true, true));
+    }
+
+    #[test]
+    fn chart_volume_profile_is_saved_per_pane_only_when_set() {
+        use crate::profile::{ProfileMode, ProfileSession};
+        let chart = |profile| PaneDoc {
+            chart: Some(ChartState {
+                bar_px: 7.0,
+                visibility: StudyVisibility::default(),
+                indicators: vec![],
+                profile,
+            }),
+            ..PaneDoc::new(PaneKind::Chart, None, None)
+        };
+        // Defaults are not written: files of charts that never touched the profile are
+        // unchanged (and older readers never see the field).
+        let plain = serde_json::to_string(&chart(ProfileConfig::default())).unwrap();
+        assert!(!plain.contains("profile"), "{plain}");
+        let set = ProfileConfig {
+            mode: ProfileMode::Composite,
+            session: ProfileSession::Rth,
+            split: true,
+            ..ProfileConfig::default()
+        };
+        let json = serde_json::to_string(&chart(set)).unwrap();
+        assert!(
+            json.contains(r#""profile":{"mode":"composite","session":"rth""#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<PaneDoc>(&json).unwrap(), chart(set));
+        // Beside VWAP: two independent optional fields; each loads without the other.
+        let both = ChartState {
+            bar_px: 7.0,
+            visibility: StudyVisibility::default(),
+            indicators: vec![lines_indicators::IndicatorConfig::Vwap {
+                spec: lines_indicators::VwapSpec::default(),
+                color: 0,
+            }],
+            profile: set,
+        };
+        let json = serde_json::to_string(&both).unwrap();
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
+        let only_vwap: ChartState =
+            serde_json::from_str(&json.replace(r#","profile":"#, r#","ignored":"#)).unwrap();
+        assert_eq!(
+            (only_vwap.indicators, only_vwap.profile),
+            (both.indicators.clone(), ProfileConfig::default())
+        );
+        // A partial profile object fills in defaults.
+        let partial: PaneDoc = serde_json::from_str(
+            r#"{"kind": "chart", "chart": {"bar_px": 7.0, "profile": {"mode": "session"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            partial.chart.unwrap().profile,
+            ProfileConfig {
+                mode: ProfileMode::Session,
+                ..ProfileConfig::default()
+            }
+        );
     }
 
     #[test]
@@ -696,7 +898,9 @@ mod tests {
             leaves[0].chart,
             Some(ChartState {
                 bar_px: 6.0,
-                indicators: vec![]
+                visibility: StudyVisibility::default(),
+                indicators: vec![],
+                profile: ProfileConfig::default()
             })
         );
         assert_eq!(
