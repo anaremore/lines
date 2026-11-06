@@ -1275,7 +1275,14 @@ impl ChartView {
             .border_b_1()
             .border_color(t.axis_line)
             .text_sm()
-            .child(div().text_color(t.text_main).child(left))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .child(div().text_color(t.text_main).child(left))
+                    .children(pane::stale_badge(&self.store, &t)),
+            )
             .child(div().text_color(t.text_dim).child(right))
     }
 }
