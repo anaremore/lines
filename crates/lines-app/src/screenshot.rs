@@ -61,6 +61,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             &ws.env.base,
             &ws.env.availability,
             pane.target.as_ref(),
+            &ws.env.fallback,
         );
         if f.sub.is_some() {
             feeds.push(f);
