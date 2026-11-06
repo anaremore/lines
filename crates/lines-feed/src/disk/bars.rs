@@ -61,21 +61,32 @@ pub fn load(path: &Path, period_ms: i64) -> Option<Vec<Bar>> {
     if body.len() != 22 + n * BAR_BYTES {
         return None;
     }
-    Some(
-        (0..n)
-            .map(|i| {
-                let o = 22 + i * BAR_BYTES;
-                Bar {
-                    time: UtcMillis(i64_at(o)),
-                    open: Price(i64_at(o + 8)),
-                    high: Price(i64_at(o + 16)),
-                    low: Price(i64_at(o + 24)),
-                    close: Price(i64_at(o + 32)),
-                    volume: Qty(i64_at(o + 40)),
-                }
-            })
-            .collect(),
-    )
+    let bars: Vec<Bar> = (0..n)
+        .map(|i| {
+            let o = 22 + i * BAR_BYTES;
+            Bar {
+                time: UtcMillis(i64_at(o)),
+                open: Price(i64_at(o + 8)),
+                high: Price(i64_at(o + 16)),
+                low: Price(i64_at(o + 24)),
+                close: Price(i64_at(o + 32)),
+                volume: Qty(i64_at(o + 40)),
+            }
+        })
+        .collect();
+    // A cache the CRC accepts can still not be a bar series (written by a bug, or a collision):
+    // bars must sit on the period grid in strictly ascending order, or the cache is rebuilt.
+    let series = period_ms > 0
+        && bars.iter().all(|b| b.time.0.rem_euclid(period_ms) == 0)
+        && bars.windows(2).all(|w| w[0].time < w[1].time);
+    if !series {
+        tracing::warn!(
+            "{}: bar index is not a valid series; rebuilding",
+            path.display()
+        );
+        return None;
+    }
+    Some(bars)
 }
 
 #[cfg(test)]
@@ -104,5 +115,18 @@ mod tests {
         raw[100] ^= 1;
         std::fs::write(&p, raw).unwrap();
         assert!(load(&p, 60_000).is_none(), "damaged");
+
+        // Fuzz regression: a CRC-valid cache with an off-grid or out-of-order bar reached
+        // `BarSeries::upsert` (a debug assertion; a misaligned bar in release).
+        let mut off = bars.clone();
+        off[3].time = UtcMillis(off[3].time.0 + 1);
+        save(&p, 60_000, &off).unwrap();
+        assert!(load(&p, 60_000).is_none(), "off the period grid");
+        let mut swapped = bars.clone();
+        swapped.swap(4, 5);
+        save(&p, 60_000, &swapped).unwrap();
+        assert!(load(&p, 60_000).is_none(), "out of order");
+        save(&p, 0, &bars).unwrap();
+        assert!(load(&p, 0).is_none(), "no period");
     }
 }
