@@ -366,6 +366,7 @@ pub async fn run_feed(
             max_bars: config.max_bars,
         },
         plan.provider.capabilities().history,
+        matches!(config.source, Source::Replay { .. }),
     );
     store.set_stale_after(
         config

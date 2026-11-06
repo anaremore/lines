@@ -86,6 +86,10 @@ pub struct WorkspaceDoc {
     /// users; written only when hidden).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_hints: bool,
+    /// Chart headers show performance stats (msgs/s, updates/s, paints/s, paint time). Off
+    /// by default; written only when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_perf_stats: bool,
     pub windows: Vec<WindowDoc>,
 }
 
@@ -372,6 +376,7 @@ impl WorkspaceDoc {
             name: name.to_owned(),
             crosshair_sync: false,
             hide_hints: false,
+            show_perf_stats: false,
             windows: vec![WindowDoc {
                 placement: None,
                 active_tab: 0,
@@ -813,6 +818,20 @@ mod tests {
             panic!("round trip")
         };
         assert!(value.hide_hints);
+        // Performance stats: off unless saved on, written only when on.
+        assert!(!value.show_perf_stats);
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains("show_perf_stats")
+        );
+        let mut w = value;
+        w.show_perf_stats = true;
+        let bytes = encode(&FORMAT, &w).unwrap();
+        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, &bytes) else {
+            panic!("round trip")
+        };
+        assert!(value.show_perf_stats);
     }
 
     #[test]

@@ -77,6 +77,9 @@ pub enum Command {
     ToggleLevelSource(u8),
     /// The focused chart: hide (or show) one kind of one source (indices).
     ToggleLevelKind(u8, u8),
+    /// Show or hide the chart headers' performance stats (feed msgs/s, updates/s, paints/s,
+    /// paint time): a workspace preference, off by default. No key: palette and menu only.
+    TogglePerfStats,
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -264,6 +267,7 @@ pub fn label(c: Command) -> String {
         Command::ToggleLevelKind(i, k) => {
             format!("Chart: hide/show level kind {} of source {}", k + 1, i + 1)
         }
+        Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
     }
 }
 
@@ -299,6 +303,7 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleHints,
         Command::ToggleLevels,
         Command::ToggleLevelLabels,
+        Command::TogglePerfStats,
         Command::SaveAs,
         Command::Open,
         Command::Menu,
@@ -481,5 +486,8 @@ mod tests {
                 DomCol::Volume
             )))]
         );
+        assert_eq!(filter("performance", &p), vec![Command::TogglePerfStats]);
+        // A palette/menu command: no key of its own.
+        assert!(BINDINGS.iter().all(|b| b.cmd != Command::TogglePerfStats));
     }
 }

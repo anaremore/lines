@@ -132,13 +132,16 @@ impl Engine {
         }
     }
 
-    /// The tap for one feed's events (the feed driver owns it).
-    pub fn tap(&'static self, info: FeedInfo, expect_history: bool) -> EngineTap {
+    /// The tap for one feed's events (the feed driver owns it). `replay`: the feed replays a
+    /// recording, which holds every trade from its first frame.
+    pub fn tap(&'static self, info: FeedInfo, expect_history: bool, replay: bool) -> EngineTap {
         self.send(Msg::FeedStart(info));
         EngineTap {
             engine: self,
             info,
             expect_history,
+            complete_from_start: replay && !expect_history,
+            first_frame: false,
         }
     }
 
@@ -182,6 +185,10 @@ pub struct EngineTap {
     engine: &'static Engine,
     info: FeedInfo,
     expect_history: bool,
+    /// A replay: the stream holds every trade from its first frame (`Input::TradesFrom`).
+    complete_from_start: bool,
+    /// The next frame is the connection's first.
+    first_frame: bool,
 }
 
 impl EngineTap {
@@ -204,11 +211,18 @@ impl EventSink for EngineTap {
                 expect_history: self.expect_history,
             }],
         ));
+        self.first_frame = true;
         newest_bar
     }
 
-    fn frame(&mut self, events: &[MarketEvent], _now: UtcMillis) {
+    fn frame(&mut self, events: &[MarketEvent], now: UtcMillis) {
         let mut inputs = Vec::new();
+        // A replay without history: every trade from its first recorded frame (the replay
+        // clock) is in the recording, so VWAP is exact from that time, not from its first
+        // trade (a replay starting at the session open is exact for the whole session).
+        if std::mem::take(&mut self.first_frame) && self.complete_from_start {
+            inputs.push(Input::TradesFrom(now));
+        }
         for e in events {
             inputs.push(match e {
                 MarketEvent::Trade {

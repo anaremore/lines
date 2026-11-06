@@ -109,6 +109,12 @@ pub enum Input {
         as_of: Option<UtcMillis>,
     },
     HistoryComplete,
+    /// A stream without history that delivers every trade from this time on: a replay's
+    /// first recorded frame (the recording holds everything after it). Without it, trades
+    /// count as complete only from the first trade, so the bucket that trade lands in, e.g.
+    /// the session's first minute when the replay starts at the open, would be approximate
+    /// and flag the whole session's VWAP. Ignored while history is expected or a run is on.
+    TradesFrom(UtcMillis),
     /// Trades were dropped (the feed reported a sequence gap).
     Gap,
     /// The feed moved to another contract (a roll): start over.
@@ -263,6 +269,12 @@ impl MarketSeries {
                     }
                 }
                 Input::HistoryComplete => self.stitch.history_complete(),
+                Input::TradesFrom(t) => {
+                    if self.restart_on_trade && !self.awaiting_history {
+                        self.restart_on_trade = false;
+                        self.run_start = Some(t.0);
+                    }
+                }
                 Input::Gap => {
                     self.close_run(self.newest_trade.map(|t| t - 1));
                     if let Some(t) = self.newest_trade {
@@ -391,6 +403,45 @@ mod tests {
         let b = m.buckets();
         assert!(!b[2].exact, "gap inside minute 3");
         assert!(b[3].exact, "minute 4 is complete again");
+    }
+
+    #[test]
+    fn a_stream_complete_from_its_start_is_exact_from_its_first_bucket() {
+        let mut m = MarketSeries::new(60_000, 100);
+        // A replay whose first frame is at the minute (e.g. the session open); its first
+        // trade comes 250 ms later.
+        m.apply(&[
+            Input::Connect {
+                expect_history: false,
+            },
+            Input::TradesFrom(t(0, 0)),
+            trade(0, 250, 100, 2),
+            trade(1, 0, 101, 1),
+        ]);
+        let b = m.buckets();
+        assert!(b[0].exact && b[1].exact);
+        assert_eq!(b[0].sums, Sums::trade(Price(100), Qty(2)));
+        // A start mid-minute leaves that minute approximate (trades before it are unknown).
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Connect {
+                expect_history: false,
+            },
+            Input::TradesFrom(t(0, 1)),
+            trade(0, 250, 100, 2),
+            trade(1, 0, 101, 1),
+        ]);
+        assert!(!m.buckets()[0].exact && m.buckets()[1].exact);
+        // While history is expected it means nothing: the snapshot's `as_of` decides.
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Connect {
+                expect_history: true,
+            },
+            Input::TradesFrom(t(0, 0)),
+            trade(0, 250, 100, 2),
+        ]);
+        assert!(!m.buckets()[0].exact);
     }
 
     #[test]
