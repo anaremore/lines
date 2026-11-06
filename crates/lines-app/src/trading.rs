@@ -361,6 +361,10 @@ pub struct TradingSetup {
     pub paper: PaperConfig,
     /// Accounts for a fresh state (default: [`default_accounts`]).
     pub accounts: Option<Vec<AccountConfig>>,
+    /// Whether the paper broker refuses orders while the product's exchange session is
+    /// closed. Applied over a saved paper file's setting too. Off for the mock: it is
+    /// synthetic and trades around the clock, so the exchange's hours don't apply to it.
+    pub check_sessions: bool,
 }
 
 impl TradingSetup {
@@ -374,6 +378,7 @@ impl TradingSetup {
             clock: if replay { Clock::Market } else { Clock::Wall },
             paper: PaperConfig::default(),
             accounts: None,
+            check_sessions: true,
         }
     }
 
@@ -402,7 +407,11 @@ impl TradingSetup {
             #[allow(unreachable_patterns)]
             _ => ("cqg".to_owned(), false),
         };
-        TradingSetup::for_source(config_dir, &label, replay)
+        let mut setup = TradingSetup::for_source(config_dir, &label, replay);
+        // The mock is synthetic and never closes: CME's hours don't apply to it. Real sources
+        // keep the check (wall clock), replays too (market clock: the recorded session).
+        setup.check_sessions = !matches!(source, S::CqgMock(_));
+        setup
     }
 
     /// Screenshots and tests: in memory, time moves only with market data and `advance_to`.
@@ -412,6 +421,7 @@ impl TradingSetup {
             clock: Clock::Manual,
             paper: PaperConfig::default(),
             accounts: None,
+            check_sessions: true,
         }
     }
 }
@@ -466,8 +476,9 @@ impl Trading {
         };
         let (mut core, paper) = match loaded {
             Some(f) => {
-                let mut core =
-                    TradingCore::new(Box::new(PaperBroker::from_state(f.paper.clone(), f.broker)));
+                let mut paper = f.paper.clone();
+                paper.check_sessions = setup.check_sessions;
+                let mut core = TradingCore::new(Box::new(PaperBroker::from_state(paper, f.broker)));
                 for a in f.accounts {
                     core.add_account(a.config, Some(a.tracker));
                 }
@@ -477,7 +488,9 @@ impl Trading {
                 (core, f.paper)
             }
             None => {
-                let mut broker = PaperBroker::new(setup.paper.clone());
+                let mut paper = setup.paper.clone();
+                paper.check_sessions = setup.check_sessions;
+                let mut broker = PaperBroker::new(paper);
                 let accounts = match setup.accounts {
                     Some(a) => a.into_iter().map(|c| (c, None)).collect(),
                     None => default_accounts(),
@@ -967,16 +980,99 @@ mod tests {
             clock: Clock::Manual,
             paper,
             accounts: Some(accounts),
+            check_sessions: true,
         }
     }
 
     fn trading(accounts: Vec<AccountConfig>) -> Trading {
+        trading_with(paper_setup(accounts))
+    }
+
+    fn trading_with(setup: TradingSetup) -> Trading {
         let base = FeedConfig::new(FeedSource::Replay {
             path: "unused.lfr".into(),
             speed: 0.0,
             stop_at: None,
         });
-        Trading::start(paper_setup(accounts), FeedRegistry::new(), base)
+        Trading::start(setup, FeedRegistry::new(), base)
+    }
+
+    /// The owner's report (live, `--source mock`, Friday 22:18 UTC): every paper order was
+    /// refused "ES market is closed". The mock is synthetic and trades around the clock, so
+    /// its paper broker doesn't apply the exchange's hours; real sources and replays do.
+    #[test]
+    fn mock_paper_trades_outside_exchange_hours() {
+        let mock = TradingSetup::for_live(
+            None,
+            &FeedSource::CqgMock(lines_feed::cqg::mock::MockConfig::default()),
+        );
+        assert!(!mock.check_sessions, "the mock never closes");
+        let replay = TradingSetup::for_live(
+            None,
+            &FeedSource::Replay {
+                path: "x.lfr".into(),
+                speed: 0.0,
+                stop_at: None,
+            },
+        );
+        assert!(
+            replay.check_sessions,
+            "replays keep the session check (market clock)"
+        );
+
+        // Friday 2026-11-06 22:18 UTC: CME is closed.
+        let closed = UtcMillis::parse_iso("2026-11-06T22:18:00Z").unwrap();
+        let account = AccountId::new("paper");
+        for check in [false, true] {
+            let mut setup = paper_setup(vec![AccountConfig::paper("paper", 50_000)]);
+            setup.check_sessions = check;
+            let t = trading_with(setup);
+            t.handle().advance_to(closed);
+            t.handle().market(
+                es(),
+                vec![
+                    MarketInput::BookClear,
+                    MarketInput::Book {
+                        side: lines_core::Side::Bid,
+                        price: px(5999.75),
+                        qty: Qty(10),
+                    },
+                    MarketInput::Book {
+                        side: lines_core::Side::Ask,
+                        price: px(6000.00),
+                        qty: Qty(10),
+                    },
+                ],
+            );
+            let cmd = dom_trade::click(
+                DomColumn::Bid,
+                px(5999.00),
+                false,
+                armed(),
+                &entry("paper", 0, (5999.75, 6000.00)),
+            )
+            .unwrap();
+            t.submit(Source::Dom, Instant::now(), cmd);
+            t.handle().advance_to(UtcMillis(closed.0 + 100)); // past the ack latency
+            t.settle();
+            let s = t.cache.read();
+            if check {
+                assert_eq!(s.open_orders(&account, es()).count(), 0);
+                let f: Vec<_> = s.flashes(&account, Some(es()), Instant::now()).collect();
+                assert!(
+                    f.iter().any(|f| f.message.contains("market is closed")),
+                    "{f:?}"
+                );
+            } else {
+                assert_eq!(
+                    s.open_orders(&account, es())
+                        .map(|o| o.state.clone())
+                        .collect::<Vec<_>>(),
+                    vec![lines_trading::OrderState::Working],
+                    "accepted on the mock outside CME hours"
+                );
+            }
+        }
     }
 
     fn entry(account: &str, position: i64, best: (f64, f64)) -> EntryCtx {
