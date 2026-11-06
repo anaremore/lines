@@ -31,6 +31,7 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 - **Spacing scale:** 2, 4, 8, 12, 16, 24 px. **Type scale:** 11, 12, 13, 15 px, one UI family and one monospace family for numbers.
 - Edges snap to device pixels (as the crosshair work established), so lines are crisp at every DPI.
 - Brand palette (from the icon): ink `#11141B`, signal violet `#8C7BFF`, paper `#ECEAF4`. Violet is the UI accent (focus, selection, active state). It is never used for up/down, which keeps market colours meaning only market direction.
+- **Language: US English (en-US)** for every word the user sees: UI text, menus, command names, notices, CLI help, README and release notes (color, center, gray, canceled, favorites, behavior). User-facing strings stay simple literals for now; when localization comes, they move to a string table with en-US as the default and fallback. Identifiers, comments and internal docs follow US spelling in new or touched code; existing names are renamed opportunistically, never in a sweep that conflicts with open branches. Saved-file field names and CLI flags never change spelling without a migration or alias.
 - Lines has its own look. Don't copy another platform's palette or layout; match behaviour traders rely on, not appearance.
 
 ## 6. Keyboard-first, mouse-excellent
