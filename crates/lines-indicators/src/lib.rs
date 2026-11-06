@@ -36,7 +36,44 @@ pub enum IndicatorConfig {
         /// Index into the theme's study colours.
         #[serde(default)]
         color: u8,
+        /// How it is shown (line width, label, hidden): optional, defaulted.
+        #[serde(flatten, default)]
+        display: Display,
     },
+}
+
+/// How a study is shown on a chart. Hiding keeps the study (and its configuration); a hidden
+/// study is not computed or drawn until shown again. Every field is optional in files.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Display {
+    /// Line width step, 1..=3 (thin, normal, thick).
+    #[serde(skip_serializing_if = "Display::normal_width")]
+    pub width: u8,
+    /// Shown in the chart's legend.
+    #[serde(skip_serializing_if = "Display::yes")]
+    pub label: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+}
+
+impl Default for Display {
+    fn default() -> Self {
+        Display {
+            width: 2,
+            label: true,
+            hidden: false,
+        }
+    }
+}
+
+impl Display {
+    fn normal_width(w: &u8) -> bool {
+        *w == 2
+    }
+    fn yes(b: &bool) -> bool {
+        *b
+    }
 }
 
 impl IndicatorConfig {
@@ -61,6 +98,7 @@ mod tests {
             IndicatorConfig::Vwap {
                 spec: VwapSpec::default(),
                 color: 0,
+                display: Default::default(),
             },
             IndicatorConfig::Vwap {
                 spec: VwapSpec {
@@ -70,6 +108,7 @@ mod tests {
                     bands: Bands(0b011),
                 },
                 color: 2,
+                display: Default::default(),
             },
         ];
         let json = serde_json::to_string(&cfgs).unwrap();

@@ -11,16 +11,14 @@
 //! ±1,2,3) · C colour · Delete remove · Esc / Ctrl+I close.
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, PathBuilder, Pixels, Styled, Window, div, point, prelude::*, px,
+    AnyElement, IntoElement, ParentElement, PathBuilder, Pixels, Styled, Window, div, point, px,
 };
 use lines_core::{Product, Viewport};
 use lines_feed::ChartData;
 use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
 use lines_indicators::render::{Column, build_columns};
-use lines_indicators::{Bands, IndicatorConfig, Reset, VwapSpec};
+use lines_indicators::{Bands, IndicatorConfig, Reset};
 
-use crate::chart_view::ChartView;
 use crate::theme::Theme;
 
 struct Study {
@@ -36,8 +34,6 @@ struct Study {
 pub struct Studies {
     list: Vec<Study>,
     feed: Option<FeedInfo>,
-    /// The menu is open on this row (`list.len()` = the "+ VWAP" row).
-    menu: Option<usize>,
 }
 
 fn bands_label(b: Bands) -> &'static str {
@@ -48,15 +44,6 @@ fn bands_label(b: Bands) -> &'static str {
         0b111 => "  ±1σ ±2σ ±3σ",
         _ => "  bands",
     }
-}
-
-fn next_bands(b: Bands) -> Bands {
-    Bands(match b.0 & 0b111 {
-        0 => 0b001,
-        0b001 => 0b011,
-        0b011 => 0b111,
-        _ => 0,
-    })
 }
 
 impl Studies {
@@ -73,7 +60,6 @@ impl Studies {
                 })
                 .collect(),
             feed: None,
-            menu: None,
         }
     }
 
@@ -82,17 +68,14 @@ impl Studies {
         self.list.iter().map(|s| s.config.clone()).collect()
     }
 
-    /// (Re)subscribe every study on `feed` (a new chart, or the chart switched symbol).
+    /// (Re)subscribe every shown study on `feed` (a new chart, or the chart switched symbol).
+    /// A hidden study holds no engine node: it is neither computed nor drawn until shown.
     pub fn attach(&mut self, feed: FeedInfo) {
         self.feed = Some(feed);
         for s in &mut self.list {
-            s.handle = Some(engine().acquire(feed, s.config.spec(feed.period_ms)));
-        }
-    }
-
-    fn resubscribe(&mut self, i: usize) {
-        if let (Some(feed), Some(s)) = (self.feed, self.list.get_mut(i)) {
-            s.handle = Some(engine().acquire(feed, s.config.spec(feed.period_ms)));
+            let IndicatorConfig::Vwap { display, .. } = &s.config;
+            s.handle =
+                (!display.hidden).then(|| engine().acquire(feed, s.config.spec(feed.period_ms)));
         }
     }
 
@@ -138,9 +121,17 @@ impl Studies {
     pub fn paint(&self, origin: (f32, f32), theme: &Theme, window: &mut Window) {
         let (ox, oy) = (origin.0, origin.1);
         let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
-        let thick = px(1.75);
         for s in &self.list {
-            let IndicatorConfig::Vwap { spec, color } = &s.config;
+            let IndicatorConfig::Vwap { display, .. } = &s.config;
+            if display.hidden {
+                continue;
+            }
+            let thick = px(match display.width {
+                1 => 1.25,
+                3 => 2.5,
+                _ => 1.75,
+            });
+            let IndicatorConfig::Vwap { spec, color, .. } = &s.config;
             let base = theme.study[*color as usize % theme.study.len()];
             let cols = &s.columns;
             // Runs of columns that continue one another (same period, adjacent bars, same
@@ -206,7 +197,11 @@ impl Studies {
     /// The legend under the readout: one row per study (render time, not paint), on a
     /// `label_bg` box so lines and profile rows never run through the text.
     pub fn legend(&self, theme: &Theme, product: &Product) -> Option<AnyElement> {
-        if self.list.is_empty() {
+        let shown = |s: &&Study| {
+            let IndicatorConfig::Vwap { display, .. } = &s.config;
+            !display.hidden && display.label
+        };
+        if !self.list.iter().any(|s| shown(&s)) {
             return None;
         }
         let no_rth = lines_feed::catalog::sessions(product.id).is_some_and(|c| !c.has_rth());
@@ -218,8 +213,8 @@ impl Studies {
             .py(px(4.0))
             .bg(theme.label_bg)
             .text_size(px(12.0));
-        for s in &self.list {
-            let IndicatorConfig::Vwap { spec, color } = &s.config;
+        for s in self.list.iter().filter(shown) {
+            let IndicatorConfig::Vwap { spec, color, .. } = &s.config;
             let c = theme.study[*color as usize % theme.study.len()];
             let mut row = div()
                 .flex()
@@ -258,210 +253,6 @@ impl Studies {
     #[cfg(test)]
     pub fn reserved_columns(&self) -> usize {
         self.list.iter().map(|s| s.columns.capacity()).sum()
-    }
-
-    pub fn menu_open(&self) -> bool {
-        self.menu.is_some()
-    }
-
-    pub fn toggle_menu(&mut self) {
-        self.menu = match self.menu {
-            Some(_) => None,
-            None => Some(self.list.len()),
-        };
-    }
-
-    fn add(&mut self) {
-        let used: Vec<u8> = self
-            .configs()
-            .iter()
-            .map(|c| match c {
-                IndicatorConfig::Vwap { color, .. } => *color,
-            })
-            .collect();
-        let color = (0..4u8).find(|c| !used.contains(c)).unwrap_or(0);
-        self.list.push(Study {
-            config: IndicatorConfig::Vwap {
-                spec: VwapSpec::default(),
-                color,
-            },
-            handle: None,
-            columns: Vec::new(),
-            approx: false,
-            error: None,
-        });
-        self.resubscribe(self.list.len() - 1);
-    }
-
-    /// Change study `i`'s config and resubscribe (a new spec is a new shared node).
-    fn edit(&mut self, i: usize, f: impl FnOnce(&mut IndicatorConfig)) {
-        if let Some(s) = self.list.get_mut(i) {
-            f(&mut s.config);
-            s.error = None;
-            s.columns.clear();
-            self.resubscribe(i);
-        }
-    }
-
-    /// Menu keys; `anchor`: the bar an anchored VWAP would start at. Returns whether the key
-    /// was the menu's.
-    pub fn key(&mut self, ev: &KeyDownEvent, anchor: Option<i64>) -> bool {
-        let Some(sel) = self.menu else { return false };
-        let k = &ev.keystroke;
-        let rows = self.list.len() + 1;
-        match k.key.as_str() {
-            "escape" => self.menu = None,
-            "i" if k.modifiers.control => self.menu = None,
-            "up" => self.menu = Some((sel + rows - 1) % rows),
-            "down" => self.menu = Some((sel + 1) % rows),
-            "enter" if sel == self.list.len() => {
-                self.add();
-                self.menu = Some(self.list.len() - 1);
-            }
-            "delete" | "backspace" if sel < self.list.len() => {
-                self.list.remove(sel);
-                self.menu = Some(sel.min(self.list.len()));
-            }
-            "r" if sel < self.list.len() => self.edit(sel, |c| {
-                let IndicatorConfig::Vwap { spec, .. } = c;
-                spec.reset = match spec.reset {
-                    Reset::Eth => Reset::Rth,
-                    Reset::Rth => Reset::Weekly,
-                    Reset::Weekly => Reset::Monthly,
-                    Reset::Monthly => match anchor {
-                        Some(from) => Reset::Anchored { from },
-                        None => Reset::Eth,
-                    },
-                    Reset::Anchored { .. } => Reset::Eth,
-                };
-            }),
-            "b" if sel < self.list.len() => self.edit(sel, |c| {
-                let IndicatorConfig::Vwap { spec, .. } = c;
-                spec.bands = next_bands(spec.bands);
-            }),
-            "c" if sel < self.list.len() => {
-                if let Some(s) = self.list.get_mut(sel) {
-                    let IndicatorConfig::Vwap { color, .. } = &mut s.config;
-                    *color = (*color + 1) % 4;
-                }
-            }
-            _ => {}
-        }
-        true
-    }
-
-    /// The open menu (render time). Rows are clickable too.
-    pub fn menu_overlay(&self, theme: &Theme, cx: &mut Context<ChartView>) -> Option<AnyElement> {
-        let sel = self.menu?;
-        let t = theme;
-        let mut rows = div().flex().flex_col().py_1();
-        for i in 0..=self.list.len() {
-            let label = match self.list.get(i) {
-                Some(s) => {
-                    let IndicatorConfig::Vwap { spec, .. } = &s.config;
-                    match spec.reset {
-                        Reset::Anchored { from } => format!(
-                            "VWAP anchored at {}{}",
-                            lines_core::UtcMillis(from),
-                            bands_label(spec.bands)
-                        ),
-                        r => format!("VWAP {}{}", r.label(), bands_label(spec.bands)),
-                    }
-                }
-                None => "+ VWAP".to_owned(),
-            };
-            let selected = i == sel;
-            rows = rows.child(
-                div()
-                    .id(("study-row", i))
-                    .px_3()
-                    .py_1()
-                    .border_l_2()
-                    .border_color(if selected {
-                        t.accent
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .when(selected, |d| d.bg(t.accent.opacity(0.16)))
-                    .text_color(t.text_main)
-                    .when(i < self.list.len(), |d| {
-                        let IndicatorConfig::Vwap { color, .. } = &self.list[i].config;
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .w(px(12.0))
-                                        .h(px(3.0))
-                                        .bg(t.study[*color as usize % 4]),
-                                )
-                                .child(label.clone()),
-                        )
-                    })
-                    .when(i == self.list.len(), |d| d.child(label.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |view, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            view.studies_click(i, cx);
-                        }),
-                    ),
-            );
-        }
-        Some(
-            div()
-                .absolute()
-                .top(px(24.0))
-                .right(px(90.0))
-                .child(
-                    div()
-                        .id("study-menu")
-                        .occlude()
-                        .w(px(340.0))
-                        .flex()
-                        .flex_col()
-                        .bg(t.panel)
-                        .border_1()
-                        .border_color(t.axis_line)
-                        .rounded_md()
-                        .text_size(px(13.0))
-                        .child(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .border_b_1()
-                                .border_color(t.axis_line)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(t.text_main)
-                                .child("Indicators"),
-                        )
-                        .child(rows)
-                        .child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .border_t_1()
-                                .border_color(t.axis_line)
-                                .text_size(px(11.0))
-                                .text_color(t.text_dim)
-                                .child("↑↓ select  Enter add  R reset  B bands  C colour  Del remove  Esc close"),
-                        ),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// A click on menu row `i`: select it; the "+ VWAP" row adds one.
-    pub fn click(&mut self, i: usize) {
-        if i == self.list.len() {
-            self.add();
-            self.menu = Some(self.list.len() - 1);
-        } else {
-            self.menu = Some(i);
-        }
     }
 
     /// Bounds hint for the column buffers: the most bars a plot `width` px wide can show.

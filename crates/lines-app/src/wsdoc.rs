@@ -610,6 +610,7 @@ mod tests {
                     bands: lines_indicators::Bands(0b011),
                 },
                 color: 1,
+                display: Default::default(),
             }],
             profile: ProfileConfig::default(),
         };
@@ -772,6 +773,7 @@ mod tests {
             indicators: vec![lines_indicators::IndicatorConfig::Vwap {
                 spec: lines_indicators::VwapSpec::default(),
                 color: 1,
+                display: Default::default(),
             }],
             profile: ProfileConfig {
                 mode: crate::profile::ProfileMode::Session,
@@ -882,6 +884,7 @@ mod tests {
             indicators: vec![lines_indicators::IndicatorConfig::Vwap {
                 spec: lines_indicators::VwapSpec::default(),
                 color: 0,
+                display: Default::default(),
             }],
             profile: set,
         };

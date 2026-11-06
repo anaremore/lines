@@ -99,6 +99,9 @@ pub struct ProfileConfig {
     pub grouping: Option<u32>,
     /// Profile width, percent of the plot width (5..=60).
     pub width_percent: u8,
+    /// Hidden on this chart (the studies menu's eye): kept, not computed or drawn.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 impl Default for ProfileConfig {
@@ -111,6 +114,7 @@ impl Default for ProfileConfig {
             split: false,
             grouping: None,
             width_percent: 25,
+            hidden: false,
         }
     }
 }
@@ -312,7 +316,7 @@ impl ChartLayer for VolumeProfileLayer {
     fn prepare(&mut self, data: &ChartData, vp: &Viewport) {
         let cfg = self.config;
         self.active = false;
-        if cfg.mode == ProfileMode::Off {
+        if cfg.mode == ProfileMode::Off || cfg.hidden {
             return;
         }
         let Some(now) = data.market_time else {
@@ -507,6 +511,7 @@ mod tests {
             split: true,
             grouping: Some(5),
             width_percent: 30,
+            hidden: false,
         };
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(

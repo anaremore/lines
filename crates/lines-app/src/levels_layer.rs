@@ -59,6 +59,9 @@ pub struct LevelsConfig {
     /// `source/kind` pairs hidden.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hidden_kinds: Vec<String>,
+    /// Source ids whose labels are off (their levels still drawn).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels_off: Vec<String>,
 }
 
 impl LevelsConfig {
@@ -92,6 +95,14 @@ impl LevelsConfig {
 
     pub fn toggle_kind(&mut self, source: &str, kind: &str) {
         Self::toggle(&mut self.hidden_kinds, format!("{source}/{kind}"));
+    }
+
+    pub fn labels_shown(&self, source: &str) -> bool {
+        !self.hide_labels && !self.labels_off.iter().any(|s| s == source)
+    }
+
+    pub fn toggle_labels(&mut self, source: &str) {
+        Self::toggle(&mut self.labels_off, source.to_owned());
     }
 }
 
@@ -437,6 +448,9 @@ impl LevelsLayer {
             let Some(map) = self.slots[si].map.clone() else {
                 continue;
             };
+            if !self.config.labels_shown(self.slots[si].handle.source()) {
+                continue;
+            }
             let dim = matches!(self.slots[si].status, LevelStatus::Stale { .. });
             for pi in 0..self.slots[si].placed.len() {
                 let p = self.slots[si].placed[pi];
