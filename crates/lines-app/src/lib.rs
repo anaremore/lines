@@ -42,6 +42,7 @@ use lines_feed::extension::ExtensionSource;
 pub use lines_feed::extension::{BoxFuture, DynTransport, SourceExtension, Timing};
 use lines_feed::registry::FeedRegistry;
 use lines_feed::{FeedConfig, Source, catalog};
+pub use lines_trading::extension::{AccountKind, AccountSource, BrokerExtension, ExtensionAccount};
 use profile::{ProfileConfig, ProfileMode, ProfileSession};
 
 use crate::dom_view::DomOptions;
@@ -69,11 +70,12 @@ enum SourceKind {
     Replay,
 }
 
-/// What the entry point adds to the built-in sources (decision 0020). Empty for the public
-/// `lines` binary.
+/// What the entry point adds to the built-in sources and brokers (decision 0020). Empty for
+/// the public `lines` binary.
 #[derive(Default, Clone)]
 pub struct Extensions {
     sources: Vec<Arc<dyn SourceExtension>>,
+    brokers: Vec<Arc<dyn BrokerExtension>>,
 }
 
 impl Extensions {
@@ -89,6 +91,22 @@ impl Extensions {
 
     pub fn sources(&self) -> &[Arc<dyn SourceExtension>] {
         &self.sources
+    }
+
+    /// Add a broker (decision 0004): its capabilities, its accounts and the `Broker` the trading
+    /// core drives. Names must be unique and not a built-in broker's.
+    pub fn with_broker(mut self, broker: Arc<dyn BrokerExtension>) -> Self {
+        self.brokers.push(broker);
+        self
+    }
+
+    pub fn brokers(&self) -> &[Arc<dyn BrokerExtension>] {
+        &self.brokers
+    }
+
+    /// Check the registrations (broker names) before anything runs.
+    pub fn validate(&self) -> Result<()> {
+        lines_trading::extension::validate(&self.brokers)
     }
 }
 
@@ -548,6 +566,20 @@ where
         .try_init();
     for e in &ext.sources {
         lines_feed::extension::register(e.clone())?;
+    }
+    ext.validate()?;
+    for b in &ext.brokers {
+        // Counts only: account ids never go to logs.
+        let s = lines_trading::extension::summarize(&b.accounts().accounts());
+        tracing::info!(
+            "broker {:?} ({}): {} simulated, {} live, {} unknown accounts; {} tradable",
+            b.name(),
+            b.label(),
+            s.simulated,
+            s.live,
+            s.unknown,
+            s.tradable
+        );
     }
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());

@@ -2888,6 +2888,7 @@ dependencies = [
  "lines-core",
  "lines-feed",
  "lines-indicators",
+ "lines-trading",
  "nucleo-matcher",
  "serde",
  "serde_json",
