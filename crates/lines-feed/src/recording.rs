@@ -142,9 +142,15 @@ impl<W: Write> Writer<W> {
         since_start: Duration,
         frame: &Frame,
     ) -> io::Result<()> {
+        let nanos = u64::try_from(since_start.as_nanos()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("frame offset {since_start:?} does not fit a recording"),
+            )
+        })?;
         self.write_raw(
             direction as u8 | (kind_bits(frame.kind) << 1),
-            since_start.as_nanos() as u64,
+            nanos,
             &frame.data,
         )
     }
@@ -336,8 +342,13 @@ impl<R: Read> Reader<R> {
             if len > MAX_FRAME {
                 return Err(bad(format!("frame too large: {len}")));
             }
-            let mut buf = vec![0u8; len as usize];
-            self.r.read_exact(&mut buf)?;
+            // Grow with the bytes actually present: a corrupt length must not allocate up to
+            // MAX_FRAME before the read finds the file is shorter.
+            let mut buf = Vec::new();
+            (&mut self.r).take(len as u64).read_to_end(&mut buf)?;
+            if buf.len() < len as usize {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
             Ok((nanos, Bytes::from(buf)))
         })();
         match rest {
@@ -406,6 +417,48 @@ pub(crate) fn read_str<R: Read>(r: &mut R) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_length_on_a_short_file_is_a_truncated_record() {
+        // Fuzz hardening: the reader used to allocate the claimed length (up to 64 MiB) before
+        // reading; it now grows with the data and reports truncation as end of file.
+        let header = Header {
+            start_wall_ms: 0,
+            provider: "lines".into(),
+            protocol: "lines-events-1".into(),
+            product: "NQ".into(),
+            contract: None,
+            version: FORMAT_VERSION,
+        };
+        let mut bytes = Writer::new(Vec::new(), &header).unwrap().finish().unwrap();
+        bytes.push(0); // tag: server, binary
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(MAX_FRAME).to_le_bytes());
+        bytes.extend_from_slice(b"abc");
+        let mut r = Reader::new(&bytes[..]).unwrap();
+        assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn offsets_beyond_u64_nanos_are_an_error_not_wrapped() {
+        // Fuzz regression (Sierra import of corrupt times): the offset was cast with `as u64`.
+        let header = Header {
+            start_wall_ms: 0,
+            provider: "lines".into(),
+            protocol: "lines-events-1".into(),
+            product: "NQ".into(),
+            contract: None,
+            version: FORMAT_VERSION,
+        };
+        let mut w = Writer::new(Vec::new(), &header).unwrap();
+        let f = Frame::binary(vec![1]);
+        let max = Duration::from_nanos(u64::MAX);
+        w.write(Direction::FromServer, max, &f).unwrap();
+        let e = w
+            .write(Direction::FromServer, max + Duration::from_nanos(1), &f)
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
 
     #[test]
     fn roundtrip_and_truncation() {

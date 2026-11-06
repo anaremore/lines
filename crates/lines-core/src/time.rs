@@ -44,10 +44,20 @@ impl UtcMillis {
             Some(_) => return None,
             None => 0,
         };
+        // Checked: a hostile year (any i64) must not overflow. Years beyond ±10^11 can't
+        // reach the multiplications below without overflowing `days_from_civil` itself.
+        if !(-100_000_000_000..=100_000_000_000).contains(&y) {
+            return None;
+        }
         let days = days_from_civil(y, mo, da);
-        Some(UtcMillis(
-            ((days * 24 + h) * 60 + mi) * 60_000 + se * 1000 + ms,
-        ))
+        let ms = days
+            .checked_mul(24)?
+            .checked_add(h)?
+            .checked_mul(60)?
+            .checked_add(mi)?
+            .checked_mul(60_000)?
+            .checked_add(se * 1000 + ms)?;
+        Some(UtcMillis(ms))
     }
 
     /// Start of the bucket of width `period_ms` containing this instant.
@@ -165,6 +175,14 @@ mod tests {
             Some(UtcMillis(1_709_251_199_000))
         );
         assert_eq!(UtcMillis::parse_iso("garbage"), None);
+        // Fuzz regression: huge years overflowed (panic in debug, wrong time in release).
+        assert_eq!(
+            UtcMillis::parse_iso("9223372036854775807-01-01T00:00:00Z"),
+            None
+        );
+        assert_eq!(UtcMillis::parse_iso("300000000-01-01T00:00:00Z"), None);
+        assert_eq!(UtcMillis::parse_iso("-300000000-01-01T00:00:00Z"), None);
+        assert!(UtcMillis::parse_iso("200000-01-01T00:00:00Z").is_some());
         assert_eq!(UtcMillis::parse_iso("2013-13-03T14:23:20"), None);
     }
 

@@ -8,3 +8,8 @@
 *.depth
 # The local market-data store may hold licensed data (decision 0019): never commit it.
 *.lseg
+# Fuzz corpora and crash inputs are generated, never committed.
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/target/
