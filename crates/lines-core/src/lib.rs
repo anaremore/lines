@@ -6,6 +6,7 @@
 pub mod bars;
 pub mod book;
 pub mod calendar;
+pub mod columns;
 pub mod continuous;
 pub mod fixed_str;
 pub mod geometry;

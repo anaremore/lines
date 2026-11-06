@@ -9,15 +9,17 @@
 //! rows into a fixed buffer under a `try_lock` and draws them with cached glyphs: no
 //! allocation.
 //!
-//! Typing a symbol (or Ctrl+K) opens the symbol picker, as on the chart.
+//! Typing a symbol (or Ctrl+K) opens the symbol picker, as on the chart. A slim header row names
+//! the columns (time, price, size, side); its dividers resize them (drag, double-click to fit)
+//! and right-clicking it shows or hides them (`crate::pane_columns`).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use gpui::{
     App, Bounds, Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Render, Styled, Window, canvas, div, fill, point,
-    prelude::*, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Styled,
+    Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::tape::write_tape_time;
 use lines_core::{Aggressor, FixedStr, Print, Product, Qty};
@@ -26,6 +28,9 @@ use lines_feed::store::ChartStore;
 
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
+use crate::pane_columns::{
+    self, ColumnCmd, ColumnMenu, Columns, HEADER_ROW_H, HeaderHit, Table, TapeCol,
+};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
@@ -67,9 +72,14 @@ pub struct TapeView {
     custom_large: Option<Qty>,
     prints: Vec<Print>,
     glyphs: Glyphs,
+    /// Column widths and visibility, and this frame's layout.
+    cols: Columns,
+    /// The table's bounds in the last frame (for header-row hits).
+    bounds: Bounds<Pixels>,
 }
 
 impl EventEmitter<FeedChanged> for TapeView {}
+impl EventEmitter<ColumnMenu> for TapeView {}
 
 impl Pane for TapeView {
     fn store(&self) -> &Arc<ChartStore> {
@@ -89,8 +99,10 @@ impl Pane for TapeView {
     }
 
     fn save_state(&self, doc: &mut PaneDoc) {
-        doc.tape = self.custom_large.map(|q| TapeState {
-            large_print: Some(q.0),
+        let columns = self.cols.save(&TapeCol::ALL);
+        doc.tape = (self.custom_large.is_some() || !columns.is_empty()).then(|| TapeState {
+            large_print: self.custom_large.map(|q| q.0),
+            columns,
         });
     }
 
@@ -139,25 +151,95 @@ impl TapeView {
             product,
             prints: Vec::with_capacity(MAX_ROWS),
             glyphs: Glyphs::new(TEXT_PX),
+            cols: Columns::new(Table::Tape),
+            bounds: Bounds::default(),
         }
     }
 
-    /// Restore saved view state (a custom large-print size).
+    /// Restore saved view state (a custom large-print size, columns).
     pub fn restore(&mut self, state: &TapeState) {
         if let Some(q) = state.large_print.filter(|&q| q > 0) {
             self.custom_large = Some(Qty(q));
             self.large = Qty(q);
         }
+        self.cols.load(&TapeCol::ALL, &state.columns);
     }
 
-    fn on_mouse_down(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// A column command on this tape (decision 0018).
+    pub fn column_command(
+        &mut self,
+        cmd: ColumnCmd,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        self.cols.apply(cmd)?;
+        cx.notify();
+        Ok(())
+    }
+
+    /// The columns (for the column menu).
+    pub fn columns(&self) -> &Columns {
+        &self.cols
+    }
+
+    /// A window position in table coordinates (from the header row's top-left).
+    fn table_xy(&self, p: Point<Pixels>) -> (f32, f32) {
+        (f(p.x - self.bounds.origin.x), f(p.y - self.bounds.origin.y))
+    }
+
+    fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
         if self.picker.close() {
             cx.notify();
         }
+        let (x, y) = self.table_xy(ev.position);
+        match self.cols.hit(x, y, ev.click_count) {
+            HeaderHit::Divider(d) => {
+                self.cols.start_drag(d, x);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            HeaderHit::AutoFit(c) => {
+                let _ = self.column_command(ColumnCmd::AutoFit(c), cx);
+                cx.stop_propagation();
+            }
+            HeaderHit::Row | HeaderHit::Outside => {}
+        }
+    }
+
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cols.drag.is_none() {
+            return;
+        }
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.cols.drag = None;
+            cx.notify();
+            return;
+        }
+        let (x, _) = self.table_xy(ev.position);
+        if let Some(cmd) = self.cols.drag_to(x) {
+            let _ = self.column_command(cmd, cx);
+        }
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cols.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Right-click on the header row: the column menu (the workspace shows it, window-wide).
+    fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (x, y) = self.table_xy(ev.position);
+        if self.cols.hit(x, y, 1) != HeaderHit::Outside {
+            cx.emit(ColumnMenu(ev.position));
+            cx.stop_propagation();
+        }
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.picker.is_open() && pane::unavailable_key(self, ev, cx) {
+            return;
+        }
         let k = &ev.keystroke;
         let m = k.modifiers;
         if self.picker.is_open() {
@@ -206,7 +288,9 @@ impl TapeView {
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         self.common.paints += 1;
-        let rows = ((f(bounds.size.height) / ROW_H).floor() as usize).clamp(1, MAX_ROWS);
+        self.bounds = bounds;
+        let rows =
+            (((f(bounds.size.height) - HEADER_ROW_H) / ROW_H).floor() as usize).clamp(1, MAX_ROWS);
         if let Some(d) = self.store.try_read() {
             self.prints.clear();
             for p in d.tape.iter_newest().take(rows) {
@@ -220,9 +304,54 @@ impl TapeView {
     fn draw(&mut self, bounds: Bounds<Pixels>, rows: usize, window: &mut Window, cx: &mut App) {
         let t = self.theme;
         let hair = 1.0 / window.scale_factor();
-        let (ox, oy) = (f(bounds.origin.x), f(bounds.origin.y));
+        let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
         let w = f(bounds.size.width);
+        let h = f(bounds.size.height);
         window.paint_quad(fill(bounds, t.bg));
+        let fmt = self.product.price;
+        let qf = self.product.qty;
+        let mut s = FixedStr::<48>::new();
+
+        // What each column must hold this frame: its title and its widest text (large prints
+        // are bold, the wider face). Columns are laid out from these: never narrower.
+        self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
+        let n = self.prints.len().min(rows);
+        for i in 0..n {
+            let p = self.prints[i];
+            s.clear();
+            let _ = write_tape_time(p.time, &mut s);
+            let tw = self.glyphs.width(s.as_str(), t.text_dim, false, window);
+            self.cols.need(TapeCol::Time.index(), tw, PAD);
+            s.clear();
+            let _ = fmt.write(p.price, &mut s);
+            let pw = self.glyphs.width(s.as_str(), t.text_main, true, window);
+            self.cols.need(TapeCol::Price.index(), pw, PAD);
+            s.clear();
+            let _ = qf.write(p.qty, &mut s);
+            let qw = self.glyphs.width(s.as_str(), t.text_main, true, window);
+            self.cols.need(TapeCol::Size.index(), qw, PAD);
+        }
+        let mw = self.glyphs.width("▲", t.text_main, false, window);
+        self.cols.need(TapeCol::Side.index(), mw, PAD * 0.5);
+        self.cols.layout(w);
+        self.cols.paint_header(
+            &mut self.glyphs,
+            &t,
+            bounds,
+            PAD,
+            &[true, false, false, false],
+            window,
+            cx,
+        );
+        let cell = |c: TapeCol| self.cols.cell(c.index(), ox);
+        let (time, price, qty, side) = (
+            cell(TapeCol::Time),
+            cell(TapeCol::Price),
+            cell(TapeCol::Size),
+            cell(TapeCol::Side),
+        );
+        let oy = top + HEADER_ROW_H;
+        let body = Bounds::new(point(px(ox), px(oy)), size(px(w), px(h - HEADER_ROW_H)));
         if self.prints.is_empty() {
             self.glyphs.paint(
                 "no trades yet",
@@ -236,15 +365,7 @@ impl TapeView {
             );
             return;
         }
-        // Columns: time | price | size | marker.
-        let marker_w = 18.0;
-        let time_r = ox + PAD + (w * 0.36).max(84.0);
-        let size_r = ox + w - PAD - marker_w;
-        let price_r = time_r + (size_r - time_r) * 0.55;
-        let fmt = self.product.price;
-        let qf = self.product.qty;
-        let mut s = FixedStr::<48>::new();
-        for i in 0..self.prints.len().min(rows) {
+        for i in 0..n {
             let p = self.prints[i];
             let y = oy + i as f32 * ROW_H;
             let large = p.qty >= self.large;
@@ -259,33 +380,58 @@ impl TapeView {
                 Some(Aggressor::Sell) => (t.down, "▼"),
                 None => (t.text_main, "·"),
             };
-            s.clear();
-            let _ = write_tape_time(p.time, &mut s);
-            self.glyphs.paint(
-                s.as_str(),
-                ox + PAD,
-                y,
-                ROW_H,
-                t.text_dim,
-                false,
-                window,
-                cx,
-            );
-            s.clear();
-            let _ = fmt.write(p.price, &mut s);
-            self.glyphs
-                .paint_right(s.as_str(), price_r, y, ROW_H, color, large, window, cx);
-            s.clear();
-            let _ = qf.write(p.qty, &mut s);
-            self.glyphs
-                .paint_right(s.as_str(), size_r, y, ROW_H, color, large, window, cx);
-            self.glyphs
-                .paint_right(marker, ox + w - PAD, y, ROW_H, color, false, window, cx);
+            if let Some((x, _)) = time {
+                s.clear();
+                let _ = write_tape_time(p.time, &mut s);
+                self.glyphs
+                    .paint(s.as_str(), x + PAD, y, ROW_H, t.text_dim, false, window, cx);
+            }
+            if let Some((x, cw)) = price {
+                s.clear();
+                let _ = fmt.write(p.price, &mut s);
+                self.glyphs.paint_right(
+                    s.as_str(),
+                    x + cw - PAD,
+                    y,
+                    ROW_H,
+                    color,
+                    large,
+                    window,
+                    cx,
+                );
+            }
+            if let Some((x, cw)) = qty {
+                s.clear();
+                let _ = qf.write(p.qty, &mut s);
+                self.glyphs.paint_right(
+                    s.as_str(),
+                    x + cw - PAD,
+                    y,
+                    ROW_H,
+                    color,
+                    large,
+                    window,
+                    cx,
+                );
+            }
+            if let Some((x, cw)) = side {
+                self.glyphs.paint_right(
+                    marker,
+                    x + cw - PAD * 0.5,
+                    y,
+                    ROW_H,
+                    color,
+                    false,
+                    window,
+                    cx,
+                );
+            }
             window.paint_quad(fill(
                 Bounds::new(point(px(ox), px(y + ROW_H - hair)), size(px(w), px(hair))),
                 t.grid,
             ));
         }
+        self.cols.paint_rules(&t, body, window);
     }
 
     fn header(&self) -> impl IntoElement {
@@ -299,6 +445,9 @@ impl TapeView {
         let mut right = String::with_capacity(32);
         let mut q = FixedStr::<32>::new();
         let _ = self.product.qty.write(self.large, &mut q);
+        if let Some(n) = pane::adopted_note(&self.feed) {
+            let _ = write!(right, "{n}  ·  ");
+        }
         let _ = write!(right, "large ≥ {q}");
         div()
             .flex()
@@ -342,14 +491,20 @@ impl Render for TapeView {
         let overlay =
             self.picker
                 .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
-        let body = match pane::unavailable_body(&self.feed, &t) {
+        let offer = self.common.offer_switch;
+        let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),
-            None => canvas(
-                |_, _, _| (),
-                move |bounds, (), window, cx| {
-                    entity.update(cx, |view, cx| view.paint(bounds, window, cx));
-                },
-            )
+            None => {
+                let e = entity.clone();
+                canvas(
+                    // Resize cursors over the column dividers (last frame's layout).
+                    move |bounds, window, cx| e.read(cx).cols.divider_hitboxes(bounds, window),
+                    move |bounds, hitboxes, window, cx| {
+                        pane_columns::set_divider_cursors(&hitboxes, window);
+                        entity.update(cx, |view, cx| view.paint(bounds, window, cx));
+                    },
+                )
+            }
             .size_full()
             .into_any_element(),
         };
@@ -367,6 +522,10 @@ impl Render for TapeView {
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+                    .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .child(body)
                     .when_some(overlay, |d, o| d.child(o)),
             )

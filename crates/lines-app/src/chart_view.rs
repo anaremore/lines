@@ -346,6 +346,9 @@ impl ChartView {
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let m = k.modifiers;
+        if !self.picker.is_open() && pane::unavailable_key(self, ev, cx) {
+            return;
+        }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
             let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
@@ -1176,6 +1179,9 @@ impl ChartView {
             quotes.push(quote("bid", d.bid));
             quotes.push(quote("ask", d.ask));
         }
+        if let Some(n) = pane::adopted_note(&self.feed) {
+            let _ = write!(right, "{n}  ·  ");
+        }
         let _ = write!(right, "{}  ·  {}", d.provider, d.status.label());
         // History back-fill is shown as state, not a spinner (docs/design.md).
         if let Some(h) = d.history.label() {
@@ -1338,7 +1344,8 @@ impl Render for ChartView {
         let overlay =
             self.picker
                 .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
-        if let Some(body) = pane::unavailable_body(&self.feed, &t) {
+        let offer = self.common.offer_switch;
+        if let Some(body) = pane::unavailable_body(&self.feed, &t, offer, cx) {
             return div()
                 .size_full()
                 .flex()
