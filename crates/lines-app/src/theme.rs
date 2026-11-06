@@ -93,6 +93,10 @@ pub struct Theme {
     pub link: [Hsla; 4],
     /// Study lines (VWAP, …), picked per instance. Never up/down or the accent.
     pub study: [Hsla; 4],
+    /// Behind text drawn over the plot (study legends, the volume profile's tag): a slightly
+    /// translucent panel box, so lines and profile rows never run through the text. Its text
+    /// meets AA over any chart content below it (`label_box_text_meets_aa_over_chart_content`).
+    pub label_bg: Hsla,
     /// Chart volume profile: rows inside the value area (rows outside it use `volume_bar`),
     /// the point of control, and the value-area edges. Neutral and translucent, drawn behind
     /// the candles; never the accent, the up/down or the study colours.
@@ -147,6 +151,7 @@ impl Theme {
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
             // sand, teal, silver, orchid
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
+            label_bg: c(0x171b24).opacity(0.9),
             profile_va: c(0x9a9fb2).opacity(0.30),
             profile_poc: c(brand::PAPER).opacity(0.70),
             profile_edge: c(brand::PAPER).opacity(0.30),
@@ -190,6 +195,7 @@ impl Theme {
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
+            label_bg: c(brand::PAPER).opacity(0.9),
             profile_va: c(0x565b6e).opacity(0.24),
             profile_poc: c(brand::INK).opacity(0.65),
             profile_edge: c(brand::INK).opacity(0.30),
@@ -334,6 +340,50 @@ mod tests {
             failures.is_empty(),
             "below WCAG AA 4.5:1:\n{}",
             failures.join("\n")
+        );
+    }
+
+    /// Legend and tag text sits on `label_bg` over whatever the plot shows there: the
+    /// background, candles (up/down), study lines and fills, profile rows. Every text colour
+    /// used on it must meet AA over each, in every theme and palette.
+    #[test]
+    fn label_box_text_meets_aa_over_chart_content() {
+        let mut failures = Vec::new();
+        for t in Theme::all() {
+            let mut under = vec![
+                ("bg", t.bg),
+                ("up", t.up),
+                ("down", t.down),
+                ("grid", t.grid),
+                ("profile_va", over(t.profile_va, t.bg)),
+                ("profile_poc", over(t.profile_poc, t.bg)),
+                ("last", t.last),
+            ];
+            for (i, s) in t.study.iter().enumerate() {
+                under.push((["study0", "study1", "study2", "study3"][i], *s));
+            }
+            let mut text = vec![("text_dim", t.text_dim), ("text_main", t.text_main)];
+            for (i, s) in t.study.iter().enumerate() {
+                text.push((["study0", "study1", "study2", "study3"][i], *s));
+            }
+            for (un, u) in &under {
+                let box_ = over(t.label_bg, *u);
+                for (tn, c) in &text {
+                    let r = contrast(*c, box_);
+                    if r < 4.5 {
+                        failures.push(format!("{}: {tn} on label_bg over {un} = {r:.2}", t.name));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "below AA:
+{}",
+            failures.join(
+                "
+"
+            )
         );
     }
 
