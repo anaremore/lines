@@ -11,6 +11,7 @@ pub mod coinbase;
 pub mod connection;
 pub mod cqg;
 pub mod disk;
+pub mod extension;
 pub mod indicators;
 pub mod kraken;
 pub mod listen;
@@ -69,6 +70,8 @@ pub enum Source {
         spot_url: String,
         futures_url: String,
     },
+    /// A source registered through the extension point (decision 0020).
+    Extension(extension::ExtensionSource),
     /// Replay a `.lfr` recording (provider, product and contract come from its header).
     /// `speed` 1.0 = real time, 0 = as fast as possible. `stop_at` ends the replay before
     /// the first frame recorded after that instant.
@@ -142,6 +145,7 @@ fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
         Source::Cqg { logon, .. } => Arc::new(cqg::CqgProvider::new(logon.clone())),
         Source::Coinbase { .. } => Arc::new(coinbase::CoinbaseProvider),
         Source::Kraken { .. } => Arc::new(kraken::KrakenProvider::default()),
+        Source::Extension(e) => e.provider(),
         Source::Replay { path, .. } => {
             let h = transport::read_header(path)?;
             match h.provider.as_str() {
@@ -157,10 +161,13 @@ fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
                 native::PROVIDER if native::protocol_compatible(&h.protocol) => {
                     Arc::new(native::NativeProvider)
                 }
-                p => bail!(
-                    "recording is from provider {p:?} protocol {:?}, which this build cannot decode",
-                    h.protocol
-                ),
+                p => match extension::for_recording(p, &h.protocol) {
+                    Some(e) => e.provider(),
+                    None => bail!(
+                        "recording is from provider {p:?} protocol {:?}, which this build cannot decode",
+                        h.protocol
+                    ),
+                },
             }
         }
     })
@@ -218,6 +225,7 @@ fn plan(config: &FeedConfig) -> Result<Plan> {
                 (Some(Target::Product(id)), _) => *id,
                 (_, Source::Coinbase { .. }) => catalog::BTC_USD,
                 (_, Source::Kraken { .. }) => catalog::BTC_USD_KR,
+                (_, Source::Extension(e)) => e.default_product(),
                 _ => catalog::ES,
             };
             let product = get(id)?;
@@ -371,7 +379,14 @@ pub async fn run_feed(
         _ => None,
     };
     let is_replay = matches!(config.source, Source::Replay { .. });
-    let opts = if is_replay {
+    let opts = if let Source::Extension(e) = &config.source {
+        let t = e.timing();
+        ConnectionOptions {
+            idle_timeout: t.idle_timeout,
+            ping_every: t.keepalive_every,
+            history_ms: config.history_ms,
+        }
+    } else if is_replay {
         // Replay is driven by recorded frames only: no idle timeout, no keep-alives.
         ConnectionOptions {
             idle_timeout: Duration::from_secs(365 * 86_400),
@@ -478,6 +493,13 @@ pub async fn run_feed(
                     Err(e) => Err(ConnectionError::Transport(e)),
                 }
             }
+            Source::Extension(e) => match e.connect(&plan.product, contract).await {
+                Ok(t) => {
+                    let t = extension::BoxedTransport(t);
+                    drive(t, rec, session, &store, &opts, &mut shutdown, sink).await
+                }
+                Err(e) => Err(ConnectionError::Transport(e)),
+            },
             Source::Kraken {
                 spot_url,
                 futures_url,
@@ -607,6 +629,6 @@ fn open_writer(
 pub fn stale_after(provider: &str) -> Duration {
     match provider {
         provider::CQG => Duration::from_secs(10),
-        _ => Duration::from_secs(5),
+        p => extension::by_provider(p).map_or(Duration::from_secs(5), |e| e.timing().stale_after),
     }
 }
