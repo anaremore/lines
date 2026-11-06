@@ -21,6 +21,8 @@ mod profile;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 mod studies;
+mod study_menu;
+mod study_menu_view;
 mod tabstate;
 mod tape_view;
 mod text;
@@ -321,6 +323,14 @@ struct Cli {
     /// Screenshot: the chart with its studies hidden (Ctrl+Shift+H in the app).
     #[arg(long, requires = "screenshot")]
     hide_studies: bool,
+    /// Screenshot: start the chart with these studies (a `StudySet` JSON file, as a template
+    /// or the defaults for new charts hold them).
+    #[arg(long, requires = "screenshot")]
+    study_set: Option<PathBuf>,
+    /// Screenshot: render with the studies menu open: `open`, or `edit:vwap:N`,
+    /// `edit:profile`, `edit:levels:ID` for that study's editor.
+    #[arg(long, requires = "screenshot")]
+    studies_menu: Option<String>,
     /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
     #[arg(long, requires = "screenshot")]
     hide_hints: bool,
@@ -679,6 +689,17 @@ where
         tape: TapeOptions { large_print },
         record: std::cell::RefCell::new(record),
         fixture: std::cell::RefCell::new(Some(chart_view::Fixture {
+            studies: match &cli.study_set {
+                Some(p) => Some(
+                    serde_json::from_slice(
+                        &std::fs::read(p)
+                            .with_context(|| format!("--study-set {}", p.display()))?,
+                    )
+                    .with_context(|| format!("--study-set {}: not a study set", p.display()))?,
+                ),
+                None => None,
+            },
+            studies_menu: cli.studies_menu.clone(),
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),
@@ -689,6 +710,7 @@ where
                 .map(|(i, spec)| lines_indicators::IndicatorConfig::Vwap {
                     spec: *spec,
                     color: (i % 4) as u8,
+                    display: Default::default(),
                 })
                 .collect(),
             profile: ProfileConfig {

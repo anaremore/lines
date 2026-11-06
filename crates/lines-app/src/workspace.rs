@@ -472,8 +472,10 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             let frozen = env.frozen;
             PaneHandle::Chart(cx.new(|cx| {
                 let mut v = ChartView::new(feed, theme, frozen, fixture, cx);
-                if let Some(s) = &doc.chart {
-                    v.restore(s);
+                match &doc.chart {
+                    Some(s) => v.restore(s),
+                    // A new chart: the studies saved as the default for new charts.
+                    None => v.apply_new_chart_defaults(cx),
                 }
                 v
             }))
@@ -1080,6 +1082,11 @@ impl WindowView {
                 let hide = !cx.global::<Workspace>().hide_hints;
                 set_hide_hints(hide, cx);
             }
+            Command::Studies => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.toggle_studies_menu(cx));
+                }
+            }
             Command::ToggleLevels
             | Command::ToggleLevelLabels
             | Command::ToggleLevelSource(_)
@@ -1652,6 +1659,7 @@ impl WindowView {
             if let PaneHandle::Chart(chart) = &h {
                 let v = chart.read(cx).visibility();
                 let hints_hidden = cx.global::<Workspace>().hide_hints;
+                items.push(MenuItem::named("Studies…", Command::Studies, false));
                 items.push(MenuItem::named(
                     "Hide study labels",
                     Command::ToggleStudyLabels,
