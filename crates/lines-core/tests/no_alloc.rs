@@ -276,3 +276,46 @@ fn volume_profile_rows_do_not_allocate() {
     });
     assert_eq!(n, 0, "volume profile rows allocated {n} times");
 }
+
+#[test]
+fn column_layout_and_resizing_do_not_allocate() {
+    use lines_core::columns::{Cell, ColumnSet, ColumnSpec, MAX_COLS};
+    let spec = |min_w, default_w, hideable| ColumnSpec {
+        min_w,
+        default_w,
+        hideable,
+        shown_by_default: true,
+    };
+    let specs = [
+        spec(16.0, 22.0, true),
+        spec(36.0, 64.0, true),
+        spec(48.0, 76.0, false),
+        spec(36.0, 64.0, true),
+        spec(36.0, 64.0, true),
+    ];
+    let mut set = ColumnSet::new(&specs, 4);
+    let mut cells = [Cell::default(); MAX_COLS];
+    let mut needed = [0.0f32; MAX_COLS];
+    let n = allocs_during(|| {
+        // What a DOM does every frame while the trader drags a divider over live data.
+        for frame in 0..10_000 {
+            needed[2] = 60.0 + (frame % 7) as f32;
+            needed[1] = 30.0 + (frame % 11) as f32;
+            set.layout(&specs, &needed, 420.0, &mut cells);
+            if let Some(d) = set.divider_at(&cells, cells[1].right() + 1.0, 3.0) {
+                set.drag(
+                    &specs,
+                    &cells,
+                    d,
+                    if frame % 2 == 0 { 3.0 } else { -2.0 },
+                    &needed,
+                );
+            }
+            if frame % 500 == 0 {
+                set.auto_fit(&specs, 3, &needed);
+            }
+            std::hint::black_box(&cells);
+        }
+    });
+    assert_eq!(n, 0, "column layout allocated {n} times");
+}

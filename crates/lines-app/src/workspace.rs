@@ -47,6 +47,7 @@ use crate::layout::{
 };
 use crate::menu::{Menu, MenuItem, MenuKey};
 use crate::pane::{FeedChanged, Pane};
+use crate::pane_columns::{ColumnCmd, ColumnMenu, Columns};
 use crate::pane_window::{self, PaneWindow};
 use crate::persist::{self, Writer};
 use crate::tabstate::{self, Leaf, PaneState};
@@ -248,6 +249,24 @@ impl PaneHandle {
             let h = e.read(cx).focus_handle().clone();
             h.focus(window, cx);
         })
+    }
+
+    /// A column command on a DOM or time & sales.
+    fn column_command(&self, c: ColumnCmd, cx: &mut App) -> Result<(), &'static str> {
+        match self {
+            PaneHandle::Dom(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
+            PaneHandle::Tape(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
+            PaneHandle::Chart(_) => Err("columns belong to a DOM or time & sales"),
+        }
+    }
+
+    /// The pane's columns, if it has a table.
+    fn columns(&self, cx: &App) -> Option<Columns> {
+        match self {
+            PaneHandle::Dom(e) => Some(e.read(cx).columns().clone()),
+            PaneHandle::Tape(e) => Some(e.read(cx).columns().clone()),
+            PaneHandle::Chart(_) => None,
+        }
     }
 
     fn set_synced_time(&self, t: Option<UtcMillis>, cx: &mut App) {
@@ -652,16 +671,22 @@ impl WindowView {
                     forward_crosshair(id, ev.0, cx)
                 }),
             ],
-            PaneHandle::Dom(e) => {
-                vec![cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
+            PaneHandle::Dom(e) => vec![
+                cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
                     feed_changed(this, ev, cx)
-                })]
-            }
-            PaneHandle::Tape(e) => {
-                vec![cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
+                }),
+                cx.subscribe(e, move |this, _, ev: &ColumnMenu, cx| {
+                    this.open_column_menu(id, ev.0, cx)
+                }),
+            ],
+            PaneHandle::Tape(e) => vec![
+                cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
                     feed_changed(this, ev, cx)
-                })]
-            }
+                }),
+                cx.subscribe(e, move |this, _, ev: &ColumnMenu, cx| {
+                    this.open_column_menu(id, ev.0, cx)
+                }),
+            ],
         }
     }
 
@@ -890,6 +915,13 @@ impl WindowView {
                 }
                 for id in ids {
                     self.reattach(id, window, cx);
+                }
+            }
+            Command::Columns(c) => {
+                if let Some(h) = self.tab().focused_handle().cloned()
+                    && let Err(e) = h.column_command(c, cx)
+                {
+                    self.refuse(e, cx);
                 }
             }
             Command::DockBesideChart => self.refuse(
@@ -1549,6 +1581,38 @@ impl WindowView {
             items.push(MenuItem::of(Command::ReopenTab, false));
         }
         items.push(MenuItem::named("All commands…", Command::Palette, false));
+        self.menu = Some(Menu::new(at, items));
+        cx.notify();
+    }
+
+    /// A DOM's or tape's column menu (right-click on its header row): show or hide each
+    /// column (the price column always stays), fit them, reset them.
+    fn open_column_menu(&mut self, id: PaneId, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(cols) = self
+            .tabs
+            .iter()
+            .find_map(|t| t.handle(id))
+            .and_then(|h| h.columns(cx))
+        else {
+            return;
+        };
+        let mut items = Vec::new();
+        for i in 0..cols.set.len() {
+            let Some(col) = cols.column(i) else { continue };
+            let label = if cols.specs()[i].hideable {
+                cols.label(i).to_owned()
+            } else {
+                format!("{} (always shown)", cols.label(i))
+            };
+            items.push(MenuItem::named(
+                &label,
+                Command::Columns(ColumnCmd::Toggle(col)),
+                cols.set.is_shown(i),
+            ));
+        }
+        items.push(MenuItem::sep());
+        items.push(MenuItem::of(Command::Columns(ColumnCmd::AutoFitAll), false));
+        items.push(MenuItem::of(Command::Columns(ColumnCmd::Reset), false));
         self.menu = Some(Menu::new(at, items));
         cx.notify();
     }

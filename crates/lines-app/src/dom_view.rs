@@ -1,8 +1,11 @@
 //! The DOM pane (roadmap 5, read-only): a price ladder of fixed rows indexed by integer ticks.
 //!
-//! Columns, left to right: a reserved slot for the trader's own orders (empty until order
+//! Columns, left to right: a reserved slot for the trader's own orders (hidden until order
 //! entry, milestone 7), bid size, price, ask size, traded volume. Sizes are numbers with a
-//! subtle depth bar behind them; numbers use tabular digits, right-aligned.
+//! subtle depth bar behind them; numbers use tabular digits, right-aligned. A slim header row
+//! names the columns; its dividers resize them (drag, double-click to fit) and right-clicking
+//! it shows or hides them (`crate::pane_columns`). A column is never narrower than its widest
+//! current number.
 //!
 //! Frame flow: the pane polls its store's revision (8 ms) and redraws only on change, so a
 //! burst of depth updates coalesces into one frame (decision 0001). Paint `try_lock`s the
@@ -19,8 +22,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, Bounds, Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Render, ScrollEvent, Styled, Window, canvas, div, fill,
-    point, prelude::*, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
+    ScrollEvent, Styled, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::ladder::{
     self, GROUPING_PRESETS, Inside, LadderRow, LadderStats, LadderView, build_ladder, inside_row,
@@ -31,6 +34,9 @@ use lines_feed::store::ChartStore;
 
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
+use crate::pane_columns::{
+    self, ColumnCmd, ColumnMenu, Columns, DomCol, HEADER_ROW_H, HeaderHit, Table,
+};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
@@ -40,8 +46,6 @@ use crate::wsdoc::{DomState, PaneDoc};
 const MAX_ROWS: usize = 256;
 const ROW_H: f32 = 18.0;
 const TEXT_PX: f32 = 12.0;
-/// Reserved for the trader's working orders (milestone 7).
-const ORDERS_W: f32 = 22.0;
 const PAD: f32 = 6.0;
 
 #[derive(Clone, Debug)]
@@ -77,9 +81,12 @@ pub struct DomView {
     scroll_rows: f32,
     focus: FocusHandle,
     glyphs: Glyphs,
+    /// Column widths and visibility, and this frame's layout.
+    cols: Columns,
 }
 
 impl EventEmitter<FeedChanged> for DomView {}
+impl EventEmitter<ColumnMenu> for DomView {}
 
 impl Pane for DomView {
     fn store(&self) -> &Arc<ChartStore> {
@@ -101,6 +108,7 @@ impl Pane for DomView {
     fn save_state(&self, doc: &mut PaneDoc) {
         doc.dom = Some(DomState {
             grouping: self.grouping,
+            columns: self.cols.save(&DomCol::ALL),
         });
     }
 
@@ -159,12 +167,30 @@ impl DomView {
             scroll_rows: 0.0,
             focus: cx.focus_handle(),
             glyphs: Glyphs::new(TEXT_PX),
+            cols: Columns::new(Table::Dom),
         }
     }
 
-    /// Restore saved view state (price grouping).
+    /// Restore saved view state (price grouping, columns).
     pub fn restore(&mut self, state: &DomState) {
         self.set_grouping(state.grouping.clamp(1, 10_000));
+        self.cols.load(&DomCol::ALL, &state.columns);
+    }
+
+    /// A column command on this DOM (decision 0018).
+    pub fn column_command(
+        &mut self,
+        cmd: ColumnCmd,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        self.cols.apply(cmd)?;
+        cx.notify();
+        Ok(())
+    }
+
+    /// The columns (for the column menu).
+    pub fn columns(&self) -> &Columns {
+        &self.cols
     }
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
@@ -196,15 +222,63 @@ impl DomView {
     }
 
     fn visible_rows(&self) -> usize {
-        ((f(self.bounds.size.height) / ROW_H).floor() as usize).clamp(1, MAX_ROWS)
+        (((f(self.bounds.size.height) - HEADER_ROW_H) / ROW_H).floor() as usize).clamp(1, MAX_ROWS)
+    }
+
+    /// A window position in table coordinates (from the header row's top-left).
+    fn table_xy(&self, p: Point<Pixels>) -> (f32, f32) {
+        (f(p.x - self.bounds.origin.x), f(p.y - self.bounds.origin.y))
     }
 
     // ---- input ---------------------------------------------------------------------
 
-    fn on_mouse_down(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
         if self.picker.close() {
             cx.notify();
+        }
+        let (x, y) = self.table_xy(ev.position);
+        match self.cols.hit(x, y, ev.click_count) {
+            HeaderHit::Divider(d) => {
+                self.cols.start_drag(d, x);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            HeaderHit::AutoFit(c) => {
+                let _ = self.column_command(ColumnCmd::AutoFit(c), cx);
+                cx.stop_propagation();
+            }
+            HeaderHit::Row | HeaderHit::Outside => {}
+        }
+    }
+
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cols.drag.is_none() {
+            return;
+        }
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.cols.drag = None;
+            cx.notify();
+            return;
+        }
+        let (x, _) = self.table_xy(ev.position);
+        if let Some(cmd) = self.cols.drag_to(x) {
+            let _ = self.column_command(cmd, cx);
+        }
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cols.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Right-click on the header row: the column menu (the workspace shows it, window-wide).
+    fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (x, y) = self.table_xy(ev.position);
+        if self.cols.hit(x, y, 1) != HeaderHit::Outside {
+            cx.emit(ColumnMenu(ev.position));
+            cx.stop_propagation();
         }
     }
 
@@ -298,20 +372,62 @@ impl DomView {
     fn draw(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let t = self.theme;
         let hair = 1.0 / window.scale_factor();
-        let (ox, oy) = (f(bounds.origin.x), f(bounds.origin.y));
+        let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
         let w = f(bounds.size.width);
         let h = f(bounds.size.height);
         let rect =
             |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
         window.paint_quad(fill(bounds, t.bg));
-        // Column geometry.
-        let vol_w = (w * 0.2).max(44.0);
-        let col = ((w - ORDERS_W - vol_w) / 3.0).max(1.0);
-        let bid_x = ox + ORDERS_W;
-        let price_x = bid_x + col;
-        let ask_x = price_x + col;
-        let vol_x = ask_x + col;
-        window.paint_quad(fill(rect(ox, oy, ORDERS_W, h), t.panel));
+        let fmt = self.product.price;
+        let qf = self.product.qty;
+        let mut s = FixedStr::<48>::new();
+
+        // What each column must hold this frame: its title and its widest number (bold is
+        // the wider face). Columns are laid out from these: never narrower.
+        self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
+        for i in 0..self.rows.len() {
+            let r = self.rows[i];
+            s.clear();
+            let _ = fmt.write(r.price, &mut s);
+            let pw = self.glyphs.width(s.as_str(), t.text_main, true, window);
+            self.cols.need(DomCol::Price.index(), pw, PAD);
+            for (q, c) in [
+                (r.bid, DomCol::Bid),
+                (r.ask, DomCol::Ask),
+                (r.volume, DomCol::Volume),
+            ] {
+                if q.0 > 0 {
+                    s.clear();
+                    let _ = qf.write(q, &mut s);
+                    let qw = self.glyphs.width(s.as_str(), t.text_main, true, window);
+                    self.cols.need(c.index(), qw, PAD);
+                }
+            }
+        }
+        self.cols.layout(w);
+        self.cols
+            .paint_header(&mut self.glyphs, &t, bounds, PAD, &[false; 5], window, cx);
+        let cell = |c: DomCol| self.cols.cell(c.index(), ox);
+        let (orders, bid, price, ask, vol) = (
+            cell(DomCol::Orders),
+            cell(DomCol::Bid),
+            cell(DomCol::Price),
+            cell(DomCol::Ask),
+            cell(DomCol::Volume),
+        );
+        let oy = top + HEADER_ROW_H;
+        let body_h = h - HEADER_ROW_H;
+        if let Some((x, cw)) = orders {
+            window.paint_quad(fill(rect(x, oy, cw, body_h), t.panel));
+        }
+        // The ladder's own columns (everything but the orders slot).
+        let table_l = [bid, price, ask, vol]
+            .into_iter()
+            .flatten()
+            .map(|c| c.0)
+            .fold(f32::INFINITY, f32::min)
+            .min(ox + w);
+        let body = Bounds::new(point(px(ox), px(oy)), size(px(w), px(body_h)));
 
         if self.rows.is_empty() {
             let msg = if self.has_depth {
@@ -321,7 +437,7 @@ impl DomView {
             };
             self.glyphs.paint(
                 msg,
-                bid_x + PAD,
+                table_l + PAD,
                 oy + PAD,
                 ROW_H,
                 t.text_dim,
@@ -332,89 +448,93 @@ impl DomView {
             return;
         }
 
-        let fmt = self.product.price;
-        let qf = self.product.qty;
         let (max_size, max_vol) = (self.stats.max_size.0.max(1), self.stats.max_volume.0.max(1));
         let flagged = matches!(self.inside, Inside::Locked | Inside::Crossed);
-        let mut s = FixedStr::<48>::new();
+        // A locked or crossed book outlines the inside rows across bid, price and ask.
+        let span = match (bid.or(price).or(ask), ask.or(price).or(bid)) {
+            (Some(l), Some(r)) => Some((l.0, r.0 + r.1)),
+            _ => None,
+        };
         for i in 0..self.rows.len() {
             let r = self.rows[i];
             let y = oy + i as f32 * ROW_H;
-            if y + ROW_H > oy + h + 0.5 {
+            if y + ROW_H > top + h + 0.5 {
                 break;
             }
-            // Bid: inside tint, then a bar growing from the price column outwards.
-            if r.best_bid {
-                window.paint_quad(fill(rect(bid_x, y, col, ROW_H), t.inside_bid));
+            // Bid: inside tint, then a bar growing from the price side outwards.
+            if let Some((x, cw)) = bid {
+                if r.best_bid {
+                    window.paint_quad(fill(rect(x, y, cw, ROW_H), t.inside_bid));
+                }
+                if r.bid.0 > 0 {
+                    let bw = (cw * (r.bid.0 as f32 / max_size as f32)).max(hair);
+                    window.paint_quad(fill(rect(x + cw - bw, y + 1.0, bw, ROW_H - 2.0), t.bid_bar));
+                    s.clear();
+                    let _ = qf.write(r.bid, &mut s);
+                    self.glyphs.paint_right(
+                        s.as_str(),
+                        x + cw - PAD,
+                        y,
+                        ROW_H,
+                        t.text_main,
+                        r.best_bid,
+                        window,
+                        cx,
+                    );
+                }
             }
-            if r.bid.0 > 0 {
-                let bw = (col * (r.bid.0 as f32 / max_size as f32)).max(hair);
-                window.paint_quad(fill(
-                    rect(price_x - bw, y + 1.0, bw, ROW_H - 2.0),
-                    t.bid_bar,
-                ));
-                s.clear();
-                let _ = qf.write(r.bid, &mut s);
-                let bold = r.best_bid;
-                self.glyphs.paint_right(
-                    s.as_str(),
-                    price_x - PAD,
-                    y,
-                    ROW_H,
-                    t.text_main,
-                    bold,
-                    window,
-                    cx,
-                );
-            }
-            if r.best_ask {
-                window.paint_quad(fill(rect(ask_x, y, col, ROW_H), t.inside_ask));
-            }
-            if r.ask.0 > 0 {
-                let aw = (col * (r.ask.0 as f32 / max_size as f32)).max(hair);
-                window.paint_quad(fill(rect(ask_x, y + 1.0, aw, ROW_H - 2.0), t.ask_bar));
-                s.clear();
-                let _ = qf.write(r.ask, &mut s);
-                let bold = r.best_ask;
-                self.glyphs.paint_right(
-                    s.as_str(),
-                    vol_x - PAD,
-                    y,
-                    ROW_H,
-                    t.text_main,
-                    bold,
-                    window,
-                    cx,
-                );
+            if let Some((x, cw)) = ask {
+                if r.best_ask {
+                    window.paint_quad(fill(rect(x, y, cw, ROW_H), t.inside_ask));
+                }
+                if r.ask.0 > 0 {
+                    let aw = (cw * (r.ask.0 as f32 / max_size as f32)).max(hair);
+                    window.paint_quad(fill(rect(x, y + 1.0, aw, ROW_H - 2.0), t.ask_bar));
+                    s.clear();
+                    let _ = qf.write(r.ask, &mut s);
+                    self.glyphs.paint_right(
+                        s.as_str(),
+                        x + cw - PAD,
+                        y,
+                        ROW_H,
+                        t.text_main,
+                        r.best_ask,
+                        window,
+                        cx,
+                    );
+                }
             }
             // Price: the last trade's row is tagged like the chart's last-price tag.
-            let (pfg, bold) = if r.last {
-                window.paint_quad(fill(rect(price_x, y, col, ROW_H), t.last));
-                (t.on_last, true)
-            } else {
-                (t.text_main, r.best_bid || r.best_ask)
-            };
-            s.clear();
-            let _ = fmt.write(r.price, &mut s);
-            self.glyphs
-                .paint_right(s.as_str(), ask_x - PAD, y, ROW_H, pfg, bold, window, cx);
-            // A locked or crossed book: the inside rows are outlined, not only tinted.
-            if flagged && (r.best_bid || r.best_ask) {
-                window.paint_quad(fill(rect(bid_x, y, vol_x - bid_x, hair), t.text_main));
-                window.paint_quad(fill(
-                    rect(bid_x, y + ROW_H - hair, vol_x - bid_x, hair),
-                    t.text_main,
-                ));
+            if let Some((x, cw)) = price {
+                let (pfg, bold) = if r.last {
+                    window.paint_quad(fill(rect(x, y, cw, ROW_H), t.last));
+                    (t.on_last, true)
+                } else {
+                    (t.text_main, r.best_bid || r.best_ask)
+                };
+                s.clear();
+                let _ = fmt.write(r.price, &mut s);
+                self.glyphs
+                    .paint_right(s.as_str(), x + cw - PAD, y, ROW_H, pfg, bold, window, cx);
+            }
+            if flagged
+                && (r.best_bid || r.best_ask)
+                && let Some((l, rr)) = span
+            {
+                window.paint_quad(fill(rect(l, y, rr - l, hair), t.text_main));
+                window.paint_quad(fill(rect(l, y + ROW_H - hair, rr - l, hair), t.text_main));
             }
             // Traded volume.
-            if r.volume.0 > 0 {
-                let vw = ((vol_w - PAD) * (r.volume.0 as f32 / max_vol as f32)).max(hair);
-                window.paint_quad(fill(rect(vol_x, y + 2.0, vw, ROW_H - 4.0), t.volume_bar));
+            if let Some((x, cw)) = vol
+                && r.volume.0 > 0
+            {
+                let vw = ((cw - PAD).max(1.0) * (r.volume.0 as f32 / max_vol as f32)).max(hair);
+                window.paint_quad(fill(rect(x, y + 2.0, vw, ROW_H - 4.0), t.volume_bar));
                 s.clear();
                 let _ = qf.write(r.volume, &mut s);
                 self.glyphs.paint_right(
                     s.as_str(),
-                    ox + w - PAD,
+                    x + cw - PAD,
                     y,
                     ROW_H,
                     t.text_dim,
@@ -424,14 +544,11 @@ impl DomView {
                 );
             }
             window.paint_quad(fill(
-                rect(bid_x, y + ROW_H - hair, w - ORDERS_W, hair),
+                rect(table_l, y + ROW_H - hair, ox + w - table_l, hair),
                 t.grid,
             ));
         }
-        // Column rules.
-        for x in [price_x, ask_x, vol_x] {
-            window.paint_quad(fill(rect(x, oy, hair, h), t.grid));
-        }
+        self.cols.paint_rules(&t, body, window);
     }
 
     fn header(&self) -> impl IntoElement {
@@ -524,12 +641,17 @@ impl Render for DomView {
                 .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
         let body = match pane::unavailable_body(&self.feed, &t) {
             Some(b) => b.into_any_element(),
-            None => canvas(
-                |_, _, _| (),
-                move |bounds, (), window, cx| {
-                    entity.update(cx, |view, cx| view.paint(bounds, window, cx));
-                },
-            )
+            None => {
+                let e = entity.clone();
+                canvas(
+                    // Resize cursors over the column dividers (last frame's layout).
+                    move |bounds, window, cx| e.read(cx).cols.divider_hitboxes(bounds, window),
+                    move |bounds, hitboxes, window, cx| {
+                        pane_columns::set_divider_cursors(&hitboxes, window);
+                        entity.update(cx, |view, cx| view.paint(bounds, window, cx));
+                    },
+                )
+            }
             .size_full()
             .into_any_element(),
         };
@@ -547,6 +669,10 @@ impl Render for DomView {
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+                    .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(body)
                     .when_some(overlay, |d, o| d.child(o)),

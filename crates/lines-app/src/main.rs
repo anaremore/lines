@@ -6,6 +6,7 @@ mod feeds;
 mod layout;
 mod menu;
 mod pane;
+mod pane_columns;
 mod pane_window;
 mod persist;
 mod picker;
