@@ -41,6 +41,7 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 ## 7. Reliability over cleverness
 - Prefer the simple, predictable layout over the adaptive one that moves things. Nothing the trader aims at should shift under the cursor (e.g. the DOM never re-centres while hovered).
 - UI degrades gracefully: missing data shows as missing (greyed, labelled), never as zero or a stale value presented as live.
+- **Stale is a state.** When the market is open (per the sessions calendar) and a feed delivers nothing for longer than its expected cadence, every pane on it shows a clear **stale** marker until data resumes. A frozen DOM must never look live.
 
 ## Checking a UI change
 Every UI PR (template checklist) confirms: tokens only, no paint-path allocation, both themes, readable at DPI 1.0 and 2.0, states unambiguous, and before/after screenshots (decision 0009).

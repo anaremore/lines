@@ -24,3 +24,4 @@ Format: Status · Context · Decision · Consequences.
 | 0016 | Workspaces, panes, layouts and link groups |
 | 0017 | Indicator engine: composable series graph; VWAP first |
 | 0018 | One trading surface: commands, trading core, connectors, accounts |
+| 0019 | Local market-data store |
