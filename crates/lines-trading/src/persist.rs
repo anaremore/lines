@@ -4,7 +4,12 @@
 //!
 //! - **v0**: a file without a `version` (hand-written or from the first prototype): just
 //!   `accounts: [{id, starting_balance}]`. Migrated by filling in defaults.
-//! - **v1**: the current format.
+//! - **v1**: accounts, rule trackers, the paper broker, in-flight orders (roadmap 6/7). Builds
+//!   from roadmap 8b wrote an optional `guardrails` per account into v1 files too.
+//! - **v2**: the current format: the same layout, with each account's guardrails (roadmap 8b:
+//!   rules in force, pending looser ones, the day's counts, a lockout). The version moved so
+//!   that a build from before guardrails **refuses** the file instead of reading it and
+//!   silently dropping a lockout.
 //!
 //! A file from a newer Lines is refused (never half-read), and a damaged file is reported,
 //! never silently replaced.
@@ -20,7 +25,7 @@ use crate::guardrails::GuardrailTracker;
 use crate::paper::{PaperConfig, PaperState};
 use crate::rules::RuleTracker;
 
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAccount {
@@ -55,10 +60,22 @@ pub fn migrate(mut v: Value) -> Result<Value> {
     while version < VERSION {
         v = match version {
             0 => v0_to_v1(v)?,
+            1 => v1_to_v2(v)?,
             n => bail!("no migration from version {n}"),
         };
         version += 1;
     }
+    Ok(v)
+}
+
+/// v1 → v2: the layout is unchanged (guardrails are optional per account, absent = none); only
+/// the version moves, so older builds refuse what this one writes.
+fn v1_to_v2(mut v: Value) -> Result<Value> {
+    let o = v.as_object_mut().context("v1 file is not an object")?;
+    if !o.get("accounts").is_some_and(Value::is_array) {
+        bail!("v1 file has no accounts");
+    }
+    o.insert("version".into(), json!(2));
     Ok(v)
 }
 
@@ -119,4 +136,188 @@ pub fn save(path: &Path, file: &TradingFile) -> Result<()> {
     std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::guardrails::GuardState;
+
+    /// Pinned: exactly what a v1 build with guardrails (roadmap 8b, before the bump) wrote, a
+    /// lockout included. It must keep migrating to the current format with the lockout intact.
+    const V1: &str = r#"
+        {
+          "version": 1,
+          "paper": {
+            "latency_ms": 0,
+            "fill_model": "trade_through",
+            "fees": {
+              "1": 20000000000
+            },
+            "default_fee": 0,
+            "check_sessions": true
+          },
+          "broker": {
+            "accounts": {
+              "paper-1": {
+                "balance": 499710000000000,
+                "positions": []
+              }
+            },
+            "orders": []
+          },
+          "accounts": [
+            {
+              "config": {
+                "id": "paper-1",
+                "name": "paper-1",
+                "starting_balance": 50000,
+                "limits": {},
+                "day_product": 1
+              },
+              "tracker": {
+                "start_balance": 500000000000000,
+                "high_water": 500000000000000,
+                "locked": false,
+                "day": "2026-11-10",
+                "day_open_balance": 500000000000000,
+                "day_profits": [],
+                "drawdown_breached": false,
+                "daily_breached": false
+              },
+              "guardrails": {
+                "active": {
+                  "max_trades_per_day": 1,
+                  "max_daily_loss": 500
+                },
+                "pending": {},
+                "day": "2026-11-10",
+                "trades": 1,
+                "streak": 1,
+                "lock": {
+                  "state": "locked",
+                  "reason": "max 1 trade reached",
+                  "until": 1794348000000,
+                  "date": "2026-11-10"
+                }
+              }
+            }
+          ],
+          "next_order_id": 3
+        }
+    "#;
+
+    /// Pinned: a v2 file as written today. If this stops reading, the format changed and needs
+    /// a version bump plus a migration, not an edit here.
+    const V2: &str = r#"
+        {
+          "version": 2,
+          "paper": {
+            "latency_ms": 0,
+            "fill_model": "trade_through",
+            "fees": {
+              "1": 20000000000
+            },
+            "default_fee": 0,
+            "check_sessions": true
+          },
+          "broker": {
+            "accounts": {
+              "paper-1": {
+                "balance": 499710000000000,
+                "positions": []
+              }
+            },
+            "orders": []
+          },
+          "accounts": [
+            {
+              "config": {
+                "id": "paper-1",
+                "name": "paper-1",
+                "starting_balance": 50000,
+                "limits": {},
+                "day_product": 1
+              },
+              "tracker": {
+                "start_balance": 500000000000000,
+                "high_water": 500000000000000,
+                "locked": false,
+                "day": "2026-11-10",
+                "day_open_balance": 500000000000000,
+                "day_profits": [],
+                "drawdown_breached": false,
+                "daily_breached": false
+              },
+              "guardrails": {
+                "active": {
+                  "max_trades_per_day": 1,
+                  "max_daily_loss": 500
+                },
+                "pending": {},
+                "day": "2026-11-10",
+                "trades": 1,
+                "streak": 1,
+                "lock": {
+                  "state": "locked",
+                  "reason": "max 1 trade reached",
+                  "until": 1794348000000,
+                  "date": "2026-11-10"
+                }
+              }
+            }
+          ],
+          "next_order_id": 3
+        }
+    "#;
+
+    fn read(text: &str) -> TradingFile {
+        serde_json::from_value(migrate(serde_json::from_str(text).unwrap()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_v1_file_migrates_to_v2_and_keeps_its_lockout() {
+        let f = read(V1);
+        assert_eq!(f.version, 2);
+        let g = &f.accounts[0].guardrails;
+        assert_eq!(g.state(), GuardState::Locked);
+        assert_eq!(g.lock.as_ref().unwrap().reason, "max 1 trade reached");
+        assert_eq!(g.active.max_trades_per_day, Some(1));
+        assert_eq!(g.trades, 1);
+        assert!(
+            g.pending.as_ref().unwrap().is_default(),
+            "loosened: from tomorrow"
+        );
+        assert_eq!(f, read(V2), "v1 migrated = the same file written as v2");
+    }
+
+    #[test]
+    fn a_v2_file_as_written_today_still_reads() {
+        let f = read(V2);
+        assert_eq!(f.version, VERSION);
+        assert_eq!(f.accounts[0].guardrails.state(), GuardState::Locked);
+        // Written back: v2, and the same content.
+        let again = serde_json::to_value(&f).unwrap();
+        assert_eq!(again["version"], json!(2));
+        assert_eq!(read(&again.to_string()), f);
+    }
+
+    #[test]
+    fn older_shapes_and_newer_versions() {
+        // v1 without guardrails (before roadmap 8b): fine, none set.
+        let mut plain: Value = serde_json::from_str(V1).unwrap();
+        plain["accounts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("guardrails");
+        let f = read(&plain.to_string());
+        assert!(f.accounts[0].guardrails.is_default());
+        // A v1 shape the migration can't follow is an error, not a guess.
+        assert!(migrate(json!({"version": 1})).is_err());
+        // A newer file is refused (this is how a v1 build refuses a v2 file).
+        let e = migrate(json!({"version": VERSION + 1}))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("newer"), "{e}");
+    }
 }
