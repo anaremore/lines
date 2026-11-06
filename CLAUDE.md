@@ -8,6 +8,7 @@ Desktop futures charting terminal. Rust + GPUI. Market data through provider ada
 - `docs/decisions/`: decision records. Accepted ones are binding; supersede, never rewrite.
 - `docs/briefs/`: task briefs for upcoming milestones (e.g. the Sierra Chart importer).
 - `docs/design.md`: UI design principles and budgets. Binding for every UI change.
+- `docs/positioning.md`: who Lines is for, how it differs, what's out of scope, published benchmarks.
 
 ## Crate layout
 
