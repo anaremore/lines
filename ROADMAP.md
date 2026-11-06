@@ -11,7 +11,7 @@ Status: `done` · `current` · `next` · `later`
 | # | Milestone | Status | Done when |
 |---|-----------|--------|-----------|
 | 1 | Skeleton: mock feed, candles, pan/zoom, record/replay, screenshot mode | done | Runs on Windows; deterministic `--screenshot` output from a replay file |
-| 1b | CI on Windows, macOS, Linux | current | GitHub Actions builds, tests, clippy and fmt on all three OSes on every push/PR, public build only (no vendor features); macOS and Linux run headless tests, screenshot mode where the runner allows |
+| 1b | CI on Windows, macOS, Linux | done | GitHub Actions builds, tests, clippy and fmt on all three OSes on every push/PR, public build only (no vendor features); macOS and Linux run headless tests, screenshot mode where the runner allows |
 | 2 | Axes, crosshair & axis scaling | done | Price/time labels, DPI-correct, crosshair hit-testing via viewport math; scroll pan, Ctrl/axis-drag scaling, auto-scale indicator |
 | 3 | Provider trait + CQG feed shape + Coinbase public feed (dev tool) | done | Two providers behind one trait; Coinbase gives free 24/7 live data |
 | 3b | Sierra Chart importer (`.scid` ticks, `.depth` depth) → replay format | done | Local futures data replays with depth. Never committed (licensed data) |
