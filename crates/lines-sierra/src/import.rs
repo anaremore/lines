@@ -299,6 +299,22 @@ pub fn scid_path(data_dir: &Path, symbol: &str) -> PathBuf {
     data_dir.join(format!("{symbol}.scid"))
 }
 
+/// Merge order of a trade and a depth batch (Unix µs). Ties go to the trade: the print
+/// happens, then the book reflects it.
+///
+/// Depth records carry whole milliseconds; Sierra makes trade times unique by adding 1 µs
+/// per trade within a millisecond, so the first trade of a millisecond sorts before that
+/// millisecond's depth and later ones after it. The true order inside a millisecond is not
+/// in the files. Merging at whole milliseconds (every trade before its millisecond's depth)
+/// was measured on NQU5 2025-09-11 and is worse: 87.5% of first fills inside the book
+/// against 97.8%, because later fills of a millisecond then miss the levels the earlier
+/// ones uncovered. (It matches the bid/ask Sierra stores on trade records more often, 72%
+/// against 61%; that bid/ask is Sierra's quote from before the millisecond, and 14% of
+/// all trades print outside it.)
+pub fn trade_before_batch(trade_us: i64, batch_us: i64) -> bool {
+    trade_us <= batch_us
+}
+
 /// One depth batch converted to native events (time = first record, clamped monotonic).
 struct Batch {
     time_us: i64,
@@ -721,9 +737,8 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         };
 
     loop {
-        // Ties go to the trade: the print happens, then the book reflects it.
         let take_tick = match (&tick, &batch) {
-            (Some((t, _, _)), Some(b)) => *t <= b.time_us,
+            (Some((t, _, _)), Some(b)) => trade_before_batch(*t, b.time_us),
             (Some(_), None) => true,
             (None, Some(_)) => false,
             (None, None) => break,
