@@ -233,7 +233,7 @@ fn lifecycle_submitted_acked_working_partial_filled() {
     })
     .unwrap();
     r.wait(LAT);
-    assert_eq!(r.states(c), ["submitted", "acked", "working", "cancelled"]);
+    assert_eq!(r.states(c), ["submitted", "acked", "working", "canceled"]);
     // Cancelling a finished order is refused with the reason.
     let e = r
         .cmd(Command::CancelOrder {
@@ -959,7 +959,7 @@ fn checklist_03_fill_during_a_pending_cancel_applies() {
             fill(b, "x-2", 6000.00, 1, t),
             BrokerEvent::Cancelled {
                 id: b,
-                reason: "cancelled".into(),
+                reason: "canceled".into(),
                 at: t,
             },
         ],
@@ -981,7 +981,7 @@ fn checklist_04_late_fill_applies_without_reopening() {
         vec![
             BrokerEvent::Cancelled {
                 id,
-                reason: "cancelled".into(),
+                reason: "canceled".into(),
                 at: t,
             },
             fill(id, "late-1", 6000.00, 1, t),

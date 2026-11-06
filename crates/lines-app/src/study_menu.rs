@@ -410,7 +410,7 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             }
             for k in 0..4u8 {
                 c(
-                    "Colour",
+                    "Color",
                     format!("{}", k + 1),
                     *color == k,
                     Swatch::Study(k),
