@@ -31,7 +31,7 @@ use gpui::{
     FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, StyleRefinement, Styled,
     Subscription as GpuiSubscription, TitlebarOptions, Window, WindowBounds, WindowHandle,
-    WindowOptions, div, point, prelude::*, px, size,
+    WindowOptions, div, point, prelude::*, px, relative, size,
 };
 use lines_core::UtcMillis;
 use lines_feed::FeedConfig;
@@ -758,10 +758,20 @@ impl WindowView {
         }
     }
 
-    fn content_area(window: &Window) -> Rect {
+    /// The tab bar's height: shown only with two tabs or more (one tab needs no bar; the
+    /// workspace's status lives in the footer either way).
+    fn bar_h(&self) -> f32 {
+        if tabstate::shows_tab_bar(self.tabs.len()) {
+            TAB_BAR_H
+        } else {
+            0.0
+        }
+    }
+
+    fn content_area(&self, window: &Window) -> Rect {
         let vs = window.viewport_size();
         let (w, h) = (f32::from(vs.width), f32::from(vs.height));
-        Rect::new(0.0, 0.0, w, (h - TAB_BAR_H - HINT_H).max(0.0))
+        Rect::new(0.0, 0.0, w, (h - self.bar_h() - HINT_H).max(0.0))
     }
 
     fn focus_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -900,7 +910,8 @@ impl WindowView {
                 }
             }
             Command::Menu => {
-                let area = Self::content_area(window);
+                let area = self.content_area(window);
+                let bar = self.bar_h();
                 let tab = self.tab();
                 let at = tab
                     .layout
@@ -912,8 +923,8 @@ impl WindowView {
                             .find(|p| p.index == i)
                             .map(|p| p.rect)
                     })
-                    .map_or(point(px(40.0), px(TAB_BAR_H + 30.0)), |r| {
-                        point(px(r.x + 24.0), px(TAB_BAR_H + r.y + 24.0))
+                    .map_or(point(px(40.0), px(bar + 30.0)), |r| {
+                        point(px(r.x + 24.0), px(bar + r.y + 24.0))
                     });
                 self.open_menu(at, cx);
             }
@@ -986,7 +997,7 @@ impl WindowView {
         let Some(h) = tab.handle(id).cloned() else {
             return;
         };
-        let area = Self::content_area(window);
+        let area = self.content_area(window);
         let index = tab.layout.index_of(&id);
         let r = tab
             .layout
@@ -996,7 +1007,7 @@ impl WindowView {
             .map_or(Rect::new(0.0, 0.0, 360.0, 600.0), |p| p.rect);
         let (x, y) = at.unwrap_or((
             self.screen.x + r.x + 24.0,
-            self.screen.y + TAB_BAR_H + r.y + 24.0,
+            self.screen.y + self.bar_h() + r.y + 24.0,
         ));
         let place = Placement {
             display: None,
@@ -1045,7 +1056,7 @@ impl WindowView {
 
     fn move_focus(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.tab();
-        let area = Self::content_area(window);
+        let area = self.content_area(window);
         let Some(i) = tab.layout.index_of(&tab.focused) else {
             return;
         };
@@ -1465,6 +1476,11 @@ impl WindowView {
             items.push(row);
         }
         items.push(MenuItem::sep());
+        // Tab actions here too: with one tab there is no tab bar (and no tab menu).
+        items.push(MenuItem::of(Command::NewTab, false));
+        if !cx.global::<Workspace>().closed_tabs.is_empty() {
+            items.push(MenuItem::of(Command::ReopenTab, false));
+        }
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.menu = Some(Menu::new(at, items));
         cx.notify();
@@ -1621,15 +1637,17 @@ impl WindowView {
     /// Which pane and tab are under the pointer (window coordinates); redraw on change.
     fn update_hover(&mut self, pos: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
         let (x, y) = (f32::from(pos.x), f32::from(pos.y));
-        let tab = (y < TAB_BAR_H && x >= TAB_X0)
+        let bar = self.bar_h();
+        let area = self.content_area(window);
+        let tab = (y < bar && x >= TAB_X0)
             .then(|| ((x - TAB_X0) / TAB_W) as usize)
             .filter(|i| *i < self.tabs.len());
         let pane = self.tabs.get(self.active).and_then(|t| {
             let order = t.order();
             t.layout
-                .place_where(Self::content_area(window), &|id| t.is_shown(id))
+                .place_where(area, &|id| t.is_shown(id))
                 .into_iter()
-                .find(|p| p.rect.contains(x, y - TAB_BAR_H))
+                .find(|p| p.rect.contains(x, y - bar))
                 .map(|p| order[p.index])
         });
         if (tab, pane) != (self.hover_tab, self.hover_pane) {
@@ -1664,7 +1682,7 @@ impl WindowView {
             }
             let r = d.ratio_at(
                 f32::from(ev.position.x),
-                f32::from(ev.position.y) - TAB_BAR_H,
+                f32::from(ev.position.y) - self.bar_h(),
             );
             let path = d.path.clone();
             self.tab_mut().layout.set_ratio(&path, r);
@@ -1725,9 +1743,6 @@ impl WindowView {
 
     fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let ws = cx.global::<Workspace>();
-        let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.report.clone());
-        let is_first = ws.windows.first().map(|w| w.window_id());
         let mut bar = div()
             .h(px(TAB_BAR_H))
             .flex_none()
@@ -1835,6 +1850,17 @@ impl WindowView {
                     }),
                 ),
         );
+        bar
+    }
+
+    /// The workspace's status for the footer (always there, with or without a tab bar):
+    /// an inline report, what this tab isn't showing (click to bring it back), crosshair
+    /// sync, and the workspace's name (click to open another).
+    fn status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        let ws = cx.global::<Workspace>();
+        let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.report.clone());
+        let is_first = ws.windows.first().map(|w| w.window_id());
         // What this tab isn't showing, as text that brings it back.
         let (hidden, detached) = match self.tabs.get(self.active) {
             Some(tab) => {
@@ -1875,16 +1901,15 @@ impl WindowView {
                     }),
                 )
         };
-        let right = div()
-            .flex_1()
-            .min_w_0()
+        div()
+            .flex_none()
+            .max_w(relative(0.7))
             .h_full()
             .flex()
             .flex_row()
             .items_center()
             .justify_end()
             .gap_3()
-            .px_3()
             .whitespace_nowrap()
             .overflow_hidden()
             .text_color(t.text_dim)
@@ -1934,8 +1959,7 @@ impl WindowView {
                             this.run(Command::Open, window, cx);
                         }),
                     ),
-            );
-        bar.child(right)
+            )
     }
 
     fn panes(&self, area: Rect, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1946,6 +1970,7 @@ impl WindowView {
         let leaves = tab.layout.leaves();
         let placed = tab.layout.place_where(area, &shown);
         let hovered = self.hover_pane;
+        let bar = self.bar_h();
         for p in &placed {
             let id = *leaves[p.index];
             let Some(h) = tab.handle(id) else { continue };
@@ -1989,7 +2014,7 @@ impl WindowView {
                             this.menu = None;
                             this.focus_pane(id, window, cx);
                             // The header is a handle: drag it out of the window to pop out.
-                            let y = f32::from(ev.position.y) - TAB_BAR_H - r.y;
+                            let y = f32::from(ev.position.y) - bar - r.y;
                             if ev.button == MouseButton::Left && (0.0..HEADER_H).contains(&y) {
                                 this.pane_drag = Some(PaneDrag {
                                     id,
@@ -2217,7 +2242,7 @@ impl WindowView {
         Some(
             div()
                 .absolute()
-                .top(px(TAB_BAR_H + 24.0))
+                .top(px(self.bar_h() + 24.0))
                 .left_0()
                 .right_0()
                 .flex()
@@ -2303,7 +2328,7 @@ impl Render for WindowView {
             self.hover_pane = None;
             self.hover_tab = None;
         }
-        let area = Self::content_area(window);
+        let area = self.content_area(window);
         let hints = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
             Some(PaneHandle::Dom(_)) => {
                 "DOM: wheel scroll, C centre, G / Shift+G grouping, Ctrl+K symbol"
@@ -2317,6 +2342,9 @@ impl Render for WindowView {
             self.panes(area, cx)
         };
         let menu = self.menu_overlay(window, cx);
+        let bar =
+            tabstate::shows_tab_bar(self.tabs.len()).then(|| self.tab_bar(cx).into_any_element());
+        let status = self.status(cx).into_any_element();
         div()
             .size_full()
             .relative()
@@ -2328,7 +2356,7 @@ impl Render for WindowView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .child(self.tab_bar(cx))
+            .children(bar)
             .child(
                 div()
                     .relative()
@@ -2354,8 +2382,14 @@ impl Render for WindowView {
                     .bg(t.panel)
                     .border_t_1()
                     .border_color(t.axis_line)
-                    .child(hints)
-                    .child(commands::workspace_hints()),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{hints}  ·  {}", commands::workspace_hints())),
+                    )
+                    .child(status),
             )
             .children(menu)
             .children(self.prompt_overlay())
