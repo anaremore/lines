@@ -176,6 +176,11 @@ async fn shoot(
     // replay and the panes' requests, then give the panes a poll tick to pick the values up,
     // so the frame is deterministic.
     lines_feed::indicators::engine().sync();
+    // External levels: every source's first answer (live) or every batch due by the replay
+    // clock (replay) is applied before the frame is read back.
+    if !lines_feed::levels::runtime::wait_settled(Duration::from_secs(20)) {
+        bail!("level sources did not settle within 20 s");
+    }
     cx.background_executor()
         .timer(Duration::from_millis(100))
         .await;

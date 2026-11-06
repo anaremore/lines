@@ -19,6 +19,8 @@ screenshot = ["gpui/test-support", "gpui_platform/test-support"]
 # macOS without full Xcode: compile GPUI's Metal shaders at startup instead of at build time
 # (`xcrun metal` ships only with Xcode). Build-time shaders stay the default: faster startup.
 runtime-shaders = ["gpui_platform/runtime_shaders"]
+# The synthetic level source (`--demo-levels`), for screenshots of the levels layer.
+demo-levels = ["lines-feed/demo-levels"]
 
 [dependencies]
 gpui.workspace = true
@@ -59,3 +61,5 @@ embed-resource = "=3.0.12"
 [dev-dependencies]
 futures-util.workspace = true
 tokio.workspace = true
+# Tests use the synthetic level source.
+lines-feed = { workspace = true, features = ["demo-levels"] }
