@@ -55,3 +55,7 @@ required-features = ["screenshot"]
 [build-dependencies]
 # Windows icon + version resources. Pinned to the version GPUI already uses for its manifest.
 embed-resource = "=3.0.12"
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio.workspace = true
