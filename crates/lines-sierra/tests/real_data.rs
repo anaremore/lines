@@ -50,11 +50,15 @@ async fn nqz5_2025_09_11_imports_and_replays() {
         "a truly crossed book: {r}"
     );
 
-    // First fills of aggressor orders print at the touch. Observed 685/775 = 88.4%; the rest
-    // are 1–10+ ticks away, spread over the day (cause under investigation). Later fills of
-    // sweeps legitimately print through the touch and are not asserted.
+    // First fills of aggressor orders print at the touch. Observed 6358/6698 = 94.9%. Of the
+    // rest, all but 7 were inside the book at some batch boundary of their own millisecond
+    // (depth times are whole ms, so the order within one is not in the files; see
+    // `examples/depth_book.rs`). Before the sub-trade markers were corrected only 775 trades
+    // were checked (685 inside): standalone trades were taken for sweep fills. Later fills
+    // of sweeps legitimately print through the touch and are not asserted.
+    assert!(r.touch_checked > 6_500, "{r}");
     let ratio = r.touch_within as f64 / r.touch_checked as f64;
-    assert!(ratio > 0.85, "first fills at the touch: {ratio:.3}\n{r}");
+    assert!(ratio > 0.94, "first fills at the touch: {ratio:.3}\n{r}");
 
     // Reproducible byte for byte.
     let r2 = import(&opts("b.lfr")).expect("import again");
@@ -105,4 +109,45 @@ async fn nqz5_2025_09_11_imports_and_replays() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The front month on the same day. NQZ25 above was the deferred contract then (8,253 lots
+/// traded against NQU25's 429,108), so its sparse 1-2 lot book is what the market showed.
+#[test]
+#[ignore = "needs LINES_SIERRA_DATA (owner's local Sierra Chart data)"]
+fn nqu5_2025_09_11_front_month_book() {
+    let Ok(data) = std::env::var("LINES_SIERRA_DATA") else {
+        eprintln!("LINES_SIERRA_DATA not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("lines-sierra-real-u5-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = import(&ImportOptions {
+        data_dir: PathBuf::from(&data),
+        symbol: "NQU5.CME".into(),
+        date: "2025-09-11".into(),
+        out: dir.join("u5.lfr"),
+        price_multiplier: None,
+    })
+    .expect("import");
+    println!("{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(r.contract, "NQU25");
+    assert!(
+        r.depth_rejected_prices.is_empty() && r.tick_rejected_prices.is_empty(),
+        "{r}"
+    );
+    // Every sweep bracket closes: as many first as last sub-trades.
+    assert_eq!(r.trades_first_sub, r.trades_last_sub, "{r}");
+    // Observed 271857/277907 = 97.8%; outside fills are mostly 1 tick away and cluster at
+    // the 12:30 UTC CPI release.
+    assert!(r.touch_checked > 270_000, "{r}");
+    let ratio = r.touch_within as f64 / r.touch_checked as f64;
+    assert!(ratio > 0.975, "first fills at the touch: {ratio:.3}\n{r}");
+    // Locked 1621 times around the CPI release; truly crossed once (12:30:02.065).
+    assert!(
+        r.book_crossed_after_batch - r.book_locked_after_batch <= 1,
+        "{r}"
+    );
 }
