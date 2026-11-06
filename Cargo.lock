@@ -2880,7 +2880,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crc32fast",
  "embed-resource",
+ "flate2",
  "futures-util",
  "gpui",
  "gpui_platform",

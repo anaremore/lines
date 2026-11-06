@@ -40,6 +40,9 @@ nucleo-matcher = "0.3.1"
 # Same major as GPUI's `image` so `RgbaImage` is one type. PNG only: decodes the window icon
 # (X11) and encodes screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Diagnostics bundles (zip): deflate and CRC-32. Both already in the tree through `image`.
+flate2 = "1.1"
+crc32fast = "1.5"
 
 # Without `font-kit`, GPUI on macOS uses a no-op text system and renders no text at all.
 # Target-specific so no macOS build can leave it out; guarded by `tests/text_system.rs`.
