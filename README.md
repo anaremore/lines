@@ -91,6 +91,10 @@ cargo run --release -p lines-app --features runtime-shaders -- --source mock
 
 Architecture decisions are recorded in [`docs/decisions/`](docs/decisions/). UI principles are in [`docs/design.md`](docs/design.md).
 
+## Troubleshooting
+
+Export diagnostics from the command palette (Ctrl+Shift+P, "Export diagnostics") and attach the zip; it stays on your computer until you share it, with credentials and account ids removed.
+
 ## Licence
 
 [FSL-1.1-ALv2](LICENSE.md): you can read, use and modify Lines for any purpose except building a competing commercial product, and each release becomes Apache 2.0 two years after it is published.

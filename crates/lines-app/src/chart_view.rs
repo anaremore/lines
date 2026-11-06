@@ -1580,6 +1580,13 @@ impl EventEmitter<FeedChanged> for ChartView {}
 
 impl EventEmitter<CrosshairTime> for ChartView {}
 
+impl ChartView {
+    /// Smoothed paint time in µs (diagnostics).
+    pub fn paint_us(&self) -> f64 {
+        self.paint_time_ewma_us
+    }
+}
+
 impl Pane for ChartView {
     fn store(&self) -> &Arc<ChartStore> {
         &self.store

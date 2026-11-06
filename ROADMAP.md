@@ -44,7 +44,7 @@ Status: `done` · `current` · `next` · `later`
 
 | # | Milestone | Status | Done when |
 |---|-----------|--------|-----------|
-| U1 | Diagnostics | later | Rotating bounded local logs; one command exports a support bundle (logs, version, settings with credentials stripped, recent feed stats); opt-in crash reports after |
+| U1 | Diagnostics | done | Rotating bounded local logs; one command exports a support bundle (logs, version, settings with credentials stripped, recent feed stats); opt-in crash reports after |
 | U2 | Auto-update | later | Signature-verified updates, never applied during market hours, one-click rollback; depends on owner code signing |
 | U3 | Legal | later | Owner completes `docs/legal-checklist.md` (required before 12) |
 | — | Parser fuzzing | done | `cargo-fuzz` targets for every network decoder (CQG protobuf, Coinbase/Kraken JSON, recordings), run in CI on a schedule |
