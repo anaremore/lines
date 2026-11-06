@@ -45,8 +45,11 @@ use crate::layout::{
     Axis, Direction, Layout, LinkGroup, PaneKind, Preset, Rect, link_letter, next_link,
     trading_group,
 };
+use crate::menu::{Menu, MenuItem, MenuKey};
 use crate::pane::{FeedChanged, Pane};
+use crate::pane_window::{self, PaneWindow};
 use crate::persist::{self, Writer};
+use crate::tabstate::{self, Leaf, PaneState};
 use crate::tape_view::{TapeOptions, TapeView};
 use crate::theme::Theme;
 use crate::versioned;
@@ -62,8 +65,12 @@ const TAB_X0: f32 = 4.0;
 const GRAB: f32 = 6.0;
 /// A tab drag starts after this much movement.
 const DRAG_START: f32 = 6.0;
-const MENU_W: f32 = 260.0;
-const MENU_ROW_H: f32 = 22.0;
+/// The top of a pane that is its header: dragging there pulls the pane out of the window.
+const HEADER_H: f32 = 22.0;
+/// Closed tabs kept for "Reopen closed tab".
+const CLOSED_TABS: usize = 10;
+/// A docked pane's neighbour keeps this share.
+const DOCK_SHARE: f32 = 0.72;
 
 // ---- environment and the app-wide state -----------------------------------------------------
 
@@ -102,6 +109,12 @@ pub struct Workspace {
     pub name: String,
     pub crosshair_sync: bool,
     pub windows: Vec<WindowHandle<WindowView>>,
+    /// Windows holding one detached pane each (the pane stays in its tab's layout).
+    pub pane_windows: Vec<WindowHandle<PaneWindow>>,
+    /// Recently closed tabs with the index they had (in-memory only).
+    closed_tabs: tabstate::ClosedTabs<TabDoc>,
+    /// The chart that last had focus in a main window (where "Dock beside chart" goes).
+    last_chart: Option<PaneId>,
     /// A problem to show inline (e.g. a workspace file that couldn't be read), until dismissed.
     pub report: Option<String>,
     autosave: Option<Autosave>,
@@ -118,6 +131,9 @@ impl Workspace {
             name: "default".into(),
             crosshair_sync: false,
             windows: Vec::new(),
+            pane_windows: Vec::new(),
+            closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
+            last_chart: None,
             report: None,
             autosave: None,
             config_dir: None,
@@ -156,7 +172,7 @@ fn env(cx: &App) -> Rc<PaneEnv> {
 
 /// A pane's identity for the lifetime of the app (unique across windows, so tabs can move).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PaneId(u64);
+pub struct PaneId(pub(crate) u64);
 
 static NEXT_PANE: AtomicU64 = AtomicU64::new(1);
 
@@ -184,7 +200,7 @@ macro_rules! each {
 }
 
 impl PaneHandle {
-    fn view(&self) -> AnyView {
+    pub(crate) fn view(&self) -> AnyView {
         each!(self, e => e.clone().into())
     }
 
@@ -215,7 +231,7 @@ impl PaneHandle {
         }))
     }
 
-    fn set_visible(&self, visible: bool, cx: &mut App) {
+    pub(crate) fn set_visible(&self, visible: bool, cx: &mut App) {
         each!(self, e => e.update(cx, |p, _| p.common().visible = visible))
     }
 
@@ -223,7 +239,7 @@ impl PaneHandle {
         each!(self, e => e.update(cx, |p, _| p.common().paints))
     }
 
-    fn focus(&self, window: &mut Window, cx: &mut App) {
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
         each!(self, e => {
             let h = e.read(cx).focus_handle().clone();
             h.focus(window, cx);
@@ -270,10 +286,59 @@ struct PaneSlot {
 pub struct Tab {
     layout: Layout<PaneId>,
     panes: HashMap<PaneId, PaneSlot>,
+    /// Hidden and detached panes (absent = shown). Their leaves stay in `layout`.
+    state: HashMap<PaneId, PaneState>,
     focused: PaneId,
+    /// Detached panes whose windows open once the tab is in a window (restore, reopen).
+    pending_windows: Vec<(PaneId, Option<Placement>)>,
 }
 
 impl Tab {
+    pub fn state(&self, id: PaneId) -> PaneState {
+        self.state.get(&id).copied().unwrap_or_default()
+    }
+
+    fn set_state(&mut self, id: PaneId, s: PaneState) {
+        if s == PaneState::Shown {
+            self.state.remove(&id);
+        } else {
+            self.state.insert(id, s);
+        }
+    }
+
+    fn is_shown(&self, id: &PaneId) -> bool {
+        self.state(*id).is_shown()
+    }
+
+    fn order(&self) -> Vec<PaneId> {
+        self.layout.leaves().into_iter().copied().collect()
+    }
+
+    /// What `crate::tabstate` decides from.
+    fn leaves(&self, cx: &mut App) -> HashMap<PaneId, Leaf> {
+        self.panes
+            .iter()
+            .map(|(id, s)| {
+                (
+                    *id,
+                    Leaf {
+                        kind: s.handle.kind(),
+                        link: s.handle.link(cx),
+                        state: self.state(*id),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Panes of this tab in `state`, in layout order.
+    fn in_state(&self, f: impl Fn(PaneState) -> bool) -> Vec<PaneId> {
+        self.order()
+            .into_iter()
+            .filter(|id| f(self.state(*id)))
+            .collect()
+    }
+
     fn handle(&self, id: PaneId) -> Option<&PaneHandle> {
         self.panes.get(&id).map(|s| &s.handle)
     }
@@ -306,7 +371,12 @@ impl Tab {
     fn doc(&self, cx: &mut App) -> TabDoc {
         let mut docs = HashMap::new();
         for (id, slot) in &self.panes {
-            docs.insert(*id, slot.handle.doc(cx));
+            let mut d = slot.handle.doc(cx);
+            d.state = self.state(*id);
+            if d.state == PaneState::Detached {
+                d.window = pane_window::placement_of(*id, cx);
+            }
+            docs.insert(*id, d);
         }
         let layout = self.layout.map(&mut |id| {
             docs.remove(id)
@@ -384,20 +454,6 @@ struct TabDrag {
     active: bool,
 }
 
-struct MenuItem {
-    label: String,
-    hint: &'static str,
-    /// `None`: a separator.
-    cmd: Option<Command>,
-    checked: bool,
-}
-
-struct Menu {
-    at: Point<Pixels>,
-    items: Vec<MenuItem>,
-    selected: usize,
-}
-
 enum Prompt {
     SaveAs {
         text: String,
@@ -408,6 +464,21 @@ enum Prompt {
         selected: usize,
         error: Option<String>,
     },
+    /// Every command, filtered by what is typed (`commands::filter`).
+    Palette {
+        query: String,
+        items: Vec<Command>,
+        shown: Vec<Command>,
+        selected: usize,
+    },
+}
+
+/// Dragging a pane by its header (out of the window pops it out).
+struct PaneDrag {
+    id: PaneId,
+    start: Point<Pixels>,
+    now: Point<Pixels>,
+    active: bool,
 }
 
 pub struct WindowView {
@@ -422,6 +493,11 @@ pub struct WindowView {
     screen: Rect,
     split_drag: Option<crate::layout::Divider>,
     tab_drag: Option<TabDrag>,
+    pane_drag: Option<PaneDrag>,
+    /// The pane and tab under the pointer, from geometry on mouse move: only they get hover
+    /// controls, so a frame doesn't build (and lay out) controls for every pane.
+    hover_pane: Option<PaneId>,
+    hover_tab: Option<usize>,
     menu: Option<Menu>,
     prompt: Option<Prompt>,
     _window_subs: Vec<GpuiSubscription>,
@@ -461,6 +537,9 @@ impl WindowView {
             screen: screen_rect(window),
             split_drag: None,
             tab_drag: None,
+            pane_drag: None,
+            hover_pane: None,
+            hover_tab: None,
             menu: None,
             prompt: None,
             _window_subs: subs,
@@ -481,6 +560,8 @@ impl WindowView {
     /// Build a tab from its saved form.
     fn build_tab(doc: &TabDoc, cx: &mut App) -> Tab {
         let mut panes = HashMap::new();
+        let mut state = HashMap::new();
+        let mut pending_windows = Vec::new();
         let mut ids = Vec::new();
         let layout = doc.layout.map(&mut |p| {
             let id = PaneId::next();
@@ -488,6 +569,12 @@ impl WindowView {
             id
         });
         for (id, p) in ids {
+            if p.state != PaneState::Shown {
+                state.insert(id, p.state);
+            }
+            if p.state == PaneState::Detached {
+                pending_windows.push((id, p.window.clone()));
+            }
             panes.insert(
                 id,
                 PaneSlot {
@@ -496,21 +583,50 @@ impl WindowView {
                 },
             );
         }
-        let leaves = layout.leaves();
-        let focused = *leaves[doc.focused.min(leaves.len() - 1)];
-        Tab {
+        let mut tab = Tab {
             layout,
             panes,
-            focused,
-        }
+            state,
+            focused: PaneId(0),
+            pending_windows,
+        };
+        let order = tab.order();
+        let want = order[doc.focused.min(order.len() - 1)];
+        // Focus is on a shown pane (`WorkspaceDoc::normalise` keeps one shown).
+        tab.focused = order
+            .iter()
+            .copied()
+            .find(|id| *id == want && tab.is_shown(id))
+            .or_else(|| order.iter().copied().find(|id| tab.is_shown(id)))
+            .unwrap_or(want);
+        tab
     }
 
     /// Take ownership of a tab (new, or moved from another window): subscribe to its panes.
-    fn adopt(&mut self, mut tab: Tab, cx: &mut Context<Self>) {
+    fn adopt(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        let i = self.tabs.len();
+        self.adopt_at(i, tab, cx);
+    }
+
+    fn adopt_at(&mut self, i: usize, mut tab: Tab, cx: &mut Context<Self>) {
         for (id, slot) in tab.panes.iter_mut() {
             slot._subs = self.subscribe(*id, &slot.handle, cx);
         }
-        self.tabs.push(tab);
+        let pending: Vec<_> = std::mem::take(&mut tab.pending_windows)
+            .into_iter()
+            .filter_map(|(id, p)| tab.handle(id).cloned().map(|h| (id, h, p)))
+            .collect();
+        self.tabs.insert(i.min(self.tabs.len()), tab);
+        if !pending.is_empty() {
+            cx.defer(move |cx| {
+                for (id, h, p) in pending {
+                    if let Err(e) = pane_window::open(id, h, p.as_ref(), cx) {
+                        cx.global_mut::<Workspace>()
+                            .add_report(format!("couldn't open a pane window: {e:#}"));
+                    }
+                }
+            });
+        }
     }
 
     fn subscribe(
@@ -545,8 +661,17 @@ impl WindowView {
         }
     }
 
-    pub fn tabs(&self) -> &[Tab] {
-        &self.tabs
+    /// Every pane with its tab index and state (the benchmark's paint report).
+    pub fn panes_by_state(&self) -> Vec<(usize, PaneState, PaneHandle)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, t)| {
+                t.panes
+                    .iter()
+                    .map(move |(id, s)| (i, t.state(*id), s.handle.clone()))
+            })
+            .collect()
     }
 
     fn tab(&self) -> &Tab {
@@ -557,14 +682,45 @@ impl WindowView {
         &mut self.tabs[self.active]
     }
 
-    /// Only the active tab of a visible window is visible.
+    /// Only the shown panes of the active tab of a visible window are visible. Detached panes
+    /// belong to their own windows, which set theirs.
     fn sync_visibility(&mut self, cx: &mut App) {
         for (i, tab) in self.tabs.iter().enumerate() {
-            let visible = self.window_visible && i == self.active;
-            for h in tab.handles() {
-                h.set_visible(visible, cx);
+            let active = self.window_visible && i == self.active;
+            for (id, slot) in &tab.panes {
+                match tab.state(*id) {
+                    PaneState::Detached => {}
+                    s => slot.handle.set_visible(active && s.is_shown(), cx),
+                }
             }
         }
+    }
+
+    /// Apply state changes to the active tab: visibility, focus, and pane windows for
+    /// newly detached or re-attached panes. `None`: where to put a new detached window.
+    fn apply_states(
+        &mut self,
+        changes: tabstate::Changes<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (id, s) in changes {
+            self.tab_mut().set_state(id, s);
+        }
+        let tab = self.tab();
+        let leaves = tab.leaves(cx);
+        let next = tabstate::refocus(&tab.order(), &leaves, tab.focused);
+        self.sync_visibility(cx);
+        if let Some(f) = next {
+            self.focus_pane(f, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Report a refused action inline (docs/design.md: errors where they happened).
+    fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
+        cx.global_mut::<Workspace>().add_report(why.to_owned());
+        cx.notify();
     }
 
     /// Pane `from` switched feed: the rest of its link group follows, in every window.
@@ -617,8 +773,11 @@ impl WindowView {
             tab.focused = id;
             cx.notify();
         }
-        if let Some(h) = self.tab().handle(id) {
+        if let Some(h) = self.tab().handle(id).cloned() {
             h.focus(window, cx);
+            if h.kind() == PaneKind::Chart {
+                cx.global_mut::<Workspace>().last_chart = Some(id);
+            }
         }
     }
 
@@ -655,20 +814,69 @@ impl WindowView {
             Command::SetLink(l) => self.set_link(l, window.window_handle().window_id(), cx),
             Command::Preset(p) => self.apply_preset(p, window, cx),
             Command::NewTab => {
-                // A trio on the focused pane's market, in its link group.
-                let target = self.focused_target(cx);
-                let link = self
-                    .tab()
-                    .focused_handle()
-                    .cloned()
-                    .and_then(|h| h.link(cx));
-                let layout = trading_group(link, &mut |k, l| PaneDoc::new(k, l, target.clone()));
-                let tab = Self::build_tab(&TabDoc { focused: 0, layout }, cx);
+                let tab = self.fresh_tab(cx);
                 self.adopt(tab, cx);
                 let i = self.tabs.len() - 1;
                 self.activate_tab(i, window, cx);
             }
             Command::CloseTab => self.close_tab(self.active, window, cx),
+            Command::ReopenTab => self.reopen_tab(window, cx),
+            Command::HidePane => {
+                let tab = self.tab();
+                match tabstate::hide(&tab.order(), &tab.leaves(cx), tab.focused) {
+                    Ok(c) => self.apply_states(c, window, cx),
+                    Err(e) => self.refuse(e, cx),
+                }
+            }
+            Command::Toggle(kind) => {
+                let tab = self.tab();
+                match tabstate::toggle_kind(&tab.order(), &tab.leaves(cx), tab.focused, kind) {
+                    Ok(c) => self.apply_states(c, window, cx),
+                    Err(e) => self.refuse(e, cx),
+                }
+            }
+            Command::ChartOnly => {
+                let tab = self.tab();
+                match tabstate::chart_only(&tab.order(), &tab.leaves(cx), tab.focused) {
+                    Ok(c) => self.apply_states(c, window, cx),
+                    Err(e) => self.refuse(e, cx),
+                }
+            }
+            Command::ShowHidden => {
+                let c = self
+                    .tab()
+                    .in_state(PaneState::is_hidden)
+                    .into_iter()
+                    .map(|id| (id, PaneState::Shown))
+                    .collect();
+                self.apply_states(c, window, cx);
+            }
+            Command::PopOut => {
+                let id = self.tab().focused;
+                self.pop_out(id, None, window, cx);
+            }
+            Command::Reattach => {
+                let ids = self.tab().in_state(|s| s == PaneState::Detached);
+                if ids.is_empty() {
+                    self.refuse("no pane of this tab is popped out", cx);
+                }
+                for id in ids {
+                    self.reattach(id, window, cx);
+                }
+            }
+            Command::DockBesideChart => self.refuse(
+                "dock beside chart works from a popped-out pane's window",
+                cx,
+            ),
+            Command::Palette => {
+                let items = commands::palette();
+                self.prompt = Some(Prompt::Palette {
+                    query: String::new(),
+                    shown: items.clone(),
+                    items,
+                    selected: 0,
+                });
+            }
             Command::NextTab => {
                 let i = (self.active + 1) % self.tabs.len();
                 self.activate_tab(i, window, cx);
@@ -693,11 +901,17 @@ impl WindowView {
             }
             Command::Menu => {
                 let area = Self::content_area(window);
-                let at = self
-                    .tab()
+                let tab = self.tab();
+                let at = tab
                     .layout
-                    .index_of(&self.tab().focused)
-                    .and_then(|i| self.tab().layout.place(area).get(i).map(|p| p.rect))
+                    .index_of(&tab.focused)
+                    .and_then(|i| {
+                        tab.layout
+                            .place_where(area, &|id| tab.is_shown(id))
+                            .into_iter()
+                            .find(|p| p.index == i)
+                            .map(|p| p.rect)
+                    })
                     .map_or(point(px(40.0), px(TAB_BAR_H + 30.0)), |r| {
                         point(px(r.x + 24.0), px(TAB_BAR_H + r.y + 24.0))
                     });
@@ -732,6 +946,97 @@ impl WindowView {
         cx.notify();
     }
 
+    /// A fresh trading tab on the focused pane's market, in its link group.
+    fn fresh_tab(&self, cx: &mut App) -> Tab {
+        let (target, link) = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
+            Some(h) => (h.feed(cx).target_doc, h.link(cx)),
+            None => (None, Some(0)),
+        };
+        let layout = trading_group(link, &mut |k, l| PaneDoc::new(k, l, target.clone()));
+        Self::build_tab(&TabDoc { focused: 0, layout }, cx)
+    }
+
+    /// Reopen the most recently closed tab where it was (layout, panes and states as saved).
+    fn reopen_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let len = self.tabs.len();
+        let Some((doc, i)) = cx.global_mut::<Workspace>().closed_tabs.pop(len) else {
+            self.refuse("no closed tab to reopen", cx);
+            return;
+        };
+        let tab = Self::build_tab(&doc, cx);
+        let i = i.min(self.tabs.len());
+        self.adopt_at(i, tab, cx);
+        self.activate_tab(i, window, cx);
+    }
+
+    /// Put pane `id` of the active tab into its own window, at screen position `at` (default:
+    /// where the pane was), keeping its leaf here for re-attaching.
+    fn pop_out(
+        &mut self,
+        id: PaneId,
+        at: Option<(f32, f32)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.tab();
+        if let Err(e) = tabstate::can_detach(&tab.order(), &tab.leaves(cx), id) {
+            self.refuse(e, cx);
+            return;
+        }
+        let Some(h) = tab.handle(id).cloned() else {
+            return;
+        };
+        let area = Self::content_area(window);
+        let index = tab.layout.index_of(&id);
+        let r = tab
+            .layout
+            .place_where(area, &|p| tab.is_shown(p))
+            .into_iter()
+            .find(|p| Some(p.index) == index)
+            .map_or(Rect::new(0.0, 0.0, 360.0, 600.0), |p| p.rect);
+        let (x, y) = at.unwrap_or((
+            self.screen.x + r.x + 24.0,
+            self.screen.y + TAB_BAR_H + r.y + 24.0,
+        ));
+        let place = Placement {
+            display: None,
+            state: WindowState::Windowed,
+            x,
+            y,
+            w: r.w.max(240.0),
+            h: r.h.max(200.0),
+        };
+        self.apply_states(vec![(id, PaneState::Detached)], window, cx);
+        cx.defer(move |cx| {
+            if let Err(e) = pane_window::open(id, h, Some(&place), cx) {
+                cx.global_mut::<Workspace>()
+                    .add_report(format!("couldn't open a pane window: {e:#}"));
+                reattach_pane(id, cx);
+            }
+        });
+    }
+
+    /// Whether pane `id` lives in one of this window's tabs.
+    pub(crate) fn has_pane(&self, id: PaneId) -> bool {
+        self.tabs.iter().any(|t| t.panes.contains_key(&id))
+    }
+
+    /// A detached pane comes back to its leaf (its previous spot); its window closes.
+    pub(crate) fn reattach(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.tabs.iter().position(|t| t.panes.contains_key(&id)) else {
+            return;
+        };
+        self.tabs[i].set_state(id, PaneState::Shown);
+        if i == self.active {
+            self.sync_visibility(cx);
+            self.focus_pane(id, window, cx);
+        } else {
+            self.sync_visibility(cx);
+        }
+        cx.defer(move |cx| pane_window::close(id, cx));
+        cx.notify();
+    }
+
     fn focused_target(&self, cx: &App) -> Option<wsdoc::TargetDoc> {
         self.tab()
             .focused_handle()
@@ -744,7 +1049,10 @@ impl WindowView {
         let Some(i) = tab.layout.index_of(&tab.focused) else {
             return;
         };
-        if let Some(j) = tab.layout.neighbour(i, dir, area) {
+        if let Some(j) = tab
+            .layout
+            .neighbour_where(i, dir, area, &|id| tab.is_shown(id))
+        {
             let id = *tab.layout.leaves()[j];
             self.focus_pane(id, window, cx);
         }
@@ -788,9 +1096,33 @@ impl WindowView {
             Ok(Some(rest)) => {
                 tab.layout = rest;
                 tab.panes.remove(&focused);
-                let leaves = tab.layout.leaves();
-                let next = *leaves[i.min(leaves.len() - 1)];
-                self.focus_pane(next, window, cx);
+                tab.state.remove(&focused);
+                // Never leave a tab with nothing on screen: bring back what was hidden, else
+                // what was popped out.
+                if tab.in_state(PaneState::is_shown).is_empty() {
+                    let hidden = tab.in_state(PaneState::is_hidden);
+                    let back = if hidden.is_empty() {
+                        tab.in_state(|s| s == PaneState::Detached)
+                    } else {
+                        hidden
+                    };
+                    for id in back {
+                        tab.set_state(id, PaneState::Shown);
+                        cx.defer(move |cx| pane_window::close(id, cx));
+                    }
+                }
+                let shown = tab.in_state(PaneState::is_shown);
+                let order = tab.order();
+                // The shown pane nearest where the closed one was.
+                let next = order[i.min(order.len() - 1)..]
+                    .iter()
+                    .chain(order[..i.min(order.len())].iter().rev())
+                    .find(|id| shown.contains(id))
+                    .copied();
+                self.sync_visibility(cx);
+                if let Some(n) = next {
+                    self.focus_pane(n, window, cx);
+                }
             }
             Ok(None) => {
                 tab.layout = Layout::Pane(focused);
@@ -800,25 +1132,32 @@ impl WindowView {
         }
     }
 
-    /// Close a tab. The last tab of the last window stays (closing it would leave nothing to
-    /// trade from); the last tab of another window closes that window.
+    /// Close tab `i`; Reopen closed tab brings it back (so no confirmation). The last tab of
+    /// another window closes that window; the last tab of the last window is replaced with a
+    /// fresh one, so closing always does something visible.
     fn close_tab(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.len() == 1 {
-            if cx.global::<Workspace>().windows.len() > 1 {
-                window.remove_window();
-            } else {
-                cx.global_mut::<Workspace>()
-                    .add_report("the last tab can't be closed".into());
-            }
+        if i >= self.tabs.len() {
             return;
         }
-        // Dropping the tab drops its panes; the registry stops feeds nobody else watches.
-        self.tabs.remove(i);
-        if self.active >= self.tabs.len() || self.active > i {
-            self.active = self.active.saturating_sub(1).min(self.tabs.len() - 1);
+        let doc = self.tabs[i].doc(cx);
+        let windows = cx.global::<Workspace>().windows.len();
+        cx.global_mut::<Workspace>().closed_tabs.push(doc, i);
+        // Detached panes of the closed tab lose their windows (kept in the closed tab's doc).
+        cx.defer(prune_pane_windows);
+        // Dropping a tab drops its panes; the registry stops feeds nobody else watches.
+        match tabstate::close_tab(self.tabs.len(), windows, self.active, i) {
+            tabstate::CloseTab::CloseWindow => window.remove_window(),
+            tabstate::CloseTab::ReplaceWithFresh => {
+                let fresh = self.fresh_tab(cx);
+                self.tabs.clear();
+                self.adopt(fresh, cx);
+                self.activate_tab(0, window, cx);
+            }
+            tabstate::CloseTab::Remove { active } => {
+                self.tabs.remove(i);
+                self.activate_tab(active, window, cx);
+            }
         }
-        let a = self.active;
-        self.activate_tab(a, window, cx);
     }
 
     fn set_kind(&mut self, kind: PaneKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -922,6 +1261,49 @@ impl WindowView {
         let i = self.active;
         self.tabs[i] = tab;
         self.activate_tab(i, window, cx);
+        // The old tab's popped-out panes went with it.
+        cx.defer(prune_pane_windows);
+    }
+
+    /// Take pane `id` out of its tab (for docking elsewhere); `None` if it is its tab's only
+    /// pane.
+    fn take_pane(&mut self, id: PaneId) -> Option<PaneSlot> {
+        let tab = self.tabs.iter_mut().find(|t| t.panes.contains_key(&id))?;
+        if tab.layout.leaf_count() < 2 {
+            return None;
+        }
+        let layout = std::mem::replace(&mut tab.layout, Layout::Pane(id));
+        tab.layout = match layout.remove_leaf(&id) {
+            Ok(Some(rest)) => rest,
+            Ok(None) => unreachable!("two leaves or more"),
+            Err(l) => l,
+        };
+        tab.state.remove(&id);
+        tab.panes.remove(&id)
+    }
+
+    /// Put `slot` (pane `id`) beside chart `chart`, which keeps [`DOCK_SHARE`] of the width.
+    fn insert_beside(
+        &mut self,
+        chart: PaneId,
+        id: PaneId,
+        mut slot: PaneSlot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(i) = self.tabs.iter().position(|t| t.panes.contains_key(&chart)) else {
+            return;
+        };
+        slot._subs = self.subscribe(id, &slot.handle, cx);
+        let tab = &mut self.tabs[i];
+        let layout = std::mem::replace(&mut tab.layout, Layout::Pane(chart));
+        tab.layout = match layout.split_leaf_at(&chart, Axis::Row, id, DOCK_SHARE) {
+            Ok(l) => l,
+            Err((l, _)) => l,
+        };
+        tab.panes.insert(id, slot);
+        self.activate_tab(i, window, cx);
+        self.focus_pane(id, window, cx);
     }
 
     // ---- tab moves --------------------------------------------------------------------------
@@ -1027,71 +1409,93 @@ impl WindowView {
 
     // ---- menu and prompt --------------------------------------------------------------------
 
+    /// The focused pane's menu: pane actions (layout and workspace actions are on the tab's).
     fn open_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(h) = self.tab().focused_handle().cloned() else {
             return;
         };
         let kind = h.kind();
         let link = h.link(cx);
-        let sync = cx.global::<Workspace>().crosshair_sync;
-        let item = |label: &str, cmd: Command, checked: bool| MenuItem {
-            label: label.to_owned(),
-            hint: commands::hint(cmd),
-            cmd: Some(cmd),
-            checked,
-        };
-        let sep = || MenuItem {
-            label: String::new(),
-            hint: "",
-            cmd: None,
-            checked: false,
-        };
+        let tab = self.tab();
+        let leaves = tab.leaves(cx);
+        let it = MenuItem::of;
         let mut items = vec![
-            item("Split right", Command::Split(Axis::Row), false),
-            item("Split down", Command::Split(Axis::Column), false),
-            item("Close pane", Command::ClosePane, false),
-            sep(),
+            it(Command::Split(Axis::Row), false),
+            it(Command::Split(Axis::Column), false),
+            it(Command::PopOut, false),
+            it(Command::ClosePane, false),
+            MenuItem::sep(),
         ];
-        for k in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
-            items.push(item(k.label(), Command::SetKind(k), k == kind));
+        if kind == PaneKind::Chart {
+            let on = tabstate::is_chart_only(&leaves, tab.focused);
+            items.push(MenuItem::named(
+                "Chart only (hide linked DOM and T&S)",
+                Command::ChartOnly,
+                on,
+            ));
+        } else {
+            items.push(MenuItem::named(
+                &format!("Hide {}", kind.label()),
+                Command::HidePane,
+                false,
+            ));
         }
-        items.push(sep());
+        items.push(it(Command::Toggle(PaneKind::Dom), false));
+        items.push(it(Command::Toggle(PaneKind::Tape), false));
+        if !tab.in_state(PaneState::is_hidden).is_empty() {
+            items.push(it(Command::ShowHidden, false));
+        }
+        if !tab.in_state(|s| s == PaneState::Detached).is_empty() {
+            items.push(it(Command::Reattach, false));
+        }
+        items.push(MenuItem::sep());
+        for k in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
+            items.push(MenuItem::named(k.label(), Command::SetKind(k), k == kind));
+        }
+        items.push(MenuItem::sep());
         for l in [None, Some(0), Some(1), Some(2), Some(3)] {
             let label = match l {
                 None => "Unlinked".to_owned(),
                 Some(_) => format!("Link group {}", link_letter(l)),
             };
-            let mut it = item(&label, Command::SetLink(l), l == link);
+            let mut row = MenuItem::named(&label, Command::SetLink(l), l == link);
             if l.is_none() {
-                it.hint = commands::hint(Command::CycleLink);
+                row.hint = commands::hint(Command::CycleLink);
             }
-            items.push(it);
+            items.push(row);
         }
-        items.push(sep());
-        for p in Preset::ALL {
-            items.push(item(
-                &format!("Layout: {}", p.label()),
-                Command::Preset(p),
-                false,
-            ));
+        items.push(MenuItem::sep());
+        items.push(MenuItem::named("All commands…", Command::Palette, false));
+        self.menu = Some(Menu::new(at, items));
+        cx.notify();
+    }
+
+    /// A tab's menu: tab, layout and workspace actions.
+    fn open_tab_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let sync = cx.global::<Workspace>().crosshair_sync;
+        let reopen = !cx.global::<Workspace>().closed_tabs.is_empty();
+        let it = MenuItem::of;
+        let mut items = vec![it(Command::NewTab, false), it(Command::CloseTab, false)];
+        if reopen {
+            items.push(it(Command::ReopenTab, false));
         }
-        items.push(sep());
-        items.push(item("New tab", Command::NewTab, false));
         if self.tabs.len() > 1 {
-            items.push(item(
-                "Move tab to new window",
-                Command::TabToNewWindow,
-                false,
-            ));
+            items.push(it(Command::TabToNewWindow, false));
         }
-        items.push(item("Crosshair sync", Command::ToggleCrosshairSync, sync));
-        items.push(item("Save workspace as…", Command::SaveAs, false));
-        items.push(item("Open workspace…", Command::Open, false));
-        self.menu = Some(Menu {
-            at,
-            items,
-            selected: 0,
-        });
+        items.push(MenuItem::sep());
+        for p in Preset::ALL {
+            items.push(it(Command::Preset(p), false));
+        }
+        items.push(MenuItem::sep());
+        items.push(MenuItem::named(
+            "Crosshair sync",
+            Command::ToggleCrosshairSync,
+            sync,
+        ));
+        items.push(it(Command::SaveAs, false));
+        items.push(it(Command::Open, false));
+        items.push(MenuItem::named("All commands…", Command::Palette, false));
+        self.menu = Some(Menu::new(at, items));
         cx.notify();
     }
 
@@ -1099,27 +1503,13 @@ impl WindowView {
         let Some(menu) = self.menu.as_mut() else {
             return;
         };
-        let n = menu.items.len();
-        let step = |from: usize, d: isize, items: &[MenuItem]| {
-            let mut i = from;
-            for _ in 0..n {
-                i = (i as isize + d).rem_euclid(n as isize) as usize;
-                if items[i].cmd.is_some() {
-                    break;
-                }
+        match menu.key(ev.keystroke.key.as_str()) {
+            MenuKey::Close => self.menu = None,
+            MenuKey::Run(cmd) => {
+                self.menu = None;
+                self.run(cmd, window, cx);
             }
-            i
-        };
-        match ev.keystroke.key.as_str() {
-            "escape" => self.menu = None,
-            "down" => menu.selected = step(menu.selected, 1, &menu.items),
-            "up" => menu.selected = step(menu.selected, -1, &menu.items),
-            "enter" => {
-                if let Some(cmd) = menu.items[menu.selected].cmd {
-                    self.run(cmd, window, cx);
-                }
-            }
-            _ => {}
+            MenuKey::Moved | MenuKey::Ignored => {}
         }
         cx.notify();
     }
@@ -1176,6 +1566,38 @@ impl WindowView {
                 }
                 _ => {}
             },
+            Some(Prompt::Palette {
+                query,
+                items,
+                shown,
+                selected,
+            }) => {
+                let n = shown.len().max(1);
+                match key {
+                    "down" => *selected = (*selected + 1) % n,
+                    "up" => *selected = (*selected + n - 1) % n,
+                    "enter" => {
+                        if let Some(cmd) = shown.get(*selected).copied() {
+                            self.prompt = None;
+                            self.run(cmd, window, cx);
+                        }
+                    }
+                    "backspace" => {
+                        query.pop();
+                        *shown = commands::filter(query, items);
+                        *selected = 0;
+                    }
+                    _ => {
+                        if let Some(c) = k.key_char.as_deref().filter(|_| {
+                            !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform
+                        }) {
+                            query.push_str(c);
+                            *shown = commands::filter(query, items);
+                            *selected = 0;
+                        }
+                    }
+                }
+            }
             None => {}
         }
         cx.notify();
@@ -1196,7 +1618,45 @@ impl WindowView {
         }
     }
 
-    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// Which pane and tab are under the pointer (window coordinates); redraw on change.
+    fn update_hover(&mut self, pos: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let (x, y) = (f32::from(pos.x), f32::from(pos.y));
+        let tab = (y < TAB_BAR_H && x >= TAB_X0)
+            .then(|| ((x - TAB_X0) / TAB_W) as usize)
+            .filter(|i| *i < self.tabs.len());
+        let pane = self.tabs.get(self.active).and_then(|t| {
+            let order = t.order();
+            t.layout
+                .place_where(Self::content_area(window), &|id| t.is_shown(id))
+                .into_iter()
+                .find(|p| p.rect.contains(x, y - TAB_BAR_H))
+                .map(|p| order[p.index])
+        });
+        if (tab, pane) != (self.hover_tab, self.hover_pane) {
+            self.hover_tab = tab;
+            self.hover_pane = pane;
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_hover(ev.position, window, cx);
+        if let Some(drag) = self.pane_drag.as_mut() {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.pane_drag = None;
+                cx.notify();
+                return;
+            }
+            drag.now = ev.position;
+            let d = drag.now - drag.start;
+            if !drag.active && (f32::from(d.x).abs() + f32::from(d.y).abs()) > DRAG_START {
+                drag.active = true;
+            }
+            if drag.active {
+                cx.notify();
+            }
+            return;
+        }
         if let Some(d) = &self.split_drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.split_drag = None;
@@ -1232,6 +1692,23 @@ impl WindowView {
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.split_drag = None;
         self.end_tab_drag(ev.position, window, cx);
+        self.end_pane_drag(ev.position, window, cx);
+    }
+
+    /// A pane dragged by its header and released outside the window pops out right there.
+    fn end_pane_drag(&mut self, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.pane_drag.take() else {
+            return;
+        };
+        cx.notify();
+        let vs = window.viewport_size();
+        let (x, y) = (f32::from(pos.x), f32::from(pos.y));
+        let inside = x >= 0.0 && y >= 0.0 && x < f32::from(vs.width) && y < f32::from(vs.height);
+        if !drag.active || inside {
+            return;
+        }
+        let at = (self.screen.x + x - 40.0, self.screen.y + y - 12.0);
+        self.pop_out(drag.id, Some(at), window, cx);
     }
 
     // ---- saved form -------------------------------------------------------------------------
@@ -1262,17 +1739,43 @@ impl WindowView {
             .border_b_1()
             .border_color(t.axis_line)
             .text_size(px(12.0));
+        let hovered = self.hover_tab;
         for (i, tab) in self.tabs.iter().enumerate() {
             let active = i == self.active;
             let title = tab.title(cx);
+            // Close: on the active tab, and on any tab while hovered.
+            let close = (active || hovered == Some(i)).then(|| {
+                div()
+                    .id(("tab-close", i))
+                    .flex_none()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .text_color(t.text_dim)
+                    .hover(|s| s.bg(t.axis_line).text_color(t.text_main))
+                    .child("×")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, window, cx);
+                        }),
+                    )
+            });
             bar = bar.child(
                 div()
                     .id(("tab", i))
                     .w(px(TAB_W))
                     .h_full()
                     .flex()
+                    .flex_row()
                     .items_center()
-                    .px_3()
+                    .gap_1()
+                    .pl_3()
+                    .pr_1()
                     .overflow_hidden()
                     .border_b_2()
                     .border_color(if active {
@@ -1282,7 +1785,8 @@ impl WindowView {
                     })
                     .text_color(if active { t.text_main } else { t.text_dim })
                     .when(active, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .child(title)
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .children(close)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -1295,11 +1799,85 @@ impl WindowView {
                                 active: false,
                             });
                         }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, window, cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.activate_tab(i, window, cx);
+                            this.open_tab_menu(ev.position, cx);
+                        }),
                     ),
             );
         }
+        bar = bar.child(
+            div()
+                .id("new-tab")
+                .h_full()
+                .px_2()
+                .flex()
+                .items_center()
+                .text_color(t.text_dim)
+                .hover(|s| s.text_color(t.text_main))
+                .child("+")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.run(Command::NewTab, window, cx);
+                    }),
+                ),
+        );
+        // What this tab isn't showing, as text that brings it back.
+        let (hidden, detached) = match self.tabs.get(self.active) {
+            Some(tab) => {
+                let kinds = |ids: Vec<PaneId>| -> Vec<&'static str> {
+                    let mut v: Vec<&'static str> = Vec::new();
+                    for id in ids {
+                        if let Some(h) = tab.handle(id) {
+                            let l = match h.kind() {
+                                PaneKind::Chart => "chart",
+                                PaneKind::Dom => "DOM",
+                                PaneKind::Tape => "T&S",
+                            };
+                            if !v.contains(&l) {
+                                v.push(l);
+                            }
+                        }
+                    }
+                    v
+                };
+                (
+                    kinds(tab.in_state(PaneState::is_hidden)),
+                    tab.in_state(|s| s == PaneState::Detached).len(),
+                )
+            }
+            None => (Vec::new(), 0),
+        };
+        let link = |id: &'static str, text: String, cmd: Command| {
+            div()
+                .id(id)
+                .text_color(t.text_dim)
+                .hover(|s| s.text_color(t.text_main))
+                .child(text)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.run(cmd, window, cx);
+                    }),
+                )
+        };
         let right = div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .flex()
             .flex_row()
@@ -1307,13 +1885,16 @@ impl WindowView {
             .justify_end()
             .gap_3()
             .px_3()
+            .whitespace_nowrap()
+            .overflow_hidden()
             .text_color(t.text_dim)
             .when_some(report.filter(|_| is_first.is_some()), |d, r| {
                 d.child(
                     div()
                         .id("report")
+                        .min_w_0()
+                        .truncate()
                         .text_color(t.text_main)
-                        .overflow_hidden()
                         .child(format!("{r}  (click to dismiss)"))
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1325,20 +1906,76 @@ impl WindowView {
                         ),
                 )
             })
+            .when(!hidden.is_empty(), |d| {
+                d.child(link(
+                    "show-hidden",
+                    format!("{} hidden · show", hidden.join(", ")),
+                    Command::ShowHidden,
+                ))
+            })
+            .when(detached > 0, |d| {
+                d.child(link(
+                    "reattach",
+                    format!("{detached} popped out · re-attach"),
+                    Command::Reattach,
+                ))
+            })
             .when(sync, |d| d.child("crosshair sync"))
-            .child(div().text_color(t.text_main).child(name));
+            .child(
+                div()
+                    .id("workspace-name")
+                    .text_color(t.text_main)
+                    .hover(|s| s.text_color(t.accent))
+                    .child(name)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.run(Command::Open, window, cx);
+                        }),
+                    ),
+            );
         bar.child(right)
     }
 
     fn panes(&self, area: Rect, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.theme;
         let tab = self.tab();
+        let shown = |id: &PaneId| tab.is_shown(id);
         let mut out = Vec::new();
         let leaves = tab.layout.leaves();
-        for p in tab.layout.place(area) {
+        let placed = tab.layout.place_where(area, &shown);
+        let hovered = self.hover_pane;
+        for p in &placed {
             let id = *leaves[p.index];
             let Some(h) = tab.handle(id) else { continue };
             let r = p.rect;
+            let kind = h.kind();
+            let controls = (hovered == Some(id)).then(|| {
+                let buttons = match kind {
+                    PaneKind::Chart => {
+                        let on = tabstate::is_chart_only(&tab.leaves(cx), id);
+                        vec![
+                            ("chart only", Command::ChartOnly, on),
+                            ("pop out", Command::PopOut, false),
+                        ]
+                    }
+                    _ => vec![
+                        ("pop out", Command::PopOut, false),
+                        ("hide", Command::HidePane, false),
+                    ],
+                };
+                header_controls(
+                    &t,
+                    buttons,
+                    |this: &mut Self, cmd, id, window, cx| {
+                        this.focus_pane(id, window, cx);
+                        this.run(cmd, window, cx);
+                    },
+                    id,
+                    cx,
+                )
+            });
             out.push(
                 div()
                     .absolute()
@@ -1348,9 +1985,19 @@ impl WindowView {
                     .h(px(r.h))
                     .overflow_hidden()
                     .capture_any_mouse_down(cx.listener(
-                        move |this, _: &MouseDownEvent, window, cx| {
+                        move |this, ev: &MouseDownEvent, window, cx| {
                             this.menu = None;
                             this.focus_pane(id, window, cx);
+                            // The header is a handle: drag it out of the window to pop out.
+                            let y = f32::from(ev.position.y) - TAB_BAR_H - r.y;
+                            if ev.button == MouseButton::Left && (0.0..HEADER_H).contains(&y) {
+                                this.pane_drag = Some(PaneDrag {
+                                    id,
+                                    start: ev.position,
+                                    now: ev.position,
+                                    active: false,
+                                });
+                            }
                         },
                     ))
                     .on_mouse_down(
@@ -1362,11 +2009,17 @@ impl WindowView {
                         }),
                     )
                     .child(h.view().cached(StyleRefinement::default().size_full()))
+                    .children(controls)
                     .into_any_element(),
             );
         }
         // Separators and their grab handles (on top of the panes).
-        for (i, d) in tab.layout.dividers(area).into_iter().enumerate() {
+        for (i, d) in tab
+            .layout
+            .dividers_where(area, &shown)
+            .into_iter()
+            .enumerate()
+        {
             let line = match d.axis {
                 Axis::Row => Rect::new(d.at, d.area.y, 1.0, d.area.h),
                 Axis::Column => Rect::new(d.area.x, d.at, d.area.w, 1.0),
@@ -1405,7 +2058,7 @@ impl WindowView {
         }
         // Focus: always visible on the focused pane (docs/design.md: violet is focus).
         if let Some(i) = tab.layout.index_of(&tab.focused)
-            && let Some(p) = tab.layout.place(area).get(i)
+            && let Some(p) = placed.iter().find(|p| p.index == i)
         {
             let r = p.rect;
             let (color, width) = if self.window_active {
@@ -1430,108 +2083,13 @@ impl WindowView {
 
     fn menu_overlay(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.as_ref()?;
-        let t = self.theme;
-        let vs = window.viewport_size();
-        let h = menu
-            .items
-            .iter()
-            .map(|i| if i.cmd.is_some() { MENU_ROW_H } else { 9.0 })
-            .sum::<f32>()
-            + 8.0;
-        let x = f32::from(menu.at.x)
-            .min(f32::from(vs.width) - MENU_W - 4.0)
-            .max(0.0);
-        let y = f32::from(menu.at.y)
-            .min(f32::from(vs.height) - h - 4.0)
-            .max(0.0);
-        let mut list = div()
-            .id("menu")
-            .occlude()
-            .absolute()
-            .left(px(x))
-            .top(px(y))
-            .w(px(MENU_W))
-            .py_1()
-            .flex()
-            .flex_col()
-            .bg(t.panel)
-            .border_1()
-            .border_color(t.axis_line)
-            .rounded_md()
-            .text_size(px(12.0));
-        for (i, item) in menu.items.iter().enumerate() {
-            let Some(cmd) = item.cmd else {
-                list = list.child(div().my_1().h(px(1.0)).bg(t.axis_line));
-                continue;
-            };
-            let selected = i == menu.selected;
-            list = list.child(
-                div()
-                    .id(("menu-item", i))
-                    .h(px(MENU_ROW_H))
-                    .px_2()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .border_l_2()
-                    .border_color(if selected {
-                        t.accent
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .when(selected, |d| d.bg(t.accent.opacity(0.16)))
-                    .child(
-                        div()
-                            .w(px(12.0))
-                            .text_color(t.text_main)
-                            .child(if item.checked { "✓" } else { "" }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(t.text_main)
-                            .child(item.label.clone()),
-                    )
-                    .child(div().text_color(t.text_dim).child(item.hint))
-                    .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-                        if let Some(m) = this.menu.as_mut()
-                            && m.selected != i
-                        {
-                            m.selected = i;
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.run(cmd, window, cx);
-                        }),
-                    ),
-            );
-        }
-        Some(
-            div()
-                .absolute()
-                .size_full()
-                .child(
-                    // Clicking anywhere else closes the menu.
-                    div()
-                        .id("menu-backdrop")
-                        .absolute()
-                        .size_full()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                this.menu = None;
-                                cx.notify();
-                            }),
-                        ),
-                )
-                .child(list)
-                .into_any_element(),
-        )
+        Some(menu.render(
+            &self.theme,
+            window.viewport_size(),
+            |this: &mut Self| &mut this.menu,
+            |this, cmd, window, cx| this.run(cmd, window, cx),
+            cx,
+        ))
     }
 
     fn prompt_overlay(&self) -> Option<AnyElement> {
@@ -1594,6 +2152,67 @@ impl WindowView {
                     "↑↓ select   Enter open   Esc cancel",
                 )
             }
+            Prompt::Palette {
+                query,
+                shown,
+                selected,
+                ..
+            } => {
+                let mut list = div().flex().flex_col().py_1();
+                // A window of rows around the selection.
+                let first = selected.saturating_sub(13);
+                for (i, cmd) in shown.iter().enumerate().skip(first).take(14) {
+                    let sel = i == *selected;
+                    list = list.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .gap_2()
+                            .border_l_2()
+                            .border_color(if sel {
+                                t.accent
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .when(sel, |d| d.bg(t.accent.opacity(0.16)))
+                            .child(div().text_color(t.text_main).child(commands::label(*cmd)))
+                            .child(div().text_color(t.text_dim).child(commands::hint(*cmd))),
+                    );
+                }
+                if shown.is_empty() {
+                    list = list.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_color(t.text_dim)
+                            .child("no matching command"),
+                    );
+                }
+                let input = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(t.axis_line)
+                    .child(if query.is_empty() {
+                        div().text_color(t.text_dim).child("Type a command")
+                    } else {
+                        div().text_color(t.text_main).child(query.clone())
+                    })
+                    .child(div().w(px(2.0)).h(px(15.0)).bg(t.accent));
+                (
+                    "Commands",
+                    div().flex().flex_col().child(input).child(list),
+                    None,
+                    "↑↓ select   Enter run   Esc close",
+                )
+            }
         };
         Some(
             div()
@@ -1607,7 +2226,7 @@ impl WindowView {
                     div()
                         .id("prompt")
                         .occlude()
-                        .w(px(420.0))
+                        .w(px(460.0))
                         .flex()
                         .flex_col()
                         .bg(t.panel)
@@ -1647,14 +2266,18 @@ impl WindowView {
     }
 
     fn drag_ghost(&self) -> Option<AnyElement> {
-        let d = self.tab_drag.as_ref().filter(|d| d.active)?;
+        let (now, label) = match (&self.tab_drag, &self.pane_drag) {
+            (Some(d), _) if d.active => (d.now, "move tab"),
+            (_, Some(d)) if d.active => (d.now, "drop outside the window to pop out"),
+            _ => return None,
+        };
         let t = self.theme;
         Some(
             div()
                 .absolute()
-                .left(d.now.x - px(TAB_W * 0.5))
-                .top(d.now.y - px(10.0))
-                .w(px(TAB_W))
+                .left(now.x - px(TAB_W * 0.5))
+                .top(now.y - px(10.0))
+                .min_w(px(TAB_W))
                 .h(px(TAB_BAR_H - 6.0))
                 .px_3()
                 .flex()
@@ -1665,7 +2288,7 @@ impl WindowView {
                 .rounded_md()
                 .text_size(px(12.0))
                 .text_color(t.text_main)
-                .child("move tab")
+                .child(label)
                 .into_any_element(),
         )
     }
@@ -1675,6 +2298,11 @@ impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         self.screen = screen_rect(window);
+        if !window.is_window_hovered() {
+            // GPUI on Windows sends no exit event: the pointer left, so nothing is hovered.
+            self.hover_pane = None;
+            self.hover_tab = None;
+        }
         let area = Self::content_area(window);
         let hints = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
             Some(PaneHandle::Dom(_)) => {
@@ -1735,6 +2363,51 @@ impl Render for WindowView {
     }
 }
 
+/// Small text controls over the right end of a pane's header. Callers build them only for
+/// the hovered pane (docs/design.md: no permanent chrome; and no per-frame cost for the
+/// others). Each is `(label, command, on)`; `on` draws it in the accent colour (e.g. "chart
+/// only" while active). `run` issues the command on pane `id`.
+pub(crate) fn header_controls<V: 'static>(
+    t: &Theme,
+    buttons: Vec<(&'static str, Command, bool)>,
+    run: fn(&mut V, Command, PaneId, &mut Window, &mut Context<V>),
+    id: PaneId,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let mut row = div()
+        .absolute()
+        .top_0()
+        .right_0()
+        .h(px(HEADER_H))
+        .px_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .bg(t.panel)
+        .text_size(px(11.0));
+    for (i, (label, cmd, on)) in buttons.into_iter().enumerate() {
+        row = row.child(
+            div()
+                .id(("pane-control", i))
+                .px_1()
+                .rounded_sm()
+                .text_color(if on { t.accent } else { t.text_dim })
+                .hover(|s| s.bg(t.axis_line).text_color(t.text_main))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        run(this, cmd, id, window, cx);
+                        cx.notify();
+                    }),
+                ),
+        );
+    }
+    row.into_any_element()
+}
+
 /// The window's screen rectangle (logical px).
 fn screen_rect(window: &Window) -> Rect {
     let b = window.bounds();
@@ -1747,7 +2420,7 @@ fn screen_rect(window: &Window) -> Rect {
 }
 
 /// Where a window is, for saving.
-fn placement(window: &Window, cx: &App) -> Option<Placement> {
+pub(crate) fn placement(window: &Window, cx: &App) -> Option<Placement> {
     let (state, b) = match window.window_bounds() {
         WindowBounds::Windowed(b) => (WindowState::Windowed, b),
         WindowBounds::Maximized(b) => (WindowState::Maximized, b),
@@ -1768,7 +2441,7 @@ fn placement(window: &Window, cx: &App) -> Option<Placement> {
 }
 
 /// Window options for a saved placement (or the default size on the primary display).
-fn window_options(
+pub(crate) fn window_options(
     placement: Option<&Placement>,
     cx: &App,
 ) -> (Option<WindowBounds>, Option<DisplayId>) {
@@ -1954,6 +2627,87 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
             wv.activate_tab(a, window, cx);
         });
     }
+    cx.defer(prune_pane_windows);
+}
+
+/// Close pane windows whose pane is no longer detached in some tab (its tab closed, its window
+/// closed, the workspace was replaced).
+fn prune_pane_windows(cx: &mut App) {
+    let windows = cx.global::<Workspace>().windows.clone();
+    let panes: Vec<_> = cx.global::<Workspace>().pane_windows.clone();
+    for p in panes {
+        let Ok(id) = p.read(cx).map(|pw| pw.id) else {
+            continue;
+        };
+        let alive = windows.iter().any(|w| {
+            w.read(cx).is_ok_and(|wv| {
+                wv.tabs
+                    .iter()
+                    .any(|t| t.panes.contains_key(&id) && t.state(id) == PaneState::Detached)
+            })
+        });
+        if !alive {
+            pane_window::close(id, cx);
+        }
+    }
+}
+
+/// The main window holding pane `id`.
+fn window_with(id: PaneId, cx: &App) -> Option<WindowHandle<WindowView>> {
+    cx.global::<Workspace>()
+        .windows
+        .iter()
+        .find(|w| w.read(cx).is_ok_and(|wv| wv.has_pane(id)))
+        .copied()
+}
+
+/// A detached pane back to its previous spot (its leaf never left the tab).
+pub(crate) fn reattach_pane(id: PaneId, cx: &mut App) {
+    match window_with(id, cx) {
+        Some(w) => {
+            let _ = w.update(cx, |wv, window, cx| {
+                wv.reattach(id, window, cx);
+                window.activate_window();
+            });
+        }
+        // Its tab is gone: nothing to return to.
+        None => pane_window::close(id, cx),
+    }
+}
+
+/// A detached pane docked beside the chart that last had focus (right of it), wherever that
+/// is; it leaves its old spot. Falls back to re-attaching.
+pub(crate) fn dock_beside_chart(id: PaneId, cx: &mut App) {
+    let chart = cx.global::<Workspace>().last_chart;
+    let (Some(chart), Some(from)) = (chart, window_with(id, cx)) else {
+        cx.global_mut::<Workspace>()
+            .add_report("no chart to dock beside yet: re-attached instead".into());
+        reattach_pane(id, cx);
+        return;
+    };
+    let Some(to) = window_with(chart, cx) else {
+        reattach_pane(id, cx);
+        return;
+    };
+    let slot = from
+        .update(cx, |wv, _, cx| {
+            let s = wv.take_pane(id);
+            wv.sync_visibility(cx);
+            cx.notify();
+            s
+        })
+        .ok()
+        .flatten();
+    let Some(slot) = slot else {
+        // Its tab's only pane: it can only go back there.
+        reattach_pane(id, cx);
+        return;
+    };
+    let _ = to.update(cx, |wv, window, cx| {
+        wv.insert_beside(chart, id, slot, window, cx);
+        window.activate_window();
+    });
+    pane_window::close(id, cx);
 }
 
 /// App-wide hooks for the interactive app: forget closed windows (also those closed by
@@ -1961,9 +2715,17 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
 pub fn install(cx: &mut App) {
     cx.on_window_closed(|cx, id| {
         if cx.has_global::<Workspace>() {
-            cx.global_mut::<Workspace>()
-                .windows
-                .retain(|w| w.window_id() != id);
+            let ws = cx.global_mut::<Workspace>();
+            ws.windows.retain(|w| w.window_id() != id);
+            ws.pane_windows.retain(|w| w.window_id() != id);
+            if ws.windows.is_empty() {
+                // The last main window went: popped-out panes go with it (already saved).
+                for p in ws.pane_windows.clone() {
+                    let _ = p.update(cx, |_, window, _| window.remove_window());
+                }
+            } else {
+                prune_pane_windows(cx);
+            }
         }
         if cx.windows().is_empty() {
             cx.quit();
