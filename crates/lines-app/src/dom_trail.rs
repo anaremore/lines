@@ -3,16 +3,16 @@
 //!
 //! - **Input**: only the prints the store counted as new (its time & sales ring, the same
 //!   trades as `tape`/`vap`), taken by sequence number at paint, so a re-delivered trade
-//!   never counts twice. A pane that wasn't painting (hidden, minimised) catches up from the
+//!   never counts twice. A pane that wasn't painting (hidden, minimized) catches up from the
 //!   ring when shown; prints older than ten half-lives are skipped (they would be invisible).
 //! - **Clock**: the feed's own clock (`ChartStore::feed_clock`: frame or market time, running
 //!   on only while the feed is live), never the wall clock, so replays and screenshots are
 //!   deterministic and a finished replay is a still picture.
 //! - **Frames**: while some visible cell is above the visibility threshold and the feed clock
 //!   moves, the pane asks for a frame when it hasn't painted for [`FRAME_EVERY`] (about
-//!   30 Hz, counting paints for new data too, so the trail only fills gaps); then it stops. Hidden and minimised panes never get here (their poll doesn't run).
-//! - **Paint**: fill only, no text. Net bought rows use the up colour, net sold rows the down
-//!   colour, mixed rows blend toward a neutral grey; a chevron on the newest trade's row points
+//!   30 Hz, counting paints for new data too, so the trail only fills gaps); then it stops. Hidden and minimized panes never get here (their poll doesn't run).
+//! - **Paint**: fill only, no text. Net bought rows use the up color, net sold rows the down
+//!   color, mixed rows blend toward a neutral gray; a chevron on the newest trade's row points
 //!   the way the last price moved (direction by shape too, docs/design.md §4). No allocation.
 //!
 //! Off by default; saved per DOM as the optional `trail` field (enabled, half-life).
@@ -214,7 +214,7 @@ impl DomTrail {
             let row = self.model.row_of(r.price);
             let c = self.model.cell(row);
             if c.alpha > 0.0 {
-                let (dir, share) = cell_colours(c.net, t);
+                let (dir, share) = cell_colors(c.net, t);
                 let b = rect(x, y, w, row_h);
                 // Mixed rows lean toward neutral: the neutral share first, then the side.
                 if share < 1.0 {
@@ -233,14 +233,14 @@ impl DomTrail {
     }
 }
 
-/// The side colour of a row with balance `net` (`-1..=1`) and how much of it to use (0 =
+/// The side color of a row with balance `net` (`-1..=1`) and how much of it to use (0 =
 /// neutral, 1 = all one side).
-fn cell_colours(net: f32, t: &Theme) -> (gpui::Hsla, f32) {
+fn cell_colors(net: f32, t: &Theme) -> (gpui::Hsla, f32) {
     let dir = if net >= 0.0 { t.up } else { t.down };
     (dir, net.abs().min(1.0))
 }
 
-/// A small chevron centred in the cell, pointing the way the last price moved: stacked
+/// A small chevron centered in the cell, pointing the way the last price moved: stacked
 /// one-pixel bars, widest at the base (quads only, no path: no allocation).
 fn paint_chevron(x: f32, y: f32, w: f32, h: f32, m: Move, t: &Theme, window: &mut Window) {
     const BARS: usize = 4;

@@ -12,7 +12,7 @@
 //!   [`DEFAULT_HALF_LIFE_MS`]). Decay is applied lazily: values are stored as of `at` and
 //!   scaled when the clock moves.
 //! - **Storage** is a fixed ring of [`ROWS`] rows around the newest trade's row; a trade
-//!   outside it recentres the window on that row, clearing only the rows that left. No
+//!   outside it recenters the window on that row, clearing only the rows that left. No
 //!   allocation after [`Trail::new`].
 //! - **Intensity** is decayed volume ÷ a *stable* scale: a slow-moving estimate of a high
 //!   percentile of the active rows' volume (it rises in about a second, falls over tens of
@@ -173,7 +173,7 @@ impl Trail {
         self.advance(time);
         let row = self.row_of(price);
         if !self.in_window(row) {
-            self.recentre(row);
+            self.recenter(row);
         }
         // A trade older than the stored values counts as already decayed by its age.
         let age = self.at.map_or(0.0, |a| (a - time.0).max(0) as f64);
@@ -216,8 +216,8 @@ impl Trail {
         }
     }
 
-    /// Centre the window on `row`, clearing the rows that leave it (no allocation).
-    fn recentre(&mut self, row: i64) {
+    /// Center the window on `row`, clearing the rows that leave it (no allocation).
+    fn recenter(&mut self, row: i64) {
         let half = (ROWS / 2) as i64;
         let (lo, hi) = (row - half, row + half);
         match self.center {
