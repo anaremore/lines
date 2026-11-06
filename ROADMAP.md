@@ -34,6 +34,7 @@ Status: `done` · `current` · `next` · `later`
 | 10e | Footprint + cumulative delta | later | Built on 10a; per-price bid/ask volume per bar from aggressor-tagged ticks |
 | 11 | Drawing tools (workspaces moved to 5b) | later | Data-space drawings, persisted layouts |
 | 12a | Rithmic Test market data (private connector) | current | Provider extension point in public app (decision 0020); private `lines-connectors` repo builds the official binary; ticker + history plants against Rithmic Test; protos read locally, never committed |
+| 12b | Sierra Chart DTC execution (private) | next | Observe mode → Sierra Sim → owner-enabled Live per decision 0023 safety rules; restart reconciliation; audit log |
 | 12 | First live connection (likely Rithmic; CQG WebAPI is enterprise-priced) | later | Vendor conformance passed; live routing gated behind a Cargo feature until then |
 | 13 | Second live connection (whichever of CQG/Rithmic wasn't first) | later | |
 | 14 | Trade copier across account groups | later | Rule-aware per account/firm |
