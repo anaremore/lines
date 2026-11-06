@@ -42,6 +42,7 @@ use lines_trading::{
     OrderId, OrderKind, PaperBroker, PaperConfig, PositionView, Reject, RulePreset, Source,
     TradingCore, TradingHandle, TradingService,
 };
+use lines_trading::{GuardState, Guardrails};
 
 use crate::dom_trade::ArmPrefs;
 
@@ -120,6 +121,16 @@ pub struct TradeState {
     notes: HashMap<CommandId, Note>,
     /// Rebuilds seen (from the broker after a (re)connect).
     pub rebuilds: u64,
+    /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
+    guards: HashMap<AccountId, GuardView>,
+}
+
+/// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuardView {
+    pub state: GuardState,
+    pub reason: Option<String>,
+    pub until: Option<lines_core::UtcMillis>,
 }
 
 impl TradeState {
@@ -184,6 +195,22 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
+            Event::Guardrail {
+                account,
+                state,
+                reason,
+                until,
+            } => {
+                self.guards.insert(
+                    account.clone(),
+                    GuardView {
+                        state,
+                        reason,
+                        until,
+                    },
+                );
+                Some(account)
+            }
             Event::Rebuilt { .. } => {
                 self.rebuilds += 1;
                 None
@@ -281,6 +308,14 @@ impl TradeState {
         self.accounts.get(account)
     }
 
+    /// The account's guardrail lockout, if one is in force (`None`: active).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn guard(&self, account: &AccountId) -> Option<&GuardView> {
+        self.guards
+            .get(account)
+            .filter(|g| g.state != GuardState::Active)
+    }
+
     pub fn result(&self, id: CommandId) -> Option<&Result<Vec<OrderId>, Reject>> {
         self.results
             .iter()
@@ -365,6 +400,10 @@ pub struct TradingSetup {
     /// closed. Applied over a saved paper file's setting too. Off for the mock: it is
     /// synthetic and trades around the clock, so the exchange's hours don't apply to it.
     pub check_sessions: bool,
+    /// The trader's guardrails per account, keyed by account name (else id), from
+    /// `settings.json` (roadmap 8b). Asked for at every start: tighter ones apply at once,
+    /// looser ones with the next trade date; a saved lockout stays.
+    pub guardrails: BTreeMap<String, Guardrails>,
 }
 
 impl TradingSetup {
@@ -379,6 +418,7 @@ impl TradingSetup {
             paper: PaperConfig::default(),
             accounts: None,
             check_sessions: true,
+            guardrails: BTreeMap::new(),
         }
     }
 
@@ -422,6 +462,7 @@ impl TradingSetup {
             paper: PaperConfig::default(),
             accounts: None,
             check_sessions: true,
+            guardrails: BTreeMap::new(),
         }
     }
 }
@@ -480,7 +521,10 @@ impl Trading {
                 paper.check_sessions = setup.check_sessions;
                 let mut core = TradingCore::new(Box::new(PaperBroker::from_state(paper, f.broker)));
                 for a in f.accounts {
+                    let id = a.config.id.clone();
                     core.add_account(a.config, Some(a.tracker));
+                    // A lockout survives the restart.
+                    core.restore_guardrails(&id, a.guardrails);
                 }
                 core.set_next_order_id(f.next_order_id);
                 // Sent before the app stopped, no answer: unresolved until the broker says.
@@ -508,6 +552,29 @@ impl Trading {
                 (core, setup.paper)
             }
         };
+        // The trader's guardrails from settings, through the command path (tighter now, looser
+        // with the next trade date; a saved lockout is never cleared).
+        let wanted: Vec<(AccountId, Guardrails)> = core
+            .accounts()
+            .filter_map(|(c, _)| {
+                setup
+                    .guardrails
+                    .get(&c.name)
+                    .or_else(|| setup.guardrails.get(c.id.0.as_str()))
+                    .map(|g| (c.id.clone(), g.clone()))
+            })
+            .collect();
+        for (account, guardrails) in wanted {
+            core.submit(
+                lines_feed::now_utc(),
+                Source::Api,
+                Instant::now(),
+                TradeCommand::SetGuardrails {
+                    account,
+                    guardrails,
+                },
+            );
+        }
         // Orders the broker still holds (brackets survive restarts) come back through rebuild.
         core.rebuild(lines_feed::now_utc());
         let _ = core.drain();
@@ -611,6 +678,7 @@ fn note_for(cmd: &TradeCommand) -> Note {
         TradeCommand::CancelOrder { account, .. } => (account.clone(), None, None),
         TradeCommand::CancelAll { account, contract }
         | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
+        TradeCommand::SetGuardrails { account, .. } => (account.clone(), None, None),
     };
     Note {
         account,
@@ -733,7 +801,9 @@ pub enum Step {
 /// - `buy 2 mkt`, `sell 1 @ 6000.25`, `buy 1 stop 6010.00`, with an optional
 ///   `bracket STOP/TARGET` (ticks) after a limit or stop;
 /// - `ack` (acks arrive; orders sent after the last `ack` stay pending);
-/// - `flatten`, `cancelall` (the contract), `account ID`.
+/// - `flatten`, `cancelall` (the contract), `account ID`;
+/// - `guard trades N | streak LOSSES/MINUTES | loss MONEY | position N | close MINUTES`: one
+///   guardrail for the account (roadmap 8b; the others unchanged).
 pub fn parse_script(
     s: &str,
     product: &lines_core::Product,
@@ -744,6 +814,7 @@ pub fn parse_script(
     use lines_trading::{BracketSpec, OrderSpec, Side};
     let mut account = first_account.clone();
     let mut out = Vec::new();
+    let mut guards: HashMap<AccountId, Guardrails> = HashMap::new();
     for raw in s.split(';') {
         let w: Vec<&str> = raw.split_whitespace().collect();
         let price = |t: &str| -> anyhow::Result<Price> {
@@ -772,6 +843,33 @@ pub fn parse_script(
                 account: account.clone(),
                 contract: Some(contract),
             })),
+            ["guard", key, value] => {
+                let n = |v: &str| -> anyhow::Result<i64> {
+                    v.parse()
+                        .map_err(|_| anyhow!("guard {key}: {v:?} is not a number"))
+                };
+                let g = guards.entry(account.clone()).or_default();
+                match *key {
+                    "trades" => g.max_trades_per_day = Some(n(value)? as u32),
+                    "loss" => g.max_daily_loss = Some(n(value)?),
+                    "position" => g.max_position = Some(n(value)?),
+                    "close" => g.no_entries_before_close_min = Some(n(value)? as u32),
+                    "streak" => {
+                        let (l, m) = value
+                            .split_once('/')
+                            .ok_or_else(|| anyhow!("guard streak LOSSES/MINUTES"))?;
+                        g.losing_streak = Some(lines_trading::LosingStreak {
+                            losses: n(l)? as u32,
+                            cooldown_min: n(m)? as u32,
+                        });
+                    }
+                    _ => bail!("guard {key:?}: trades, streak, loss, position or close"),
+                }
+                out.push(Step::Command(TradeCommand::SetGuardrails {
+                    account: account.clone(),
+                    guardrails: g.clone(),
+                }));
+            }
             [side @ ("buy" | "sell"), qty, rest @ ..] => {
                 let side = if *side == "buy" {
                     Side::Buy
@@ -856,7 +954,7 @@ mod tests {
     use lines_feed::recording::{Direction, FORMAT_VERSION, Header, Writer};
     use lines_feed::{Source as FeedSource, catalog, new_store, run_feed};
     use lines_trading::market::{MarketInput, from_events};
-    use lines_trading::{Money, OrderState, RejectCode, RiskLimits};
+    use lines_trading::{Money, OrderSpec, OrderState, RejectCode, RiskLimits, Side};
 
     use super::*;
     use crate::dom_trade::{self, ArmEvent, Arming, DomColumn, EntryCtx};
@@ -981,6 +1079,7 @@ mod tests {
             paper,
             accounts: Some(accounts),
             check_sessions: true,
+            guardrails: BTreeMap::new(),
         }
     }
 
@@ -1073,6 +1172,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Roadmap 8b: guardrails from settings reach the core at start, a guardrail denial reaches
+    /// the DOM header as a short reason, and a lockout reaches the cache.
+    #[test]
+    fn guardrails_from_settings_deny_and_report() {
+        let mut setup = paper_setup(vec![AccountConfig::paper("paper", 50_000)]);
+        setup.guardrails.insert(
+            "paper".into(),
+            Guardrails {
+                max_position: Some(1),
+                ..Default::default()
+            },
+        );
+        let base = FeedConfig::new(FeedSource::Replay {
+            path: "unused.lfr".into(),
+            speed: 0.0,
+            stop_at: None,
+        });
+        let t = Trading::start(setup, FeedRegistry::new(), base);
+        let account = AccountId::new("paper");
+        let id = t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::PlaceOrder(OrderSpec {
+                account: account.clone(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(2),
+                kind: OrderKind::Limit { price: px(5990.00) },
+            }),
+        );
+        t.settle();
+        let s = t.cache.read();
+        let Some(Err(r)) = s.result(id) else {
+            panic!("not denied: {:?}", s.result(id))
+        };
+        assert_eq!(r.code, RejectCode::Guardrail);
+        let flash = s
+            .flashes(&account, Some(es()), Instant::now())
+            .next()
+            .unwrap();
+        assert_eq!(flash.kind.label(), "DENIED");
+        assert_eq!(flash.message, "Max position: would be 2, your limit is 1");
+        assert_eq!(s.guard(&account), None, "a denial, not a lockout");
+        drop(s);
+        // A lockout as the pump receives it: shown until it ends.
+        let mut st = TradeState::default();
+        let until = UtcMillis(1_800_000_000_000);
+        st.apply(
+            Event::Guardrail {
+                account: account.clone(),
+                state: GuardState::Cooldown,
+                reason: Some("3 losses in a row".into()),
+                until: Some(until),
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            st.guard(&account),
+            Some(&GuardView {
+                state: GuardState::Cooldown,
+                reason: Some("3 losses in a row".into()),
+                until: Some(until),
+            })
+        );
+        st.apply(
+            Event::Guardrail {
+                account: account.clone(),
+                state: GuardState::Active,
+                reason: None,
+                until: None,
+            },
+            Instant::now(),
+        );
+        assert_eq!(st.guard(&account), None);
     }
 
     fn entry(account: &str, position: i64, best: (f64, f64)) -> EntryCtx {

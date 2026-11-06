@@ -5,6 +5,7 @@ use lines_core::{ContractKey, Price, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::command::{Reject, Source};
+use crate::guardrails::GuardState;
 use crate::order::Order;
 use crate::rules::{Breach, RuleStatus, TradingState};
 use crate::types::{
@@ -31,6 +32,15 @@ pub enum Event {
     Breach {
         account: AccountId,
         breach: Breach,
+    },
+    /// The account's guardrail state changed (roadmap 8b): a cooldown or lockout began
+    /// (`reason`, `until`: its end), or ended (`Active`, both `None`).
+    Guardrail {
+        account: AccountId,
+        state: GuardState,
+        reason: Option<String>,
+        #[serde(default, with = "crate::types::opt_time_serde")]
+        until: Option<UtcMillis>,
     },
     /// The cache was rebuilt from the broker (after a (re)connect or restart).
     Rebuilt {

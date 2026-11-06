@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::core::AccountConfig;
+use crate::guardrails::GuardrailTracker;
 use crate::paper::{PaperConfig, PaperState};
 use crate::rules::RuleTracker;
 
@@ -26,6 +27,10 @@ pub struct SavedAccount {
     pub config: AccountConfig,
     /// Rule progress (high-water mark, day, breaches).
     pub tracker: RuleTracker,
+    /// Guardrails in force, pending (looser) ones, the day's counts and any lockout
+    /// (roadmap 8b). Optional: older files have none.
+    #[serde(default, skip_serializing_if = "GuardrailTracker::is_default")]
+    pub guardrails: GuardrailTracker,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
