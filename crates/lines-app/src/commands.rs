@@ -53,6 +53,15 @@ pub enum Command {
     Palette,
     SaveAs,
     Open,
+    /// The focused chart: hide (or show) its study legends and tags; studies stay drawn.
+    ToggleStudyLabels,
+    /// The focused chart: hide (or show) all its studies, keeping their configuration.
+    ToggleStudies,
+    /// The focused chart without legends or study tags, and the key-hint bar hidden; again
+    /// restores both.
+    CleanChart,
+    /// Show or hide the key-hint bar (a workspace preference; shown by default).
+    ToggleHints,
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -102,6 +111,10 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Palette, true, true, false, "p"),
     b(Command::SaveAs, true, true, false, "s"),
     b(Command::Open, true, false, false, "o"),
+    b(Command::ToggleStudyLabels, true, true, false, "l"),
+    b(Command::ToggleStudies, true, true, false, "i"),
+    b(Command::CleanChart, true, true, false, "m"),
+    b(Command::ToggleHints, false, false, false, "f1"),
 ];
 
 /// The command bound to a keystroke, if any.
@@ -219,6 +232,10 @@ pub fn label(c: Command) -> String {
         Command::Palette => "Command palette".into(),
         Command::SaveAs => "Save workspace as…".into(),
         Command::Open => "Open workspace…".into(),
+        Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
+        Command::ToggleStudies => "Chart: hide/show studies".into(),
+        Command::CleanChart => "Clean chart (no study labels, no key hints)".into(),
+        Command::ToggleHints => "Hide/show key hints bar".into(),
     }
 }
 
@@ -248,6 +265,10 @@ pub fn palette() -> Vec<Command> {
     v.extend(Preset::ALL.map(Command::Preset));
     v.extend([
         Command::ToggleCrosshairSync,
+        Command::ToggleStudyLabels,
+        Command::ToggleStudies,
+        Command::CleanChart,
+        Command::ToggleHints,
         Command::SaveAs,
         Command::Open,
         Command::Menu,
@@ -272,9 +293,9 @@ pub fn filter(query: &str, commands: &[Command]) -> Vec<Command> {
 /// The workspace's key hints for the status line.
 pub fn workspace_hints() -> &'static str {
     if cfg!(target_os = "macos") {
-        "⇧⌘P: all commands  ·  ⌘T: new tab  ·  right-click: pane menu"
+        "⇧⌘P: all commands  ·  ⌘T: new tab  ·  right-click: pane menu  ·  F1: hide hints"
     } else {
-        "Ctrl+Shift+P: all commands  ·  Ctrl+T: new tab  ·  right-click: pane menu"
+        "Ctrl+Shift+P: all commands  ·  Ctrl+T: new tab  ·  right-click: pane menu  ·  F1: hide hints"
     }
 }
 
@@ -324,6 +345,18 @@ mod tests {
         assert_eq!(c("shift-o"), Some(Command::PopOut));
         assert_eq!(c("shift-b"), Some(Command::DockBesideChart));
         assert_eq!(c("shift-p"), Some(Command::Palette));
+        assert_eq!(c("shift-l"), Some(Command::ToggleStudyLabels));
+        assert_eq!(c("shift-i"), Some(Command::ToggleStudies));
+        assert_eq!(c("shift-m"), Some(Command::CleanChart));
+        assert_eq!(cmd("f1"), Some(Command::ToggleHints));
+        // Neighbours that must stay as they are: Ctrl+L links, Ctrl+I (indicators menu),
+        // Ctrl+K (picker) and Alt+V (profile) belong to the chart, plain C to the DOM.
+        assert_eq!(c("l"), Some(Command::CycleLink));
+        for k in ["alt-v", "c", "i", "shift-f1"] {
+            assert_eq!(cmd(k), None, "{k}");
+        }
+        assert_eq!(c("i"), None);
+        assert_eq!(c("k"), None);
     }
 
     #[test]
@@ -343,9 +376,12 @@ mod tests {
     #[test]
     fn pane_keys_stay_with_the_panes() {
         // Letters open the picker, C/G drive the DOM, Home resets the chart, Ctrl+K opens the
-        // picker, Ctrl+D and Alt+M work inside it: none of them is a workspace command.
+        // picker, Ctrl+D and Alt+M work inside it, Alt+V/R/B/G drive the chart's volume
+        // profile: none of them is a workspace command.
         for k in [
             "a", "c", "g", "shift-g", "home", "left", "escape", "enter", "alt-m", "0",
+            // Chart volume profile: Alt+V/R/B/G.
+            "alt-v", "alt-r", "alt-b", "alt-g",
         ] {
             assert_eq!(cmd(k), None, "{k}");
         }

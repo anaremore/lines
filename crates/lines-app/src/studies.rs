@@ -203,7 +203,8 @@ impl Studies {
         }
     }
 
-    /// The legend under the readout: one row per study (render time, not paint).
+    /// The legend under the readout: one row per study (render time, not paint), on a
+    /// `label_bg` box so lines and profile rows never run through the text.
     pub fn legend(&self, theme: &Theme, product: &Product) -> Option<AnyElement> {
         if self.list.is_empty() {
             return None;
@@ -216,6 +217,9 @@ impl Studies {
             .flex()
             .flex_col()
             .gap_1()
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(theme.label_bg)
             .text_size(px(12.0));
         for s in &self.list {
             let IndicatorConfig::Vwap { spec, color } = &s.config;
@@ -251,6 +255,12 @@ impl Studies {
             col = col.child(row);
         }
         Some(col.into_any_element())
+    }
+
+    /// Column buffers reserved so far (tests: hidden studies do no work).
+    #[cfg(test)]
+    pub fn reserved_columns(&self) -> usize {
+        self.list.iter().map(|s| s.columns.capacity()).sum()
     }
 
     pub fn menu_open(&self) -> bool {
