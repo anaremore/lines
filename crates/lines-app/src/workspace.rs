@@ -1174,6 +1174,15 @@ impl WindowView {
                     dom.update(cx, |v, cx| v.toggle_trail(cx));
                 }
             }
+            Command::CyclePnl | Command::SetPnl(_) => {
+                let s = cx.global_mut::<crate::picker_view::AppSettings>();
+                let m = match cmd {
+                    Command::SetPnl(m) => m,
+                    _ => s.settings.pnl_display.next(),
+                };
+                s.set_pnl_display(m);
+                cx.notify();
+            }
             Command::Trade(tc) => {
                 // The focused pane's account and contract (decision 0016).
                 let issued = std::time::Instant::now();
@@ -1789,6 +1798,21 @@ impl WindowView {
                     &format!("Trail half-life: {:.1} s (next)", f64::from(hl) / 1000.0),
                     Command::DomTrailHalfLife,
                     false,
+                ));
+            }
+        }
+        if kind == PaneKind::Dom {
+            // P&L display (app-wide): each mode, the current one checked.
+            let current = cx
+                .try_global::<crate::picker_view::AppSettings>()
+                .map(|s| s.settings.pnl_display)
+                .unwrap_or_default();
+            items.push(MenuItem::sep());
+            for m in crate::pnl::PnlDisplay::ALL {
+                items.push(MenuItem::named(
+                    &format!("P&L: {}", m.label()),
+                    Command::SetPnl(m),
+                    m == current,
                 ));
             }
         }

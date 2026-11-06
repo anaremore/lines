@@ -22,6 +22,7 @@ mod pane_window;
 mod persist;
 mod picker;
 mod picker_view;
+mod pnl;
 mod profile;
 mod redact;
 #[cfg(feature = "screenshot")]
@@ -151,6 +152,27 @@ impl SourceChoice {
         SourceKind::from_str(name, true)
             .ok()
             .map(SourceChoice::Builtin)
+    }
+}
+
+/// `--pnl`: the P&L display (`crate::pnl::PnlDisplay`).
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum PnlArg {
+    Off,
+    Ticks,
+    Currency,
+    Both,
+}
+
+impl PnlArg {
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    fn mode(self) -> pnl::PnlDisplay {
+        match self {
+            PnlArg::Off => pnl::PnlDisplay::Off,
+            PnlArg::Ticks => pnl::PnlDisplay::Ticks,
+            PnlArg::Currency => pnl::PnlDisplay::Currency,
+            PnlArg::Both => pnl::PnlDisplay::Both,
+        }
     }
 }
 
@@ -339,6 +361,9 @@ struct Cli {
     /// Screenshot: DOMs start armed for one-click trading (the app always starts disarmed).
     #[arg(long, requires = "screenshot")]
     arm: bool,
+    /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
+    #[arg(long, requires = "screenshot", value_enum)]
+    pnl: Option<PnlArg>,
     /// Screenshot: the chart without study legends and tags (Ctrl+Shift+L in the app).
     #[arg(long, requires = "screenshot")]
     hide_study_labels: bool,
@@ -804,6 +829,7 @@ where
                 doc,
                 paper: cli.paper.clone(),
                 arm: cli.arm,
+                pnl: cli.pnl.map(PnlArg::mode),
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);

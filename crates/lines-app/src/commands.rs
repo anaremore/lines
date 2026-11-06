@@ -95,6 +95,10 @@ pub enum Command {
     Studies,
     /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
     Trade(TradeCmd),
+    /// The app-wide P&L display: the next mode (off, ticks, currency, both).
+    CyclePnl,
+    /// The app-wide P&L display: this mode.
+    SetPnl(crate::pnl::PnlDisplay),
 }
 
 /// Trading actions of the focused pane (`crate::trade_bar::run`). Flatten and Cancel All act
@@ -197,6 +201,7 @@ pub const BINDINGS: &[Binding] = &[
         false,
         "u",
     ),
+    b(Command::CyclePnl, true, false, true, "p"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
     b(
@@ -351,6 +356,8 @@ pub fn label(c: Command) -> String {
         Command::DomTrail => "DOM: price trail on/off".into(),
         Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
+        Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
+        Command::SetPnl(m) => format!("P&L display: {}", m.label()),
         Command::Trade(t) => match t {
             TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
             TradeCmd::CancelAll => "Trade: Cancel all orders",
@@ -419,6 +426,8 @@ pub fn palette() -> Vec<Command> {
     );
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
     v.extend(TradeCmd::ALL.map(Command::Trade));
+    v.push(Command::CyclePnl);
+    v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
     v
 }
@@ -532,6 +541,19 @@ mod tests {
             "down" => TradeCmd::QtyDown,
             _ => TradeCmd::NextBracket,
         }
+    }
+
+    #[test]
+    fn pnl_display_has_a_ctrl_alt_key_and_palette_entries() {
+        assert_eq!(cmd(&format!("{}-alt-p", ctrl())), Some(Command::CyclePnl));
+        let p = palette();
+        assert!(p.contains(&Command::CyclePnl));
+        for m in crate::pnl::PnlDisplay::ALL {
+            assert!(p.contains(&Command::SetPnl(m)), "{m:?}");
+        }
+        assert!(
+            filter("p&l display off", &p).contains(&Command::SetPnl(crate::pnl::PnlDisplay::Off))
+        );
     }
 
     #[test]
