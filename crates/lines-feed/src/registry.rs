@@ -54,6 +54,10 @@ fn source_key(source: &Source) -> String {
         #[cfg(feature = "vendor-cqg")]
         Source::Cqg { url, .. } => format!("cqg {url}"),
         Source::Coinbase { url } => format!("coinbase {url}"),
+        Source::Kraken {
+            spot_url,
+            futures_url,
+        } => format!("kraken {spot_url} {futures_url}"),
         Source::Replay {
             path,
             speed,

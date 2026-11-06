@@ -37,6 +37,9 @@ enum SourceKind {
     Cqg,
     /// Coinbase Exchange public feed (free, 24/7; dev tool).
     Coinbase,
+    /// Kraken public feeds: spot (BTC/USD.KR, ETH/USD.KR) and perpetuals (BTC-PERP.KR,
+    /// ETH-PERP.KR). Free, 24/7, book verified against Kraken's checksum.
+    Kraken,
     /// A `.lfr` recording (provider, product and contract come from the file).
     Replay,
 }
@@ -81,7 +84,7 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = SourceKind::Mock)]
     source: SourceKind,
     /// A product followed to its front month (ES, NQ, MES, MNQ, ZN, BTC/USD, ETH/USD) or one
-    /// contract (ESZ26, MNQH2027). Default: ES, or BTC/USD for coinbase.
+    /// contract (ESZ26, MNQH2027). Default: ES, or BTC/USD for coinbase, BTC/USD.KR for kraken.
     #[arg(long)]
     instrument: Option<String>,
     /// Record every raw feed frame to this .lfr file.
@@ -241,6 +244,10 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
                 stop_at: cli.at,
             }
         }
+        SourceKind::Kraken => Source::Kraken {
+            spot_url: lines_feed::kraken::SPOT_WS_URL.into(),
+            futures_url: lines_feed::kraken::FUTURES_WS_URL.into(),
+        },
         SourceKind::Coinbase => Source::Coinbase {
             url: lines_feed::coinbase::WS_URL.into(),
         },
@@ -284,6 +291,7 @@ fn store_config(cli: &Cli) -> Option<lines_feed::disk::StoreConfig> {
     let source = match cli.source {
         _ if cli.no_store || cli.screenshot.is_some() => return None,
         SourceKind::Coinbase => "coinbase",
+        SourceKind::Kraken => "kraken",
         #[cfg(feature = "vendor-cqg")]
         SourceKind::Cqg => "cqg",
         SourceKind::Mock | SourceKind::Replay => return None,
@@ -483,7 +491,7 @@ fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
         next_print += Duration::from_secs(1);
         let d = feed.store.read();
         println!(
-            "[{:>4.1}s] {} {:<16} bars={:<6} updates={:<9} trades={:<8} frames={:<7} gaps={} rejected={} reconnects={}",
+            "[{:>4.1}s] {} {:<16} bars={:<6} updates={:<9} trades={:<8} frames={:<7} gaps={} rejected={} reconnects={} book_checksums_ok={} mismatches={} resyncs={}",
             start.elapsed().as_secs_f64(),
             d.contract_label().map_or_else(
                 || format!("{} (contract unknown)", d.product.symbol),
@@ -496,7 +504,10 @@ fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
             d.stats.frames_in,
             d.stats.gaps,
             d.stats.rejected,
-            d.stats.reconnects
+            d.stats.reconnects,
+            d.stats.book_checksums_ok,
+            d.stats.book_checksum_mismatches,
+            d.stats.book_resyncs
         );
         if matches!(
             d.status,
@@ -528,7 +539,7 @@ mod tests {
 
     #[test]
     fn public_sources_always_parse() {
-        for s in ["mock", "coinbase", "replay"] {
+        for s in ["mock", "coinbase", "kraken", "replay"] {
             assert!(Cli::try_parse_from(["lines", "--source", s]).is_ok(), "{s}");
         }
     }
