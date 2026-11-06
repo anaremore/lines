@@ -566,9 +566,9 @@ mod tests {
         for t in Theme::all() {
             assert!(contrast(t.text_main, t.bg) >= 4.5, "{}", t.name);
             assert!(contrast(t.on_last, t.last) >= 4.5, "{}", t.name);
-            for (what, colour) in [("up", t.up), ("down", t.down), ("neutral", t.text_dim)] {
+            for (what, color) in [("up", t.up), ("down", t.down), ("neutral", t.text_dim)] {
                 for alpha in [MAX_ALPHA * 0.25, MAX_ALPHA * 0.5, MAX_ALPHA] {
-                    let cell = over(colour.opacity(alpha), t.bg);
+                    let cell = over(color.opacity(alpha), t.bg);
                     let r = contrast(t.text_main, cell);
                     assert!(
                         r >= 3.0,

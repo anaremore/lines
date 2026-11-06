@@ -377,7 +377,7 @@ fn level_placement_does_not_allocate() {
     assert!(!out.is_empty());
 }
 
-/// The DOM price trail (`lines_core::trail`): taking trades (including recentring the ring
+/// The DOM price trail (`lines_core::trail`): taking trades (including recentering the ring
 /// and far jumps), decaying, re-targeting the scale, reading cells for every visible row and
 /// the animation check all run without allocating once the trail exists.
 #[test]

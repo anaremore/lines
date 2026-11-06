@@ -119,11 +119,11 @@ fn one_big_print_doesnt_blank_the_rest() {
 }
 
 #[test]
-fn recentres_without_losing_rows_still_in_the_window() {
+fn recenters_without_losing_rows_still_in_the_window() {
     let mut t = trail();
     t.trade(ms(0), p(0), Qty(5), Some(Aggressor::Buy));
     t.trade(ms(0), p(200), Qty(5), Some(Aggressor::Buy));
-    // 400 rows up: outside the window around row 0 (±256), so it recentres there. Row 200
+    // 400 rows up: outside the window around row 0 (±256), so it recenters there. Row 200
     // is still inside the new window; row 0 is 400 away (outside).
     t.trade(ms(0), p(400), Qty(5), Some(Aggressor::Buy));
     assert!(t.cell(t.row_of(p(200))).alpha > 0.0);
