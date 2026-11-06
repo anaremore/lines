@@ -479,7 +479,11 @@ fn main() -> Result<()> {
     let mut base = config.clone();
     let instrument = base.target.take().map(|t| TargetDoc::from_target(&t));
     let record = base.record.take();
+    // A replay shows its one contract in panes it can't otherwise serve, for this run only;
+    // not when --instrument says what every pane shows.
+    let fallback = feeds::Fallback::for_source(&base, instrument.is_none());
     let env = PaneEnv {
+        fallback,
         availability: lines_feed::availability::availability(&base.source)?,
         base,
         theme,

@@ -16,7 +16,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, Div, EventEmitter, FocusHandle, FontWeight, ParentElement, Styled, div, px};
+use gpui::{
+    Context, Div, EventEmitter, FocusHandle, FontWeight, InteractiveElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, ParentElement, Styled, div, px,
+};
 use lines_core::CivilDate;
 use lines_feed::store::ChartStore;
 
@@ -38,6 +41,9 @@ pub struct PaneCommon {
     pub link: LinkGroup,
     /// Frames painted (the benchmark checks hidden panes paint nothing).
     pub paints: u64,
+    /// Offer the one-click switch when unavailable (off when the tab offers it once for
+    /// every pane).
+    pub offer_switch: bool,
 }
 
 impl Default for PaneCommon {
@@ -46,6 +52,7 @@ impl Default for PaneCommon {
             visible: true,
             link: None,
             paints: 0,
+            offer_switch: true,
         }
     }
 }
@@ -69,6 +76,17 @@ pub trait Pane: EventEmitter<FeedChanged> + Sized + 'static {
     fn focus_handle(&self) -> &FocusHandle;
     /// Write this pane's view state into its saved form.
     fn save_state(&self, doc: &mut PaneDoc);
+    /// The one-click action on an unavailable pane: show the source's own symbol here (a
+    /// deliberate switch, saved and followed by the link group like the picker's).
+    fn show_suggested(&mut self, cx: &mut Context<Self>) {
+        match self.feed().to_suggested(&crate::feeds::Feeds::registry(cx)) {
+            Ok(feed) => {
+                self.set_feed(feed.clone(), cx);
+                cx.emit(FeedChanged(feed));
+            }
+            Err(e) => tracing::warn!("{e:#}"),
+        }
+    }
 }
 
 /// Start the pane's revision poll: notify when its store changed, nothing otherwise, and
@@ -144,9 +162,36 @@ pub fn link_chip(link: LinkGroup, theme: &Theme) -> Option<Div> {
     )
 }
 
-/// The body of a pane whose target the source can't serve: the symbol and the reason, greyed.
-pub fn unavailable_body(feed: &PaneFeed, theme: &Theme) -> Option<Div> {
+/// The body of a pane whose target the source can't serve: the symbol and the reason, greyed,
+/// and (when `offer`) a one-click switch to the source's own symbol, also on Enter.
+pub fn unavailable_body<V: Pane>(
+    feed: &PaneFeed,
+    theme: &Theme,
+    offer: bool,
+    cx: &mut Context<V>,
+) -> Option<Div> {
     let u = feed.unavailable.as_ref()?;
+    let button = feed.suggest.as_ref().filter(|_| offer).map(|s| {
+        div()
+            .id("show-source")
+            .mt_2()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.accent)
+            .text_size(px(12.0))
+            .text_color(theme.text_main)
+            .hover(|d| d.bg(theme.accent.opacity(0.16)))
+            .child(format!("Show {} here  (Enter)", s.label))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v: &mut V, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    v.show_suggested(cx);
+                }),
+            )
+    });
     Some(
         div()
             .flex_1()
@@ -169,12 +214,34 @@ pub fn unavailable_body(feed: &PaneFeed, theme: &Theme) -> Option<Div> {
                     .text_size(px(12.0))
                     .child(format!("unavailable: {}", u.reason)),
             )
+            .children(button)
             .child(
                 div()
                     .text_size(px(11.0))
                     .child("Ctrl+K: choose another symbol"),
             ),
     )
+}
+
+/// Enter on an unavailable pane: the one-click switch. `true` if it handled the key.
+pub fn unavailable_key<V: Pane>(v: &mut V, ev: &KeyDownEvent, cx: &mut Context<V>) -> bool {
+    let k = &ev.keystroke;
+    let m = k.modifiers;
+    let offered =
+        v.feed().unavailable.is_some() && v.feed().suggest.is_some() && v.common().offer_switch;
+    if offered && k.key == "enter" && !(m.control || m.alt || m.platform || m.shift) {
+        v.show_suggested(cx);
+        cx.stop_propagation();
+        return true;
+    }
+    false
+}
+
+/// The header note of a pane showing the replay's contract for this run.
+pub fn adopted_note(feed: &PaneFeed) -> Option<String> {
+    feed.adopted
+        .as_ref()
+        .map(|a| format!("replay: {} (workspace: {})", a.shown, a.workspace))
 }
 
 /// The header's left text for an unavailable pane.

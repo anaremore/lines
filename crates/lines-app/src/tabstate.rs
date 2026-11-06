@@ -227,6 +227,29 @@ pub fn refocus<Id: Copy + Eq + Hash>(
         .copied()
 }
 
+// ---- unavailable panes ----------------------------------------------------------------
+
+/// Where a tab offers the one-click switch to the source's symbol.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Offer {
+    /// Every pane is served: nothing to offer.
+    None,
+    /// On each unavailable pane.
+    PerPane,
+    /// Once for the whole tab (every one of its two or more panes is unavailable): no
+    /// identical button repeated in each pane.
+    Tab,
+}
+
+/// `unavailable[i]`: whether pane `i` of a tab can't be served.
+pub fn switch_offer(unavailable: &[bool]) -> Offer {
+    match unavailable.iter().filter(|u| **u).count() {
+        0 => Offer::None,
+        n if n == unavailable.len() && n > 1 => Offer::Tab,
+        _ => Offer::PerPane,
+    }
+}
+
 // ---- tabs -------------------------------------------------------------------------------
 
 /// A window shows its tab bar only with two tabs or more (one tab needs no bar; Ctrl+T, the
@@ -580,6 +603,18 @@ mod tests {
         // The last tab overall is replaced, never removed: one tab, no bar.
         assert_eq!(close_tab(1, 1, 0, 0), CloseTab::ReplaceWithFresh);
         assert!(!shows_tab_bar(1));
+    }
+
+    #[test]
+    fn the_switch_is_offered_once_when_every_pane_needs_it() {
+        assert_eq!(switch_offer(&[false, false]), Offer::None);
+        // A 2×2 of ES on an NQ-only source: once, for the tab.
+        assert_eq!(switch_offer(&[true; 4]), Offer::Tab);
+        // Mixed: some panes are served, so each unavailable one offers it.
+        assert_eq!(switch_offer(&[true, false, true]), Offer::PerPane);
+        // A single pane: its own button.
+        assert_eq!(switch_offer(&[true]), Offer::PerPane);
+        assert_eq!(switch_offer(&[]), Offer::None);
     }
 
     #[test]

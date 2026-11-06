@@ -97,6 +97,8 @@ pub struct PaneEnv {
     /// Window size for windows without a saved placement (`--size`), else a share of the
     /// primary display.
     pub default_size: Option<(f32, f32)>,
+    /// What the source shows when a pane's own symbol can't be served (adopt / suggest).
+    pub fallback: crate::feeds::Fallback,
 }
 
 struct Autosave {
@@ -238,6 +240,25 @@ impl PaneHandle {
 
     pub(crate) fn set_visible(&self, visible: bool, cx: &mut App) {
         each!(self, e => e.update(cx, |p, _| p.common().visible = visible))
+    }
+
+    /// Whether the pane can't be served (and the source has a symbol to offer instead).
+    fn switchable(&self, cx: &App) -> bool {
+        let f = self.feed(cx);
+        f.unavailable.is_some() && f.suggest.is_some()
+    }
+
+    fn set_offer(&self, offer: bool, cx: &mut App) {
+        each!(self, e => e.update(cx, |p, cx| {
+            if p.common().offer_switch != offer {
+                p.common().offer_switch = offer;
+                cx.notify();
+            }
+        }))
+    }
+
+    fn show_suggested(&self, cx: &mut App) {
+        each!(self, e => e.update(cx, |p, cx| p.show_suggested(cx)))
     }
 
     pub fn paints(&self, cx: &mut App) -> u64 {
@@ -418,7 +439,13 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
     let registry = Feeds::registry(cx);
     let mut base = env.base.clone();
     base.record = env.record.borrow().clone();
-    let feed = PaneFeed::open(&registry, &base, &env.availability, doc.target.as_ref());
+    let feed = PaneFeed::open(
+        &registry,
+        &base,
+        &env.availability,
+        doc.target.as_ref(),
+        &env.fallback,
+    );
     if feed.sub.is_some() {
         // The recording belongs to the first pane that started a feed (one contract per file).
         env.record.borrow_mut().take();
@@ -723,6 +750,38 @@ impl WindowView {
                 }
             }
         }
+        self.sync_offers(cx);
+    }
+
+    /// Where each tab offers the switch to the source's symbol: on each unavailable pane, or
+    /// once for the tab when every pane needs it (`tabstate::switch_offer`).
+    fn sync_offers(&mut self, cx: &mut App) {
+        for tab in &self.tabs {
+            let order = tab.order();
+            let flags: Vec<bool> = order
+                .iter()
+                .map(|id| tab.handle(*id).is_some_and(|h| h.switchable(cx)))
+                .collect();
+            let per_pane = tabstate::switch_offer(&flags) != tabstate::Offer::Tab;
+            for h in tab.handles() {
+                h.set_offer(per_pane, cx);
+            }
+        }
+    }
+
+    /// The active tab offers the switch once, for all its panes.
+    fn tab_offer(&self, cx: &App) -> Option<(String, String)> {
+        let tab = self.tabs.get(self.active)?;
+        let order = tab.order();
+        let flags: Vec<bool> = order
+            .iter()
+            .map(|id| tab.handle(*id).is_some_and(|h| h.switchable(cx)))
+            .collect();
+        if tabstate::switch_offer(&flags) != tabstate::Offer::Tab {
+            return None;
+        }
+        let f = tab.handle(order[0])?.feed(cx);
+        Some((f.unavailable?.reason, f.suggest?.label))
     }
 
     /// Apply state changes to the active tab: visibility, focus, and pane windows for
@@ -764,6 +823,8 @@ impl WindowView {
             return;
         };
         cx.notify(); // the tab title
+        // A pane that switched may no longer need the switch (or the tab banner).
+        self.sync_offers(cx);
         let Some(group) = link else { return };
         let feed = ev.0.clone();
         let windows = cx.global::<Workspace>().windows.clone();
@@ -771,6 +832,7 @@ impl WindowView {
             for w in windows {
                 let _ = w.update(cx, |wv, _, cx| {
                     wv.apply_group_feed(group, from, &feed, cx);
+                    wv.sync_offers(cx);
                     cx.notify();
                 });
             }
@@ -916,6 +978,24 @@ impl WindowView {
                 for id in ids {
                     self.reattach(id, window, cx);
                 }
+            }
+            Command::ShowSourceHere => match self.tab().focused_handle().cloned() {
+                Some(h) if h.switchable(cx) => h.show_suggested(cx),
+                _ => self.refuse("this pane already shows data", cx),
+            },
+            Command::ShowSourceInTab => {
+                let hs: Vec<PaneHandle> = self.tab().handles().cloned().collect();
+                let mut any = false;
+                for h in hs {
+                    if h.switchable(cx) {
+                        h.show_suggested(cx);
+                        any = true;
+                    }
+                }
+                if !any {
+                    self.refuse("every pane here already shows data", cx);
+                }
+                self.sync_offers(cx);
             }
             Command::Columns(c) => {
                 if let Some(h) = self.tab().focused_handle().cloned()
@@ -2213,6 +2293,57 @@ impl WindowView {
                             cx.stop_propagation();
                             this.split_drag = Some(d.clone());
                         }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // Every pane is unavailable for the same reason: one switch for the whole tab.
+        if let Some((reason, label)) = self.tab_offer(cx) {
+            out.push(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(16.0))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("switch-all")
+                            .occlude()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .px_3()
+                            .py_2()
+                            .bg(t.panel)
+                            .border_1()
+                            .border_color(t.axis_line)
+                            .rounded_md()
+                            .text_size(px(12.0))
+                            .text_color(t.text_dim)
+                            .child(format!("Every pane: {reason}"))
+                            .child(
+                                div()
+                                    .id("switch-all-button")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(t.accent)
+                                    .text_color(t.text_main)
+                                    .hover(|d| d.bg(t.accent.opacity(0.16)))
+                                    .child(format!("Switch all panes to {label}"))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                            cx.stop_propagation();
+                                            this.run(Command::ShowSourceInTab, window, cx);
+                                        }),
+                                    ),
+                            )
+                            .child("Ctrl+Shift+P: commands"),
                     )
                     .into_any_element(),
             );

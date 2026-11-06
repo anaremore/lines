@@ -295,6 +295,9 @@ impl DomView {
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.picker.is_open() && pane::unavailable_key(self, ev, cx) {
+            return;
+        }
         let k = &ev.keystroke;
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
@@ -561,6 +564,9 @@ impl DomView {
             let _ = write!(left, "{}  DOM", pane::contract_text(&d));
         }
         let ticks = if self.grouping == 1 { "tick" } else { "ticks" };
+        if let Some(n) = pane::adopted_note(&self.feed) {
+            let _ = write!(right, "{n}  ·  ");
+        }
         let _ = write!(right, "{} {ticks}/row", self.grouping);
         let state = match self.inside {
             Inside::Locked => Some("locked"),
@@ -639,7 +645,8 @@ impl Render for DomView {
         let overlay =
             self.picker
                 .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
-        let body = match pane::unavailable_body(&self.feed, &t) {
+        let offer = self.common.offer_switch;
+        let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),
             None => {
                 let e = entity.clone();

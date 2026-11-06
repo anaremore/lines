@@ -65,6 +65,10 @@ pub enum Command {
     ToggleHints,
     /// A column action on the focused DOM or time & sales (`crate::pane_columns`).
     Columns(ColumnCmd),
+    /// The focused unavailable pane shows the source's own symbol (one click, also Enter).
+    ShowSourceHere,
+    /// Every unavailable pane in the tab shows the source's own symbol.
+    ShowSourceInTab,
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -243,6 +247,8 @@ pub fn label(c: Command) -> String {
         Command::Columns(ColumnCmd::AutoFit(c)) => format!("Fit {} to content", c.label()),
         Command::Columns(ColumnCmd::AutoFitAll) => "Fit columns to content".into(),
         Command::Columns(ColumnCmd::Reset) => "Reset columns".into(),
+        Command::ShowSourceHere => "Show the source's symbol in this pane".into(),
+        Command::ShowSourceInTab => "Switch all unavailable panes to the source's symbol".into(),
         Command::Columns(ColumnCmd::Width(c, w)) => format!("Set {} width to {w} px", c.label()),
     }
 }
@@ -292,6 +298,7 @@ pub fn palette() -> Vec<Command> {
                 Command::Columns(ColumnCmd::Reset),
             ]),
     );
+    v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
     v
 }
 
