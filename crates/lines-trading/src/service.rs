@@ -10,20 +10,28 @@
 //! The thread wakes for commands, market data and the broker's due times (paper ack latency),
 //! and saves the paper trading file (if configured) at most once a second after a change.
 //! Market data comes from running feeds through [`FeedBridge`].
+//!
+//! **Time** ([`Clock`]): live sources run on the wall clock. A replay runs on market time
+//! (the newest trade time seen, advancing with the wall clock between trades, so acks still
+//! arrive while the market is quiet). [`Clock::Manual`] moves only with market data and
+//! [`TradingHandle::advance_to`]: with [`TradingHandle::sync`] a session is deterministic
+//! (tests, screenshots).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use lines_core::ContractKey;
+use lines_core::{ContractKey, Side as BookSide, UtcMillis};
 use lines_feed::FeedConfig;
 use lines_feed::catalog::Target;
+use lines_feed::provider::MarketEvent;
 use lines_feed::registry::{FeedRegistry, Subscription};
+use lines_feed::store::ChartStore;
 
 use crate::command::{Command, Envelope, Source};
 use crate::core::TradingCore;
@@ -33,12 +41,25 @@ use crate::paper::PaperConfig;
 use crate::persist::{SavedAccount, TradingFile, VERSION};
 use crate::types::CommandId;
 
+/// Where the core's `now` comes from.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Clock {
+    /// Live sources.
+    Wall,
+    /// Replays: the newest market time seen, plus the wall time since it arrived.
+    Market,
+    /// Only market data and [`TradingHandle::advance_to`] move time (deterministic).
+    Manual,
+}
+
 enum Msg {
     Command(Envelope),
     Market(ContractKey, Vec<MarketInput>),
     Subscribe(Sender<Event>),
     Rebuild,
     Latency(Sender<(Option<u64>, Option<u64>, usize)>),
+    AdvanceTo(UtcMillis),
+    Sync(Sender<()>),
     Shutdown,
 }
 
@@ -81,9 +102,23 @@ impl TradingHandle {
         }
     }
 
-    /// Rebuild the cache from the broker (as after a reconnect).
+    /// Rebuild the cache from the broker (as after a reconnect). Also emits the full state
+    /// (orders, positions, accounts): a new subscriber's starting point.
     pub fn rebuild(&self) {
         let _ = self.tx.send(Msg::Rebuild);
+    }
+
+    /// [`Clock::Manual`]: move time forward (never back).
+    pub fn advance_to(&self, t: UtcMillis) {
+        let _ = self.tx.send(Msg::AdvanceTo(t));
+    }
+
+    /// Wait until everything sent before this call is handled and its events delivered to
+    /// subscribers. Blocks (tests, screenshots; never the UI's trading path).
+    pub fn sync(&self) {
+        let (tx, rx) = mpsc::channel();
+        let _ = self.tx.send(Msg::Sync(tx));
+        let _ = rx.recv_timeout(Duration::from_secs(10));
     }
 
     /// Click → order-sent latency: (p50 µs, p99 µs, samples). Blocks briefly (tests, stats).
@@ -101,11 +136,19 @@ pub struct TradingService {
 }
 
 impl TradingService {
-    /// Run `core` on its own thread. `file`: where to save paper state (with the paper
-    /// broker's config, needed to write it).
+    /// Run `core` on its own thread on the wall clock. `file`: where to save paper state
+    /// (with the paper broker's config, needed to write it).
     pub fn start(
         core: TradingCore,
         file: Option<(PathBuf, PaperConfig)>,
+    ) -> Result<TradingService> {
+        TradingService::start_with(core, file, Clock::Wall)
+    }
+
+    pub fn start_with(
+        core: TradingCore,
+        file: Option<(PathBuf, PaperConfig)>,
+        clock: Clock,
     ) -> Result<TradingService> {
         let (tx, rx) = mpsc::channel();
         let handle = TradingHandle {
@@ -114,7 +157,7 @@ impl TradingService {
         };
         let thread = thread::Builder::new()
             .name("lines-trading".into())
-            .spawn(move || run(core, rx, file))?;
+            .spawn(move || run(core, rx, file, clock))?;
         Ok(TradingService {
             handle,
             thread: Some(thread),
@@ -153,16 +196,79 @@ pub fn trading_file(core: &TradingCore, paper: &PaperConfig) -> Option<TradingFi
     })
 }
 
-fn run(mut core: TradingCore, rx: Receiver<Msg>, file: Option<(PathBuf, PaperConfig)>) {
+/// The core's notion of now.
+struct Now {
+    clock: Clock,
+    /// Market/Manual: the newest time seen, and (Market) when it arrived.
+    market: Option<(UtcMillis, Instant)>,
+    /// Never goes back.
+    last: UtcMillis,
+}
+
+impl Now {
+    fn now(&mut self) -> UtcMillis {
+        let t = match (self.clock, self.market) {
+            (Clock::Wall, _) => lines_feed::now_utc(),
+            (Clock::Market, Some((t, at))) => {
+                UtcMillis(t.0 + at.elapsed().as_millis().min(i64::MAX as u128) as i64)
+            }
+            (Clock::Manual, Some((t, _))) => t,
+            (_, None) => self.last,
+        };
+        self.last = UtcMillis(self.last.0.max(t.0));
+        self.last
+    }
+
+    /// Market data arrived: its newest trade time moves the market clocks.
+    fn saw(&mut self, inputs: &[MarketInput]) {
+        let newest = inputs
+            .iter()
+            .filter_map(|i| match i {
+                MarketInput::Trade { time, .. } => Some(time.0),
+                _ => None,
+            })
+            .max();
+        if let Some(t) = newest {
+            self.advance(UtcMillis(t));
+        }
+    }
+
+    fn advance(&mut self, t: UtcMillis) {
+        if self.clock != Clock::Wall && self.market.is_none_or(|(m, _)| t.0 > m.0) {
+            self.market = Some((t, Instant::now()));
+        }
+    }
+
+    /// When the core next needs a tick, as a wait from now.
+    fn wait(&mut self, wake: Option<UtcMillis>) -> Duration {
+        let idle = Duration::from_millis(100);
+        if self.clock == Clock::Manual {
+            // Time only moves with messages: nothing to wake for.
+            return idle;
+        }
+        let now = self.now();
+        wake.map(|t| Duration::from_millis((t.0 - now.0).clamp(0, 100) as u64))
+            .unwrap_or(idle)
+    }
+}
+
+fn run(
+    mut core: TradingCore,
+    rx: Receiver<Msg>,
+    file: Option<(PathBuf, PaperConfig)>,
+    clock: Clock,
+) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     let mut dirty = false;
     let mut last_save = Instant::now();
+    let mut clock = Now {
+        clock,
+        market: None,
+        last: UtcMillis(0),
+    };
+    let mut syncs: Vec<Sender<()>> = Vec::new();
     loop {
-        let now = lines_feed::now_utc();
-        let wait = core
-            .next_wake()
-            .map(|t| Duration::from_millis((t.0 - now.0).clamp(0, 100) as u64))
-            .unwrap_or(Duration::from_millis(100));
+        let wait = clock.wait(core.next_wake());
         // Handle the first message, then everything already queued, before the broker tick
         // and the broadcast (a burst of clicks doesn't wait behind per-message overhead).
         let mut msg = rx.recv_timeout(wait);
@@ -170,16 +276,28 @@ fn run(mut core: TradingCore, rx: Receiver<Msg>, file: Option<(PathBuf, PaperCon
         loop {
             match msg {
                 Ok(Msg::Command(env)) => {
-                    core.handle(lines_feed::now_utc(), env);
+                    let now = clock.now();
+                    core.handle(now, env);
                     dirty = true;
                 }
-                Ok(Msg::Market(k, inputs)) => core.market(lines_feed::now_utc(), k, &inputs),
+                Ok(Msg::Market(k, inputs)) => {
+                    clock.saw(&inputs);
+                    let now = clock.now();
+                    // Acks due before this data happen first.
+                    core.tick(now);
+                    core.market(now, k, &inputs);
+                }
                 Ok(Msg::Subscribe(tx)) => subscribers.push(tx),
-                Ok(Msg::Rebuild) => core.rebuild(lines_feed::now_utc()),
+                Ok(Msg::Rebuild) => core.rebuild(clock.now()),
                 Ok(Msg::Latency(tx)) => {
                     let l = core.latency();
                     let _ = tx.send((l.percentile(50.0), l.percentile(99.0), l.count()));
                 }
+                Ok(Msg::AdvanceTo(t)) => {
+                    clock.advance(t);
+                    core.tick(clock.now());
+                }
+                Ok(Msg::Sync(tx)) => syncs.push(tx),
                 Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                     stop = true;
                     break;
@@ -195,11 +313,14 @@ fn run(mut core: TradingCore, rx: Receiver<Msg>, file: Option<(PathBuf, PaperCon
         if stop {
             break;
         }
-        core.tick(lines_feed::now_utc());
+        core.tick(clock.now());
         let events = core.drain();
         if !events.is_empty() {
             dirty = true;
             subscribers.retain(|s| events.iter().all(|e| s.send(e.clone()).is_ok()));
+        }
+        for s in syncs.drain(..) {
+            let _ = s.send(());
         }
         if dirty && last_save.elapsed() >= Duration::from_secs(1) {
             save(&core, &file);
@@ -219,12 +340,20 @@ fn save(core: &TradingCore, file: &Option<(PathBuf, PaperConfig)>) {
     }
 }
 
-/// Market data for the trading core from running feeds: subscribes to a contract through the
-/// shared feed registry (decision 0013: always a contract) and forwards its batches.
+/// Market data for the trading core from running feeds.
+///
+/// - [`FeedBridge::follow`] subscribes to a contract through the shared registry (decision
+///   0013: always a contract).
+/// - [`FeedBridge::follow_store`] listens to a feed that is already running (a pane's), so the
+///   paper broker sees exactly the data the pane shows, without a second connection or a
+///   second replay. Its contract comes from the store and follows `ContractChanged`.
+#[derive(Clone)]
 pub struct FeedBridge {
     registry: FeedRegistry,
     base: FeedConfig,
-    subs: HashMap<ContractKey, Subscription>,
+    subs: Arc<Mutex<HashMap<ContractKey, Subscription>>>,
+    /// Feed ids being forwarded by `follow_store`.
+    listening: Arc<Mutex<HashSet<u64>>>,
 }
 
 impl FeedBridge {
@@ -233,13 +362,15 @@ impl FeedBridge {
         FeedBridge {
             registry,
             base,
-            subs: HashMap::new(),
+            subs: Arc::default(),
+            listening: Arc::default(),
         }
     }
 
     /// Start forwarding a contract's market data to the trading core (once per contract).
-    pub fn follow(&mut self, contract: ContractKey, handle: &TradingHandle) -> Result<()> {
-        if self.subs.contains_key(&contract) {
+    pub fn follow(&self, contract: ContractKey, handle: &TradingHandle) -> Result<()> {
+        let mut subs = self.subs.lock().unwrap_or_else(|e| e.into_inner());
+        if subs.contains_key(&contract) {
             return Ok(());
         }
         let mut cfg = self.base.clone();
@@ -255,7 +386,86 @@ impl FeedBridge {
                     h.market(contract, from_events(&batch));
                 }
             })?;
-        self.subs.insert(contract, sub);
+        subs.insert(contract, sub);
         Ok(())
     }
+
+    /// Forward a running feed's data (once per feed). The core is first given the store's
+    /// current book and last price (book levels are totals, so overlap with the first
+    /// forwarded batches is harmless; no trade is replayed). Ends when the store is gone.
+    pub fn follow_store(&self, store: &Arc<ChartStore>, handle: &TradingHandle) {
+        let feed = store.feed_id();
+        if !self
+            .listening
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(feed)
+        {
+            return;
+        }
+        // Listen first, then snapshot: nothing between the two is lost.
+        let rx = lines_feed::listen::listen(feed);
+        let (contract, seed, market_time) = {
+            let d = store.read();
+            (d.contract, seed_inputs(&d), d.market_time)
+        };
+        // Market clocks start at the feed's time (a finished replay has no trades to come).
+        if let Some(t) = market_time {
+            handle.advance_to(t);
+        }
+        if let Some(k) = contract {
+            handle.market(k, seed);
+        }
+        let weak: Weak<ChartStore> = Arc::downgrade(store);
+        let h = handle.clone();
+        let listening = self.listening.clone();
+        let spawned = thread::Builder::new()
+            .name("lines-trading-md".into())
+            .spawn(move || {
+                let mut contract = contract;
+                loop {
+                    match rx.recv_timeout(Duration::from_secs(1)) {
+                        Ok(batch) => {
+                            for e in batch.iter() {
+                                if let MarketEvent::ContractChanged(k) = e {
+                                    contract = Some(*k);
+                                }
+                            }
+                            if let Some(k) = contract {
+                                h.market(k, from_events(&batch));
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) if weak.strong_count() > 0 => {}
+                        Err(_) => break,
+                    }
+                }
+                listening
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&feed);
+            });
+        if let Err(e) = spawned {
+            tracing::error!("can't forward market data to trading: {e}");
+            self.listening
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&feed);
+        }
+    }
+}
+
+/// A store's current market state as inputs: the book, best bid/ask, the last price.
+fn seed_inputs(d: &lines_feed::ChartData) -> Vec<MarketInput> {
+    let mut v = vec![MarketInput::BookClear];
+    for side in [BookSide::Bid, BookSide::Ask] {
+        v.extend(d.book.levels(side).map(|(price, l)| MarketInput::Book {
+            side,
+            price,
+            qty: l.qty,
+        }));
+    }
+    v.extend(d.bid.map(MarketInput::Bid));
+    v.extend(d.ask.map(MarketInput::Ask));
+    v.extend(d.last_trade.map(MarketInput::Last));
+    v
 }

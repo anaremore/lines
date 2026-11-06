@@ -796,7 +796,7 @@ impl TradingCore {
         for i in inputs {
             let m = self.marks.entry(contract).or_default();
             match *i {
-                MarketInput::Trade { price, .. } => m.last = Some(price),
+                MarketInput::Trade { price, .. } | MarketInput::Last(price) => m.last = Some(price),
                 MarketInput::Bid(p) => m.bid = Some(p),
                 MarketInput::Ask(p) => m.ask = Some(p),
                 _ => {}

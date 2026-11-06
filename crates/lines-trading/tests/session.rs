@@ -203,9 +203,10 @@ fn far_limit(i: i64) -> Command {
     })
 }
 
-/// Decision 0012: click → order-sent latency through the threaded service.
-#[test]
-fn click_to_order_sent_latency_through_the_service() {
+/// Clicks a millisecond apart through the threaded service (far faster than a trader), each
+/// order cancelled by the next click, so the account holds what a trader would. Returns the
+/// core's click → order-sent latency (p50 µs, p99 µs, samples) and how many orders were placed.
+fn click_latency(n: i64) -> ((Option<u64>, Option<u64>, usize), usize) {
     let mut broker = PaperBroker::new(PaperConfig {
         check_sessions: false,
         ..Default::default()
@@ -216,15 +217,12 @@ fn click_to_order_sent_latency_through_the_service() {
     let svc = TradingService::start(core, None).unwrap();
     let h = svc.handle();
     let events = h.subscribe();
-    // Clicks a millisecond apart (far faster than a trader), each order cancelled by the
-    // next click, so the account holds what a trader would.
-    const N: i64 = 2000;
     let mut last = None;
-    let mut placed = Vec::new();
-    for i in 0..N {
+    let mut placed = 0;
+    for i in 0..n {
         if i % 2 == 0 {
             last = Some(h.submit(Source::Test, far_limit(i)));
-            placed.push(last);
+            placed += 1;
         } else {
             last = Some(h.submit(
                 Source::Test,
@@ -237,9 +235,8 @@ fn click_to_order_sent_latency_through_the_service() {
         std::thread::sleep(Duration::from_millis(1));
     }
     // Wait for the last command's result.
-    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        match events.recv_timeout(Duration::from_secs(5)) {
+        match events.recv_timeout(Duration::from_secs(30)) {
             Ok(Event::Command { id, result, .. }) if Some(id) == last => {
                 assert!(result.is_ok());
                 break;
@@ -247,12 +244,30 @@ fn click_to_order_sent_latency_through_the_service() {
             Ok(_) => {}
             Err(e) => panic!("{e}"),
         }
-        assert!(Instant::now() < deadline);
     }
-    let (p50, p99, n) = h.latency();
+    (h.latency(), placed)
+}
+
+/// Decision 0012: every command sent through the threaded service records its click →
+/// order-sent time. Behaviour only: the budget is a perf test (below), never a unit test
+/// (wall-clock budgets fail under parallel load).
+#[test]
+fn click_to_order_sent_is_recorded_through_the_service() {
+    let ((p50, p99, n), placed) = click_latency(100);
+    assert!(n >= placed, "one sample per order sent ({n} < {placed})");
+    let (p50, p99) = (p50.expect("p50"), p99.expect("p99"));
+    assert!(p50 <= p99);
+}
+
+/// The click → order-sent budget (decision 0012; roadmap 7 target: under 1 ms to the core).
+/// A perf test: run alone, in release, on an idle machine:
+/// `cargo test --release -p lines-trading --test session -- --ignored --nocapture`.
+#[test]
+#[ignore = "perf: wall-clock budget; run alone in release"]
+fn click_to_order_sent_latency_budget() {
+    let ((p50, p99, n), _) = click_latency(2000);
     println!("click -> order sent: p50 {p50:?} us, p99 {p99:?} us over {n} orders and cancels");
-    assert!(n >= placed.len());
-    assert!(p99.unwrap() < 50_000, "p99 {p99:?} us");
+    assert!(p99.unwrap() < 1_000, "p99 {p99:?} us");
 }
 
 /// Live market data through the bridge: the CQG mock's ES feed fills a paper market order.
@@ -275,7 +290,7 @@ fn feed_bridge_brings_live_market_data_to_the_paper_broker() {
     let svc = TradingService::start(core, None).unwrap();
     let h = svc.handle();
     let events = h.subscribe();
-    let mut bridge = FeedBridge::new(lines_feed::registry::FeedRegistry::new(), base);
+    let bridge = FeedBridge::new(lines_feed::registry::FeedRegistry::new(), base);
     bridge.follow(front, &h).unwrap();
     std::thread::sleep(Duration::from_millis(800)); // the book arrives
     let id = h.submit(

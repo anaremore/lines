@@ -477,6 +477,7 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
                     // A new chart: the studies saved as the default for new charts.
                     None => v.apply_new_chart_defaults(cx),
                 }
+                v.restore_trade(doc.trade.as_ref(), cx);
                 v
             }))
         }
@@ -488,6 +489,7 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
                 if let Some(s) = &doc.dom {
                     v.restore(s);
                 }
+                v.restore_trade(doc.trade.as_ref(), cx);
                 v
             }))
         }
@@ -1120,6 +1122,19 @@ impl WindowView {
             Command::TogglePerfStats => {
                 let show = !cx.global::<Workspace>().show_perf_stats;
                 set_show_perf_stats(show, cx);
+            }
+            Command::Trade(tc) => {
+                // The focused pane's account and contract (decision 0016).
+                let issued = std::time::Instant::now();
+                match self.tab().focused_handle().cloned() {
+                    Some(PaneHandle::Dom(d)) => {
+                        d.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
+                    }
+                    Some(PaneHandle::Chart(c)) => {
+                        c.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
+                    }
+                    _ => self.refuse("trading commands act on the focused DOM or chart", cx),
+                }
             }
             Command::Menu => {
                 let area = self.content_area(window, cx);

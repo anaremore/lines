@@ -92,8 +92,15 @@ pub fn run(
         .count();
     let rss_start = resident_bytes();
 
+    // Trading headers are part of what a DOM draws: measure them (in memory, no file).
+    let trading = crate::trading::Trading::start(
+        crate::trading::TradingSetup::manual(),
+        registry.clone(),
+        ws.env.base.clone(),
+    );
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(Feeds(registry));
+        cx.set_global(trading);
         cx.set_global(AppSettings::ephemeral());
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);

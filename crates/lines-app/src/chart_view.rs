@@ -240,9 +240,35 @@ pub struct ChartView {
     perf_stats: bool,
     /// The rates changed since the last paint (redraw once a second while shown).
     rates_changed: bool,
+    /// The chart's account (chart trading is roadmap 8; Flatten/Cancel All hotkeys work now).
+    trade: crate::trade_bar::PaneTrade,
+}
+
+impl crate::trade_bar::TradePane for ChartView {
+    fn trade(&mut self) -> &mut crate::trade_bar::PaneTrade {
+        &mut self.trade
+    }
+    fn trade_ref(&self) -> &crate::trade_bar::PaneTrade {
+        &self.trade
+    }
+    fn trade_store(&self) -> &Arc<ChartStore> {
+        &self.store
+    }
+    fn trade_unavailable(&self) -> bool {
+        self.feed.unavailable.is_some()
+    }
 }
 
 impl ChartView {
+    /// Restore the pane's trading choices (its account).
+    pub fn restore_trade(
+        &mut self,
+        doc: Option<&crate::trade_bar::TradeDoc>,
+        cx: &mut Context<Self>,
+    ) {
+        self.trade = crate::trade_bar::PaneTrade::new(doc, cx);
+    }
+
     pub fn new(
         feed: PaneFeed,
         theme: Theme,
@@ -262,6 +288,12 @@ impl ChartView {
         levels.attach(&store);
         let (fixture_studies, fixture_menu) =
             (fixture.studies.clone(), fixture.studies_menu.clone());
+        if feed.sub.is_some()
+            && let Some(t) = crate::trading::Trading::try_global(cx)
+        {
+            t.follow(&store);
+        }
+        let trade = crate::trade_bar::PaneTrade::new(None, cx);
 
         let mut view = ChartView {
             study_menu: None,
@@ -313,6 +345,7 @@ impl ChartView {
             paint_time_ewma_us: 0.0,
             perf_stats: false,
             rates_changed: false,
+            trade,
         };
         if let Some(set) = fixture_studies {
             view.set_study_set(set);
@@ -1462,7 +1495,7 @@ impl ChartView {
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
     }
 
-    fn header(&self) -> impl IntoElement {
+    fn header(&self) -> gpui::Div {
         let t = self.theme;
         let bar = || {
             div()
@@ -1605,6 +1638,7 @@ impl Pane for ChartView {
             visibility: self.visibility,
             levels: self.levels.config.clone(),
         });
+        doc.trade = self.trade.doc();
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -1613,7 +1647,9 @@ impl Pane for ChartView {
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
         self.picker.close();
+        let follow = feed.sub.is_some();
         self.apply_feed(feed);
+        self.trade.feed_changed(&self.store, follow, cx);
         cx.notify();
     }
 
@@ -1736,12 +1772,14 @@ impl Render for ChartView {
                 );
         }
         let _ = window;
+        let account = crate::trade_bar::chart_chip(self, &t, cx);
+        let accounts = crate::trade_bar::account_menu(self, &t, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header())
+            .child(self.header().children(account))
             .child(
                 div()
                     .relative()
@@ -1775,7 +1813,8 @@ impl Render for ChartView {
                     .when(self.anchoring.is_some(), |d| {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
-                    .when_some(overlay, |d, overlay| d.child(overlay)),
+                    .when_some(overlay, |d, overlay| d.child(overlay))
+                    .when_some(accounts, |d, o| d.child(o)),
             )
     }
 }

@@ -40,7 +40,7 @@ const fn spec(min_w: f32, default_w: f32, hideable: bool, shown: bool) -> Column
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DomCol {
-    /// The trader's working orders (milestone 7): hidden until trading exists.
+    /// The trader's working orders (milestone 7): drag to move, right-click to cancel.
     Orders,
     Bid,
     Price,
@@ -61,7 +61,7 @@ impl DomCol {
     /// The header row's text (the orders column is still empty: no title).
     pub fn header(self) -> &'static str {
         match self {
-            DomCol::Orders => "",
+            DomCol::Orders => "Ord",
             DomCol::Volume => "Vol",
             c => c.label(),
         }
@@ -83,7 +83,8 @@ impl DomCol {
 }
 
 pub const DOM_SPECS: [ColumnSpec; 5] = [
-    spec(16.0, 22.0, true, false),
+    // Orders (milestone 7): shown, wide enough for `S10` or `2/5`; grows with its content.
+    spec(28.0, 40.0, true, true),
     spec(36.0, 64.0, true, true),
     spec(48.0, 76.0, false, true),
     spec(36.0, 64.0, true, true),
@@ -556,9 +557,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dom_defaults_hide_the_orders_column() {
+    fn dom_defaults_show_the_orders_column() {
         let c = Columns::new(Table::Dom);
-        assert!(!c.set.is_shown(DomCol::Orders.index()));
+        assert!(c.set.is_shown(DomCol::Orders.index()));
         assert!(c.set.is_shown(DomCol::Price.index()));
         assert!(c.save(&DomCol::ALL).is_empty(), "defaults save nothing");
     }
@@ -574,7 +575,7 @@ mod tests {
             .unwrap();
         c.apply(ColumnCmd::Toggle(Column::Dom(DomCol::Orders)))
             .unwrap();
-        assert!(!c.set.is_shown(4) && c.set.is_shown(0));
+        assert!(!c.set.is_shown(4) && !c.set.is_shown(0));
         assert!(
             c.apply(ColumnCmd::Toggle(Column::Tape(TapeCol::Side)))
                 .is_err()

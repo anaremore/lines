@@ -5,6 +5,8 @@
 mod bench;
 mod chart_view;
 mod commands;
+mod dom_orders;
+mod dom_trade;
 mod dom_view;
 mod feeds;
 mod layout;
@@ -27,6 +29,8 @@ mod tabstate;
 mod tape_view;
 mod text;
 mod theme;
+mod trade_bar;
+mod trading;
 mod versioned;
 mod workspace;
 mod wsdoc;
@@ -317,6 +321,15 @@ struct Cli {
     /// Screenshot: render with the symbol picker open on this query (e.g. "nq").
     #[arg(long, requires = "screenshot")]
     picker: Option<String>,
+    /// Screenshot: a scripted paper session on the recording's contract, run at `--at`
+    /// before the frame (e.g. "buy 2 mkt; ack; buy 1 @ 5999.50; ack; sell 1 stop 5998.00").
+    /// `ack` lets acks arrive; orders after the last `ack` stay pending. See
+    /// `trading::parse_script`.
+    #[arg(long, requires = "screenshot")]
+    paper: Option<String>,
+    /// Screenshot: DOMs start armed for one-click trading (the app always starts disarmed).
+    #[arg(long, requires = "screenshot")]
+    arm: bool,
     /// Screenshot: the chart without study legends and tags (Ctrl+Shift+L in the app).
     #[arg(long, requires = "screenshot")]
     hide_study_labels: bool,
@@ -773,6 +786,8 @@ where
                 size,
                 scale: cli.scale,
                 doc,
+                paper: cli.paper.clone(),
+                arm: cli.arm,
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);
@@ -830,6 +845,15 @@ where
         doc.retarget_all(instrument);
     }
     let mut ws = Workspace::new(env);
+    // The paper trading core (roadmap 7): its own thread, state per data source.
+    let trading = trading::Trading::start(
+        trading::TradingSetup::for_live(dir.as_deref(), &config.source),
+        registry.clone(),
+        config.clone(),
+    );
+    if let Some(r) = &trading.report {
+        reports.push(r.clone());
+    }
     if let Some(d) = dir {
         ws = ws.with_files(d, writer.clone(), autosave);
     }
@@ -842,6 +866,7 @@ where
 
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(Feeds(registry));
+        cx.set_global(trading);
         cx.set_global(settings);
         cx.set_global(ws);
         workspace::install(cx);
