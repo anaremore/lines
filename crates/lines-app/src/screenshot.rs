@@ -14,9 +14,8 @@
 //! DPI scale cannot be forced: GPUI on Windows takes it from the monitor
 //! (`GetDpiForWindow`). `--scale` therefore *asserts* the scale and fails on mismatch.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -56,25 +55,31 @@ pub fn run(config: FeedConfig, shot: Shot) -> Result<i32> {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // 2. Render one frame off-screen and read it back.
-    let code = Arc::new(AtomicI32::new(1));
-    let exit = code.clone();
+    // 2. Render one frame off-screen and read it back. Every outcome ends the process from
+    // inside the app with its own exit code: quitting the app is not enough, because on
+    // macOS it terminates the process with status 0 before `run` returns.
     gpui_platform::application().run(move |cx: &mut App| {
-        let result = capture(cx, feed, shot, exit.clone());
-        if let Err(e) = result {
-            eprintln!("screenshot failed: {e:#}");
-            cx.quit();
+        if let Err(e) = capture(cx, feed, shot) {
+            fail(&e);
         }
     });
-    Ok(code.load(Ordering::SeqCst))
+    // Only reached if the platform returned without the capture finishing.
+    eprintln!("screenshot failed: the app exited before a frame was captured");
+    Ok(1)
 }
 
-fn capture(
-    cx: &mut App,
-    feed: lines_feed::FeedHandle,
-    shot: Shot,
-    exit: Arc<AtomicI32>,
-) -> Result<()> {
+fn fail(e: &anyhow::Error) -> ! {
+    eprintln!("screenshot failed: {e:#}");
+    exit(1)
+}
+
+fn exit(code: i32) -> ! {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code)
+}
+
+fn capture(cx: &mut App, feed: lines_feed::FeedHandle, shot: Shot) -> Result<()> {
     let Shot {
         out,
         size: (w, h),
@@ -142,11 +147,10 @@ fn capture(
         match result.and_then(|r| r) {
             Ok((pw, ph)) => {
                 println!("wrote {} ({pw}x{ph} px)", out.display());
-                exit.store(0, Ordering::SeqCst);
+                exit(0)
             }
-            Err(e) => eprintln!("screenshot failed: {e:#}"),
+            Err(e) => fail(&e),
         }
-        cx.update(|cx| cx.quit());
     })
     .detach();
     Ok(())

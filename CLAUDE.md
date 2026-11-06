@@ -34,6 +34,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # includes screenshot + vendor-cqg
 cargo test --workspace --features lines-app/vendor-cqg,lines-feed/vendor-cqg   # tests must pass with and without it
 cargo fmt --all --check
+cargo test -p lines-app --features screenshot --test screenshot_exit   # failures exit non-zero
+# macOS: install Xcode, or build with `--features runtime-shaders` (GPUI compiles Metal shaders
+# at startup instead of with `xcrun metal`, which only full Xcode has). Build-time is the default.
 
 cargo run -p lines-app -- --source mock                          # CQG-protocol mock, ES, 5k updates/s
 cargo run -p lines-app -- --source mock --disconnect-every 10    # reconnect + back-fill
@@ -99,6 +102,8 @@ body` (pre-URL recordings: body only), so recordings contain them and sessions i
 - No heap allocation in our paint path (`lines-core/tests/no_alloc.rs`, counting allocator). Label text is shaped once per value and cached; a cache miss allocates. GPUI allocates internally per frame.
 - The UI never blocks on the feed. Sessions decode outside the lock, the store applies events under a short lock, the UI polls an atomic revision every 8 ms and `try_lock`s in paint.
 - Transport `recv` must be cancel-safe.
+- macOS always builds `gpui_platform` with `font-kit` (target-specific dependency in `lines-app`); without it GPUI's no-op text system renders no text. `lines-app/tests/text_system.rs` (no harness, main thread) asserts the platform text system lists fonts and shapes glyphs.
+- Screenshot mode exits from inside the app with its own code (quitting the app exits 0 on macOS); every failure exits non-zero with no file.
 - Screenshot mode: repeated runs with the same inputs on one machine produced byte-identical PNGs. Output dimensions are checked against `size × scale`.
 - Colours are tokens in `crates/lines-app/src/theme.rs` only (a test rejects colour literals in views). Themes derive from the brand palette (ink `#11141B`, violet `#8C7BFF`, paper `#ECEAF4`); violet is the accent and last-price tag, never up/down. Every text token meets WCAG AA (4.5:1) on its backgrounds in all four theme/palette combinations (`theme::tests`). Direction is shown by shape too: one direction's bodies are hollow (bodies under 3 device px each way stay filled).
 
@@ -108,4 +113,4 @@ body` (pre-URL recordings: body only), so recordings contain them and sessions i
 - Screenshot DPI cannot be overridden on Windows (GPUI reads monitor DPI); `--scale` asserts it instead. Screenshots use the OS UI font, so they differ across machines.
 - Coinbase: if the local clock is ahead of Coinbase's, the connect-time bar boundary can be early and trades just before it are dropped as "covered". REST trades are paged back at most 10 × 1000 trades; beyond that the hole is reported as a history gap.
 - Sierra: format docs are withdrawn. The sub-trade markers in `open` (`0xfd709f01` first, `0xfd709ef9` last) and the ×100 price multiplier were determined from NQ files only; ES/MES/MNQ are assumed the same. On NQZ5 2025-09-11, 90 of 775 first fills printed outside the rebuilt book (cause unknown). Recordings imported before format v3 have no contract (read as unknown); re-import to get it.
-- Verified on Windows 11 only.
+- Verified on Windows 11, and by hand on macOS 27 (Apple silicon, Retina 2×; screenshots byte-identical across runs there too). Linux: CI only.
