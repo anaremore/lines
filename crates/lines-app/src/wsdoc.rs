@@ -79,9 +79,14 @@ pub const FORMAT: Format = Format {
 pub struct WorkspaceDoc {
     #[serde(default = "default_name")]
     pub name: String,
-    /// Charts mark the time under the pointer of any other chart (opt-in).
+    /// Charts mark the time under the pointer of the other charts in their link group
+    /// (opt-in; unlinked charts sync with each other).
     #[serde(default)]
     pub crosshair_sync: bool,
+    /// With crosshair sync: charts of the same product also mark its price. Optional:
+    /// written only when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crosshair_sync_price: bool,
     /// The key-hint bar at the bottom of each window is hidden (shown by default, for new
     /// users; written only when hidden).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -244,6 +249,10 @@ pub struct ChartState {
         skip_serializing_if = "crate::levels_layer::LevelsConfig::is_default"
     )]
     pub levels: crate::levels_layer::LevelsConfig,
+    /// Magnet crosshair: the price snaps to the hovered bar's open/high/low/close. Optional:
+    /// written only when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub magnet: bool,
 }
 
 /// What a chart draws of its studies (VWAP lines and bands, the volume profile). Hiding
@@ -380,6 +389,7 @@ impl WorkspaceDoc {
         WorkspaceDoc {
             name: name.to_owned(),
             crosshair_sync: false,
+            crosshair_sync_price: false,
             hide_hints: false,
             show_perf_stats: false,
             windows: vec![WindowDoc {
@@ -605,6 +615,30 @@ mod tests {
     use super::*;
     use crate::versioned::{Decoded, decode, encode};
 
+    /// Chart behaviours: the magnet crosshair (per chart) and price sync (per workspace) are
+    /// optional fields, written only when on (no version bump).
+    #[test]
+    fn magnet_and_price_sync_are_optional() {
+        let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
+        assert!(!old.magnet);
+        assert!(!serde_json::to_string(&old).unwrap().contains("magnet"));
+        let on = ChartState {
+            magnet: true,
+            ..old
+        };
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""magnet":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), on);
+
+        let mut w = builtin("pair").unwrap();
+        assert!(!w.crosshair_sync_price);
+        let text = serde_json::to_string(&w).unwrap();
+        assert!(!text.contains("crosshair_sync_price"), "{text}");
+        w.crosshair_sync_price = true;
+        let back: WorkspaceDoc = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        assert!(back.crosshair_sync_price);
+    }
+
     /// Roadmap 5c: a chart's indicators are saved with it; files from before load with none.
     #[test]
     fn chart_indicators_are_optional_and_round_trip() {
@@ -623,6 +657,7 @@ mod tests {
                 display: Default::default(),
             }],
             profile: ProfileConfig::default(),
+            magnet: false,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""indicators""#), "{json}");
@@ -634,6 +669,7 @@ mod tests {
             levels: Default::default(),
             indicators: vec![],
             profile: ProfileConfig::default(),
+            magnet: false,
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -712,6 +748,7 @@ mod tests {
                             levels: Default::default(),
                             indicators: vec![],
                             profile: ProfileConfig::default(),
+                            magnet: false,
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -794,6 +831,7 @@ mod tests {
                 hidden_sources: vec!["demo".into()],
                 ..Default::default()
             },
+            magnet: false,
         };
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(
@@ -881,6 +919,7 @@ mod tests {
                 levels: Default::default(),
                 indicators: vec![],
                 profile,
+                magnet: false,
             }),
             ..PaneDoc::new(PaneKind::Chart, None, None)
         };
@@ -911,6 +950,7 @@ mod tests {
                 display: Default::default(),
             }],
             profile: set,
+            magnet: false,
         };
         let json = serde_json::to_string(&both).unwrap();
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
@@ -977,7 +1017,8 @@ mod tests {
                 visibility: StudyVisibility::default(),
                 levels: Default::default(),
                 indicators: vec![],
-                profile: ProfileConfig::default()
+                profile: ProfileConfig::default(),
+                magnet: false,
             })
         );
         assert_eq!(

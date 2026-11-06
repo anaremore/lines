@@ -48,6 +48,10 @@ pub enum Command {
     /// Move the active tab into a new window.
     TabToNewWindow,
     ToggleCrosshairSync,
+    /// Crosshair sync carries the price too, between charts of the same product.
+    ToggleCrosshairSyncPrice,
+    /// The focused chart's magnet crosshair (snap to the bar's open/high/low/close).
+    ToggleMagnet,
     /// The focused pane's context menu, from the keyboard.
     Menu,
     /// Every command, searchable.
@@ -158,6 +162,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::TabToNewWindow, true, true, false, "n"),
     b(Command::CycleLink, true, false, false, "l"),
     b(Command::ToggleCrosshairSync, true, true, false, "x"),
+    b(Command::ToggleMagnet, true, true, false, "g"),
     b(Command::Menu, false, true, false, "f10"),
     b(Command::Menu, true, false, false, "."),
     b(Command::Palette, true, true, false, "p"),
@@ -308,7 +313,11 @@ pub fn label(c: Command) -> String {
         Command::PrevTab => "Previous tab".into(),
         Command::SelectTab(i) => format!("Go to tab {}", i + 1),
         Command::TabToNewWindow => "Move tab to new window".into(),
-        Command::ToggleCrosshairSync => "Crosshair sync on/off".into(),
+        Command::ToggleCrosshairSync => "Crosshair sync on/off (within link groups)".into(),
+        Command::ToggleCrosshairSyncPrice => {
+            "Crosshair sync: price too, same product (on/off)".into()
+        }
+        Command::ToggleMagnet => "Chart: magnet crosshair, snap to OHLC (on/off)".into(),
         Command::Menu => "Pane menu".into(),
         Command::Palette => "Command palette".into(),
         Command::SaveAs => "Save workspace as…".into(),
@@ -371,6 +380,8 @@ pub fn palette() -> Vec<Command> {
     v.extend(Preset::ALL.map(Command::Preset));
     v.extend([
         Command::ToggleCrosshairSync,
+        Command::ToggleCrosshairSyncPrice,
+        Command::ToggleMagnet,
         Command::ToggleStudyLabels,
         Command::ToggleStudies,
         Command::CleanChart,
@@ -458,6 +469,7 @@ mod tests {
         assert_eq!(c("shift-n"), Some(Command::TabToNewWindow));
         assert_eq!(c("l"), Some(Command::CycleLink));
         assert_eq!(c("shift-x"), Some(Command::ToggleCrosshairSync));
+        assert_eq!(c("shift-g"), Some(Command::ToggleMagnet));
         assert_eq!(cmd("shift-f10"), Some(Command::Menu));
         assert_eq!(c("shift-s"), Some(Command::SaveAs));
         assert_eq!(c("o"), Some(Command::Open));

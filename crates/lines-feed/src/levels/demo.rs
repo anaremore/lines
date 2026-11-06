@@ -99,6 +99,10 @@ impl LevelSource for DemoLevels {
     fn refresh(&self) -> RefreshMode {
         RefreshMode::OneShot
     }
+    /// Synthetic: screenshots draw it over any replay (`--demo-levels`).
+    fn synthetic(&self) -> bool {
+        true
+    }
     fn stale_after(&self) -> Duration {
         Duration::from_secs(24 * 3600)
     }

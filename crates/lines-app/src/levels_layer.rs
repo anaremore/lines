@@ -138,6 +138,9 @@ pub struct LevelsLayer {
     vwap_cols: Vec<Column>,
     /// Plot px per catalog price unit this frame (offsets from the VWAP to px).
     px_per_unit: f32,
+    /// The chart's market clock as last seen under the store lock (freshness of replayed
+    /// sources when a snapshot can't read the store).
+    clock: Option<UtcMillis>,
 }
 
 /// Columns kept for the VWAP that VWAP-relative levels follow.
@@ -153,6 +156,7 @@ impl LevelsLayer {
             vwap: None,
             vwap_cols: Vec::with_capacity(VWAP_COLUMNS),
             px_per_unit: 0.0,
+            clock: None,
         }
     }
 
@@ -213,15 +217,21 @@ impl LevelsLayer {
             .fold(0u64, |a, s| a.wrapping_add(s.handle.cell().revision()))
     }
 
-    /// Under the store lock, after the viewport update. `last_y`: the last price's row.
-    pub fn prepare(&mut self, data: &ChartData, vp: &Viewport, last_y: Option<f32>) {
-        let plot_h = vp.height as f32;
-        // 1. Each source's current map and freshness.
+    /// This frame's view of every source (map, freshness, error), taken once per frame
+    /// *before* the legend is built (render time). [`Self::legend`] and the draw path
+    /// ([`Self::prepare`], paint) both read this snapshot, so the legend never describes a
+    /// different state than the levels drawn (a source can update between render and paint).
+    /// `market_time`: the chart's market clock, if readable now (else the last one seen).
+    pub fn snapshot(&mut self, market_time: Option<UtcMillis>) {
+        if market_time.is_some() {
+            self.clock = market_time;
+        }
+        let clock = self.clock;
         for s in &mut self.slots {
             if let Some(st) = s.handle.cell().try_read() {
                 // Freshness on the source's clock: the replay clock in a replay.
                 let now = if st.replay {
-                    data.market_time.unwrap_or(UtcMillis(i64::MIN))
+                    clock.unwrap_or(UtcMillis(i64::MIN))
                 } else {
                     lines_feed::now_utc()
                 };
@@ -234,6 +244,16 @@ impl LevelsLayer {
                 }
             }
         }
+    }
+
+    /// Under the store lock, after the viewport update. `last_y`: the last price's row.
+    /// Draws from this frame's [`Self::snapshot`] (never re-reads the sources).
+    pub fn prepare(&mut self, data: &ChartData, vp: &Viewport, last_y: Option<f32>) {
+        let plot_h = vp.height as f32;
+        if data.market_time.is_some() {
+            self.clock = data.market_time;
+        }
+        // 1. Each source's map and freshness: this frame's snapshot (render time).
         // 2. VWAP-relative levels (decision 0022, e.g. VWAP ± k × a statistic) follow the
         // chart's own ETH VWAP: the shared engine node, acquired the first time a map needs it.
         let needs_vwap = self.slots.iter().any(|s| {
@@ -528,7 +548,8 @@ impl LevelsLayer {
         self.slots[i].status = status;
     }
 
-    /// Legend rows (render time): one per source on this chart, with its freshness.
+    /// Legend rows (render time, after [`Self::snapshot`]): one per source on this chart,
+    /// with its freshness, from the same snapshot the levels are drawn from.
     pub fn legend(&self) -> Vec<LegendRow> {
         self.slots
             .iter()

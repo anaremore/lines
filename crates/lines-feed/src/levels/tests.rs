@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use lines_core::{Bar, ContractKey, Month, Price, Qty, UtcMillis};
 
 use super::demo::{self, DemoLevels};
-use super::runtime::{LevelCell, LevelStatus, read_recording, recording_path};
+use super::runtime::{
+    LevelCell, LevelMode, LevelStatus, NOT_RECORDED, mode_for, read_recording, recording_path,
+};
 use super::*;
 use crate::catalog;
 
@@ -204,6 +206,127 @@ fn status_is_missing_current_or_stale() {
 
 /// Live with recording, then replay of the recording: the same map, applied at its recorded
 /// time on the replay clock, and never before it.
+/// Owner's bug: a 2025 NQ replay without `--replay-levels` showed a source's live map ("as
+/// of 22:19Z", current) against the replay clock. A market replay never runs a source live.
+#[test]
+fn a_replay_never_fetches_live() {
+    let d = std::path::PathBuf::from("levels");
+    assert_eq!(mode_for(true, None, None), LevelMode::NotRecorded);
+    assert_eq!(
+        mode_for(true, None, Some(d.clone())),
+        LevelMode::Replay(d.clone())
+    );
+    // Recording live levels next to a replay would record today's map: not recorded.
+    assert_eq!(
+        mode_for(true, Some(d.clone()), None),
+        LevelMode::NotRecorded
+    );
+    assert_eq!(mode_for(false, None, None), LevelMode::Live);
+    assert_eq!(mode_for(false, Some(d.clone()), None), LevelMode::Record(d));
+}
+
+/// A source with no recorded batches in a replay (no levels directory, or no file for it in
+/// the directory): missing with the reason, no map, never fetched, settled at once.
+#[test]
+fn unrecorded_sources_are_missing_in_a_replay() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let empty = std::env::temp_dir().join(format!("lines-levels-none-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&empty);
+    for dir in [None, Some(empty.clone())] {
+        let src: Arc<dyn LevelSource> = Arc::new(DemoLevels);
+        let prices: Arc<dyn ChartPrices> = Arc::new(Fixed {
+            bars: vec![bar_at("2025-09-11T14:30:00", 600_100)],
+            now: Some(t("2025-09-11T15:00:00")),
+        });
+        let cell = Arc::new(LevelCell::for_test(&*src, true));
+        let (next, loaded) = (
+            Arc::new(AtomicI64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (cell2, loaded2) = (cell.clone(), loaded.clone());
+        rt.block_on(async move {
+            // Returns by itself: nothing to wait for.
+            runtime::replay(src, es_ctx(), prices, cell2, dir, next, loaded2).await;
+        });
+        let s = cell.read().clone();
+        assert!(s.map.is_none(), "nothing drawn");
+        assert_eq!(s.received, None);
+        assert_eq!(s.error.as_deref(), Some(NOT_RECORDED));
+        assert_eq!(s.status(t("2025-09-11T15:00:00")), LevelStatus::Missing);
+        assert!(loaded.load(std::sync::atomic::Ordering::Acquire));
+    }
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// A real source that counts connects (any connect is a live fetch).
+struct Counting(std::sync::atomic::AtomicUsize);
+
+impl LevelSource for Counting {
+    fn id(&self) -> &'static str {
+        "counting"
+    }
+    fn label(&self) -> &'static str {
+        "Counting"
+    }
+    fn serves(&self, _: &lines_core::Product) -> bool {
+        true
+    }
+    fn refresh(&self) -> RefreshMode {
+        RefreshMode::OneShot
+    }
+    fn stale_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(3600)
+    }
+    fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { anyhow::bail!("live fetch in a replay") })
+    }
+    fn decode(
+        &self,
+        _: &LevelContext,
+        _: &dyn ChartPrices,
+        _: Option<&LevelMap>,
+        _: &[LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        Ok(None)
+    }
+}
+
+/// End to end through `acquire` (the only test here that sets the process-wide mode): in a
+/// market replay without recordings a real source never connects and is missing; the
+/// synthetic demo still draws (screenshots with `--demo-levels`).
+#[test]
+fn acquire_in_a_replay_without_recordings() {
+    runtime::set_mode(mode_for(true, None, None));
+    let src = Arc::new(Counting(Default::default()));
+    let prices: Arc<dyn ChartPrices> = Arc::new(Fixed {
+        bars: vec![bar_at("2026-11-05T14:30:00", 600_100)],
+        now: Some(t("2025-09-11T15:00:00")),
+    });
+    let real = runtime::acquire(src.clone(), es_ctx(), prices.clone());
+    let demo = runtime::acquire(Arc::new(DemoLevels), es_ctx(), prices);
+    assert!(runtime::wait_settled(std::time::Duration::from_secs(10)));
+    std::thread::sleep(std::time::Duration::from_millis(100)); // a live task would connect
+    runtime::set_mode(LevelMode::Live);
+    assert_eq!(
+        src.0.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "never fetched"
+    );
+    let s = real.cell().read().clone();
+    assert!(s.map.is_none() && s.replay);
+    assert_eq!(s.error.as_deref(), Some(NOT_RECORDED));
+    assert_eq!(s.status(t("2025-09-11T15:00:00")), LevelStatus::Missing);
+    let d = demo.cell().read().clone();
+    assert!(
+        d.map.is_some(),
+        "synthetic sources still draw over a replay"
+    );
+}
+
 #[test]
 fn recorded_levels_replay_to_the_same_map() {
     let dir = std::env::temp_dir().join(format!("lines-levels-{}", std::process::id()));
@@ -264,7 +387,7 @@ fn recorded_levels_replay_to_the_same_map() {
                 ctx2,
                 replay_prices,
                 cell2,
-                dir2,
+                Some(dir2),
                 next,
                 loaded,
             ));
