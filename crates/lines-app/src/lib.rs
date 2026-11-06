@@ -922,6 +922,16 @@ fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Level sources (decision 0022) register through the same extension point as market data.
+    #[test]
+    fn extensions_carry_level_sources() {
+        let ext =
+            Extensions::new().with_level_source(Arc::new(lines_feed::levels::demo::DemoLevels));
+        assert_eq!(ext.level_sources().len(), 1);
+        assert_eq!(ext.level_sources()[0].id(), "demo");
+        assert!(ext.sources().is_empty());
+    }
+
     fn help() -> String {
         command(&Extensions::new()).render_long_help().to_string()
     }
