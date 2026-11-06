@@ -26,7 +26,7 @@ use gpui::{
 use lines_feed::FeedConfig;
 use lines_feed::store::FeedStatus;
 
-use crate::chart_view::ChartView;
+use crate::chart_view::{ChartView, Fixture};
 use crate::theme::Theme;
 
 /// Everything besides the data that determines the image.
@@ -37,8 +37,8 @@ pub struct Shot {
     /// Required DPI scale (asserted, not forced).
     pub scale: Option<f32>,
     pub theme: Theme,
-    /// Fixed pointer position, plot-local logical px.
-    pub cursor: Option<(f32, f32)>,
+    /// Fixed pointer position and other stand-ins for input.
+    pub fixture: Fixture,
 }
 
 pub fn run(config: FeedConfig, shot: Shot) -> Result<i32> {
@@ -80,7 +80,7 @@ fn capture(
         size: (w, h),
         scale,
         theme,
-        cursor,
+        fixture,
     } = shot;
     let bounds = Bounds {
         origin: point(px(0.0), px(0.0)),
@@ -97,7 +97,7 @@ fn capture(
             focus: false,
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| ChartView::new(feed, theme, true, cursor, cx)),
+        move |_, cx| cx.new(|cx| ChartView::new(feed, theme, true, fixture, cx)),
     )?;
     cx.spawn(async move |cx| {
         // A hidden window's DirectX render target is only sized on WM_SIZE, which a window

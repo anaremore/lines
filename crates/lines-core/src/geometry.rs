@@ -498,6 +498,7 @@ mod tests {
             price_hi: 402_000.0,
             auto_price: false,
             follow_live: false,
+            ..Viewport::default()
         }
     }
 

@@ -20,6 +20,9 @@ pub struct Theme {
     /// Crosshair price/time tags on the axes, and the text on them.
     pub cross_tag: Hsla,
     pub on_cross_tag: Hsla,
+    /// Brand accent (signal violet, docs/design.md): focus, selection, active state such as
+    /// manual price scale. Never used for up/down.
+    pub accent: Hsla,
 }
 
 impl Theme {
@@ -38,6 +41,7 @@ impl Theme {
             crosshair: Hsla::from(rgb(0x9aa4b2)).opacity(0.55),
             cross_tag: rgb(0x3b4252).into(),
             on_cross_tag: rgb(0xeceff4).into(),
+            accent: rgb(0x8c7bff).into(), // 5.3:1 on `panel`
         }
     }
 
@@ -56,6 +60,9 @@ impl Theme {
             crosshair: Hsla::from(rgb(0x4b5563)).opacity(0.55),
             cross_tag: rgb(0x374151).into(),
             on_cross_tag: rgb(0xffffff).into(),
+            // Brand violet is 3.0:1 on the light panel; this darker violet of the same hue
+            // meets WCAG AA (5.3:1) for text.
+            accent: rgb(0x5e4ae3).into(),
         }
     }
 }
