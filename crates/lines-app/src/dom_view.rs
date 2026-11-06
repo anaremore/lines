@@ -42,6 +42,7 @@ use lines_feed::store::ChartStore;
 
 use crate::dom_orders::{DragOrder, OrdersLayer};
 use crate::dom_trade::{self, DomColumn, EntryCtx, Ghost, Refusal};
+use crate::dom_trail::DomTrail;
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
@@ -64,11 +65,16 @@ const PAD: f32 = 6.0;
 pub struct DomOptions {
     /// Ticks per row.
     pub grouping: u32,
+    /// Start with the price trail on (`--dom-trail`; a DOM's saved `trail` wins).
+    pub trail: bool,
 }
 
 impl Default for DomOptions {
     fn default() -> Self {
-        DomOptions { grouping: 1 }
+        DomOptions {
+            grouping: 1,
+            trail: false,
+        }
     }
 }
 
@@ -99,6 +105,8 @@ pub struct DomView {
     trade: PaneTrade,
     /// This frame's own orders, position and rejections; drags and their ghosts.
     orders: OrdersLayer,
+    /// Where price just traded (`crate::dom_trail`), off by default.
+    trail: DomTrail,
 }
 
 impl EventEmitter<FeedChanged> for DomView {}
@@ -140,12 +148,14 @@ impl Pane for DomView {
         doc.dom = Some(DomState {
             grouping: self.grouping,
             columns: self.cols.save(&DomCol::ALL),
+            trail: self.trail.doc(),
         });
         doc.trade = self.trade.doc();
     }
 
     fn changed(&mut self) -> bool {
-        self.trade.changed()
+        let shown = self.cols.set.is_shown(DomCol::Trail.index());
+        self.trade.changed() | self.trail.wants_frame(&self.store, shown)
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -169,6 +179,7 @@ impl Pane for DomView {
         self.stats = LadderStats::default();
         self.inside = Inside::Empty;
         self.seen_revision = u64::MAX;
+        self.trail.reset();
         cx.notify();
     }
 }
@@ -193,6 +204,10 @@ impl DomView {
             t.follow(&store);
         }
         let trade = PaneTrade::new(None, cx);
+        let mut trail = DomTrail::new(i64::from(opts.grouping.max(1)) * product.price.tick);
+        trail.set_enabled(opts.trail);
+        let mut cols = Columns::new(Table::Dom);
+        sync_trail_column(&mut cols, &trail, false);
         DomView {
             feed,
             common: PaneCommon::default(),
@@ -212,9 +227,10 @@ impl DomView {
             scroll_rows: 0.0,
             focus: cx.focus_handle(),
             glyphs: Glyphs::new(TEXT_PX),
-            cols: Columns::new(Table::Dom),
+            cols,
             trade,
             orders: OrdersLayer::default(),
+            trail,
         }
     }
 
@@ -233,6 +249,31 @@ impl DomView {
     pub fn restore(&mut self, state: &DomState) {
         self.set_grouping(state.grouping.clamp(1, 10_000));
         self.cols.load(&DomCol::ALL, &state.columns);
+        if state.trail.is_some() {
+            self.trail.restore(state.trail);
+        }
+        let hidden = state.columns.get(&DomCol::Trail).and_then(|c| c.shown) == Some(false);
+        sync_trail_column(&mut self.cols, &self.trail, hidden);
+    }
+
+    /// Turn the price trail on or off (its column comes and goes with it).
+    pub fn toggle_trail(&mut self, cx: &mut Context<Self>) -> bool {
+        let on = !self.trail.enabled();
+        self.trail.set_enabled(on);
+        sync_trail_column(&mut self.cols, &self.trail, false);
+        cx.notify();
+        on
+    }
+
+    /// The next trail half-life preset; returns it (ms).
+    pub fn cycle_trail_half_life(&mut self, cx: &mut Context<Self>) -> u32 {
+        let ms = self.trail.cycle_half_life();
+        cx.notify();
+        ms
+    }
+
+    pub fn trail(&self) -> &DomTrail {
+        &self.trail
     }
 
     /// A column command on this DOM (decision 0018).
@@ -241,6 +282,11 @@ impl DomView {
         cmd: ColumnCmd,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
+        // The trail column is the trail: showing it turns the trail on, hiding it off.
+        if cmd == ColumnCmd::Toggle(pane_columns::Column::Dom(DomCol::Trail)) {
+            self.toggle_trail(cx);
+            return Ok(());
+        }
         self.cols.apply(cmd)?;
         cx.notify();
         Ok(())
@@ -581,6 +627,7 @@ impl DomView {
             !self.frozen && window.is_window_hovered() && bounds.contains(&window.mouse_position());
         let units = self.row_units();
         if let Some(d) = self.store.try_read() {
+            self.trail.prepare(&d, units, self.store.feed_clock());
             let inside = inside_row(&d.book, d.last_trade, units);
             self.view.follow(inside, rows, hovered);
             self.inside = ladder::inside(&d.book);
@@ -786,6 +833,15 @@ impl DomView {
                 t.grid,
             ));
         }
+        self.trail.paint(
+            &self.rows,
+            cell(DomCol::Trail),
+            oy,
+            ROW_H,
+            top + h,
+            &t,
+            window,
+        );
         // The trader's orders, the position marker and rejections, over the rows.
         if let Some(tr) = Trading::try_global(cx) {
             let contract = trade_bar::contract_of(&self.store);
@@ -879,6 +935,13 @@ impl DomView {
                     .child(right),
             )
     }
+}
+
+/// The trail column is shown exactly while the trail is on (unless a saved file hid it).
+fn sync_trail_column(cols: &mut Columns, trail: &DomTrail, hidden: bool) {
+    let i = DomCol::Trail.index();
+    let specs = cols.specs();
+    let _ = cols.set.set_shown(specs, i, trail.enabled() && !hidden);
 }
 
 /// The next grouping preset after (or before, `back`) `g`; custom values rejoin the presets.

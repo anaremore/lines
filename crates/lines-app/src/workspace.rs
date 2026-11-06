@@ -1158,6 +1158,22 @@ impl WindowView {
                 let show = !cx.global::<Workspace>().show_perf_stats;
                 set_show_perf_stats(show, cx);
             }
+            Command::DomTrail | Command::DomTrailHalfLife => {
+                let Some(PaneHandle::Dom(dom)) = self.tab().focused_handle().cloned() else {
+                    self.refuse("the price trail is on a DOM: focus one first", cx);
+                    return;
+                };
+                if cmd == Command::DomTrailHalfLife {
+                    let ms = dom.update(cx, |v, cx| v.cycle_trail_half_life(cx));
+                    notice(
+                        format!("trail half-life {:.1} s", f64::from(ms) / 1000.0),
+                        cx,
+                    );
+                    cx.notify();
+                } else {
+                    dom.update(cx, |v, cx| v.toggle_trail(cx));
+                }
+            }
             Command::Trade(tc) => {
                 // The focused pane's account and contract (decision 0016).
                 let issued = std::time::Instant::now();
@@ -1765,6 +1781,16 @@ impl WindowView {
                 Command::HidePane,
                 false,
             ));
+            if let PaneHandle::Dom(dom) = &h {
+                let tr = dom.read(cx).trail();
+                let (on, hl) = (tr.enabled(), tr.half_life_ms());
+                items.push(MenuItem::named("Price trail", Command::DomTrail, on));
+                items.push(MenuItem::named(
+                    &format!("Trail half-life: {:.1} s (next)", f64::from(hl) / 1000.0),
+                    Command::DomTrailHalfLife,
+                    false,
+                ));
+            }
         }
         items.push(it(Command::Toggle(PaneKind::Dom), false));
         items.push(it(Command::Toggle(PaneKind::Tape), false));

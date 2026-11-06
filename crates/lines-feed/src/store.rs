@@ -332,6 +332,9 @@ pub struct ChartStore {
     stale_after_ms: AtomicU64,
     /// Market time (newest trade) at the last update, `i64::MIN` = none yet.
     market_ms: AtomicI64,
+    /// The newest feed frame's own time (the replay clock, or the wall clock live),
+    /// `i64::MIN` = none yet. See [`ChartStore::feed_clock`].
+    frame_ms: AtomicI64,
     /// The product's trading hours: a closed market is never stale.
     calendar: Option<&'static lines_core::sessions::SessionCalendar>,
     /// This store's feed in the indicator engine (unique per process).
@@ -361,6 +364,7 @@ impl ChartStore {
             calendar,
             feed_id: NEXT_FEED_ID.fetch_add(1, Ordering::Relaxed),
             market_ms: AtomicI64::new(i64::MIN),
+            frame_ms: AtomicI64::new(i64::MIN),
             data: Mutex::new(ChartData {
                 product,
                 contract,
@@ -432,6 +436,36 @@ impl ChartStore {
         Some(Duration::from_millis(quiet))
     }
 
+    /// Feed side: the time of the frame being applied (the replay clock, or the wall clock
+    /// live). Lock-free; call before applying the frame.
+    pub fn set_frame_time(&self, t: UtcMillis) {
+        self.frame_ms.fetch_max(t.0, Ordering::AcqRel);
+    }
+
+    /// The feed's own clock (lock-free), for things that animate on market time (the DOM
+    /// trail): the newest of the last frame's time and the market time, plus the silence
+    /// since the last update while the feed is live. Frozen when it isn't (a finished replay,
+    /// screenshots), so replays stay deterministic. `None` before any data.
+    pub fn feed_clock(&self) -> Option<UtcMillis> {
+        let t = self
+            .frame_ms
+            .load(Ordering::Acquire)
+            .max(self.market_ms.load(Ordering::Acquire));
+        if t == i64::MIN {
+            return None;
+        }
+        if !self.live.load(Ordering::Acquire) {
+            return Some(UtcMillis(t));
+        }
+        let last = self.last_data.load(Ordering::Acquire);
+        let quiet = if last == 0 {
+            0
+        } else {
+            mono_ms().saturating_sub(last)
+        };
+        Some(UtcMillis(t.saturating_add(quiet as i64)))
+    }
+
     /// Lock-free change detector for the UI.
     #[inline]
     pub fn revision(&self) -> u64 {
@@ -501,6 +535,33 @@ mod tests {
     use super::*;
     use crate::catalog;
     use lines_core::{Month, Qty, Side};
+
+    /// The feed clock: frame time or market time, whichever is newer; runs on (by the
+    /// silence) only while live, frozen otherwise.
+    #[test]
+    fn feed_clock_is_frozen_unless_live() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        assert_eq!(store.feed_clock(), None);
+        store.set_frame_time(UtcMillis(5_000));
+        store.update_frame(|_| ());
+        assert_eq!(
+            store.feed_clock(),
+            Some(UtcMillis(5_000)),
+            "not live: frozen"
+        );
+        store.set_frame_time(UtcMillis(4_000));
+        assert_eq!(
+            store.feed_clock(),
+            Some(UtcMillis(5_000)),
+            "never backwards"
+        );
+        store.set_status(FeedStatus::Live);
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(store.feed_clock().unwrap().0 >= 5_020, "live: runs on");
+        store.set_status(FeedStatus::ReplayFinished);
+        assert_eq!(store.feed_clock(), Some(UtcMillis(5_000)));
+    }
 
     /// Depth that leaves the touch alone repaints only the DOM (the chart revision stays);
     /// a new best bid, a trade or any other update moves both.

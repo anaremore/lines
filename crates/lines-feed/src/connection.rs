@@ -173,6 +173,7 @@ async fn drive<T: Transport>(
                 // Decode + convert outside the store lock.
                 let result = session.on_frame(&frame, now, &mut events, &mut out);
                 let len = frame.data.len() as u64;
+                store.set_frame_time(now);
                 store.update_frame(|d| {
                     d.stats.frames_in += 1;
                     d.stats.bytes_in += len;
