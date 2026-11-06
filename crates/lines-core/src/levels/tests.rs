@@ -41,9 +41,9 @@ fn builder_validates_and_indexes_kinds() {
         [0, 1, 0]
     );
     assert_eq!(m.kind_index("zone"), Some(1));
-    assert_eq!(m.levels[1].span(), (599_500.0, 599_750.0));
+    assert_eq!(m.levels[1].span_at(None).unwrap(), (599_500.0, 599_750.0));
     // A raw value is kept as the source gave it (rounded only when drawn).
-    assert_eq!(m.levels[2].span().0, 600_512.4);
+    assert_eq!(m.levels[2].span_at(None).unwrap().0, 600_512.4);
 
     let b = || LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"));
     let err = |r: Result<LevelMap, LevelError>| r.unwrap_err();
@@ -123,17 +123,17 @@ fn placement_filters_kinds_and_skips_off_screen_levels() {
         meta: LevelMeta::default(),
     });
     let mut out = Vec::with_capacity(16);
-    place(&m, &vp(), |_| true, &mut out);
+    place(&m, &vp(), None, |_| true, &mut out);
     assert_eq!(out.iter().map(|p| p.index).collect::<Vec<_>>(), [0, 1, 2]);
     // Line at 600_000: (601_000 - 600_000) / 5 = 200 px. Zone 599_500..599_750: 250..300 px.
     assert_eq!((out[0].top, out[0].bottom), (200.0, 200.0));
     assert_eq!((out[1].top, out[1].bottom), (250.0, 300.0));
     // Kind filter: only zones.
-    place(&m, &vp(), |k| k == 1, &mut out);
+    place(&m, &vp(), None, |k| k == 1, &mut out);
     assert_eq!(out.iter().map(|p| p.index).collect::<Vec<_>>(), [1]);
     // Capacity bounds the work; never grows.
     let mut small = Vec::with_capacity(1);
-    place(&m, &vp(), |_| true, &mut small);
+    place(&m, &vp(), None, |_| true, &mut small);
     assert_eq!((small.len(), small.capacity()), (1, 1));
 }
 
@@ -141,7 +141,7 @@ fn placement_filters_kinds_and_skips_off_screen_levels() {
 fn labels_avoid_the_last_price_and_each_other() {
     let m = demo();
     let mut out = Vec::with_capacity(16);
-    place(&m, &vp(), |_| true, &mut out);
+    place(&m, &vp(), None, |_| true, &mut out);
     // No last price: labels on their levels (the unlabelled raw line gets none).
     place_labels(&mut out, &m, 16.0, 400.0, None);
     assert_eq!(
@@ -158,7 +158,7 @@ fn labels_avoid_the_last_price_and_each_other() {
         .line("a", LevelValue::Raw(599_975.0), Some("B"), style()) // 5 px lower
         .build(TICK)
         .unwrap();
-    place(&close, &vp(), |_| true, &mut out);
+    place(&close, &vp(), None, |_| true, &mut out);
     place_labels(&mut out, &close, 16.0, 400.0, None);
     assert_eq!(out.len(), 2);
     assert_eq!((out[0].label_y, out[1].label_y), (Some(200.0), None));
@@ -167,7 +167,7 @@ fn labels_avoid_the_last_price_and_each_other() {
         .line("a", LevelValue::Raw(601_000.0), Some("T"), style())
         .build(TICK)
         .unwrap();
-    place(&top, &vp(), |_| true, &mut out);
+    place(&top, &vp(), None, |_| true, &mut out);
     place_labels(&mut out, &top, 16.0, 400.0, None);
     assert_eq!(out[0].label_y, Some(8.0));
 }
@@ -218,5 +218,72 @@ fn price_at_time_edge_cases() {
     assert_eq!(
         price_at(&bars, t("2026-11-05T14:29:30"), 30_000),
         Some(Price(600_000))
+    );
+}
+
+#[test]
+fn vwap_relative_levels_follow_the_vwap_and_wait_for_it() {
+    let b = || LevelMap::builder("demo", ES, UtcMillis(0));
+    // VWAP ± 5.00 band and a VWAP + 2.50 line.
+    let m = b()
+        .zone(
+            "band",
+            LevelValue::VwapOffset(-500.0),
+            LevelValue::VwapOffset(500.0),
+            Some("±1"),
+            style(),
+        )
+        .line("band", LevelValue::VwapOffset(250.0), None, style())
+        .build(TICK)
+        .unwrap();
+    assert!(m.levels.iter().all(|l| l.is_vwap_relative()));
+    assert_eq!(m.levels[0].vwap_offsets(), Some((-500.0, 500.0)));
+    assert_eq!(m.levels[0].span_at(None), None);
+    assert_eq!(
+        m.levels[0].span_at(Some(600_000.0)),
+        Some((599_500.0, 600_500.0))
+    );
+    let mut out = Vec::with_capacity(8);
+    // No VWAP yet: withheld, not drawn at some made-up price.
+    place(&m, &vp(), None, |_| true, &mut out);
+    assert!(out.is_empty());
+    // At VWAP 6000.00 (200 px): the band spans 600_500 (100 px) .. 599_500 (300 px).
+    place(&m, &vp(), Some(600_000.0), |_| true, &mut out);
+    assert_eq!(out.len(), 2);
+    assert!(out[0].vwap_relative);
+    assert_eq!((out[0].top, out[0].bottom), (100.0, 300.0));
+    // It moves with the VWAP.
+    place(&m, &vp(), Some(600_250.0), |_| true, &mut out);
+    assert_eq!((out[0].top, out[0].bottom), (50.0, 250.0));
+    // A zone mixing relative and absolute bounds is refused; offsets must be ordered.
+    assert_eq!(
+        b().zone(
+            "z",
+            LevelValue::VwapOffset(-1.0),
+            LevelValue::Raw(600_000.0),
+            None,
+            style()
+        )
+        .build(TICK)
+        .unwrap_err(),
+        LevelError::MixedAnchors
+    );
+    assert_eq!(
+        b().zone(
+            "z",
+            LevelValue::VwapOffset(5.0),
+            LevelValue::VwapOffset(-5.0),
+            None,
+            style()
+        )
+        .build(TICK)
+        .unwrap_err(),
+        LevelError::Inverted
+    );
+    assert_eq!(
+        b().line("z", LevelValue::VwapOffset(f64::INFINITY), None, style())
+            .build(TICK)
+            .unwrap_err(),
+        LevelError::NotFinite
     );
 }

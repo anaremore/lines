@@ -27,7 +27,8 @@ pub const BODY: &str = r#"{
     {"kind": "resist", "line": 602500, "label": "R1 6025",     "color": "e0a84aff", "weight": 1},
     {"kind": "support","line": 599750, "label": "S1 5997.50",  "color": "4cc4c9ff", "weight": 1, "dashed": true},
     {"kind": "zone",   "lower": 601750, "upper": 602250, "label": "Supply", "color": "e0a84aff"},
-    {"kind": "zone",   "lower": 599000, "upper": 599500, "label": "Demand", "color": "4cc4c9ff"}
+    {"kind": "zone",   "lower": 599000, "upper": 599500, "label": "Demand", "color": "4cc4c9ff"},
+    {"kind": "band",   "vwap_lower": -750, "vwap_upper": 750, "label": "VWAP ±7.50", "color": "b8bccbff", "dashed": true}
   ],
   "anchor": {"at": "2026-11-05T14:30:00", "offset": 750, "label": "Open +7.50", "color": "d98ac4ff"}
 }"#;
@@ -45,6 +46,9 @@ struct Row {
     line: Option<i64>,
     lower: Option<i64>,
     upper: Option<i64>,
+    /// A band relative to the chart's ETH VWAP (catalog units).
+    vwap_lower: Option<i64>,
+    vwap_upper: Option<i64>,
     label: Option<String>,
     color: String,
     #[serde(default = "one")]
@@ -124,6 +128,16 @@ impl LevelSource for DemoLevels {
                 dashed: r.dashed,
             };
             let label = r.label.as_deref();
+            if let (Some(lo), Some(hi)) = (r.vwap_lower, r.vwap_upper) {
+                b = b.zone(
+                    &r.kind,
+                    LevelValue::VwapOffset(lo as f64),
+                    LevelValue::VwapOffset(hi as f64),
+                    label,
+                    style,
+                );
+                continue;
+            }
             b = match (r.line, r.lower, r.upper) {
                 (Some(p), None, None) => b.line(&r.kind, LevelValue::Tick(Price(p)), label, style),
                 (None, Some(lo), Some(hi)) => b.zone(

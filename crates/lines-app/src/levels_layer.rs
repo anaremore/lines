@@ -27,9 +27,12 @@ use lines_core::geometry::snap;
 use lines_core::levels::{LevelMap, LevelShape, MAX_LEVELS, Placed, place, place_labels};
 use lines_core::{Product, UtcMillis, Viewport};
 use lines_feed::ChartData;
+use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
 use lines_feed::levels::runtime::{self, LevelHandle, LevelStatus};
 use lines_feed::levels::{LevelContext, StorePrices};
 use lines_feed::store::ChartStore;
+use lines_indicators::render::{Column, build_columns};
+use lines_indicators::{Bands, Reset, Spec, VwapSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::Theme;
@@ -115,7 +118,19 @@ pub struct LevelsLayer {
     pub config: LevelsConfig,
     slots: Vec<Slot>,
     shaped: HashMap<String, ShapedLine>,
+    /// The chart's feed, for the ETH VWAP node.
+    feed: Option<FeedInfo>,
+    /// The chart's ETH VWAP from the shared indicator engine, acquired only while some map
+    /// has VWAP-relative levels.
+    vwap: Option<IndicatorHandle>,
+    /// This frame's VWAP, one column per visible bar (fixed capacity).
+    vwap_cols: Vec<Column>,
+    /// Plot px per catalog price unit this frame (offsets from the VWAP to px).
+    px_per_unit: f32,
 }
+
+/// Columns kept for the VWAP that VWAP-relative levels follow.
+const VWAP_COLUMNS: usize = 4096;
 
 impl LevelsLayer {
     pub fn new(config: LevelsConfig) -> LevelsLayer {
@@ -123,6 +138,10 @@ impl LevelsLayer {
             config,
             slots: Vec::new(),
             shaped: HashMap::new(),
+            feed: None,
+            vwap: None,
+            vwap_cols: Vec::with_capacity(VWAP_COLUMNS),
+            px_per_unit: 0.0,
         }
     }
 
@@ -130,8 +149,15 @@ impl LevelsLayer {
     pub fn attach(&mut self, store: &Arc<ChartStore>) {
         let (product, contract): (Product, _) = {
             let d = store.read();
+            self.feed = Some(FeedInfo {
+                feed: store.feed_id(),
+                product: d.product.id,
+                period_ms: d.series.period_ms(),
+                max_bars: d.series.max_len(),
+            });
             (d.product.clone(), d.contract)
         };
+        self.vwap = None; // the new feed's node is acquired when a map needs it
         self.slots = lines_feed::levels::serving(&product)
             .into_iter()
             .map(|source| {
@@ -179,6 +205,7 @@ impl LevelsLayer {
     /// Under the store lock, after the viewport update. `last_y`: the last price's row.
     pub fn prepare(&mut self, data: &ChartData, vp: &Viewport, last_y: Option<f32>) {
         let plot_h = vp.height as f32;
+        // 1. Each source's current map and freshness.
         for s in &mut self.slots {
             if let Some(st) = s.handle.cell().try_read() {
                 // Freshness on the source's clock: the replay clock in a replay.
@@ -195,6 +222,48 @@ impl LevelsLayer {
                     s.error = st.error.clone(); // only when it changes
                 }
             }
+        }
+        // 2. VWAP-relative levels (decision 0022, e.g. VWAP ± k × a statistic) follow the
+        // chart's own ETH VWAP: the shared engine node, acquired the first time a map needs it.
+        let needs_vwap = self.slots.iter().any(|s| {
+            s.map
+                .as_ref()
+                .is_some_and(|m| m.levels.iter().any(|l| l.is_vwap_relative()))
+        });
+        if needs_vwap
+            && self.vwap.is_none()
+            && let Some(info) = self.feed
+        {
+            self.vwap = Some(engine().acquire(
+                info,
+                Spec::Vwap {
+                    period_ms: info.period_ms,
+                    vwap: VwapSpec {
+                        reset: Reset::Eth,
+                        bands: Bands(0),
+                    },
+                },
+            ));
+        }
+        let range = (vp.price_hi - vp.price_lo).abs().max(1e-9);
+        self.px_per_unit = (vp.height / range) as f32;
+        let mut vwap_now = None;
+        if let Some(h) = &self.vwap
+            && let Some(out) = h.cell().try_read()
+        {
+            vwap_now = out.points.last().map(|p| p.vwap);
+            build_columns(
+                &out.points,
+                data.series.bars(),
+                vp,
+                Bands(0),
+                &mut self.vwap_cols,
+            );
+        } else if self.vwap.is_none() {
+            self.vwap_cols.clear();
+        }
+        // 3. Placement.
+        for s in &mut self.slots {
             s.placed.clear();
             let source = s.handle.source();
             let Some(map) = s.map.as_ref() else { continue };
@@ -208,7 +277,7 @@ impl LevelsLayer {
                 }
             }
             s.kinds = mask;
-            place(map, vp, |k| mask & (1 << k) != 0, &mut s.placed);
+            place(map, vp, vwap_now, |k| mask & (1 << k) != 0, &mut s.placed);
             place_labels(&mut s.placed, map, LABEL_PX * 1.6, plot_h, last_y);
         }
     }
@@ -233,8 +302,26 @@ impl LevelsLayer {
         let scale = window.scale_factor();
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let pw = f32::from(plot.size.width);
+        let ppu = self.px_per_unit;
+        let cols = &self.vwap_cols;
         self.each(|map, p, dim| {
             let l = &map.levels[p.index as usize];
+            if let (true, Some((lo, hi))) = (p.vwap_relative, l.vwap_offsets()) {
+                // Along the VWAP, bar by bar.
+                if let LevelShape::Zone { .. } = l.shape {
+                    for c in cols {
+                        let (top, bottom) = (c.y - hi as f32 * ppu, c.y - lo as f32 * ppu);
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(px(ox + c.left), px(oy + top)),
+                                size(px(c.right - c.left), px((bottom - top).max(1.0 / scale))),
+                            ),
+                            colour(l.style.rgba, 0.10 * dim),
+                        ));
+                    }
+                }
+                return;
+            }
             if let LevelShape::Zone { .. } = l.shape {
                 let (top, bottom) = (snap(p.top as f64, scale), snap(p.bottom as f64, scale));
                 let h = (bottom - top).max(1.0 / scale);
@@ -273,9 +360,52 @@ impl LevelsLayer {
                 ));
             }
         };
+        let ppu = self.px_per_unit;
+        let cols = &self.vwap_cols;
+        // A VWAP-relative edge: a segment across each bar at VWAP + offset, joined to the
+        // previous bar of the same session; dashed draws every other bar.
+        let along = |window: &mut Window, offset: f64, weight: u8, dashed: bool, c: Hsla| {
+            let w = f32::from(weight.clamp(1, 4)) * hair;
+            let dy = offset as f32 * ppu;
+            let mut prev: Option<f32> = None;
+            for (i, col) in cols.iter().enumerate() {
+                let y = col.y - dy;
+                if !(dashed && i % 2 == 1) {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(px(ox + col.left), px(oy + y - w * 0.5)),
+                            size(px(col.right - col.left), px(w)),
+                        ),
+                        c,
+                    ));
+                }
+                if let (true, Some(py)) = (col.joins && !dashed, prev) {
+                    let (a, b) = (py.min(y), py.max(y));
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(px(ox + col.left - w * 0.5), px(oy + a - w * 0.5)),
+                            size(px(w), px(b - a + w)),
+                        ),
+                        c,
+                    ));
+                }
+                prev = Some(y);
+            }
+        };
         self.each(|map, p, dim| {
             let l = &map.levels[p.index as usize];
             let c = colour(l.style.rgba, dim);
+            if let (true, Some((lo, hi))) = (p.vwap_relative, l.vwap_offsets()) {
+                match l.shape {
+                    LevelShape::Line(_) => along(window, lo, l.style.weight, l.style.dashed, c),
+                    LevelShape::Zone { .. } => {
+                        let c = colour(l.style.rgba, 0.6 * dim);
+                        along(window, hi, 1, l.style.dashed, c);
+                        along(window, lo, 1, l.style.dashed, c);
+                    }
+                }
+                return;
+            }
             match l.shape {
                 LevelShape::Line(_) => line(window, p.top, l.style.weight, l.style.dashed, c),
                 LevelShape::Zone { .. } => {

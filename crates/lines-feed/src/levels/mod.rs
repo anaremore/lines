@@ -99,7 +99,8 @@ impl LevelContext {
     }
 }
 
-/// The chart's market data, for decoding (anchor translation: decision 0022).
+/// The chart's market data, for decoding (anchor translation: decision 0022). Also exported
+/// as [`PriceAtTime`].
 pub trait ChartPrices: Send + Sync {
     /// The chart's price at `t` (`lines_core::levels::price_at`): `None` when the chart's
     /// data doesn't cover `t`. Translation must then be withheld.
@@ -107,6 +108,12 @@ pub trait ChartPrices: Send + Sync {
     /// The chart's market clock (the replay clock in a replay), if it has data.
     fn now(&self) -> Option<UtcMillis>;
 }
+
+/// The price-at-time interface adapters translate with (decision 0022): the same trait as
+/// [`ChartPrices`], under the name adapters use. The helper itself is public too:
+/// [`price_at`] (`lines_core::levels::price_at`).
+pub use self::ChartPrices as PriceAtTime;
+pub use lines_core::levels::price_at;
 
 /// [`ChartPrices`] over a chart's store: its bars (history + live, stitched) and its market
 /// clock. Locks the store briefly; used on the levels thread only.
