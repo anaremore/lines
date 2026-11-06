@@ -9,6 +9,8 @@ use crate::bars::Bar;
 
 pub const MIN_BAR_PX: f64 = 1.0;
 pub const MAX_BAR_PX: f64 = 80.0;
+/// Bar width of a new chart, and after a double-click on the time axis.
+pub const DEFAULT_BAR_PX: f64 = 8.0;
 /// Default empty space (in bars) right of the newest bar when following live.
 pub const RIGHT_MARGIN_BARS: f64 = 3.0;
 const PRICE_PAD_FRACTION: f64 = 0.08;
@@ -37,7 +39,9 @@ pub struct Viewport {
     pub price_hi: f64,
     /// Fit the price range to visible bars every frame.
     pub auto_price: bool,
-    /// Keep the newest bar in view as new bars arrive.
+    /// A new bar shifts the view by one bar, so the newest bar keeps its place on screen.
+    /// On exactly while the newest bar is visible ([`Viewport::newest_visible`]); a view
+    /// scrolled back into history stays put.
     pub follow_live: bool,
     /// While following live: bars between the newest bar and the right edge. Set by
     /// whatever put the view at the live edge (pan, zoom, scaling), so new bars never make
@@ -54,7 +58,7 @@ impl Default for Viewport {
             width: 800.0,
             height: 600.0,
             right_index: 0.0,
-            bar_px: 8.0,
+            bar_px: DEFAULT_BAR_PX,
             price_lo: 0.0,
             price_hi: 1.0,
             auto_price: true,
@@ -180,6 +184,16 @@ impl Viewport {
         self.auto_price = true;
     }
 
+    /// Reset the time axis only (a double-click on it): the default bar width, back to the
+    /// newest bar with the default margin, following live. The price range is untouched
+    /// (a manual price scale stays manual).
+    pub fn reset_time(&mut self, len: usize) {
+        self.bar_px = DEFAULT_BAR_PX;
+        self.follow_live = true;
+        self.live_margin = RIGHT_MARGIN_BARS;
+        self.snap_to_latest(len);
+    }
+
     /// Jump to the newest bar and re-enable auto-scale and live following.
     pub fn reset(&mut self, len: usize) {
         self.auto_price = true;
@@ -245,8 +259,9 @@ impl Viewport {
         self.right_index = self.right_index.clamp(min_right.min(max_right), max_right);
     }
 
+    /// Follow live exactly while the newest bar is on screen, keeping its place.
     fn update_follow(&mut self, len: usize) {
-        self.follow_live = len > 0 && self.right_index >= (len - 1) as f64 + 0.5;
+        self.follow_live = self.newest_visible(len);
         if self.follow_live {
             self.live_margin = self.right_index - (len - 1) as f64;
         }
@@ -579,6 +594,57 @@ mod tests {
         );
         v.reset(bars.len());
         assert!(close(v.right_index, 300.0 + RIGHT_MARGIN_BARS));
+    }
+
+    #[test]
+    fn a_new_bar_shifts_the_view_only_while_the_newest_bar_is_visible() {
+        let mut bars = series(300);
+        let mut v = vp(); // 1000 px, 10 px per bar
+        v.on_data(&bars, 25);
+        // Newest bar in the middle of the plot: still visible, so a new bar keeps it there
+        // (the view shifts by one bar).
+        v.pan(-500.0, 0.0, bars.len());
+        assert!(v.newest_visible(bars.len()));
+        assert!(v.follow_live);
+        let x = v.index_to_x(299.0);
+        bars.extend(series(1));
+        v.on_data(&bars, 25);
+        assert!(
+            close(v.index_to_x(300.0), x),
+            "the newest bar keeps its place"
+        );
+        // Scrolled back so the newest bar is off the right edge: new bars don't move it.
+        v.pan(600.0, 0.0, bars.len());
+        assert!(!v.newest_visible(bars.len()));
+        assert!(!v.follow_live);
+        let right = v.right_index;
+        bars.extend(series(5));
+        v.on_data(&bars, 25);
+        assert_eq!(v.right_index, right);
+        // Newest bar's centre exactly on the right edge: visible, so following again.
+        v.pan(-10.0 * (bars.len() as f64 - 1.0 - right), 0.0, bars.len());
+        assert!(close(v.right_index, (bars.len() - 1) as f64));
+        assert!(v.follow_live);
+    }
+
+    #[test]
+    fn time_reset_leaves_the_price_axis_alone() {
+        let bars = series(300);
+        let mut v = vp();
+        v.on_data(&bars, 25);
+        v.zoom_price_at(100.0, 2.0, 25);
+        let (lo, hi) = (v.price_lo, v.price_hi);
+        v.zoom_at(500.0, 3.0, bars.len());
+        v.pan(900.0, 0.0, bars.len());
+        assert!(!v.follow_live);
+        v.reset_time(bars.len());
+        assert_eq!(v.bar_px, DEFAULT_BAR_PX);
+        assert!(v.follow_live);
+        assert!(close(v.right_index, 299.0 + RIGHT_MARGIN_BARS));
+        assert!(!v.auto_price, "manual price scale stays");
+        assert_eq!((v.price_lo, v.price_hi), (lo, hi));
+        v.on_data(&bars, 25);
+        assert_eq!((v.price_lo, v.price_hi), (lo, hi));
     }
 
     fn drag_at(mode: ScaleMode, x: f64, y: f64) -> (Viewport, ScaleDrag) {

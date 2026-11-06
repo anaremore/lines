@@ -323,6 +323,10 @@ struct Cli {
     /// Screenshot: the chart with its studies hidden (Ctrl+Shift+H in the app).
     #[arg(long, requires = "screenshot")]
     hide_studies: bool,
+    /// Magnet crosshair on the first chart: the price snaps to the hovered bar's
+    /// open/high/low/close (Ctrl+Shift+G in the app).
+    #[arg(long)]
+    magnet: bool,
     /// Screenshot: start the chart with these studies (a `StudySet` JSON file, as a template
     /// or the defaults for new charts hold them).
     #[arg(long, requires = "screenshot")]
@@ -700,6 +704,7 @@ where
                 None => None,
             },
             studies_menu: cli.studies_menu.clone(),
+            magnet: cli.magnet,
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),

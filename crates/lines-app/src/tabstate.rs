@@ -15,6 +15,8 @@ use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
 
+use lines_core::ProductId;
+
 use crate::layout::{LinkGroup, PaneKind};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -339,9 +341,35 @@ impl<T> ClosedTabs<T> {
     }
 }
 
+/// Crosshair sync is keyed by link group (as uPlot's sync key): a chart's crosshair is shown
+/// on the charts of its own group, and unlinked charts sync with each other.
+pub fn crosshair_peers(from: LinkGroup, to: LinkGroup) -> bool {
+    from == to
+}
+
+/// The synced crosshair carries its price only with price sync on and between charts of the
+/// same product (the same price scale and meaning; another product's price would be a
+/// different number on a different axis).
+pub fn syncs_price(price_sync: bool, from: ProductId, to: ProductId) -> bool {
+    price_sync && from == to
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crosshair_sync_is_keyed_by_link_group() {
+        assert!(crosshair_peers(Some(0), Some(0)));
+        assert!(!crosshair_peers(Some(0), Some(1)));
+        assert!(!crosshair_peers(Some(0), None));
+        assert!(!crosshair_peers(None, Some(2)));
+        assert!(crosshair_peers(None, None), "unlinked charts share one key");
+        let (es, nq) = (ProductId(1), ProductId(2));
+        assert!(syncs_price(true, es, es));
+        assert!(!syncs_price(true, es, nq));
+        assert!(!syncs_price(false, es, es));
+    }
     use crate::layout::{Axis, Layout, Preset, Rect};
 
     /// The pair: NQ (A) chart 1, DOM 2, tape 3 | ES (B) chart 4, DOM 5, tape 6.

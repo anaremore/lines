@@ -28,10 +28,15 @@
 //! background thread (decision 0001: never on the UI thread). While closed it costs nothing
 //! per frame.
 //!
-//! Crosshair time sync (decision 0016, opt-in per workspace): after each paint the chart emits
-//! [`CrosshairTime`] when the time under its pointer changed; the workspace hands it to the
-//! other charts, which mark that time with a vertical line and a time tag (no price: the
-//! instruments differ). Mapping a time back to a bar is pure (`geometry::time_slot`).
+//! Crosshair sync (decision 0016, opt-in per workspace): after each paint the chart emits
+//! [`CrosshairTime`] when the time or price under its pointer changed; the workspace hands it
+//! to the other charts of the same link group (`tabstate::crosshair_peers`), which mark that
+//! time with a vertical line and a time tag, and, with price sync on, the price as well where
+//! the product is the same (`tabstate::syncs_price`: other instruments' prices mean nothing
+//! here). Mapping a time back to a bar is pure (`geometry::time_slot`).
+//!
+//! Magnet crosshair (per chart, saved): over a bar the price snaps to its open, high, low or
+//! close, whichever is nearest the pointer (`geometry::magnet_price`).
 //!
 //! Layers (seam for the volume profile and other studies): a [`ChartLayer`] is prepared under
 //! the store lock with this frame's data and viewport, then painted inside the plot after the
@@ -49,10 +54,11 @@ use gpui::{
     TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::geometry::{
-    Crosshair, Span, crosshair, label_clear_of_tags, slot_x, snap, time_slot, write_ohlcv,
+    Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
+    snap, time_slot, write_ohlcv,
 };
 use lines_core::viewport::{MAX_BAR_PX, MIN_BAR_PX, ScaleDrag, ScaleMode};
-use lines_core::{Bar, FixedStr, Price, Product, Scene, UtcMillis, Viewport};
+use lines_core::{Bar, FixedStr, Price, Product, ProductId, Scene, UtcMillis, Viewport};
 use lines_feed::ChartData;
 use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
@@ -82,6 +88,9 @@ const MANUAL_LABEL: &str = "manual";
 enum LabelKind {
     Price,
     Time,
+    /// A time gridline's date (`MM-DD`), and date with time.
+    Date,
+    DateTime,
     LastPrice,
     CrossPrice,
     CrossTime,
@@ -137,6 +146,8 @@ pub struct Fixture {
     /// Open the studies menu (screenshots): `open`, or `edit:vwap:N`, `edit:profile`,
     /// `edit:levels:ID` to open that study's editor.
     pub studies_menu: Option<String>,
+    /// Start with the magnet crosshair (screenshots: `--magnet`).
+    pub magnet: bool,
 }
 
 /// Which part of a studies-menu row a click hit.
@@ -170,10 +181,16 @@ struct Rates {
     paints_per_sec: f64,
 }
 
-/// The time under this chart's crosshair changed (`None`: it left the plot). The workspace
-/// forwards it to the other charts when crosshair sync is on.
+/// What is under this chart's crosshair changed (`time: None`: it left the plot). The
+/// workspace forwards it to the chart's link group when crosshair sync is on.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CrosshairTime(pub Option<UtcMillis>);
+pub struct CrosshairTime {
+    pub time: Option<UtcMillis>,
+    /// The crosshair's price (with the magnet: the bar's open/high/low/close).
+    pub price: Option<Price>,
+    /// The chart's product: prices sync only between charts of the same product.
+    pub product: ProductId,
+}
 
 pub struct ChartView {
     feed: PaneFeed,
@@ -220,8 +237,16 @@ pub struct ChartView {
     synced_time: Option<UtcMillis>,
     /// This frame's sync marker: plot-local x of the synced time's bar, and the time.
     sync_marker: Option<(f32, UtcMillis)>,
+    /// Another chart's crosshair price (price sync, same product only).
+    synced_price: Option<Price>,
+    /// This frame's synced price, with its plot-local y (when on screen).
+    sync_price: Option<(f32, Price)>,
+    /// Magnet crosshair: snap to the hovered bar's open/high/low/close (saved).
+    crosshair_mode: CrosshairMode,
+    /// Axis label spacing has been measured with this window's font.
+    space_measured: bool,
     /// The time this chart last reported under its own crosshair.
-    reported_time: Option<UtcMillis>,
+    reported: (Option<UtcMillis>, Option<Price>),
     /// Screenshot fixture: price zoom to apply once, after the first auto-fit.
     pending_price_zoom: Option<f64>,
     /// Pointer position in plot-local logical px, while it is over the plot.
@@ -292,7 +317,15 @@ impl ChartView {
             focus: cx.focus_handle(),
             synced_time: None,
             sync_marker: None,
-            reported_time: None,
+            synced_price: None,
+            sync_price: None,
+            crosshair_mode: if fixture.magnet {
+                CrosshairMode::Magnet
+            } else {
+                CrosshairMode::Normal
+            },
+            space_measured: false,
+            reported: (None, None),
             hover: fixture.cursor,
             pending_price_zoom: fixture.price_zoom,
             cross: None,
@@ -595,7 +628,8 @@ impl ChartView {
             match region {
                 Region::Plot => self.vp.reset(self.series_len),
                 Region::PriceAxis => self.vp.restore_auto_price(),
-                Region::TimeAxis => return,
+                // Each axis resets only itself: time = bar width and the live edge.
+                Region::TimeAxis => self.vp.reset_time(self.series_len),
             }
             cx.notify();
             return;
@@ -721,15 +755,44 @@ impl ChartView {
     }
 
     /// Another chart's crosshair time (crosshair sync); `None` clears it.
-    pub fn set_synced_time(&mut self, t: Option<UtcMillis>, cx: &mut Context<Self>) {
-        if self.synced_time != t {
+    pub fn set_synced_time(
+        &mut self,
+        t: Option<UtcMillis>,
+        price: Option<Price>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.synced_time != t || self.synced_price != price {
             self.synced_time = t;
+            self.synced_price = price;
             cx.notify();
         }
     }
 
+    /// The product this chart shows.
+    pub fn product(&self) -> ProductId {
+        self.instrument.id
+    }
+
+    /// Magnet crosshair (snap to OHLC) on this chart.
+    pub fn magnet(&self) -> bool {
+        self.crosshair_mode == CrosshairMode::Magnet
+    }
+
+    /// The `ToggleMagnet` command.
+    pub fn toggle_magnet(&mut self, cx: &mut Context<Self>) {
+        self.crosshair_mode = if self.magnet() {
+            CrosshairMode::Normal
+        } else {
+            CrosshairMode::Magnet
+        };
+        cx.notify();
+    }
+
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
+        if state.magnet {
+            self.crosshair_mode = CrosshairMode::Magnet;
+        }
         if state.bar_px.is_finite() {
             self.vp.bar_px = state.bar_px.clamp(MIN_BAR_PX, MAX_BAR_PX);
         }
@@ -945,6 +1008,12 @@ impl ChartView {
         self.vp.set_size(plot_w as f64, plot_h as f64);
         // Only allocates when the window grows wider than ever before.
         self.scene.ensure_capacity(plot_w as f64);
+        if self.font.is_none() {
+            self.font = Some(window.text_style().font());
+        }
+        if !self.space_measured {
+            self.measure_grid_space(window);
+        }
 
         // Sample the feed. If it holds the lock this instant, redraw the previous scene.
         if let Some(d) = self.store.try_read() {
@@ -977,6 +1046,7 @@ impl ChartView {
                     fmt.tick,
                     self.period_ms,
                     scale,
+                    self.crosshair_mode,
                     f64::from(x),
                     f64::from(y),
                 )
@@ -987,6 +1057,11 @@ impl ChartView {
                 let slot = time_slot(bars, t, self.period_ms)?;
                 let x = slot_x(&self.vp, slot as f64, scale);
                 (x >= 0.0 && f64::from(x) < self.vp.width).then_some((x, t))
+            });
+            // And its price, if this chart is told it (same product, price sync on).
+            self.sync_price = self.synced_price.and_then(|p| {
+                let y = snap(self.vp.price_to_y(p.0 as f64), scale);
+                (y >= 0.0 && f64::from(y) < self.vp.height).then_some((y, p))
             });
             let max_columns = crate::studies::Studies::max_columns(self.plot.size.width);
             prepare_studies(
@@ -1011,16 +1086,20 @@ impl ChartView {
             self.cross_bar = None;
         }
 
-        if self.font.is_none() {
-            self.font = Some(window.text_style().font());
-        }
         self.draw(bounds, window, cx);
 
-        // Crosshair sync: report this frame's time under the pointer when it changed.
-        let time = self.cross.and_then(|c| c.time);
-        if time != self.reported_time {
-            self.reported_time = time;
-            cx.emit(CrosshairTime(time));
+        // Crosshair sync: report this frame's time and price under the pointer when changed.
+        let now = (
+            self.cross.and_then(|c| c.time),
+            self.cross.filter(|c| c.time.is_some()).map(|c| c.price),
+        );
+        if now != self.reported {
+            self.reported = now;
+            cx.emit(CrosshairTime {
+                time: now.0,
+                price: now.1,
+                product: self.instrument.id,
+            });
         }
 
         let us = t0.elapsed().as_secs_f64() * 1e6;
@@ -1126,6 +1205,9 @@ impl ChartView {
                 && let Some((x, _)) = self.sync_marker
             {
                 window.paint_quad(fill(rect(x - hair * 0.5, 0.0, hair, ph), t.crosshair));
+                if let Some((y, _)) = self.sync_price {
+                    window.paint_quad(fill(rect(0.0, y, pw, hair), t.crosshair));
+                }
             }
             if let Some(c) = self.cross {
                 // Vertical line through the wick; the horizontal one stops either side of it
@@ -1145,11 +1227,29 @@ impl ChartView {
         // The tags drawn over the price axis below; a label any of them would cover isn't
         // drawn at all (a half-covered number reads as another price).
         let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
+        // The synced price shows only with the synced time (both from the other chart).
+        let sync_price = self
+            .sync_price
+            .filter(|_| self.cross.is_none() && self.sync_marker.is_some());
         let tags = [
             last_y.map(|y| Span::around(y, TAG_H * 0.5)),
             self.cross
                 .map(|c| Span::around(cross_tag_y(c.y, ph), TAG_H * 0.5)),
+            sync_price.map(|(y, _)| Span::around(cross_tag_y(y, ph), TAG_H * 0.5)),
         ];
+        // The time tag (own crosshair, else the synced time) on the time axis: time labels
+        // it would cover aren't drawn either.
+        let time_tag = match self.cross {
+            Some(c) => c.time.map(|time| (c.x, time)),
+            None => self.sync_marker,
+        }
+        .map(|(x, time)| {
+            let (left, w) = self.time_tag_box(x, time, window);
+            Span {
+                top: left,
+                bottom: left + w,
+            }
+        });
         for i in 0..self.scene.price_lines.len() {
             let l = self.scene.price_lines[i];
             if l.y < 0.0 || l.y > ph {
@@ -1174,22 +1274,28 @@ impl ChartView {
         }
         for i in 0..self.scene.time_lines.len() {
             let l = self.scene.time_lines[i];
-            if l.x < 0.0 || l.x > pw - 20.0 {
+            if l.x < 0.0 {
+                continue;
+            }
+            let kind = match l.label {
+                TimeLabel::Time => LabelKind::Time,
+                TimeLabel::Date => LabelKind::Date,
+                TimeLabel::DateTime => LabelKind::DateTime,
+            };
+            let text = |s: &mut FixedStr<32>| {
+                let _ = l.label.write(l.time, s);
+            };
+            let w = f32::from(self.label(kind, l.time.0, t.text_dim, window, text).width);
+            // Entirely on the time axis (not under the price axis), clear of the time tag.
+            let span = Span {
+                top: l.x + 4.0,
+                bottom: l.x + 4.0 + w,
+            };
+            if span.bottom > pw || !label_clear_of_tags(span, &[time_tag]) {
                 continue;
             }
             let origin = point(px(ox + l.x + 4.0), px(oy + ph + 4.0));
-            self.paint_label(
-                LabelKind::Time,
-                l.time.0,
-                origin,
-                line_h,
-                t.text_dim,
-                window,
-                cx,
-                |s| {
-                    let _ = l.time.write_axis_label(s);
-                },
-            );
+            self.paint_label(kind, l.time.0, origin, line_h, t.text_dim, window, cx, text);
         }
         if let (Some(p), Some(y)) = (self.last_trade, last_y) {
             window.paint_quad(fill(
@@ -1217,6 +1323,9 @@ impl ChartView {
             self.draw_crosshair_tags(c, bounds, window, cx);
         } else if let Some((x, time)) = self.sync_marker {
             self.draw_time_tag(x, time, bounds, window, cx);
+            if let Some((y, price)) = sync_price {
+                self.draw_price_tag(y, price, bounds, window, cx);
+            }
         }
         if let Some(bar) = self.cross_bar {
             self.draw_readout(bar, bounds, window, cx);
@@ -1271,6 +1380,22 @@ impl ChartView {
         window: &mut Window,
         cx: &mut App,
     ) {
+        self.draw_price_tag(c.y, c.price, bounds, window, cx);
+        if let Some(time) = c.time {
+            self.draw_time_tag(c.x, time, bounds, window, cx);
+        }
+    }
+
+    /// A crosshair price tag on the price axis at plot-local `y`: same box as the last-price
+    /// tag, kept fully inside the plot's height.
+    fn draw_price_tag(
+        &mut self,
+        y: f32,
+        price: Price,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let t = self.theme;
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
@@ -1281,9 +1406,7 @@ impl ChartView {
         );
         let line_h = px(LABEL_PX * 1.3);
         let fmt = self.instrument.price;
-
-        // Price tag: same box as the last-price tag, kept fully inside the plot's height.
-        let y = cross_tag_y(c.y, ph);
+        let y = cross_tag_y(y, ph);
         let top = snap(f64::from(y - TAG_H * 0.5), scale);
         window.paint_quad(fill(
             Bounds::new(
@@ -1292,7 +1415,6 @@ impl ChartView {
             ),
             t.cross_tag,
         ));
-        let price = c.price;
         self.paint_label(
             LabelKind::CrossPrice,
             price.0,
@@ -1305,10 +1427,46 @@ impl ChartView {
                 let _ = fmt.write(price, s);
             },
         );
+    }
 
-        if let Some(time) = c.time {
-            self.draw_time_tag(c.x, time, bounds, window, cx);
-        }
+    /// Measure the axis labels' spacing (`GridSpace`) with this window's font, once.
+    fn measure_grid_space(&mut self, window: &mut Window) {
+        let dim = self.theme.text_dim;
+        let mut w = |key: i64, text: &'static str| {
+            f32::from(
+                self.label(LabelKind::Indicator, key, dim, window, |s| {
+                    let _ = s.write_str(text);
+                })
+                .width,
+            ) as f64
+        };
+        // Widest digits; a gap of two digits' width between labels.
+        let (time, date_time) = (w(1, "88:88"), w(2, "88-88 88:88"));
+        let gap = time * 0.4 + 8.0;
+        self.scene.space = GridSpace {
+            price_px: f64::from(LABEL_PX) * 2.5,
+            time_px: time + gap,
+            date_time_px: date_time + gap,
+        };
+        self.space_measured = true;
+    }
+
+    /// The time tag's box for `time` at plot-local `x`: (left, width), centred on `x` and
+    /// kept on the time axis.
+    fn time_tag_box(&mut self, x: f32, time: UtcMillis, window: &mut Window) -> (f32, f32) {
+        let scale = window.scale_factor();
+        let pw = f32::from(self.plot.size.width);
+        let period = self.period_ms;
+        let on = self.theme.on_cross_tag;
+        let text_w = f32::from(
+            self.label(LabelKind::CrossTime, time.0, on, window, |s| {
+                let _ = time.write_crosshair_label(period, s);
+            })
+            .width,
+        );
+        let box_w = text_w + 12.0;
+        let left = snap(f64::from((x - box_w * 0.5).min(pw - box_w).max(0.0)), scale);
+        (left, box_w)
     }
 
     /// A time tag on the time axis, centred on `x` (plot-local) and clamped to the axis.
@@ -1324,21 +1482,13 @@ impl ChartView {
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let (pw, ph) = (
-            f32::from(self.plot.size.width),
-            f32::from(self.plot.size.height),
-        );
+        let ph = f32::from(self.plot.size.height);
         let line_h = px(LABEL_PX * 1.3);
         let period = self.period_ms;
         let text = move |s: &mut FixedStr<32>| {
             let _ = time.write_crosshair_label(period, s);
         };
-        let text_w = f32::from(
-            self.label(LabelKind::CrossTime, time.0, t.on_cross_tag, window, text)
-                .width,
-        );
-        let box_w = text_w + 12.0;
-        let left = snap(f64::from((x - box_w * 0.5).min(pw - box_w).max(0.0)), scale);
+        let (left, box_w) = self.time_tag_box(x, time, window);
         window.paint_quad(fill(
             Bounds::new(
                 point(px(ox + left), px(oy + ph + hair)),
@@ -1604,6 +1754,7 @@ impl Pane for ChartView {
             profile: self.profile.config(),
             visibility: self.visibility,
             levels: self.levels.config.clone(),
+            magnet: self.magnet(),
         });
     }
 
