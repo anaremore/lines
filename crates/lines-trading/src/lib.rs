@@ -12,6 +12,8 @@
 //!   book walking, stops, partial fills, fees, sessions, server-side brackets/OCO).
 //! - [`position`]: exact FIFO P&L; [`types::Money`]: exact money.
 //! - [`persist`]: the versioned paper trading file.
+//! - [`extension`]: the broker extension point (decision 0020): brokers registered from outside
+//!   the public crates, with capabilities and an account source.
 //!
 //! No GPUI. Live brokers come later through decision 0014's private connector.
 
@@ -19,6 +21,7 @@ pub mod broker;
 pub mod command;
 pub mod core;
 pub mod event;
+pub mod extension;
 pub mod market;
 pub mod order;
 pub mod paper;
