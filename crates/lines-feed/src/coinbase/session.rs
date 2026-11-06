@@ -118,6 +118,8 @@ pub struct CoinbaseSession {
     head_issued: bool,
     /// REST trades in the forming bar, collected across pages.
     forming: Vec<RestFill>,
+    /// History older than the page budget: reported as a gap with the first response.
+    unfetched: Option<(UtcMillis, UtcMillis)>,
 }
 
 /// A REST trade inside the forming bar.
@@ -231,6 +233,7 @@ impl CoinbaseSession {
             last_ws_time: UtcMillis(i64::MIN),
             head_issued: false,
             forming: Vec::new(),
+            unfetched: None,
         }
     }
 
@@ -773,7 +776,11 @@ impl ProviderSession for CoinbaseSession {
             pages.push(Request::Candles { start, end_excl });
             end_excl = start;
         }
-        // History is bounded: anything older than the page budget is not requested.
+        // History is bounded: anything older than the page budget is not requested, and is
+        // reported as missing (e.g. a local store whose newest bar is older than this).
+        if end_excl > wanted {
+            self.unfetched = Some((wanted, end_excl));
+        }
         self.queue.extend(pages.into_iter().rev());
         self.queue.push_back(Request::Trades { after: None });
         self.issue_head(out);
@@ -791,6 +798,9 @@ impl ProviderSession for CoinbaseSession {
             FrameKind::Http => {
                 // Live: this answers the head request. Replay: the queue is irrelevant.
                 self.queue.pop_front();
+                if let Some((from, to)) = self.unfetched.take() {
+                    events.push(MarketEvent::HistoryGap { from, to });
+                }
                 self.head_issued = false;
                 let (url, body) = split_http(&frame.data);
                 match url {
@@ -935,6 +945,11 @@ mod tests {
             .filter(|r| matches!(r, Request::Candles { .. }))
             .count();
         assert_eq!(candle_pages, MAX_CANDLE_PAGES);
+        // What the page budget can't reach is reported missing with the first response.
+        let (mut s, _) = start(None, 100 * 24 * 60 * 60_000);
+        let f = reply(&s, "[]");
+        let (ev, _) = feed(&mut s, f);
+        assert!(matches!(ev[0], MarketEvent::HistoryGap { .. }), "{ev:?}");
         // Reconnect within the same minute: only the forming bar's trades.
         let (s, _) = start(Some(iso("2026-11-06T14:05:00Z")), 1000 * 60_000);
         assert_eq!(s.queue.len(), 1);

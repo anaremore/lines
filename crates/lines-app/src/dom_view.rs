@@ -218,6 +218,7 @@ impl DomView {
             }
         }
         self.draw(bounds, window, cx);
+        pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
     }
 
     fn draw(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
@@ -384,7 +385,14 @@ impl DomView {
             .border_b_1()
             .border_color(t.axis_line)
             .text_size(px(12.0))
-            .child(div().text_color(t.text_main).child(left))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .child(div().text_color(t.text_main).child(left))
+                    .children(pane::stale_badge(&self.store, &t)),
+            )
             .child(
                 div()
                     .flex()

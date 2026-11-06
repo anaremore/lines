@@ -98,7 +98,7 @@ pub struct Recorder {
     worker: Option<thread::JoinHandle<io::Result<()>>>,
 }
 
-fn write_str(w: &mut impl Write, s: &str) -> io::Result<()> {
+pub(crate) fn write_str(w: &mut impl Write, s: &str) -> io::Result<()> {
     let len = u16::try_from(s.len()).map_err(|_| io::Error::other("header string too long"))?;
     w.write_all(&len.to_le_bytes())?;
     w.write_all(s.as_bytes())
@@ -355,13 +355,13 @@ impl<R: Read> Reader<R> {
     }
 }
 
-fn read_n<const N: usize, R: Read>(r: &mut R) -> io::Result<[u8; N]> {
+pub(crate) fn read_n<const N: usize, R: Read>(r: &mut R) -> io::Result<[u8; N]> {
     let mut b = [0u8; N];
     r.read_exact(&mut b)?;
     Ok(b)
 }
 
-fn write_contract(w: &mut impl Write, c: Option<ContractKey>) -> io::Result<()> {
+pub(crate) fn write_contract(w: &mut impl Write, c: Option<ContractKey>) -> io::Result<()> {
     let Some(k) = c else {
         return w.write_all(&[0]);
     };
@@ -378,7 +378,7 @@ fn write_contract(w: &mut impl Write, c: Option<ContractKey>) -> io::Result<()> 
     Ok(())
 }
 
-fn read_contract<R: Read>(r: &mut R) -> io::Result<Option<ContractKey>> {
+pub(crate) fn read_contract<R: Read>(r: &mut R) -> io::Result<Option<ContractKey>> {
     let kind = read_n::<1, _>(r)?[0];
     if kind == 0 {
         return Ok(None);
@@ -396,7 +396,7 @@ fn read_contract<R: Read>(r: &mut R) -> io::Result<Option<ContractKey>> {
     }
 }
 
-fn read_str<R: Read>(r: &mut R) -> io::Result<String> {
+pub(crate) fn read_str<R: Read>(r: &mut R) -> io::Result<String> {
     let len = u16::from_le_bytes(read_n(r)?) as usize;
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;

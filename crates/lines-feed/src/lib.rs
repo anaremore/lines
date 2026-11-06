@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod coinbase;
 pub mod connection;
 pub mod cqg;
+pub mod disk;
 pub mod native;
 pub mod provider;
 pub mod recording;
@@ -27,7 +28,7 @@ use lines_core::{CivilDate, ContractKey, Product, UtcMillis};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
-use connection::{ConnectionEnd, ConnectionError, ConnectionOptions, run_connection};
+use connection::{ConnectionEnd, ConnectionError, ConnectionOptions, EventSink, NoSink};
 use cqg::mock::{MockConfig, MockMarket, MockTransport};
 use provider::Provider;
 use recording::Recorder;
@@ -83,6 +84,11 @@ pub struct FeedConfig {
     /// History requested when none is stored (default 3 days of 1-minute bars). Must fit in
     /// `max_bars`; reconnects request only from the newest stored bar.
     pub history_ms: i64,
+    /// Keep this feed in the local market-data store (decision 0019); `None` = don't.
+    pub store: Option<disk::StoreConfig>,
+    /// Override how long a live feed may be silent before panes show it stale
+    /// (default per provider, [`stale_after`]).
+    pub stale_after: Option<Duration>,
 }
 
 impl FeedConfig {
@@ -94,6 +100,8 @@ impl FeedConfig {
             bar_period_ms: UtcMillis::MINUTE,
             max_bars: 50_000,
             history_ms: 3 * 24 * 60 * UtcMillis::MINUTE,
+            store: None,
+            stale_after: None,
         }
     }
 }
@@ -323,6 +331,14 @@ pub async fn run_feed(
         },
         None => None,
     };
+    // The local store: cached bars first (panes show them at once), then the feed fills from
+    // where they end. One writer per contract; a roll switches it.
+    let mut writer = open_writer(&config, &plan.product, plan.contract, &store);
+    store.set_stale_after(
+        config
+            .stale_after
+            .unwrap_or_else(|| stale_after(plan.provider.id())),
+    );
     let mock_market = match &config.source {
         Source::CqgMock(m) => Some(match &m.market {
             Some(shared) => shared.0.clone(),
@@ -363,6 +379,8 @@ pub async fn run_feed(
             {
                 tracing::info!("front month rolled to {}", k.label(&plan.product));
                 store.update(|d| d.switch_contract(k));
+                drop(writer.take());
+                writer = open_writer(&config, &plan.product, Some(k), &store);
                 // Recordings hold exactly one contract: stop rather than mix two.
                 if let Some(r) = recorder.take() {
                     tracing::warn!("recording stopped at the roll (recordings hold one contract)");
@@ -384,31 +402,47 @@ pub async fn run_feed(
         };
         let session = session.as_mut();
         let rec = recorder.as_ref();
+        let mut no_sink = NoSink;
+        let sink: &mut dyn EventSink = match writer.as_mut() {
+            Some(w) => w,
+            None => &mut no_sink,
+        };
 
         let result = match &config.source {
             Source::CqgMock(m) => {
                 let t =
                     MockTransport::connect(m.clone(), mock_market.clone().expect("mock market"));
-                drive(t, rec, session, &store, &opts, &mut shutdown).await
+                drive(t, rec, session, &store, &opts, &mut shutdown, sink).await
+            }
+            // A stored contract or day replays like a recording (decision 0019).
+            Source::Replay {
+                path,
+                speed,
+                stop_at,
+            } if disk::is_stored(path) => {
+                match disk::replay::SegmentReplay::open(path, *speed, *stop_at) {
+                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
+                    Err(e) => Err(ConnectionError::Transport(e)),
+                }
             }
             Source::Replay {
                 path,
                 speed,
                 stop_at,
             } => match ReplayTransport::open(path, *speed, *stop_at) {
-                Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
+                Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
                 Err(e) => Err(ConnectionError::Transport(e)),
             },
             #[cfg(feature = "vendor-cqg")]
             Source::Cqg { url, .. } => {
                 match WsTransport::connect(url, Duration::from_secs(15)).await {
-                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
+                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
                     Err(e) => Err(ConnectionError::Transport(e)),
                 }
             }
             Source::Coinbase { url } => {
                 match WsTransport::connect(url, Duration::from_secs(15)).await {
-                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
+                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
                     Err(e) => Err(ConnectionError::Transport(e)),
                 }
             }
@@ -468,12 +502,65 @@ async fn drive<T: Transport>(
     store: &ChartStore,
     opts: &ConnectionOptions,
     shutdown: &mut watch::Receiver<bool>,
+    sink: &mut dyn EventSink,
 ) -> Result<ConnectionEnd, ConnectionError> {
+    use connection::run_connection_with;
     match recorder {
-        Some(r) => run_connection(&mut Recording::new(t, r), session, store, opts, shutdown).await,
+        Some(r) => {
+            run_connection_with(
+                &mut Recording::new(t, r),
+                session,
+                store,
+                opts,
+                shutdown,
+                sink,
+            )
+            .await
+        }
         None => {
             let mut t = t;
-            run_connection(&mut t, session, store, opts, shutdown).await
+            run_connection_with(&mut t, session, store, opts, shutdown, sink).await
         }
+    }
+}
+
+/// Open the local store's writer for a contract and show its cached bars. Store problems
+/// never stop the feed: they are logged and the feed runs without the store.
+fn open_writer(
+    config: &FeedConfig,
+    product: &Product,
+    contract: Option<ContractKey>,
+    store: &Arc<ChartStore>,
+) -> Option<disk::ContractWriter> {
+    let cfg = config.store.as_ref()?;
+    match disk::ContractWriter::open(cfg, product, contract, store.clone()) {
+        Ok((w, opened)) => {
+            tracing::info!(
+                "local store {}: {} cached bars{}",
+                w.dir().path.display(),
+                opened.bars.len(),
+                if opened.rebuilt {
+                    " (rebuilt from segments)"
+                } else {
+                    ""
+                }
+            );
+            store.update(|d| d.load_cached(&opened.bars));
+            Some(w)
+        }
+        Err(e) => {
+            tracing::warn!("local store unavailable: {e}");
+            None
+        }
+    }
+}
+
+/// How long a live feed may go without any frame before panes show it as stale
+/// (docs/design.md §7). Coinbase and the mock send several frames a second (Coinbase has a
+/// 1 s heartbeat); CQG can be quiet in slow markets, so it gets longer.
+pub fn stale_after(provider: &str) -> Duration {
+    match provider {
+        provider::CQG => Duration::from_secs(10),
+        _ => Duration::from_secs(5),
     }
 }
