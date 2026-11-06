@@ -19,6 +19,7 @@ lines-core = { path = "crates/lines-core" }
 cqg-proto = { path = "crates/cqg-proto" }
 lines-feed = { path = "crates/lines-feed" }
 lines-indicators = { path = "crates/lines-indicators" }
+lines-trading = { path = "crates/lines-trading" }
 
 # GPUI is pinned to an exact Zed commit. The crates.io release (0.2.2, Oct 2025) is
 # far behind main. Bump deliberately: change BOTH revs together, rebuild, fix API drift.
