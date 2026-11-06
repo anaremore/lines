@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use lines_core::{ContractKey, Delivery, Month, ProductId};
+use lines_core::{ContractKey, Delivery, Month, ProductId, Timeframe};
 use lines_feed::catalog::{self, Target};
 use serde::{Deserialize, Serialize};
 
@@ -253,6 +253,39 @@ pub struct ChartState {
     /// written only when on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub magnet: bool,
+    /// The chart's timeframe (roadmap 9), e.g. `"5m"`, `"1h"`, `"1D"`. Optional: absent means
+    /// 1 minute; a value this version doesn't offer also loads as 1 minute.
+    #[serde(default, skip_serializing_if = "TimeframeDoc::is_default")]
+    pub timeframe: TimeframeDoc,
+}
+
+/// A chart timeframe in the workspace file, as its label (`"5m"`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TimeframeDoc(pub Timeframe);
+
+impl Default for TimeframeDoc {
+    fn default() -> Self {
+        TimeframeDoc(Timeframe::ONE_MINUTE)
+    }
+}
+
+impl TimeframeDoc {
+    pub fn is_default(&self) -> bool {
+        self.0.is_one_minute()
+    }
+}
+
+impl Serialize for TimeframeDoc {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeframeDoc {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Timeframe::parse(&s).map_or_else(TimeframeDoc::default, TimeframeDoc))
+    }
 }
 
 /// What a chart draws of its studies (VWAP lines and bands, the volume profile). Hiding
@@ -642,12 +675,37 @@ mod tests {
         assert!(back.crosshair_sync_price);
     }
 
+    /// Roadmap 9: a chart's timeframe is optional in the file (absent = 1 minute), saved as its
+    /// label, and an unknown value loads as 1 minute rather than failing the file.
+    #[test]
+    fn chart_timeframe_is_optional_and_round_trips() {
+        let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
+        assert_eq!(old.timeframe.0, Timeframe::ONE_MINUTE);
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("timeframe"), "{json}");
+        for tf in Timeframe::ALL {
+            let state = ChartState {
+                timeframe: TimeframeDoc(tf),
+                ..old.clone()
+            };
+            let json = serde_json::to_string(&state).unwrap();
+            if !tf.is_one_minute() {
+                assert!(json.contains(&format!(r#""timeframe":"{tf}""#)), "{json}");
+            }
+            assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), state);
+        }
+        let future: ChartState =
+            serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "3s"}"#).unwrap();
+        assert_eq!(future.timeframe.0, Timeframe::ONE_MINUTE);
+    }
+
     /// Roadmap 5c: a chart's indicators are saved with it; files from before load with none.
     #[test]
     fn chart_indicators_are_optional_and_round_trip() {
         let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
         assert!(old.indicators.is_empty());
         let state = ChartState {
+            timeframe: Default::default(),
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -667,6 +725,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), state);
         // None saved: the field is left out, so the file stays as before.
         let none = serde_json::to_string(&ChartState {
+            timeframe: Default::default(),
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -746,6 +805,7 @@ mod tests {
                     focused: 0,
                     layout: Layout::Pane(PaneDoc {
                         chart: Some(ChartState {
+                            timeframe: Default::default(),
                             bar_px: 9.5,
                             visibility: StudyVisibility::default(),
                             levels: Default::default(),
@@ -816,6 +876,7 @@ mod tests {
         assert!(old.visibility.draws_studies() && old.visibility.draws_labels());
         // Set: flat keys, round-trip; unset: not written.
         let hidden = ChartState {
+            timeframe: Default::default(),
             bar_px: 7.0,
             visibility: StudyVisibility {
                 hide_study_labels: true,
@@ -918,6 +979,7 @@ mod tests {
         use crate::profile::{ProfileMode, ProfileSession};
         let chart = |profile| PaneDoc {
             chart: Some(ChartState {
+                timeframe: Default::default(),
                 bar_px: 7.0,
                 visibility: StudyVisibility::default(),
                 levels: Default::default(),
@@ -945,6 +1007,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<PaneDoc>(&json).unwrap(), chart(set));
         // Beside VWAP: two independent optional fields; each loads without the other.
         let both = ChartState {
+            timeframe: Default::default(),
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -1017,6 +1080,7 @@ mod tests {
         assert_eq!(
             leaves[0].chart,
             Some(ChartState {
+                timeframe: Default::default(),
                 bar_px: 6.0,
                 visibility: StudyVisibility::default(),
                 levels: Default::default(),

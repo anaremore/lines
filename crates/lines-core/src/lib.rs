@@ -21,11 +21,12 @@ pub mod sessions;
 pub mod stitch;
 pub mod tape;
 pub mod time;
+pub mod timeframe;
 pub mod trail;
 pub mod vap;
 pub mod viewport;
 
-pub use bars::{Bar, BarSeries, TradeOutcome};
+pub use bars::{Bar, BarSeries, Changed, TradeOutcome};
 pub use book::{Level, OrderBook, Side};
 pub use calendar::CivilDate;
 pub use fixed_str::FixedStr;
@@ -43,5 +44,6 @@ pub use sessions::{
 pub use stitch::{StitchStats, Stitcher};
 pub use tape::{Aggressor, Print, Tape};
 pub use time::UtcMillis;
+pub use timeframe::{BarsView, Derived, Timeframe};
 pub use vap::VolumeAtPrice;
 pub use viewport::Viewport;

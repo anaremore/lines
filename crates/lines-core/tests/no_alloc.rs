@@ -416,3 +416,54 @@ fn dom_trail_does_not_allocate() {
     });
     assert_eq!(n, 0, "the trail allocated {n} times");
 }
+
+#[test]
+fn timeframe_updates_do_not_allocate() {
+    use lines_core::sessions::{ExchangeHours, Hours, SessionSpec};
+    use lines_core::{Derived, LocalTime, SessionCalendar, Timeframe};
+    let cal = SessionCalendar::new(
+        SessionSpec {
+            time_zone: "America/Chicago",
+            hours: Hours::Exchange(ExchangeHours {
+                eth_open: LocalTime::hm(17, 0),
+                eth_close: LocalTime::hm(16, 0),
+                rth: Some((LocalTime::hm(8, 30), LocalTime::hm(15, 0))),
+            }),
+            holidays: None,
+        },
+        None,
+    )
+    .unwrap();
+    let start = UtcMillis::parse_iso("2026-11-09T23:00:00Z").unwrap().0;
+    let mut series = BarSeries::new(UtcMillis::MINUTE, 2_000);
+    let mut derived: Vec<Derived> = Timeframe::ALL
+        .iter()
+        .map(|&tf| Derived::new(tf, series.capacity()))
+        .collect();
+    let tick = |s: &mut BarSeries, i: i64| {
+        let at = UtcMillis(start + i * 20_000);
+        s.apply_trade(at, Price(500_000 + (i % 17) * 25), Qty(1));
+    };
+    for i in 0..3_000 {
+        tick(&mut series, i);
+    }
+    for d in &mut derived {
+        d.update(&series, Some(&cal));
+    }
+    // Ticks (the forming bucket), a late history bar and a trim: none allocate.
+    let n = allocs_during(|| {
+        for i in 3_000..12_000 {
+            tick(&mut series, i);
+            if i % 500 == 0 {
+                let mut b = series.bars()[series.len() / 2];
+                b.volume = Qty(99);
+                series.upsert(b);
+            }
+            for d in &mut derived {
+                d.update(&series, Some(&cal));
+            }
+        }
+    });
+    assert!(series.trimmed() > 0, "the test covers a trim");
+    assert_eq!(n, 0, "timeframe updates allocated {n} times");
+}

@@ -13,8 +13,7 @@
 use gpui::{
     AnyElement, IntoElement, ParentElement, PathBuilder, Pixels, Styled, Window, div, point, px,
 };
-use lines_core::{Product, Viewport};
-use lines_feed::ChartData;
+use lines_core::{BarsView, Product, Viewport};
 use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
 use lines_indicators::render::{Column, build_columns};
 use lines_indicators::{Bands, IndicatorConfig, Reset};
@@ -90,8 +89,8 @@ impl Studies {
     }
 
     /// Under the store lock, after the viewport update: build this frame's columns.
-    pub fn prepare(&mut self, d: &ChartData, vp: &Viewport, max_columns: usize) {
-        let bars = d.series.bars();
+    /// `bars`: the chart's bars (its timeframe's); the engine's points are per 1-minute bar.
+    pub fn prepare(&mut self, bars: BarsView<'_>, vp: &Viewport, max_columns: usize) {
         for s in &mut self.list {
             if s.columns.capacity() < max_columns {
                 // Only when the plot grows wider than ever before (as the candle scene).

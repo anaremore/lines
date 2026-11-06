@@ -35,7 +35,7 @@ use gpui::{
 };
 use lines_core::geometry::snap;
 use lines_core::ladder::{GROUPING_PRESETS, row_of};
-use lines_core::{FixedStr, Price, ProfileRows, SessionKind, UtcMillis, Viewport};
+use lines_core::{BarsView, FixedStr, Price, ProfileRows, SessionKind, UtcMillis, Viewport};
 use lines_feed::ChartData;
 use serde::{Deserialize, Serialize};
 
@@ -313,7 +313,7 @@ fn write_partial(s: &mut FixedStr<64>, from: UtcMillis) {
 }
 
 impl ChartLayer for VolumeProfileLayer {
-    fn prepare(&mut self, data: &ChartData, vp: &Viewport) {
+    fn prepare(&mut self, data: &ChartData, bars: BarsView<'_>, vp: &Viewport) {
         let cfg = self.config;
         self.active = false;
         if cfg.mode == ProfileMode::Off || cfg.hidden {
@@ -360,16 +360,13 @@ impl ChartLayer for VolumeProfileLayer {
                 (first.session.open, newest.session.close)
             }
             ProfileMode::VisibleRange => {
-                let bars = data.series.bars();
+                // The footprint is per 1-minute bar: a higher timeframe's bars merge theirs.
                 let r = vp.visible_range(bars.len());
                 if r.is_empty() {
                     return;
                 }
                 let _ = label.write_str("visible range");
-                (
-                    bars[r.start].time,
-                    UtcMillis(bars[r.end - 1].time.0 + data.series.period_ms()),
-                )
+                (bars.bars[r.start].time, bars.end(r.end - 1))
             }
         };
         if let Some(s) = data_start
@@ -607,7 +604,11 @@ mod tests {
             mode: ProfileMode::Session,
             ..ProfileConfig::default()
         });
-        layer.prepare(&d, &vp);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp,
+        );
         assert!(layer.active);
         assert_eq!(layer.label.as_str(), "ETH 2026-11-05 · partial from 13:00Z");
         assert_eq!(layer.rows.total, Qty(10));
@@ -617,14 +618,22 @@ mod tests {
         );
         // Nothing changed: the rows are not rebuilt (the key is the same).
         let key = layer.key;
-        layer.prepare(&d, &vp);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp,
+        );
         assert_eq!(layer.key, key);
 
         layer.set_config(ProfileConfig {
             session: ProfileSession::Rth,
             ..layer.config()
         });
-        layer.prepare(&d, &vp);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp,
+        );
         assert_eq!(layer.label.as_str(), "RTH 2026-11-05");
         assert_eq!(layer.rows.total, Qty(5));
         assert_eq!(
@@ -634,7 +643,11 @@ mod tests {
 
         // A new trade changes the version: rebuilt, incrementally fed by the store.
         d.apply(&[trade("2026-11-05T15:02:00", 600_025, 4)]);
-        layer.prepare(&d, &vp);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp,
+        );
         assert_eq!(layer.rows.total, Qty(9));
         assert_eq!(
             layer.rows.row_price(layer.rows.poc.unwrap()),
@@ -646,7 +659,11 @@ mod tests {
             session: ProfileSession::Eth,
             ..layer.config()
         });
-        layer.prepare(&d, &vp);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp,
+        );
         assert_eq!(
             layer.label.as_str(),
             "ETH 1 session (of 5) · partial from 13:00Z"
@@ -656,12 +673,20 @@ mod tests {
             mode: ProfileMode::VisibleRange,
             ..layer.config()
         });
-        layer.prepare(&d, &vp);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp,
+        );
         assert_eq!(layer.label.as_str(), "visible range");
         assert_eq!(layer.rows.total, Qty(14));
 
         layer.set_config(ProfileConfig::default());
-        layer.prepare(&d, &vp);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp,
+        );
         assert!(!layer.active);
     }
 

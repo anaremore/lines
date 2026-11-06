@@ -377,6 +377,11 @@ struct Cli {
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
     #[arg(long, value_parser = parse_vwap)]
     vwap: Vec<lines_indicators::VwapSpec>,
+    /// The first chart's timeframe: 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w (a bare number is
+    /// minutes). Bars align to the product's session open. A timeframe saved with the chart
+    /// wins. In the app: type it on a chart (`5`, `1h`, `1d` + Enter) or use the header chip.
+    #[arg(long, value_parser = parse_timeframe)]
+    timeframe: Option<lines_core::Timeframe>,
 }
 
 /// The CLI with every registered source as a `--source` value, with its help.
@@ -480,6 +485,11 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
         return Err("size out of range".into());
     }
     Ok((w, h))
+}
+
+fn parse_timeframe(s: &str) -> Result<lines_core::Timeframe, String> {
+    lines_core::Timeframe::parse(s)
+        .ok_or_else(|| "expected 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d or 1w".into())
 }
 
 fn parse_zoom(s: &str) -> Result<f64, String> {
@@ -729,6 +739,7 @@ where
             },
             studies_menu: cli.studies_menu.clone(),
             magnet: cli.magnet,
+            timeframe: cli.timeframe.unwrap_or_default(),
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),

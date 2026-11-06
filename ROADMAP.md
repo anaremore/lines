@@ -31,7 +31,7 @@ Status: `done` · `current` · `next` · `later`
 | 8b | Discipline guardrails + economic calendar | later | Loss/streak lockouts with cooldown, max trades/day, news blackout (warn/flatten/block) tied to prop-rule presets; overrides deliberately hard. Calendar from official sources only (BLS, BEA, Federal Reserve schedules; FRED API), as a data-source plugin (0007); no scraping |
 | 8c | Automatic trade journal | later | Fills → trades with auto entry/exit screenshots, tags, P&L by time/setup/account, consistency-rule progress |
 | 10 | Indicators (10a engine + VWAP moved to 5c): 10a more built-ins · 10b WASM host · 10c data-source plugins · 10d plugin dev tooling | later | See decisions 0007–0008 |
-| 9 | Chart timeframes | current | Minute/hour/day/week candles derived exactly from 1-minute bars, aligned to sessions; per-chart, saved; VWAP/profile/crosshair sync follow |
+| 9 | Chart timeframes | done | Minute/hour/day/week candles derived exactly from 1-minute bars, aligned to sessions; per-chart, saved; VWAP/profile/crosshair sync follow |
 | 9b | Tick, volume, range and seconds charts | later | Bars built from counted trades (live, replay, local store); span covered only by history is labelled; same chart layers and trading as time charts |
 | 10e | Footprint + cumulative delta | later | Built on 10a; per-price bid/ask volume per bar from aggressor-tagged ticks |
 | 11 | Drawing tools (workspaces moved to 5b) | later | Data-space drawings, persisted layouts |

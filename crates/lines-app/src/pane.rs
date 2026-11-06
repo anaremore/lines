@@ -154,6 +154,45 @@ pub fn controls_gutter(kind: PaneKind) -> f32 {
     }
 }
 
+/// The timeframe chip's text in a chart header ("5m ▾"): one place for the renderer and the
+/// header layout test.
+pub fn timeframe_chip_text(tf: lines_core::Timeframe) -> String {
+    format!("{tf} ▾")
+}
+
+/// The narrowest chart header (logical px, gutter included) that still shows its chips whole:
+/// a chart pane narrower than this clips them at the gutter (never draws under it).
+pub const CHART_HEADER_MIN_W: f32 = 700.0;
+
+/// Logical px the chart header's left group takes through its chips, as the renderer lays it
+/// out: row padding, link chip, contract text, timeframe chip, account chip (and its PAPER
+/// badge), at `char_px` a character. The quotes and status that follow may be clipped at the
+/// controls' gutter; the chips must fit before it (`CHART_HEADER_MIN_W`).
+pub fn chart_header_chips_px(
+    linked: bool,
+    contract: &str,
+    timeframe: &str,
+    account: Option<(&str, bool)>,
+    char_px: f32,
+) -> f32 {
+    const ROW_PAD: f32 = 12.0; // px_3
+    const GAP: f32 = 8.0; // gap_2 between the group's items
+    const CHIP_PAD: f32 = 10.0; // px_1 each side + a 1 px border each side
+    let text = |s: &str| s.chars().count() as f32 * char_px;
+    let mut w = ROW_PAD + text(contract);
+    if linked {
+        w += 8.0 + 4.0 + char_px + GAP; // swatch, gap_1, letter
+    }
+    w += GAP + text(timeframe) + CHIP_PAD;
+    if let Some((name, paper)) = account {
+        w += GAP + text(name) + CHIP_PAD;
+        if paper {
+            w += 4.0 + text("PAPER") + 8.0; // gap_1, the badge (px_1, no border)
+        }
+    }
+    w
+}
+
 /// A pane header's content row: left and right groups, clipped to the header's content box
 /// (the header's right padding is the controls' gutter).
 pub fn header_content() -> Div {
@@ -361,5 +400,48 @@ mod tests {
                 controls_gutter(kind)
             );
         }
+    }
+
+    /// The chart header's chips (timeframe, account) sit with the contract on the left and
+    /// stay clear of the hover controls' gutter: for every catalog product, every timeframe
+    /// and the default accounts, the group through the account chip fits before the gutter in
+    /// a header `CHART_HEADER_MIN_W` wide (at the same wide glyph width as above).
+    #[test]
+    fn chart_header_chips_fit_before_the_gutter() {
+        const CHAR: f32 = 7.0;
+        let room = CHART_HEADER_MIN_W - controls_gutter(PaneKind::Chart);
+        let mut widest: f32 = 0.0;
+        for p in lines_feed::catalog::all() {
+            // Contract label ("MNQZ26"; a spot product's is its symbol) and its description.
+            let month = if p.is_spot() { "" } else { "Z26" };
+            let contract = format!("{}{month}  {}", p.symbol, p.description);
+            for tf in lines_core::Timeframe::ALL {
+                for account in ["Paper", "Paper 50K eval"] {
+                    let w = chart_header_chips_px(
+                        true,
+                        &contract,
+                        &timeframe_chip_text(tf),
+                        Some((&format!("{account} ▾"), true)),
+                        CHAR,
+                    );
+                    assert!(
+                        w <= room,
+                        "{contract} {tf} {account}: {w} px > {room} px before the gutter"
+                    );
+                    widest = widest.max(w);
+                }
+            }
+        }
+        // The timeframe chip is counted: without it the group is narrower.
+        let without = chart_header_chips_px(true, "ESZ26", "", None, CHAR);
+        let with = chart_header_chips_px(
+            true,
+            "ESZ26",
+            &timeframe_chip_text(lines_core::Timeframe::Minutes(15)),
+            None,
+            CHAR,
+        );
+        assert_eq!(with - without, 5.0 * CHAR);
+        assert!(widest > 0.0);
     }
 }
