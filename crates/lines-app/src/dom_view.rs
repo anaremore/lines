@@ -1,7 +1,15 @@
-//! The DOM pane (roadmap 5, read-only): a price ladder of fixed rows indexed by integer ticks.
+//! The DOM pane (roadmap 5; order entry roadmap 7): a price ladder of fixed rows indexed by
+//! integer ticks.
 //!
-//! Columns, left to right: a reserved slot for the trader's own orders (hidden until order
-//! entry, milestone 7), bid size, price, ask size, traded volume. Sizes are numbers with a
+//! Columns, left to right: the trader's own orders, bid size, price, ask size, traded volume.
+//!
+//! Trading (`crate::dom_trade` decides, `crate::dom_orders` draws, `crate::trade_bar` is the
+//! header): in an **armed** DOM a click in the bid column buys and in the ask column sells, at
+//! the row's displayed price (limit; Shift: stop market). Working orders sit in the orders
+//! column at their price: drag one to another row to move it (a ghost shows until the broker
+//! confirms), right-click it to cancel. Moving and cancelling don't need arming (they never
+//! add exposure). Every action is a command sent to the trading core with the click's time;
+//! the DOM never waits for an answer. Sizes are numbers with a
 //! subtle depth bar behind them; numbers use tabular digits, right-aligned. A slim header row
 //! names the columns; its dividers resize them (drag, double-click to fit) and right-clicking
 //! it shows or hides them (`crate::pane_columns`). A column is never narrower than its widest
@@ -32,6 +40,8 @@ use lines_core::{FixedStr, Product};
 use lines_feed::catalog::Target;
 use lines_feed::store::ChartStore;
 
+use crate::dom_orders::{DragOrder, OrdersLayer};
+use crate::dom_trade::{self, DomColumn, EntryCtx, Ghost, Refusal};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
@@ -40,6 +50,8 @@ use crate::pane_columns::{
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
+use crate::trade_bar::{self, PaneTrade, TradeDoc, TradePane};
+use crate::trading::Trading;
 use crate::wsdoc::{DomState, PaneDoc};
 
 /// Most rows a ladder shows (the row buffer is allocated once at this size).
@@ -83,10 +95,29 @@ pub struct DomView {
     glyphs: Glyphs,
     /// Column widths and visibility, and this frame's layout.
     cols: Columns,
+    /// Account, quantity, bracket, arming (roadmap 7).
+    trade: PaneTrade,
+    /// This frame's own orders, position and rejections; drags and their ghosts.
+    orders: OrdersLayer,
 }
 
 impl EventEmitter<FeedChanged> for DomView {}
 impl EventEmitter<ColumnMenu> for DomView {}
+
+impl TradePane for DomView {
+    fn trade(&mut self) -> &mut PaneTrade {
+        &mut self.trade
+    }
+    fn trade_ref(&self) -> &PaneTrade {
+        &self.trade
+    }
+    fn trade_store(&self) -> &Arc<ChartStore> {
+        &self.store
+    }
+    fn trade_unavailable(&self) -> bool {
+        self.feed.unavailable.is_some()
+    }
+}
 
 impl Pane for DomView {
     fn store(&self) -> &Arc<ChartStore> {
@@ -110,6 +141,11 @@ impl Pane for DomView {
             grouping: self.grouping,
             columns: self.cols.save(&DomCol::ALL),
         });
+        doc.trade = self.trade.doc();
+    }
+
+    fn changed(&mut self) -> bool {
+        self.trade.changed()
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -124,7 +160,10 @@ impl Pane for DomView {
             self.product = d.product.clone();
             self.has_depth = d.capabilities.depth;
         }
+        let follow = feed.sub.is_some();
+        self.orders = OrdersLayer::default();
         self.feed = feed;
+        self.trade.feed_changed(&self.store, follow, cx);
         self.view = LadderView::default();
         self.rows.clear();
         self.stats = LadderStats::default();
@@ -148,6 +187,12 @@ impl DomView {
             (d.product.clone(), d.capabilities.depth)
         };
         pane::watch_store(cx);
+        if feed.sub.is_some()
+            && let Some(t) = Trading::try_global(cx)
+        {
+            t.follow(&store);
+        }
+        let trade = PaneTrade::new(None, cx);
         DomView {
             feed,
             common: PaneCommon::default(),
@@ -168,6 +213,19 @@ impl DomView {
             focus: cx.focus_handle(),
             glyphs: Glyphs::new(TEXT_PX),
             cols: Columns::new(Table::Dom),
+            trade,
+            orders: OrdersLayer::default(),
+        }
+    }
+
+    /// Restore the pane's trading choices (account, quantity, bracket). Never armed, except
+    /// the screenshot fixture's `--arm`.
+    pub fn restore_trade(&mut self, doc: Option<&TradeDoc>, cx: &mut Context<Self>) {
+        self.trade = PaneTrade::new(doc, cx);
+        if Trading::try_global(cx).is_some_and(|t| t.start_armed) {
+            let ok = trade_bar::cant_trade(self, cx).is_none();
+            self.trade
+                .arm_event(crate::dom_trade::ArmEvent::Toggle, ok, cx);
         }
     }
 
@@ -234,7 +292,7 @@ impl DomView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
-        if self.picker.close() {
+        if self.picker.close() || std::mem::take(&mut self.trade.account_menu) {
             cx.notify();
         }
         let (x, y) = self.table_xy(ev.position);
@@ -248,11 +306,158 @@ impl DomView {
                 let _ = self.column_command(ColumnCmd::AutoFit(c), cx);
                 cx.stop_propagation();
             }
-            HeaderHit::Row | HeaderHit::Outside => {}
+            HeaderHit::Row => {}
+            HeaderHit::Outside => self.body_down(ev, cx),
+        }
+    }
+
+    /// The ladder row under a window point: its displayed price.
+    fn row_at(&self, p: Point<Pixels>) -> Option<lines_core::Price> {
+        let (_, y) = self.table_xy(p);
+        let y = y - HEADER_ROW_H;
+        if y < 0.0 {
+            return None;
+        }
+        self.rows.get((y / ROW_H) as usize).map(|r| r.price)
+    }
+
+    /// The column under a window point.
+    fn column_at(&self, p: Point<Pixels>) -> Option<DomColumn> {
+        let (x, ox) = (f(p.x), f(self.bounds.origin.x));
+        [
+            (DomCol::Orders, DomColumn::Orders),
+            (DomCol::Bid, DomColumn::Bid),
+            (DomCol::Price, DomColumn::Price),
+            (DomCol::Ask, DomColumn::Ask),
+            (DomCol::Volume, DomColumn::Volume),
+        ]
+        .into_iter()
+        .find(|(c, _)| {
+            self.cols
+                .cell(c.index(), ox)
+                .is_some_and(|(cx, w)| x >= cx && x < cx + w)
+        })
+        .map(|(_, d)| d)
+    }
+
+    /// What a click needs: account, contract, quantity, position, bracket, the inside market.
+    fn entry_ctx(&self, cx: &App) -> Result<EntryCtx, &'static str> {
+        if let Some(why) = trade_bar::cant_trade(self, cx) {
+            return Err(why);
+        }
+        let t = Trading::try_global(cx).ok_or("trading is not running")?;
+        let account = self.trade.account.clone().ok_or("no account")?;
+        let contract = trade_bar::contract_of(&self.store).ok_or("contract unknown")?;
+        let position = t
+            .cache
+            .read()
+            .position(&account, contract)
+            .map_or(0, |p| p.qty);
+        let (best_bid, best_ask, last) = self
+            .store
+            .try_read()
+            .map(|d| {
+                (
+                    d.book.best_bid().map(|b| b.0).or(d.bid),
+                    d.book.best_ask().map(|a| a.0).or(d.ask),
+                    d.last_trade,
+                )
+            })
+            .unwrap_or_default();
+        Ok(EntryCtx {
+            account,
+            contract,
+            qty: trade_bar::qty(&self.trade),
+            position,
+            bracket: self.trade.bracket,
+            tick: self.product.price.tick,
+            best_bid,
+            best_ask,
+            last,
+        })
+    }
+
+    /// A left press in the ladder: place an order (bid/ask columns, armed), or grab one of
+    /// the trader's orders to move it (orders column).
+    fn body_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        let issued = std::time::Instant::now();
+        let (Some(price), Some(col)) = (self.row_at(ev.position), self.column_at(ev.position))
+        else {
+            return;
+        };
+        if col == DomColumn::Orders {
+            if let Some(m) = self.orders.order_at(price, self.row_units()) {
+                self.orders.drag = Some(DragOrder {
+                    order: m.id,
+                    to: price,
+                });
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if !matches!(col, DomColumn::Bid | DomColumn::Ask) {
+            return;
+        }
+        match self.entry_ctx(cx) {
+            Err(why) => self.trade.flash(why),
+            Ok(ctx) => {
+                match dom_trade::click(col, price, ev.modifiers.shift, self.trade.arming, &ctx) {
+                    Ok(cmd) => {
+                        if let Some(t) = Trading::try_global(cx) {
+                            t.submit(lines_trading::Source::Dom, issued, cmd);
+                        }
+                    }
+                    Err(Refusal(why)) => self.trade.flash(why),
+                }
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Release after dragging an order: move it to the row under the pointer (unless that is
+    /// its own row), with a ghost until the broker confirms.
+    fn drop_order(&mut self, d: DragOrder, cx: &mut Context<Self>) {
+        let issued = std::time::Instant::now();
+        let units = self.row_units();
+        let Some(t) = Trading::try_global(cx) else {
+            return;
+        };
+        let order = t.cache.read().order(d.order).cloned();
+        let Some(o) = order else {
+            return;
+        };
+        let Some(from) = dom_trade::order_price(&o) else {
+            return;
+        };
+        if dom_trade::row_of(from.0, units) == dom_trade::row_of(d.to.0, units) {
+            return;
+        }
+        if let Some(cmd) = dom_trade::drag_command(&o, d.to) {
+            let id = t.submit(lines_trading::Source::Dom, issued, cmd);
+            self.orders.ghosts.push(Ghost {
+                order: o.id,
+                price: d.to,
+                command: id,
+            });
         }
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = self.orders.drag {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.orders.drag = None;
+            } else if let Some(to) = self.row_at(ev.position)
+                && to != d.to
+            {
+                self.orders.drag = Some(DragOrder { to, ..d });
+            } else {
+                return;
+            }
+            cx.notify();
+            return;
+        }
         if self.cols.drag.is_none() {
             return;
         }
@@ -268,6 +473,10 @@ impl DomView {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = self.orders.drag.take() {
+            self.drop_order(d, cx);
+            cx.notify();
+        }
         if self.cols.drag.take().is_some() {
             cx.notify();
         }
@@ -279,6 +488,24 @@ impl DomView {
         if self.cols.hit(x, y, 1) != HeaderHit::Outside {
             cx.emit(ColumnMenu(ev.position));
             cx.stop_propagation();
+            return;
+        }
+        // Right-click one of the trader's orders: cancel it (never needs arming).
+        if self.column_at(ev.position) == Some(DomColumn::Orders)
+            && let Some(price) = self.row_at(ev.position)
+            && let Some(m) = self.orders.order_at(price, self.row_units())
+            && let (Some(account), Some(t)) = (self.trade.account.clone(), Trading::try_global(cx))
+        {
+            t.submit(
+                lines_trading::Source::Dom,
+                std::time::Instant::now(),
+                lines_trading::Command::CancelOrder {
+                    account,
+                    order: m.id,
+                },
+            );
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 
@@ -299,6 +526,10 @@ impl DomView {
             return;
         }
         let k = &ev.keystroke;
+        if trade_bar::qty_key(self, k.key.as_str(), cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
             let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
@@ -407,6 +638,10 @@ impl DomView {
                 }
             }
         }
+        // The orders column holds two orders per row, each `S10+` or `10/25` at most.
+        let ow = self.glyphs.width("S88+", t.text_main, true, window);
+        self.cols
+            .need(DomCol::Orders.index(), 2.0 * (ow + 6.0), PAD);
         self.cols.layout(w);
         self.cols
             .paint_header(&mut self.glyphs, &t, bounds, PAD, &[false; 5], window, cx);
@@ -551,6 +786,33 @@ impl DomView {
                 t.grid,
             ));
         }
+        // The trader's orders, the position marker and rejections, over the rows.
+        if let Some(tr) = Trading::try_global(cx) {
+            let contract = trade_bar::contract_of(&self.store);
+            for (p, why) in self
+                .orders
+                .prepare(&tr.cache, self.trade.account.as_ref(), contract)
+            {
+                self.trade
+                    .flash(format!("{}: {why}", fmt.format::<32>(p).as_str()));
+            }
+            let units = self.row_units();
+            self.orders.paint(
+                &mut self.glyphs,
+                &t,
+                &self.rows,
+                units,
+                self.product.price.tick,
+                orders,
+                price,
+                (table_l, ox + w),
+                oy,
+                ROW_H,
+                hair,
+                window,
+                cx,
+            );
+        }
         self.cols.paint_rules(&t, body, window);
     }
 
@@ -638,9 +900,18 @@ pub fn next_grouping(g: u32, back: bool) -> u32 {
 }
 
 impl Render for DomView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let t = self.theme;
+        let focus = self.focus.clone();
+        PaneTrade::watch_focus(self, &focus, window, cx);
+        // Armed but no longer able to trade (no contract, feed gone): disarm.
+        if self.trade.arming.is_armed() && trade_bar::cant_trade(self, cx).is_some() {
+            self.trade
+                .arm_event(dom_trade::ArmEvent::Unavailable, false, cx);
+        }
+        let trade = trade_bar::dom_bar(self, &self.product, &t, cx);
+        let accounts = trade_bar::account_menu(self, &t, cx);
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
@@ -668,6 +939,7 @@ impl Render for DomView {
             .flex_col()
             .bg(t.bg)
             .child(self.header())
+            .children(trade)
             .child(
                 div()
                     .relative()
@@ -682,7 +954,8 @@ impl Render for DomView {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(body)
-                    .when_some(overlay, |d, o| d.child(o)),
+                    .when_some(overlay, |d, o| d.child(o))
+                    .when_some(accounts, |d, o| d.child(o)),
             )
     }
 }

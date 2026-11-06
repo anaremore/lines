@@ -41,5 +41,5 @@ pub use order::{Order, OrderState, Role};
 pub use paper::{FillModel, PaperBroker, PaperConfig};
 pub use risk::RiskLimits;
 pub use rules::{RulePreset, RuleStatus, RuleTracker};
-pub use service::{FeedBridge, TradingHandle, TradingService};
+pub use service::{Clock, FeedBridge, TradingHandle, TradingService};
 pub use types::{AccountId, CommandId, Money, OrderId, OrderKind, Side};

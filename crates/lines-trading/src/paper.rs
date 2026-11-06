@@ -721,6 +721,11 @@ impl Broker for PaperBroker {
                     m.taken.clear();
                 }
             }
+            MarketInput::Last(price) => {
+                if let Some(m) = self.markets.get_mut(&contract) {
+                    m.last = Some(price);
+                }
+            }
             MarketInput::Bid(_) | MarketInput::Ask(_) => {}
         }
     }

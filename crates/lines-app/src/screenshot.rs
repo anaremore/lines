@@ -32,8 +32,10 @@ use lines_feed::store::FeedStatus;
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane_window;
 use crate::picker_view::AppSettings;
+use crate::trading::{Trading, TradingSetup};
 use crate::workspace::{self, Workspace};
 use crate::wsdoc::{WindowDoc, WorkspaceDoc};
+use lines_trading::PaperConfig;
 
 /// Everything besides the data that determines the image.
 pub struct Shot {
@@ -43,6 +45,10 @@ pub struct Shot {
     /// Required DPI scale (asserted, not forced).
     pub scale: Option<f32>,
     pub doc: WorkspaceDoc,
+    /// A scripted paper session run before the frame (`--paper`).
+    pub paper: Option<String>,
+    /// DOMs start armed (`--arm`).
+    pub arm: bool,
 }
 
 pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
@@ -88,14 +94,54 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         size,
         scale,
         doc,
+        paper,
+        arm,
     } = shot;
+    // A deterministic paper core: in memory, its clock moved only by the data and the script.
+    let mut trading = Trading::start(
+        TradingSetup::manual(),
+        registry.clone(),
+        ws.env.base.clone(),
+    );
+    trading.start_armed = arm;
+    let script = match &paper {
+        Some(s) => {
+            let f = feeds
+                .iter()
+                .find(|f| f.store().read().contract.is_some())
+                .ok_or_else(|| anyhow!("--paper: the recording has no contract to trade"))?;
+            let (product, contract, at) = {
+                let d = f.store().read();
+                (
+                    d.product.clone(),
+                    d.contract.expect("checked"),
+                    d.market_time,
+                )
+            };
+            let account = trading
+                .default_account()
+                .ok_or_else(|| anyhow!("--paper: no paper account"))?;
+            let steps = crate::trading::parse_script(s, &product, contract, &account)
+                .map_err(|e| anyhow!("--paper: {e:#}"))?;
+            trading.start_account = steps.iter().find_map(|s| match s {
+                crate::trading::Step::Account(a) => Some(a.clone()),
+                _ => None,
+            });
+            Some((
+                steps,
+                at.ok_or_else(|| anyhow!("--paper: the replay has no market time"))?,
+            ))
+        }
+        None => None,
+    };
     gpui_platform::application().run(move |cx: &mut App| {
         let _keep = &feeds;
         cx.set_global(Feeds(registry));
+        cx.set_global(trading);
         cx.set_global(AppSettings::ephemeral());
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);
-        if let Err(e) = capture(cx, window, out, size, scale) {
+        if let Err(e) = capture(cx, window, out, size, scale, script) {
             fail(&e);
         }
     });
@@ -121,12 +167,21 @@ fn capture(
     out: PathBuf,
     (w, h): (f32, f32),
     scale: Option<f32>,
+    script: Option<(Vec<crate::trading::Step>, lines_core::UtcMillis)>,
 ) -> Result<()> {
     let handle = workspace::open_doc_window(
         &window,
         Some(workspace::hidden_window("Lines (screenshot)", (w, h))),
         cx,
     )?;
+    // The panes now follow their feeds (the core has the book): run the script and wait for
+    // its events to reach the panes.
+    let t = cx.global::<Trading>();
+    if let Some((steps, at)) = &script {
+        t.run_script(steps, *at, PaperConfig::default().latency_ms);
+    } else {
+        t.settle();
+    }
     cx.spawn(async move |cx| {
         let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
         // Popped-out panes: their windows opened (hidden) with the main window's tabs.

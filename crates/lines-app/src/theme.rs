@@ -108,6 +108,14 @@ pub struct Theme {
     /// drawn from the profile's base edge).
     pub profile_buy: Hsla,
     pub profile_sell: Hsla,
+    /// Trading: a warning cell (a prop rule near its limit or reached, a rejection), always
+    /// with words, and the text on it. Not up/down, not the accent.
+    pub warn: Hsla,
+    pub on_warn: Hsla,
+    /// The PAPER badge beside a paper account's name: an inverted chip (the word carries it;
+    /// live accounts get a different badge).
+    pub paper_badge: Hsla,
+    pub on_paper_badge: Hsla,
 }
 
 fn c(hex: u32) -> Hsla {
@@ -157,6 +165,10 @@ impl Theme {
             profile_edge: c(brand::PAPER).opacity(0.30),
             profile_buy: c(up).opacity(0.38),
             profile_sell: c(down).opacity(0.38),
+            warn: c(0xf5b83d),
+            on_warn: c(brand::INK),
+            paper_badge: c(brand::PAPER),
+            on_paper_badge: c(brand::INK),
         }
     }
 
@@ -201,6 +213,10 @@ impl Theme {
             profile_edge: c(brand::INK).opacity(0.30),
             profile_buy: c(up).opacity(0.32),
             profile_sell: c(down).opacity(0.32),
+            warn: c(0x8a5300),
+            on_warn: c(0xffffff),
+            paper_badge: c(brand::INK),
+            on_paper_badge: c(brand::PAPER),
         }
     }
 
@@ -335,6 +351,18 @@ mod tests {
             ("study1", t.study[1], "panel", t.panel),
             ("study2", t.study[2], "panel", t.panel),
             ("study3", t.study[3], "panel", t.panel),
+            // Trading header: warnings, the PAPER badge, ARMED (accent fill), and working
+            // orders' quantities on their side's colour.
+            ("on_warn", t.on_warn, "warn", t.warn),
+            (
+                "on_paper_badge",
+                t.on_paper_badge,
+                "paper_badge",
+                t.paper_badge,
+            ),
+            ("on_last", t.on_last, "accent", t.accent),
+            ("bg", t.bg, "up", t.up),
+            ("bg", t.bg, "down", t.down),
         ]
     }
 
@@ -479,6 +507,19 @@ mod tests {
     }
 
     #[test]
+    fn trading_tokens_never_borrow_market_or_accent_colours() {
+        for t in Theme::all() {
+            for (name, tok) in [("up", t.up), ("down", t.down), ("accent", t.accent)] {
+                assert_ne!(t.warn, tok, "{}: warn is {name}", t.name);
+                assert_ne!(t.paper_badge, tok, "{}: paper badge is {name}", t.name);
+            }
+            // The badge stands out from the header it sits on (non-text contrast, 3:1).
+            assert!(contrast(t.paper_badge, t.panel) >= 3.0, "{}", t.name);
+            assert!(contrast(t.warn, t.panel) >= 3.0, "{}", t.name);
+        }
+    }
+
+    #[test]
     fn hollow_selection() {
         assert!(HollowBodies::Up.is_hollow(true) && !HollowBodies::Up.is_hollow(false));
         assert!(HollowBodies::Down.is_hollow(false) && !HollowBodies::Down.is_hollow(true));
@@ -501,6 +542,9 @@ mod tests {
             ("studies.rs", include_str!("studies.rs")),
             ("main.rs", include_str!("main.rs")),
             ("screenshot.rs", include_str!("screenshot.rs")),
+            ("trade_bar.rs", include_str!("trade_bar.rs")),
+            ("trading.rs", include_str!("trading.rs")),
+            ("dom_trade.rs", include_str!("dom_trade.rs")),
         ] {
             for needle in ["rgb(", "rgba(", "hsla(", "Hsla {"] {
                 assert!(

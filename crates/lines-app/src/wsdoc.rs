@@ -135,6 +135,10 @@ pub struct PaneDoc {
     /// A detached pane's window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<Placement>,
+    /// The pane's trading choices (account, quantity, bracket; roadmap 7). Optional: files
+    /// without it trade on the default account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trade: Option<crate::trade_bar::TradeDoc>,
 }
 
 impl PaneDoc {
@@ -148,6 +152,7 @@ impl PaneDoc {
             tape: None,
             state: PaneState::Shown,
             window: None,
+            trade: None,
         }
     }
 }

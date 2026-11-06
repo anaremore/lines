@@ -20,6 +20,9 @@ pub enum MarketInput {
     BookClear,
     Bid(Price),
     Ask(Price),
+    /// The last trade price without a trade (seeding a mark when following a running feed):
+    /// moves marks, never fills an order.
+    Last(Price),
 }
 
 /// The inputs in one feed batch (other events are ignored).
@@ -36,6 +39,7 @@ pub fn from_events(events: &[MarketEvent]) -> Vec<MarketInput> {
             MarketEvent::BookClear => Some(MarketInput::BookClear),
             MarketEvent::Bid(p) => Some(MarketInput::Bid(p)),
             MarketEvent::Ask(p) => Some(MarketInput::Ask(p)),
+            MarketEvent::LastPrice(p) => Some(MarketInput::Last(p)),
             _ => None,
         })
         .collect()

@@ -82,6 +82,38 @@ pub enum Command {
     TogglePerfStats,
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
     Studies,
+    /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
+    Trade(TradeCmd),
+}
+
+/// Trading actions of the focused pane (`crate::trade_bar::run`). Flatten and Cancel All act
+/// on the pane's contract and are never blocked by arming, risk or prop rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TradeCmd {
+    /// Cancel the contract's orders and close its position at market.
+    Flatten,
+    /// Cancel the contract's working orders.
+    CancelAll,
+    /// Arm or disarm one-click trading on the DOM.
+    ToggleArm,
+    /// Trade on the next account.
+    NextAccount,
+    QtyUp,
+    QtyDown,
+    /// Cycle the bracket preset (none, 8/16, 12/24, 20/40 ticks).
+    NextBracket,
+}
+
+impl TradeCmd {
+    pub const ALL: [TradeCmd; 7] = [
+        TradeCmd::Flatten,
+        TradeCmd::CancelAll,
+        TradeCmd::ToggleArm,
+        TradeCmd::NextAccount,
+        TradeCmd::QtyUp,
+        TradeCmd::QtyDown,
+        TradeCmd::NextBracket,
+    ];
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -136,6 +168,32 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::CleanChart, true, true, false, "m"),
     b(Command::ToggleHints, false, false, false, "f1"),
     b(Command::Studies, true, false, false, "i"),
+    // Trading (roadmap 7): always Ctrl+Shift or Ctrl+Alt, so no stray key can trade.
+    b(Command::Trade(TradeCmd::Flatten), true, true, false, "f"),
+    b(Command::Trade(TradeCmd::CancelAll), true, true, false, "a"),
+    b(
+        Command::Trade(TradeCmd::ToggleArm),
+        true,
+        true,
+        false,
+        "space",
+    ),
+    b(
+        Command::Trade(TradeCmd::NextAccount),
+        true,
+        true,
+        false,
+        "u",
+    ),
+    b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
+    b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
+    b(
+        Command::Trade(TradeCmd::NextBracket),
+        true,
+        true,
+        false,
+        "k",
+    ),
 ];
 
 /// The command bound to a keystroke, if any.
@@ -191,6 +249,8 @@ pub fn hint(c: Command) -> String {
         "tab" => "Tab".to_owned(),
         "pagedown" => "PgDn".to_owned(),
         "pageup" => "PgUp".to_owned(),
+        "up" => "↑".to_owned(),
+        "space" => "Space".to_owned(),
         k => k.to_uppercase(),
     };
     if mac {
@@ -272,6 +332,16 @@ pub fn label(c: Command) -> String {
         }
         Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
+        Command::Trade(t) => match t {
+            TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
+            TradeCmd::CancelAll => "Trade: Cancel all orders",
+            TradeCmd::ToggleArm => "Trade: Arm/disarm one-click DOM trading",
+            TradeCmd::NextAccount => "Trade: Next account",
+            TradeCmd::QtyUp => "Trade: Quantity up",
+            TradeCmd::QtyDown => "Trade: Quantity down",
+            TradeCmd::NextBracket => "Trade: Next bracket preset",
+        }
+        .into(),
     }
 }
 
@@ -325,6 +395,7 @@ pub fn palette() -> Vec<Command> {
             ]),
     );
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
+    v.extend(TradeCmd::ALL.map(Command::Trade));
     v
 }
 
@@ -401,6 +472,20 @@ mod tests {
         assert_eq!(c("shift-i"), Some(Command::ToggleStudies));
         assert_eq!(c("shift-m"), Some(Command::CleanChart));
         assert_eq!(cmd("f1"), Some(Command::ToggleHints));
+        let t = |k: &str| Some(Command::Trade(k_trade(k)));
+        assert_eq!(c("shift-f"), t("flatten"));
+        assert_eq!(c("shift-a"), t("cancel"));
+        assert_eq!(c("shift-space"), t("arm"));
+        assert_eq!(c("shift-u"), t("account"));
+        assert_eq!(c("alt-up"), t("up"));
+        assert_eq!(c("alt-down"), t("down"));
+        assert_eq!(c("shift-k"), t("bracket"));
+        // No trading command fires from a bare key, Shift alone or Alt alone.
+        for k in [
+            "f", "a", "space", "shift-f", "shift-a", "alt-up", "alt-down", "up",
+        ] {
+            assert!(!matches!(cmd(k), Some(Command::Trade(_))), "{k}");
+        }
         // Neighbours that must stay as they are: Ctrl+L links, Ctrl+I (indicators menu),
         // Ctrl+K (picker) and Alt+V (profile) belong to the chart, plain C to the DOM.
         assert_eq!(c("l"), Some(Command::CycleLink));
@@ -410,6 +495,31 @@ mod tests {
         // Ctrl+I opens the chart's studies menu (a command: also the palette and the menu).
         assert_eq!(c("i"), Some(Command::Studies));
         assert_eq!(c("k"), None);
+    }
+
+    fn k_trade(k: &str) -> TradeCmd {
+        match k {
+            "flatten" => TradeCmd::Flatten,
+            "cancel" => TradeCmd::CancelAll,
+            "arm" => TradeCmd::ToggleArm,
+            "account" => TradeCmd::NextAccount,
+            "up" => TradeCmd::QtyUp,
+            "down" => TradeCmd::QtyDown,
+            _ => TradeCmd::NextBracket,
+        }
+    }
+
+    #[test]
+    fn every_trading_command_has_a_key_and_a_palette_entry() {
+        let p = palette();
+        for t in TradeCmd::ALL {
+            assert!(!hint(Command::Trade(t)).is_empty(), "{t:?} has no key");
+            assert!(p.contains(&Command::Trade(t)), "{t:?} not in the palette");
+        }
+        assert_eq!(
+            filter("flatten", &p),
+            vec![Command::Trade(TradeCmd::Flatten)]
+        );
     }
 
     #[test]
