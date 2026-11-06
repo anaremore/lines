@@ -26,3 +26,7 @@ ignore-dev-dependencies = true
 ignore-build-dependencies = true
 # Our own crates (FSL, see LICENSE.md) are not third-party.
 private = { ignore = true }
+
+# Crate-scoped acceptance, mirroring deny.toml's exception (Mozilla CA root data).
+[webpki-roots]
+accepted = ["CDLA-Permissive-2.0"]
