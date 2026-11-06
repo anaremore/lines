@@ -11,6 +11,7 @@ use crate::provider::{self, Provider, ProviderSession, SessionError};
 pub use session::{CqgSession, LogonParams};
 
 /// Default CQG demo endpoint (requires CQG-issued demo credentials).
+#[cfg(feature = "vendor-cqg")]
 pub const DEMO_URL: &str = "wss://demoapi.cqg.com:443";
 
 /// CQG contract symbol by rule (decision 0013): root + month code + last digit of the year,

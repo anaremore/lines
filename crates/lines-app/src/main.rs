@@ -11,7 +11,6 @@ use clap::{Parser, ValueEnum};
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use lines_core::UtcMillis;
 use lines_feed::cqg::mock::MockConfig;
-use lines_feed::cqg::{self, LogonParams};
 use lines_feed::{FeedConfig, Source, catalog};
 
 use crate::chart_view::ChartView;
@@ -21,7 +20,8 @@ use crate::theme::{HollowBodies, Palette, Theme};
 enum SourceKind {
     /// In-process mock of the CQG WebAPI protocol.
     Mock,
-    /// Real CQG WebAPI (needs credentials).
+    /// Real CQG WebAPI (needs credentials). Only in builds with `--features vendor-cqg`.
+    #[cfg(feature = "vendor-cqg")]
     Cqg,
     /// Coinbase Exchange public feed (free, 24/7; dev tool).
     Coinbase,
@@ -85,10 +85,13 @@ struct Cli {
     #[arg(long)]
     disconnect_every: Option<u64>,
     /// CQG WebAPI endpoint. Credentials: LINES_CQG_USER / LINES_CQG_PASSWORD.
-    #[arg(long, default_value = cqg::DEMO_URL)]
+    #[cfg(feature = "vendor-cqg")]
+    #[arg(long, default_value = lines_feed::cqg::DEMO_URL)]
     cqg_url: String,
+    #[cfg(feature = "vendor-cqg")]
     #[arg(long, default_value = "CQG")]
     private_label: String,
+    #[cfg(feature = "vendor-cqg")]
     #[arg(long, default_value = "WebAPITest")]
     client_app_id: String,
     /// Run the feed without a window for N seconds and print stats (useful for recording).
@@ -196,6 +199,7 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
         SourceKind::Coinbase => Source::Coinbase {
             url: lines_feed::coinbase::WS_URL.into(),
         },
+        #[cfg(feature = "vendor-cqg")]
         SourceKind::Cqg => {
             let user = std::env::var("LINES_CQG_USER").ok();
             let password = std::env::var("LINES_CQG_PASSWORD").ok();
@@ -204,7 +208,7 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
             }
             Source::Cqg {
                 url: cli.cqg_url.clone(),
-                logon: LogonParams {
+                logon: lines_feed::cqg::LogonParams {
                     user_name: user,
                     password,
                     private_label: Some(cli.private_label.clone()),
@@ -343,4 +347,49 @@ fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
     }
     feed.shutdown();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn help() -> String {
+        Cli::command().render_long_help().to_string()
+    }
+
+    #[test]
+    fn public_sources_always_parse() {
+        for s in ["mock", "coinbase", "replay"] {
+            assert!(Cli::try_parse_from(["lines", "--source", s]).is_ok(), "{s}");
+        }
+    }
+
+    /// Decision 0014 / docs/release.md: public builds have no real-CQG connection at all.
+    #[cfg(not(feature = "vendor-cqg"))]
+    #[test]
+    fn real_cqg_is_absent_without_the_feature() {
+        let err = Cli::try_parse_from(["lines", "--source", "cqg"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+        assert!(Cli::try_parse_from(["lines", "--cqg-url", "wss://x"]).is_err());
+        let h = help();
+        for needle in [
+            "Real CQG",
+            "--cqg-url",
+            "--private-label",
+            "--client-app-id",
+            "LINES_CQG_",
+        ] {
+            assert!(!h.contains(needle), "--help mentions {needle:?}:\n{h}");
+        }
+    }
+
+    #[cfg(feature = "vendor-cqg")]
+    #[test]
+    fn real_cqg_is_available_with_the_feature() {
+        let cli = Cli::try_parse_from(["lines", "--source", "cqg"]).unwrap();
+        assert!(matches!(cli.source, SourceKind::Cqg));
+        assert_eq!(cli.cqg_url, lines_feed::cqg::DEMO_URL);
+        assert!(help().contains("--cqg-url"));
+    }
 }

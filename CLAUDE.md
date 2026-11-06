@@ -31,7 +31,8 @@ cargo test --workspace               # offline
 cargo test -p lines-feed --test feed -- --ignored   # + live Coinbase smoke test (internet)
 LINES_SIERRA_DATA="C:\SierraChart\SierraChart - Apex\Data" cargo test -p lines-sierra -- --ignored   # real Sierra data, ~1 min
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --workspace --all-targets --all-features -- -D warnings   # includes screenshot
+cargo clippy --workspace --all-targets --all-features -- -D warnings   # includes screenshot + vendor-cqg
+cargo test --workspace --features lines-app/vendor-cqg,lines-feed/vendor-cqg   # tests must pass with and without it
 cargo fmt --all --check
 
 cargo run -p lines-app -- --source mock                          # CQG-protocol mock, ES, 5k updates/s
@@ -40,8 +41,9 @@ cargo run -p lines-app -- --source coinbase                      # live BTC/USD 
 cargo run -p lines-app -- --source mock --headless 5 --record recordings/x.lfr
 cargo run -p lines-app -- --source replay --replay recordings/x.lfr --speed 10   # 0 = max speed
 cargo run -p lines-app -- --source replay --replay recordings/x.lfr --at 2026-11-06T14:05:00Z
-# Real CQG (never run: no credentials). Defaults: demo server, label CQG, app id WebAPITest.
-LINES_CQG_USER=... LINES_CQG_PASSWORD=... cargo run -p lines-app -- --source cqg --instrument ES
+# Real CQG (never run: no credentials). Only with the off-by-default `vendor-cqg` feature;
+# public builds have no `--source cqg` at all. Defaults: demo server, label CQG, app id WebAPITest.
+LINES_CQG_USER=... LINES_CQG_PASSWORD=... cargo run -p lines-app --features vendor-cqg -- --source cqg --instrument ES
 
 # Sierra Chart import (personal dev tool; output stays in gitignored recordings/).
 cargo run --release -p lines-sierra -- --data "C:\SierraChart\SierraChart - Apex\Data"   --symbol NQZ5.CME --date 2025-09-11 --out recordings/nqz5-2025-09-11.lfr
@@ -64,6 +66,7 @@ Catalog products (ids are permanent): `ES` 1, `NQ` 2, `ZN` 3, `MES` 4, `MNQ` 5, 
 
 - The repo is public under FSL-1.1-ALv2 (`LICENSE.md`, decision 0014). Never commit credentials, account IDs, vendor usernames, vendor protos/kits, or anything derived from licensed data, including in screenshots and docs.
 - Live vendor connectors (Rithmic, CQG production) belong in a private module (decision 0014). Public code may depend only on the provider/broker traits.
+- Public builds ship only mock, replay, Coinbase and paper (`docs/release.md`). The real CQG connection (`Source::Cqg`, `--source cqg`, `--cqg-url`/`--private-label`/`--client-app-id`, the `LINES_CQG_*` env vars) exists only with the off-by-default `vendor-cqg` feature on `lines-feed`/`lines-app`. The CQG mock, `CqgSession` and `cqg-proto` stay public (mock and CQG-format replays need them). Never add `vendor-cqg` to default features or release builds.
 - Never drive the real mouse or keyboard or capture the screen. Verify UI with screenshot mode and unit tests; the owner checks live behaviour.
 - `cargo` may not be on PATH: use `~/.cargo/bin/cargo.exe`.
 

@@ -10,6 +10,8 @@ name = "lines"
 path = "src/main.rs"
 
 [features]
+# Real CQG connection (`--source cqg`); off by default (decision 0014, docs/release.md).
+vendor-cqg = ["lines-feed/vendor-cqg"]
 # Reproducible --screenshot mode (decision 0009). Off by default because it enables GPUI's
 # `test-support` feature (that is where `Window::render_to_image` lives), which pulls in
 # test-only dependencies that release builds should not ship.

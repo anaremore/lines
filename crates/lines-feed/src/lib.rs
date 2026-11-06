@@ -49,7 +49,8 @@ pub fn client_version() -> String {
 pub enum Source {
     /// In-process mock that speaks the CQG WebAPI protocol.
     CqgMock(MockConfig),
-    /// Real CQG WebAPI. Untested until credentials exist.
+    /// Real CQG WebAPI. Untested until credentials exist. Only with the `vendor-cqg` feature.
+    #[cfg(feature = "vendor-cqg")]
     Cqg {
         url: String,
         logon: cqg::LogonParams,
@@ -113,6 +114,7 @@ fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
             client_version: client_version(),
             ..Default::default()
         })),
+        #[cfg(feature = "vendor-cqg")]
         Source::Cqg { logon, .. } => Arc::new(cqg::CqgProvider::new(logon.clone())),
         Source::Coinbase { .. } => Arc::new(coinbase::CoinbaseProvider),
         Source::Replay { path, .. } => {
@@ -375,7 +377,14 @@ pub async fn run_feed(
                 Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
                 Err(e) => Err(ConnectionError::Transport(e)),
             },
-            Source::Cqg { url, .. } | Source::Coinbase { url } => {
+            #[cfg(feature = "vendor-cqg")]
+            Source::Cqg { url, .. } => {
+                match WsTransport::connect(url, Duration::from_secs(15)).await {
+                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
+                    Err(e) => Err(ConnectionError::Transport(e)),
+                }
+            }
+            Source::Coinbase { url } => {
                 match WsTransport::connect(url, Duration::from_secs(15)).await {
                     Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
                     Err(e) => Err(ConnectionError::Transport(e)),

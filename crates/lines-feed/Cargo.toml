@@ -5,6 +5,13 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Real CQG WebAPI connection (WSS logon to CQG's servers). Off by default: public builds ship
+# only mock, replay, Coinbase public data and paper (decision 0014, docs/release.md). The CQG
+# protocol session, the in-process mock and cqg-proto stay in every build so the mock and
+# replays of CQG-format recordings work.
+vendor-cqg = []
+
 [dependencies]
 lines-core.workspace = true
 cqg-proto.workspace = true
