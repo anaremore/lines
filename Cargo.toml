@@ -8,7 +8,7 @@ default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed",
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
-license = "UNLICENSED"
+license = "FSL-1.1-ALv2"
 publish = false
 
 [workspace.dependencies]

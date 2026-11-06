@@ -17,3 +17,5 @@ Format: Status · Context · Decision · Consequences.
 | 0009 | UI pull requests include reproducible screenshots |
 | 0010 | Licensed data and vendor files never enter the repo |
 | 0011 | Providers are I/O-free sessions; every inbound byte flows through recorded frames (Proposed) |
+| 0012 | The OMS runs independently of the UI, and orders bypass the frame loop |
+| 0014 | Public repo under FSL; live vendor connectors in a private module |

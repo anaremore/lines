@@ -54,6 +54,13 @@ Catalog instruments (ids are permanent): `ES` 1, `NQ` 2, `ZN` 3, `MES` 4, `MNQ` 
 
 `recordings/`, `*.lfr`, `*.scid`, `*.depth` are gitignored. Recordings may contain licensed data; committed fixtures must be synthetic (tests build them in code).
 
+## Rules
+
+- The repo is public under FSL-1.1-ALv2 (`LICENSE.md`, decision 0014). Never commit credentials, account IDs, vendor usernames, vendor protos/kits, or anything derived from licensed data, including in screenshots and docs.
+- Live vendor connectors (Rithmic, CQG production) belong in a private module (decision 0014). Public code may depend only on the provider/broker traits.
+- Never drive the real mouse or keyboard or capture the screen. Verify UI with screenshot mode and unit tests; the owner checks live behaviour.
+- `cargo` may not be on PATH: use `~/.cargo/bin/cargo.exe`.
+
 ## Pinned versions
 
 - Rust `1.98.1` (`rust-toolchain.toml`, matches the pinned Zed commit)
