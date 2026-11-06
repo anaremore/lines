@@ -240,8 +240,13 @@ impl ReplayTransport {
     }
 }
 
-/// Read only the header of a recording (to pick the provider and instrument).
+/// Read only the header of a recording or stored session (to pick the provider and
+/// instrument).
 pub fn read_header(path: &Path) -> Result<Header> {
+    if crate::disk::is_stored(path) {
+        // A stored contract or day (decision 0019): replayed through the `lines` provider.
+        return crate::disk::replay::header(path);
+    }
     Ok(Reader::open(path)
         .with_context(|| format!("open recording {}", path.display()))?
         .header)

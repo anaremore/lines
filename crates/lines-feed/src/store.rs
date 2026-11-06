@@ -7,8 +7,14 @@
 //!   slow; the UI only *samples* the latest state.
 //! - The UI checks [`ChartStore::revision`] (an atomic, no lock) once per frame and uses
 //!   `try_lock`, so a contended frame simply redraws the previous scene.
+//!
+//! Stale (docs/design.md §7): every update stamps a monotonic "last data" time, also an
+//! atomic, so panes can tell a live feed that went quiet from one that is ticking without
+//! taking the lock: [`ChartStore::stale_for`].
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use lines_core::{
     BarSeries, Capabilities, ContractKey, OrderBook, Price, Print, Product, Stitcher, Tape,
@@ -207,6 +213,17 @@ impl ChartData {
         }
     }
 
+    /// Bars from the local store's cache, shown before the feed connects (decision 0019).
+    /// The feed then requests history from where they end and the stitch merges it.
+    pub fn load_cached(&mut self, bars: &[lines_core::Bar]) {
+        for b in bars {
+            self.series.upsert(*b);
+        }
+        if let Some(b) = bars.last() {
+            self.bump_time(b.time);
+        }
+    }
+
     /// Display label of the active contract (`ESZ26`, `BTC/USD`), or `None` if unknown.
     pub fn contract_label(&self) -> Option<lines_core::FixedStr<24>> {
         self.contract.map(|k| k.label(&self.product))
@@ -267,6 +284,24 @@ const MAX_RETIRED: usize = 4;
 pub struct ChartStore {
     data: Mutex<ChartData>,
     revision: AtomicU64,
+    /// Monotonic ms (see [`mono_ms`]) of the last update; 0 = never.
+    last_data: AtomicU64,
+    /// The feed is live (status `Live`).
+    live: AtomicBool,
+    stale_after_ms: AtomicU64,
+}
+
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Monotonic milliseconds since the first use (never 0).
+fn mono_ms() -> u64 {
+    EPOCH.elapsed().as_millis() as u64 + 1
+}
+
+/// Whether the market is open now. TODO(m5c-sessions): from the product's sessions calendar;
+/// until it lands every market counts as open, so a quiet closed market can show as stale.
+fn market_open(_d: &ChartData) -> bool {
+    true
 }
 
 impl ChartStore {
@@ -304,7 +339,28 @@ impl ChartStore {
                 stats: FeedStats::default(),
             }),
             revision: AtomicU64::new(0),
+            last_data: AtomicU64::new(0),
+            live: AtomicBool::new(false),
+            stale_after_ms: AtomicU64::new(5_000),
         }
+    }
+
+    /// How long a live feed may be silent before it is stale.
+    pub fn set_stale_after(&self, d: Duration) {
+        self.stale_after_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// `Some(time since the last data)` when the feed is live, its market open, and nothing
+    /// has arrived for longer than its expected cadence; `None` otherwise. Lock-free.
+    pub fn stale_for(&self) -> Option<Duration> {
+        if !self.live.load(Ordering::Acquire) {
+            return None;
+        }
+        let last = self.last_data.load(Ordering::Acquire);
+        let quiet = mono_ms().saturating_sub(last);
+        (last != 0 && quiet > self.stale_after_ms.load(Ordering::Relaxed))
+            .then(|| Duration::from_millis(quiet))
     }
 
     /// Lock-free change detector for the UI.
@@ -315,7 +371,12 @@ impl ChartStore {
 
     /// Feed side: mutate and publish.
     pub fn update<R>(&self, f: impl FnOnce(&mut ChartData) -> R) -> R {
-        let r = f(&mut self.data.lock());
+        let mut d = self.data.lock();
+        let r = f(&mut d);
+        let live = d.status == FeedStatus::Live && market_open(&d);
+        drop(d);
+        self.last_data.store(mono_ms(), Ordering::Release);
+        self.live.store(live, Ordering::Release);
         self.revision.fetch_add(1, Ordering::Release);
         r
     }
