@@ -228,6 +228,13 @@ pub struct ChartState {
     /// when set).
     #[serde(flatten)]
     pub visibility: StudyVisibility,
+    /// External levels on this chart (decision 0022): hidden sources, kinds and labels.
+    /// Optional: absent means every source and kind shown.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::levels_layer::LevelsConfig::is_default"
+    )]
+    pub levels: crate::levels_layer::LevelsConfig,
 }
 
 /// What a chart draws of its studies (VWAP lines and bands, the volume profile). Hiding
@@ -596,6 +603,7 @@ mod tests {
         let state = ChartState {
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
+            levels: Default::default(),
             indicators: vec![lines_indicators::IndicatorConfig::Vwap {
                 spec: lines_indicators::VwapSpec {
                     reset: lines_indicators::Reset::Rth,
@@ -612,6 +620,7 @@ mod tests {
         let none = serde_json::to_string(&ChartState {
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
+            levels: Default::default(),
             indicators: vec![],
             profile: ProfileConfig::default(),
         })
@@ -689,6 +698,7 @@ mod tests {
                         chart: Some(ChartState {
                             bar_px: 9.5,
                             visibility: StudyVisibility::default(),
+                            levels: Default::default(),
                             indicators: vec![],
                             profile: ProfileConfig::default(),
                         }),
@@ -767,16 +777,27 @@ mod tests {
                 mode: crate::profile::ProfileMode::Session,
                 ..ProfileConfig::default()
             },
+            levels: crate::levels_layer::LevelsConfig {
+                hide_labels: true,
+                hidden_sources: vec!["demo".into()],
+                ..Default::default()
+            },
         };
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(
             json.contains(r#""hide_study_labels":true"#) && json.contains(r#""hide_studies":true"#),
             "{json}"
         );
+        // Levels (decision 0022): their own optional field beside the others.
+        assert!(
+            json.contains(r#""levels":{"hide-labels":true,"hidden-sources":["demo"]}"#),
+            "{json}"
+        );
         // Hiding keeps every study's configuration.
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
         let shown = ChartState {
             visibility: StudyVisibility::default(),
+            levels: Default::default(),
             ..hidden.clone()
         };
         let json = serde_json::to_string(&shown).unwrap();
@@ -831,6 +852,7 @@ mod tests {
             chart: Some(ChartState {
                 bar_px: 7.0,
                 visibility: StudyVisibility::default(),
+                levels: Default::default(),
                 indicators: vec![],
                 profile,
             }),
@@ -856,6 +878,7 @@ mod tests {
         let both = ChartState {
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
+            levels: Default::default(),
             indicators: vec![lines_indicators::IndicatorConfig::Vwap {
                 spec: lines_indicators::VwapSpec::default(),
                 color: 0,
@@ -925,6 +948,7 @@ mod tests {
             Some(ChartState {
                 bar_px: 6.0,
                 visibility: StudyVisibility::default(),
+                levels: Default::default(),
                 indicators: vec![],
                 profile: ProfileConfig::default()
             })

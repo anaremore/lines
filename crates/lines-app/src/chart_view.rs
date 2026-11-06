@@ -56,6 +56,7 @@ use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
 
 use crate::feeds::{Feeds, PaneFeed};
+use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::profile::{ProfileConfig, VolumeProfileLayer};
@@ -155,6 +156,10 @@ pub struct ChartView {
     studies: crate::studies::Studies,
     /// `studies.revision()` last drawn.
     seen_studies: u64,
+    /// External levels (decision 0022), saved with the pane.
+    levels: LevelsLayer,
+    /// `levels.revision()` last drawn.
+    seen_levels: u64,
     /// Study legends/tags or all studies hidden (saved with the pane). Hidden studies keep
     /// their configuration and engine nodes, so showing them again is exact and immediate,
     /// but cost no prepare or paint work while hidden.
@@ -214,6 +219,8 @@ impl ChartView {
         pane::watch_store(cx);
         let mut studies = crate::studies::Studies::new(fixture.indicators.clone());
         studies.attach(feed_info(&store));
+        let mut levels = LevelsLayer::new(LevelsConfig::default());
+        levels.attach(&store);
 
         ChartView {
             feed,
@@ -222,6 +229,8 @@ impl ChartView {
             layers: Vec::new(),
             studies,
             seen_studies: u64::MAX,
+            levels,
+            seen_levels: u64::MAX,
             visibility: fixture.visibility,
             picker,
             store,
@@ -431,6 +440,8 @@ impl ChartView {
         self.store = feed.store().clone();
         // The same indicators on the new feed (new shared nodes).
         self.studies.attach(feed_info(&self.store));
+        self.levels.attach(&self.store);
+        self.seen_levels = u64::MAX;
         self.feed = feed;
         self.instrument = self.store.read().product.clone();
         // A fresh view for the new series; price labels belong to the old product's format.
@@ -465,6 +476,9 @@ impl ChartView {
         if state.visibility != StudyVisibility::default() {
             self.visibility = state.visibility;
         }
+        if !state.levels.is_default() {
+            self.levels.config = state.levels.clone();
+        }
         // A saved profile wins; a pane without one keeps its initial (CLI) settings.
         if !state.profile.is_default() {
             self.profile.set_config(state.profile);
@@ -477,6 +491,75 @@ impl ChartView {
             }
         }
         self.set_indicator_configs(configs);
+    }
+
+    /// Study legends (VWAP …) and level-source rows, top left under the readout, unless the
+    /// chart hides its study labels (render time).
+    fn legend(&self, t: &Theme) -> Option<gpui::AnyElement> {
+        if !self.visibility.draws_labels() {
+            return None;
+        }
+        let studies = self.studies.legend(t, &self.instrument);
+        let rows = if self.levels.config.hide_labels {
+            Vec::new()
+        } else {
+            self.levels.legend()
+        };
+        if studies.is_none() && rows.is_empty() {
+            return None;
+        }
+        let levels = (!rows.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px(px(8.0))
+                .py(px(4.0))
+                .bg(t.label_bg)
+                .text_size(px(12.0))
+                .children(rows.into_iter().map(|r| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(div().text_color(t.text_main).child(r.label))
+                        .child(
+                            div()
+                                .text_color(if r.warn { t.text_main } else { t.text_dim })
+                                .child(r.text),
+                        )
+                }))
+        });
+        Some(
+            div()
+                .absolute()
+                .top(px(30.0))
+                .left(px(8.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(studies)
+                .children(levels)
+                .into_any_element(),
+        )
+    }
+
+    /// External level sources on this chart, `(id, label, kinds)`, for menus.
+    pub fn level_sources(&self) -> Vec<(String, &'static str, Vec<String>)> {
+        self.levels.sources()
+    }
+
+    pub fn levels_config(&self) -> LevelsConfig {
+        self.levels.config.clone()
+    }
+
+    /// Change which levels and labels this chart shows (commands `ToggleLevels`, ...).
+    pub fn set_levels_config(&mut self, c: LevelsConfig, cx: &mut Context<Self>) {
+        if c != self.levels.config {
+            self.levels.config = c;
+            self.seen_levels = u64::MAX;
+            cx.notify();
+        }
     }
 
     /// What this chart draws of its studies.
@@ -665,6 +748,7 @@ impl ChartView {
                 &mut self.profile,
                 &mut self.layers,
                 &mut self.studies,
+                &mut self.levels,
                 &d,
                 &self.vp,
                 max_columns,
@@ -735,6 +819,7 @@ impl ChartView {
             );
             if studies {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
+                self.levels.paint_back(plot, window);
             }
             for c in &self.scene.candles {
                 let color = if c.up { t.up } else { t.down };
@@ -781,8 +866,10 @@ impl ChartView {
                     l.paint(plot, &self.vp, &t, window, cx);
                 }
                 self.studies.paint((ox, oy), &t, window);
+                self.levels.paint_front(plot, window);
             }
             if labels {
+                self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
             }
             if let Some(p) = self.last_trade {
@@ -1262,6 +1349,7 @@ impl Pane for ChartView {
             indicators: self.indicator_configs(),
             profile: self.profile.config(),
             visibility: self.visibility,
+            levels: self.levels.config.clone(),
         });
     }
 
@@ -1286,8 +1374,10 @@ impl Pane for ChartView {
             return false;
         }
         let r = self.studies.revision();
-        let changed = r != self.seen_studies;
+        let l = self.levels.revision();
+        let changed = r != self.seen_studies || l != self.seen_levels;
         self.seen_studies = r;
+        self.seen_levels = l;
         changed
     }
 }
@@ -1308,6 +1398,7 @@ fn prepare_studies(
     profile: &mut VolumeProfileLayer,
     layers: &mut [Box<dyn ChartLayer>],
     studies: &mut crate::studies::Studies,
+    levels: &mut LevelsLayer,
     d: &ChartData,
     vp: &Viewport,
     max_columns: usize,
@@ -1320,6 +1411,8 @@ fn prepare_studies(
         l.prepare(d, vp);
     }
     studies.prepare(d, vp, max_columns);
+    let last_y = d.last_trade.map(|p| vp.price_to_y(p.0 as f64) as f32);
+    levels.prepare(d, vp, last_y);
 }
 
 /// The indicator engine's view of a chart store's feed.
@@ -1392,13 +1485,7 @@ impl Render for ChartView {
                         )
                         .size_full(),
                     )
-                    .when_some(
-                        self.visibility
-                            .draws_labels()
-                            .then(|| self.studies.legend(&t, &self.instrument))
-                            .flatten(),
-                        |d, l| d.child(l),
-                    )
+                    .when_some(self.legend(&t), |d, l| d.child(l))
                     .when_some(self.studies.menu_overlay(&t, cx), |d, m| d.child(m))
                     .when_some(overlay, |d, overlay| d.child(overlay)),
             )
@@ -1445,7 +1532,16 @@ mod tests {
             ..StudyVisibility::default()
         };
         for _ in 0..3 {
-            prepare_studies(hidden, &mut profile, &mut [], &mut studies, &d, &vp, 256);
+            prepare_studies(
+                hidden,
+                &mut profile,
+                &mut [],
+                &mut studies,
+                &mut LevelsLayer::new(LevelsConfig::default()),
+                &d,
+                &vp,
+                256,
+            );
         }
         assert!(!profile.has_built());
         assert_eq!(studies.reserved_columns(), 0);
@@ -1459,6 +1555,7 @@ mod tests {
             &mut profile,
             &mut [],
             &mut studies,
+            &mut LevelsLayer::new(LevelsConfig::default()),
             &d,
             &vp,
             256,

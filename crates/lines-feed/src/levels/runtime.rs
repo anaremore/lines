@@ -160,6 +160,8 @@ struct Entry {
     /// Replay: time of the next batch not yet applied (`i64::MAX`: none); live: `i64::MAX`.
     next_due: Arc<AtomicI64>,
     loaded: Arc<AtomicBool>,
+    /// The chart's clock (replays deliver batches by it).
+    prices: Arc<dyn ChartPrices>,
 }
 
 impl Drop for Entry {
@@ -233,6 +235,7 @@ pub fn acquire(
     let cell = Arc::new(LevelCell::new(&*source, replaying));
     let next_due = Arc::new(AtomicI64::new(i64::MAX));
     let loaded = Arc::new(AtomicBool::new(!replaying));
+    let clock = prices.clone();
     let task = {
         let (cell, next_due, loaded) = (cell.clone(), next_due.clone(), loaded.clone());
         rt().spawn(async move {
@@ -251,22 +254,43 @@ pub fn acquire(
         task,
         next_due,
         loaded,
+        prices: clock,
     });
     map.insert(key, Arc::downgrade(&entry));
     LevelHandle { entry }
 }
 
-/// Replay: whether every batch recorded up to `now` has been applied (and every file read).
-/// Live sources are always settled.
-pub fn replay_settled(now: UtcMillis) -> bool {
+/// Whether every source has caught up: a replay has applied each batch due by its chart's
+/// clock; a live source has received its first answer (a map or an error). Screenshot mode
+/// waits for this so its frame is deterministic.
+pub fn settled() -> bool {
     // Upgrade under the lock, look (and drop) outside it: dropping the last handle locks.
-    let live: Vec<Arc<Entry>> = entries()
+    let held: Vec<Arc<Entry>> = entries()
         .lock()
         .values()
         .filter_map(Weak::upgrade)
         .collect();
-    live.iter()
-        .all(|e| e.loaded.load(Ordering::Acquire) && e.next_due.load(Ordering::Acquire) > now.0)
+    held.iter().all(|e| {
+        let s = e.cell.read();
+        if s.replay {
+            let now = e.prices.now().map_or(i64::MIN, |t| t.0);
+            e.loaded.load(Ordering::Acquire) && e.next_due.load(Ordering::Acquire) > now
+        } else {
+            s.received.is_some() || s.error.is_some()
+        }
+    })
+}
+
+/// Block until [`settled`] (or `timeout`); `false` on timeout.
+pub fn wait_settled(timeout: Duration) -> bool {
+    let end = std::time::Instant::now() + timeout;
+    while !settled() {
+        if std::time::Instant::now() > end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 /// Decode one batch received at `time` and publish the result.

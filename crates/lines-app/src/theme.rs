@@ -216,6 +216,19 @@ impl Theme {
     }
 }
 
+/// A colour an external level source fixed for its levels (`0xRRGGBBAA`), alpha scaled by
+/// `alpha`. Decision 0022: the one exception to "colours are tokens", for external levels whose
+/// source contract fixes the colour. Their labels still use theme text tokens.
+pub fn source_colour(rgba: u32, alpha: f32) -> Hsla {
+    gpui::Rgba {
+        r: ((rgba >> 24) & 0xff) as f32 / 255.0,
+        g: ((rgba >> 16) & 0xff) as f32 / 255.0,
+        b: ((rgba >> 8) & 0xff) as f32 / 255.0,
+        a: (rgba & 0xff) as f32 / 255.0 * alpha.clamp(0.0, 1.0),
+    }
+    .into()
+}
+
 /// `top` (possibly translucent) composited over opaque `bottom`, as drawn.
 #[cfg(test)]
 pub fn over(top: Hsla, bottom: Hsla) -> Hsla {
@@ -477,6 +490,7 @@ mod tests {
         for (file, src) in [
             ("chart_view.rs", include_str!("chart_view.rs")),
             ("profile.rs", include_str!("profile.rs")),
+            ("levels_layer.rs", include_str!("levels_layer.rs")),
             ("dom_view.rs", include_str!("dom_view.rs")),
             ("tape_view.rs", include_str!("tape_view.rs")),
             ("workspace.rs", include_str!("workspace.rs")),

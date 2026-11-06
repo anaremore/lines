@@ -108,6 +108,20 @@ pub trait ChartPrices: Send + Sync {
     fn now(&self) -> Option<UtcMillis>;
 }
 
+/// [`ChartPrices`] over a chart's store: its bars (history + live, stitched) and its market
+/// clock. Locks the store briefly; used on the levels thread only.
+pub struct StorePrices(pub Arc<crate::store::ChartStore>);
+
+impl ChartPrices for StorePrices {
+    fn price_at(&self, t: UtcMillis, tolerance_ms: i64) -> Option<Price> {
+        let d = self.0.read();
+        lines_core::levels::price_at(d.series.bars(), t, tolerance_ms)
+    }
+    fn now(&self) -> Option<UtcMillis> {
+        self.0.read().market_time
+    }
+}
+
 /// One response or event, as recorded: a topic (the request path or event name; never a
 /// secret, never a query string carrying one) and the body.
 #[derive(Clone, Debug, PartialEq, Eq)]
