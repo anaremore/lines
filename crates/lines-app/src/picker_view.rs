@@ -61,6 +61,15 @@ impl AppSettings {
         }
     }
 
+    /// Change the P&L display for the whole app (saved; every pane repaints).
+    pub fn set_pnl_display(&mut self, m: crate::pnl::PnlDisplay) {
+        if self.settings.pnl_display != m {
+            self.settings.pnl_display = m;
+            self.save();
+            crate::pnl::display_changed();
+        }
+    }
+
     fn save(&self) {
         if let (Some(p), Some(w)) = (&self.path, &self.writer) {
             w.write(p.clone(), self.settings.encode());

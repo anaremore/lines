@@ -49,6 +49,8 @@ pub struct Shot {
     pub paper: Option<String>,
     /// DOMs start armed (`--arm`).
     pub arm: bool,
+    /// The P&L display (`--pnl`; default: the app's default).
+    pub pnl: Option<crate::pnl::PnlDisplay>,
 }
 
 pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
@@ -96,6 +98,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         doc,
         paper,
         arm,
+        pnl,
     } = shot;
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut trading = Trading::start(
@@ -138,7 +141,11 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         let _keep = &feeds;
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
-        cx.set_global(AppSettings::ephemeral());
+        let mut settings = AppSettings::ephemeral();
+        if let Some(m) = pnl {
+            settings.settings.pnl_display = m;
+        }
+        cx.set_global(settings);
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);
         if let Err(e) = capture(cx, window, out, size, scale, script) {
