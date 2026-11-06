@@ -479,11 +479,9 @@ fn rebuild_drops_orders_the_broker_does_not_have() {
     r.core.set_broker(Box::new(fresh));
     r.core.rebuild(r.now());
     r.collect();
-    assert_eq!(
-        r.state(id),
-        OrderState::Cancelled,
-        "not at the broker: not working"
-    );
+    // Sent with no answer and not at the broker: unresolved, never assumed working (or gone).
+    assert_eq!(r.state(id), OrderState::Unresolved);
+    assert!(!r.core.order(id).unwrap().is_open(), "not shown as working");
     assert!(
         r.events
             .iter()
@@ -499,6 +497,7 @@ fn risk_rejects_but_flatten_and_cancel_all_always_work() {
         max_position: Some(2),
         price_band_ticks: Some(40),
         daily_loss: Some(500),
+        ..Default::default()
     };
     let mut r = Rig::with(FillModel::TradeThrough, cfg);
     r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
@@ -589,6 +588,7 @@ fn trailing_drawdown_breach_liquidates_and_blocks() {
         profit_target: Some(3_000),
         consistency: None,
         liquidate_on_breach: true,
+        on_breach: Default::default(),
     };
     let mut r = Rig::with(FillModel::TradeThrough, prop_account(preset));
     r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
@@ -655,6 +655,7 @@ fn contract_cap_counts_micro_equivalents() {
         profit_target: None,
         consistency: None,
         liquidate_on_breach: false,
+        on_breach: Default::default(),
     };
     let mut r = Rig::with(FillModel::TradeThrough, prop_account(preset));
     // 2 NQ = 20 micro-equivalents (1 NQ = 10 MNQ): allowed; working orders count too.
@@ -747,4 +748,684 @@ fn account_groups_exist_in_the_model() {
         vec![AccountId::new("a"), AccountId::new("b")]
     );
     let _ = core.broker().capabilities();
+}
+
+// ---- OMS checklist (docs/inspiration.md, "Trading core, OMS, risk") ---------------------
+//
+// One test per item that applies to lines-trading; behaviour only. Items that need exact
+// broker event orderings use `Scripted`, a broker whose events the test delivers.
+
+use std::sync::{Arc, Mutex};
+
+use lines_trading::broker::{
+    BrokerAccount, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot,
+};
+use lines_trading::core::OverfillPolicy;
+use lines_trading::rules::{BreachStates, TradingState};
+use lines_trading::{Broker, Order};
+
+#[derive(Default)]
+struct Script {
+    requests: Vec<BrokerRequest>,
+    due: Vec<BrokerEvent>,
+    snapshot: BrokerSnapshot,
+}
+
+/// A broker the test drives: it records requests and emits exactly the events pushed.
+struct Scripted(Arc<Mutex<Script>>);
+
+impl Broker for Scripted {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+    fn capabilities(&self) -> BrokerCaps {
+        BrokerCaps {
+            market_orders: true,
+            stop_orders: true,
+            modify: true,
+            server_brackets: true,
+            oco: true,
+            fractional_qty: false,
+        }
+    }
+    fn request(&mut self, _: UtcMillis, req: BrokerRequest) {
+        self.0.lock().unwrap().requests.push(req);
+    }
+    fn market(&mut self, _: UtcMillis, _: ContractKey, _: &MarketInput) {}
+    fn poll(&mut self, _: UtcMillis, out: &mut Vec<BrokerEvent>) {
+        out.append(&mut self.0.lock().unwrap().due);
+    }
+    fn next_wake(&self) -> Option<UtcMillis> {
+        None
+    }
+    fn snapshot(&self) -> BrokerSnapshot {
+        self.0.lock().unwrap().snapshot.clone()
+    }
+}
+
+fn scripted() -> (Rig, Arc<Mutex<Script>>) {
+    let s = Arc::new(Mutex::new(Script::default()));
+    let mut core = TradingCore::new(Box::new(Scripted(s.clone())));
+    core.add_account(AccountConfig::paper("paper-1", 50_000), None);
+    let rig = Rig {
+        core,
+        t: UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0,
+        events: Vec::new(),
+    };
+    (rig, s)
+}
+
+impl Rig {
+    /// Deliver broker events and let the core apply them.
+    fn deliver(&mut self, s: &Arc<Mutex<Script>>, evs: Vec<BrokerEvent>) {
+        s.lock().unwrap().due.extend(evs);
+        self.wait(1);
+    }
+}
+
+fn at(r: &Rig) -> UtcMillis {
+    r.now()
+}
+
+fn fill(id: OrderId, trade_id: &str, p: f64, q: i64, t: UtcMillis) -> BrokerEvent {
+    BrokerEvent::Fill {
+        id,
+        trade_id: trade_id.into(),
+        price: px(p),
+        qty: Qty(q),
+        fee: Money::ZERO,
+        at: t,
+    }
+}
+
+fn working(r: &mut Rig, s: &Arc<Mutex<Script>>, qty: i64) -> OrderId {
+    let id = r.place(Side::Buy, qty, limit(6000.00));
+    let t = at(r);
+    r.deliver(
+        s,
+        vec![
+            BrokerEvent::Acked { id, at: t },
+            BrokerEvent::Working { id, at: t },
+        ],
+    );
+    id
+}
+
+/// Item 1: Denied (by the core's risk or rules, never sent) is not rejected (by the broker).
+#[test]
+fn checklist_01_denied_is_not_rejected() {
+    let (mut r, s) = scripted();
+    // Denied: an off-grid price never reaches the broker and creates no order.
+    let denied = r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Buy,
+        qty: Qty(1),
+        kind: limit(6000.10),
+    }));
+    assert_eq!(denied.unwrap_err().code, RejectCode::Invalid);
+    assert!(s.lock().unwrap().requests.is_empty(), "never sent");
+    assert!(!r.events.iter().any(|e| matches!(e, Event::Order(_))));
+    // Rejected: sent, then refused by the broker: the order says so, with the reason.
+    let id = r.place(Side::Buy, 1, limit(6000.00));
+    assert_eq!(s.lock().unwrap().requests.len(), 1);
+    let t = at(&r);
+    r.deliver(
+        &s,
+        vec![BrokerEvent::Rejected {
+            id,
+            reason: "insufficient margin".into(),
+            at: t,
+        }],
+    );
+    assert_eq!(
+        r.state(id),
+        OrderState::Rejected {
+            reason: "insufficient margin".into()
+        }
+    );
+}
+
+/// Item 2: Cancel All covers orders still submitted (no ack yet) and acked (held exits).
+#[test]
+fn checklist_02_cancel_all_covers_submitted_and_acked_orders() {
+    let (mut r, s) = scripted();
+    let submitted = r.place(Side::Buy, 1, limit(6000.00));
+    let acked = r.place(Side::Buy, 1, limit(5999.00));
+    let t = at(&r);
+    r.deliver(&s, vec![BrokerEvent::Acked { id: acked, at: t }]);
+    let ids = r
+        .cmd(Command::CancelAll {
+            account: acct(),
+            contract: None,
+        })
+        .unwrap();
+    assert_eq!(ids, vec![submitted, acked]);
+    let cancels: Vec<OrderId> = s
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter_map(|q| match q {
+            BrokerRequest::Cancel { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, vec![submitted, acked]);
+}
+
+/// Item 3: A fill that arrives while a cancel is in flight applies; the order ends Filled, or
+/// Cancelled with its filled quantity.
+#[test]
+fn checklist_03_fill_during_a_pending_cancel_applies() {
+    let (mut r, s) = scripted();
+    // Filled before the cancel lands: Filled; the broker's late "too late to cancel" can't
+    // turn it into anything else.
+    let a = working(&mut r, &s, 2);
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: a,
+    })
+    .unwrap();
+    assert_eq!(
+        r.state(a),
+        OrderState::Working,
+        "still working while the cancel is in flight"
+    );
+    let t = at(&r);
+    r.deliver(&s, vec![fill(a, "x-1", 6000.00, 2, t)]);
+    assert_eq!(r.state(a), OrderState::Filled);
+    r.deliver(
+        &s,
+        vec![BrokerEvent::Rejected {
+            id: a,
+            reason: "too late to cancel".into(),
+            at: t,
+        }],
+    );
+    assert_eq!(r.state(a), OrderState::Filled);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    // Part-filled, then cancelled: Cancelled, and the fill counts.
+    let b = working(&mut r, &s, 3);
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: b,
+    })
+    .unwrap();
+    let t = at(&r);
+    r.deliver(
+        &s,
+        vec![
+            fill(b, "x-2", 6000.00, 1, t),
+            BrokerEvent::Cancelled {
+                id: b,
+                reason: "cancelled".into(),
+                at: t,
+            },
+        ],
+    );
+    assert_eq!(r.state(b), OrderState::Cancelled);
+    assert_eq!(r.core.order(b).unwrap().filled, Qty(1));
+    assert_eq!(r.core.position(&acct(), es()), 3);
+}
+
+/// Item 4: A fill reported after the order finished (Lines has no GTD/DAY orders yet; the same
+/// rule covers a cancel confirmed before a fill report) is applied without reopening it.
+#[test]
+fn checklist_04_late_fill_applies_without_reopening() {
+    let (mut r, s) = scripted();
+    let id = working(&mut r, &s, 2);
+    let t = at(&r);
+    r.deliver(
+        &s,
+        vec![
+            BrokerEvent::Cancelled {
+                id,
+                reason: "cancelled".into(),
+                at: t,
+            },
+            fill(id, "late-1", 6000.00, 1, t),
+        ],
+    );
+    let o = r.core.order(id).unwrap();
+    assert_eq!(o.state, OrderState::Cancelled, "not reopened");
+    assert_eq!(o.filled, Qty(1));
+    assert_eq!(r.core.position(&acct(), es()), 1, "the fill counts");
+}
+
+fn breach_preset() -> RulePreset {
+    RulePreset {
+        name: "states".into(),
+        label: APPROXIMATION.into(),
+        account_size: 50_000,
+        trailing_drawdown: Some(TrailingDrawdown {
+            amount: 400,
+            mode: DrawdownMode::Intraday,
+            lock_at_start_plus: None,
+        }),
+        daily_loss_limit: Some(200),
+        max_micro_contracts: None,
+        profit_target: None,
+        consistency: None,
+        liquidate_on_breach: false,
+        on_breach: BreachStates::default(),
+    }
+}
+
+fn spec(side: Side, qty: i64, kind: OrderKind) -> Command {
+    Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side,
+        qty: Qty(qty),
+        kind,
+    })
+}
+
+/// Items 5 and 6: Trading states after prop breaches: daily loss → reducing only (orders that would
+/// increase or flip are refused; reduce-only orders shrink with the position and are
+/// cancelled when it is flat), drawdown → halted (only cancels and Flatten).
+#[test]
+fn checklist_05_06_reducing_only_and_halted() {
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 3);
+    assert_eq!(r.core.trading_state(&acct()), TradingState::Active);
+    // Down 1.5 points × 3 × $50 = −$225 (plus fees): daily loss (200) reached, drawdown (400)
+    // not: reducing only.
+    r.book(&[(5998.75, 50)], &[(5999.00, 50)]);
+    r.trade(5998.75, 1);
+    assert_eq!(r.core.trading_state(&acct()), TradingState::ReducingOnly);
+    let last_account = |r: &Rig| {
+        r.events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Event::Account(a) => Some(a.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(last_account(&r).trading, TradingState::ReducingOnly);
+    // Adding or flipping: refused.
+    let add = r.cmd(spec(Side::Buy, 1, limit(5998.00))).unwrap_err();
+    assert_eq!(add.code, RejectCode::PropRule);
+    assert!(add.message.contains("reducing only"));
+    let flip = r.cmd(spec(Side::Sell, 4, limit(6010.00))).unwrap_err();
+    assert_eq!(flip.code, RejectCode::PropRule);
+    // Reducing: allowed, up to what open orders don't already close.
+    let exit = r.cmd(spec(Side::Sell, 2, limit(6010.00))).unwrap()[0];
+    assert!(r.core.order(exit).unwrap().reduce_only);
+    assert!(
+        r.cmd(spec(Side::Sell, 2, limit(6010.00))).is_err(),
+        "3 − 2 open = 1 left"
+    );
+    let exit2 = r.cmd(spec(Side::Sell, 1, limit(6011.00))).unwrap()[0];
+    r.wait(LAT);
+    // The position shrinks elsewhere (a manual Flatten of part is not possible; use a fill
+    // of the first exit): the remaining reduce-only order never closes more than is left.
+    r.book(&[(6010.25, 50)], &[(6010.50, 50)]);
+    r.trade(6010.25, 2); // exit fills 2: position 1, exit2 (1) still fits
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(r.state(exit2), OrderState::Working);
+    // Flatten closes the last one: exit2 has nothing left to close and is cancelled.
+    r.cmd(Command::Flatten {
+        account: acct(),
+        contract: None,
+    })
+    .unwrap();
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(exit2), OrderState::Cancelled);
+
+    // Drawdown breach: halted. Nothing new, not even a reducing order; cancels still work.
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    r.wait(LAT);
+    r.book(&[(5997.00, 50)], &[(5997.25, 50)]);
+    r.trade(5997.00, 1); // −$487.50: drawdown (400) breached
+    assert_eq!(r.core.trading_state(&acct()), TradingState::Halted);
+    let e = r.cmd(spec(Side::Sell, 1, limit(6010.00))).unwrap_err();
+    assert!(e.message.contains("halted"), "{e:?}");
+    assert!(
+        r.cmd(Command::CancelAll {
+            account: acct(),
+            contract: None
+        })
+        .is_ok()
+    );
+    r.cmd(Command::Flatten {
+        account: acct(),
+        contract: None,
+    })
+    .unwrap();
+    r.wait(LAT);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        0,
+        "Flatten works when halted"
+    );
+}
+
+/// Item 7: Submit and modify rate limits (separate), and the maximum notional per order.
+#[test]
+fn checklist_07_rate_limits_and_notional() {
+    let mut cfg = AccountConfig::paper("paper-1", 50_000);
+    cfg.limits = RiskLimits {
+        max_submits_per_sec: Some(3),
+        max_modifies_per_sec: Some(2),
+        // ES at 6000 × $50 = $300,000 a contract.
+        max_notional: Some(700_000),
+        ..Default::default()
+    };
+    let mut r = Rig::with(FillModel::TradeThrough, cfg);
+    r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
+    let big = r.cmd(spec(Side::Buy, 3, limit(5990.00))).unwrap_err();
+    assert!(big.message.contains("order value"), "{big:?}");
+    let ids: Vec<OrderId> = (0..3)
+        .map(|i| r.place(Side::Buy, 1, limit(5990.00 - i as f64)))
+        .collect();
+    let fourth = r.cmd(spec(Side::Buy, 1, limit(5980.00))).unwrap_err();
+    assert!(fourth.message.contains("new orders in a second"));
+    // Modifies are counted on their own: still allowed (the submit limit is used up).
+    r.wait(LAT);
+    for (i, id) in ids.iter().take(2).enumerate() {
+        r.cmd(Command::ModifyOrder {
+            account: acct(),
+            order: *id,
+            qty: None,
+            price: Some(px(5985.00 - i as f64)),
+        })
+        .unwrap();
+    }
+    let third = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order: ids[2],
+            qty: None,
+            price: Some(px(5984.00)),
+        })
+        .unwrap_err();
+    assert!(third.message.contains("modifies in a second"));
+    // Cancels and Flatten are never rate limited.
+    r.cmd(Command::CancelAll {
+        account: acct(),
+        contract: None,
+    })
+    .unwrap();
+    // A second later the window has moved on.
+    r.wait(1000);
+    r.place(Side::Buy, 1, limit(5990.00));
+}
+
+/// Item 8: Fills are de-duplicated by the broker's execution id on every path; reconciliation's
+/// own fills have deterministic ids, so repeating it (another reconnect, a restart) never
+/// counts them twice.
+#[test]
+fn checklist_08_fills_deduplicated_by_trade_id() {
+    let (mut r, s) = scripted();
+    let id = working(&mut r, &s, 3);
+    let t = at(&r);
+    // The stream delivers an execution twice (a reconnect replays it), even with another
+    // price: counted once.
+    r.deliver(&s, vec![fill(id, "exec-7", 6000.00, 1, t)]);
+    r.deliver(&s, vec![fill(id, "exec-7", 5999.00, 1, t)]);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(r.fills(id).len(), 1);
+    // The broker filled one more while we weren't listening: the snapshot says 2 filled.
+    let mut at_broker: Order = r.core.order(id).unwrap().clone();
+    at_broker.filled = Qty(2);
+    at_broker.fill_value += px(6000.00).0 as i128;
+    at_broker.state = OrderState::PartiallyFilled;
+    s.lock().unwrap().snapshot = BrokerSnapshot {
+        accounts: vec![BrokerAccount {
+            id: acct(),
+            balance: Money::whole(50_000),
+            positions: vec![lines_trading::broker::BrokerPosition {
+                contract: es(),
+                position: {
+                    let mut p = lines_trading::position::Position::default();
+                    p.apply_fill(Side::Buy, px(6000.00), Qty(2));
+                    p
+                },
+            }],
+            orders: vec![at_broker.clone()],
+        }],
+    };
+    r.core.rebuild(r.now());
+    r.collect();
+    let recon: Vec<_> = r
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Fill(f) if f.reconciled => Some((f.trade_id.clone(), f.qty.0, f.price)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recon,
+        vec![(format!("recon-{}-2", id.0), 1, px(6000.00))],
+        "one synthesised fill, deterministic id"
+    );
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        2,
+        "position from the broker"
+    );
+    // Reconcile again (another reconnect): nothing new.
+    r.events.clear();
+    r.core.rebuild(r.now());
+    r.collect();
+    assert!(!r.events.iter().any(|e| matches!(e, Event::Fill(_))));
+    // The same execution replayed by the broker later is still ignored.
+    r.deliver(&s, vec![fill(id, "exec-7", 6000.00, 1, t)]);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+}
+
+/// Item 9: Overfill: recorded (default) or refused, always reported, never clamped.
+#[test]
+fn checklist_09_overfill_recorded_or_refused() {
+    let (mut r, s) = scripted();
+    let id = working(&mut r, &s, 2);
+    let t = at(&r);
+    r.deliver(&s, vec![fill(id, "o-1", 6000.00, 3, t)]);
+    let o = r.core.order(id).unwrap();
+    assert_eq!(
+        (o.filled, o.overfill, o.state.clone()),
+        (Qty(3), Qty(1), OrderState::Filled)
+    );
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        3,
+        "the broker's quantity, not clamped"
+    );
+    assert!(r.events.iter().any(|e| matches!(
+        e,
+        Event::Overfill {
+            excess: Qty(1),
+            recorded: true,
+            ..
+        }
+    )));
+
+    let (mut r, s) = scripted();
+    r.core.set_overfill_policy(OverfillPolicy::Reject);
+    let id = working(&mut r, &s, 2);
+    let t = at(&r);
+    r.deliver(&s, vec![fill(id, "o-2", 6000.00, 3, t)]);
+    assert_eq!(
+        r.core.order(id).unwrap().filled,
+        Qty(0),
+        "refused whole, not clamped to 2"
+    );
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert!(r.events.iter().any(|e| matches!(
+        e,
+        Event::Overfill {
+            excess: Qty(1),
+            recorded: false,
+            ..
+        }
+    )));
+}
+
+/// Item 10: Several resting orders never fill more than a trade printed (paper broker).
+#[test]
+fn checklist_10_orders_never_fill_more_than_printed() {
+    for model in [
+        FillModel::TradeThrough,
+        FillModel::Touch,
+        FillModel::QueueEstimate,
+    ] {
+        let mut r = Rig::new(model);
+        r.book(&[(5999.75, 0)], &[(6000.25, 10)]);
+        let ids: Vec<OrderId> = (0..3)
+            .map(|_| r.place(Side::Buy, 2, limit(6000.00)))
+            .collect();
+        r.wait(LAT);
+        r.trade(5999.75, 3); // through 6000.00, 3 printed
+        let filled: i64 = ids
+            .iter()
+            .map(|id| r.core.order(*id).unwrap().filled.0)
+            .sum();
+        assert_eq!(filled, 3, "{model:?}: exactly what printed");
+        // Oldest first.
+        assert_eq!(r.core.order(ids[0]).unwrap().filled, Qty(2), "{model:?}");
+        assert_eq!(r.core.order(ids[1]).unwrap().filled, Qty(1), "{model:?}");
+    }
+}
+
+/// Item 11: Contingent orders, one-updates-other: a partial fill of one exit shrinks its sibling;
+/// a partially filled entry protects exactly what it filled, and exits follow later fills.
+#[test]
+fn checklist_11_one_updates_other_on_partial_fills() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(3),
+                kind: limit(6000.00),
+            },
+            take_profit: Some(px(6002.00)),
+            stop_loss: Some(px(5998.00)),
+        }))
+        .unwrap();
+    let (entry, tp, sl) = (ids[0], ids[1], ids[2]);
+    r.wait(LAT);
+    let qty = |r: &Rig, id| {
+        let o = r.core.order(id).unwrap();
+        (o.qty.0, o.filled.0)
+    };
+    // Entry fills 1 of 3: both exits protect 1.
+    r.trade(5999.75, 1);
+    assert_eq!((qty(&r, tp), qty(&r, sl)), ((1, 0), (1, 0)));
+    // Take-profit fills that 1 while the entry still works: the stop has nothing to close
+    // and is held, not cancelled (the entry may fill more).
+    r.book(&[(6002.25, 10)], &[(6002.50, 10)]);
+    r.trade(6002.25, 1);
+    assert_eq!(r.state(tp), OrderState::Filled);
+    assert_ne!(
+        r.state(sl),
+        OrderState::Cancelled,
+        "kept for the rest of the entry"
+    );
+    assert_eq!(qty(&r, sl), (0, 0));
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    // The entry fills its other 2: the stop protects exactly those 2.
+    r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
+    r.trade(5999.75, 5);
+    assert_eq!(r.state(entry), OrderState::Filled);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert_eq!(qty(&r, sl), (2, 0), "the stop covers the open 2");
+    // The stop, now the only exit, closes the 2 (walking a thin bid, then at the trade).
+    r.book(&[(5997.75, 1)], &[(5998.00, 10)]);
+    r.trade(5997.75, 1);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(sl), OrderState::Filled);
+
+    // Fully filled entry, partial take-profit: the stop shrinks to what is left (OUO).
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(3),
+                kind: limit(6000.00),
+            },
+            take_profit: Some(px(6002.00)),
+            stop_loss: Some(px(5998.00)),
+        }))
+        .unwrap();
+    let (tp, sl) = (ids[1], ids[2]);
+    r.wait(LAT);
+    r.trade(5999.75, 5);
+    assert_eq!(qty(&r, sl), (3, 0));
+    r.book(&[(6002.25, 10)], &[(6002.50, 10)]);
+    r.trade(6002.25, 2); // take-profit 2 of 3
+    assert_eq!(qty(&r, tp), (3, 2));
+    assert_eq!(
+        qty(&r, sl),
+        (1, 0),
+        "the sibling shrank by the partial fill"
+    );
+    r.trade(6002.25, 5);
+    assert_eq!(r.state(tp), OrderState::Filled);
+    assert_eq!(
+        r.state(sl),
+        OrderState::Cancelled,
+        "OCO done once nothing is open"
+    );
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// Item 12: Shutdown and restart: a submit with no broker outcome comes back unresolved, never
+/// assumed working; one the broker knows comes back as the broker has it.
+#[test]
+fn checklist_12_unanswered_submits_are_unresolved_after_restart() {
+    let dir = std::env::temp_dir().join(format!("lines-trading-12-{}", std::process::id()));
+    let path = dir.join("paper.json");
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
+    let acked = r.place(Side::Buy, 1, limit(5990.00));
+    r.wait(LAT);
+    let in_flight = r.place(Side::Buy, 1, limit(5991.00)); // the app stops before the ack
+    let file = trading_file(&r.core, &paper(FillModel::TradeThrough)).unwrap();
+    assert_eq!(file.in_flight.len(), 1);
+    persist::save(&path, &file).unwrap();
+    drop(r);
+
+    let file = persist::load(&path).unwrap().unwrap();
+    // The paper broker's queue of not-yet-handled requests isn't saved: the in-flight order
+    // never reached it (like a request lost in a crash).
+    let broker = PaperBroker::from_state(file.paper.clone(), file.broker.clone());
+    let mut core = TradingCore::new(Box::new(broker));
+    for a in file.accounts {
+        core.add_account(a.config, Some(a.tracker));
+    }
+    core.set_next_order_id(file.next_order_id);
+    core.restore_in_flight(file.in_flight);
+    let mut r2 = Rig {
+        core,
+        t: UtcMillis::parse_iso("2026-11-10T15:05:00Z").unwrap().0,
+        events: Vec::new(),
+    };
+    r2.core.rebuild(r2.now());
+    r2.collect();
+    assert_eq!(r2.state(acked), OrderState::Working, "as the broker has it");
+    assert_eq!(r2.state(in_flight), OrderState::Unresolved);
+    assert!(
+        !r2.core.order(in_flight).unwrap().is_open(),
+        "never shown as working"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

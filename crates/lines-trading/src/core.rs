@@ -26,7 +26,7 @@ use crate::market::MarketInput;
 use crate::order::{Order, OrderState, Role};
 use crate::position::Position;
 use crate::risk::{self, RiskContext, RiskLimits};
-use crate::rules::{RulePreset, RuleTracker};
+use crate::rules::{RulePreset, RuleTracker, TradingState};
 use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind, Side};
 
 /// An account as configured (saved with the trading state).
@@ -71,6 +71,17 @@ struct AccountCache {
     balance: Money,
     positions: BTreeMap<ContractKey, Position>,
     tracker: RuleTracker,
+    /// When recent new orders and modifies were sent (rate limits, decision 0006).
+    submits: VecDeque<UtcMillis>,
+    modifies: VecDeque<UtcMillis>,
+}
+
+/// Count `times` within the last second of `now` (dropping older ones).
+fn in_last_second(times: &mut VecDeque<UtcMillis>, now: UtcMillis) -> u32 {
+    while times.front().is_some_and(|t| now.0 - t.0 >= 1000) {
+        times.pop_front();
+    }
+    times.len() as u32
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -136,9 +147,27 @@ pub struct TradingCore {
     finished: VecDeque<OrderId>,
     /// Orders with a cancel on its way (not sent twice).
     cancelling: HashSet<OrderId>,
+    overfill: OverfillPolicy,
+    /// Execution ids already applied, and their order (to forget the oldest).
+    fill_ids: HashSet<String>,
+    fill_order: VecDeque<String>,
 }
 
 const KEEP_FINISHED: usize = 2000;
+/// Execution ids remembered for de-duplication (oldest forgotten first).
+const KEEP_FILL_IDS: usize = 100_000;
+
+/// What to do with a fill for more than an order had left (it should never happen; when it
+/// does it is reported, never clamped).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverfillPolicy {
+    /// Apply the whole fill (the broker's position is the truth) and report it.
+    #[default]
+    Record,
+    /// Don't apply it; report it (reconciliation with the broker settles the position).
+    Reject,
+}
 
 impl TradingCore {
     pub fn new(broker: Box<dyn Broker>) -> TradingCore {
@@ -155,7 +184,43 @@ impl TradingCore {
             broker_events: Vec::new(),
             finished: VecDeque::new(),
             cancelling: HashSet::new(),
+            overfill: OverfillPolicy::default(),
+            fill_ids: HashSet::new(),
+            fill_order: VecDeque::new(),
         }
+    }
+
+    pub fn set_overfill_policy(&mut self, p: OverfillPolicy) {
+        self.overfill = p;
+    }
+
+    /// The account's trading state (active unless a prop breach restricts it).
+    pub fn trading_state(&self, account: &AccountId) -> TradingState {
+        self.accounts
+            .get(account)
+            .map_or(TradingState::Active, |a| {
+                a.cfg
+                    .rules
+                    .as_ref()
+                    .map_or(TradingState::Active, |r| a.tracker.trading_state(r))
+            })
+    }
+
+    /// Remember an execution id; `false` if it was seen already.
+    fn first_fill(&mut self, trade_id: &str) -> bool {
+        if trade_id.is_empty() {
+            return true; // a broker without execution ids: nothing to de-duplicate on
+        }
+        if !self.fill_ids.insert(trade_id.to_owned()) {
+            return false;
+        }
+        self.fill_order.push_back(trade_id.to_owned());
+        if self.fill_order.len() > KEEP_FILL_IDS
+            && let Some(old) = self.fill_order.pop_front()
+        {
+            self.fill_ids.remove(&old);
+        }
+        true
     }
 
     pub fn add_account(&mut self, cfg: AccountConfig, tracker: Option<RuleTracker>) {
@@ -167,6 +232,8 @@ impl TradingCore {
                 balance: start,
                 positions: BTreeMap::new(),
                 cfg,
+                submits: VecDeque::new(),
+                modifies: VecDeque::new(),
             },
         );
     }
@@ -211,6 +278,25 @@ impl TradingCore {
     /// Continue numbering after a restart (ids are the broker's client order ids).
     pub fn set_next_order_id(&mut self, n: u64) {
         self.next_order = self.next_order.max(n);
+    }
+
+    /// Orders sent without a known outcome (saved with the trading file: after a restart
+    /// they come back [`OrderState::Unresolved`] unless the broker lists them).
+    pub fn in_flight(&self) -> impl Iterator<Item = &Order> {
+        self.orders
+            .values()
+            .filter(|o| matches!(o.state, OrderState::Submitted | OrderState::Unresolved))
+    }
+
+    /// Restore orders that were in flight when the app stopped, as unresolved. The next
+    /// [`TradingCore::rebuild`] replaces any the broker knows.
+    pub fn restore_in_flight(&mut self, orders: Vec<Order>) {
+        for mut o in orders {
+            o.state = OrderState::Unresolved;
+            self.next_order = self.next_order.max(o.id.0 + 1);
+            self.events.push(Event::Order(o.clone()));
+            self.orders.insert(o.id, o);
+        }
     }
 
     pub fn order(&self, id: OrderId) -> Option<&Order> {
@@ -371,6 +457,15 @@ impl TradingCore {
                 order, qty, price, ..
             } => {
                 let o = self.open_order(&account, order)?;
+                let a = self.accounts.get_mut(&account).expect("checked");
+                if let Some(max) = a.cfg.limits.max_modifies_per_sec
+                    && in_last_second(&mut a.modifies, now) >= max
+                {
+                    return Err(Reject::new(
+                        RejectCode::Risk,
+                        format!("more than {max} modifies in a second; slow down"),
+                    ));
+                }
                 if !self.broker.capabilities().modify {
                     return Err(Reject::new(
                         RejectCode::Broker,
@@ -408,6 +503,9 @@ impl TradingCore {
                         ..Default::default()
                     };
                     risk::check(&band_only, &spec, o.side, Qty(0), &kind, &ctx)?;
+                }
+                if let Some(a) = self.accounts.get_mut(&account) {
+                    a.modifies.push_back(now);
                 }
                 self.send(
                     env,
@@ -493,7 +591,7 @@ impl TradingCore {
     }
 
     /// Validation, prop rules and risk for a new order.
-    fn check_new(&mut self, _now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
+    fn check_new(&mut self, now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
         let cs = self
             .spec(spec.contract)
             .ok_or_else(|| Reject::new(RejectCode::UnknownContract, "unknown contract"))?;
@@ -531,16 +629,40 @@ impl TradingCore {
             ));
         }
         let acct = &self.accounts[&spec.account];
-        // Prop rules: a breach blocks new orders; the contract cap counts micro-equivalents.
+        // Prop rules: a breach restricts the account (reducing only, or halted); the contract
+        // cap counts micro-equivalents.
         if let Some(preset) = &acct.cfg.rules {
-            if let Some(b) = acct.tracker.blocked() {
-                return Err(Reject::new(
-                    RejectCode::PropRule,
-                    format!(
-                        "{b:?} limit breached ({}); only Flatten and Cancel All",
-                        preset.name
-                    ),
-                ));
+            let why = acct.tracker.blocked().map_or_else(String::new, |b| {
+                format!("{b:?} limit breached ({})", preset.name)
+            });
+            match acct.tracker.trading_state(preset) {
+                TradingState::Active => {}
+                TradingState::Halted => {
+                    return Err(Reject::new(
+                        RejectCode::PropRule,
+                        format!("trading halted: {why}; only Flatten and Cancel All"),
+                    ));
+                }
+                TradingState::ReducingOnly => {
+                    let position = acct.positions.get(&spec.contract).map_or(0, Position::qty);
+                    let (open_buy, open_sell) = self.open_qty(&spec.account, spec.contract);
+                    // What may still be closed: the position less what open orders already close.
+                    let closable = match spec.side {
+                        Side::Sell if position > 0 => position - open_sell,
+                        Side::Buy if position < 0 => -position - open_buy,
+                        _ => 0,
+                    };
+                    if spec.qty.0 > closable {
+                        return Err(Reject::new(
+                            RejectCode::PropRule,
+                            format!(
+                                "reducing only: {why}; an order may only close the open position ({closable} left to close)"
+                            ),
+                        ));
+                    }
+                    // A reducing order never adds exposure: the cap can't be crossed.
+                    return self.check_risk(now, spec, &cs);
+                }
             }
             if let Some(max) = preset.max_micro_contracts {
                 let after =
@@ -555,6 +677,26 @@ impl TradingCore {
                 }
             }
         }
+        self.check_risk(now, spec, &cs)
+    }
+
+    /// Pre-trade risk (decision 0006) for a new order. Counts it toward the submit rate when
+    /// it passes.
+    fn check_risk(
+        &mut self,
+        now: UtcMillis,
+        spec: &OrderSpec,
+        cs: &ContractSpec,
+    ) -> Result<(), Reject> {
+        let recent_submits = in_last_second(
+            &mut self
+                .accounts
+                .get_mut(&spec.account)
+                .expect("checked")
+                .submits,
+            now,
+        );
+        let acct = &self.accounts[&spec.account];
         let position = acct.positions.get(&spec.contract).map_or(0, Position::qty);
         let (open_buy, open_sell) = self.open_qty(&spec.account, spec.contract);
         let ctx = RiskContext {
@@ -564,15 +706,20 @@ impl TradingCore {
             reference: self.marks.get(&spec.contract).and_then(Mark::price),
             day_pnl: self.equity(&spec.account)
                 - self.accounts[&spec.account].tracker.day_open_balance,
+            recent_submits,
         };
         risk::check(
             &self.accounts[&spec.account].cfg.limits,
-            &cs,
+            cs,
             spec.side,
             spec.qty,
             &spec.kind,
             &ctx,
-        )
+        )?;
+        if let Some(a) = self.accounts.get_mut(&spec.account) {
+            a.submits.push_back(now);
+        }
+        Ok(())
     }
 
     fn open_qty(&self, account: &AccountId, contract: ContractKey) -> (i64, i64) {
@@ -632,6 +779,10 @@ impl TradingCore {
     ) -> Order {
         let id = OrderId(self.next_order);
         self.next_order += 1;
+        // Flatten's orders, and anything placed while the account may only reduce, are
+        // reduce-only at the broker too.
+        let reduce_only = role == Role::Flatten
+            || self.trading_state(&spec.account) == TradingState::ReducingOnly;
         let o = Order {
             id,
             account: spec.account.clone(),
@@ -648,6 +799,8 @@ impl TradingCore {
             triggered: false,
             created: now,
             updated: now,
+            reduce_only,
+            overfill: Qty(0),
         };
         self.orders.insert(id, o.clone());
         if parent.is_none() {
@@ -748,16 +901,48 @@ impl TradingCore {
             }
             BrokerEvent::Fill {
                 id,
+                trade_id,
                 price,
                 qty,
                 fee,
                 at,
             } => {
+                if !self.first_fill(&trade_id) {
+                    tracing::warn!("order {}: execution {trade_id} already applied", id.0);
+                    return None;
+                }
+                let policy = self.overfill;
                 let o = self.orders.get_mut(&id)?;
-                if !o.state.can_become(&OrderState::Filled) {
-                    tracing::warn!("order {}: fill in state {:?}", id.0, o.state);
+                let excess = qty.0 - o.remaining().0;
+                if excess > 0 {
+                    let account = o.account.clone();
+                    tracing::error!(
+                        "order {}: fill of {} with {} left ({policy:?})",
+                        id.0,
+                        qty.0,
+                        o.remaining().0
+                    );
+                    self.events.push(Event::Overfill {
+                        account: account.clone(),
+                        order: id,
+                        excess: Qty(excess),
+                        recorded: policy == OverfillPolicy::Record,
+                    });
+                    if policy == OverfillPolicy::Reject {
+                        return Some(account);
+                    }
+                }
+                let o = self.orders.get_mut(&id)?;
+                // A fill that arrives after the order finished (a cancel that lost the race,
+                // reported late) still happened: it counts, the order keeps its final state.
+                let finished = (!o.is_open()).then(|| o.state.clone());
+                if let Some(s) = &finished {
+                    tracing::warn!("order {}: fill after it was {}", id.0, s.label());
                 }
                 o.apply_fill(price, qty, at);
+                if let Some(s) = finished {
+                    o.state = s;
+                }
                 let o = o.clone();
                 if !o.is_open() {
                     self.finish(id);
@@ -781,6 +966,8 @@ impl TradingCore {
                     fee,
                     realised,
                     at,
+                    trade_id,
+                    reconciled: false,
                 }));
                 self.position_event(&o.account, o.contract);
                 Some(o.account)
@@ -897,6 +1084,11 @@ impl TradingCore {
             day_pnl: equity - a.tracker.day_open_balance,
             rules: status,
             blocked: a.cfg.rules.as_ref().and(a.tracker.blocked()),
+            trading: a
+                .cfg
+                .rules
+                .as_ref()
+                .map_or(TradingState::Active, |r| a.tracker.trading_state(r)),
         };
         self.events.push(Event::Account(view));
         for b in breaches {
@@ -941,8 +1133,36 @@ impl TradingCore {
                 seen.push(o.id);
                 open += 1;
                 self.next_order = self.next_order.max(o.id.0 + 1);
+                let known = self.orders.get(&o.id).map(|c| (c.filled.0, c.fill_value));
                 self.orders.insert(o.id, o.clone());
                 self.events.push(Event::Order(o.clone()));
+                // The broker filled more than the cache knew (executions missed while
+                // disconnected): report them as one fill with a deterministic id, so a repeat
+                // reconciliation (another reconnect, a restart) never counts them twice.
+                if let Some((filled, value)) = known
+                    && o.filled.0 > filled
+                {
+                    let qty = o.filled.0 - filled;
+                    let trade_id = format!("recon-{}-{}", o.id.0, o.filled.0);
+                    if self.first_fill(&trade_id) {
+                        // The missed fills' average price, to the price unit (exact when
+                        // they share one price).
+                        let price = Price(((o.fill_value - value) / qty as i128) as i64);
+                        self.events.push(Event::Fill(FillEvent {
+                            account: o.account.clone(),
+                            order: o.id,
+                            contract: o.contract,
+                            side: o.side,
+                            price,
+                            qty: Qty(qty),
+                            fee: Money::ZERO,
+                            realised: Money::ZERO,
+                            at: now,
+                            trade_id,
+                            reconciled: true,
+                        }));
+                    }
+                }
             }
         }
         let gone: Vec<OrderId> = self
@@ -953,8 +1173,14 @@ impl TradingCore {
             .collect();
         for id in gone {
             if let Some(o) = self.orders.get_mut(&id) {
-                // Not at the broker: whatever it was, it is not working.
-                o.state = OrderState::Cancelled;
+                // Not at the broker. Sent with no answer yet: its outcome is unknown, so it is
+                // unresolved (never assumed working, never assumed gone). Acknowledged before:
+                // it finished at the broker while we weren't listening.
+                o.state = if o.state == OrderState::Submitted {
+                    OrderState::Unresolved
+                } else {
+                    OrderState::Cancelled
+                };
                 o.updated = now;
                 let o = o.clone();
                 self.events.push(Event::Order(o));
@@ -987,5 +1213,6 @@ fn no_rules() -> RulePreset {
         profit_target: None,
         consistency: None,
         liquidate_on_breach: false,
+        on_breach: crate::rules::BreachStates::default(),
     }
 }

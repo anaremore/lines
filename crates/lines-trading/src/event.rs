@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{Reject, Source};
 use crate::order::Order;
-use crate::rules::{Breach, RuleStatus};
+use crate::rules::{Breach, RuleStatus, TradingState};
 use crate::types::{
     AccountId, CommandId, Money, OrderId, Side, contract_serde, price_serde, qty_serde, time_serde,
 };
@@ -37,6 +37,16 @@ pub enum Event {
         accounts: usize,
         open_orders: usize,
     },
+    /// A fill for more than the order had left. With [`crate::core::OverfillPolicy::Record`]
+    /// it was applied (the broker's position is the truth); with `Reject` it was not. Never
+    /// clamped.
+    Overfill {
+        account: AccountId,
+        order: OrderId,
+        #[serde(with = "qty_serde")]
+        excess: Qty,
+        recorded: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +63,15 @@ pub struct FillEvent {
     pub fee: Money,
     /// P&L this fill realised (before the fee).
     pub realised: Money,
+    /// The broker's stable execution id (`recon-<order>-<filled>` for fills the core learned
+    /// of by reconciliation).
+    #[serde(default)]
+    pub trade_id: String,
+    /// Synthesised by reconciliation after a reconnect: the broker had filled more than the
+    /// cache knew. Positions and balances come from the broker snapshot, so it carries no P&L
+    /// of its own (`realised` and `fee` are zero).
+    #[serde(default)]
+    pub reconciled: bool,
     #[serde(with = "time_serde")]
     pub at: UtcMillis,
 }
@@ -79,6 +98,9 @@ pub struct AccountView {
     /// Today's P&L (trade date of the account's day calendar), fees included.
     pub day_pnl: Money,
     pub rules: Option<RuleStatus>,
-    /// New orders are blocked by a rule (Flatten and Cancel All still work).
+    /// The breach that restricts new orders, if any (Flatten and Cancel All still work).
     pub blocked: Option<Breach>,
+    /// What the account may do: active, reducing only, or halted.
+    #[serde(default)]
+    pub trading: TradingState,
 }

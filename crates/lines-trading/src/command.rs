@@ -158,7 +158,10 @@ pub struct Envelope {
     pub command: Command,
 }
 
-/// Why a command was refused. Shown inline where it happened (docs/design.md §3).
+/// Why a command was **denied**: refused by the core (validation, broker capabilities, risk,
+/// prop rules) before anything was sent. Never confused with a broker's refusal, which is an
+/// order that was sent and came back [`crate::OrderState::Rejected`] with the broker's
+/// reason. Shown inline where it happened (docs/design.md §3), labelled "denied".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reject {
     pub code: RejectCode,
