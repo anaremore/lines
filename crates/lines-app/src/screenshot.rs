@@ -176,12 +176,23 @@ async fn shoot(
     // replay and the panes' requests, then give the panes a poll tick to pick the values up,
     // so the frame is deterministic.
     lines_feed::indicators::engine().sync();
+    // External levels: every source's first answer (live) or every batch due by the replay
+    // clock (replay) is applied before the frame is read back.
+    if !lines_feed::levels::runtime::wait_settled(Duration::from_secs(20)) {
+        bail!("level sources did not settle within 20 s");
+    }
     cx.background_executor()
         .timer(Duration::from_millis(100))
         .await;
     // Warm-up frame in its own update, so what it emits (crosshair sync between charts) is
-    // delivered before the frame that is read back.
+    // delivered before the frame that is read back. It may also request indicator nodes that
+    // only paint asks for (VWAP-relative levels follow the chart's ETH VWAP): sync the engine
+    // again and give the panes a poll tick before the frames that are read back.
     let _ = cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx));
+    lines_feed::indicators::engine().sync();
+    cx.background_executor()
+        .timer(Duration::from_millis(100))
+        .await;
     cx.update_window(handle, |_, window, cx| -> Result<(PathBuf, u32, u32)> {
         let actual = window.scale_factor();
         if let Some(want) = scale

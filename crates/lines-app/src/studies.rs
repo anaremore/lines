@@ -211,9 +211,6 @@ impl Studies {
         }
         let no_rth = lines_feed::catalog::sessions(product.id).is_some_and(|c| !c.has_rth());
         let mut col = div()
-            .absolute()
-            .top(px(30.0))
-            .left(px(8.0))
             .flex()
             .flex_col()
             .gap_1()
