@@ -19,6 +19,7 @@ Format: Status · Context · Decision · Consequences.
 | 0011 | Providers are I/O-free sessions; every inbound byte flows through recorded frames (Proposed) |
 | 0012 | The OMS runs independently of the UI, and orders bypass the frame loop |
 | 0013 | Products, contracts, and rolls |
+| 0018 | One trading surface: commands, trading core, connectors, accounts (Proposed) |
 | 0017 | Indicator engine: composable series graph; VWAP first (Proposed) |
 | 0016 | Workspaces, panes, layouts and link groups (Proposed) |
 | 0015 | Sierra contract-year resolution, amends 0013 (Proposed) |
