@@ -16,25 +16,39 @@
 //! double-click plot / Home = newest bar + auto-scale; double-click price axis = auto-scale.
 //! While any drag is active the viewport is `held`, so arriving bars can't move the axes
 //! under the pointer.
+//!
+//! Symbol picker (roadmap 4b): any letter or Ctrl+K opens it over the chart. Its logic lives in
+//! `crate::picker` (pure, tested); this file only renders it and routes keys. Picking a symbol
+//! starts a new feed for the same source with a new target and stops the old one on a
+//! background thread (its `Drop` joins the feed thread; decision 0001: never on the UI thread).
+//! While closed it costs nothing per frame.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, ContentMask, Context, FocusHandle, Font, Hsla, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString, Styled, TextAlign, TextRun,
-    Window, canvas, div, fill, point, prelude::*, px, size,
+    App, Bounds, ContentMask, Context, FocusHandle, Font, FontFeatures, FontWeight, Hsla,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
+    Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::geometry::{Crosshair, crosshair, snap, write_ohlcv};
 use lines_core::viewport::{ScaleDrag, ScaleMode};
-use lines_core::{Bar, FixedStr, Price, Product, Scene, Viewport};
-use lines_feed::FeedHandle;
+use lines_core::{Bar, CivilDate, FixedStr, Price, Product, Scene, Viewport};
+use lines_feed::availability::{Availability, availability};
+use lines_feed::catalog::{self, Target};
 use lines_feed::store::{ChartStore, FeedStatus};
+use lines_feed::{FeedConfig, FeedHandle};
 
+use crate::picker::{self, Picker, Settings};
 use crate::theme::Theme;
+
+/// Result rows shown at once.
+const PICKER_ROWS: usize = 10;
+const PICKER_W: f32 = 600.0;
 
 const AXIS_W: f32 = 78.0;
 const AXIS_H: f32 = 24.0;
@@ -62,14 +76,36 @@ enum Region {
     TimeAxis,
 }
 
+/// The running feed plus what switching it needs (symbol picker).
+pub struct Feed {
+    pub handle: FeedHandle,
+    /// The config it started with; switching keeps the source and changes the target.
+    pub config: FeedConfig,
+    /// What the source can serve; drives the picker's disabled rows.
+    pub availability: Availability,
+}
+
+impl Feed {
+    pub fn start(config: FeedConfig) -> anyhow::Result<Feed> {
+        let availability = availability(&config.source)?;
+        Ok(Feed {
+            handle: lines_feed::spawn(config.clone())?,
+            config,
+            availability,
+        })
+    }
+}
+
 /// Deterministic input for screenshot mode (decision 0009), standing in for the mouse.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Fixture {
     /// Fixed pointer position, plot-local logical px.
     pub cursor: Option<(f32, f32)>,
     /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
     /// would (turns auto-scale off).
     pub price_zoom: Option<f64>,
+    /// Render with the symbol picker open on this query.
+    pub picker: Option<String>,
 }
 
 enum Drag {
@@ -88,6 +124,20 @@ struct Rates {
 
 pub struct ChartView {
     feed: FeedHandle,
+    config: FeedConfig,
+    availability: Availability,
+    entries: Vec<picker::Entry>,
+    settings: Settings,
+    /// `None` in screenshot mode: no user settings are read or written there.
+    settings_path: Option<PathBuf>,
+    /// Generation of the newest settings snapshot written (background saves skip stale ones).
+    settings_saved: Arc<Mutex<u64>>,
+    settings_gen: u64,
+    picker: Option<Picker>,
+    /// Shown inline in the picker (e.g. a switch that failed to start).
+    picker_error: Option<String>,
+    /// Tabular digits for the picker's dates and day counts.
+    tnum: FontFeatures,
     store: Arc<ChartStore>,
     theme: Theme,
     /// Screenshot mode: no wall-clock-dependent text (rates, paint time) is shown.
@@ -123,24 +173,49 @@ pub struct ChartView {
 
 impl ChartView {
     pub fn new(
-        feed: FeedHandle,
+        feed: Feed,
         theme: Theme,
         frozen: bool,
         fixture: Fixture,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Feed {
+            handle: feed,
+            config,
+            availability,
+        } = feed;
         let store = feed.store.clone();
         let instrument = store.read().product.clone();
-        // Poll the lock-free revision counter at ~120 Hz; redraw only on change.
-        let poll_store = store.clone();
+        // Screenshots must not depend on (or change) the user's recents and favourites.
+        let settings_path = if frozen {
+            None
+        } else {
+            Settings::default_path()
+        };
+        let settings = settings_path
+            .as_deref()
+            .map_or_else(Settings::default, |p| {
+                let (s, warning) = Settings::load(p);
+                if let Some(w) = warning {
+                    tracing::warn!("{w}");
+                }
+                s
+            });
+        let entries = picker::entries(catalog::all());
+        let picker = fixture
+            .picker
+            .as_deref()
+            .map(|q| Picker::open(q, &entries, &settings));
+        // Poll the lock-free revision counter at ~120 Hz; redraw only on change. Reads the
+        // view's current store, which changes when the picker switches symbols.
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(8))
                     .await;
-                let rev = poll_store.revision();
                 let alive = this.update(cx, |view, cx| {
                     view.update_rates();
+                    let rev = view.store.revision();
                     if rev != view.seen_revision {
                         view.seen_revision = rev;
                         cx.notify();
@@ -155,6 +230,16 @@ impl ChartView {
 
         ChartView {
             feed,
+            config,
+            availability,
+            entries,
+            settings,
+            settings_path,
+            settings_saved: Arc::new(Mutex::new(0)),
+            settings_gen: 0,
+            picker,
+            picker_error: None,
+            tnum: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
             store,
             theme,
             frozen,
@@ -239,6 +324,11 @@ impl ChartView {
             return;
         };
         self.focus.focus(window, cx);
+        if self.picker.take().is_some() {
+            // Clicking the chart dismisses the picker (rows handle their own clicks).
+            cx.notify();
+            return;
+        }
         self.end_drag();
         let (x, y) = self.local(ev.position);
         if ev.click_count >= 2 {
@@ -262,10 +352,178 @@ impl ChartView {
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if ev.keystroke.key == "home" {
+        let k = &ev.keystroke;
+        let m = k.modifiers;
+        if self.picker.is_some() {
+            self.picker_key(ev, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if m.control && !m.alt && k.key == "k" {
+            self.open_picker("");
+        } else if k.key == "home" {
             self.vp.reset(self.series_len);
+        } else if let Some(letter) = k.key_char.as_deref().filter(|c| {
+            !m.control
+                && !m.alt
+                && !m.platform
+                && c.len() == 1
+                && c.as_bytes()[0].is_ascii_alphabetic()
+        }) {
+            // Type a symbol straight onto the chart: the picker opens with that letter.
+            self.open_picker(letter);
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
+    fn open_picker(&mut self, query: &str) {
+        self.end_drag();
+        self.picker_error = None;
+        self.picker = Some(Picker::open(query, &self.entries, &self.settings));
+    }
+
+    /// The date contract choices are computed for: the replay's market date in screenshot mode
+    /// (reproducible), else today (UTC).
+    fn today(&self) -> CivilDate {
+        let market = self
+            .frozen
+            .then(|| self.store.try_read().and_then(|d| d.market_time))
+            .flatten();
+        CivilDate::from_utc(market.unwrap_or_else(lines_feed::now_utc))
+    }
+
+    fn picker_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        let m = k.modifiers;
+        let today = self.today();
+        let Some(p) = self.picker.as_mut() else {
+            return;
+        };
+        let (entries, settings) = (&self.entries, &self.settings);
+        self.picker_error = None;
+        match k.key.as_str() {
+            "escape" => self.picker = None,
+            "enter" => self.confirm_picker(),
+            "up" => p.move_selection(-1),
+            "down" => p.move_selection(1),
+            "tab" => p.cycle_contract(if m.shift { -1 } else { 1 }, entries, today),
+            "backspace" => p.backspace(entries, settings),
+            "m" if m.alt => p.toggle_size(entries, settings),
+            "d" if m.control => {
+                if let Some(id) = p.selected_entry(entries).map(|e| e.product.id) {
+                    self.settings.toggle_favourite(id);
+                    if let Some(p) = self.picker.as_mut() {
+                        p.refresh(&self.entries, &self.settings);
+                    }
+                    self.save_settings();
+                }
+            }
+            _ => {
+                if let Some(text) = k.key_char.as_deref().filter(|t| {
+                    !m.control && !m.alt && !m.platform && t.chars().all(|c| !c.is_control())
+                }) {
+                    p.push_str(text, entries, settings);
+                } else {
+                    return;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
+        if let Some(p) = self.picker.as_mut() {
+            if p.selected != row {
+                p.selected = row;
+                p.offset = 0;
+            }
+            self.confirm_picker();
             cx.notify();
         }
+    }
+
+    /// Enter: switch to the selected row's product (front month) or contract. Disabled rows
+    /// stay open and say why; nothing is started that the source can't serve.
+    fn confirm_picker(&mut self) {
+        let today = self.today();
+        let Some(row) = self
+            .picker
+            .as_ref()
+            .and_then(|p| p.selected_row(&self.entries, today))
+        else {
+            return;
+        };
+        if let Err(reason) = self.availability.check(&row.target) {
+            self.picker_error = Some(reason);
+            return;
+        }
+        match self.switch_to(row.target) {
+            Ok(()) => {
+                self.picker = None;
+                self.settings.push_recent(row.contract.product);
+                self.save_settings();
+            }
+            Err(e) => self.picker_error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Start a feed for `target` on the same source and swap it in. The old feed stops on a
+    /// background thread.
+    fn switch_to(&mut self, target: Target) -> anyhow::Result<()> {
+        let mut config = self.config.clone();
+        config.target = Some(target);
+        if config.record.take().is_some() {
+            // A recording holds exactly one contract (format v3); don't overwrite it.
+            tracing::warn!("recording stopped: switching symbol does not continue the recording");
+        }
+        let handle = lines_feed::spawn(config.clone())?;
+        let old = std::mem::replace(&mut self.feed, handle);
+        let _ = std::thread::Builder::new()
+            .name("lines-feed-stop".into())
+            .spawn(move || drop(old));
+        self.config = config;
+        self.store = self.feed.store.clone();
+        self.instrument = self.store.read().product.clone();
+        // A fresh view for the new series; price labels belong to the old product's format.
+        self.vp = Viewport::default();
+        self.drag = None;
+        self.series_len = 0;
+        self.series_trimmed = 0;
+        self.last_trade = None;
+        self.seen_revision = u64::MAX;
+        self.cross = None;
+        self.cross_bar = None;
+        self.readout = None;
+        self.labels.clear();
+        Ok(())
+    }
+
+    /// Persist recents/favourites off the UI thread. Saves can finish out of order, so each
+    /// carries a generation and only a newer one may overwrite the file.
+    fn save_settings(&mut self) {
+        let Some(path) = self.settings_path.clone() else {
+            return;
+        };
+        self.settings_gen += 1;
+        let (generation, snapshot, saved) = (
+            self.settings_gen,
+            self.settings.clone(),
+            self.settings_saved.clone(),
+        );
+        let _ = std::thread::Builder::new()
+            .name("lines-settings".into())
+            .spawn(move || {
+                let mut last = saved.lock().unwrap_or_else(|e| e.into_inner());
+                if generation <= *last {
+                    return;
+                }
+                match snapshot.save(&path) {
+                    Ok(()) => *last = generation,
+                    Err(e) => tracing::warn!("can't save {}: {e}", path.display()),
+                }
+            });
     }
 
     /// Track the pointer for the crosshair; it shows only while the pointer is over the plot.
@@ -802,6 +1060,167 @@ impl ChartView {
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
     }
 
+    /// The open picker: query line, ranked rows, key hints. Built only while open.
+    fn picker_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let p = self.picker.as_ref()?;
+        let t = self.theme;
+        let today = self.today();
+        let first = p.selected.saturating_sub(PICKER_ROWS - 1);
+        let mut rows = div().flex().flex_col().py_1();
+        for (i, hit) in p.hits.iter().enumerate().skip(first).take(PICKER_ROWS) {
+            let e = &self.entries[hit.index];
+            let selected = i == p.selected;
+            let row = picker::contract_row(&e.product, today, if selected { p.offset } else { 0 });
+            let unavailable = match &row {
+                Some(r) => self.availability.check(&r.target).err(),
+                None => Some("no listed contract".to_owned()),
+            };
+            let fg = if unavailable.is_some() {
+                t.text_dim
+            } else {
+                t.text_main
+            };
+            let mut right = div().flex().flex_row().gap_2().text_color(t.text_dim);
+            match (&unavailable, &row) {
+                (Some(reason), _) => right = right.child(reason.clone()),
+                (None, Some(r)) => {
+                    right = right.child(div().text_color(fg).child(r.label.as_str().to_owned()));
+                    if r.is_front && !e.product.is_spot() {
+                        right = right.child("front");
+                    }
+                    if let Some(x) = r.expiry {
+                        right = right.child(format!("exp {x}"));
+                    }
+                    if let Some(d) = r.days_to_roll {
+                        let roll = div().child(if r.roll_soon {
+                            format!("roll soon · {d}d")
+                        } else {
+                            format!("roll {d}d")
+                        });
+                        right = right.child(if r.roll_soon {
+                            roll.text_color(t.text_main).font_weight(FontWeight::BOLD)
+                        } else {
+                            roll
+                        });
+                    }
+                }
+                (None, None) => {}
+            }
+            let star = if self.settings.is_favourite(e.product.id) {
+                "★"
+            } else {
+                ""
+            };
+            rows = rows.child(
+                div()
+                    .id(("picker-row", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .border_l_2()
+                    .border_color(if selected {
+                        t.accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(selected, |d| d.bg(t.accent.opacity(0.16)))
+                    .child(div().w(px(12.0)).text_color(t.text_dim).child(star))
+                    .child(
+                        div()
+                            .w(px(64.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child(e.product.symbol),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_color(t.text_dim)
+                            .child(format!("{}  ·  {}", e.product.description, e.exchange)),
+                    )
+                    .child(right)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            view.picker_click(i, cx);
+                        }),
+                    ),
+            );
+        }
+        if p.hits.is_empty() {
+            rows = rows.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_color(t.text_dim)
+                    .child("no matching symbols"),
+            );
+        }
+        let query = if p.query.is_empty() {
+            div().text_color(t.text_dim).child("Search symbols")
+        } else {
+            div().text_color(t.text_main).child(p.query.clone())
+        };
+        let hints = div()
+            .flex()
+            .flex_row()
+            .justify_between()
+            .px_3()
+            .py_1()
+            .border_t_1()
+            .border_color(t.axis_line)
+            .text_size(px(11.0))
+            .text_color(t.text_dim)
+            .child("↑↓ select   Tab month   Alt+M micro/mini   Ctrl+D favourite   Enter open   Esc close")
+            .when_some(self.picker_error.clone(), |d, err| {
+                d.child(div().text_color(t.text_main).child(err))
+            });
+        Some(
+            div()
+                .absolute()
+                .top(px(24.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("symbol-picker")
+                        .occlude()
+                        .w(px(PICKER_W))
+                        .flex()
+                        .flex_col()
+                        .bg(t.panel)
+                        .border_1()
+                        .border_color(t.axis_line)
+                        .rounded_md()
+                        .text_size(px(13.0))
+                        .font_features(self.tnum.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(t.axis_line)
+                                .child(query)
+                                .child(div().w(px(2.0)).h(px(15.0)).bg(t.accent)),
+                        )
+                        .child(rows)
+                        .child(hints),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn header(&self) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(96);
@@ -885,6 +1304,7 @@ impl Render for ChartView {
             .child(self.header())
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .size_full()
                     .track_focus(&self.focus)
@@ -903,10 +1323,11 @@ impl Render for ChartView {
                             },
                         )
                         .size_full(),
-                    ),
+                    )
+                    .when_some(self.picker_overlay(cx), |d, overlay| d.child(overlay)),
             )
             .child(div().px_3().py_1().text_xs().text_color(t.text_dim).bg(t.panel).child(
-                "drag: pan   ·   wheel: zoom time   ·   shift+wheel: scroll   ·   ctrl+wheel, ctrl+drag or drag an axis: scale   ·   double-click price axis: auto-scale   ·   double-click / Home: latest",
+                "drag: pan   ·   wheel: zoom time   ·   shift+wheel: scroll   ·   ctrl+wheel, ctrl+drag or drag an axis: scale   ·   double-click price axis: auto-scale   ·   double-click / Home: latest   ·   type a symbol or Ctrl+K: switch",
             ))
     }
 }

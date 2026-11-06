@@ -5,6 +5,7 @@
 //! touches the UI; it publishes into a shared [`ChartStore`] that the UI samples per frame.
 //! Above this crate only catalog instruments are visible, never vendor symbols (0003).
 
+pub mod availability;
 pub mod catalog;
 pub mod coinbase;
 pub mod connection;
