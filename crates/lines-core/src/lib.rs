@@ -14,6 +14,7 @@ pub mod ladder;
 pub mod price;
 pub mod qty;
 pub mod roll;
+pub mod sessions;
 pub mod stitch;
 pub mod tape;
 pub mod time;
@@ -31,6 +32,9 @@ pub use instrument::{
 };
 pub use price::{DisplayStyle, Price, PriceFormat, PriceScale, UnitConverter, UnitError};
 pub use qty::{Qty, QtyFormat};
+pub use sessions::{
+    HolidayData, HolidayTable, LocalTime, Session, SessionCalendar, SessionKind, SessionSpec,
+};
 pub use stitch::{StitchStats, Stitcher};
 pub use tape::{Aggressor, Print, Tape};
 pub use time::UtcMillis;

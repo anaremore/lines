@@ -10,9 +10,13 @@
 //!
 //! Ids are permanent: never renumber or reuse one (they match the former `InstrumentId`s).
 
+use std::sync::OnceLock;
+
+use lines_core::sessions::{ExchangeHours, Hours};
 use lines_core::{
-    ContractKey, Currency, DisplayStyle, ExpiryRule, MicroEquivalent, MonthCycle, PriceFormat,
-    PriceScale, Product, ProductId, ProductKind, QtyFormat, Ratio, RollRule,
+    ContractKey, Currency, DisplayStyle, ExpiryRule, HolidayTable, LocalTime, MicroEquivalent,
+    MonthCycle, PriceFormat, PriceScale, Product, ProductId, ProductKind, QtyFormat, Ratio,
+    RollRule, SessionCalendar, SessionSpec,
 };
 
 pub const ES: ProductId = ProductId(1);
@@ -138,6 +142,71 @@ pub fn exchange(id: ProductId) -> &'static str {
     }
 }
 
+/// Exchange holidays and early closes: versioned data, not code (decision 0017). Sources and
+/// the verification status of every date are in the file.
+pub const HOLIDAYS: &str = include_str!("../data/exchange-holidays.txt");
+
+/// CME Globex hours shared by the CME equity index and CBOT Treasury futures: Sunday–Friday
+/// 17:00–16:00 Central, with the daily 16:00–17:00 halt. The session opening at 17:00 belongs
+/// to the next trade date.
+const fn globex(rth_open: LocalTime, rth_close: LocalTime) -> Hours {
+    Hours::Exchange(ExchangeHours {
+        eth_open: LocalTime::hm(17, 0),
+        eth_close: LocalTime::hm(16, 0),
+        rth: Some((rth_open, rth_close)),
+    })
+}
+
+/// A product's trading hours (decision 0017). Every catalog product has one.
+pub fn session_spec(id: ProductId) -> Option<SessionSpec> {
+    match id {
+        // RTH = the cash equity session, 08:30–15:00 CT.
+        ES | NQ | MES | MNQ => Some(SessionSpec {
+            time_zone: "America/Chicago",
+            hours: globex(LocalTime::hm(8, 30), LocalTime::hm(15, 0)),
+            holidays: Some("cme-equity-index"),
+        }),
+        // RTH = the former open-outcry hours, 07:20–14:00 CT (14:00 is the settlement time).
+        ZN => Some(SessionSpec {
+            time_zone: "America/Chicago",
+            hours: globex(LocalTime::hm(7, 20), LocalTime::hm(14, 0)),
+            holidays: Some("cbot-treasury"),
+        }),
+        // Coinbase spot trades 24/7; the session day is the UTC day.
+        BTC_USD | ETH_USD => Some(SessionSpec::continuous_utc(LocalTime::MIDNIGHT)),
+        _ => None,
+    }
+}
+
+/// The shipped holiday table, parsed and validated once.
+pub fn holiday_table() -> &'static HolidayTable {
+    static TABLE: OnceLock<HolidayTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        // The embedded file is validated by `catalog::tests`; failing here is a build defect.
+        HolidayTable::parse(HOLIDAYS).unwrap_or_else(|e| panic!("embedded {e}"))
+    })
+}
+
+/// A product's session calendar, built once. Queries on it are pure and allocation-free.
+pub fn sessions(id: ProductId) -> Option<&'static SessionCalendar> {
+    static CALENDARS: OnceLock<Vec<(ProductId, SessionCalendar)>> = OnceLock::new();
+    CALENDARS
+        .get_or_init(|| {
+            all()
+                .iter()
+                .filter_map(|p| {
+                    let spec = session_spec(p.id)?;
+                    let cal = SessionCalendar::new(spec, Some(holiday_table()))
+                        .unwrap_or_else(|e| panic!("{}: {e}", p.symbol));
+                    Some((p.id, cal))
+                })
+                .collect()
+        })
+        .iter()
+        .find(|(p, _)| *p == id)
+        .map(|(_, c)| c)
+}
+
 /// What a user asked for: a product (resolved to its front month) or one contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -198,7 +267,7 @@ pub(crate) fn roots(id: ProductId) -> Roots {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lines_core::{Month, Qty};
+    use lines_core::{CivilDate, HolidayData, Month, Qty, SessionKind, UtcMillis};
 
     #[test]
     fn every_product_has_an_exchange() {
@@ -268,5 +337,116 @@ mod tests {
         // Point values: NQ = 10 × MNQ, ES = 10 × MES.
         let pv = |id| get(id).unwrap().point_value.num;
         assert_eq!((pv(NQ), pv(MNQ), pv(ES), pv(MES)), (20, 2, 50, 5));
+    }
+
+    fn t(s: &str) -> UtcMillis {
+        UtcMillis::parse_iso(s).unwrap()
+    }
+
+    fn d(y: u16, m: u8, day: u8) -> CivilDate {
+        CivilDate::new(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn shipped_holiday_table_is_valid() {
+        let table = HolidayTable::parse(HOLIDAYS).unwrap();
+        assert_eq!(&table, holiday_table());
+        for cal in &table.calendars {
+            // Current and next year (decision 0017).
+            assert!(
+                cal.coverage.0 <= 2026 && cal.coverage.1 >= 2027,
+                "{}",
+                cal.name
+            );
+            assert!(!cal.sources.is_empty());
+            assert!(!cal.days.is_empty());
+        }
+        // Every calendar is used by a product, and every product's calendar exists.
+        for cal in &table.calendars {
+            assert!(
+                all()
+                    .iter()
+                    .any(|p| session_spec(p.id).unwrap().holidays == Some(&cal.name)),
+                "unused calendar {}",
+                cal.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_product_has_a_session_calendar() {
+        for p in all() {
+            let cal = sessions(p.id).unwrap_or_else(|| panic!("{}", p.symbol));
+            assert_eq!(cal.has_rth(), !p.is_spot(), "{}", p.symbol);
+        }
+        assert!(sessions(ProductId(999)).is_none());
+        // Micro and mini share hours and holidays.
+        for (a, b) in [(ES, MES), (NQ, MNQ), (ES, NQ)] {
+            assert_eq!(session_spec(a), session_spec(b));
+        }
+    }
+
+    #[test]
+    fn index_futures_sessions() {
+        let es = sessions(ES).unwrap();
+        // Sunday 17:00 CST opens Monday's session.
+        let s = es
+            .session_at(t("2026-11-08T23:00:00Z"), SessionKind::Eth)
+            .unwrap();
+        assert_eq!(s.trade_date, d(2026, 11, 9));
+        assert_eq!(s.close, t("2026-11-09T22:00:00Z"));
+        assert_eq!(
+            s.holidays,
+            HolidayData::Unverified,
+            "table not yet verified"
+        );
+        let r = es.session(d(2026, 11, 9), SessionKind::Rth).unwrap();
+        assert_eq!(
+            (r.open, r.close),
+            (t("2026-11-09T14:30:00Z"), t("2026-11-09T21:00:00Z"))
+        );
+        // Thanksgiving 2026: Thursday halts at 12:00 CT and belongs to Friday, which closes 12:15.
+        let f = es.session(d(2026, 11, 27), SessionKind::Eth).unwrap();
+        assert_eq!(f.open, t("2026-11-25T23:00:00Z"));
+        assert_eq!(
+            f.halt,
+            Some((t("2026-11-26T18:00:00Z"), t("2026-11-26T23:00:00Z")))
+        );
+        assert_eq!(f.close, t("2026-11-27T18:15:00Z"));
+        // Christmas 2026: early close Thursday, closed Friday, reopen Sunday 17:00.
+        assert_eq!(
+            es.next_open(t("2026-12-24T18:15:00Z")),
+            Some(t("2026-12-27T23:00:00Z"))
+        );
+        // Good Friday 2026: an abbreviated trade date with no RTH for equities; ZN keeps a short RTH.
+        assert!(es.session(d(2026, 4, 3), SessionKind::Rth).is_none());
+        let zn = sessions(ZN).unwrap();
+        let g = zn.session(d(2026, 4, 3), SessionKind::Rth).unwrap();
+        assert_eq!(
+            (g.open, g.close),
+            (t("2026-04-03T12:20:00Z"), t("2026-04-03T15:15:00Z"))
+        );
+        // Outside coverage: regular, and flagged.
+        assert_eq!(
+            es.session(d(2025, 12, 25), SessionKind::Eth)
+                .unwrap()
+                .holidays,
+            HolidayData::NotCovered
+        );
+    }
+
+    #[test]
+    fn crypto_sessions_are_utc_days() {
+        let btc = sessions(BTC_USD).unwrap();
+        let s = btc
+            .session_at(t("2026-12-25T13:00:00Z"), SessionKind::Eth)
+            .unwrap();
+        assert_eq!(s.trade_date, d(2026, 12, 25));
+        assert_eq!(
+            (s.open, s.close),
+            (t("2026-12-25T00:00:00Z"), t("2026-12-26T00:00:00Z"))
+        );
+        assert!(btc.is_open(t("2026-12-25T13:00:00Z")));
+        assert_eq!(btc.next_close(t("2026-12-25T13:00:00Z")), None);
     }
 }
