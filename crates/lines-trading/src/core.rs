@@ -19,7 +19,7 @@ use std::time::Instant;
 use lines_core::{ContractKey, Price, ProductId, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
-use crate::broker::{Broker, BrokerEvent, BrokerRequest};
+use crate::broker::{Broker, BrokerEvent, BrokerRequest, PaneContext, RequestContext};
 use crate::command::{Command, Envelope, OrderSpec, Reject, RejectCode, Source};
 use crate::event::{AccountView, Event, FillEvent, PositionView};
 use crate::market::MarketInput;
@@ -346,6 +346,19 @@ impl TradingCore {
         issued: Instant,
         command: Command,
     ) -> CommandId {
+        self.submit_from_pane(now, source, issued, None, command)
+    }
+
+    /// [`TradingCore::submit`] for a command issued from a pane: the broker gets the pane's
+    /// contract, how it was chosen and the front month with every request.
+    pub fn submit_from_pane(
+        &mut self,
+        now: UtcMillis,
+        source: Source,
+        issued: Instant,
+        pane: Option<PaneContext>,
+        command: Command,
+    ) -> CommandId {
         let id = CommandId(self.next_command);
         self.next_command += 1;
         self.handle(
@@ -355,6 +368,7 @@ impl TradingCore {
                 source,
                 issued,
                 command,
+                pane,
             },
         );
         id
@@ -812,7 +826,8 @@ impl TradingCore {
     /// Hand a request to the broker, recording click → sent latency (decision 0012: the
     /// input event's time to the moment the order leaves the core).
     fn send(&mut self, env: &Envelope, now: UtcMillis, req: BrokerRequest) {
-        self.broker.request(now, req);
+        let ctx = RequestContext::new(env.source, env.pane);
+        self.broker.request_in_context(now, req, &ctx);
         let us = env.issued.elapsed().as_micros() as u64;
         self.latency.record(us);
         tracing::info!(

@@ -33,6 +33,7 @@ use lines_feed::provider::MarketEvent;
 use lines_feed::registry::{FeedRegistry, Subscription};
 use lines_feed::store::ChartStore;
 
+use crate::broker::PaneContext;
 use crate::command::{Command, Envelope, Source};
 use crate::core::TradingCore;
 use crate::event::Event;
@@ -79,12 +80,25 @@ impl TradingHandle {
     /// Submit a command whose input event happened at `issued` (the click), so the latency
     /// metric covers the whole path.
     pub fn submit_at(&self, source: Source, issued: Instant, command: Command) -> CommandId {
+        self.submit_from_pane(source, issued, None, command)
+    }
+
+    /// [`TradingHandle::submit_at`] for a command issued from a pane (DOM, chart): its
+    /// contract, how it was chosen and the front month go to the broker with each request.
+    pub fn submit_from_pane(
+        &self,
+        source: Source,
+        issued: Instant,
+        pane: Option<PaneContext>,
+        command: Command,
+    ) -> CommandId {
         let id = CommandId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let _ = self.tx.send(Msg::Command(Envelope {
             id,
             source,
             issued,
             command,
+            pane,
         }));
         id
     }
