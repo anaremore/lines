@@ -11,10 +11,10 @@ Status: `done` · `current` · `next` · `later`
 | # | Milestone | Status | Done when |
 |---|-----------|--------|-----------|
 | 1 | Skeleton: mock feed, candles, pan/zoom, record/replay, screenshot mode | done | Runs on Windows; deterministic `--screenshot` output from a replay file |
-| 1b | CI on Windows, macOS, Linux | next | GitHub Actions builds, tests, clippy and fmt on all three OSes on every push/PR, public build only (no vendor features); macOS and Linux run headless tests, screenshot mode where the runner allows |
-| 2 | Axes & crosshair | current | Price/time labels, DPI-correct, crosshair hit-testing via viewport math |
+| 1b | CI on Windows, macOS, Linux | current | GitHub Actions builds, tests, clippy and fmt on all three OSes on every push/PR, public build only (no vendor features); macOS and Linux run headless tests, screenshot mode where the runner allows |
+| 2 | Axes, crosshair & axis scaling | done | Price/time labels, DPI-correct, crosshair hit-testing via viewport math; scroll pan, Ctrl/axis-drag scaling, auto-scale indicator (axis scaling awaiting owner live check) |
 | 3 | Provider trait + CQG feed shape + Coinbase public feed (dev tool) | done | Two providers behind one trait; Coinbase gives free 24/7 live data |
-| 3b | Sierra Chart importer (`.scid` ticks, `.depth` depth) → replay format | next | Local futures data replays with depth. Never committed (licensed data) |
+| 3b | Sierra Chart importer (`.scid` ticks, `.depth` depth) → replay format | done | Local futures data replays with depth. Never committed (licensed data) |
 | 4 | Historical bars + live stitch | next | Backfill then live with no gap or double-count |
 | 4b | Symbol search & picker | next | Keyboard-first fuzzy search over products → contracts (decision 0013), recents/favourites, micro↔mini toggle, results <16 ms locally, provider lookups async |
 | 5 | Depth model + read-only DOM, price grouping, time & sales, volume profile | later | Tick-indexed ladder, per-frame coalescing, fixed rows, no allocs in paint; T&S with aggressor side; session/visible-range volume profile |
