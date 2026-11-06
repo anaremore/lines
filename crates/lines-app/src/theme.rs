@@ -581,4 +581,29 @@ mod tests {
             }
         }
     }
+
+    /// The DOM price trail (`crate::dom_trail`) is fill only, in its own column, so it never
+    /// sits under text: the price column beside it keeps its AA contrast (its numbers are on
+    /// `bg`, or on the last-price tag). The chevron drawn on the trail is a graphical mark
+    /// (WCAG 1.4.11: 3:1): it stays legible on the strongest fill of either side or neutral,
+    /// in every theme and palette.
+    #[test]
+    fn dom_trail_keeps_contrast() {
+        use lines_core::trail::MAX_ALPHA;
+        for t in Theme::all() {
+            assert!(contrast(t.text_main, t.bg) >= 4.5, "{}", t.name);
+            assert!(contrast(t.on_last, t.last) >= 4.5, "{}", t.name);
+            for (what, color) in [("up", t.up), ("down", t.down), ("neutral", t.text_dim)] {
+                for alpha in [MAX_ALPHA * 0.25, MAX_ALPHA * 0.5, MAX_ALPHA] {
+                    let cell = over(color.opacity(alpha), t.bg);
+                    let r = contrast(t.text_main, cell);
+                    assert!(
+                        r >= 3.0,
+                        "{}: chevron on {what} trail at {alpha}: {r:.2}",
+                        t.name
+                    );
+                }
+            }
+        }
+    }
 }

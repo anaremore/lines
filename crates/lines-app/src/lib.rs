@@ -8,6 +8,7 @@ mod commands;
 mod diagnostics;
 mod dom_orders;
 mod dom_trade;
+mod dom_trail;
 mod dom_view;
 mod feeds;
 mod layout;
@@ -278,6 +279,10 @@ struct Cli {
     /// DOM price grouping in ticks per row (G cycles 1, 2, 5, 10, 25 in the app).
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     dom_grouping: u32,
+    /// Start DOMs with the price trail on (a DOM's saved setting wins; screenshots and the
+    /// benchmark). In the app: the DOM's pane menu or the palette.
+    #[arg(long)]
+    dom_trail: bool,
     /// Time & sales: highlight prints of at least this size (in the product's units, e.g.
     /// 20 or 0.5). Default: 10 contracts, or 1 unit of a fractional product.
     #[arg(long)]
@@ -707,6 +712,7 @@ where
         track_visibility: !frozen && !bench,
         dom: DomOptions {
             grouping: cli.dom_grouping,
+            trail: cli.dom_trail,
         },
         tape: TapeOptions { large_print },
         record: std::cell::RefCell::new(record),
