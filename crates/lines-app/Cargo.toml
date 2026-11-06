@@ -28,6 +28,8 @@ gpui_platform.workspace = true
 lines-core.workspace = true
 lines-feed.workspace = true
 lines-indicators.workspace = true
+# Broker extension types only (decision 0020); the trading UI comes with roadmap 7.
+lines-trading.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
