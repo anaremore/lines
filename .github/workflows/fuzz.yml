@@ -1,0 +1,98 @@
+# Parser fuzzing (roadmap "Parser fuzzing"): every decoder of untrusted bytes under libFuzzer.
+# Scheduled and manual only: never runs on, or blocks, pull requests. (Scheduled runs use the
+# workflow file on the default branch.) The same harnesses run as stable smoke tests in CI
+# (`cargo test --workspace` includes `crates/lines-fuzz/tests/smoke.rs`).
+#
+# Seeds are generated from synthetic fixtures at run time (decision 0010): no recordings or
+# vendor data are checked out or committed. Crash inputs are uploaded as artifacts; reproduce
+# one with `cargo +nightly fuzz run <target> <file>`.
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "23 4 * * *" # nightly, 04:23 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "600"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned so builds are reproducible and the cache survives between nights. Bump on purpose.
+  NIGHTLY: nightly-2026-11-05
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - cqg_decode
+          - cqg_session
+          - coinbase_session
+          - native_session
+          - recording
+          - sierra_import
+          - disk_store
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # cqg-proto generates code from the CQG protos at build time (decision 0010).
+          submodules: true
+
+      - name: Install nightly toolchain
+        # rust-toolchain.toml pins the stable release; `cargo +$NIGHTLY` overrides it here.
+        run: rustup toolchain install "$NIGHTLY" --profile minimal
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: fuzz-${{ env.NIGHTLY }}
+          cache-bin: true
+          # fuzz/ is its own workspace (libfuzzer-sys stays out of the root graph).
+          workspaces: |
+            . -> target
+            fuzz -> target
+
+      - name: Install cargo-fuzz
+        run: |
+          if ! cargo fuzz --version 2>/dev/null | grep -q "$CARGO_FUZZ_VERSION"; then
+            cargo +"$NIGHTLY" install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+          fi
+
+      - name: Generate synthetic seed corpus
+        run: cargo +"$NIGHTLY" run -p lines-fuzz --example gen_corpus -- fuzz/corpus
+
+      - name: Fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+          TARGET: ${{ matrix.target }}
+        # No panics, no allocation over 1 GiB at once or 2 GiB in total, no input slower
+        # than 10 s (endless loops).
+        run: |
+          mkdir -p "fuzz/artifacts/$TARGET"
+          cargo +"$NIGHTLY" fuzz run "$TARGET" "fuzz/corpus/$TARGET" -- \
+            -max_total_time="$SECONDS_PER_TARGET" \
+            -rss_limit_mb=2048 -malloc_limit_mb=1024 -timeout=10 -max_len=65536 \
+            -artifact_prefix="fuzz/artifacts/$TARGET/" -print_final_stats=1
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
