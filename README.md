@@ -63,7 +63,13 @@ The first build takes several minutes. Later builds are quick.
 
 ### macOS and Linux
 
-CI-tested; see the workflow in [`.github/workflows/`](.github/workflows/). <!-- Arrives with the CI branch (PR #1). -->
+CI-tested; see the workflow in [`.github/workflows/`](.github/workflows/). Tested by hand on an Apple-silicon Mac (macOS 27, Retina).
+
+macOS: install Xcode, or build with `--features runtime-shaders`. By default GPUI compiles its Metal shaders at build time with `xcrun metal`, which only full Xcode includes (not the command-line tools). `runtime-shaders` compiles them at startup instead, which makes startup slower:
+
+```sh
+cargo run --release -p lines-app --features runtime-shaders -- --source mock
+```
 
 ## How it fits together
 

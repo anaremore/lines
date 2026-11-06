@@ -16,6 +16,9 @@ vendor-cqg = ["lines-feed/vendor-cqg"]
 # `test-support` feature (that is where `Window::render_to_image` lives), which pulls in
 # test-only dependencies that release builds should not ship.
 screenshot = ["gpui/test-support", "gpui_platform/test-support"]
+# macOS without full Xcode: compile GPUI's Metal shaders at startup instead of at build time
+# (`xcrun metal` ships only with Xcode). Build-time shaders stay the default: faster startup.
+runtime-shaders = ["gpui_platform/runtime_shaders"]
 
 [dependencies]
 gpui.workspace = true
@@ -29,6 +32,20 @@ tracing-subscriber.workspace = true
 # Same major as GPUI's `image` so `RgbaImage` is one type. PNG only: decodes the window icon
 # (X11) and encodes screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Without `font-kit`, GPUI on macOS uses a no-op text system and renders no text at all.
+# Target-specific so no macOS build can leave it out; guarded by `tests/text_system.rs`.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_platform = { workspace = true, features = ["font-kit"] }
+
+[[test]]
+name = "text_system"
+# Runs on the main thread (GPUI's macOS platform requires it), so no libtest harness.
+harness = false
+
+[[test]]
+name = "screenshot_exit"
+required-features = ["screenshot"]
 
 [build-dependencies]
 # Windows icon + version resources. Pinned to the version GPUI already uses for its manifest.
