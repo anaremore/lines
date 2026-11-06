@@ -7,6 +7,8 @@ use anyhow::Result;
 use tokio::sync::watch;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use lines_core::UtcMillis;
+
 use crate::provider::{MarketEvent, Outgoing, ProviderSession, SessionError, StartContext};
 use crate::store::{ChartStore, FeedStatus};
 use crate::transport::Transport;
@@ -66,6 +68,35 @@ async fn flush<T: Transport>(t: &mut T, out: &mut Vec<Outgoing>) -> Result<()> {
     Ok(())
 }
 
+/// Receives every decoded batch of a connection, after the store applied it (e.g. the local
+/// store's writer, `crate::disk`). Runs on the feed task: it must not block.
+pub trait EventSink: Send {
+    /// A connection starts. `newest_bar` is the newest bar in the chart store and
+    /// `window_start` the oldest time the history window asks for; returns where history
+    /// should start (by default, the newest bar: it may be partial).
+    fn begin(
+        &mut self,
+        newest_bar: Option<UtcMillis>,
+        window_start: UtcMillis,
+    ) -> Option<UtcMillis> {
+        let _ = window_start;
+        newest_bar
+    }
+    /// One decoded frame's events (an atomic batch), at feed time `now`.
+    fn frame(&mut self, events: &[MarketEvent], now: UtcMillis);
+    /// The connection ended (closed, failed or shut down).
+    fn end(&mut self, now: UtcMillis) {
+        let _ = now;
+    }
+}
+
+/// A sink that ignores everything.
+pub struct NoSink;
+
+impl EventSink for NoSink {
+    fn frame(&mut self, _: &[MarketEvent], _: UtcMillis) {}
+}
+
 /// Run one connection until it ends. Bars accumulate in `store` and survive the return.
 pub async fn run_connection<T: Transport>(
     transport: &mut T,
@@ -74,16 +105,44 @@ pub async fn run_connection<T: Transport>(
     opts: &ConnectionOptions,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<ConnectionEnd, ConnectionError> {
+    run_connection_with(transport, session, store, opts, shutdown, &mut NoSink).await
+}
+
+/// [`run_connection`], handing every batch to `sink` as well.
+pub async fn run_connection_with<T: Transport>(
+    transport: &mut T,
+    session: &mut dyn ProviderSession,
+    store: &ChartStore,
+    opts: &ConnectionOptions,
+    shutdown: &mut watch::Receiver<bool>,
+    sink: &mut dyn EventSink,
+) -> Result<ConnectionEnd, ConnectionError> {
+    let now = transport.clock().unwrap_or_else(crate::now_utc);
+    let result = drive(transport, session, store, opts, shutdown, sink, now).await;
+    sink.end(transport.clock().unwrap_or_else(crate::now_utc));
+    result
+}
+
+async fn drive<T: Transport>(
+    transport: &mut T,
+    session: &mut dyn ProviderSession,
+    store: &ChartStore,
+    opts: &ConnectionOptions,
+    shutdown: &mut watch::Receiver<bool>,
+    sink: &mut dyn EventSink,
+    now: UtcMillis,
+) -> Result<ConnectionEnd, ConnectionError> {
     // Re-request from the newest stored bar (it may be partial); everything before it is
     // complete. The store marks history as loading for this connection.
-    let (history_from, period) = store.update(|d| {
+    let (newest_bar, period) = store.update(|d| {
         d.begin_connection();
         d.status = FeedStatus::LoggingOn;
         (d.series.last().map(|b| b.time), d.series.period_ms())
     });
+    let window_start = UtcMillis(now.0 - opts.history_ms).floor_to(period);
+    let history_from = sink.begin(newest_bar, window_start);
     let mut out: Vec<Outgoing> = Vec::new();
     let mut events: Vec<MarketEvent> = Vec::new();
-    let now = transport.clock().unwrap_or_else(crate::now_utc);
     session.start(
         StartContext {
             now,
@@ -122,6 +181,7 @@ pub async fn run_connection<T: Transport>(
                     }
                     d.apply(&events);
                 });
+                sink.frame(&events, now);
                 result?;
                 flush(transport, &mut out).await?;
             }

@@ -4,7 +4,8 @@
 //! Each pane polls *its* store's atomic revision on the UI thread every 8 ms and notifies only
 //! itself (decision 0001: never per tick). The workspace renders panes as cached views, so a
 //! pane whose market didn't move replays its previous frame instead of repainting: N panes
-//! don't cost N× when one market ticks.
+//! don't cost N× when one market ticks. The same poll notices a live feed going quiet
+//! (`ChartStore::stale_for`, lock-free) and redraws the pane with its stale marker.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +33,8 @@ pub trait Pane: EventEmitter<FeedChanged> + Sized + 'static {
 /// Start the pane's revision poll: notify when its store changed, nothing otherwise.
 pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
     cx.spawn(async move |this, cx| {
+        // Whole seconds the feed has been stale (redraw when it changes: the marker counts).
+        let mut stale_secs: Option<u64> = None;
         loop {
             cx.background_executor()
                 .timer(Duration::from_millis(8))
@@ -42,6 +45,11 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
                 let seen = pane.seen_revision();
                 if rev != *seen {
                     *seen = rev;
+                    cx.notify();
+                }
+                let stale = pane.store().stale_for().map(|d| d.as_secs());
+                if stale != stale_secs {
+                    stale_secs = stale;
                     cx.notify();
                 }
             });
@@ -59,5 +67,33 @@ pub fn contract_text(d: &lines_feed::ChartData) -> String {
     match d.contract_label() {
         Some(c) => c.to_string(),
         None => format!("{} (contract unknown)", d.product.symbol),
+    }
+}
+
+/// The stale marker for a pane header (docs/design.md §7): shown while the pane's live feed
+/// has delivered nothing for longer than its cadence, so a frozen pane never looks live.
+pub fn stale_badge(store: &ChartStore, t: &crate::theme::Theme) -> Option<gpui::AnyElement> {
+    use gpui::{IntoElement, ParentElement, Styled, div};
+    let quiet = store.stale_for()?;
+    Some(
+        div()
+            .px_1()
+            .bg(t.last)
+            .text_color(t.on_last)
+            .font_weight(gpui::FontWeight::BOLD)
+            .child(format!("STALE · no data {} s", quiet.as_secs()))
+            .into_any_element(),
+    )
+}
+
+/// Dim a stale pane's content (paint after the content).
+pub fn paint_stale_veil(
+    store: &ChartStore,
+    bounds: gpui::Bounds<gpui::Pixels>,
+    t: &crate::theme::Theme,
+    window: &mut gpui::Window,
+) {
+    if store.stale_for().is_some() {
+        window.paint_quad(gpui::fill(bounds, t.bg.opacity(0.55)));
     }
 }

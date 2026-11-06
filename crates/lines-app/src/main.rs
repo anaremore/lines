@@ -115,6 +115,17 @@ struct Cli {
     #[cfg(feature = "vendor-cqg")]
     #[arg(long, default_value = "WebAPITest")]
     client_app_id: String,
+    /// Don't use the local market-data store. By default live feeds (Coinbase, CQG) keep
+    /// trades and best bid/ask per contract in the OS data directory (`LINES_DATA_DIR`
+    /// overrides), show the cached bars at startup and fill the rest from the feed.
+    #[arg(long)]
+    no_store: bool,
+    /// Also store order-book depth for these products (e.g. ES,NQ). Off by default: large.
+    #[arg(long, value_delimiter = ',')]
+    store_depth: Vec<String>,
+    /// Local store size budget in GiB; the oldest trade dates are removed beyond it.
+    #[arg(long, default_value_t = 4.0)]
+    store_budget_gb: f64,
     /// Run the feed without a window for N seconds and print stats (useful for recording).
     #[arg(long)]
     headless: Option<u64>,
@@ -263,7 +274,38 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
         })?);
     }
     cfg.record = cli.record.clone();
+    cfg.store = store_config(cli);
     Ok(cfg)
+}
+
+/// The local store (decision 0019) for live sources: the mock invents a new market every
+/// run and replays and screenshots must not write, so those never store.
+fn store_config(cli: &Cli) -> Option<lines_feed::disk::StoreConfig> {
+    let source = match cli.source {
+        _ if cli.no_store || cli.screenshot.is_some() => return None,
+        SourceKind::Coinbase => "coinbase",
+        #[cfg(feature = "vendor-cqg")]
+        SourceKind::Cqg => "cqg",
+        SourceKind::Mock | SourceKind::Replay => return None,
+    };
+    let Some(root) = lines_feed::disk::default_root() else {
+        tracing::warn!("no data directory (set LINES_DATA_DIR); running without the local store");
+        return None;
+    };
+    let mut cfg = lines_feed::disk::StoreConfig::new(root, source);
+    cfg.depth_products = cli.store_depth.clone();
+    cfg.budget_bytes = (cli.store_budget_gb.max(0.0) * (1u64 << 30) as f64) as u64;
+    tracing::info!(
+        "local store: {} (budget {:.1} GiB{})",
+        cfg.root.display(),
+        cli.store_budget_gb,
+        if cfg.depth_products.is_empty() {
+            String::new()
+        } else {
+            format!(", depth for {}", cfg.depth_products.join(","))
+        }
+    );
+    Some(cfg)
 }
 
 fn main() -> Result<()> {
@@ -391,10 +433,54 @@ fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
 }
 
 fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
-    let mut feed = lines_feed::spawn(config)?;
     let start = std::time::Instant::now();
+    let mut feed = lines_feed::spawn(config)?;
+    // Startup timing (roadmap 5a): when the first bars and the newest bar were in the store
+    // (a pane paints them within one poll tick, 8 ms), and when history was complete.
+    let (mut first_bars, mut recent, mut complete) = (None, None, None);
+    let started_wall = lines_feed::now_utc();
+    let mut next_print = Duration::from_secs(1);
     while start.elapsed() < dur {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(2));
+        {
+            let d = feed.store.read();
+            if first_bars.is_none() && !d.series.is_empty() {
+                first_bars = Some(start.elapsed());
+                println!(
+                    "first bars in the store after {:.1} ms ({} bars, newest {})",
+                    start.elapsed().as_secs_f64() * 1e3,
+                    d.series.len(),
+                    d.series
+                        .last()
+                        .map(|b| b.time)
+                        .unwrap_or(lines_core::UtcMillis(0))
+                );
+            }
+            // The newest minutes are on screen (what a trader looks at first).
+            if recent.is_none()
+                && d.series
+                    .last()
+                    .is_some_and(|b| b.time.0 >= started_wall.0 - 3 * 60_000)
+            {
+                recent = Some(start.elapsed());
+                println!(
+                    "bars up to the last 3 minutes after {:.1} ms",
+                    start.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            if complete.is_none() && d.history == lines_feed::store::HistoryState::Complete {
+                complete = Some(start.elapsed());
+                println!(
+                    "history complete after {:.1} ms ({} bars)",
+                    start.elapsed().as_secs_f64() * 1e3,
+                    d.series.len()
+                );
+            }
+        }
+        if start.elapsed() < next_print {
+            continue;
+        }
+        next_print += Duration::from_secs(1);
         let d = feed.store.read();
         println!(
             "[{:>4.1}s] {} {:<16} bars={:<6} updates={:<9} trades={:<8} frames={:<7} gaps={} rejected={} reconnects={}",
