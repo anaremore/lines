@@ -73,6 +73,24 @@ pub struct BarSeries {
     revision: u64,
     /// Number of bars ever removed from the front (lets views keep a stable index anchor).
     trimmed: u64,
+    /// The earliest bar time each recent revision touched (a ring of the last
+    /// [`CHANGE_LOG`] mutations), so derived views (higher timeframes) recompute only from
+    /// there: [`BarSeries::changed_since`].
+    changes: [(u64, i64); CHANGE_LOG],
+    change_head: usize,
+}
+
+/// Mutations remembered by [`BarSeries::changed_since`].
+pub const CHANGE_LOG: usize = 32;
+
+/// What changed in a series since a revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Changed {
+    Nothing,
+    /// Bars at or after this time (bucket start) may differ.
+    From(UtcMillis),
+    /// Too much to tell (more mutations than remembered, or cleared): rebuild everything.
+    All,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +113,35 @@ impl BarSeries {
             max_len,
             revision: 0,
             trimmed: 0,
+            changes: [(0, 0); CHANGE_LOG],
+            change_head: 0,
+        }
+    }
+
+    /// Record that the current revision touched bars from `t` on.
+    fn note_change(&mut self, t: i64) {
+        self.changes[self.change_head] = (self.revision, t);
+        self.change_head = (self.change_head + 1) % CHANGE_LOG;
+    }
+
+    /// What changed since `revision` (allocation-free). Trimming the front is reported by
+    /// [`BarSeries::trimmed`], not here.
+    pub fn changed_since(&self, revision: u64) -> Changed {
+        if revision >= self.revision {
+            return Changed::Nothing;
+        }
+        if self.revision - revision > CHANGE_LOG as u64 {
+            return Changed::All;
+        }
+        let from = self
+            .changes
+            .iter()
+            .filter(|(r, _)| *r > revision && *r <= self.revision)
+            .map(|(_, t)| *t)
+            .min();
+        match from {
+            Some(i64::MIN) | None => Changed::All,
+            Some(t) => Changed::From(UtcMillis(t)),
         }
     }
 
@@ -108,6 +155,10 @@ impl BarSeries {
     }
     pub fn bars(&self) -> &[Bar] {
         &self.bars
+    }
+    /// Bars the series can hold without reallocating (it never holds more).
+    pub fn capacity(&self) -> usize {
+        self.bars.capacity()
     }
     pub fn len(&self) -> usize {
         self.bars.len()
@@ -128,6 +179,7 @@ impl BarSeries {
     pub fn clear(&mut self) {
         self.bars.clear();
         self.revision += 1;
+        self.note_change(i64::MIN);
     }
 
     /// Fold one trade into the series.
@@ -149,6 +201,7 @@ impl BarSeries {
     ) -> TradeOutcome {
         let bucket = time.floor_to(self.period_ms);
         self.revision += 1;
+        self.note_change(bucket.0);
         match self.bars.last_mut() {
             Some(bar) if bar.time == bucket => {
                 bar.apply_trade_ordered(price, volume, first, last);
@@ -184,6 +237,7 @@ impl BarSeries {
             "bar not aligned to period"
         );
         self.revision += 1;
+        self.note_change(bar.time.0);
         match self.bars.last() {
             Some(last) if last.time < bar.time => self.bars.push(bar),
             None => self.bars.push(bar),
@@ -327,5 +381,30 @@ mod tests {
         let r = s.revision();
         s.apply_trade(t(0), Price(1), Qty(1));
         assert!(s.revision() > r);
+    }
+
+    #[test]
+    fn changes_are_reported_from_the_earliest_bar_touched() {
+        let mut s = BarSeries::new(M, 1000);
+        for i in 0..10 {
+            s.apply_trade(t(i * M), Price(100), Qty(1));
+        }
+        let seen = s.revision();
+        assert_eq!(s.changed_since(seen), Changed::Nothing);
+        s.apply_trade(t(9 * M + 5), Price(101), Qty(1));
+        assert_eq!(s.changed_since(seen), Changed::From(t(9 * M)));
+        // A late trade and a history bar further back: the earliest wins.
+        s.apply_trade(t(3 * M + 1), Price(99), Qty(1));
+        s.upsert(Bar::from_trade(t(5 * M), Price(98), Qty(2)));
+        assert_eq!(s.changed_since(seen), Changed::From(t(3 * M)));
+        // More mutations than remembered, or a clear: everything.
+        let old = s.revision();
+        for i in 0..(CHANGE_LOG as i64 + 1) {
+            s.apply_trade(t(20 * M + i), Price(100), Qty(1));
+        }
+        assert_eq!(s.changed_since(old), Changed::All);
+        let r = s.revision();
+        s.clear();
+        assert_eq!(s.changed_since(r), Changed::All);
     }
 }

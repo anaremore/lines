@@ -3,7 +3,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use lines_core::{Bar, Price, Qty, UtcMillis, Viewport};
+use lines_core::{Bar, BarSeries, BarsView, Derived, Price, Qty, Timeframe, UtcMillis, Viewport};
 use lines_indicators::render::{Column, build_columns};
 use lines_indicators::{Bands, Point};
 
@@ -60,19 +60,37 @@ fn vwap_columns_do_not_allocate() {
     vp.price_lo = 599_000.0;
     vp.price_hi = 601_000.0;
     let mut out: Vec<Column> = Vec::with_capacity(4096);
+    let view = BarsView::fixed(&bars, 60_000);
+    // A higher timeframe samples the bucket's last point (roadmap 9): no allocation either.
+    let mut series = BarSeries::new(60_000, 10_000);
+    for b in &bars {
+        series.upsert(*b);
+    }
+    let mut derived = Derived::new(Timeframe::Minutes(15), series.capacity());
+    derived.update(&series, None);
+    let before = ALLOCS.with(|c| c.get());
+    for frame in 0..100 {
+        vp.right_index = 330.0 - (frame % 30) as f64;
+        build_columns(&points, derived.view(), &vp, Bands(0b111), &mut out);
+    }
+    assert_eq!(
+        ALLOCS.with(|c| c.get()) - before,
+        0,
+        "15m VWAP geometry allocated"
+    );
     let before = ALLOCS.with(|c| c.get());
     let mut drawn = 0;
     for frame in 0..500 {
         vp.right_index = 4_999.0 - (frame % 300) as f64;
         vp.bar_px = [2.0, 5.0, 9.5][frame % 3];
-        build_columns(&points, &bars, &vp, Bands(0b111), &mut out);
+        build_columns(&points, view, &vp, Bands(0b111), &mut out);
         drawn += out.len();
     }
     let n = ALLOCS.with(|c| c.get()) - before;
     assert!(drawn > 0);
     assert_eq!(n, 0, "VWAP geometry allocated {n} times");
     // Columns break at reset periods and at bars without a value.
-    build_columns(&points, &bars, &vp, Bands::NONE, &mut out);
+    build_columns(&points, view, &vp, Bands::NONE, &mut out);
     assert!(out.iter().any(|c| !c.joins));
     assert!(out.iter().any(|c| c.joins));
 }
