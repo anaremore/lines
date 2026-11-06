@@ -2805,6 +2805,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "embed-resource",
  "gpui",
  "gpui_platform",
  "image",

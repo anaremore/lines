@@ -15,7 +15,7 @@ vendor-cqg = ["lines-feed/vendor-cqg"]
 # Reproducible --screenshot mode (decision 0009). Off by default because it enables GPUI's
 # `test-support` feature (that is where `Window::render_to_image` lives), which pulls in
 # test-only dependencies that release builds should not ship.
-screenshot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+screenshot = ["gpui/test-support", "gpui_platform/test-support"]
 
 [dependencies]
 gpui.workspace = true
@@ -26,5 +26,10 @@ anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-# Same major as GPUI's `image` so `RgbaImage` is one type; only adds PNG encoding.
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+# Same major as GPUI's `image` so `RgbaImage` is one type. PNG only: decodes the window icon
+# (X11) and encodes screenshots.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+# Windows icon + version resources. Pinned to the version GPUI already uses for its manifest.
+embed-resource = "=3.0.12"

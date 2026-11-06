@@ -300,6 +300,7 @@ fn main() -> Result<()> {
                     title: Some("Lines".into()),
                     ..Default::default()
                 }),
+                icon: window_icon(),
                 ..Default::default()
             },
             move |_, cx| cx.new(|cx| ChartView::new(feed, theme, false, Default::default(), cx)),
@@ -312,6 +313,20 @@ fn main() -> Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+
+/// Runtime window icon from `assets/icon/png/lines-256.png`. GPUI applies it on X11 only; on
+/// Windows the window/taskbar icon comes from the executable's icon resource 1 (`build.rs`),
+/// and on macOS from the app bundle.
+fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    const PNG: &[u8] = include_bytes!("../../../assets/icon/png/lines-256.png");
+    match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
+        Ok(img) => Some(std::sync::Arc::new(img.into_rgba8())),
+        Err(e) => {
+            tracing::warn!("window icon not decoded: {e}");
+            None
+        }
+    }
 }
 
 fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
@@ -356,6 +371,12 @@ mod tests {
 
     fn help() -> String {
         Cli::command().render_long_help().to_string()
+    }
+
+    #[test]
+    fn window_icon_decodes() {
+        let icon = window_icon().expect("embedded PNG decodes");
+        assert_eq!(icon.dimensions(), (256, 256));
     }
 
     #[test]

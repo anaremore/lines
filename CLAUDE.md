@@ -17,7 +17,7 @@ Desktop futures charting terminal. Rust + GPUI. Market data through provider ada
 | `crates/lines-core` | Vendor-neutral types and math: `Price`/`PriceScale`/`UnitConverter`, `Qty`/`QtyFormat`, `Product`/`ProductId`/`ContractKey`/`Capabilities` (`instrument.rs`), `calendar` (civil dates, expiry/roll calendars), `roll` (front-month resolution), `continuous` (display-only continuous series), bars, book, viewport, allocation-free geometry. | nothing |
 | `crates/cqg-proto` | Rust types generated at build time from CQG `.proto` files (`protox` + `prost-build`, no `protoc`). | prost |
 | `crates/lines-feed` | `catalog` (products with permanent ids, crate-private provider root symbols, `Target` = product or contract), `provider` (`Provider`, I/O-free `ProviderSession`, `MarketEvent`, `Frame`), `cqg/` (session, mock, symbol map), `coinbase/` (session, symbol map), `native` (`lines-events-1` encoding of normalized events incl. depth; replay-only provider `lines`), `connection` (generic driver + reconnect backoff), `transport` (WSS + HTTP, replay, recording tee), `recording` (`.lfr` v3), `store` (`ChartStore`). Own thread + Tokio runtime. | lines-core, cqg-proto |
-| `crates/lines-app` | `lines` binary: CLI, GPUI window, `chart_view`, `theme`, `screenshot` (feature-gated). | lines-core, lines-feed |
+| `crates/lines-app` | `lines` binary: CLI, GPUI window, `chart_view`, `theme`, `screenshot` (feature-gated). `build.rs` embeds the Windows icon (`assets/icon/lines.ico` as resource 1, which GPUI uses as the window/taskbar icon) and version info, via `embed-resource` pinned to GPUI's version; no-op on other targets. | lines-core, lines-feed |
 | `crates/lines-sierra` | **Personal dev tool, never ships.** `lines-import-sierra` binary: Sierra Chart `.scid` + `.depth` → `lines-events` replay file. Workspace member (tested) but not a default member; nothing depends on it. | lines-core, lines-feed |
 
 `third_party/cqg-webapi` is a git submodule (github.com/cqg/WebAPIPythonSamples); only `proto/` is used. Protos are not vendored (decision 0010).
@@ -53,6 +53,9 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair.
+# README hero (assets/readme/lines-dark.png): synthetic mock data only (decision 0010):
+#   lines --source mock --headless 5 --record recordings/readme-mock.lfr
+#   lines --replay recordings/readme-mock.lfr --screenshot assets/readme/lines-dark.png --size 1600x900 --theme dark --cursor 900,520
 # Colours: --theme dark|light, --palette standard|cb (colourblind: blue up, orange down),
 # --hollow up|down (which direction's candle bodies are hollow; default up). Also for the live app.
 # --price-zoom F zooms the auto-fitted price range by F (as Ctrl+wheel), i.e. manual price scale.
