@@ -11,6 +11,7 @@ pub mod coinbase;
 pub mod connection;
 pub mod cqg;
 pub mod disk;
+pub mod kraken;
 pub mod native;
 pub mod provider;
 pub mod recording;
@@ -60,6 +61,12 @@ pub enum Source {
     },
     /// Coinbase Exchange public feed.
     Coinbase { url: String },
+    /// Kraken public data: spot over WebSocket v2, perpetuals over the Kraken Futures feed
+    /// (chosen by product). REST bases are the provider's (`kraken::KrakenProvider`).
+    Kraken {
+        spot_url: String,
+        futures_url: String,
+    },
     /// Replay a `.lfr` recording (provider, product and contract come from its header).
     /// `speed` 1.0 = real time, 0 = as fast as possible. `stop_at` ends the replay before
     /// the first frame recorded after that instant.
@@ -132,6 +139,7 @@ fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
         #[cfg(feature = "vendor-cqg")]
         Source::Cqg { logon, .. } => Arc::new(cqg::CqgProvider::new(logon.clone())),
         Source::Coinbase { .. } => Arc::new(coinbase::CoinbaseProvider),
+        Source::Kraken { .. } => Arc::new(kraken::KrakenProvider::default()),
         Source::Replay { path, .. } => {
             let h = transport::read_header(path)?;
             match h.provider.as_str() {
@@ -140,6 +148,9 @@ fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
                 }
                 provider::COINBASE if coinbase::protocol_compatible(&h.protocol) => {
                     Arc::new(coinbase::CoinbaseProvider)
+                }
+                provider::KRAKEN if kraken::protocol_compatible(&h.protocol) => {
+                    Arc::new(kraken::KrakenProvider::default())
                 }
                 native::PROVIDER if native::protocol_compatible(&h.protocol) => {
                     Arc::new(native::NativeProvider)
@@ -204,6 +215,7 @@ fn plan(config: &FeedConfig) -> Result<Plan> {
             let id = match (target, source) {
                 (Some(Target::Product(id)), _) => *id,
                 (_, Source::Coinbase { .. }) => catalog::BTC_USD,
+                (_, Source::Kraken { .. }) => catalog::BTC_USD_KR,
                 _ => catalog::ES,
             };
             let product = get(id)?;
@@ -441,6 +453,20 @@ pub async fn run_feed(
                 }
             }
             Source::Coinbase { url } => {
+                match WsTransport::connect(url, Duration::from_secs(15)).await {
+                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
+                    Err(e) => Err(ConnectionError::Transport(e)),
+                }
+            }
+            Source::Kraken {
+                spot_url,
+                futures_url,
+            } => {
+                let url = if kraken::is_futures(&plan.product) {
+                    futures_url
+                } else {
+                    spot_url
+                };
                 match WsTransport::connect(url, Duration::from_secs(15)).await {
                     Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
                     Err(e) => Err(ConnectionError::Transport(e)),

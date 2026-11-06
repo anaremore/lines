@@ -94,10 +94,20 @@ impl Availability {
             };
         }
         if !self.provider.supports(&product) {
-            return Err(match self.provider.id() {
-                crate::provider::COINBASE => "coinbase: spot crypto only".into(),
-                p if product.is_spot() => format!("{p}: futures only"),
-                p => format!("not mapped for {p}"),
+            // A crypto market belongs to one exchange: name the source that has it.
+            let home = match catalog::exchange(id) {
+                "Coinbase" => Some(("Coinbase", "coinbase")),
+                "Kraken" | "Kraken Futures" => Some(("Kraken", "kraken")),
+                _ => None,
+            };
+            return Err(match (self.provider.id(), home) {
+                (p, Some((name, source))) if p != source => {
+                    format!("{name} market: use --source {source}")
+                }
+                (crate::provider::COINBASE, _) => "coinbase: spot crypto only".into(),
+                (crate::provider::KRAKEN, _) => "kraken: crypto only".into(),
+                (p, _) if product.is_spot() => format!("{p}: futures only"),
+                (p, _) => format!("not mapped for {p}"),
             });
         }
         if self.mock && catalog::roots(id).cqg != Some(cqg::mock::MOCK_SYMBOL) {
@@ -129,6 +139,10 @@ mod tests {
             Source::CqgMock(MockConfig::default()),
             Source::Coinbase {
                 url: "wss://example.invalid".into(),
+            },
+            Source::Kraken {
+                spot_url: "wss://example.invalid".into(),
+                futures_url: "wss://example.invalid".into(),
             },
         ]
     }
@@ -167,13 +181,38 @@ mod tests {
         );
         assert_eq!(
             mock.check(&Target::Product(catalog::BTC_USD)),
-            Err("cqg: futures only".into())
+            Err("Coinbase market: use --source coinbase".into())
         );
         let cb = availability(&Source::Coinbase { url: String::new() }).unwrap();
         assert_eq!(cb.check(&Target::Product(catalog::BTC_USD)), Ok(()));
         assert_eq!(
             cb.check(&Target::Product(catalog::ES)),
             Err("coinbase: spot crypto only".into())
+        );
+        assert_eq!(
+            cb.check(&Target::Product(catalog::BTC_PERP_KR)),
+            Err("Kraken market: use --source kraken".into())
+        );
+        let kr = availability(&Source::Kraken {
+            spot_url: String::new(),
+            futures_url: String::new(),
+        })
+        .unwrap();
+        for id in [
+            catalog::BTC_USD_KR,
+            catalog::ETH_USD_KR,
+            catalog::BTC_PERP_KR,
+            catalog::ETH_PERP_KR,
+        ] {
+            assert_eq!(kr.check(&Target::Product(id)), Ok(()));
+        }
+        assert_eq!(
+            kr.check(&Target::Product(catalog::BTC_USD)),
+            Err("Coinbase market: use --source coinbase".into())
+        );
+        assert_eq!(
+            kr.check(&Target::Product(catalog::ES)),
+            Err("kraken: crypto only".into())
         );
     }
 
