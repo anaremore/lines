@@ -31,16 +31,17 @@ pub const FIRST_SUB_TRADE: f32 = f32::from_bits(0xfd70_9ef9); // -1.99900095e37
 /// `open` marker on the last record of an unbundled trade.
 pub const LAST_SUB_TRADE: f32 = f32::from_bits(0xfd70_9f01); // -1.99900197e37
 
-/// Sierra time → Unix microseconds.
+/// Sierra time → Unix microseconds. Saturates: a corrupt record time far outside any real
+/// date must not overflow (it then sorts before/after all real data).
 #[inline]
 pub fn sc_to_unix_us(sc: i64) -> i64 {
-    sc - SC_EPOCH_OFFSET_US
+    sc.saturating_sub(SC_EPOCH_OFFSET_US)
 }
 
-/// Unix microseconds → Sierra time.
+/// Unix microseconds → Sierra time (saturating, like [`sc_to_unix_us`]).
 #[inline]
 pub fn unix_us_to_sc(us: i64) -> i64 {
-    us + SC_EPOCH_OFFSET_US
+    us.saturating_add(SC_EPOCH_OFFSET_US)
 }
 
 fn bad(msg: impl Into<String>) -> io::Error {
@@ -335,10 +336,10 @@ impl<R: Read> DepthReader<R> {
 }
 
 // ---------------------------------------------------------------------------------------
-// Synthetic builders (used by tests in this crate; never real data).
+// Synthetic builders (tests in this crate and fuzz seed corpora; never real data).
 
-#[cfg(test)]
-pub(crate) mod synth {
+#[doc(hidden)]
+pub mod synth {
     use super::*;
 
     pub fn scid_header() -> Vec<u8> {
@@ -419,6 +420,10 @@ mod tests {
         let unix_us = 1_757_549_028_061_000;
         assert_eq!(sc_to_unix_us(unix_us_to_sc(unix_us)), unix_us);
         assert_eq!(unix_us_to_sc(0), 2_209_161_600_000_000);
+        // Fuzz regression: corrupt record times overflowed (panic in debug, wrap in release).
+        assert_eq!(sc_to_unix_us(i64::MIN), i64::MIN);
+        assert_eq!(unix_us_to_sc(i64::MAX), i64::MAX);
+        assert!(sc_to_unix_us(i64::MIN + 1) < sc_to_unix_us(0));
     }
 
     #[test]

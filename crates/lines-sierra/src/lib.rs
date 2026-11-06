@@ -11,4 +11,4 @@ pub mod symbol;
 #[cfg(test)]
 mod import_tests;
 
-pub use import::{ImportOptions, ImportReport, import};
+pub use import::{ImportOptions, ImportReport, ImportSource, import, import_from};

@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -619,34 +620,16 @@ impl Importer {
 
 /// Run an import. Returns the report; the output file is complete only on `Ok`.
 pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
+    // Validate the symbol before touching the file system (clearer errors).
     let sym = symbol::parse(&opts.symbol)
         .with_context(|| format!("cannot parse Sierra symbol {:?}", opts.symbol))?;
-    let (instrument, default_mult) = symbol::map_root(&sym.root)
+    symbol::map_root(&sym.root)
         .with_context(|| format!("no catalog product for root {:?}", sym.root))?;
-    let multiplier = opts.price_multiplier.unwrap_or(default_mult);
-    let day_start = UtcMillis::parse_iso(&format!("{}T00:00:00", opts.date))
-        .with_context(|| format!("bad --date {:?} (want YYYY-MM-DD)", opts.date))?;
-    let (day_start_us, day_end_us) = (day_start.0 * 1000, (day_start.0 + 86_400_000) * 1000);
-
     let scid_file = scid_path(&opts.data_dir, &opts.symbol);
-    let mut scid =
+    let scid =
         ScidReader::open(&scid_file).with_context(|| format!("open {}", scid_file.display()))?;
-    // Contract from the file name; a 1-digit year is resolved from the newest data in the
-    // file (or the imported day, if later).
-    let last_data_year = scid
-        .last_time()?
-        .map(|t| CivilDate::from_utc(UtcMillis(sc_to_unix_us(t).div_euclid(1000))).year)
-        .unwrap_or(0)
-        .max(CivilDate::from_utc(day_start).year);
-    let contract = symbol::contract_for(&sym, &instrument, last_data_year).with_context(|| {
-        format!(
-            "cannot derive a {} contract from {:?}",
-            instrument.symbol, opts.symbol
-        )
-    })?;
-    scid.seek_to_time(unix_us_to_sc(day_start_us))?;
     let depth_file = depth_path(&opts.data_dir, &opts.symbol, &opts.date);
-    let mut depth = match DepthReader::open(&depth_file) {
+    let depth = match DepthReader::open(&depth_file) {
         Ok(d) => Some(d),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!(
@@ -657,6 +640,62 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         }
         Err(e) => return Err(e).with_context(|| format!("open {}", depth_file.display())),
     };
+    let source = ImportSource {
+        symbol: &opts.symbol,
+        date: &opts.date,
+        price_multiplier: opts.price_multiplier,
+    };
+    let out = || {
+        std::fs::File::create(&opts.out)
+            .map(std::io::BufWriter::new)
+            .with_context(|| format!("create {}", opts.out.display()))
+    };
+    let (report, _) = import_from(&source, scid, depth, out)?;
+    Ok(report)
+}
+
+/// What to import, for [`import_from`].
+#[derive(Copy, Clone, Debug)]
+pub struct ImportSource<'a> {
+    /// Sierra symbol, e.g. `NQZ5.CME`.
+    pub symbol: &'a str,
+    /// UTC day, `YYYY-MM-DD`.
+    pub date: &'a str,
+    pub price_multiplier: Option<f64>,
+}
+
+/// The import pipeline over any readers and writer (files for the CLI, memory for tests and
+/// fuzzing). `out` is called only once there is something to write, so a failed import never
+/// creates an output. Returns the report and the finished writer.
+pub fn import_from<S: Read + Seek, D: Read, W: Write>(
+    src: &ImportSource<'_>,
+    mut scid: ScidReader<S>,
+    mut depth: Option<DepthReader<D>>,
+    out: impl FnOnce() -> Result<W>,
+) -> Result<(ImportReport, W)> {
+    let sym = symbol::parse(src.symbol)
+        .with_context(|| format!("cannot parse Sierra symbol {:?}", src.symbol))?;
+    let (instrument, default_mult) = symbol::map_root(&sym.root)
+        .with_context(|| format!("no catalog product for root {:?}", sym.root))?;
+    let multiplier = src.price_multiplier.unwrap_or(default_mult);
+    let day_start = UtcMillis::parse_iso(&format!("{}T00:00:00", src.date))
+        .with_context(|| format!("bad --date {:?} (want YYYY-MM-DD)", src.date))?;
+    let (day_start_us, day_end_us) = (day_start.0 * 1000, (day_start.0 + 86_400_000) * 1000);
+
+    // Contract from the file name; a 1-digit year is resolved from the newest data in the
+    // file (or the imported day, if later).
+    let last_data_year = scid
+        .last_time()?
+        .map(|t| CivilDate::from_utc(UtcMillis(sc_to_unix_us(t).div_euclid(1000))).year)
+        .unwrap_or(0)
+        .max(CivilDate::from_utc(day_start).year);
+    let contract = symbol::contract_for(&sym, &instrument, last_data_year).with_context(|| {
+        format!(
+            "cannot derive a {} contract from {:?}",
+            instrument.symbol, src.symbol
+        )
+    })?;
+    scid.seek_to_time(unix_us_to_sc(day_start_us))?;
 
     let mut imp = Importer {
         conv: PriceConv::new(&instrument, multiplier),
@@ -705,7 +744,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         (Some(b), Some((t, _, _))) => b.time_us.min(*t),
         (Some(b), None) => b.time_us,
         (None, Some((t, _, _))) => *t,
-        (None, None) => bail!("no ticks or depth for {} on {}", opts.symbol, opts.date),
+        (None, None) => bail!("no ticks or depth for {} on {}", src.symbol, src.date),
     };
     let header = Header {
         start_wall_ms: first_us.div_euclid(1000),
@@ -715,8 +754,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         contract: Some(contract),
         version: lines_feed::recording::FORMAT_VERSION,
     };
-    let mut writer = Writer::create(&opts.out, &header)
-        .with_context(|| format!("create {}", opts.out.display()))?;
+    let mut writer = Writer::new(out()?, &header)?;
     let mut buf = Vec::with_capacity(4096);
     let mut last_emit_us = first_us;
     let mut emit =
@@ -727,7 +765,11 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
             }
             // Frame offsets must not go backwards; events keep their own exact times.
             last_emit_us = last_emit_us.max(time_us);
-            let since = Duration::from_micros((last_emit_us - first_us) as u64);
+            let span = last_emit_us
+                .checked_sub(first_us)
+                .and_then(|us| u64::try_from(us).ok())
+                .context("record times span more than a recording can hold (corrupt file?)")?;
+            let since = Duration::from_micros(span);
             writer.write(Direction::FromServer, since, &Frame::binary(buf.clone()))?;
             report.frames_written += 1;
             let t = UtcMillis(time_us.div_euclid(1000));
@@ -763,7 +805,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
             batch = next_batch(&mut imp)?;
         }
     }
-    writer.finish()?;
+    let out = writer.finish()?;
     let mut top: Vec<_> = imp
         .outside_minutes
         .iter()
@@ -772,5 +814,5 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(5);
     imp.report.touch_outside_top_minutes = top;
-    Ok(imp.report)
+    Ok((imp.report, out))
 }
