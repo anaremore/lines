@@ -2699,7 +2699,7 @@ impl Render for WindowView {
         let area = self.content_area(window, cx);
         let hints = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
             Some(PaneHandle::Dom(_)) => {
-                "DOM: wheel scroll, C centre, G / Shift+G grouping, Ctrl+K symbol"
+                "DOM: wheel scroll, C center, G / Shift+G grouping, Ctrl+K symbol"
             }
             Some(PaneHandle::Tape(_)) => "Time & sales: type a symbol or Ctrl+K: switch",
             _ => chart_view::HINTS_SHORT,

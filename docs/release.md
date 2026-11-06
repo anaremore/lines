@@ -14,7 +14,7 @@ Lines ships continuous **pre-alpha** builds. Releases are produced by the planni
 4. **Live trading cannot be enabled in any public build.** Only mock, replay, Coinbase public data and paper trading ship.
 
 ## Always stops for the owner (never done autonomously)
-- Anything involving money, contracts, vendor agreements, or legal terms (including licence changes).
+- Anything involving money, contracts, vendor agreements, or legal terms (including license changes).
 - Enabling live order routing, or connecting to any production trading system.
 - Publishing outside GitHub (package registries, websites, app stores), code signing, notarization.
 - Deleting branches, tags, releases or history; force-pushing `main`.

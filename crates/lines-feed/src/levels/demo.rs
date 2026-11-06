@@ -83,7 +83,7 @@ fn rgba(hex: &str) -> Result<u32, String> {
     u32::from_str_radix(hex, 16)
         .ok()
         .filter(|_| hex.len() == 8)
-        .ok_or_else(|| format!("bad colour {hex:?}"))
+        .ok_or_else(|| format!("bad color {hex:?}"))
 }
 
 impl LevelSource for DemoLevels {
