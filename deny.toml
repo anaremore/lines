@@ -31,6 +31,14 @@ allow = [
 ]
 confidence-threshold = 0.93
 
+# Crate-scoped exceptions, each reviewed (not added to the global list):
+[[licenses.exceptions]]
+# Mozilla's CA root certificate data (via ureq -> lines-feed, Coinbase REST over TLS).
+# CDLA-Permissive-2.0 is a permissive data licence; its condition (ship the licence text)
+# is met by THIRD_PARTY_LICENSES.txt.
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [licenses.private]
 # Our own crates are `publish = false` and FSL-licensed.
 ignore = true
@@ -59,6 +67,6 @@ allow-git = [
     "https://github.com/gfx-rs/wgpu",
     "https://github.com/zed-industries/font-kit",
     "https://github.com/zed-industries/oo7",
-    "https://github.com/zed-industries/scap",
-    "https://github.com/zed-industries/wasm_thread",
+    # Also in Cargo.lock but unreachable on our targets: zed-industries/scap,
+    # zed-industries/wasm_thread. Add them here only if they ever enter the graph.
 ]
