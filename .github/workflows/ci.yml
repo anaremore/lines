@@ -3,9 +3,13 @@
 # ignored. Toolchain comes from rust-toolchain.toml (rustup installs it on first use).
 name: CI
 
+# Pushes to main plus PRs, so a PR commit runs the matrix once (not once for the push and
+# again for the PR). Other branches can be run by hand from the Actions tab.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,7 +42,8 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Cold builds (empty cache) take ~16 min on macOS; leave plenty of headroom.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,6 +65,8 @@ jobs:
         shell: bash
         run: rustup toolchain install
 
+      # Key = job + OS + rustc + Cargo.lock/Cargo.toml hashes, so unchanged dependencies
+      # reuse the previous build. PR runs read caches saved on main and on their own branch.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: clippy
