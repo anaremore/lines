@@ -123,6 +123,14 @@ pub enum MarketEvent {
         qty: Qty,
         orders: u32,
     },
+    /// The rebuilt book matched the exchange's checksum after this message (Kraken spot).
+    BookChecksumOk,
+    /// The rebuilt book did *not* match the exchange's checksum. The session follows it with
+    /// `BookClear` and `BookResync`: a book known to be wrong is never shown.
+    BookChecksumMismatch,
+    /// The session dropped its book and asked the exchange for a fresh snapshot (checksum
+    /// mismatch or a book sequence gap).
+    BookResync,
     /// Messages known to be missing (sequence gap).
     Gap {
         missed: u64,
@@ -194,6 +202,7 @@ pub trait ProviderSession: Send {
 /// Stable provider identifiers (stored in recordings).
 pub const CQG: &str = "cqg";
 pub const COINBASE: &str = "coinbase";
+pub const KRAKEN: &str = "kraken";
 
 pub trait Provider: Send + Sync {
     /// Stable id, e.g. `"cqg"`; stored in recording headers.
