@@ -1,6 +1,6 @@
 # 0015: Sierra contract-year resolution (amends 0013)
 
-**Status:** Proposed (supersedes only the Sierra decade clause of 0013)
+**Status:** Accepted (amends the Sierra clause of 0013)
 
 **Context:** 0013 says single-digit Sierra years resolve to "the nearest decade at or before the data's dates". That fails at a decade boundary: `NQH0` traded in December 2029 is the March 2030 contract, not 2020.
 
