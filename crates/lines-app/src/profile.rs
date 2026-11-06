@@ -200,6 +200,12 @@ impl VolumeProfileLayer {
         self.config
     }
 
+    /// Rows were built at least once (tests: hidden studies do no work).
+    #[cfg(test)]
+    pub fn has_built(&self) -> bool {
+        self.key.is_some()
+    }
+
     pub fn set_config(&mut self, config: ProfileConfig) {
         self.config = config;
         self.key = None;
@@ -255,7 +261,7 @@ impl VolumeProfileLayer {
             let box_h = LABEL_PX * 1.6;
             let x = snap(6.0, scale);
             let y = snap(f64::from((ph - box_h - 6.0).max(0.0)), scale);
-            paint(window, x, y, w, box_h, t.panel.opacity(0.85));
+            paint(window, x, y, w, box_h, t.label_bg);
             let _ = line.paint(
                 point(px(ox + x + 6.0), px(oy + y + box_h * 0.5 - LABEL_PX * 0.65)),
                 px(LABEL_PX * 1.3),

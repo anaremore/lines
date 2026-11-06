@@ -53,6 +53,7 @@ use crate::tabstate::{self, Leaf, PaneState};
 use crate::tape_view::{TapeOptions, TapeView};
 use crate::theme::Theme;
 use crate::versioned;
+use crate::wsdoc::StudyVisibility;
 use crate::wsdoc::{
     self, DisplayInfo, PaneDoc, Placement, TabDoc, TabDrop, WindowDoc, WindowState, WorkspaceDoc,
 };
@@ -108,6 +109,8 @@ pub struct Workspace {
     pub env: Rc<PaneEnv>,
     pub name: String,
     pub crosshair_sync: bool,
+    /// The key-hint bar is hidden in every window (workspace preference; shown by default).
+    pub hide_hints: bool,
     pub windows: Vec<WindowHandle<WindowView>>,
     /// Windows holding one detached pane each (the pane stays in its tab's layout).
     pub pane_windows: Vec<WindowHandle<PaneWindow>>,
@@ -130,6 +133,7 @@ impl Workspace {
             env: Rc::new(env),
             name: "default".into(),
             crosshair_sync: false,
+            hide_hints: false,
             windows: Vec::new(),
             pane_windows: Vec::new(),
             closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
@@ -768,10 +772,24 @@ impl WindowView {
         }
     }
 
-    fn content_area(&self, window: &Window) -> Rect {
+    /// The footer (key hints and workspace status) is shown unless the key hints are hidden
+    /// and the status has nothing to say beyond the workspace's name: hidden or popped-out
+    /// panes, crosshair sync and reports always bring it back (docs/design.md §3, §7).
+    fn footer_shown(&self, cx: &App) -> bool {
+        let ws = cx.global::<Workspace>();
+        let report = ws.report.is_some() && !ws.windows.is_empty();
+        let panes = self.tabs.get(self.active).is_some_and(|t| {
+            !t.in_state(PaneState::is_hidden).is_empty()
+                || !t.in_state(|s| s == PaneState::Detached).is_empty()
+        });
+        StudyVisibility::footer_shown(ws.hide_hints, ws.crosshair_sync || report || panes)
+    }
+
+    fn content_area(&self, window: &Window, cx: &App) -> Rect {
         let vs = window.viewport_size();
         let (w, h) = (f32::from(vs.width), f32::from(vs.height));
-        Rect::new(0.0, 0.0, w, (h - self.bar_h() - HINT_H).max(0.0))
+        let foot = if self.footer_shown(cx) { HINT_H } else { 0.0 };
+        Rect::new(0.0, 0.0, w, (h - self.bar_h() - foot).max(0.0))
     }
 
     fn focus_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -909,8 +927,38 @@ impl WindowView {
                     clear_synced_times(cx);
                 }
             }
+            Command::ToggleStudyLabels | Command::ToggleStudies | Command::CleanChart => {
+                let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+                    return; // chart commands; other panes have no studies
+                };
+                let v = chart.read(cx).visibility();
+                let hints = cx.global::<Workspace>().hide_hints;
+                let (v, hints) = match cmd {
+                    Command::ToggleStudyLabels => (
+                        StudyVisibility {
+                            hide_study_labels: !v.hide_study_labels,
+                            ..v
+                        },
+                        hints,
+                    ),
+                    Command::ToggleStudies => (
+                        StudyVisibility {
+                            hide_studies: !v.hide_studies,
+                            ..v
+                        },
+                        hints,
+                    ),
+                    _ => v.clean_chart(hints),
+                };
+                chart.update(cx, |c, cx| c.set_visibility(v, cx));
+                set_hide_hints(hints, cx);
+            }
+            Command::ToggleHints => {
+                let hide = !cx.global::<Workspace>().hide_hints;
+                set_hide_hints(hide, cx);
+            }
             Command::Menu => {
-                let area = self.content_area(window);
+                let area = self.content_area(window, cx);
                 let bar = self.bar_h();
                 let tab = self.tab();
                 let at = tab
@@ -997,7 +1045,7 @@ impl WindowView {
         let Some(h) = tab.handle(id).cloned() else {
             return;
         };
-        let area = self.content_area(window);
+        let area = self.content_area(window, cx);
         let index = tab.layout.index_of(&id);
         let r = tab
             .layout
@@ -1056,7 +1104,7 @@ impl WindowView {
 
     fn move_focus(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.tab();
-        let area = self.content_area(window);
+        let area = self.content_area(window, cx);
         let Some(i) = tab.layout.index_of(&tab.focused) else {
             return;
         };
@@ -1444,6 +1492,25 @@ impl WindowView {
                 Command::ChartOnly,
                 on,
             ));
+            if let PaneHandle::Chart(chart) = &h {
+                let v = chart.read(cx).visibility();
+                let hints_hidden = cx.global::<Workspace>().hide_hints;
+                items.push(MenuItem::named(
+                    "Hide study labels",
+                    Command::ToggleStudyLabels,
+                    v.hide_study_labels,
+                ));
+                items.push(MenuItem::named(
+                    "Hide studies",
+                    Command::ToggleStudies,
+                    v.hide_studies,
+                ));
+                items.push(MenuItem::named(
+                    "Clean chart (no study labels, no key hints)",
+                    Command::CleanChart,
+                    v.hide_study_labels && hints_hidden,
+                ));
+            }
         } else {
             items.push(MenuItem::named(
                 &format!("Hide {}", kind.label()),
@@ -1510,6 +1577,11 @@ impl WindowView {
         ));
         items.push(it(Command::SaveAs, false));
         items.push(it(Command::Open, false));
+        items.push(MenuItem::named(
+            "Key hints",
+            Command::ToggleHints,
+            !cx.global::<Workspace>().hide_hints,
+        ));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.menu = Some(Menu::new(at, items));
         cx.notify();
@@ -1638,7 +1710,7 @@ impl WindowView {
     fn update_hover(&mut self, pos: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
         let (x, y) = (f32::from(pos.x), f32::from(pos.y));
         let bar = self.bar_h();
-        let area = self.content_area(window);
+        let area = self.content_area(window, cx);
         let tab = (y < bar && x >= TAB_X0)
             .then(|| ((x - TAB_X0) / TAB_W) as usize)
             .filter(|i| *i < self.tabs.len());
@@ -2328,7 +2400,7 @@ impl Render for WindowView {
             self.hover_pane = None;
             self.hover_tab = None;
         }
-        let area = self.content_area(window);
+        let area = self.content_area(window, cx);
         let hints = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
             Some(PaneHandle::Dom(_)) => {
                 "DOM: wheel scroll, C centre, G / Shift+G grouping, Ctrl+K symbol"
@@ -2345,6 +2417,8 @@ impl Render for WindowView {
         let bar =
             tabstate::shows_tab_bar(self.tabs.len()).then(|| self.tab_bar(cx).into_any_element());
         let status = self.status(cx).into_any_element();
+        // F1 / Clean chart hide the key hints; the footer stays while it has state to show.
+        let (footer, hide_hints) = (self.footer_shown(cx), cx.global::<Workspace>().hide_hints);
         div()
             .size_full()
             .relative()
@@ -2366,7 +2440,7 @@ impl Render for WindowView {
                     .overflow_hidden()
                     .children(content),
             )
-            .child(
+            .children(footer.then(|| {
                 div()
                     .h(px(HINT_H))
                     .flex_none()
@@ -2382,15 +2456,11 @@ impl Render for WindowView {
                     .bg(t.panel)
                     .border_t_1()
                     .border_color(t.axis_line)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(format!("{hints}  ·  {}", commands::workspace_hints())),
-                    )
-                    .child(status),
-            )
+                    .child(div().flex_1().min_w_0().truncate().when(!hide_hints, |d| {
+                        d.child(format!("{hints}  ·  {}", commands::workspace_hints()))
+                    }))
+                    .child(status)
+            }))
             .children(menu)
             .children(self.prompt_overlay())
             .children(self.drag_ghost())
@@ -2597,11 +2667,21 @@ pub fn open_doc_window(
     open_window(tabs, doc.active_tab, bounds, options, cx)
 }
 
+/// Show or hide the key-hint bar in every window (a workspace preference, saved with it).
+fn set_hide_hints(hide: bool, cx: &mut App) {
+    let ws = cx.global_mut::<Workspace>();
+    if ws.hide_hints != hide {
+        ws.hide_hints = hide;
+        cx.refresh_windows();
+    }
+}
+
 /// Take a workspace's name and settings (not its windows).
 pub fn set_meta(doc: &WorkspaceDoc, cx: &mut App) {
     let ws = cx.global_mut::<Workspace>();
     ws.name = doc.name.clone();
     ws.crosshair_sync = doc.crosshair_sync;
+    ws.hide_hints = doc.hide_hints;
 }
 
 /// Open a whole workspace (startup).
@@ -2631,6 +2711,7 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
         let ws = cx.global_mut::<Workspace>();
         ws.name = doc.name.clone();
         ws.crosshair_sync = doc.crosshair_sync;
+        ws.hide_hints = doc.hide_hints;
     }
     for w in &doc.windows {
         if let Err(e) = open_doc_window(w, None, cx) {
@@ -2814,7 +2895,12 @@ fn snapshot_with(
     cx: &mut App,
 ) -> Option<WorkspaceDoc> {
     let ws = cx.global::<Workspace>();
-    let (name, sync, windows) = (ws.name.clone(), ws.crosshair_sync, ws.windows.clone());
+    let (name, sync, hide_hints, windows) = (
+        ws.name.clone(),
+        ws.crosshair_sync,
+        ws.hide_hints,
+        ws.windows.clone(),
+    );
     let mut docs = Vec::new();
     for w in windows {
         let doc = if w.window_id() == current.window_id() {
@@ -2827,6 +2913,7 @@ fn snapshot_with(
     Some(WorkspaceDoc {
         name,
         crosshair_sync: sync,
+        hide_hints,
         windows: docs,
     })
 }
@@ -2834,7 +2921,12 @@ fn snapshot_with(
 /// The whole workspace as a document (from outside any window update).
 pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     let ws = cx.global::<Workspace>();
-    let (name, sync, windows) = (ws.name.clone(), ws.crosshair_sync, ws.windows.clone());
+    let (name, sync, hide_hints, windows) = (
+        ws.name.clone(),
+        ws.crosshair_sync,
+        ws.hide_hints,
+        ws.windows.clone(),
+    );
     let windows = windows
         .into_iter()
         .filter_map(|w| w.update(cx, |wv, window, cx| wv.doc(window, cx)).ok())
@@ -2842,6 +2934,7 @@ pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     WorkspaceDoc {
         name,
         crosshair_sync: sync,
+        hide_hints,
         windows,
     }
 }

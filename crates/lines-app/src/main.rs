@@ -226,6 +226,15 @@ struct Cli {
     /// Screenshot: render with the symbol picker open on this query (e.g. "nq").
     #[arg(long, requires = "screenshot")]
     picker: Option<String>,
+    /// Screenshot: the chart without study legends and tags (Ctrl+Shift+L in the app).
+    #[arg(long, requires = "screenshot")]
+    hide_study_labels: bool,
+    /// Screenshot: the chart with its studies hidden (Ctrl+Shift+H in the app).
+    #[arg(long, requires = "screenshot")]
+    hide_studies: bool,
+    /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
+    #[arg(long, requires = "screenshot")]
+    hide_hints: bool,
     /// Add a VWAP to the first chart (repeatable): eth (default reset), rth, week, month or
     /// anchor@2026-11-06T14:30:00Z, optionally with σ bands after a slash: eth/1,2,3 (quote it
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
@@ -510,6 +519,10 @@ fn main() -> Result<()> {
                 grouping: cli.profile_grouping,
                 ..ProfileConfig::default()
             },
+            visibility: wsdoc::StudyVisibility {
+                hide_study_labels: cli.hide_study_labels,
+                hide_studies: cli.hide_studies,
+            },
         })),
         default_size: cli.size,
     };
@@ -526,6 +539,7 @@ fn main() -> Result<()> {
         if instrument.is_some() {
             doc.retarget_all(instrument.clone());
         }
+        doc.hide_hints |= cli.hide_hints;
         doc.normalise().map_err(|e| anyhow!("--workspace: {e}"))?;
         let size = cli.size.unwrap_or((1280.0, 800.0));
         if let Some(secs) = cli.bench {
