@@ -20,7 +20,7 @@ Status: `done` · `current` · `next` · `later`
 | 5 | Depth model + read-only DOM, price grouping, time & sales, volume profile | current | Tick-indexed ladder, per-frame coalescing, fixed rows, no allocs in paint; T&S with aggressor side; session/visible-range volume profile; visible **stale** state when a feed goes quiet during market hours |
 | 5a | Local market-data store | done | Per-contract append-only segments in `lines-events-1`, partitioned by session trade date; CRC blocks, torn-tail truncation, gap tracking, retention budget; instant cached startup then stitch-fill (decision 0019) |
 | 5b | Workspaces: grid, tabs, windows, link groups | current | Panes (chart/DOM/T&S) in custom grids and presets, tabs, drag-out windows across monitors; link groups; opt-in crosshair time sync; shared data per contract; autosave/restore (decision 0016). Owner's default: NQ and ES side by side. DOM and T&S hide/show in one action (chart reflows, size restored) and detach into their own window per pane; per-chart "chart only" toggle. Settings and workspace files are versioned with forward migrations and a backup of the previous file; user data is never silently discarded |
-| 5c | Sessions + indicator engine + VWAP | current | Product trading-hours calendars (TZ/DST, ETH/RTH, holidays); composable series graph with shared nodes (decision 0017); VWAP (session/weekly/monthly/anchored resets, σ bands, exact accumulators, approximate flag on bar-only history) on charts and as an input to other indicators |
+| 5c | Sessions + indicator engine + VWAP | done | Product trading-hours calendars (TZ/DST, ETH/RTH, holidays); composable series graph with shared nodes (decision 0017); VWAP (session/weekly/monthly/anchored resets, σ bands, exact accumulators, approximate flag on bar-only history) on charts and as an input to other indicators |
 | 5d | Kraken public data provider | done | Spot + public perps; L2 book verified against Kraken's CRC32 checksum on every update (mismatch → resync, counted); history via REST; exact decimal parsing; free, no account |
 | 6 | Command layer + OMS + Broker trait + PaperBroker + prop-firm rules + Connections/accounts (decision 0018) | later | Order lifecycle, positions, P&L, risk layer, account groups, rule presets as data. OMS isolated from UI (decision 0012); state reconciled from broker on reconnect, no orphaned brackets; click/hotkey → order-sent latency measured and tracked |
 | 6b | Latency HUD | later | Exchange→receive, input→order-sent, gateway RTT visible; clock-sync status shown |
@@ -43,7 +43,7 @@ Status: `done` · `current` · `next` · `later`
 | U1 | Diagnostics | later | Rotating bounded local logs; one command exports a support bundle (logs, version, settings with credentials stripped, recent feed stats); opt-in crash reports after |
 | U2 | Auto-update | later | Signature-verified updates, never applied during market hours, one-click rollback; depends on owner code signing |
 | U3 | Legal | later | Owner completes `docs/legal-checklist.md` (required before 12) |
-| — | Parser fuzzing | current | `cargo-fuzz` targets for every network decoder (CQG protobuf, Coinbase/Kraken JSON, recordings), run in CI on a schedule |
+| — | Parser fuzzing | done | `cargo-fuzz` targets for every network decoder (CQG protobuf, Coinbase/Kraken JSON, recordings), run in CI on a schedule |
 
 ## Cross-cutting requirements (apply to every milestone)
 
