@@ -29,3 +29,4 @@ Format: Status · Context · Decision · Consequences.
 | 0021 | Settings: in context first, one searchable Settings window, settings as data (Proposed) |
 | 0022 | External level sources: a public levels layer, private adapters |
 | 0023 | Trade execution via Sierra Chart's DTC server |
+| 0024 | Contract alignment for live orders, amends 0023 |
