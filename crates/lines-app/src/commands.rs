@@ -77,6 +77,8 @@ pub enum Command {
     ToggleLevelSource(u8),
     /// The focused chart: hide (or show) one kind of one source (indices).
     ToggleLevelKind(u8, u8),
+    /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
+    Studies,
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -130,6 +132,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::ToggleStudies, true, true, false, "i"),
     b(Command::CleanChart, true, true, false, "m"),
     b(Command::ToggleHints, false, false, false, "f1"),
+    b(Command::Studies, true, false, false, "i"),
 ];
 
 /// The command bound to a keystroke, if any.
@@ -264,6 +267,7 @@ pub fn label(c: Command) -> String {
         Command::ToggleLevelKind(i, k) => {
             format!("Chart: hide/show level kind {} of source {}", k + 1, i + 1)
         }
+        Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
     }
 }
 
@@ -299,6 +303,7 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleHints,
         Command::ToggleLevels,
         Command::ToggleLevelLabels,
+        Command::Studies,
         Command::SaveAs,
         Command::Open,
         Command::Menu,
@@ -397,7 +402,8 @@ mod tests {
         for k in ["alt-v", "c", "i", "shift-f1"] {
             assert_eq!(cmd(k), None, "{k}");
         }
-        assert_eq!(c("i"), None);
+        // Ctrl+I opens the chart's studies menu (a command: also the palette and the menu).
+        assert_eq!(c("i"), Some(Command::Studies));
         assert_eq!(c("k"), None);
     }
 
@@ -427,10 +433,11 @@ mod tests {
         ] {
             assert_eq!(cmd(k), None, "{k}");
         }
-        // Ctrl+I: the chart's indicator menu (roadmap 5c).
-        for k in ["k", "d", "i"] {
+        for k in ["k", "d"] {
             assert_eq!(cmd(&format!("{}-{k}", ctrl())), None, "{k}");
         }
+        // Ctrl+I is the Studies command (it acts on the focused chart; decision 0018).
+        assert_eq!(cmd(&format!("{}-i", ctrl())), Some(Command::Studies));
         assert_eq!(cmd("ctrl-alt-left"), None);
     }
 

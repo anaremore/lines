@@ -77,6 +77,13 @@ pub struct Settings {
     pub recents: Vec<u32>,
     #[serde(default)]
     pub favourites: Vec<u32>,
+    /// Studies for new charts ("Save as default for new charts"; decision 0021: app-wide
+    /// scope). Optional: absent means new charts start empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_defaults: Option<crate::study_menu::StudySet>,
+    /// Named study templates, in save order. Optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub study_templates: Vec<crate::study_menu::StudyTemplate>,
 }
 
 /// Files written before versioning (no `version` field) have exactly version 1's fields.

@@ -60,6 +60,10 @@ use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::profile::{ProfileConfig, VolumeProfileLayer};
+use crate::study_menu::{
+    Item, MenuCmd, MenuInput, SourceInfo, StudyAction, StudyMenu, StudyRef, StudySet, anchor_at,
+    save_template,
+};
 use crate::theme::Theme;
 use crate::wsdoc::{ChartState, PaneDoc, StudyVisibility};
 
@@ -123,6 +127,23 @@ pub struct Fixture {
     pub profile: ProfileConfig,
     /// Study labels / studies hidden from the start (screenshots of a clean chart).
     pub visibility: StudyVisibility,
+    /// Studies to start with, as a template or a new chart's defaults would give them
+    /// (screenshots: `--study-set FILE`).
+    pub studies: Option<StudySet>,
+    /// Open the studies menu (screenshots): `open`, or `edit:vwap:N`, `edit:profile`,
+    /// `edit:levels:ID` to open that study's editor.
+    pub studies_menu: Option<String>,
+}
+
+/// Which part of a studies-menu row a click hit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MenuPart {
+    /// The label or the gear: open the editor; a control or catalog entry: run it.
+    Primary,
+    /// The eye: hide or show.
+    Eye,
+    /// Remove a study, delete a template.
+    Delete,
 }
 
 enum Drag {
@@ -156,6 +177,10 @@ pub struct ChartView {
     studies: crate::studies::Studies,
     /// `studies.revision()` last drawn.
     seen_studies: u64,
+    /// The studies menu (Ctrl+I, "Studies…"), while open.
+    study_menu: Option<StudyMenu>,
+    /// Waiting for a click on a bar to anchor a VWAP: `Some(None)` adds a new one.
+    anchoring: Option<Option<usize>>,
     /// External levels (decision 0022), saved with the pane.
     levels: LevelsLayer,
     /// `levels.revision()` last drawn.
@@ -221,8 +246,12 @@ impl ChartView {
         studies.attach(feed_info(&store));
         let mut levels = LevelsLayer::new(LevelsConfig::default());
         levels.attach(&store);
+        let (fixture_studies, fixture_menu) =
+            (fixture.studies.clone(), fixture.studies_menu.clone());
 
-        ChartView {
+        let mut view = ChartView {
+            study_menu: None,
+            anchoring: None,
             feed,
             common: PaneCommon::default(),
             profile: VolumeProfileLayer::new(fixture.profile),
@@ -266,7 +295,193 @@ impl ChartView {
                 frames_per_sec: 0.0,
             },
             paint_time_ewma_us: 0.0,
+        };
+        if let Some(set) = fixture_studies {
+            view.set_study_set(set);
         }
+        if let Some(spec) = fixture_menu {
+            view.open_menu_at(&spec, cx);
+        }
+        view
+    }
+
+    // ---- studies menu (crate::study_menu) ---------------------------------------------------
+
+    /// Every study on this chart, as one value (templates, defaults).
+    pub fn study_set(&self) -> StudySet {
+        StudySet {
+            indicators: self.studies.configs(),
+            profile: self.profile.config(),
+            levels: self.levels.config.clone(),
+        }
+    }
+
+    /// Replace this chart's studies (a template, the defaults, a menu change).
+    pub fn set_study_set(&mut self, s: StudySet) {
+        if s.indicators != self.studies.configs() {
+            self.set_indicator_configs(s.indicators);
+        }
+        self.profile.set_config(s.profile);
+        self.levels.config = s.levels;
+        self.seen_levels = u64::MAX;
+        self.seen_studies = u64::MAX;
+    }
+
+    /// A new chart (not restored from a workspace file): the saved defaults, if any.
+    pub fn apply_new_chart_defaults(&mut self, cx: &mut Context<Self>) {
+        if let Some(set) = crate::picker_view::settings(cx).chart_defaults.clone() {
+            self.set_study_set(set);
+        }
+    }
+
+    fn menu_items(&self, menu: &StudyMenu, cx: &App) -> Vec<Item> {
+        let set = self.study_set();
+        let sources: Vec<SourceInfo> = self
+            .levels
+            .sources()
+            .into_iter()
+            .map(|(id, label, kinds)| SourceInfo {
+                id,
+                label: label.to_owned(),
+                kinds,
+            })
+            .collect();
+        let templates: Vec<String> = crate::picker_view::settings(cx)
+            .study_templates
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let has_rth = lines_feed::catalog::sessions(self.instrument.id).is_none_or(|c| c.has_rth());
+        menu.items(&MenuInput {
+            set: &set,
+            sources: &sources,
+            templates: &templates,
+            has_rth,
+        })
+    }
+
+    /// Open or close the studies menu (command `Studies`: Ctrl+I, "Studies…", the palette).
+    pub fn toggle_studies_menu(&mut self, cx: &mut Context<Self>) {
+        self.picker.close();
+        self.anchoring = None;
+        self.study_menu = match self.study_menu.take() {
+            Some(_) => None,
+            None => {
+                let mut m = StudyMenu::default();
+                let items = self.menu_items(&m, cx);
+                m.clamp(&items);
+                Some(m)
+            }
+        };
+        cx.notify();
+    }
+
+    /// Screenshot fixture: the menu open, optionally on a study's editor.
+    fn open_menu_at(&mut self, spec: &str, cx: &mut Context<Self>) {
+        let editing = match spec.split(':').collect::<Vec<_>>().as_slice() {
+            ["edit", "vwap", i] => i.parse().ok().map(StudyRef::Vwap),
+            ["edit", "profile"] => Some(StudyRef::Profile),
+            ["edit", "levels", id] => Some(StudyRef::Levels((*id).to_owned())),
+            _ => None,
+        };
+        let mut m = StudyMenu {
+            editing,
+            ..StudyMenu::default()
+        };
+        let items = self.menu_items(&m, cx);
+        m.clamp(&items);
+        self.study_menu = Some(m);
+    }
+
+    /// A click on menu item `i`.
+    pub fn menu_click(&mut self, i: usize, part: MenuPart, cx: &mut Context<Self>) {
+        let Some(mut m) = self.study_menu.take() else {
+            return;
+        };
+        let items = self.menu_items(&m, cx);
+        let cmd = match part {
+            MenuPart::Primary => m.activate(&items, i),
+            MenuPart::Eye => m.eye(&items, i),
+            MenuPart::Delete => m.delete(&items, i),
+        };
+        self.study_menu = Some(m);
+        self.run_menu(cmd, cx);
+    }
+
+    fn menu_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(mut m) = self.study_menu.take() else {
+            return;
+        };
+        let k = &ev.keystroke;
+        let mods = k.modifiers;
+        let text = k
+            .key_char
+            .as_deref()
+            .filter(|_| !mods.control && !mods.alt && !mods.platform);
+        let items = self.menu_items(&m, cx);
+        let query = m.query.clone();
+        let cmd = m.key(&items, &k.key, text);
+        if m.query != query {
+            let items = self.menu_items(&m, cx);
+            m.follow_query(&items);
+        }
+        self.study_menu = Some(m);
+        self.run_menu(cmd, cx);
+    }
+
+    /// Run a menu command: the menu's own part, then the chart's (studies, anchoring,
+    /// templates and defaults in the app settings).
+    fn run_menu(&mut self, cmd: Option<MenuCmd>, cx: &mut Context<Self>) {
+        let cmd = match (cmd, self.study_menu.as_mut()) {
+            (Some(c), Some(m)) => m.local(c),
+            (c, _) => c,
+        };
+        match cmd {
+            Some(MenuCmd::Set(a)) => {
+                let mut s = self.study_set();
+                s.apply(&a);
+                self.set_study_set(s);
+            }
+            Some(MenuCmd::BeginAnchor(i)) => {
+                self.study_menu = None;
+                self.anchoring = Some(i);
+            }
+            Some(MenuCmd::ApplyTemplate(name)) => {
+                let t = crate::picker_view::settings(cx)
+                    .study_templates
+                    .iter()
+                    .find(|t| t.name == name)
+                    .map(|t| t.set.clone());
+                if let Some(set) = t {
+                    let mut s = self.study_set();
+                    s.apply(&StudyAction::Replace(set));
+                    self.set_study_set(s);
+                }
+            }
+            Some(MenuCmd::DeleteTemplate(name)) => {
+                crate::picker_view::update_settings(cx, |s| {
+                    s.study_templates.retain(|t| t.name != name)
+                });
+            }
+            Some(MenuCmd::SaveTemplate(name)) => {
+                let set = self.study_set();
+                crate::picker_view::update_settings(cx, |s| {
+                    save_template(&mut s.study_templates, &name, set)
+                });
+            }
+            Some(MenuCmd::SaveDefault) => {
+                let set = self.study_set();
+                crate::picker_view::update_settings(cx, |s| s.chart_defaults = Some(set));
+            }
+            Some(MenuCmd::Close) => self.study_menu = None,
+            Some(MenuCmd::Edit(_) | MenuCmd::StartSaveTemplate) | None => {}
+        }
+        if let Some(mut m) = self.study_menu.take() {
+            let items = self.menu_items(&m, cx);
+            m.clamp(&items);
+            self.study_menu = Some(m);
+        }
+        cx.notify();
     }
 
     /// Add a study layer (volume profile, …), painted above earlier layers.
@@ -332,6 +547,22 @@ impl ChartView {
         }
         self.end_drag();
         let (x, y) = self.local(ev.position);
+        if let Some(index) = self.anchoring {
+            // Anchored VWAP: this click picks the bar (off the bars: keep waiting).
+            if region == Region::Plot
+                && let Some(from) = self
+                    .store
+                    .try_read()
+                    .and_then(|d| anchor_at(d.series.bars(), &self.vp, x))
+            {
+                self.anchoring = None;
+                self.run_menu(
+                    Some(MenuCmd::Set(StudyAction::AnchorAt { index, from })),
+                    cx,
+                );
+            }
+            return;
+        }
         if ev.click_count >= 2 {
             match region {
                 Region::Plot => self.vp.reset(self.series_len),
@@ -366,17 +597,18 @@ impl ChartView {
             cx.notify();
             return;
         }
-        if self.studies.menu_open() {
-            let anchor = self.anchor_hint();
-            self.studies.key(ev, anchor);
+        if self.study_menu.is_some() {
+            self.menu_key(ev, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.anchoring.is_some() && k.key == "escape" {
+            self.anchoring = None;
             cx.stop_propagation();
             cx.notify();
             return;
         }
-        if (m.control || m.platform) && !m.alt && k.key == "i" {
-            // Indicators (Cmd+I on macOS).
-            self.studies.toggle_menu();
-        } else if m.control && !m.alt && k.key == "k" {
+        if m.control && !m.alt && k.key == "k" {
             self.open_picker("", cx);
         } else if k.key == "home" {
             self.vp.reset(self.series_len);
@@ -590,20 +822,6 @@ impl ChartView {
     }
 
     /// A click on indicator-menu row `i`.
-    pub fn studies_click(&mut self, i: usize, cx: &mut Context<Self>) {
-        self.studies.click(i);
-        cx.notify();
-    }
-
-    /// Where an anchored VWAP starts: the bar under the crosshair, else the newest bar.
-    fn anchor_hint(&self) -> Option<i64> {
-        self.cross_bar.map(|b| b.time.0).or_else(|| {
-            self.store
-                .try_read()
-                .and_then(|d| d.series.last().map(|b| b.time.0))
-        })
-    }
-
     /// Track the pointer for the crosshair; it shows only while the pointer is over the plot.
     fn set_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let hover = self.plot.contains(&pos).then(|| {
@@ -1427,7 +1645,7 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
 }
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I indicators  ·  Alt+V profile";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I studies  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1486,7 +1704,16 @@ impl Render for ChartView {
                         .size_full(),
                     )
                     .when_some(self.legend(&t), |d, l| d.child(l))
-                    .when_some(self.studies.menu_overlay(&t, cx), |d, m| d.child(m))
+                    .when_some(
+                        self.study_menu.as_ref().map(|m| {
+                            let items = self.menu_items(m, cx);
+                            crate::study_menu_view::render(m, &items, &t, cx)
+                        }),
+                        |d, m| d.child(m),
+                    )
+                    .when(self.anchoring.is_some(), |d| {
+                        d.child(crate::study_menu_view::anchor_banner(&t))
+                    })
                     .when_some(overlay, |d, overlay| d.child(overlay)),
             )
     }
@@ -1526,6 +1753,7 @@ mod tests {
             crate::studies::Studies::new(vec![lines_indicators::IndicatorConfig::Vwap {
                 spec: lines_indicators::VwapSpec::default(),
                 color: 0,
+                display: Default::default(),
             }]);
         let hidden = StudyVisibility {
             hide_studies: true,

@@ -68,14 +68,14 @@ impl AppSettings {
     }
 }
 
-fn settings(cx: &App) -> &Settings {
+pub(crate) fn settings(cx: &App) -> &Settings {
     static EMPTY: std::sync::OnceLock<Settings> = std::sync::OnceLock::new();
     cx.try_global::<AppSettings>()
         .map(|s| &s.settings)
         .unwrap_or_else(|| EMPTY.get_or_init(Settings::default))
 }
 
-fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
+pub(crate) fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     if cx.has_global::<AppSettings>() {
         let g = cx.global_mut::<AppSettings>();
         f(&mut g.settings);
