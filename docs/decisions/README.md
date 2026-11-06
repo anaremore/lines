@@ -16,3 +16,4 @@ Format: Status · Context · Decision · Consequences.
 | 0008 | User plugins run as WebAssembly components in Wasmtime |
 | 0009 | UI pull requests include reproducible screenshots |
 | 0010 | Licensed data and vendor files never enter the repo |
+| 0011 | Providers are I/O-free sessions; every inbound byte flows through recorded frames (Proposed) |

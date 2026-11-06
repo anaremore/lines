@@ -10,9 +10,9 @@ Status: `done` · `current` · `next` · `later`
 
 | # | Milestone | Status | Done when |
 |---|-----------|--------|-----------|
-| 1 | Skeleton: mock feed, candles, pan/zoom, record/replay, screenshot mode | current | Runs on Windows; deterministic `--screenshot` output from a replay file |
+| 1 | Skeleton: mock feed, candles, pan/zoom, record/replay, screenshot mode | done | Runs on Windows; deterministic `--screenshot` output from a replay file |
 | 2 | Axes & crosshair | current | Price/time labels, DPI-correct, crosshair hit-testing via viewport math |
-| 3 | Provider trait + CQG feed shape + Coinbase public feed (dev tool) | current | Two providers behind one trait; Coinbase gives free 24/7 live data |
+| 3 | Provider trait + CQG feed shape + Coinbase public feed (dev tool) | done | Two providers behind one trait; Coinbase gives free 24/7 live data |
 | 3b | Sierra Chart importer (`.scid` ticks, `.depth` depth) → replay format | next | Local futures data replays with depth. Never committed (licensed data) |
 | 4 | Historical bars + live stitch | next | Backfill then live with no gap or double-count |
 | 5 | Depth model + read-only DOM, price grouping | later | Tick-indexed ladder, per-frame coalescing, fixed rows, no allocs in paint |
@@ -29,6 +29,6 @@ Status: `done` · `current` · `next` · `later`
 
 ## Vendor access status
 
-- **CQG:** WebAPI is enterprise-only (sales process, likely fees). Public protos via `third_party/cqg-webapi` let us build against real message shapes now. Information request form not yet submitted.
+- **CQG:** WebAPI is enterprise-only (sales process, likely fees). Public protos via `third_party/cqg-webapi` let us build against real message shapes now. Information request form not yet submitted. Demo API credentials requested from apihelp@cqg.com (2026-11-06).
 - **Rithmic:** primary live target (prop firms; owner trades on it). Not yet contacted.
 - **Open question for both:** can prop-firm accounts log into a conformed third-party platform, or must each firm approve it?
