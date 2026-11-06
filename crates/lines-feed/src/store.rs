@@ -1,8 +1,8 @@
 //! State shared between the feed thread (writer) and the UI thread (reader).
 //!
-//! Rules that keep the UI from ever stalling on the feed:
-//! - The feed decodes protobuf *outside* the lock and holds the lock only to apply one
-//!   frame's worth of already-decoded updates (microseconds).
+//! Rules that keep the UI from ever stalling on the feed (decision 0001):
+//! - Sessions decode and convert *outside* the lock; the lock is held only to apply one
+//!   frame's worth of normalized [`MarketEvent`]s (microseconds).
 //! - Every tick is applied to the bars on the feed side, so nothing is lost if the UI is
 //!   slow; the UI only *samples* the latest state.
 //! - The UI checks [`ChartStore::revision`] (an atomic, no lock) once per frame and uses
@@ -10,26 +10,15 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lines_core::{BarSeries, Price, PriceFormat, UtcMillis};
+use lines_core::{BarSeries, Capabilities, Instrument, Price, UtcMillis};
 use parking_lot::{Mutex, MutexGuard};
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct InstrumentInfo {
-    /// Symbol the user asked for (e.g. "EP").
-    pub requested_symbol: String,
-    /// Resolved contract symbol (e.g. "EPZ6").
-    pub contract_symbol: String,
-    pub title: String,
-    /// Session-scoped: changes across reconnects, never persist it.
-    pub contract_id: u32,
-    pub format: PriceFormat,
-}
+use crate::provider::MarketEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedStatus {
     Connecting,
     LoggingOn,
-    Resolving,
     Live,
     Reconnecting { attempt: u32, reason: String },
     ReplayFinished,
@@ -41,8 +30,7 @@ impl FeedStatus {
     pub fn label(&self) -> &str {
         match self {
             FeedStatus::Connecting => "connecting",
-            FeedStatus::LoggingOn => "logging on",
-            FeedStatus::Resolving => "resolving symbol",
+            FeedStatus::LoggingOn => "subscribing",
             FeedStatus::Live => "live",
             FeedStatus::Reconnecting { .. } => "reconnecting",
             FeedStatus::ReplayFinished => "replay finished",
@@ -57,8 +45,11 @@ impl FeedStatus {
 pub struct FeedStats {
     pub frames_in: u64,
     pub bytes_in: u64,
-    pub quotes_in: u64,
+    /// Trades + best bid/offer updates.
+    pub updates_in: u64,
     pub trades_in: u64,
+    pub gaps: u64,
+    pub rejected: u64,
     pub corrections_ignored: u64,
     pub decode_errors: u64,
     pub reconnects: u64,
@@ -66,14 +57,66 @@ pub struct FeedStats {
 
 #[derive(Debug)]
 pub struct ChartData {
-    pub instrument: Option<InstrumentInfo>,
+    pub instrument: Instrument,
+    pub capabilities: Capabilities,
+    /// Provider id ("cqg", "coinbase"); for status display, not for feature switches.
+    pub provider: &'static str,
     pub series: BarSeries,
     pub last_trade: Option<Price>,
     pub bid: Option<Price>,
     pub ask: Option<Price>,
-    pub last_quote_time: Option<UtcMillis>,
+    /// Exchange time of the newest trade/bar seen (the replay "clock").
+    pub market_time: Option<UtcMillis>,
     pub status: FeedStatus,
     pub stats: FeedStats,
+}
+
+impl ChartData {
+    /// Fold normalized events into the chart state.
+    pub fn apply(&mut self, events: &[MarketEvent]) {
+        for e in events {
+            match *e {
+                MarketEvent::Ready => self.status = FeedStatus::Live,
+                MarketEvent::ContractChanged => {
+                    self.series.clear();
+                    self.last_trade = None;
+                    self.bid = None;
+                    self.ask = None;
+                }
+                MarketEvent::Bar(bar) => {
+                    self.series.upsert(bar);
+                    self.bump_time(bar.time);
+                }
+                MarketEvent::Trade { time, price, qty } => {
+                    self.series.apply_trade(time, price, qty);
+                    self.last_trade = Some(price);
+                    self.stats.trades_in += 1;
+                    self.stats.updates_in += 1;
+                    self.bump_time(time);
+                }
+                MarketEvent::LastPrice(p) => self.last_trade = Some(p),
+                MarketEvent::Bid(p) => {
+                    self.bid = Some(p);
+                    self.stats.updates_in += 1;
+                }
+                MarketEvent::Ask(p) => {
+                    self.ask = Some(p);
+                    self.stats.updates_in += 1;
+                }
+                MarketEvent::Gap { missed } => self.stats.gaps += missed,
+                MarketEvent::Rejected { count } => self.stats.rejected += count,
+                MarketEvent::CorrectionsIgnored { count } => {
+                    self.stats.corrections_ignored += count
+                }
+            }
+        }
+    }
+
+    fn bump_time(&mut self, t: UtcMillis) {
+        if self.market_time.is_none_or(|m| t > m) {
+            self.market_time = Some(t);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -83,15 +126,23 @@ pub struct ChartStore {
 }
 
 impl ChartStore {
-    pub fn new(period_ms: i64, max_bars: usize) -> Self {
+    pub fn new(
+        instrument: Instrument,
+        capabilities: Capabilities,
+        provider: &'static str,
+        period_ms: i64,
+        max_bars: usize,
+    ) -> Self {
         ChartStore {
             data: Mutex::new(ChartData {
-                instrument: None,
+                instrument,
+                capabilities,
+                provider,
                 series: BarSeries::new(period_ms, max_bars),
                 last_trade: None,
                 bid: None,
                 ask: None,
-                last_quote_time: None,
+                market_time: None,
                 status: FeedStatus::Connecting,
                 stats: FeedStats::default(),
             }),

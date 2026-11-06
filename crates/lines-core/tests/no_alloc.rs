@@ -4,7 +4,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use lines_core::{Bar, BarSeries, FixedStr, Price, PriceFormat, Scene, UtcMillis, Viewport};
+use lines_core::{
+    Bar, BarSeries, DisplayStyle, FixedStr, Price, PriceFormat, PriceScale, Qty, Scene, UtcMillis,
+    Viewport,
+};
 
 struct Counting;
 
@@ -37,7 +40,11 @@ fn allocs_during(f: impl FnOnce()) -> usize {
 
 #[test]
 fn paint_path_does_not_allocate() {
-    let fmt = PriceFormat::from_cqg(0.01, 2, 0.25).unwrap();
+    let fmt = PriceFormat::new(
+        PriceScale::decimal(2),
+        DisplayStyle::Decimal { digits: 2 },
+        25,
+    );
     let mut series = BarSeries::new(60_000, 20_000);
     for i in 0..10_000i64 {
         let p = 500_000 + (i * 37 % 400) * 25;
@@ -47,7 +54,7 @@ fn paint_path_does_not_allocate() {
             high: Price(p + 100),
             low: Price(p - 100),
             close: Price(p + 25),
-            volume: 3,
+            volume: Qty(3),
         });
     }
 
@@ -62,7 +69,7 @@ fn paint_path_does_not_allocate() {
             series.apply_trade(
                 UtcMillis(9_999 * 60_000 + frame),
                 Price(500_000 + frame % 8 * 25),
-                1,
+                Qty(1),
             );
             // Interaction.
             vp.zoom_at(

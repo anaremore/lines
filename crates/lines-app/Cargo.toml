@@ -9,6 +9,12 @@ publish.workspace = true
 name = "lines"
 path = "src/main.rs"
 
+[features]
+# Reproducible --screenshot mode (decision 0009). Off by default because it enables GPUI's
+# `test-support` feature (that is where `Window::render_to_image` lives), which pulls in
+# test-only dependencies that release builds should not ship.
+screenshot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
@@ -18,3 +24,5 @@ anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Same major as GPUI's `image` so `RgbaImage` is one type; only adds PNG encoding.
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }

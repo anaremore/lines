@@ -1,13 +1,16 @@
-//! Raw feed recording (`.lfr`): every WebSocket binary frame in both directions, *before*
-//! decoding, with a monotonic timestamp. Replaying a file therefore exercises the exact same
-//! decode + session path as a live connection.
+//! Raw feed recording (`.lfr`): every frame in both directions, *before* decoding, with a
+//! monotonic timestamp. Replaying a file therefore exercises the exact same session code as
+//! a live connection, for any provider (the header says which one).
 //!
-//! Format (little-endian):
+//! Format v2 (little-endian):
 //! ```text
-//! header:  b"LINESFR\0" | u16 format_version | u32 proto_major | u32 proto_minor | i64 start_wall_ms
-//! record:  u8 direction (0 = server->client, 1 = client->server) | u64 nanos_since_start | u32 len | len bytes
+//! header:  b"LINESFR\0" | u16 format_version=2 | i64 start_wall_ms
+//!          | str provider | str protocol | str instrument_symbol      (str = u16 len + UTF-8)
+//! record:  u8 tag | u64 nanos_since_start | u32 len | len bytes
+//!          tag bit 0: direction (0 = server->client, 1 = client->server)
+//!          tag bits 1-2: kind (0 = binary, 1 = text, 2 = http response)
 //! ```
-//! Recordings can contain licensed exchange data: keep them out of git (see .gitignore).
+//! Recordings can contain licensed exchange data: keep them out of git (decision 0010).
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -18,8 +21,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 
+use crate::provider::{Frame, FrameKind};
+
 pub const MAGIC: &[u8; 8] = b"LINESFR\0";
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -30,21 +35,39 @@ pub enum Direction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
-    pub format_version: u16,
-    pub proto_major: u32,
-    pub proto_minor: u32,
     pub start_wall_ms: i64,
+    /// Provider id, e.g. "cqg" or "coinbase".
+    pub provider: String,
+    /// Provider wire protocol version, e.g. "cqg-webapi-2.230".
+    pub protocol: String,
+    /// Internal (catalog) instrument symbol, e.g. "ES". Never a vendor symbol.
+    pub instrument: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub direction: Direction,
     pub since_start: Duration,
-    pub payload: Bytes,
+    pub frame: Frame,
+}
+
+impl Record {
+    /// Wall-clock time the frame was recorded.
+    pub fn wall_ms(&self, header: &Header) -> i64 {
+        header.start_wall_ms + self.since_start.as_millis() as i64
+    }
+}
+
+fn kind_bits(k: FrameKind) -> u8 {
+    match k {
+        FrameKind::Binary => 0,
+        FrameKind::Text => 1,
+        FrameKind::Http => 2,
+    }
 }
 
 enum Msg {
-    Record(Direction, u64, Bytes),
+    Record(u8, u64, Bytes),
     Flush,
 }
 
@@ -56,8 +79,19 @@ pub struct Recorder {
     worker: Option<thread::JoinHandle<io::Result<()>>>,
 }
 
+fn write_str(w: &mut impl Write, s: &str) -> io::Result<()> {
+    let len = u16::try_from(s.len()).map_err(|_| io::Error::other("header string too long"))?;
+    w.write_all(&len.to_le_bytes())?;
+    w.write_all(s.as_bytes())
+}
+
 impl Recorder {
-    pub fn create(path: &Path, proto_major: u32, proto_minor: u32) -> io::Result<Recorder> {
+    pub fn create(
+        path: &Path,
+        provider: &str,
+        protocol: &str,
+        instrument: &str,
+    ) -> io::Result<Recorder> {
         if let Some(dir) = path.parent()
             && !dir.as_os_str().is_empty()
         {
@@ -70,17 +104,18 @@ impl Recorder {
             .unwrap_or(0);
         w.write_all(MAGIC)?;
         w.write_all(&FORMAT_VERSION.to_le_bytes())?;
-        w.write_all(&proto_major.to_le_bytes())?;
-        w.write_all(&proto_minor.to_le_bytes())?;
         w.write_all(&start_wall_ms.to_le_bytes())?;
+        write_str(&mut w, provider)?;
+        write_str(&mut w, protocol)?;
+        write_str(&mut w, instrument)?;
         let (tx, rx) = mpsc::channel::<Msg>();
         let worker = thread::Builder::new().name("lines-recorder".into()).spawn(
             move || -> io::Result<()> {
                 let mut last_flush = Instant::now();
                 loop {
                     match rx.recv_timeout(Duration::from_millis(250)) {
-                        Ok(Msg::Record(dir, nanos, payload)) => {
-                            w.write_all(&[dir as u8])?;
+                        Ok(Msg::Record(tag, nanos, payload)) => {
+                            w.write_all(&[tag])?;
                             w.write_all(&nanos.to_le_bytes())?;
                             w.write_all(&(payload.len() as u32).to_le_bytes())?;
                             w.write_all(&payload)?;
@@ -104,11 +139,12 @@ impl Recorder {
         })
     }
 
-    pub fn record(&self, direction: Direction, payload: &Bytes) {
+    pub fn record(&self, direction: Direction, frame: &Frame) {
         let nanos = self.start.elapsed().as_nanos() as u64;
+        let tag = direction as u8 | (kind_bits(frame.kind) << 1);
         if let Some(tx) = &self.tx {
             // Bytes clone is a refcount bump, not a copy.
-            let _ = tx.send(Msg::Record(direction, nanos, payload.clone()));
+            let _ = tx.send(Msg::Record(tag, nanos, frame.data.clone()));
         }
     }
 
@@ -154,70 +190,77 @@ impl Reader<BufReader<File>> {
     }
 }
 
+fn bad(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
 impl<R: Read> Reader<R> {
     pub fn new(mut r: R) -> io::Result<Self> {
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic)?;
         if &magic != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not a Lines feed recording",
-            ));
+            return Err(bad("not a Lines feed recording"));
         }
-        let format_version = u16::from_le_bytes(read_n(&mut r)?);
-        if format_version != FORMAT_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unsupported recording format version {format_version}"),
-            ));
+        let version = u16::from_le_bytes(read_n(&mut r)?);
+        if version != FORMAT_VERSION {
+            return Err(bad(format!(
+                "recording format v{version} is not supported (this build reads v{FORMAT_VERSION}); re-record it"
+            )));
         }
-        let header = Header {
-            format_version,
-            proto_major: u32::from_le_bytes(read_n(&mut r)?),
-            proto_minor: u32::from_le_bytes(read_n(&mut r)?),
-            start_wall_ms: i64::from_le_bytes(read_n(&mut r)?),
-        };
-        Ok(Reader { r, header })
+        let start_wall_ms = i64::from_le_bytes(read_n(&mut r)?);
+        let provider = read_str(&mut r)?;
+        let protocol = read_str(&mut r)?;
+        let instrument = read_str(&mut r)?;
+        Ok(Reader {
+            r,
+            header: Header {
+                start_wall_ms,
+                provider,
+                protocol,
+                instrument,
+            },
+        })
     }
 
     /// Next record, `Ok(None)` at clean end of file. A truncated final record (e.g. the app
     /// was killed mid-write) is treated as end of file.
     pub fn next_record(&mut self) -> io::Result<Option<Record>> {
-        let mut dir = [0u8; 1];
-        match self.r.read_exact(&mut dir) {
+        let mut tag = [0u8; 1];
+        match self.r.read_exact(&mut tag) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e),
         }
-        let direction = match dir[0] {
-            0 => Direction::FromServer,
-            1 => Direction::ToServer,
-            d => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("bad direction byte {d}"),
-                ));
-            }
+        let direction = if tag[0] & 1 == 0 {
+            Direction::FromServer
+        } else {
+            Direction::ToServer
         };
-        let rest = (|| -> io::Result<Record> {
+        let kind = match (tag[0] >> 1) & 0b11 {
+            0 => FrameKind::Binary,
+            1 => FrameKind::Text,
+            2 => FrameKind::Http,
+            _ => return Err(bad(format!("bad record tag {:#x}", tag[0]))),
+        };
+        if tag[0] >> 3 != 0 {
+            return Err(bad(format!("bad record tag {:#x}", tag[0])));
+        }
+        let rest = (|| -> io::Result<(u64, Bytes)> {
             let nanos = u64::from_le_bytes(read_n(&mut self.r)?);
             let len = u32::from_le_bytes(read_n(&mut self.r)?);
             if len > MAX_FRAME {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("frame too large: {len}"),
-                ));
+                return Err(bad(format!("frame too large: {len}")));
             }
             let mut buf = vec![0u8; len as usize];
             self.r.read_exact(&mut buf)?;
-            Ok(Record {
-                direction,
-                since_start: Duration::from_nanos(nanos),
-                payload: Bytes::from(buf),
-            })
+            Ok((nanos, Bytes::from(buf)))
         })();
         match rest {
-            Ok(r) => Ok(Some(r)),
+            Ok((nanos, data)) => Ok(Some(Record {
+                direction,
+                since_start: Duration::from_nanos(nanos),
+                frame: Frame { kind, data },
+            })),
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 tracing::warn!("recording ends with a truncated frame; ignoring it");
                 Ok(None)
@@ -233,6 +276,13 @@ fn read_n<const N: usize, R: Read>(r: &mut R) -> io::Result<[u8; N]> {
     Ok(b)
 }
 
+fn read_str<R: Read>(r: &mut R) -> io::Result<String> {
+    let len = u16::from_le_bytes(read_n(r)?) as usize;
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf)?;
+    String::from_utf8(buf).map_err(|_| bad("header string is not UTF-8"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,9 +291,14 @@ mod tests {
     fn roundtrip_and_truncation() {
         let dir = std::env::temp_dir().join(format!("lines-rec-test-{}", std::process::id()));
         let path = dir.join("t.lfr");
-        let rec = Recorder::create(&path, 2, 230).unwrap();
-        let frames: Vec<Bytes> = (0..1000u32)
-            .map(|i| Bytes::from(i.to_le_bytes().repeat(i as usize % 7 + 1)))
+        let rec =
+            Recorder::create(&path, "coinbase", "coinbase-exchange-ws-v1", "BTC/USD").unwrap();
+        let frames: Vec<Frame> = (0..1000u32)
+            .map(|i| match i % 3 {
+                0 => Frame::binary(i.to_le_bytes().repeat(i as usize % 7 + 1)),
+                1 => Frame::text(format!("{{\"n\":{i}}}")),
+                _ => Frame::http(format!("[[{i}]]")),
+            })
             .collect();
         for (i, f) in frames.iter().enumerate() {
             rec.record(
@@ -258,11 +313,13 @@ mod tests {
         rec.finish().unwrap();
 
         let mut r = Reader::open(&path).unwrap();
-        assert_eq!((r.header.proto_major, r.header.proto_minor), (2, 230));
+        assert_eq!(r.header.provider, "coinbase");
+        assert_eq!(r.header.protocol, "coinbase-exchange-ws-v1");
+        assert_eq!(r.header.instrument, "BTC/USD");
         let mut prev = Duration::ZERO;
         for (i, f) in frames.iter().enumerate() {
             let rec = r.next_record().unwrap().unwrap();
-            assert_eq!(&rec.payload, f);
+            assert_eq!(&rec.frame, f);
             assert_eq!(rec.direction == Direction::ToServer, i % 10 == 0);
             assert!(rec.since_start >= prev);
             prev = rec.since_start;
@@ -282,7 +339,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_recording() {
+    fn rejects_non_recording_and_old_versions() {
         assert!(Reader::new(&b"NOTAFILE\x01\x00"[..]).is_err());
+        let mut v1 = MAGIC.to_vec();
+        v1.extend_from_slice(&1u16.to_le_bytes());
+        let err = Reader::new(&v1[..]).err().unwrap();
+        assert!(err.to_string().contains("v1"));
     }
 }

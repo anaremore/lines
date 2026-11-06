@@ -210,6 +210,7 @@ pub fn build_time_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DisplayStyle, PriceScale, Qty};
 
     fn bars(n: usize) -> Vec<Bar> {
         (0..n)
@@ -223,14 +224,18 @@ mod tests {
                     high: Price(p + 100),
                     low: Price(p - 75),
                     close: Price(if i % 2 == 0 { p + 50 } else { p - 50 }),
-                    volume: 1,
+                    volume: Qty(1),
                 }
             })
             .collect()
     }
 
     fn es() -> PriceFormat {
-        PriceFormat::from_cqg(0.01, 2, 0.25).unwrap()
+        PriceFormat::new(
+            PriceScale::decimal(2),
+            DisplayStyle::Decimal { digits: 2 },
+            25,
+        )
     }
 
     #[test]

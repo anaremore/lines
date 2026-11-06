@@ -187,7 +187,7 @@ impl Viewport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Price, UtcMillis};
+    use crate::{Price, Qty, UtcMillis};
 
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
@@ -216,7 +216,7 @@ mod tests {
                     high: Price(p + 50),
                     low: Price(p - 50),
                     close: Price(p + 25),
-                    volume: 1,
+                    volume: Qty(1),
                 }
             })
             .collect()

@@ -14,11 +14,12 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use cqg_proto::{cqg, historical_2, market_data_2, metadata_2, user_session_2, web_api_2};
-use lines_core::{Bar, BarSeries, Price, UtcMillis};
+use lines_core::{Bar, BarSeries, Price, Qty, UtcMillis};
 use parking_lot::Mutex;
 use prost::Message;
 use tokio::time::Instant;
 
+use crate::provider::{Frame, FrameKind};
 use crate::transport::Transport;
 
 #[derive(Clone, Debug)]
@@ -47,6 +48,8 @@ impl Default for MockConfig {
     }
 }
 
+/// The CQG symbol the mock resolves (CQG naming for E-mini S&P 500).
+pub const MOCK_SYMBOL: &str = "EP";
 pub const MOCK_CONTRACT_ID: u32 = 1;
 const SCALE: f64 = 0.01; // E-mini S&P style: scaled units are cents
 const TICK: i64 = 25; // 0.25 index points
@@ -128,7 +131,7 @@ impl MockMarket {
                     high: Price(hi),
                     low: Price(lo),
                     close: Price(self.price),
-                    volume: vol,
+                    volume: Qty(vol as i64),
                 });
             }
             t = UtcMillis(t.0 + UtcMillis::MINUTE);
@@ -139,7 +142,7 @@ impl MockMarket {
 pub struct MockTransport {
     cfg: MockConfig,
     market: Arc<Mutex<MockMarket>>,
-    outbox: VecDeque<Bytes>,
+    outbox: VecDeque<Frame>,
     connected_at: Instant,
     base_time: UtcMillis,
     md_started: Option<Instant>,
@@ -180,7 +183,8 @@ impl MockTransport {
     }
 
     fn push(&mut self, msg: web_api_2::ServerMsg) {
-        self.outbox.push_back(Bytes::from(msg.encode_to_vec()));
+        self.outbox
+            .push_back(Frame::binary(Bytes::from(msg.encode_to_vec())));
     }
 
     fn handle_client(&mut self, msg: web_api_2::ClientMsg) {
@@ -218,6 +222,18 @@ impl MockTransport {
         }
         for req in msg.information_requests {
             if let Some(sym) = req.symbol_resolution_request.and_then(|r| r.symbol) {
+                if sym != MOCK_SYMBOL {
+                    self.push(web_api_2::ServerMsg {
+                        information_reports: vec![web_api_2::InformationReport {
+                            id: req.id,
+                            status_code: 104, // STATUS_CODE_NOT_FOUND
+                            text_message: Some(format!("mock knows only {MOCK_SYMBOL}, not {sym}")),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    });
+                    continue;
+                }
                 self.push(web_api_2::ServerMsg {
                     information_reports: vec![web_api_2::InformationReport {
                         id: req.id,
@@ -323,7 +339,7 @@ impl MockTransport {
             scaled_low_price: Some(b.low.0),
             scaled_close_price: Some(b.close.0),
             volume: Some(cqg::Decimal {
-                significand: Some(b.volume as i64),
+                significand: Some(b.volume.0),
                 exponent: Some(0),
             }),
             ..Default::default()
@@ -356,7 +372,7 @@ impl MockTransport {
                         // ~1 tick move per 2000 trades: realistic 1-minute ranges at 3k trades/s.
                         let p = m.step(LIVE_MOVE_PPM);
                         let v = 1 + m.rng.below(9);
-                        m.bars.apply_trade(now, Price(p), v);
+                        m.bars.apply_trade(now, Price(p), Qty(v as i64));
                         quotes.push(quote(market_data_2::quote::Type::Trade, time, p, v as i64));
                     } else if kind < 8 {
                         let p = m.price - TICK;
@@ -432,14 +448,17 @@ fn quote(
 }
 
 impl Transport for MockTransport {
-    async fn send(&mut self, frame: Bytes) -> Result<()> {
-        let msg =
-            web_api_2::ClientMsg::decode(frame).map_err(|e| anyhow!("mock: bad ClientMsg: {e}"))?;
+    async fn send(&mut self, frame: Frame) -> Result<()> {
+        if frame.kind != FrameKind::Binary {
+            return Err(anyhow!("mock: CQG only speaks binary frames"));
+        }
+        let msg = web_api_2::ClientMsg::decode(frame.data)
+            .map_err(|e| anyhow!("mock: bad ClientMsg: {e}"))?;
         self.handle_client(msg);
         Ok(())
     }
 
-    async fn recv(&mut self) -> Result<Option<Bytes>> {
+    async fn recv(&mut self) -> Result<Option<Frame>> {
         // Cancel-safe: state is only mutated synchronously, after the sleep completes.
         loop {
             if let Some(limit) = self.cfg.disconnect_after

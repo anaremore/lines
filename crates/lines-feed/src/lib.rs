@@ -1,12 +1,16 @@
-//! Market-data feed for Lines: CQG WebAPI session, mock server, recording and replay.
+//! Market-data feed for Lines: provider abstraction, CQG (mock + WebAPI), Coinbase public
+//! feed, recording and replay.
 //!
-//! The feed runs on its own OS thread with its own Tokio runtime. It never touches the UI;
-//! it publishes into a shared [`ChartStore`] that the UI samples once per frame.
+//! The feed runs on its own OS thread with its own Tokio runtime (decision 0001). It never
+//! touches the UI; it publishes into a shared [`ChartStore`] that the UI samples per frame.
+//! Above this crate only catalog instruments are visible, never vendor symbols (0003).
 
+pub mod catalog;
+pub mod coinbase;
 pub mod connection;
-pub mod mock;
+pub mod cqg;
+pub mod provider;
 pub mod recording;
-pub mod session;
 pub mod store;
 pub mod transport;
 
@@ -15,18 +19,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use lines_core::UtcMillis;
+use anyhow::{Context, Result, anyhow, bail};
+use lines_core::{Instrument, UtcMillis};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
-use connection::{ConnectionEnd, ConnectionOptions, run_connection};
-use mock::{MockConfig, MockMarket, MockTransport};
+use connection::{ConnectionEnd, ConnectionError, ConnectionOptions, run_connection};
+use cqg::mock::{MockConfig, MockMarket, MockTransport};
+use provider::Provider;
 use recording::Recorder;
-use session::{LogonParams, Session, SessionConfig};
 use store::{ChartStore, FeedStatus};
 use transport::{Recording, ReplayTransport, Transport, WsTransport};
 
-pub use store::{ChartData, FeedStats, InstrumentInfo};
+pub use store::{ChartData, FeedStats};
 
 pub fn now_utc() -> UtcMillis {
     let d = std::time::SystemTime::now()
@@ -35,28 +40,39 @@ pub fn now_utc() -> UtcMillis {
     UtcMillis(d.as_millis() as i64)
 }
 
+pub fn client_version() -> String {
+    format!("lines {}", env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Clone, Debug)]
 pub enum Source {
-    Mock(MockConfig),
-    /// Replay a `.lfr` recording. `speed` 1.0 = real time, 0 = as fast as possible.
+    /// In-process mock that speaks the CQG WebAPI protocol.
+    CqgMock(MockConfig),
+    /// Real CQG WebAPI. Untested until credentials exist.
+    Cqg {
+        url: String,
+        logon: cqg::LogonParams,
+    },
+    /// Coinbase Exchange public feed.
+    Coinbase { url: String },
+    /// Replay a `.lfr` recording (provider and instrument come from its header).
+    /// `speed` 1.0 = real time, 0 = as fast as possible. `stop_at` ends the replay before
+    /// the first frame recorded after that instant.
     Replay {
         path: PathBuf,
         speed: f64,
-    },
-    /// Real CQG WebAPI. Untested until credentials exist (see CLAUDE.md).
-    Cqg {
-        url: String,
-        logon: LogonParams,
+        stop_at: Option<UtcMillis>,
     },
 }
 
 #[derive(Clone, Debug)]
 pub struct FeedConfig {
     pub source: Source,
-    pub symbol: String,
+    /// Catalog instrument; `None` = the source's default (or the recording's).
+    pub instrument: Option<Instrument>,
     /// Tee all raw frames to this `.lfr` file.
     pub record: Option<PathBuf>,
-    pub history_ms: i64,
+    pub bar_period_ms: i64,
     pub max_bars: usize,
 }
 
@@ -64,12 +80,71 @@ impl FeedConfig {
     pub fn new(source: Source) -> Self {
         FeedConfig {
             source,
-            symbol: "EP".into(),
+            instrument: None,
             record: None,
-            history_ms: 3 * 24 * 60 * UtcMillis::MINUTE,
+            bar_period_ms: UtcMillis::MINUTE,
             max_bars: 50_000,
         }
     }
+}
+
+/// A validated plan: which provider serves which instrument.
+struct Plan {
+    provider: Arc<dyn Provider>,
+    instrument: Instrument,
+}
+
+fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
+    Ok(match source {
+        Source::CqgMock(_) => Arc::new(cqg::CqgProvider::new(cqg::LogonParams {
+            client_version: client_version(),
+            ..Default::default()
+        })),
+        Source::Cqg { logon, .. } => Arc::new(cqg::CqgProvider::new(logon.clone())),
+        Source::Coinbase { .. } => Arc::new(coinbase::CoinbaseProvider),
+        Source::Replay { path, .. } => {
+            let h = transport::read_header(path)?;
+            match h.provider.as_str() {
+                provider::CQG if cqg::protocol_compatible(&h.protocol) => {
+                    Arc::new(cqg::CqgProvider::new(cqg::LogonParams::default()))
+                }
+                provider::COINBASE if coinbase::protocol_compatible(&h.protocol) => {
+                    Arc::new(coinbase::CoinbaseProvider)
+                }
+                p => bail!(
+                    "recording is from provider {p:?} protocol {:?}, which this build cannot decode",
+                    h.protocol
+                ),
+            }
+        }
+    })
+}
+
+fn plan(config: &FeedConfig) -> Result<Plan> {
+    let provider = provider_for(&config.source)?;
+    let instrument = match (&config.source, &config.instrument) {
+        (Source::Replay { path, .. }, requested) => {
+            let h = transport::read_header(path)?;
+            let recorded = catalog::by_symbol(&h.instrument)
+                .ok_or_else(|| anyhow!("recording is for unknown instrument {:?}", h.instrument))?;
+            if let Some(r) = requested
+                && r.id != recorded.id
+            {
+                bail!("recording is for {}, not {}", recorded.symbol, r.symbol);
+            }
+            recorded
+        }
+        (_, Some(i)) => i.clone(),
+        (Source::Coinbase { .. }, None) => catalog::get(catalog::BTC_USD).expect("catalog"),
+        (_, None) => catalog::get(catalog::ES).expect("catalog"),
+    };
+    if !provider.supports(&instrument) {
+        bail!("{} does not provide {}", provider.id(), instrument.symbol);
+    }
+    Ok(Plan {
+        provider,
+        instrument,
+    })
 }
 
 /// Owns the feed thread. Dropping it shuts the feed down and joins the thread.
@@ -94,9 +169,21 @@ impl Drop for FeedHandle {
     }
 }
 
+/// Create the store for a config (validates provider/instrument up front).
+pub fn new_store(config: &FeedConfig) -> Result<Arc<ChartStore>> {
+    let p = plan(config)?;
+    Ok(Arc::new(ChartStore::new(
+        p.instrument,
+        p.provider.capabilities(),
+        p.provider.id(),
+        config.bar_period_ms,
+        config.max_bars,
+    )))
+}
+
 /// Start the feed on a dedicated thread.
-pub fn spawn(config: FeedConfig) -> std::io::Result<FeedHandle> {
-    let store = Arc::new(ChartStore::new(UtcMillis::MINUTE, config.max_bars));
+pub fn spawn(config: FeedConfig) -> Result<FeedHandle> {
+    let store = new_store(&config)?;
     let (tx, rx) = watch::channel(false);
     let s = store.clone();
     let thread = thread::Builder::new()
@@ -115,7 +202,8 @@ pub fn spawn(config: FeedConfig) -> std::io::Result<FeedHandle> {
                 }
             };
             rt.block_on(run_feed(config, s, rx));
-        })?;
+        })
+        .context("spawn feed thread")?;
     Ok(FeedHandle {
         store,
         shutdown: tx,
@@ -129,11 +217,19 @@ pub async fn run_feed(
     store: Arc<ChartStore>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let plan = match plan(&config) {
+        Ok(p) => p,
+        Err(e) => {
+            store.set_status(FeedStatus::Failed(format!("{e:#}")));
+            return;
+        }
+    };
     let recorder = match &config.record {
         Some(path) => match Recorder::create(
             path,
-            cqg_proto::PROTOCOL_VERSION_MAJOR,
-            cqg_proto::PROTOCOL_VERSION_MINOR,
+            plan.provider.id(),
+            &plan.provider.protocol(),
+            plan.instrument.symbol,
         ) {
             Ok(r) => {
                 tracing::info!("recording raw frames to {}", path.display());
@@ -149,22 +245,20 @@ pub async fn run_feed(
         },
         None => None,
     };
-    let session_cfg = SessionConfig {
-        symbol: config.symbol.clone(),
-        logon: match &config.source {
-            Source::Cqg { logon, .. } => logon.clone(),
-            _ => LogonParams {
-                client_version: client_version(),
-                ..Default::default()
-            },
-        },
-        history_ms: config.history_ms,
-    };
     let mock_market = match &config.source {
-        Source::Mock(m) => Some(Arc::new(Mutex::new(MockMarket::new(m, now_utc())))),
+        Source::CqgMock(m) => Some(Arc::new(Mutex::new(MockMarket::new(m, now_utc())))),
         _ => None,
     };
-    let opts = ConnectionOptions::default();
+    let is_replay = matches!(config.source, Source::Replay { .. });
+    let opts = if is_replay {
+        // Replay is driven by recorded frames only: no idle timeout, no keep-alives.
+        ConnectionOptions {
+            idle_timeout: Duration::from_secs(365 * 86_400),
+            ping_every: Duration::from_secs(86_400),
+        }
+    } else {
+        ConnectionOptions::default()
+    };
     let mut attempt: u32 = 0;
 
     loop {
@@ -172,61 +266,39 @@ pub async fn run_feed(
             break;
         }
         store.set_status(FeedStatus::Connecting);
-        let mut session = Session::new(session_cfg.clone());
         let started = tokio::time::Instant::now();
+        let mut session = match plan.provider.new_session(&plan.instrument) {
+            Ok(s) => s,
+            Err(e) => {
+                store.set_status(FeedStatus::Failed(e.to_string()));
+                break;
+            }
+        };
+        let session = session.as_mut();
+        let rec = recorder.as_ref();
 
         let result = match &config.source {
-            Source::Mock(m) => {
+            Source::CqgMock(m) => {
                 let t =
                     MockTransport::connect(m.clone(), mock_market.clone().expect("mock market"));
-                drive(
-                    t,
-                    recorder.as_ref(),
-                    &mut session,
-                    &store,
-                    &opts,
-                    &mut shutdown,
-                )
-                .await
+                drive(t, rec, session, &store, &opts, &mut shutdown).await
             }
-            Source::Replay { path, speed } => match ReplayTransport::open(path, *speed) {
-                // Replay is driven by recorded frames only; no idle timeout or reconnects.
-                Ok(t) => {
-                    let opts = ConnectionOptions {
-                        idle_timeout: Duration::from_secs(365 * 86_400),
-                        ..Default::default()
-                    };
-                    drive(
-                        t,
-                        recorder.as_ref(),
-                        &mut session,
-                        &store,
-                        &opts,
-                        &mut shutdown,
-                    )
-                    .await
-                }
-                Err(e) => Err(connection::ConnectionError::Transport(e)),
+            Source::Replay {
+                path,
+                speed,
+                stop_at,
+            } => match ReplayTransport::open(path, *speed, *stop_at) {
+                Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
+                Err(e) => Err(ConnectionError::Transport(e)),
             },
-            Source::Cqg { url, .. } => {
+            Source::Cqg { url, .. } | Source::Coinbase { url } => {
                 match WsTransport::connect(url, Duration::from_secs(15)).await {
-                    Ok(t) => {
-                        drive(
-                            t,
-                            recorder.as_ref(),
-                            &mut session,
-                            &store,
-                            &opts,
-                            &mut shutdown,
-                        )
-                        .await
-                    }
-                    Err(e) => Err(connection::ConnectionError::Transport(e)),
+                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown).await,
+                    Err(e) => Err(ConnectionError::Transport(e)),
                 }
             }
         };
 
-        let is_replay = matches!(config.source, Source::Replay { .. });
         match result {
             Ok(ConnectionEnd::Shutdown) => break,
             Ok(ConnectionEnd::Closed) if is_replay => {
@@ -277,11 +349,11 @@ pub async fn run_feed(
 async fn drive<T: Transport>(
     t: T,
     recorder: Option<&Recorder>,
-    session: &mut Session,
+    session: &mut dyn provider::ProviderSession,
     store: &ChartStore,
     opts: &ConnectionOptions,
     shutdown: &mut watch::Receiver<bool>,
-) -> Result<ConnectionEnd, connection::ConnectionError> {
+) -> Result<ConnectionEnd, ConnectionError> {
     match recorder {
         Some(r) => run_connection(&mut Recording::new(t, r), session, store, opts, shutdown).await,
         None => {
@@ -289,8 +361,4 @@ async fn drive<T: Transport>(
             run_connection(&mut t, session, store, opts, shutdown).await
         }
     }
-}
-
-pub fn client_version() -> String {
-    format!("lines {}", env!("CARGO_PKG_VERSION"))
 }

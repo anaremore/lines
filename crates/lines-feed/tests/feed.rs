@@ -2,10 +2,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lines_core::UtcMillis;
-use lines_feed::mock::MockConfig;
+use lines_core::{Price, Qty, UtcMillis};
+use lines_feed::catalog;
+use lines_feed::cqg::mock::MockConfig;
+use lines_feed::provider::Frame;
+use lines_feed::recording::{Direction, Recorder};
 use lines_feed::store::{ChartStore, FeedStatus};
-use lines_feed::{FeedConfig, Source, run_feed};
+use lines_feed::{FeedConfig, Source, new_store, run_feed};
 use tokio::sync::watch;
 
 fn temp_path(name: &str) -> PathBuf {
@@ -16,7 +19,7 @@ fn temp_path(name: &str) -> PathBuf {
 
 /// Run the feed for `dur` and return its store.
 async fn run_for(config: FeedConfig, dur: Duration) -> Arc<ChartStore> {
-    let store = Arc::new(ChartStore::new(UtcMillis::MINUTE, config.max_bars));
+    let store = new_store(&config).unwrap();
     let (tx, rx) = watch::channel(false);
     let task = tokio::spawn(run_feed(config, store.clone(), rx));
     tokio::time::sleep(dur).await;
@@ -25,41 +28,51 @@ async fn run_for(config: FeedConfig, dur: Duration) -> Arc<ChartStore> {
     store
 }
 
+/// Run the feed until it stops by itself (replay end / fatal error).
+async fn run_to_end(config: FeedConfig) -> Arc<ChartStore> {
+    let store = new_store(&config).unwrap();
+    let (_tx, rx) = watch::channel(false);
+    tokio::time::timeout(Duration::from_secs(60), run_feed(config, store.clone(), rx))
+        .await
+        .expect("feed did not finish");
+    store
+}
+
 fn mock(cfg: MockConfig) -> FeedConfig {
-    let mut c = FeedConfig::new(Source::Mock(cfg));
-    c.history_ms = 600 * UtcMillis::MINUTE;
-    c
+    FeedConfig::new(Source::CqgMock(cfg))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mock_feed_end_to_end_at_5k() {
+async fn cqg_mock_end_to_end_at_5k() {
     let cfg = MockConfig {
         history_bars: 600,
         ..Default::default()
     };
     let store = run_for(mock(cfg), Duration::from_secs(3)).await;
     let d = store.read();
-    let inst = d.instrument.as_ref().expect("symbol resolved");
-    assert_eq!(inst.contract_symbol, "EPZ6");
-    assert_eq!(inst.format.tick, 25);
+    assert_eq!(
+        d.instrument.symbol, "ES",
+        "catalog instrument, not the CQG symbol"
+    );
+    assert_eq!(d.provider, "cqg");
     assert!(
         d.series.len() >= 600,
         "history back-filled: {} bars",
         d.series.len()
     );
-    // ~5k quotes/s for 3 s minus logon/history: demand at least 60% of nominal.
+    // ~5k updates/s for 3 s minus logon/history: demand at least 60% of nominal.
     assert!(
-        d.stats.quotes_in >= 9_000,
-        "quotes_in = {}",
-        d.stats.quotes_in
+        d.stats.updates_in >= 9_000,
+        "updates_in = {}",
+        d.stats.updates_in
     );
     assert!(d.stats.trades_in > 0);
-    assert_eq!(d.stats.decode_errors, 0);
+    assert_eq!((d.stats.decode_errors, d.stats.rejected), (0, 0));
     assert!(d.bid.is_some() && d.ask.is_some() && d.last_trade.is_some());
-    // Every price is on the tick grid (exact integers end to end).
+    let tick = d.instrument.price.tick;
     for b in d.series.bars() {
         for p in [b.open, b.high, b.low, b.close] {
-            assert_eq!(p.0 % 25, 0, "off-tick price in {b:?}");
+            assert_eq!(p.0 % tick, 0, "off-tick price in {b:?}");
         }
         assert!(b.low <= b.open && b.low <= b.close && b.high >= b.open && b.high >= b.close);
     }
@@ -77,47 +90,82 @@ async fn record_then_replay_reproduces_bars_exactly() {
     live.record = Some(path.clone());
     let live_store = run_for(live, Duration::from_millis(2_000)).await;
 
-    let replay = FeedConfig {
-        history_ms: 600 * UtcMillis::MINUTE,
-        ..FeedConfig::new(Source::Replay {
-            path: path.clone(),
-            speed: 0.0,
-        })
-    };
     let started = Instant::now();
-    let replay_store = run_for_until_done(replay).await;
+    let replay_store = run_to_end(FeedConfig::new(Source::Replay {
+        path: path.clone(),
+        speed: 0.0,
+        stop_at: None,
+    }))
+    .await;
     let elapsed = started.elapsed();
 
     let (a, b) = (live_store.read(), replay_store.read());
     assert_eq!(b.status, FeedStatus::ReplayFinished);
-    assert!(
-        a.stats.quotes_in > 5_000,
-        "live quotes_in = {}",
-        a.stats.quotes_in
+    assert_eq!(
+        b.instrument, a.instrument,
+        "instrument restored from the recording header"
     );
-    assert_eq!(a.stats.quotes_in, b.stats.quotes_in);
+    assert!(
+        a.stats.updates_in > 5_000,
+        "live updates_in = {}",
+        a.stats.updates_in
+    );
+    assert_eq!(a.stats.updates_in, b.stats.updates_in);
     assert_eq!(a.stats.frames_in, b.stats.frames_in);
     assert_eq!(
         a.series.bars(),
         b.series.bars(),
         "replayed bars differ from live bars"
     );
-    assert_eq!(a.instrument, b.instrument);
-    let qps = b.stats.quotes_in as f64 / elapsed.as_secs_f64();
+    let ups = b.stats.updates_in as f64 / elapsed.as_secs_f64();
     println!(
-        "replay (speed 0): {} quotes in {elapsed:?} = {qps:.0} quotes/s",
-        b.stats.quotes_in
+        "replay (speed 0): {} updates in {elapsed:?} = {ups:.0}/s",
+        b.stats.updates_in
     );
     let _ = std::fs::remove_file(&path);
 }
 
-async fn run_for_until_done(config: FeedConfig) -> Arc<ChartStore> {
-    let store = Arc::new(ChartStore::new(UtcMillis::MINUTE, config.max_bars));
-    let (_tx, rx) = watch::channel(false);
-    tokio::time::timeout(Duration::from_secs(60), run_feed(config, store.clone(), rx))
-        .await
-        .expect("replay did not finish");
-    store
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_stops_at_timestamp() {
+    let path = temp_path("stop_at.lfr");
+    let mut live = mock(MockConfig {
+        history_bars: 30,
+        ..Default::default()
+    });
+    live.record = Some(path.clone());
+    run_for(live, Duration::from_millis(1_500)).await;
+
+    let full = run_to_end(FeedConfig::new(Source::Replay {
+        path: path.clone(),
+        speed: 0.0,
+        stop_at: None,
+    }))
+    .await;
+    let header = lines_feed::transport::read_header(&path).unwrap();
+    let cut = UtcMillis(header.start_wall_ms + 700);
+    let part = run_to_end(FeedConfig::new(Source::Replay {
+        path: path.clone(),
+        speed: 0.0,
+        stop_at: Some(cut),
+    }))
+    .await;
+    let again = run_to_end(FeedConfig::new(Source::Replay {
+        path: path.clone(),
+        speed: 0.0,
+        stop_at: Some(cut),
+    }))
+    .await;
+    let (f, p, a) = (full.read(), part.read(), again.read());
+    assert!(
+        p.stats.frames_in < f.stats.frames_in,
+        "{} vs {}",
+        p.stats.frames_in,
+        f.stats.frames_in
+    );
+    assert!(p.stats.frames_in > 0);
+    assert_eq!(p.series.bars(), a.series.bars(), "same cut, same result");
+    assert_eq!(p.last_trade, a.last_trade);
+    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -143,13 +191,128 @@ async fn reconnects_and_keeps_bars() {
 }
 
 #[tokio::test]
+async fn unmapped_or_unknown_instruments_fail_cleanly() {
+    // Coinbase does not carry ES: rejected before connecting.
+    let mut c = FeedConfig::new(Source::Coinbase {
+        url: "wss://invalid.example".into(),
+    });
+    c.instrument = catalog::get(catalog::ES);
+    assert!(new_store(&c).is_err());
+    // CQG maps NQ, but the mock only knows EP: server says not found -> Failed, no retry loop.
+    let mut c = mock(MockConfig {
+        history_bars: 10,
+        ..Default::default()
+    });
+    c.instrument = catalog::get(catalog::NQ);
+    let store = run_to_end(c).await;
+    assert!(
+        matches!(&store.read().status, FeedStatus::Failed(m) if m.contains("not found") || m.contains("knows only"))
+    );
+}
+
+#[tokio::test]
 async fn replay_of_missing_file_fails_cleanly() {
     let cfg = FeedConfig::new(Source::Replay {
         path: temp_path("does-not-exist.lfr"),
         speed: 1.0,
+        stop_at: None,
     });
-    let store = run_for_until_done(cfg).await;
-    assert!(matches!(store.read().status, FeedStatus::Failed(_)));
+    assert!(new_store(&cfg).is_err());
+}
+
+/// Coinbase end to end, offline: a synthetic recording (decision 0010: committed fixtures
+/// are synthetic) replayed through the real Coinbase session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coinbase_replay_from_synthetic_recording() {
+    let path = temp_path("coinbase.lfr");
+    let rec = Recorder::create(&path, "coinbase", "coinbase-exchange-ws-1", "BTC/USD").unwrap();
+    // Recording "starts" now; candles must predate the start minute to count as history.
+    let start_min = lines_feed::now_utc().floor_to(60_000).0 / 1000;
+    let candles = format!(
+        "[[{},75400,75500.5,75410.01,75450,1.5],[{},75415.72,75556.5,75523.22,75433.92,30.69151416]]",
+        start_min - 60,
+        start_min - 120
+    );
+    let iso = |s: i64| UtcMillis(s * 1000 + 1_500).to_string();
+    for f in [
+        Frame::text(r#"{"type":"subscriptions","channels":[]}"#),
+        Frame::http(candles),
+        Frame::text(r#"{"type":"ticker","best_bid":"75449.99","best_ask":"75450.00"}"#),
+        Frame::text(format!(
+            r#"{{"type":"match","trade_id":7,"size":"0.25","price":"75450.01","time":"{}"}}"#,
+            iso(start_min)
+        )),
+        Frame::text(format!(
+            r#"{{"type":"match","trade_id":8,"size":"0.00000001","price":"75451","time":"{}"}}"#,
+            iso(start_min)
+        )),
+    ] {
+        rec.record(Direction::FromServer, &f);
+    }
+    rec.finish().unwrap();
+
+    let store = run_to_end(FeedConfig::new(Source::Replay {
+        path: path.clone(),
+        speed: 0.0,
+        stop_at: None,
+    }))
+    .await;
+    let d = store.read();
+    assert_eq!(d.status, FeedStatus::ReplayFinished);
+    assert_eq!(d.provider, "coinbase");
+    assert_eq!(d.instrument.symbol, "BTC/USD");
+    assert!(d.capabilities.fractional_qty);
+    let bars = d.series.bars();
+    assert_eq!(bars.len(), 3, "{bars:?}");
+    assert_eq!(bars[0].volume, Qty(3_069_151_416));
+    assert_eq!(
+        bars[2].volume,
+        Qty(25_000_001),
+        "0.25 + 0.00000001 BTC, exactly"
+    );
+    assert_eq!(
+        (bars[2].open, bars[2].close),
+        (Price(7_545_001), Price(7_545_100))
+    );
+    assert_eq!(
+        (d.bid, d.ask),
+        (Some(Price(7_544_999)), Some(Price(7_545_000)))
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Live network test against Coinbase's public feed. Run with `cargo test -- --ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs internet"]
+async fn coinbase_live_smoke() {
+    let path = temp_path("coinbase-live.lfr");
+    let mut c = FeedConfig::new(Source::Coinbase {
+        url: lines_feed::coinbase::WS_URL.into(),
+    });
+    c.record = Some(path.clone());
+    let store = run_for(c, Duration::from_secs(12)).await;
+    let live_bars = {
+        let d = store.read();
+        println!(
+            "coinbase live: {} bars, {:?}, status {:?}",
+            d.series.len(),
+            d.stats,
+            d.status
+        );
+        assert!(d.series.len() >= 100, "REST history arrived");
+        assert!(d.bid.is_some() && d.ask.is_some());
+        assert_eq!(d.stats.rejected, 0);
+        d.series.bars().to_vec()
+    };
+    // The recording replays to the same bars.
+    let replay = run_to_end(FeedConfig::new(Source::Replay {
+        path: path.clone(),
+        speed: 0.0,
+        stop_at: None,
+    }))
+    .await;
+    assert_eq!(replay.read().series.bars(), &live_bars[..]);
+    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]

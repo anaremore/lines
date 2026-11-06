@@ -1,22 +1,19 @@
-//! Async driver: runs one connection (any [`Transport`]) through a [`Session`], and the
-//! reconnect loop around it.
+//! Generic async driver: runs one connection (any [`Transport`]) through any
+//! [`ProviderSession`]. All I/O lives here; sessions stay pure.
 
 use std::time::Duration;
 
 use anyhow::Result;
-use bytes::Bytes;
-use cqg_proto::web_api_2::{ClientMsg, ServerMsg};
-use prost::Message;
 use tokio::sync::watch;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::session::{Session, SessionError};
+use crate::provider::{MarketEvent, Outgoing, ProviderSession, SessionError, StartContext};
 use crate::store::{ChartStore, FeedStatus};
 use crate::transport::Transport;
 
 #[derive(Debug)]
 pub enum ConnectionEnd {
-    /// Server closed the stream / replay reached end of file.
+    /// Server closed the stream / replay reached its end.
     Closed,
     Shutdown,
 }
@@ -41,7 +38,7 @@ impl ConnectionError {
 }
 
 pub struct ConnectionOptions {
-    /// Client keep-alive ping interval.
+    /// Client keep-alive interval (only if the session has a keep-alive).
     pub ping_every: Duration,
     /// Treat the connection as dead if nothing arrives for this long.
     pub idle_timeout: Duration,
@@ -56,26 +53,46 @@ impl Default for ConnectionOptions {
     }
 }
 
-async fn send<T: Transport>(t: &mut T, msg: &ClientMsg) -> Result<()> {
-    t.send(Bytes::from(msg.encode_to_vec())).await
+async fn flush<T: Transport>(t: &mut T, out: &mut Vec<Outgoing>) -> Result<()> {
+    for o in out.drain(..) {
+        match o {
+            Outgoing::Frame(f) => t.send(f).await?,
+            Outgoing::HttpGet(url) => t.request_http(url),
+        }
+    }
+    Ok(())
 }
 
 /// Run one connection until it ends. Bars accumulate in `store` and survive the return.
 pub async fn run_connection<T: Transport>(
     transport: &mut T,
-    session: &mut Session,
+    session: &mut dyn ProviderSession,
     store: &ChartStore,
     opts: &ConnectionOptions,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<ConnectionEnd, ConnectionError> {
+    let (history_from, period) = {
+        let d = store.read();
+        (d.series.last().map(|b| b.time), d.series.period_ms())
+    };
     store.set_status(FeedStatus::LoggingOn);
-    send(transport, &session.logon_msg()).await?;
+    let mut out: Vec<Outgoing> = Vec::new();
+    let mut events: Vec<MarketEvent> = Vec::new();
+    let now = transport.clock().unwrap_or_else(crate::now_utc);
+    session.start(
+        StartContext {
+            now,
+            history_from,
+            bar_period_ms: period,
+        },
+        &mut out,
+    );
+    flush(transport, &mut out).await?;
 
     let mut ping = tokio::time::interval(opts.ping_every);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping.tick().await; // first tick is immediate
     let mut last_rx = Instant::now();
-    let mut out: Vec<ClientMsg> = Vec::new();
 
     loop {
         let idle_deadline = last_rx + opts.idle_timeout;
@@ -85,29 +102,27 @@ pub async fn run_connection<T: Transport>(
             frame = transport.recv() => {
                 let Some(frame) = frame? else { return Ok(ConnectionEnd::Closed) };
                 last_rx = Instant::now();
-                let len = frame.len() as u64;
-                // Decode outside the store lock.
-                let decoded = ServerMsg::decode(frame);
-                let now = crate::now_utc();
-                let result = store.update(|d| {
+                // Replay supplies the recorded time, so sessions see a frozen, deterministic clock.
+                let now = transport.clock().unwrap_or_else(crate::now_utc);
+                events.clear();
+                // Decode + convert outside the store lock.
+                let result = session.on_frame(&frame, now, &mut events, &mut out);
+                let len = frame.data.len() as u64;
+                store.update(|d| {
                     d.stats.frames_in += 1;
                     d.stats.bytes_in += len;
-                    match &decoded {
-                        Ok(msg) => session.on_server_msg(msg, now, d, &mut out),
-                        Err(_) => { d.stats.decode_errors += 1; Ok(()) }
+                    if result.is_err() {
+                        d.stats.decode_errors += 1;
                     }
+                    d.apply(&events);
                 });
-                if let Err(e) = &decoded {
-                    tracing::warn!("undecodable server frame ({len} bytes): {e}");
-                }
                 result?;
-                for msg in out.drain(..) {
-                    send(transport, &msg).await?;
-                }
+                flush(transport, &mut out).await?;
             }
             _ = ping.tick() => {
-                if let Some(p) = session.ping_msg(crate::now_utc()) {
-                    send(transport, &p).await?;
+                if let Some(p) = session.keepalive(crate::now_utc()) {
+                    out.push(p);
+                    flush(transport, &mut out).await?;
                 }
             }
             _ = tokio::time::sleep_until(idle_deadline) => {

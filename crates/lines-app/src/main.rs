@@ -1,20 +1,38 @@
 mod chart_view;
+#[cfg(feature = "screenshot")]
+mod screenshot;
+mod theme;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
-use lines_feed::mock::MockConfig;
-use lines_feed::session::LogonParams;
-use lines_feed::{FeedConfig, Source};
+use lines_core::UtcMillis;
+use lines_feed::cqg::mock::MockConfig;
+use lines_feed::cqg::{self, LogonParams};
+use lines_feed::{FeedConfig, Source, catalog};
+
+use crate::chart_view::ChartView;
+use crate::theme::Theme;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum SourceKind {
+    /// In-process mock of the CQG WebAPI protocol.
     Mock,
-    Replay,
+    /// Real CQG WebAPI (needs credentials).
     Cqg,
+    /// Coinbase Exchange public feed (free, 24/7; dev tool).
+    Coinbase,
+    /// A `.lfr` recording (provider + instrument come from the file).
+    Replay,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum ThemeKind {
+    Dark,
+    Light,
 }
 
 /// Lines: futures charting terminal.
@@ -24,9 +42,9 @@ struct Cli {
     /// Where market data comes from.
     #[arg(long, value_enum, default_value_t = SourceKind::Mock)]
     source: SourceKind,
-    /// CQG symbol to chart (CQG naming: EP = E-mini S&P 500).
-    #[arg(long, default_value = "EP")]
-    symbol: String,
+    /// Catalog instrument (ES, NQ, ZN, BTC/USD, ETH/USD). Default: ES, or BTC/USD for coinbase.
+    #[arg(long)]
+    instrument: Option<String>,
     /// Record every raw feed frame to this .lfr file.
     #[arg(long)]
     record: Option<PathBuf>,
@@ -36,18 +54,21 @@ struct Cli {
     /// Replay speed: 1 = real time, 10 = 10x, 0 = as fast as possible.
     #[arg(long, default_value_t = 1.0)]
     speed: f64,
-    /// Mock: quotes per second.
+    /// Replay: stop at this UTC time (e.g. 2026-11-06T14:05:00Z). Default: end of file.
+    #[arg(long, value_parser = parse_time)]
+    at: Option<UtcMillis>,
+    /// Mock: updates per second.
     #[arg(long, default_value_t = 5_000)]
     rate: u32,
-    /// Mock: quotes per frame.
+    /// Mock: updates per frame.
     #[arg(long, default_value_t = 50)]
     batch: u32,
     /// Mock: drop the connection every N seconds (exercise reconnect + back-fill).
     #[arg(long)]
     disconnect_every: Option<u64>,
-    /// CQG WebAPI endpoint (demo by default). Credentials: LINES_CQG_USER / LINES_CQG_PASSWORD.
-    #[arg(long, default_value = "wss://demoapi.cqg.com:443")]
-    url: String,
+    /// CQG WebAPI endpoint. Credentials: LINES_CQG_USER / LINES_CQG_PASSWORD.
+    #[arg(long, default_value = cqg::DEMO_URL)]
+    cqg_url: String,
     #[arg(long, default_value = "CQG")]
     private_label: String,
     #[arg(long, default_value = "WebAPITest")]
@@ -55,11 +76,56 @@ struct Cli {
     /// Run the feed without a window for N seconds and print stats (useful for recording).
     #[arg(long)]
     headless: Option<u64>,
+    /// Color theme.
+    #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
+    theme: ThemeKind,
+    /// Window size in logical pixels, WIDTHxHEIGHT.
+    #[arg(long, default_value = "1280x800", value_parser = parse_size)]
+    size: (f32, f32),
+    /// Screenshot mode (decision 0009): replay --replay up to --at at full speed, render one
+    /// frame at --size/--theme with a frozen clock, write this PNG, exit.
+    /// Requires building with `--features screenshot`.
+    #[arg(long, requires = "replay")]
+    screenshot: Option<PathBuf>,
+    /// Screenshot: required DPI scale. GPUI on Windows cannot override the monitor's DPI,
+    /// so the run fails if the actual scale differs (rather than silently differing).
+    #[arg(long)]
+    scale: Option<f32>,
+}
+
+fn parse_time(s: &str) -> Result<UtcMillis, String> {
+    UtcMillis::parse_iso(s).ok_or_else(|| {
+        format!("expected an ISO-8601 UTC time like 2026-11-06T14:05:00Z, got {s:?}")
+    })
+}
+
+fn parse_size(s: &str) -> Result<(f32, f32), String> {
+    let (w, h) = s.split_once(['x', 'X']).ok_or("expected WIDTHxHEIGHT")?;
+    let (w, h): (f32, f32) = (
+        w.parse().map_err(|_| "bad width")?,
+        h.parse().map_err(|_| "bad height")?,
+    );
+    if !(200.0..=8192.0).contains(&w) || !(150.0..=8192.0).contains(&h) {
+        return Err("size out of range".into());
+    }
+    Ok((w, h))
 }
 
 fn feed_config(cli: &Cli) -> Result<FeedConfig> {
     let source = match cli.source {
-        SourceKind::Mock => Source::Mock(MockConfig {
+        _ if cli.screenshot.is_some() => {
+            // Screenshots are always a full-speed replay to a fixed point.
+            let path = cli
+                .replay
+                .clone()
+                .context("--screenshot needs --replay <FILE>")?;
+            Source::Replay {
+                path,
+                speed: 0.0,
+                stop_at: cli.at,
+            }
+        }
+        SourceKind::Mock => Source::CqgMock(MockConfig {
             quotes_per_sec: cli.rate,
             quotes_per_frame: cli.batch.max(1),
             disconnect_after: cli.disconnect_every.map(Duration::from_secs),
@@ -72,8 +138,12 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
             Source::Replay {
                 path,
                 speed: cli.speed,
+                stop_at: cli.at,
             }
         }
+        SourceKind::Coinbase => Source::Coinbase {
+            url: lines_feed::coinbase::WS_URL.into(),
+        },
         SourceKind::Cqg => {
             let user = std::env::var("LINES_CQG_USER").ok();
             let password = std::env::var("LINES_CQG_PASSWORD").ok();
@@ -81,7 +151,7 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
                 bail!("set LINES_CQG_USER and LINES_CQG_PASSWORD for --source cqg");
             }
             Source::Cqg {
-                url: cli.url.clone(),
+                url: cli.cqg_url.clone(),
                 logon: LogonParams {
                     user_name: user,
                     password,
@@ -93,7 +163,12 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
         }
     };
     let mut cfg = FeedConfig::new(source);
-    cfg.symbol = cli.symbol.clone();
+    if let Some(sym) = &cli.instrument {
+        cfg.instrument = Some(catalog::by_symbol(sym).with_context(|| {
+            let known: Vec<_> = catalog::all().iter().map(|i| i.symbol).collect();
+            format!("unknown instrument {sym:?}; known: {}", known.join(", "))
+        })?);
+    }
     cfg.record = cli.record.clone();
     Ok(cfg)
 }
@@ -111,8 +186,28 @@ fn main() -> Result<()> {
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));
     }
+    let theme = match cli.theme {
+        ThemeKind::Dark => Theme::dark(),
+        ThemeKind::Light => Theme::light(),
+    };
+
+    if let Some(out) = cli.screenshot.clone() {
+        #[cfg(feature = "screenshot")]
+        {
+            let code = screenshot::run(config, out, cli.size, cli.scale, theme)?;
+            std::process::exit(code);
+        }
+        #[cfg(not(feature = "screenshot"))]
+        {
+            let _ = out;
+            bail!(
+                "this build has no screenshot support; rebuild with `cargo run -p lines-app --features screenshot`"
+            );
+        }
+    }
 
     let feed = lines_feed::spawn(config)?;
+    let (w, h) = cli.size;
     gpui_platform::application().run(move |cx: &mut App| {
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -120,7 +215,7 @@ fn main() -> Result<()> {
             }
         })
         .detach();
-        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+        let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -130,7 +225,7 @@ fn main() -> Result<()> {
                 }),
                 ..Default::default()
             },
-            move |_, cx| cx.new(|cx| chart_view::ChartView::new(feed, cx)),
+            move |_, cx| cx.new(|cx| ChartView::new(feed, theme, false, cx)),
         );
         if let Err(e) = opened {
             tracing::error!("failed to open window: {e:#}");
@@ -149,13 +244,16 @@ fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
         std::thread::sleep(Duration::from_secs(1));
         let d = feed.store.read();
         println!(
-            "[{:>4.1}s] {:<16} bars={:<6} quotes={:<9} trades={:<8} frames={:<7} reconnects={}",
+            "[{:>4.1}s] {} {:<16} bars={:<6} updates={:<9} trades={:<8} frames={:<7} gaps={} rejected={} reconnects={}",
             start.elapsed().as_secs_f64(),
+            d.instrument.symbol,
             d.status.label(),
             d.series.len(),
-            d.stats.quotes_in,
+            d.stats.updates_in,
             d.stats.trades_in,
             d.stats.frames_in,
+            d.stats.gaps,
+            d.stats.rejected,
             d.stats.reconnects
         );
         if matches!(

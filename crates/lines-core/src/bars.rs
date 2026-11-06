@@ -5,6 +5,7 @@
 //! server bar updates for the same bucket overwrite the local bar (server is authoritative).
 
 use crate::price::Price;
+use crate::qty::Qty;
 use crate::time::UtcMillis;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -15,12 +16,12 @@ pub struct Bar {
     pub high: Price,
     pub low: Price,
     pub close: Price,
-    /// Contracts traded.
-    pub volume: u64,
+    /// Exact traded quantity (decision 0002).
+    pub volume: Qty,
 }
 
 impl Bar {
-    pub fn from_trade(time: UtcMillis, price: Price, volume: u64) -> Bar {
+    pub fn from_trade(time: UtcMillis, price: Price, volume: Qty) -> Bar {
         Bar {
             time,
             open: price,
@@ -32,7 +33,7 @@ impl Bar {
     }
 
     #[inline]
-    pub fn apply_trade(&mut self, price: Price, volume: u64) {
+    pub fn apply_trade(&mut self, price: Price, volume: Qty) {
         if price > self.high {
             self.high = price;
         }
@@ -40,7 +41,7 @@ impl Bar {
             self.low = price;
         }
         self.close = price;
-        self.volume += volume;
+        self.volume = self.volume.saturating_add(volume);
     }
 }
 
@@ -107,7 +108,7 @@ impl BarSeries {
     }
 
     /// Fold one trade into the series.
-    pub fn apply_trade(&mut self, time: UtcMillis, price: Price, volume: u64) -> TradeOutcome {
+    pub fn apply_trade(&mut self, time: UtcMillis, price: Price, volume: Qty) -> TradeOutcome {
         let bucket = time.floor_to(self.period_ms);
         self.revision += 1;
         match self.bars.last_mut() {
@@ -186,21 +187,24 @@ mod tests {
     #[test]
     fn aggregates_trades_into_buckets() {
         let mut s = BarSeries::new(M, 100);
-        assert_eq!(s.apply_trade(t(1_000), Price(100), 1), TradeOutcome::NewBar);
         assert_eq!(
-            s.apply_trade(t(2_000), Price(105), 2),
+            s.apply_trade(t(1_000), Price(100), Qty(1)),
+            TradeOutcome::NewBar
+        );
+        assert_eq!(
+            s.apply_trade(t(2_000), Price(105), Qty(2)),
             TradeOutcome::UpdatedLast
         );
         assert_eq!(
-            s.apply_trade(t(3_000), Price(95), 3),
+            s.apply_trade(t(3_000), Price(95), Qty(3)),
             TradeOutcome::UpdatedLast
         );
         assert_eq!(
-            s.apply_trade(t(59_999), Price(101), 4),
+            s.apply_trade(t(59_999), Price(101), Qty(4)),
             TradeOutcome::UpdatedLast
         );
         assert_eq!(
-            s.apply_trade(t(60_000), Price(102), 5),
+            s.apply_trade(t(60_000), Price(102), Qty(5)),
             TradeOutcome::NewBar
         );
         assert_eq!(s.len(), 2);
@@ -212,7 +216,7 @@ mod tests {
                 high: Price(105),
                 low: Price(95),
                 close: Price(101),
-                volume: 10
+                volume: Qty(10)
             }
         );
         assert_eq!(s.bars()[1].time, t(60_000));
@@ -221,11 +225,17 @@ mod tests {
     #[test]
     fn late_trade_updates_old_bar_and_gaps_are_filled_in_order() {
         let mut s = BarSeries::new(M, 100);
-        s.apply_trade(t(0), Price(10), 1);
-        s.apply_trade(t(3 * M), Price(13), 1);
-        assert_eq!(s.apply_trade(t(1_000), Price(20), 1), TradeOutcome::Late);
+        s.apply_trade(t(0), Price(10), Qty(1));
+        s.apply_trade(t(3 * M), Price(13), Qty(1));
+        assert_eq!(
+            s.apply_trade(t(1_000), Price(20), Qty(1)),
+            TradeOutcome::Late
+        );
         assert_eq!(s.bars()[0].high, Price(20));
-        assert_eq!(s.apply_trade(t(M + 5), Price(11), 1), TradeOutcome::Late);
+        assert_eq!(
+            s.apply_trade(t(M + 5), Price(11), Qty(1)),
+            TradeOutcome::Late
+        );
         let times: Vec<_> = s.bars().iter().map(|b| b.time.0).collect();
         assert_eq!(times, vec![0, M, 3 * M]);
     }
@@ -233,28 +243,28 @@ mod tests {
     #[test]
     fn server_bar_overwrites_local() {
         let mut s = BarSeries::new(M, 100);
-        s.apply_trade(t(0), Price(10), 1);
+        s.apply_trade(t(0), Price(10), Qty(1));
         let server = Bar {
             time: t(0),
             open: Price(9),
             high: Price(12),
             low: Price(8),
             close: Price(10),
-            volume: 50,
+            volume: Qty(50),
         };
         s.upsert(server);
         assert_eq!(s.bars(), &[server]);
         // Live trades continue on top of the server bar.
-        s.apply_trade(t(10), Price(13), 2);
+        s.apply_trade(t(10), Price(13), Qty(2));
         assert_eq!(s.bars()[0].high, Price(13));
-        assert_eq!(s.bars()[0].volume, 52);
+        assert_eq!(s.bars()[0].volume, Qty(52));
     }
 
     #[test]
     fn history_merge_out_of_order() {
         let mut s = BarSeries::new(M, 100);
         for i in [5i64, 1, 3, 2, 4, 3] {
-            s.upsert(Bar::from_trade(t(i * M), Price(i), 1));
+            s.upsert(Bar::from_trade(t(i * M), Price(i), Qty(1)));
         }
         let times: Vec<_> = s.bars().iter().map(|b| b.time.0 / M).collect();
         assert_eq!(times, vec![1, 2, 3, 4, 5]);
@@ -265,7 +275,7 @@ mod tests {
         let mut s = BarSeries::new(M, 8);
         let cap = s.bars.capacity();
         for i in 0..1000 {
-            s.apply_trade(t(i * M), Price(i), 1);
+            s.apply_trade(t(i * M), Price(i), Qty(1));
         }
         assert!(s.len() <= 8 + 8 / 4 + 1);
         assert_eq!(s.last().unwrap().time, t(999 * M));
@@ -277,7 +287,7 @@ mod tests {
     fn revision_bumps() {
         let mut s = BarSeries::new(M, 8);
         let r = s.revision();
-        s.apply_trade(t(0), Price(1), 1);
+        s.apply_trade(t(0), Price(1), Qty(1));
         assert!(s.revision() > r);
     }
 }
