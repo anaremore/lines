@@ -25,7 +25,7 @@ use gpui::{
 };
 use lines_core::geometry::snap;
 use lines_core::levels::{LevelMap, LevelShape, MAX_LEVELS, Placed, place, place_labels};
-use lines_core::{Product, UtcMillis, Viewport};
+use lines_core::{BarsView, Product, UtcMillis, Viewport};
 use lines_feed::ChartData;
 use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
 use lines_feed::levels::runtime::{self, LevelHandle, LevelStatus};
@@ -248,7 +248,13 @@ impl LevelsLayer {
 
     /// Under the store lock, after the viewport update. `last_y`: the last price's row.
     /// Draws from this frame's [`Self::snapshot`] (never re-reads the sources).
-    pub fn prepare(&mut self, data: &ChartData, vp: &Viewport, last_y: Option<f32>) {
+    pub fn prepare(
+        &mut self,
+        data: &ChartData,
+        bars: BarsView<'_>,
+        vp: &Viewport,
+        last_y: Option<f32>,
+    ) {
         let plot_h = vp.height as f32;
         if data.market_time.is_some() {
             self.clock = data.market_time;
@@ -283,13 +289,7 @@ impl LevelsLayer {
             && let Some(out) = h.cell().try_read()
         {
             vwap_now = out.points.last().map(|p| p.vwap);
-            build_columns(
-                &out.points,
-                data.series.bars(),
-                vp,
-                Bands(0),
-                &mut self.vwap_cols,
-            );
+            build_columns(&out.points, bars, vp, Bands(0), &mut self.vwap_cols);
         } else if self.vwap.is_none() {
             self.vwap_cols.clear();
         }

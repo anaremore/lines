@@ -1124,6 +1124,17 @@ impl WindowView {
                     chart.update(cx, |c, cx| c.toggle_studies_menu(cx));
                 }
             }
+            // Per chart: linked charts keep their own timeframes (links share the market).
+            Command::Timeframe(tf) => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.set_timeframe(tf, cx));
+                }
+            }
+            Command::TimeframeMenu => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.toggle_timeframe_menu(cx));
+                }
+            }
             Command::ToggleLevels
             | Command::ToggleLevelLabels
             | Command::ToggleLevelSource(_)
@@ -1725,6 +1736,12 @@ impl WindowView {
             if let PaneHandle::Chart(chart) = &h {
                 let v = chart.read(cx).visibility();
                 let hints_hidden = cx.global::<Workspace>().hide_hints;
+                let tf = chart.read(cx).timeframe();
+                items.push(MenuItem::named(
+                    &format!("Timeframe: {tf}…"),
+                    Command::TimeframeMenu,
+                    false,
+                ));
                 items.push(MenuItem::named("Studies…", Command::Studies, false));
                 items.push(MenuItem::named(
                     "Magnet crosshair (snap to OHLC)",

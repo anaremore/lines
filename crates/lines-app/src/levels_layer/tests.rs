@@ -92,7 +92,12 @@ fn legend_and_levels_describe_the_same_frame() {
     let d = store.read();
     layer.snapshot(d.market_time);
     let rows = layer.legend();
-    layer.prepare(&d, &vp(), None);
+    layer.prepare(
+        &d,
+        BarsView::fixed(d.series.bars(), d.series.period_ms()),
+        &vp(),
+        None,
+    );
     assert_eq!(
         rows[i].text, "as of 13:00Z",
         "the legend sees the map drawn"
@@ -102,12 +107,22 @@ fn legend_and_levels_describe_the_same_frame() {
     // The draw path never re-reads the sources: what the snapshot says is what is drawn,
     // even if the source has moved on since (here: a snapshot saying missing).
     layer.force_status(i, LevelStatus::Missing);
-    layer.prepare(&d, &vp(), None);
+    layer.prepare(
+        &d,
+        BarsView::fixed(d.series.bars(), d.series.period_ms()),
+        &vp(),
+        None,
+    );
     assert_eq!(layer.legend()[i].text, "missing");
     assert_eq!(layer.placed_per_source()[i], 0, "missing: nothing drawn");
     // The next frame's snapshot brings both back together.
     layer.snapshot(d.market_time);
-    layer.prepare(&d, &vp(), None);
+    layer.prepare(
+        &d,
+        BarsView::fixed(d.series.bars(), d.series.period_ms()),
+        &vp(),
+        None,
+    );
     assert_eq!(layer.legend()[i].text, "as of 13:00Z");
     assert!(layer.placed_per_source()[i] > 0);
 }
@@ -133,7 +148,8 @@ fn layer_places_filters_and_reports_freshness() {
     let prepare = |layer: &mut LevelsLayer, last_y: Option<f32>| {
         let d = store.read();
         layer.snapshot(d.market_time);
-        layer.prepare(&d, &vp(), last_y);
+        let bars = BarsView::fixed(d.series.bars(), d.series.period_ms());
+        layer.prepare(&d, bars, &vp(), last_y);
     };
     prepare(&mut layer, None);
     // 3 lines + 2 zones + the anchored line (the chart has the 14:30 bar): all on screen.
