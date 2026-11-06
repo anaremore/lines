@@ -25,3 +25,4 @@ Format: Status · Context · Decision · Consequences.
 | 0017 | Indicator engine: composable series graph; VWAP first |
 | 0018 | One trading surface: commands, trading core, connectors, accounts |
 | 0019 | Local market-data store |
+| 0020 | Official builds wrap the public app; connectors register through an extension point |
