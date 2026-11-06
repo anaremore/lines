@@ -82,16 +82,6 @@ impl UtcMillis {
         )
     }
 
-    /// Write "HH:MM" (or "MM-DD" at midnight) without allocating.
-    pub fn write_axis_label<W: fmt::Write>(self, out: &mut W) -> fmt::Result {
-        let (_, mo, d, h, mi, _) = self.to_civil();
-        if h == 0 && mi == 0 {
-            write!(out, "{mo:02}-{d:02}")
-        } else {
-            write!(out, "{h:02}:{mi:02}")
-        }
-    }
-
     /// Day of week, 0 = Sunday.
     pub fn weekday(self) -> u32 {
         // 1970-01-01 was a Thursday.

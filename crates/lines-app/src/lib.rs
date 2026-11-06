@@ -336,6 +336,10 @@ struct Cli {
     /// Screenshot: the chart with its studies hidden (Ctrl+Shift+H in the app).
     #[arg(long, requires = "screenshot")]
     hide_studies: bool,
+    /// Magnet crosshair on the first chart: the price snaps to the hovered bar's
+    /// open/high/low/close (Ctrl+Shift+G in the app).
+    #[arg(long)]
+    magnet: bool,
     /// Screenshot: start the chart with these studies (a `StudySet` JSON file, as a template
     /// or the defaults for new charts hold them).
     #[arg(long, requires = "screenshot")]
@@ -644,11 +648,13 @@ where
     let choice = SourceChoice::parse(&cli.source, &ext)
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source))?;
     let config = feed_config(&cli, &choice)?;
-    lines_feed::levels::runtime::set_mode(match (&cli.record_levels, &cli.replay_levels) {
-        (Some(d), _) => lines_feed::levels::runtime::LevelMode::Record(d.clone()),
-        (_, Some(d)) => lines_feed::levels::runtime::LevelMode::Replay(d.clone()),
-        _ => lines_feed::levels::runtime::LevelMode::Live,
-    });
+    // A market replay never runs a level source live (only its recorded batches, if any).
+    let market_replay = matches!(config.source, lines_feed::Source::Replay { .. });
+    lines_feed::levels::runtime::set_mode(lines_feed::levels::runtime::mode_for(
+        market_replay,
+        cli.record_levels.clone(),
+        cli.replay_levels.clone(),
+    ));
     #[cfg(feature = "demo-levels")]
     if cli.demo_levels {
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
@@ -713,6 +719,7 @@ where
                 None => None,
             },
             studies_menu: cli.studies_menu.clone(),
+            magnet: cli.magnet,
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),

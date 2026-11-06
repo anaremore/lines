@@ -168,6 +168,12 @@ pub trait LevelSource: Send + Sync + 'static {
     fn refresh(&self) -> RefreshMode;
     /// A map older than this (since it was last received or confirmed) shows as stale.
     fn stale_after(&self) -> Duration;
+    /// A synthetic source whose map doesn't depend on the day (the demo, test fixtures): it
+    /// may run in a market replay that has no recorded batches for it. Real sources are not
+    /// (the default): in a replay they show only what was recorded, else missing.
+    fn synthetic(&self) -> bool {
+        false
+    }
     fn settings(&self) -> &'static [SettingSpec] {
         &[]
     }

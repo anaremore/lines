@@ -12,7 +12,7 @@
 //! an odd number of device pixels wide so the wick runs exactly through the middle.
 
 use crate::bars::Bar;
-use crate::price::{Price, PriceFormat};
+use crate::price::{DisplayStyle, Price, PriceFormat};
 use crate::qty::QtyFormat;
 use crate::time::UtcMillis;
 use crate::viewport::Viewport;
@@ -39,6 +39,8 @@ pub struct PriceGridLine {
 pub struct TimeGridLine {
     pub time: UtcMillis,
     pub x: f32,
+    /// What the label shows (the date only on a new day).
+    pub label: TimeLabel,
 }
 
 /// Reusable per-frame draw lists.
@@ -47,6 +49,8 @@ pub struct Scene {
     pub candles: Vec<Candle>,
     pub price_lines: Vec<PriceGridLine>,
     pub time_lines: Vec<TimeGridLine>,
+    /// Minimum label spacing on both axes (set by the app from its font).
+    pub space: GridSpace,
 }
 
 pub const MAX_GRID_LINES: usize = 64;
@@ -57,6 +61,7 @@ impl Scene {
             candles: Vec::with_capacity(max_candles),
             price_lines: Vec::with_capacity(MAX_GRID_LINES),
             time_lines: Vec::with_capacity(MAX_GRID_LINES),
+            space: GridSpace::default(),
         }
     }
 
@@ -83,13 +88,19 @@ impl Scene {
         period_ms: i64,
     ) {
         build_candles(bars, vp, scale_factor, &mut self.candles);
-        build_price_grid(vp, fmt, scale_factor, 48.0, &mut self.price_lines);
+        build_price_grid(
+            vp,
+            fmt,
+            scale_factor,
+            self.space.price_px,
+            &mut self.price_lines,
+        );
         build_time_grid(
             bars,
             vp,
             period_ms,
             scale_factor,
-            90.0,
+            &self.space,
             &mut self.time_lines,
         );
     }
@@ -169,16 +180,80 @@ pub fn build_candles(bars: &[Bar], vp: &Viewport, scale_factor: f32, out: &mut V
     }
 }
 
-/// Choose a "nice" price step: a multiple of the tick of the form {1,2,5}·10^k ticks, so
-/// every gridline lands exactly on a tradable price.
-pub fn price_step(vp: &Viewport, tick: i64, min_px: f64) -> i64 {
-    let tick = tick.max(1);
+/// How far apart axis labels must be, in logical px (uPlot's "space"): each axis takes the
+/// smallest step from its fixed table whose labels clear it. The app measures its label
+/// font; the defaults suit a 12 px UI font.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GridSpace {
+    /// Price axis: label height plus a gap (labels are stacked vertically).
+    pub price_px: f64,
+    /// Time axis: the width of an `HH:MM` label plus a gap.
+    pub time_px: f64,
+    /// Time axis: the width of a `MM-DD HH:MM` label (a new day mid-step) plus a gap.
+    pub date_time_px: f64,
+}
+
+impl Default for GridSpace {
+    fn default() -> Self {
+        GridSpace {
+            price_px: 36.0,
+            time_px: 56.0,
+            date_time_px: 96.0,
+        }
+    }
+}
+
+/// Price step for gridlines: the smallest entry of a fixed table whose lines are at least
+/// `min_px` apart. Every step is a multiple of the tick, so each line is a tradable price.
+///
+/// The table is "nice" in the price's own notation: decimal prices step through
+/// {1, 2, 2.5, 5}·10^k (ES: 0.25 0.5 1 2 2.5 5 10 …, entries that aren't tick multiples are
+/// skipped); fractional prices (32nds) halve a point (1/64 … 1/2) before whole points. If
+/// nothing in the table fits (an odd tick), the step is {1, 2, 5}·10^k ticks.
+pub fn price_step(vp: &Viewport, fmt: &PriceFormat, min_px: f64) -> i64 {
+    let tick = fmt.tick.max(1);
     let px_per_unit = vp.height / (vp.price_hi - vp.price_lo).abs().max(f64::MIN_POSITIVE);
+    let fits = |units: i64| units as f64 * px_per_unit >= min_px;
+    // A price `n / d` (display units) in price units, if whole and a tick multiple.
+    let (num, den) = (fmt.scale.num() as i128, fmt.scale.den() as i128);
+    let units = |n: i128, d: i128| -> Option<i64> {
+        let (a, b) = (n * den, d * num);
+        (a % b == 0)
+            .then(|| a / b)
+            .and_then(|u| i64::try_from(u).ok())
+            .filter(|u| *u > 0 && u % tick == 0)
+    };
+    let binary = !matches!(fmt.style, DisplayStyle::Decimal { .. });
+    if binary {
+        // 1/4096 … 1/2 of a point, then whole points below.
+        for k in (1..=12).rev() {
+            if let Some(u) = units(1, 1 << k)
+                && fits(u)
+            {
+                return u;
+            }
+        }
+    }
+    // {1, 2, 2.5, 5} x 10^e, e from -18 (fractional prices: from whole points) to 18.
+    for e in if binary { 0 } else { -18 }..=18i32 {
+        for (m, d) in [(10i128, 10i128), (20, 10), (25, 10), (50, 10)] {
+            let (n, d) = if e >= 0 {
+                (m * 10i128.pow(e as u32), d)
+            } else {
+                (m, d * 10i128.pow(e.unsigned_abs()))
+            };
+            if let Some(u) = units(n, d)
+                && fits(u)
+            {
+                return u;
+            }
+        }
+    }
     let mut pow = 1i64;
     loop {
         for m in [1i64, 2, 5] {
             let step = tick.saturating_mul(m).saturating_mul(pow);
-            if step as f64 * px_per_unit >= min_px || step == i64::MAX {
+            if fits(step) || step == i64::MAX {
                 return step;
             }
         }
@@ -195,7 +270,7 @@ pub fn build_price_grid(
     out: &mut Vec<PriceGridLine>,
 ) {
     out.clear();
-    let step = price_step(vp, fmt.tick, min_px);
+    let step = price_step(vp, fmt, min_px);
     let lo = vp.price_lo.min(vp.price_hi);
     let hi = vp.price_lo.max(vp.price_hi);
     if !(lo.is_finite() && hi.is_finite()) {
@@ -211,44 +286,147 @@ pub fn build_price_grid(
     }
 }
 
-/// Bar-count multiples used for time grid spacing (in units of the bar period).
-const TIME_STEPS: [i64; 14] = [
-    1, 2, 5, 10, 15, 30, 60, 120, 240, 360, 720, 1440, 2880, 10080,
+const SEC: i64 = 1_000;
+const MIN: i64 = 60 * SEC;
+const HOUR: i64 = 60 * MIN;
+const DAY: i64 = 24 * HOUR;
+const WEEK: i64 = 7 * DAY;
+
+/// Time steps for the time axis (uPlot's table, to a week). Entries that aren't whole bar
+/// periods are skipped; past the table, whole weeks.
+const TIME_STEPS: [i64; 26] = [
+    SEC,
+    2 * SEC,
+    5 * SEC,
+    10 * SEC,
+    15 * SEC,
+    30 * SEC,
+    MIN,
+    2 * MIN,
+    5 * MIN,
+    10 * MIN,
+    15 * MIN,
+    30 * MIN,
+    HOUR,
+    2 * HOUR,
+    3 * HOUR,
+    4 * HOUR,
+    6 * HOUR,
+    8 * HOUR,
+    12 * HOUR,
+    DAY,
+    2 * DAY,
+    3 * DAY,
+    WEEK,
+    2 * WEEK,
+    4 * WEEK,
+    8 * WEEK,
 ];
 
-/// Fill `out` (within capacity) with vertical grid lines at round times.
+/// What a time gridline's label shows.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TimeLabel {
+    /// `HH:MM`: same day as the line before it.
+    Time,
+    /// `MM-DD`: the first line of a new day, on midnight (or every line of a step of a day
+    /// or more).
+    Date,
+    /// `MM-DD HH:MM`: the first line of a new day, not on midnight.
+    DateTime,
+}
+
+impl TimeLabel {
+    /// Write the label for `t` (UTC, as the axis), without allocating.
+    pub fn write<W: std::fmt::Write>(self, t: UtcMillis, out: &mut W) -> std::fmt::Result {
+        let (_, mo, d, h, mi, _) = t.to_civil();
+        match self {
+            TimeLabel::Time => write!(out, "{h:02}:{mi:02}"),
+            TimeLabel::Date => write!(out, "{mo:02}-{d:02}"),
+            TimeLabel::DateTime => write!(out, "{mo:02}-{d:02} {h:02}:{mi:02}"),
+        }
+    }
+}
+
+/// The time step for gridlines: the smallest table entry that is a whole number of bar
+/// periods and puts `HH:MM` labels at least `min_px` apart.
+pub fn time_step(vp: &Viewport, period_ms: i64, min_px: f64) -> i64 {
+    let period = period_ms.max(1);
+    let px_per_ms = vp.bar_px / period as f64;
+    let fits = |ms: i64| ms as f64 * px_per_ms >= min_px;
+    if let Some(s) = TIME_STEPS
+        .iter()
+        .copied()
+        .find(|s| *s % period == 0 && *s >= period && fits(*s))
+    {
+        return s;
+    }
+    let mut s = (WEEK / period).max(1) * period;
+    while !fits(s) && s < i64::MAX / 2 {
+        s *= 2;
+    }
+    s
+}
+
+/// Start of the step-`step_ms` bucket holding `t`. Weeks start on Monday 00:00 UTC.
+fn time_bucket(t: UtcMillis, step_ms: i64) -> i64 {
+    if step_ms >= WEEK && step_ms % WEEK == 0 {
+        // 1970-01-01 was a Thursday: the first Monday is 4 days later.
+        let off = 4 * DAY;
+        (t.0 - off).div_euclid(step_ms) * step_ms + off
+    } else {
+        t.0.div_euclid(step_ms) * step_ms
+    }
+}
+
+/// Fill `out` (within capacity) with vertical grid lines at round times: the first bar of
+/// each step bucket (bars missing in a gap move the line to the next bar), where its label
+/// clears the previous one. The first line of the view and the first of each new UTC day
+/// carry the date ([`TimeLabel`]); the rest show only the time.
 pub fn build_time_grid(
     bars: &[Bar],
     vp: &Viewport,
     period_ms: i64,
     scale_factor: f32,
-    min_px: f64,
+    space: &GridSpace,
     out: &mut Vec<TimeGridLine>,
 ) {
     out.clear();
-    let bars_per_line = (min_px / vp.bar_px).ceil().max(1.0) as i64;
-    let step_ms = TIME_STEPS
-        .iter()
-        .map(|m| m * period_ms)
-        .find(|ms| *ms >= bars_per_line * period_ms)
-        .unwrap_or(TIME_STEPS[TIME_STEPS.len() - 1] * period_ms);
-    let mut last_x = f64::NEG_INFINITY;
+    let step = time_step(vp, period_ms, space.time_px);
+    let mut last: Option<(f64, f64, i64)> = None; // (x, label space, day)
     for i in vp.visible_range(bars.len()) {
         if out.len() == out.capacity() {
             break;
         }
         let t = bars[i].time;
-        // First bar at or after each round boundary (handles gaps where the exact bar is missing).
-        let is_boundary = t.0.rem_euclid(step_ms) == 0
-            || (i > 0 && bars[i - 1].time.floor_to(step_ms) != t.floor_to(step_ms));
-        let x = vp.index_to_x(i as f64);
-        if is_boundary && x - last_x >= min_px * 0.75 {
-            out.push(TimeGridLine {
-                time: t,
-                x: slot_x(vp, i as f64, scale_factor),
-            });
-            last_x = x;
+        let is_boundary = t.0 - time_bucket(t, step) == 0
+            || (i > 0 && time_bucket(bars[i - 1].time, step) != time_bucket(t, step));
+        if !is_boundary {
+            continue;
         }
+        let x = vp.index_to_x(i as f64);
+        if let Some((lx, room, _)) = last
+            && x - lx < room
+        {
+            continue;
+        }
+        let day = t.0.div_euclid(DAY);
+        let label = if last.is_some_and(|(_, _, d)| d == day) {
+            TimeLabel::Time
+        } else if step >= DAY || t.0.rem_euclid(DAY) == 0 {
+            TimeLabel::Date
+        } else {
+            TimeLabel::DateTime
+        };
+        let room = match label {
+            TimeLabel::DateTime => space.date_time_px,
+            _ => space.time_px,
+        };
+        out.push(TimeGridLine {
+            time: t,
+            x: slot_x(vp, i as f64, scale_factor),
+            label,
+        });
+        last = Some((x, room, day));
     }
 }
 
@@ -341,14 +519,38 @@ pub fn time_slot(bars: &[Bar], t: UtcMillis, period_ms: i64) -> Option<i64> {
     (t.0 < bars[i].time.0 + p).then_some(i as i64)
 }
 
+/// How the crosshair's price follows the pointer.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CrosshairMode {
+    /// The tick nearest the pointer.
+    #[default]
+    Normal,
+    /// Magnet: over a bar, its open, high, low or close nearest the pointer (off the bars,
+    /// as `Normal`).
+    Magnet,
+}
+
+/// Of `bar`'s open, high, low and close, the one nearest `price` (ties: in that order).
+pub fn magnet_price(bar: &Bar, price: f64) -> Price {
+    let mut best = bar.open;
+    for p in [bar.high, bar.low, bar.close] {
+        if (p.0 as f64 - price).abs() < (best.0 as f64 - price).abs() {
+            best = p;
+        }
+    }
+    best
+}
+
 /// Hit-test the pointer at plot-local logical (`x`, `y`). `None` when the pointer is outside
 /// the plot `[0, width) × [0, height)` or not a finite position. Pure and allocation-free.
+#[allow(clippy::too_many_arguments)]
 pub fn crosshair(
     bars: &[Bar],
     vp: &Viewport,
     tick: i64,
     period_ms: i64,
     scale_factor: f32,
+    mode: CrosshairMode,
     x: f64,
     y: f64,
 ) -> Option<Crosshair> {
@@ -356,8 +558,11 @@ pub fn crosshair(
         return None; // also rejects NaN
     }
     let slot = hit_slot(vp, x);
-    let price = snap_price(vp, y, tick)?;
     let bar = usize::try_from(slot).ok().filter(|&i| i < bars.len());
+    let price = match (mode, bar) {
+        (CrosshairMode::Magnet, Some(i)) => magnet_price(&bars[i], vp.y_to_price(y)),
+        _ => snap_price(vp, y, tick)?,
+    };
     Some(Crosshair {
         slot,
         bar,
@@ -525,9 +730,9 @@ mod tests {
             price_hi: 1_000.0,
             ..Viewport::default()
         };
-        let small = price_step(&vp, 25, 48.0);
+        let small = price_step(&vp, &es(), 48.0);
         vp.price_hi = 1_000_000.0;
-        let big = price_step(&vp, 25, 48.0);
+        let big = price_step(&vp, &es(), 48.0);
         assert!(big > small);
         assert_eq!(small % 25, 0);
         assert_eq!(big % 25, 0);
@@ -539,12 +744,221 @@ mod tests {
         let mut vp = Viewport::default();
         vp.on_data(&b, 25);
         let mut out = Vec::with_capacity(MAX_GRID_LINES);
-        build_time_grid(&b, &vp, 60_000, 1.0, 90.0, &mut out);
+        let space = GridSpace::default();
+        build_time_grid(&b, &vp, 60_000, 1.0, &space, &mut out);
         assert!(out.len() >= 2);
         for w in out.windows(2) {
-            assert!(w[1].x - w[0].x >= 90.0 * 0.75 - 1.0);
+            let room = match w[0].label {
+                TimeLabel::DateTime => space.date_time_px,
+                _ => space.time_px,
+            };
+            // Device-pixel snapping moves each line by at most half a device pixel.
+            assert!((w[1].x - w[0].x) as f64 >= room - 1.0, "{w:?}");
             assert!(w[1].time > w[0].time);
         }
+    }
+
+    /// Plot of `height` px over `span` price units starting at 400_000.
+    fn price_vp(span: f64) -> Viewport {
+        Viewport {
+            height: 500.0,
+            price_lo: 400_000.0,
+            price_hi: 400_000.0 + span,
+            ..Viewport::default()
+        }
+    }
+
+    #[test]
+    fn price_steps_come_from_the_nice_table_and_are_tick_multiples() {
+        // ES: tick 0.25 (25 units of 0.01). Steps 0.25 0.5 1 2 2.5 5 10 20 25 50 …; 0.1, 0.2
+        // and 1.25-style steps never appear.
+        let es = es();
+        let mut seen = Vec::new();
+        for k in 0..60 {
+            let span = 200.0 * 1.25f64.powi(k);
+            let step = price_step(&price_vp(span), &es, 36.0);
+            assert_eq!(step % 25, 0, "{step}");
+            // The smallest table entry that clears 36 px.
+            assert!(step as f64 * 500.0 / span >= 36.0);
+            if seen.last() != Some(&step) {
+                seen.push(step);
+            }
+        }
+        assert_eq!(
+            &seen[..10],
+            &[25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000]
+        );
+        // Each is the smallest that fits: the previous table entry would be too tight.
+        let step = price_step(&price_vp(10_000.0), &es, 36.0); // 0.05 px per unit
+        assert_eq!(step, 1000, "720 px > 36 px at 10.00; 5.00 gives 25 px");
+    }
+
+    #[test]
+    fn fractional_prices_step_in_halves_of_a_point() {
+        // ZN: unit 1/128 point, tick 1/64 (2 units). Steps: 1/64 1/32 1/16 1/8 1/4 1/2 then
+        // 1 2 2.5 5 … points.
+        let zn = PriceFormat::new(
+            PriceScale::new(1, 128),
+            DisplayStyle::SubFraction {
+                denominator: 32,
+                sub: 4,
+            },
+            2,
+        );
+        let mut seen = Vec::new();
+        for k in 0..40 {
+            let span = 10.0 * 1.3f64.powi(k);
+            let step = price_step(&price_vp(span), &zn, 36.0);
+            assert_eq!(step % 2, 0);
+            if seen.last() != Some(&step) {
+                seen.push(step);
+            }
+        }
+        assert_eq!(&seen[..9], &[2, 4, 8, 16, 32, 64, 128, 256, 320]);
+    }
+
+    #[test]
+    fn odd_ticks_fall_back_to_tick_multiples() {
+        // A tick of 3 units divides no nice decimal below 30 (and 30 = 3 x 10 is in the
+        // table as 0.30): every step is still a tick multiple.
+        let f = PriceFormat::new(
+            PriceScale::decimal(2),
+            DisplayStyle::Decimal { digits: 2 },
+            3,
+        );
+        for k in 0..40 {
+            let step = price_step(&price_vp(50.0 * 1.4f64.powi(k)), &f, 36.0);
+            assert_eq!(step % 3, 0, "{step}");
+        }
+    }
+
+    #[test]
+    fn time_steps_are_whole_periods_from_the_table() {
+        let mut vp = Viewport::default();
+        for bar_px in [80.0, 20.0, 8.0, 3.0, 1.0] {
+            vp.bar_px = bar_px;
+            for period in [1_000, 5_000, 60_000, 300_000, 3_600_000, DAY] {
+                let s = time_step(&vp, period, 56.0);
+                assert_eq!(s % period, 0, "{s} {period}");
+                assert!(s as f64 / period as f64 * bar_px >= 56.0);
+            }
+        }
+        // One-minute bars at 8 px: 7 bars per label; 10 minutes is the first that fits.
+        vp.bar_px = 8.0;
+        assert_eq!(time_step(&vp, 60_000, 56.0), 10 * MIN);
+        // 5-minute bars at 8 px: 30 minutes is 48 px, so an hour; steps under a bar skipped.
+        assert_eq!(time_step(&vp, 300_000, 56.0), HOUR);
+        // Beyond the table: whole weeks, doubling.
+        vp.bar_px = 1.0;
+        assert_eq!(time_step(&vp, DAY, 56.0), 8 * WEEK);
+    }
+
+    /// One-minute bars from `start` (UTC ms), `n` of them, skipping minutes in `gaps`.
+    fn minute_bars(start: i64, n: usize) -> Vec<Bar> {
+        (0..n)
+            .map(|i| Bar {
+                time: UtcMillis(start + i as i64 * MIN),
+                open: Price(400_000),
+                high: Price(400_100),
+                low: Price(399_900),
+                close: Price(400_050),
+                volume: Qty(1),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_date_shows_only_on_the_first_line_of_a_new_day() {
+        // 2026-11-05 22:00Z to 2026-11-06 02:00Z, one-minute bars, all on screen.
+        let start = crate::time::days_from_civil(2026, 11, 5) * DAY + 22 * HOUR; // 2026-11-05T22:00Z
+        assert_eq!(start.rem_euclid(DAY), 22 * HOUR);
+        let b = minute_bars(start, 240);
+        let mut vp = Viewport {
+            width: 1200.0,
+            bar_px: 5.0,
+            ..Viewport::default()
+        };
+        vp.on_data(&b, 25);
+        let mut out = Vec::with_capacity(MAX_GRID_LINES);
+        build_time_grid(&b, &vp, MIN, 1.0, &GridSpace::default(), &mut out);
+        let labels: Vec<(String, TimeLabel)> = out
+            .iter()
+            .map(|l| {
+                let mut s = String::new();
+                l.label.write(l.time, &mut s).unwrap();
+                (s, l.label)
+            })
+            .collect();
+        // First line of the view: the date with its time; midnight: the date alone; every
+        // other line the time only.
+        assert_eq!(labels[0].1, TimeLabel::DateTime, "{labels:?}");
+        assert!(labels[0].0.starts_with("11-05 "), "{labels:?}");
+        let dates: Vec<&str> = labels
+            .iter()
+            .filter(|(_, k)| *k != TimeLabel::Time)
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert_eq!(dates, [labels[0].0.as_str(), "11-06"], "{labels:?}");
+        assert!(labels.iter().any(|(s, _)| s == "23:00"));
+        assert!(labels.iter().any(|(s, _)| s == "01:00"));
+        // Daily steps: every line is a date.
+        vp.bar_px = 1.0;
+        let b = minute_bars(start, 6 * 1440);
+        vp.on_data(&b, 25);
+        build_time_grid(&b, &vp, MIN, 1.0, &GridSpace::default(), &mut out);
+        assert!(
+            out.iter()
+                .all(|l| l.label != TimeLabel::DateTime || l == &out[0])
+        );
+    }
+
+    #[test]
+    fn week_lines_start_on_monday() {
+        // Monday 2026-11-02 00:00Z.
+        let monday = crate::time::days_from_civil(2026, 11, 2) * DAY;
+        assert_eq!(UtcMillis(monday).weekday(), 1);
+        assert_eq!(time_bucket(UtcMillis(monday + 5 * DAY), WEEK), monday);
+        assert_eq!(time_bucket(UtcMillis(monday - 1), WEEK), monday - WEEK);
+    }
+
+    #[test]
+    fn magnet_snaps_to_the_nearest_of_ohlc() {
+        let b = Bar {
+            time: UtcMillis(0),
+            open: Price(400_000),
+            high: Price(400_500),
+            low: Price(399_000),
+            close: Price(400_250),
+            volume: Qty(1),
+        };
+        assert_eq!(magnet_price(&b, 400_600.0), Price(400_500));
+        assert_eq!(magnet_price(&b, 400_130.0), Price(400_250));
+        assert_eq!(magnet_price(&b, 400_100.0), Price(400_000));
+        assert_eq!(magnet_price(&b, 300_000.0), Price(399_000));
+        // Through the hit-test: over a bar the price is one of its OHLC; off the bars the
+        // pointer's tick.
+        let bars = bars(100);
+        let vp = plot();
+        for y in [5.0, 120.0, 260.0, 499.0] {
+            let c =
+                crosshair(&bars, &vp, 25, 60_000, 1.0, CrosshairMode::Magnet, 500.0, y).unwrap();
+            let bar = bars[c.bar.unwrap()];
+            assert!([bar.open, bar.high, bar.low, bar.close].contains(&c.price));
+            assert_eq!(c.y, snap(vp.price_to_y(c.price.0 as f64), 1.0));
+        }
+        let off = crosshair(
+            &bars[..90],
+            &vp,
+            25,
+            60_000,
+            1.0,
+            CrosshairMode::Magnet,
+            995.0,
+            250.0,
+        )
+        .unwrap();
+        assert_eq!(off.bar, None);
+        assert_eq!(off.price, snap_price(&vp, 250.0, 25).unwrap());
     }
 
     #[test]
@@ -611,7 +1025,17 @@ mod tests {
     fn crosshair_inside_data() {
         let b = bars(100);
         let vp = plot();
-        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, 503.0, 250.0).unwrap();
+        let ch = crosshair(
+            &b,
+            &vp,
+            25,
+            60_000,
+            1.0,
+            CrosshairMode::Normal,
+            503.0,
+            250.0,
+        )
+        .unwrap();
         assert_eq!(ch.slot, 49);
         assert_eq!(ch.bar, Some(49));
         assert_eq!(ch.time, Some(b[49].time));
@@ -625,7 +1049,7 @@ mod tests {
         let b = bars(100);
         let vp = plot(); // 4 price units per px; tick 25 = 6.25 px
         for y in [0.0, 1.0, 3.0, 3.2, 100.7, 250.0, 333.3, 499.0, 499.99] {
-            let ch = crosshair(&b, &vp, 25, 60_000, 1.0, 500.0, y).unwrap();
+            let ch = crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, 500.0, y).unwrap();
             assert_eq!(ch.price.0 % 25, 0, "off tick at y={y}: {ch:?}");
             let raw = vp.y_to_price(y);
             assert!(
@@ -659,15 +1083,15 @@ mod tests {
         let b = bars(20);
         let mut vp = plot();
         vp.right_index = 60.0; // bar 0 centred at x = 400; empty space to its left
-        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, 100.0, 10.0).unwrap();
+        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, 100.0, 10.0).unwrap();
         assert_eq!(ch.slot, -30);
         assert_eq!(ch.bar, None, "no bar before the first one");
         assert_eq!(ch.time, Some(UtcMillis(b[0].time.0 - 30 * 60_000)));
         assert_eq!(ch.x, 100.5);
         // The left half of bar 0's slot still hits bar 0.
-        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, 395.0, 10.0).unwrap();
+        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, 395.0, 10.0).unwrap();
         assert_eq!(ch.bar, Some(0));
-        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, 394.9, 10.0).unwrap();
+        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, 394.9, 10.0).unwrap();
         assert_eq!(ch.bar, None);
         assert_eq!(ch.slot, -1);
     }
@@ -676,18 +1100,28 @@ mod tests {
     fn crosshair_after_last_bar() {
         let b = bars(97); // last bar 96; slots 97..=99 are the empty right margin
         let vp = plot();
-        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, 995.0, 10.0).unwrap();
+        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, 995.0, 10.0).unwrap();
         assert_eq!(ch.slot, 99);
         assert_eq!(ch.bar, None);
         assert_eq!(ch.time, Some(UtcMillis(b[96].time.0 + 3 * 60_000)));
-        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, 974.9, 10.0).unwrap();
+        let ch = crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, 974.9, 10.0).unwrap();
         assert_eq!(ch.bar, Some(96));
     }
 
     #[test]
     fn crosshair_without_data() {
         let vp = plot();
-        let ch = crosshair(&[], &vp, 25, 60_000, 1.0, 500.0, 250.0).unwrap();
+        let ch = crosshair(
+            &[],
+            &vp,
+            25,
+            60_000,
+            1.0,
+            CrosshairMode::Normal,
+            500.0,
+            250.0,
+        )
+        .unwrap();
         assert_eq!(ch.bar, None);
         assert_eq!(ch.time, None, "no time without bars");
         assert_eq!(ch.price, Price(401_000), "the price axis still works");
@@ -707,13 +1141,25 @@ mod tests {
             (10.0, f64::INFINITY),
         ] {
             assert_eq!(
-                crosshair(&b, &vp, 25, 60_000, 1.0, x, y),
+                crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, x, y),
                 None,
                 "({x}, {y})"
             );
         }
-        assert!(crosshair(&b, &vp, 25, 60_000, 1.0, 0.0, 0.0).is_some());
-        assert!(crosshair(&b, &vp, 25, 60_000, 1.0, 999.99, 499.99).is_some());
+        assert!(crosshair(&b, &vp, 25, 60_000, 1.0, CrosshairMode::Normal, 0.0, 0.0).is_some());
+        assert!(
+            crosshair(
+                &b,
+                &vp,
+                25,
+                60_000,
+                1.0,
+                CrosshairMode::Normal,
+                999.99,
+                499.99
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -726,7 +1172,8 @@ mod tests {
             vp.price_lo = 400_003.0;
             for x in [0.0, 0.4, 33.3, 333.33, 666.7, 999.9] {
                 for y in [0.0, 0.7, 123.45, 499.9] {
-                    let ch = crosshair(&b, &vp, 25, 60_000, s, x, y).unwrap();
+                    let ch =
+                        crosshair(&b, &vp, 25, 60_000, s, CrosshairMode::Normal, x, y).unwrap();
                     assert!(on_device_centre(ch.x, s), "x {} at {s}", ch.x);
                     assert!(on_device_grid(ch.y, s), "y {} at {s}", ch.y);
                     // Snapping moves a line by at most half a device pixel.
@@ -756,7 +1203,8 @@ mod tests {
                 if !(0.0..vp.width).contains(&x) {
                     continue;
                 }
-                let ch = crosshair(&b, &vp, 25, 60_000, s, x, 100.0).unwrap();
+                let ch =
+                    crosshair(&b, &vp, 25, 60_000, s, CrosshairMode::Normal, x, 100.0).unwrap();
                 assert_eq!(ch.bar, Some(i));
                 assert_eq!(ch.x, c.x, "crosshair and wick differ at bar {i}, scale {s}");
             }
