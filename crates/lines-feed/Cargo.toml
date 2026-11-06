@@ -1,0 +1,21 @@
+[package]
+name = "lines-feed"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lines-core.workspace = true
+cqg-proto.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true

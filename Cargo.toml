@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed", "crates/lines-app"]
+default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed", "crates/lines-app"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+lines-core = { path = "crates/lines-core" }
+cqg-proto = { path = "crates/cqg-proto" }
+lines-feed = { path = "crates/lines-feed" }
+
+# GPUI is pinned to an exact Zed commit. The crates.io release (0.2.2, Oct 2025) is
+# far behind main. Bump deliberately: change BOTH revs together, rebuild, fix API drift.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "db43f05e398036f08e544c03cbc068216c7a0aaa" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "db43f05e398036f08e544c03cbc068216c7a0aaa" }
+
+prost = "0.14"
+prost-build = "0.14"
+prost-types = "0.14"
+protox = "0.10"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "fs", "io-util"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+# `ring` instead of the default aws-lc-rs backend: no CMake/NASM needed to build on Windows.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+parking_lot = "0.12"
+clap = { version = "4.6", features = ["derive"] }
+
+[profile.dev.package."*"]
+# Dependencies (GPUI especially) are painfully slow unoptimised.
+opt-level = 2
+
+[profile.release]
+debug = "line-tables-only"

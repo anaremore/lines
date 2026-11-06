@@ -1,0 +1,5 @@
+[toolchain]
+# Matches the toolchain of the pinned Zed commit (see Cargo.toml).
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

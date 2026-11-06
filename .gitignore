@@ -1,0 +1,7 @@
+/target
+# Feed recordings may contain licensed exchange data. Never commit them.
+/recordings/
+*.lfr
+# Sierra Chart data is licensed for personal use only (decision 0010).
+*.scid
+*.depth

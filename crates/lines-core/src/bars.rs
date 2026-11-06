@@ -1,0 +1,283 @@
+//! OHLCV bars and live aggregation.
+//!
+//! Ownership model: history arrives as complete bars from the server (CQG `TimeBarReport`);
+//! live trades are folded into the forming bar locally so the chart moves with every tick;
+//! server bar updates for the same bucket overwrite the local bar (server is authoritative).
+
+use crate::price::Price;
+use crate::time::UtcMillis;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Bar {
+    /// Bucket start (inclusive).
+    pub time: UtcMillis,
+    pub open: Price,
+    pub high: Price,
+    pub low: Price,
+    pub close: Price,
+    /// Contracts traded.
+    pub volume: u64,
+}
+
+impl Bar {
+    pub fn from_trade(time: UtcMillis, price: Price, volume: u64) -> Bar {
+        Bar {
+            time,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume,
+        }
+    }
+
+    #[inline]
+    pub fn apply_trade(&mut self, price: Price, volume: u64) {
+        if price > self.high {
+            self.high = price;
+        }
+        if price < self.low {
+            self.low = price;
+        }
+        self.close = price;
+        self.volume += volume;
+    }
+}
+
+/// Bars of fixed period, sorted by time, unique per bucket.
+#[derive(Debug, Clone)]
+pub struct BarSeries {
+    period_ms: i64,
+    bars: Vec<Bar>,
+    max_len: usize,
+    /// Bumped on every mutation. The UI compares it to decide whether to redraw.
+    revision: u64,
+    /// Number of bars ever removed from the front (lets views keep a stable index anchor).
+    trimmed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeOutcome {
+    UpdatedLast,
+    NewBar,
+    /// Trade belongs to an older bucket (late/out-of-order); applied in place.
+    Late,
+    /// Older than anything we keep; dropped.
+    TooOld,
+}
+
+impl BarSeries {
+    pub fn new(period_ms: i64, max_len: usize) -> Self {
+        assert!(period_ms > 0 && max_len > 0);
+        BarSeries {
+            period_ms,
+            // trim() lets len reach max_len + slack + 1 before draining; reserve exactly that.
+            bars: Vec::with_capacity(max_len + max_len / 4 + 2),
+            max_len,
+            revision: 0,
+            trimmed: 0,
+        }
+    }
+
+    pub fn period_ms(&self) -> i64 {
+        self.period_ms
+    }
+    pub fn bars(&self) -> &[Bar] {
+        &self.bars
+    }
+    pub fn len(&self) -> usize {
+        self.bars.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bars.is_empty()
+    }
+    pub fn last(&self) -> Option<&Bar> {
+        self.bars.last()
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn trimmed(&self) -> u64 {
+        self.trimmed
+    }
+
+    pub fn clear(&mut self) {
+        self.bars.clear();
+        self.revision += 1;
+    }
+
+    /// Fold one trade into the series.
+    pub fn apply_trade(&mut self, time: UtcMillis, price: Price, volume: u64) -> TradeOutcome {
+        let bucket = time.floor_to(self.period_ms);
+        self.revision += 1;
+        match self.bars.last_mut() {
+            Some(last) if last.time == bucket => {
+                last.apply_trade(price, volume);
+                TradeOutcome::UpdatedLast
+            }
+            Some(last) if last.time > bucket => {
+                match self.bars.binary_search_by_key(&bucket, |b| b.time) {
+                    Ok(i) => {
+                        self.bars[i].apply_trade(price, volume);
+                        TradeOutcome::Late
+                    }
+                    Err(0) if self.bars.len() >= self.max_len => TradeOutcome::TooOld,
+                    Err(i) => {
+                        self.bars.insert(i, Bar::from_trade(bucket, price, volume));
+                        self.trim();
+                        TradeOutcome::Late
+                    }
+                }
+            }
+            _ => {
+                self.bars.push(Bar::from_trade(bucket, price, volume));
+                self.trim();
+                TradeOutcome::NewBar
+            }
+        }
+    }
+
+    /// Insert or overwrite a complete bar (server history or server bar update).
+    pub fn upsert(&mut self, bar: Bar) {
+        debug_assert_eq!(
+            bar.time,
+            bar.time.floor_to(self.period_ms),
+            "bar not aligned to period"
+        );
+        self.revision += 1;
+        match self.bars.last() {
+            Some(last) if last.time < bar.time => self.bars.push(bar),
+            None => self.bars.push(bar),
+            _ => match self.bars.binary_search_by_key(&bar.time, |b| b.time) {
+                Ok(i) => self.bars[i] = bar,
+                Err(i) => self.bars.insert(i, bar),
+            },
+        }
+        self.trim();
+    }
+
+    /// Index of the bar containing `time`, or where it would be inserted.
+    pub fn index_at(&self, time: UtcMillis) -> Result<usize, usize> {
+        let bucket = time.floor_to(self.period_ms);
+        self.bars.binary_search_by_key(&bucket, |b| b.time)
+    }
+
+    /// Keep at most `max_len` bars. Trims in chunks so the O(n) shift is rare.
+    fn trim(&mut self) {
+        let slack = self.max_len / 4 + 1;
+        if self.bars.len() > self.max_len + slack {
+            let drop = self.bars.len() - self.max_len;
+            self.bars.drain(..drop);
+            self.trimmed += drop as u64;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const M: i64 = UtcMillis::MINUTE;
+
+    fn t(ms: i64) -> UtcMillis {
+        UtcMillis(ms)
+    }
+
+    #[test]
+    fn aggregates_trades_into_buckets() {
+        let mut s = BarSeries::new(M, 100);
+        assert_eq!(s.apply_trade(t(1_000), Price(100), 1), TradeOutcome::NewBar);
+        assert_eq!(
+            s.apply_trade(t(2_000), Price(105), 2),
+            TradeOutcome::UpdatedLast
+        );
+        assert_eq!(
+            s.apply_trade(t(3_000), Price(95), 3),
+            TradeOutcome::UpdatedLast
+        );
+        assert_eq!(
+            s.apply_trade(t(59_999), Price(101), 4),
+            TradeOutcome::UpdatedLast
+        );
+        assert_eq!(
+            s.apply_trade(t(60_000), Price(102), 5),
+            TradeOutcome::NewBar
+        );
+        assert_eq!(s.len(), 2);
+        assert_eq!(
+            s.bars()[0],
+            Bar {
+                time: t(0),
+                open: Price(100),
+                high: Price(105),
+                low: Price(95),
+                close: Price(101),
+                volume: 10
+            }
+        );
+        assert_eq!(s.bars()[1].time, t(60_000));
+    }
+
+    #[test]
+    fn late_trade_updates_old_bar_and_gaps_are_filled_in_order() {
+        let mut s = BarSeries::new(M, 100);
+        s.apply_trade(t(0), Price(10), 1);
+        s.apply_trade(t(3 * M), Price(13), 1);
+        assert_eq!(s.apply_trade(t(1_000), Price(20), 1), TradeOutcome::Late);
+        assert_eq!(s.bars()[0].high, Price(20));
+        assert_eq!(s.apply_trade(t(M + 5), Price(11), 1), TradeOutcome::Late);
+        let times: Vec<_> = s.bars().iter().map(|b| b.time.0).collect();
+        assert_eq!(times, vec![0, M, 3 * M]);
+    }
+
+    #[test]
+    fn server_bar_overwrites_local() {
+        let mut s = BarSeries::new(M, 100);
+        s.apply_trade(t(0), Price(10), 1);
+        let server = Bar {
+            time: t(0),
+            open: Price(9),
+            high: Price(12),
+            low: Price(8),
+            close: Price(10),
+            volume: 50,
+        };
+        s.upsert(server);
+        assert_eq!(s.bars(), &[server]);
+        // Live trades continue on top of the server bar.
+        s.apply_trade(t(10), Price(13), 2);
+        assert_eq!(s.bars()[0].high, Price(13));
+        assert_eq!(s.bars()[0].volume, 52);
+    }
+
+    #[test]
+    fn history_merge_out_of_order() {
+        let mut s = BarSeries::new(M, 100);
+        for i in [5i64, 1, 3, 2, 4, 3] {
+            s.upsert(Bar::from_trade(t(i * M), Price(i), 1));
+        }
+        let times: Vec<_> = s.bars().iter().map(|b| b.time.0 / M).collect();
+        assert_eq!(times, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn trims_to_capacity_without_reallocating() {
+        let mut s = BarSeries::new(M, 8);
+        let cap = s.bars.capacity();
+        for i in 0..1000 {
+            s.apply_trade(t(i * M), Price(i), 1);
+        }
+        assert!(s.len() <= 8 + 8 / 4 + 1);
+        assert_eq!(s.last().unwrap().time, t(999 * M));
+        assert_eq!(s.bars.capacity(), cap);
+        assert_eq!(s.trimmed() as usize + s.len(), 1000);
+    }
+
+    #[test]
+    fn revision_bumps() {
+        let mut s = BarSeries::new(M, 8);
+        let r = s.revision();
+        s.apply_trade(t(0), Price(1), 1);
+        assert!(s.revision() > r);
+    }
+}

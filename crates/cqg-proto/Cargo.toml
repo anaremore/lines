@@ -1,0 +1,15 @@
+[package]
+name = "cqg-proto"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Rust types generated from CQG WebAPI .proto files (git submodule third_party/cqg-webapi)."
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "lines-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pure charting/pricing logic. Must not depend on GPUI, Tokio or protobuf."
+
+[dependencies]
