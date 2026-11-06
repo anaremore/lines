@@ -14,6 +14,7 @@ pub mod disk;
 pub mod extension;
 pub mod indicators;
 pub mod kraken;
+pub mod levels;
 pub mod listen;
 pub mod native;
 pub mod provider;
