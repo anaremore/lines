@@ -1,3 +1,12 @@
+//! End-to-end feeds: the CQG-protocol mock and replays through the real session, transport
+//! and store.
+//!
+//! The mock produces data in real time, so these tests never assert on what happened within a
+//! fixed number of seconds (that fails when other builds load the CPU). They run **until** the
+//! condition they need holds, with a generous deadline ([`run_until`]): contention only makes
+//! them slower. The mock's throughput budget (5k updates/s) is checked only by the ignored
+//! perf test `cqg_mock_sustains_5k_updates_per_second`.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +25,42 @@ fn temp_path(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// Run the feed for `dur` and return its store.
+/// How long a test waits for a real-time feed to get somewhere (far more than it needs
+/// unloaded: a deadline, not an expectation).
+const DEADLINE: Duration = Duration::from_secs(60);
+
+/// Run the feed until `done` holds for its data (checked every 10 ms), then stop it. Panics
+/// with the feed's status and stats if `DEADLINE` passes first.
+async fn run_until(
+    config: FeedConfig,
+    what: &str,
+    done: impl Fn(&lines_feed::ChartData) -> bool,
+) -> Arc<ChartStore> {
+    let store = new_store(&config).unwrap();
+    let (tx, rx) = watch::channel(false);
+    let task = tokio::spawn(run_feed(config, store.clone(), rx));
+    let start = Instant::now();
+    loop {
+        {
+            let d = store.read();
+            if done(&d) {
+                break;
+            }
+            assert!(
+                start.elapsed() < DEADLINE,
+                "{what}: not reached in {DEADLINE:?} ({:?}, {:?})",
+                d.status,
+                d.stats
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tx.send(true).unwrap();
+    task.await.unwrap();
+    store
+}
+
+/// Run the feed for `dur` and return its store (the perf test only).
 async fn run_for(config: FeedConfig, dur: Duration) -> Arc<ChartStore> {
     let store = new_store(&config).unwrap();
     let (tx, rx) = watch::channel(false);
@@ -47,7 +91,11 @@ async fn cqg_mock_end_to_end_at_5k() {
         history_bars: 600,
         ..Default::default()
     };
-    let store = run_for(mock(cfg), Duration::from_secs(3)).await;
+    // History back-filled and 9k live updates (3 s of the mock's 5k/s, unloaded).
+    let store = run_until(mock(cfg), "history and 9k updates", |d| {
+        d.series.len() >= 600 && d.stats.updates_in >= 9_000 && d.stats.trades_in > 0
+    })
+    .await;
     let d = store.read();
     assert_eq!(
         d.product.symbol, "ES",
@@ -56,18 +104,6 @@ async fn cqg_mock_end_to_end_at_5k() {
     // Following the product: the store is keyed by its front-month contract.
     assert_eq!(d.contract, lines_feed::front_month(&d.product, None));
     assert_eq!(d.provider, "cqg");
-    assert!(
-        d.series.len() >= 600,
-        "history back-filled: {} bars",
-        d.series.len()
-    );
-    // ~5k updates/s for 3 s minus logon/history: demand at least 60% of nominal.
-    assert!(
-        d.stats.updates_in >= 9_000,
-        "updates_in = {}",
-        d.stats.updates_in
-    );
-    assert!(d.stats.trades_in > 0);
     assert_eq!((d.stats.decode_errors, d.stats.rejected), (0, 0));
     assert!(d.bid.is_some() && d.ask.is_some() && d.last_trade.is_some());
     let tick = d.product.price.tick;
@@ -78,6 +114,27 @@ async fn cqg_mock_end_to_end_at_5k() {
         assert!(b.low <= b.open && b.low <= b.close && b.high >= b.open && b.high >= b.close);
     }
     assert!(d.series.bars().windows(2).all(|w| w[0].time < w[1].time));
+    println!("mock: {:?}", d.stats);
+}
+
+/// The mock's throughput budget: ~5k updates/s for 3 s minus logon and history, at least 60%
+/// of nominal. Wall-clock bound, so ignored by default (it fails when other builds load the
+/// CPU); run it on a quiet machine:
+/// `cargo test -p lines-feed --test feed -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "perf: wall-clock throughput; run on a quiet machine"]
+async fn cqg_mock_sustains_5k_updates_per_second() {
+    let cfg = MockConfig {
+        history_bars: 600,
+        ..Default::default()
+    };
+    let store = run_for(mock(cfg), Duration::from_secs(3)).await;
+    let d = store.read();
+    assert!(
+        d.stats.updates_in >= 9_000,
+        "updates_in = {} in 3 s",
+        d.stats.updates_in
+    );
     println!("mock 3s: {:?}", d.stats);
 }
 
@@ -89,7 +146,10 @@ async fn record_then_replay_reproduces_bars_exactly() {
         ..Default::default()
     });
     live.record = Some(path.clone());
-    let live_store = run_for(live, Duration::from_millis(2_000)).await;
+    let live_store = run_until(live, "5k updates recorded", |d| {
+        d.stats.updates_in > 5_000 && d.stats.trades_in > 0
+    })
+    .await;
 
     let started = Instant::now();
     let replay_store = run_to_end(FeedConfig::new(Source::Replay {
@@ -135,7 +195,10 @@ async fn replay_stops_at_timestamp() {
         ..Default::default()
     });
     live.record = Some(path.clone());
-    run_for(live, Duration::from_millis(1_500)).await;
+    run_until(live, "100 frames recorded", |d| {
+        d.stats.frames_in >= 100 && d.stats.trades_in > 0
+    })
+    .await;
 
     let full = run_to_end(FeedConfig::new(Source::Replay {
         path: path.clone(),
@@ -143,8 +206,17 @@ async fn replay_stops_at_timestamp() {
         stop_at: None,
     }))
     .await;
-    let header = lines_feed::transport::read_header(&path).unwrap();
-    let cut = UtcMillis(header.start_wall_ms + 700);
+    // Cut at the recorded time of the middle frame from the server (not a wall-clock offset:
+    // how many frames a loaded machine recorded by then varies).
+    let mut r = lines_feed::recording::Reader::open(&path).unwrap();
+    let mut times = Vec::new();
+    while let Some(rec) = r.next_record().unwrap() {
+        if rec.direction == lines_feed::recording::Direction::FromServer {
+            times.push(rec.wall_ms(&r.header));
+        }
+    }
+    let cut = UtcMillis(times[times.len() / 2]);
+    assert!(cut.0 < *times.last().unwrap(), "frames after the cut");
     let part = run_to_end(FeedConfig::new(Source::Replay {
         path: path.clone(),
         speed: 0.0,
@@ -177,13 +249,11 @@ async fn reconnects_and_keeps_bars() {
         disconnect_after: Some(Duration::from_millis(600)),
         ..Default::default()
     };
-    let store = run_for(mock(cfg), Duration::from_millis(3_500)).await;
+    let store = run_until(mock(cfg), "2 reconnects", |d| {
+        d.stats.reconnects >= 2 && d.stats.trades_in > 0 && d.series.len() >= 120
+    })
+    .await;
     let d = store.read();
-    assert!(
-        d.stats.reconnects >= 2,
-        "reconnects = {}",
-        d.stats.reconnects
-    );
     assert!(d.series.len() >= 120);
     assert!(
         d.series.bars().windows(2).all(|w| w[0].time < w[1].time),
@@ -248,7 +318,7 @@ async fn explicit_contract_is_requested_and_recorded() {
     });
     c.target = Some(Target::Contract(h27));
     c.record = Some(path.clone());
-    let store = run_for(c, Duration::from_millis(1_200)).await;
+    let store = run_until(c, "a trade", |d| d.stats.trades_in > 0).await;
     {
         let d = store.read();
         assert_eq!(d.contract, Some(h27));

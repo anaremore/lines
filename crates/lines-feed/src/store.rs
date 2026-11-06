@@ -414,12 +414,21 @@ impl ChartStore {
     /// product's sessions calendar), and nothing
     /// has arrived for longer than its expected cadence; `None` otherwise. Lock-free.
     pub fn stale_for(&self) -> Option<Duration> {
-        if !self.live.load(Ordering::Acquire) {
+        let last = self.last_data.load(Ordering::Acquire);
+        if last == 0 {
             return None;
         }
-        let last = self.last_data.load(Ordering::Acquire);
-        let quiet = mono_ms().saturating_sub(last);
-        if last == 0 || quiet <= self.stale_after_ms.load(Ordering::Relaxed) {
+        self.stale_after_quiet(Duration::from_millis(mono_ms().saturating_sub(last)))
+    }
+
+    /// [`Self::stale_for`] if the feed has been silent for `quiet` (no data since then): the
+    /// decision without the clock, so it is tested deterministically.
+    pub fn stale_after_quiet(&self, quiet: Duration) -> Option<Duration> {
+        if !self.live.load(Ordering::Acquire) || self.last_data.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let quiet = quiet.as_millis() as u64;
+        if quiet <= self.stale_after_ms.load(Ordering::Relaxed) {
             return None;
         }
         // Is the market open *now*, on the feed's own clock: the last market time plus the
@@ -613,6 +622,42 @@ mod tests {
         assert_eq!(store.chart_revision(), c + 3, "new ask");
         store.set_status(FeedStatus::Live);
         assert_eq!(store.chart_revision(), c + 4, "any other update moves both");
+    }
+
+    /// docs/design.md §7, without the clock: silent longer than `stale_after` while live and
+    /// the market open is stale; not live, no data yet, or a closed market is not.
+    #[test]
+    fn staleness_decision_is_deterministic() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        store.set_stale_after(Duration::from_millis(400));
+        let ms = Duration::from_millis;
+        let trade_at = |iso: &str| MarketEvent::Trade {
+            time: UtcMillis::parse_iso(iso).unwrap(),
+            price: Price(600_000),
+            qty: Qty(1),
+            aggressor: None,
+        };
+        assert_eq!(store.stale_after_quiet(ms(10_000)), None, "no data yet");
+        // Wednesday mid-session, connecting: not live yet.
+        store.update(|d| d.apply(&[trade_at("2026-11-11T15:00:00Z")]));
+        assert_eq!(store.stale_after_quiet(ms(10_000)), None, "not live");
+        store.update(|d| d.status = FeedStatus::Live);
+        assert_eq!(store.stale_after_quiet(ms(400)), None, "at the limit: fine");
+        assert_eq!(store.stale_after_quiet(ms(401)), Some(ms(401)));
+        // The market's clock moves on with the silence: 15:00 + 7 h = 22:00Z, the close.
+        assert!(
+            store.stale_after_quiet(ms(6 * 3_600_000)).is_some(),
+            "still open"
+        );
+        assert_eq!(
+            store.stale_after_quiet(ms(7 * 3_600_000 + 1_000)),
+            None,
+            "closed by then"
+        );
+        // A finished replay is not live.
+        store.update(|d| d.status = FeedStatus::ReplayFinished);
+        assert_eq!(store.stale_after_quiet(ms(10_000)), None);
     }
 
     /// docs/design.md §7: silence while the market is closed is not staleness.
