@@ -451,24 +451,43 @@ impl ChartView {
             }
             for c in &self.scene.candles {
                 let color = if c.up { t.up } else { t.down };
-                window.paint_quad(fill(
-                    rect(
-                        c.x - hair * 0.5,
-                        c.wick_top,
-                        hair,
-                        c.wick_bottom - c.wick_top,
-                    ),
-                    color,
-                ));
-                window.paint_quad(fill(
-                    rect(
-                        c.x - c.half_width,
-                        c.body_top,
-                        c.half_width * 2.0,
-                        c.body_bottom - c.body_top,
-                    ),
-                    color,
-                ));
+                let (bx, bw) = (c.x - c.half_width, c.half_width * 2.0);
+                let bh = c.body_bottom - c.body_top;
+                // Direction is shown by shape as well as colour (docs/design.md §4): one
+                // direction's bodies are hollow. A body needs 3 device pixels each way to
+                // have an interior; smaller ones stay filled.
+                let hollow = t.hollow.is_hollow(c.up) && bw >= 3.0 * hair && bh >= 3.0 * hair;
+                if hollow {
+                    // Wick above and below the body only, then a one-device-pixel outline.
+                    let wx = c.x - hair * 0.5;
+                    if c.body_top > c.wick_top {
+                        window.paint_quad(fill(
+                            rect(wx, c.wick_top, hair, c.body_top - c.wick_top),
+                            color,
+                        ));
+                    }
+                    if c.wick_bottom > c.body_bottom {
+                        window.paint_quad(fill(
+                            rect(wx, c.body_bottom, hair, c.wick_bottom - c.body_bottom),
+                            color,
+                        ));
+                    }
+                    window.paint_quad(fill(rect(bx, c.body_top, bw, hair), color));
+                    window.paint_quad(fill(rect(bx, c.body_bottom - hair, bw, hair), color));
+                    window.paint_quad(fill(rect(bx, c.body_top, hair, bh), color));
+                    window.paint_quad(fill(rect(bx + bw - hair, c.body_top, hair, bh), color));
+                } else {
+                    window.paint_quad(fill(
+                        rect(
+                            c.x - hair * 0.5,
+                            c.wick_top,
+                            hair,
+                            c.wick_bottom - c.wick_top,
+                        ),
+                        color,
+                    ));
+                    window.paint_quad(fill(rect(bx, c.body_top, bw, bh), color));
+                }
             }
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;

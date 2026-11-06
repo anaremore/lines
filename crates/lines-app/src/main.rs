@@ -15,7 +15,7 @@ use lines_feed::cqg::{self, LogonParams};
 use lines_feed::{FeedConfig, Source, catalog};
 
 use crate::chart_view::ChartView;
-use crate::theme::Theme;
+use crate::theme::{HollowBodies, Palette, Theme};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum SourceKind {
@@ -27,6 +27,23 @@ enum SourceKind {
     Coinbase,
     /// A `.lfr` recording (provider, product and contract come from the file).
     Replay,
+}
+
+/// Up/down colour preset.
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum PaletteKind {
+    /// Mint up, rose down.
+    Standard,
+    /// Blue up, orange down (red-green colour blindness).
+    #[value(alias = "cb", alias = "colourblind")]
+    Colorblind,
+}
+
+/// Which candle bodies are hollow.
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum HollowKind {
+    Up,
+    Down,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -80,6 +97,13 @@ struct Cli {
     /// Color theme.
     #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
     theme: ThemeKind,
+    /// Up/down colour preset (`--palette cb` for the colourblind-safe one). Rising candle
+    /// bodies are hollow in every preset, so direction never relies on colour alone.
+    #[arg(long, value_enum, default_value_t = PaletteKind::Standard)]
+    palette: PaletteKind,
+    /// Which direction's candle bodies are hollow (the other is filled).
+    #[arg(long, value_enum, default_value_t = HollowKind::Up)]
+    hollow: HollowKind,
     /// Window size in logical pixels, WIDTHxHEIGHT.
     #[arg(long, default_value = "1280x800", value_parser = parse_size)]
     size: (f32, f32),
@@ -217,9 +241,17 @@ fn main() -> Result<()> {
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));
     }
-    let theme = match cli.theme {
-        ThemeKind::Dark => Theme::dark(),
-        ThemeKind::Light => Theme::light(),
+    let palette = match cli.palette {
+        PaletteKind::Standard => Palette::Standard,
+        PaletteKind::Colorblind => Palette::Colorblind,
+    };
+    let mut theme = match cli.theme {
+        ThemeKind::Dark => Theme::dark(palette),
+        ThemeKind::Light => Theme::light(palette),
+    };
+    theme.hollow = match cli.hollow {
+        HollowKind::Up => HollowBodies::Up,
+        HollowKind::Down => HollowBodies::Down,
     };
 
     if let Some(out) = cli.screenshot.clone() {

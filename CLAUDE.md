@@ -51,6 +51,8 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair.
+# Colours: --theme dark|light, --palette standard|cb (colourblind: blue up, orange down),
+# --hollow up|down (which direction's candle bodies are hollow; default up). Also for the live app.
 # --price-zoom F zooms the auto-fitted price range by F (as Ctrl+wheel), i.e. manual price scale.
 ```
 
@@ -90,6 +92,7 @@ Catalog products (ids are permanent): `ES` 1, `NQ` 2, `ZN` 3, `MES` 4, `MNQ` 5, 
 - The UI never blocks on the feed. Sessions decode outside the lock, the store applies events under a short lock, the UI polls an atomic revision every 8 ms and `try_lock`s in paint.
 - Transport `recv` must be cancel-safe.
 - Screenshot mode: repeated runs with the same inputs on one machine produced byte-identical PNGs. Output dimensions are checked against `size × scale`.
+- Colours are tokens in `crates/lines-app/src/theme.rs` only (a test rejects colour literals in views). Themes derive from the brand palette (ink `#11141B`, violet `#8C7BFF`, paper `#ECEAF4`); violet is the accent and last-price tag, never up/down. Every text token meets WCAG AA (4.5:1) on its backgrounds in all four theme/palette combinations (`theme::tests`). Direction is shown by shape too: one direction's bodies are hollow (bodies under 3 device px each way stay filled).
 
 ## Known gaps
 
