@@ -89,6 +89,10 @@ pub struct Settings {
     /// it). Read at start: tighter limits apply at once, looser ones from the next trade date.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub guardrails: std::collections::BTreeMap<String, lines_trading::Guardrails>,
+    /// How P&L shows in the trading UI, every pane and account: off, ticks, currency or both
+    /// (`crate::pnl`). Optional: absent (and the default, both) isn't written.
+    #[serde(default, skip_serializing_if = "crate::pnl::PnlDisplay::is_default")]
+    pub pnl_display: crate::pnl::PnlDisplay,
 }
 
 /// Files written before versioning (no `version` field) have exactly version 1's fields.
@@ -532,6 +536,26 @@ mod tests {
         assert!(s.is_favourite(ES));
         assert!(!s.toggle_favourite(ES));
         assert!(!s.is_favourite(ES));
+    }
+
+    #[test]
+    fn pnl_display_is_an_optional_setting() {
+        use crate::pnl::PnlDisplay;
+        // A file from before the setting: the default (both), no version bump needed.
+        let old: Settings = serde_json::from_str(r#"{"recents":[1],"favourites":[]}"#).unwrap();
+        assert_eq!(old.pnl_display, PnlDisplay::Both);
+        // The default isn't written; any other mode is, and reads back.
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.contains("pnl_display"), "{json}");
+        let off = Settings {
+            pnl_display: PnlDisplay::Off,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains(r#""pnl_display":"off""#), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pnl_display, PnlDisplay::Off);
+        assert_eq!(SETTINGS_FORMAT.current, 1, "no version bump");
     }
 
     #[test]
