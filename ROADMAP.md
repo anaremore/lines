@@ -18,16 +18,16 @@ Status: `done` · `current` · `next` · `later`
 | 4 | Historical bars + live stitch | done | Backfill then live with no gap or double-count |
 | 4b | Symbol search & picker | done | Keyboard-first fuzzy search over products → contracts (decision 0013), recents/favourites, micro↔mini toggle, results <16 ms locally, provider lookups async |
 | 5 | Depth model + read-only DOM, price grouping, time & sales, volume profile | later | Tick-indexed ladder, per-frame coalescing, fixed rows, no allocs in paint; T&S with aggressor side; session/visible-range volume profile |
+| 5b | Workspaces: grid, tabs, windows, link groups | next | Panes (chart/DOM/T&S) in custom grids and presets, tabs, drag-out windows across monitors; link groups; opt-in crosshair time sync; shared data per contract; autosave/restore (decision 0016). Owner's default: NQ and ES side by side |
 | 6 | OMS + Broker trait + PaperBroker + prop-firm rules | later | Order lifecycle, positions, P&L, risk layer, account groups, rule presets as data. OMS isolated from UI (decision 0012); state reconciled from broker on reconnect, no orphaned brackets; click/hotkey → order-sent latency measured and tracked |
 | 6b | Latency HUD | later | Exchange→receive, input→order-sent, gateway RTT visible; clock-sync status shown |
 | 7 | DOM trading | later | Click/drag/hotkey orders, brackets, pending vs working states, flatten/cancel-all; orders dispatch from the input handler, not the next frame |
 | 8 | Chart trading | later | Draggable order/position lines, bracket P&L, same intents as DOM |
 | 8b | Discipline guardrails + economic calendar | later | Loss/streak lockouts with cooldown, max trades/day, news blackout (warn/flatten/block) tied to prop-rule presets; overrides deliberately hard |
 | 8c | Automatic trade journal | later | Fills → trades with auto entry/exit screenshots, tags, P&L by time/setup/account, consistency-rule progress |
-| 9 | Multi-chart / multi-symbol | later | One feed fanned out to many panes |
 | 10 | Indicators: 10a built-in trait · 10b WASM host · 10c data-source plugins · 10d plugin dev tooling | later | See decisions 0007–0008 |
 | 10e | Footprint + cumulative delta | later | Built on 10a; per-price bid/ask volume per bar from aggressor-tagged ticks |
-| 11 | Drawing tools + saved workspaces | later | Data-space drawings, persisted layouts |
+| 11 | Drawing tools (workspaces moved to 5b) | later | Data-space drawings, persisted layouts |
 | 12 | First live connection (likely Rithmic; CQG WebAPI is enterprise-priced) | later | Vendor conformance passed; live routing gated behind a Cargo feature until then |
 | 13 | Second live connection (whichever of CQG/Rithmic wasn't first) | later | |
 | 14 | Trade copier across account groups | later | Rule-aware per account/firm |
