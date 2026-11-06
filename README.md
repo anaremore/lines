@@ -20,10 +20,10 @@ Lines is early. Nothing here is ready for trading.
 
 - Data feeds: an in-process mock, the Coinbase public feed (BTC/USD, ETH/USD, free and 24/7), and replay of recorded sessions. Every feed can be recorded and replayed deterministically.
 - Candlestick chart with pan, zoom and axis scaling, a crosshair with an OHLCV readout, and device-pixel-sharp drawing.
-- Read-only DOM: a tick-indexed price ladder with depth bars, exact price grouping, traded volume per price, and auto-centring that never moves while the pointer is over it. Time & sales with the aggressor side shown by colour and a marker, and large prints highlighted.
+- Read-only DOM: a tick-indexed price ladder with depth bars, exact price grouping, traded volume per price, and auto-centering that never moves while the pointer is over it. Time & sales with the aggressor side shown by color and a marker, and large prints highlighted.
 - Independent panes (chart, DOM, time & sales) that share one feed per contract. The default window puts the chart beside the DOM, with time & sales under it.
 - Exact prices and quantities (integer units, never floating point), and a futures product/contract model with front-month resolution.
-- Dark and light themes, a colourblind-safe palette, and hollow vs filled candles so direction never depends on colour alone.
+- Dark and light themes, a colorblind-safe palette, and hollow vs filled candles so direction never depends on color alone.
 
 **Not yet**
 
@@ -58,7 +58,7 @@ Other sources and options:
 cargo run --release -p lines-app -- --source coinbase                        # live BTC/USD
 cargo run --release -p lines-app -- --source mock --record recordings/x.lfr  # record a session
 cargo run --release -p lines-app -- --source replay --replay recordings/x.lfr --speed 10
-cargo run --release -p lines-app -- --theme light --palette cb               # colourblind-safe colours
+cargo run --release -p lines-app -- --theme light --palette cb               # colorblind-safe colors
 ```
 
 The first build takes several minutes. Later builds are quick.
@@ -91,6 +91,6 @@ cargo run --release -p lines-app --features runtime-shaders -- --source mock
 
 Architecture decisions are recorded in [`docs/decisions/`](docs/decisions/). UI principles are in [`docs/design.md`](docs/design.md).
 
-## Licence
+## License
 
 [FSL-1.1-ALv2](LICENSE.md): you can read, use and modify Lines for any purpose except building a competing commercial product, and each release becomes Apache 2.0 two years after it is published.
