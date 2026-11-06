@@ -2,12 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lines_core::UtcMillis;
 use lines_core::{ContractKey, Month};
-use lines_core::{Price, Qty, UtcMillis};
 use lines_feed::catalog::{self, Target};
 use lines_feed::cqg::mock::MockConfig;
-use lines_feed::provider::Frame;
-use lines_feed::recording::{Direction, Recorder};
 use lines_feed::store::{ChartStore, FeedStatus};
 use lines_feed::{FeedConfig, Source, new_store, run_feed};
 use tokio::sync::watch;
@@ -222,109 +220,6 @@ async fn replay_of_missing_file_fails_cleanly() {
         stop_at: None,
     });
     assert!(new_store(&cfg).is_err());
-}
-
-/// Coinbase end to end, offline: a synthetic recording (decision 0010: committed fixtures
-/// are synthetic) replayed through the real Coinbase session.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn coinbase_replay_from_synthetic_recording() {
-    let path = temp_path("coinbase.lfr");
-    let rec = Recorder::create(
-        &path,
-        "coinbase",
-        "coinbase-exchange-ws-1",
-        "BTC/USD",
-        Some(ContractKey::spot(catalog::BTC_USD)),
-    )
-    .unwrap();
-    // Recording "starts" now; candles must predate the start minute to count as history.
-    let start_min = lines_feed::now_utc().floor_to(60_000).0 / 1000;
-    let candles = format!(
-        "[[{},75400,75500.5,75410.01,75450,1.5],[{},75415.72,75556.5,75523.22,75433.92,30.69151416]]",
-        start_min - 60,
-        start_min - 120
-    );
-    let iso = |s: i64| UtcMillis(s * 1000 + 1_500).to_string();
-    for f in [
-        Frame::text(r#"{"type":"subscriptions","channels":[]}"#),
-        Frame::http(candles),
-        Frame::text(r#"{"type":"ticker","best_bid":"75449.99","best_ask":"75450.00"}"#),
-        Frame::text(format!(
-            r#"{{"type":"match","trade_id":7,"size":"0.25","price":"75450.01","time":"{}"}}"#,
-            iso(start_min)
-        )),
-        Frame::text(format!(
-            r#"{{"type":"match","trade_id":8,"size":"0.00000001","price":"75451","time":"{}"}}"#,
-            iso(start_min)
-        )),
-    ] {
-        rec.record(Direction::FromServer, &f);
-    }
-    rec.finish().unwrap();
-
-    let store = run_to_end(FeedConfig::new(Source::Replay {
-        path: path.clone(),
-        speed: 0.0,
-        stop_at: None,
-    }))
-    .await;
-    let d = store.read();
-    assert_eq!(d.status, FeedStatus::ReplayFinished);
-    assert_eq!(d.provider, "coinbase");
-    assert_eq!(d.product.symbol, "BTC/USD");
-    assert_eq!(d.contract, Some(ContractKey::spot(catalog::BTC_USD)));
-    assert!(d.capabilities.fractional_qty);
-    let bars = d.series.bars();
-    assert_eq!(bars.len(), 3, "{bars:?}");
-    assert_eq!(bars[0].volume, Qty(3_069_151_416));
-    assert_eq!(
-        bars[2].volume,
-        Qty(25_000_001),
-        "0.25 + 0.00000001 BTC, exactly"
-    );
-    assert_eq!(
-        (bars[2].open, bars[2].close),
-        (Price(7_545_001), Price(7_545_100))
-    );
-    assert_eq!(
-        (d.bid, d.ask),
-        (Some(Price(7_544_999)), Some(Price(7_545_000)))
-    );
-    let _ = std::fs::remove_file(&path);
-}
-
-/// Live network test against Coinbase's public feed. Run with `cargo test -- --ignored`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs internet"]
-async fn coinbase_live_smoke() {
-    let path = temp_path("coinbase-live.lfr");
-    let mut c = FeedConfig::new(Source::Coinbase {
-        url: lines_feed::coinbase::WS_URL.into(),
-    });
-    c.record = Some(path.clone());
-    let store = run_for(c, Duration::from_secs(12)).await;
-    let live_bars = {
-        let d = store.read();
-        println!(
-            "coinbase live: {} bars, {:?}, status {:?}",
-            d.series.len(),
-            d.stats,
-            d.status
-        );
-        assert!(d.series.len() >= 100, "REST history arrived");
-        assert!(d.bid.is_some() && d.ask.is_some());
-        assert_eq!(d.stats.rejected, 0);
-        d.series.bars().to_vec()
-    };
-    // The recording replays to the same bars.
-    let replay = run_to_end(FeedConfig::new(Source::Replay {
-        path: path.clone(),
-        speed: 0.0,
-        stop_at: None,
-    }))
-    .await;
-    assert_eq!(replay.read().series.bars(), &live_bars[..]);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]

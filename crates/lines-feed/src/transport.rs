@@ -143,7 +143,15 @@ impl Transport for WsTransport {
     fn request_http(&mut self, url: String) {
         let tx = self.http_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let _ = tx.send(http_get(&url).map(Frame::http));
+            // The frame carries its request URL as the first line, so a response is
+            // self-describing in recordings and replays (see `provider::split_http`).
+            let _ = tx.send(http_get(&url).map(|body| {
+                let mut data = Vec::with_capacity(url.len() + 1 + body.len());
+                data.extend_from_slice(url.as_bytes());
+                data.push(b'\n');
+                data.extend_from_slice(&body);
+                Frame::http(data)
+            }));
         });
     }
 }

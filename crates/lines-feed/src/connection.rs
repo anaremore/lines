@@ -42,6 +42,8 @@ pub struct ConnectionOptions {
     pub ping_every: Duration,
     /// Treat the connection as dead if nothing arrives for this long.
     pub idle_timeout: Duration,
+    /// History to request when none is stored.
+    pub history_ms: i64,
 }
 
 impl Default for ConnectionOptions {
@@ -49,6 +51,7 @@ impl Default for ConnectionOptions {
         ConnectionOptions {
             ping_every: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(30),
+            history_ms: 3 * 24 * 60 * 60_000,
         }
     }
 }
@@ -71,11 +74,13 @@ pub async fn run_connection<T: Transport>(
     opts: &ConnectionOptions,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<ConnectionEnd, ConnectionError> {
-    let (history_from, period) = {
-        let d = store.read();
+    // Re-request from the newest stored bar (it may be partial); everything before it is
+    // complete. The store marks history as loading for this connection.
+    let (history_from, period) = store.update(|d| {
+        d.begin_connection();
+        d.status = FeedStatus::LoggingOn;
         (d.series.last().map(|b| b.time), d.series.period_ms())
-    };
-    store.set_status(FeedStatus::LoggingOn);
+    });
     let mut out: Vec<Outgoing> = Vec::new();
     let mut events: Vec<MarketEvent> = Vec::new();
     let now = transport.clock().unwrap_or_else(crate::now_utc);
@@ -84,6 +89,7 @@ pub async fn run_connection<T: Transport>(
             now,
             history_from,
             bar_period_ms: period,
+            history_ms: opts.history_ms,
         },
         &mut out,
     );

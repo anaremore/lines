@@ -32,6 +32,24 @@ impl Bar {
         }
     }
 
+    /// See [`BarSeries::apply_trade_ordered`].
+    #[inline]
+    pub fn apply_trade_ordered(&mut self, price: Price, volume: Qty, first: bool, last: bool) {
+        if price > self.high {
+            self.high = price;
+        }
+        if price < self.low {
+            self.low = price;
+        }
+        if first {
+            self.open = price;
+        }
+        if last {
+            self.close = price;
+        }
+        self.volume = self.volume.saturating_add(volume);
+    }
+
     #[inline]
     pub fn apply_trade(&mut self, price: Price, volume: Qty) {
         if price > self.high {
@@ -114,17 +132,32 @@ impl BarSeries {
 
     /// Fold one trade into the series.
     pub fn apply_trade(&mut self, time: UtcMillis, price: Price, volume: Qty) -> TradeOutcome {
+        self.apply_trade_ordered(time, price, volume, false, true)
+    }
+
+    /// Fold a trade whose time order within its bar is known, for trades that may arrive out
+    /// of order (e.g. REST back-fill after newer live trades): `first` = it is the earliest
+    /// trade of its bar so far (sets the open), `last` = the latest (sets the close). High,
+    /// low and volume always update. A trade that starts a new bar sets everything.
+    pub fn apply_trade_ordered(
+        &mut self,
+        time: UtcMillis,
+        price: Price,
+        volume: Qty,
+        first: bool,
+        last: bool,
+    ) -> TradeOutcome {
         let bucket = time.floor_to(self.period_ms);
         self.revision += 1;
         match self.bars.last_mut() {
-            Some(last) if last.time == bucket => {
-                last.apply_trade(price, volume);
+            Some(bar) if bar.time == bucket => {
+                bar.apply_trade_ordered(price, volume, first, last);
                 TradeOutcome::UpdatedLast
             }
-            Some(last) if last.time > bucket => {
+            Some(bar) if bar.time > bucket => {
                 match self.bars.binary_search_by_key(&bucket, |b| b.time) {
                     Ok(i) => {
-                        self.bars[i].apply_trade(price, volume);
+                        self.bars[i].apply_trade_ordered(price, volume, first, last);
                         TradeOutcome::Late
                     }
                     Err(0) if self.bars.len() >= self.max_len => TradeOutcome::TooOld,

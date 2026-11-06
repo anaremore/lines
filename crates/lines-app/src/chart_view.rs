@@ -827,6 +827,10 @@ impl ChartView {
             let _ = write!(left, "   bid {}   ask {}", fp(d.bid), fp(d.ask));
         }
         let _ = write!(right, "{}  ·  {}", d.provider, d.status.label());
+        // History back-fill is shown as state, not a spinner (docs/design.md).
+        if let Some(h) = d.history.label() {
+            let _ = write!(right, "  ·  {h}");
+        }
         if self.frozen {
             // Frozen clock: only data-derived time is shown, so screenshots are reproducible.
             if let Some(mt) = d.market_time {
