@@ -6,6 +6,7 @@
 //! "Ctrl" means Cmd on macOS (GPUI's `secondary` modifier).
 
 use gpui::Keystroke;
+use lines_core::Timeframe;
 
 use crate::layout::{Axis, Direction, LinkGroup, PaneKind, Preset, link_letter};
 use crate::pane_columns::{Column, ColumnCmd, DomCol, TapeCol};
@@ -99,6 +100,11 @@ pub enum Command {
     CyclePnl,
     /// The app-wide P&L display: this mode.
     SetPnl(crate::pnl::PnlDisplay),
+    /// The focused chart's timeframe (roadmap 9). No key: typed on the chart (`5`, `1h` +
+    /// Enter), the header chip, the pane menu and the palette.
+    Timeframe(Timeframe),
+    /// The focused chart's timeframe list.
+    TimeframeMenu,
 }
 
 /// Trading actions of the focused pane (`crate::trade_bar::run`). Flatten and Cancel All act
@@ -358,6 +364,8 @@ pub fn label(c: Command) -> String {
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
+        Command::Timeframe(tf) => format!("Timeframe: {tf}"),
+        Command::TimeframeMenu => "Chart: timeframe…".into(),
         Command::Trade(t) => match t {
             TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
             TradeCmd::CancelAll => "Trade: Cancel all orders",
@@ -409,6 +417,7 @@ pub fn palette() -> Vec<Command> {
         Command::DomTrail,
         Command::DomTrailHalfLife,
         Command::Studies,
+        Command::TimeframeMenu,
         Command::SaveAs,
         Command::Open,
         Command::Menu,
@@ -429,6 +438,7 @@ pub fn palette() -> Vec<Command> {
     v.push(Command::CyclePnl);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
+    v.extend(Timeframe::ALL.map(Command::Timeframe));
     v
 }
 
@@ -651,6 +661,27 @@ mod tests {
             )))]
         );
         assert_eq!(filter("performance", &p), vec![Command::TogglePerfStats]);
+        // Timeframes: one entry each, "Timeframe: 1m" … "Timeframe: 1W"; no keys of their own
+        // (digits and letters typed on a chart are the chart's).
+        assert_eq!(
+            filter("timeframe 15m", &p),
+            vec![Command::Timeframe(Timeframe::Minutes(15))]
+        );
+        assert_eq!(
+            filter("timeframe 1w", &p),
+            vec![Command::Timeframe(Timeframe::Week)]
+        );
+        assert_eq!(
+            p.iter()
+                .filter(|c| matches!(c, Command::Timeframe(_)))
+                .count(),
+            Timeframe::ALL.len()
+        );
+        assert!(
+            BINDINGS
+                .iter()
+                .all(|b| !matches!(b.cmd, Command::Timeframe(_) | Command::TimeframeMenu))
+        );
         // A palette/menu command: no key of its own.
         assert!(BINDINGS.iter().all(|b| b.cmd != Command::TogglePerfStats));
         // The DOM trail: palette and pane menu only, never a key (pane keys are reserved).

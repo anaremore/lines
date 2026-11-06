@@ -48,17 +48,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, Font, Hsla, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString, Styled, TextAlign,
-    TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
+    AnyElement, App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, Font, FontWeight,
+    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
+    Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::geometry::{
     Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
-    snap, time_slot, write_ohlcv,
+    snap, write_ohlcv,
 };
+use lines_core::timeframe::bar_date;
 use lines_core::viewport::{MAX_BAR_PX, MIN_BAR_PX, ScaleDrag, ScaleMode};
-use lines_core::{Bar, FixedStr, Price, Product, ProductId, Scene, UtcMillis, Viewport};
+use lines_core::{
+    Bar, BarsView, Derived, FixedStr, Price, Product, ProductId, Scene, Timeframe, UtcMillis,
+    Viewport,
+};
 use lines_feed::ChartData;
 use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
@@ -111,7 +115,8 @@ enum Region {
 /// buffers; neither method may allocate in steady state.
 pub trait ChartLayer: 'static {
     /// Under the store lock, after this frame's viewport update: copy what `paint` needs.
-    fn prepare(&mut self, data: &ChartData, vp: &Viewport);
+    /// `bars` are the bars the chart shows (its timeframe's; the viewport indexes them).
+    fn prepare(&mut self, data: &ChartData, bars: BarsView<'_>, vp: &Viewport);
     /// Inside the plot's content mask, after the candles. `plot` is the plot's bounds; the
     /// viewport maps prices/bars to plot-local coordinates.
     fn paint(
@@ -149,6 +154,8 @@ pub struct Fixture {
     pub studies_menu: Option<String>,
     /// Start with the magnet crosshair (screenshots: `--magnet`).
     pub magnet: bool,
+    /// Initial timeframe (`--timeframe`). One saved with the pane takes precedence.
+    pub timeframe: Timeframe,
 }
 
 /// Which part of a studies-menu row a click hit.
@@ -256,8 +263,8 @@ pub struct ChartView {
     cross: Option<Crosshair>,
     cross_bar: Option<Bar>,
     period_ms: i64,
-    /// OHLCV readout, shaped once per distinct bar value.
-    readout: Option<(Bar, ShapedLine)>,
+    /// OHLCV readout (and whether the bar is partial), shaped once per distinct value.
+    readout: Option<(Bar, bool, ShapedLine)>,
     labels: HashMap<(LabelKind, i64), ShapedLine>,
     font: Option<Font>,
     rates: Rates,
@@ -270,6 +277,20 @@ pub struct ChartView {
     trade: crate::trade_bar::PaneTrade,
     /// The position tag's text (glyphs shaped once).
     pos_glyphs: crate::text::Glyphs,
+    /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
+    /// groups: they share the market only.
+    timeframe: Timeframe,
+    /// Its bars when it isn't 1 minute: derived from the store's 1-minute bars, updated
+    /// incrementally in paint.
+    derived: Option<Derived>,
+    /// After a timeframe change: put the bar holding this time at this plot-local x.
+    tf_anchor: Option<(UtcMillis, f64)>,
+    /// The timeframe list (header chip, pane menu), while open.
+    tf_menu: bool,
+    /// A timeframe being typed (digits, then a unit), while typing.
+    tf_entry: Option<String>,
+    /// The hovered bar was cut short by a session break.
+    cross_partial: bool,
 }
 
 impl crate::trade_bar::TradePane for ChartView {
@@ -322,6 +343,7 @@ impl ChartView {
             t.follow(&store);
         }
         let trade = crate::trade_bar::PaneTrade::new(None, cx);
+        let timeframe = fixture.timeframe;
 
         let mut view = ChartView {
             study_menu: None,
@@ -383,7 +405,14 @@ impl ChartView {
             rates_changed: false,
             trade,
             pos_glyphs: crate::text::Glyphs::new(LABEL_PX),
+            timeframe: Timeframe::ONE_MINUTE,
+            derived: None,
+            tf_anchor: None,
+            tf_menu: false,
+            tf_entry: None,
+            cross_partial: false,
         };
+        view.apply_timeframe(timeframe);
         if let Some(set) = fixture_studies {
             view.set_study_set(set);
         }
@@ -638,6 +667,11 @@ impl ChartView {
             return;
         };
         self.focus.focus(window, cx);
+        if std::mem::take(&mut self.tf_menu) {
+            // Clicking the chart dismisses the timeframe list (its rows handle their clicks).
+            cx.notify();
+            return;
+        }
         if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
             cx.notify();
@@ -651,7 +685,7 @@ impl ChartView {
                 && let Some(from) = self
                     .store
                     .try_read()
-                    .and_then(|d| anchor_at(d.series.bars(), &self.vp, x))
+                    .and_then(|d| anchor_at(bars_view(&self.derived, &d).bars, &self.vp, x))
             {
                 self.anchoring = None;
                 self.run_menu(
@@ -707,6 +741,18 @@ impl ChartView {
             cx.notify();
             return;
         }
+        if self.tf_entry.is_some() {
+            self.timeframe_key(k, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if self.tf_menu && k.key == "escape" {
+            self.tf_menu = false;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if m.control && !m.alt && k.key == "k" {
             self.open_picker("", cx);
         } else if k.key == "home" {
@@ -720,6 +766,12 @@ impl ChartView {
             changed
         } {
             // Volume profile keys (`crate::profile`).
+        } else if let Some(digit) = k.key_char.as_deref().filter(|c| {
+            !m.control && !m.alt && !m.platform && c.len() == 1 && c.as_bytes()[0].is_ascii_digit()
+        }) {
+            // Type a timeframe: digits, then an optional unit (m, h, d, w), then Enter.
+            self.tf_menu = false;
+            self.tf_entry = Some(digit.to_owned());
         } else if let Some(letter) = k.key_char.as_deref().filter(|c| {
             !m.control
                 && !m.alt
@@ -789,6 +841,69 @@ impl ChartView {
         self.cross_bar = None;
         self.readout = None;
         self.labels.clear();
+        // The same timeframe on the new market.
+        self.derived = None;
+        self.tf_anchor = None;
+        let tf = std::mem::replace(&mut self.timeframe, Timeframe::ONE_MINUTE);
+        self.apply_timeframe(tf);
+    }
+
+    pub fn timeframe(&self) -> Timeframe {
+        self.timeframe
+    }
+
+    /// Switch the timeframe (header list, typed, palette): the time under the pointer stays
+    /// where it is (with no pointer, the plot's middle, unless the chart follows the live
+    /// edge, which it keeps doing).
+    pub fn set_timeframe(&mut self, tf: Timeframe, cx: &mut Context<Self>) {
+        self.tf_menu = false;
+        self.tf_entry = None;
+        if tf != self.timeframe && tf.is_valid() {
+            let x = match self.hover {
+                Some((x, _)) => Some(f64::from(x)),
+                None if !self.vp.follow_live => Some(self.vp.width * 0.5),
+                None => None,
+            };
+            let anchor = x.and_then(|x| {
+                let d = self.store.try_read()?;
+                let view = bars_view(&self.derived, &d);
+                let last = view.len().checked_sub(1)?;
+                let i = self.vp.x_to_index(x).round().clamp(0.0, last as f64) as usize;
+                Some((view.bars[i].time, x))
+            });
+            self.apply_timeframe(tf);
+            self.tf_anchor = anchor;
+        }
+        cx.notify();
+    }
+
+    /// Set the timeframe without moving the view (restore, a new feed).
+    fn apply_timeframe(&mut self, tf: Timeframe) {
+        if tf == self.timeframe || !tf.is_valid() {
+            return;
+        }
+        self.timeframe = tf;
+        let capacity = self.store.read().series.capacity();
+        self.derived = (!tf.is_one_minute()).then(|| Derived::new(tf, capacity));
+        // Indices change: re-baseline the trim count on the next paint.
+        self.series_trimmed = u64::MAX;
+        // Time labels are cached by bar time; their text depends on the timeframe.
+        self.labels.clear();
+        self.readout = None;
+        self.cross = None;
+        self.cross_bar = None;
+    }
+
+    /// Open or close the timeframe list (header chip, pane menu, palette).
+    pub fn toggle_timeframe_menu(&mut self, cx: &mut Context<Self>) {
+        self.tf_menu = !self.tf_menu;
+        if self.tf_menu {
+            self.picker.close();
+            self.study_menu = None;
+            self.tf_entry = None;
+            self.trade.account_menu = false;
+        }
+        cx.notify();
     }
 
     /// Another chart's crosshair time (crosshair sync); `None` clears it.
@@ -829,6 +944,11 @@ impl ChartView {
     pub fn restore(&mut self, state: &ChartState) {
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
+        }
+
+        // A saved timeframe wins; a pane without one keeps its initial (CLI) timeframe.
+        if !state.timeframe.is_default() {
+            self.apply_timeframe(state.timeframe.0);
         }
         if state.bar_px.is_finite() {
             self.vp.bar_px = state.bar_px.clamp(MIN_BAR_PX, MAX_BAR_PX);
@@ -1037,6 +1157,41 @@ impl ChartView {
         cx.notify();
     }
 
+    /// A key while a timeframe is being typed: digits and units extend it, Backspace edits,
+    /// Enter switches (if it names an offered timeframe), Esc cancels.
+    fn timeframe_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some(entry) = self.tf_entry.as_mut() else {
+            return;
+        };
+        match k.key.as_str() {
+            "escape" => self.tf_entry = None,
+            "enter" => {
+                if let Some(tf) = Timeframe::parse(entry) {
+                    self.set_timeframe(tf, cx);
+                }
+            }
+            "backspace" => {
+                entry.pop();
+                if entry.is_empty() {
+                    self.tf_entry = None;
+                }
+            }
+            _ => {
+                let m = k.modifiers;
+                if let Some(c) = k.key_char.as_deref().filter(|c| {
+                    !m.control
+                        && !m.alt
+                        && !m.platform
+                        && c.len() == 1
+                        && (c.as_bytes()[0].is_ascii_digit() || "mhdwMHDW".contains(*c))
+                }) && entry.len() < 4
+                {
+                    entry.push_str(c);
+                }
+            }
+        }
+    }
+
     // ---- paint ---------------------------------------------------------------------
 
     fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1060,18 +1215,38 @@ impl ChartView {
 
         // Sample the feed. If it holds the lock this instant, redraw the previous scene.
         if let Some(d) = self.store.try_read() {
-            let trimmed = d.series.trimmed();
+            // A higher timeframe: bring its bars up to date (only what changed).
+            if let Some(dv) = &mut self.derived {
+                dv.update(&d.series, lines_feed::catalog::sessions(d.product.id));
+            }
+            let view = bars_view(&self.derived, &d);
+            let trimmed = self
+                .derived
+                .as_ref()
+                .map_or(d.series.trimmed(), Derived::trimmed);
             if trimmed > self.series_trimmed && (!self.vp.follow_live || self.vp.held) {
                 // Bars dropped from the front shift indices; keep the view anchored.
                 self.vp.right_index -= (trimmed - self.series_trimmed) as f64;
             }
             self.series_trimmed = trimmed;
-            self.series_len = d.series.len();
+            self.series_len = view.len();
             self.last_trade = d.last_trade;
             let fmt = self.instrument.price;
-            let bars = d.series.bars();
+            let bars = view.bars;
+            if let Some((t, x)) = self.tf_anchor.take()
+                && !bars.is_empty()
+            {
+                // After a timeframe change: the bar holding the anchored time goes where that
+                // time was; live following resumes if the newest bar is then in view.
+                let i = bars.partition_point(|b| b.time <= t).saturating_sub(1);
+                self.vp.right_index += i as f64 - self.vp.x_to_index(x);
+                if self.drag.is_none() {
+                    self.vp.held = true;
+                    self.vp.set_held(false, bars.len());
+                }
+            }
             self.vp.on_data(bars, fmt.tick);
-            self.period_ms = d.series.period_ms();
+            self.period_ms = view.period_ms;
             // Only once bars are visible, i.e. auto-scale has fitted a real range (the first
             // layout pass can paint at a placeholder size with nothing on screen).
             if !self.vp.visible_range(bars.len()).is_empty()
@@ -1095,9 +1270,14 @@ impl ChartView {
                 )
             });
             self.cross_bar = self.cross.and_then(|c| c.bar).map(|i| bars[i]);
-            // Another chart's crosshair time, where this chart has a bar for it.
+            self.cross_partial = match (self.cross.and_then(|c| c.bar), &self.derived) {
+                (Some(i), Some(dv)) => dv.is_partial(i),
+                _ => false,
+            };
+            // Another chart's crosshair time, where this chart has a bar for it (each chart
+            // maps it into its own timeframe's bars).
             self.sync_marker = self.synced_time.and_then(|t| {
-                let slot = time_slot(bars, t, self.period_ms)?;
+                let slot = view.slot(t)?;
                 let x = slot_x(&self.vp, slot as f64, scale);
                 (x >= 0.0 && f64::from(x) < self.vp.width).then_some((x, t))
             });
@@ -1114,6 +1294,7 @@ impl ChartView {
                 &mut self.studies,
                 &mut self.levels,
                 &d,
+                view,
                 &self.vp,
                 max_columns,
             );
@@ -1425,18 +1606,27 @@ impl ChartView {
                 },
             );
         }
+        let tf = self.timeframe;
+        let calendar = lines_feed::catalog::sessions(self.instrument.id);
         for i in 0..self.scene.time_lines.len() {
             let l = self.scene.time_lines[i];
             if l.x < 0.0 {
                 continue;
             }
             let kind = match l.label {
+                _ if tf.is_daily() => LabelKind::Date,
                 TimeLabel::Time => LabelKind::Time,
                 TimeLabel::Date => LabelKind::Date,
                 TimeLabel::DateTime => LabelKind::DateTime,
             };
             let text = |s: &mut FixedStr<32>| {
-                let _ = l.label.write(l.time, s);
+                if tf.is_daily() {
+                    // Days and weeks are labeled by trade date, not the open's UTC clock.
+                    let d = bar_date(tf, calendar, l.time);
+                    let _ = write!(s, "{:02}-{:02}", d.month, d.day);
+                } else {
+                    let _ = l.label.write(l.time, s);
+                }
             };
             let w = f32::from(self.label(kind, l.time.0, t.text_dim, window, text).width);
             // Entirely on the time axis (not under the price axis), clear of the time tag.
@@ -1487,7 +1677,8 @@ impl ChartView {
             }
         }
         if let Some(bar) = self.cross_bar {
-            self.draw_readout(bar, bounds, window, cx);
+            let partial = self.cross_partial;
+            self.draw_readout(bar, partial, bounds, window, cx);
         }
     }
 
@@ -1610,18 +1801,39 @@ impl ChartView {
         self.space_measured = true;
     }
 
+    /// The crosshair time tag's text: date and time, or on daily and weekly charts the trade
+    /// date ("Mon 2026-11-09", "Week of 2026-11-09").
+    fn time_tag_text(&self, time: UtcMillis) -> impl FnOnce(&mut FixedStr<32>) + use<> {
+        let period = self.period_ms;
+        let tf = self.timeframe;
+        let calendar = lines_feed::catalog::sessions(self.instrument.id);
+        move |s: &mut FixedStr<32>| {
+            const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+            match tf {
+                Timeframe::Day => {
+                    let d = bar_date(tf, calendar, time);
+                    let _ = write!(s, "{} {d}", DAYS[usize::from(d.weekday())]);
+                }
+                Timeframe::Week => {
+                    let _ = write!(s, "Week of {}", bar_date(tf, calendar, time));
+                }
+                _ => {
+                    let _ = time.write_crosshair_label(period, s);
+                }
+            }
+        }
+    }
+
     /// The time tag's box for `time` at plot-local `x`: (left, width), centred on `x` and
     /// kept on the time axis.
     fn time_tag_box(&mut self, x: f32, time: UtcMillis, window: &mut Window) -> (f32, f32) {
         let scale = window.scale_factor();
         let pw = f32::from(self.plot.size.width);
-        let period = self.period_ms;
         let on = self.theme.on_cross_tag;
+        let text = self.time_tag_text(time);
         let text_w = f32::from(
-            self.label(LabelKind::CrossTime, time.0, on, window, |s| {
-                let _ = time.write_crosshair_label(period, s);
-            })
-            .width,
+            self.label(LabelKind::CrossTime, time.0, on, window, text)
+                .width,
         );
         let box_w = text_w + 12.0;
         let left = snap(f64::from((x - box_w * 0.5).min(pw - box_w).max(0.0)), scale);
@@ -1643,10 +1855,7 @@ impl ChartView {
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         let ph = f32::from(self.plot.size.height);
         let line_h = px(LABEL_PX * 1.3);
-        let period = self.period_ms;
-        let text = move |s: &mut FixedStr<32>| {
-            let _ = time.write_crosshair_label(period, s);
-        };
+        let text = self.time_tag_text(time);
         let (left, box_w) = self.time_tag_box(x, time, window);
         window.paint_quad(fill(
             Bounds::new(
@@ -1672,18 +1881,27 @@ impl ChartView {
     fn draw_readout(
         &mut self,
         bar: Bar,
+        partial: bool,
         bounds: Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) {
         let t = self.theme;
-        if self.readout.as_ref().is_none_or(|(b, _)| *b != bar) {
+        if self
+            .readout
+            .as_ref()
+            .is_none_or(|(b, p, _)| *b != bar || *p != partial)
+        {
             let mut s = FixedStr::<128>::new();
             let _ = write_ohlcv(&bar, &self.instrument.price, self.instrument.qty, &mut s);
+            if partial {
+                // Cut short by a session break (the close, or a holiday halt).
+                let _ = s.write_str("  partial");
+            }
             let line = self.shape(s.as_str(), t.text_main, window);
-            self.readout = Some((bar, line));
+            self.readout = Some((bar, partial, line));
         }
-        let Some((_, line)) = &self.readout else {
+        let Some((_, _, line)) = &self.readout else {
             return;
         };
         let scale = window.scale_factor();
@@ -1772,8 +1990,9 @@ impl ChartView {
     }
 
     /// The chart's header. `account`: its trading account chip (with the PAPER badge), shown
-    /// with the contract on the left; the right end is the hover controls' gutter.
-    fn header(&self, account: Option<gpui::AnyElement>) -> gpui::Div {
+    /// with the contract and the timeframe chip on the left; the right end is the hover
+    /// controls' gutter.
+    fn header(&self, account: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
         let bar = || {
             div()
@@ -1878,6 +2097,7 @@ impl ChartView {
                         .flex_shrink_0()
                         .children(chip)
                         .child(div().text_color(t.text_main).child(left))
+                        .child(self.timeframe_chip(&t, cx))
                         .children(account)
                         .children(quotes)
                         .children(pane::stale_badge(&self.store, &t)),
@@ -1889,6 +2109,136 @@ impl ChartView {
                         .text_color(t.text_dim)
                         .child(right),
                 ),
+        )
+    }
+}
+
+// ---- timeframe controls (roadmap 9) ---------------------------------------------------
+
+impl ChartView {
+    /// The header's timeframe chip ("5m ▾"): opens the list.
+    fn timeframe_chip(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let accent = t.accent;
+        div()
+            .id("timeframe")
+            .px_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(if self.tf_menu { accent } else { t.axis_line })
+            .text_color(t.text_main)
+            .cursor_pointer()
+            .hover(move |s| s.border_color(accent))
+            .child(pane::timeframe_chip_text(self.timeframe))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, _, cx| {
+                    cx.stop_propagation();
+                    v.toggle_timeframe_menu(cx);
+                }),
+            )
+    }
+
+    /// The timeframe list under the header, while open.
+    fn timeframe_list(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.tf_menu {
+            return None;
+        }
+        let accent = t.accent;
+        let mut list = div()
+            .absolute()
+            .top(px(2.0))
+            .left(px(8.0))
+            .min_w(px(150.0))
+            .flex()
+            .flex_col()
+            .py_1()
+            .bg(t.panel)
+            .border_1()
+            .border_color(accent)
+            .rounded_sm()
+            .text_size(px(12.0));
+        for (i, tf) in Timeframe::ALL.into_iter().enumerate() {
+            let on = tf == self.timeframe;
+            list = list.child(
+                div()
+                    .id(("timeframe", i as u64))
+                    .px_2()
+                    .py(px(2.0))
+                    .cursor_pointer()
+                    .text_color(t.text_main)
+                    .hover(move |s| s.bg(accent.opacity(0.18)))
+                    .font_weight(if on {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .child(if on {
+                        format!("✓ {tf}")
+                    } else {
+                        format!("   {tf}")
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |v, _, _, cx| {
+                            cx.stop_propagation();
+                            v.set_timeframe(tf, cx);
+                        }),
+                    ),
+            );
+        }
+        Some(
+            list.child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_color(t.text_dim)
+                    .text_size(px(11.0))
+                    .child("Or type 5, 1h, 1d … + Enter"),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// The timeframe being typed, bottom left of the plot: what it will switch to.
+    fn timeframe_entry(&self, t: &Theme) -> Option<AnyElement> {
+        let entry = self.tf_entry.as_deref()?;
+        let (hint, ok) = match Timeframe::parse(entry) {
+            Some(tf) => (format!("Enter: {tf}"), true),
+            None => (
+                "1 2 3 5 10 15 30 (m)  ·  1h 2h 4h  ·  1d  ·  1w".to_owned(),
+                false,
+            ),
+        };
+        Some(
+            div()
+                .absolute()
+                .bottom(px(AXIS_H + 8.0))
+                .left(px(8.0))
+                .flex()
+                .flex_row()
+                .gap_2()
+                .items_center()
+                .px_2()
+                .py_1()
+                .bg(t.panel)
+                .border_1()
+                .border_color(t.accent)
+                .rounded_sm()
+                .text_size(px(12.0))
+                .child(div().text_color(t.text_dim).child("Timeframe"))
+                .child(
+                    div()
+                        .text_color(t.text_main)
+                        .font_weight(FontWeight::BOLD)
+                        .child(format!("{entry}▏")),
+                )
+                .child(
+                    div()
+                        .text_color(if ok { t.text_main } else { t.text_dim })
+                        .child(hint),
+                )
+                .child(div().text_color(t.text_dim).child("Esc cancels"))
+                .into_any_element(),
         )
     }
 }
@@ -1929,6 +2279,7 @@ impl Pane for ChartView {
             visibility: self.visibility,
             levels: self.levels.config.clone(),
             magnet: self.magnet(),
+            timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
         });
         doc.trade = self.trade.doc();
     }
@@ -2003,19 +2354,28 @@ fn prepare_studies(
     studies: &mut crate::studies::Studies,
     levels: &mut LevelsLayer,
     d: &ChartData,
+    bars: BarsView<'_>,
     vp: &Viewport,
     max_columns: usize,
 ) {
     if !visibility.draws_studies() {
         return;
     }
-    profile.prepare(d, vp);
+    profile.prepare(d, bars, vp);
     for l in layers {
-        l.prepare(d, vp);
+        l.prepare(d, bars, vp);
     }
-    studies.prepare(d, vp, max_columns);
+    studies.prepare(bars, vp, max_columns);
     let last_y = d.last_trade.map(|p| vp.price_to_y(p.0 as f64) as f32);
-    levels.prepare(d, vp, last_y);
+    levels.prepare(d, bars, vp, last_y);
+}
+
+/// The bars a chart shows: its timeframe's, or the store's 1-minute bars.
+fn bars_view<'a>(derived: &'a Option<Derived>, d: &'a ChartData) -> BarsView<'a> {
+    match derived {
+        Some(dv) => dv.view(),
+        None => BarsView::fixed(d.series.bars(), d.series.period_ms()),
+    }
 }
 
 /// The indicator engine's view of a chart store's feed.
@@ -2033,7 +2393,7 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
 const LEGEND_MAX_W: f32 = 360.0;
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I studies  ·  Alt+V profile";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Ctrl+I studies  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2058,7 +2418,7 @@ impl Render for ChartView {
                 .flex()
                 .flex_col()
                 .bg(t.bg)
-                .child(self.header(None))
+                .child(self.header(None, cx))
                 .child(
                     div()
                         .relative()
@@ -2078,7 +2438,7 @@ impl Render for ChartView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header(account))
+            .child(self.header(account, cx))
             .child(
                 div()
                     .relative()
@@ -2113,7 +2473,9 @@ impl Render for ChartView {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
                     .when_some(overlay, |d, overlay| d.child(overlay))
-                    .when_some(accounts, |d, o| d.child(o)),
+                    .when_some(accounts, |d, o| d.child(o))
+                    .when_some(self.timeframe_list(&t, cx), |d, l| d.child(l))
+                    .when_some(self.timeframe_entry(&t), |d, e| d.child(e)),
             )
     }
 }
@@ -2166,6 +2528,7 @@ mod tests {
                 &mut studies,
                 &mut LevelsLayer::new(LevelsConfig::default()),
                 &d,
+                BarsView::fixed(d.series.bars(), d.series.period_ms()),
                 &vp,
                 256,
             );
@@ -2184,6 +2547,7 @@ mod tests {
             &mut studies,
             &mut LevelsLayer::new(LevelsConfig::default()),
             &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
             &vp,
             256,
         );
