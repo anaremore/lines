@@ -69,6 +69,14 @@ pub enum Command {
     ShowSourceHere,
     /// Every unavailable pane in the tab shows the source's own symbol.
     ShowSourceInTab,
+    /// The focused chart: hide (or show) all external levels (decision 0022).
+    ToggleLevels,
+    /// The focused chart: hide (or show) level labels and level legend rows.
+    ToggleLevelLabels,
+    /// The focused chart: hide (or show) one level source (index into its sources).
+    ToggleLevelSource(u8),
+    /// The focused chart: hide (or show) one kind of one source (indices).
+    ToggleLevelKind(u8, u8),
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -250,6 +258,12 @@ pub fn label(c: Command) -> String {
         Command::ShowSourceHere => "Show the source's symbol in this pane".into(),
         Command::ShowSourceInTab => "Switch all unavailable panes to the source's symbol".into(),
         Command::Columns(ColumnCmd::Width(c, w)) => format!("Set {} width to {w} px", c.label()),
+        Command::ToggleLevels => "Chart: hide/show levels".into(),
+        Command::ToggleLevelLabels => "Chart: hide/show level labels".into(),
+        Command::ToggleLevelSource(i) => format!("Chart: hide/show level source {}", i + 1),
+        Command::ToggleLevelKind(i, k) => {
+            format!("Chart: hide/show level kind {} of source {}", k + 1, i + 1)
+        }
     }
 }
 
@@ -283,6 +297,8 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleStudies,
         Command::CleanChart,
         Command::ToggleHints,
+        Command::ToggleLevels,
+        Command::ToggleLevelLabels,
         Command::SaveAs,
         Command::Open,
         Command::Menu,

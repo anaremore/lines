@@ -319,3 +319,52 @@ fn column_layout_and_resizing_do_not_allocate() {
     });
     assert_eq!(n, 0, "column layout allocated {n} times");
 }
+
+/// External levels (decision 0022): placing a map's levels and their labels each frame.
+#[test]
+fn level_placement_does_not_allocate() {
+    use lines_core::ProductId;
+    use lines_core::levels::{LevelMap, LevelStyle, LevelValue, place, place_labels};
+
+    let mut b = LevelMap::builder("demo", ProductId(1), UtcMillis(0));
+    for k in 0..200i64 {
+        let p = 600_000 + (k * 37 % 400 - 200) * 25;
+        b = if k % 3 == 0 {
+            b.zone(
+                "zone",
+                LevelValue::Tick(Price(p)),
+                LevelValue::Tick(Price(p + 100)),
+                Some("Z"),
+                LevelStyle::default(),
+            )
+        } else {
+            b.line(
+                "line",
+                LevelValue::Raw(p as f64 + 0.4),
+                Some("L"),
+                LevelStyle::default(),
+            )
+        };
+    }
+    let map = b.build(25).unwrap();
+    let mut vp = Viewport::default();
+    vp.set_size(1200.0, 700.0);
+    (vp.price_lo, vp.price_hi) = (596_000.0, 604_000.0);
+    let mut out = Vec::with_capacity(1024);
+    place(&map, &vp, Some(600_000.0), |_| true, &mut out); // warm
+    let n = allocs_during(|| {
+        for i in 0..50 {
+            vp.price_hi = 604_000.0 + i as f64 * 25.0;
+            place(
+                &map,
+                &vp,
+                Some(600_000.0),
+                |k| k != 1 || i % 2 == 0,
+                &mut out,
+            );
+            place_labels(&mut out, &map, 17.6, 700.0, Some(350.0));
+        }
+    });
+    assert_eq!(n, 0, "level placement allocated {n} times");
+    assert!(!out.is_empty());
+}

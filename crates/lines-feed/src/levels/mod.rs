@@ -1,0 +1,264 @@
+//! External level sources (decision 0022): the public half.
+//!
+//! A [`LevelSource`] publishes [`LevelMap`]s (lines, zones, labels: `lines_core::levels`) for
+//! the products it serves. Sources are registered process-wide ([`register`]), like market
+//! data extensions (decision 0020); official builds register theirs at start-up. Nothing in
+//! this module names a vendor.
+//!
+//! # Shape (decision 0011, I/O-free decoding)
+//!
+//! - [`LevelSource::connect`] opens the source's own [`LevelTransport`]: the adapter does its
+//!   HTTP / SSE (and keeps any credentials) itself.
+//! - The runtime ([`runtime`]) asks the transport for [`LevelFrame`]s: one refresh's
+//!   responses for poll and one-shot sources ([`LevelTransport::fetch`]), events for SSE
+//!   ([`LevelTransport::next_event`]). Each batch is stamped, optionally **recorded**, then
+//!   handed to [`LevelSource::decode`], which is pure: frames (+ the previous map + the
+//!   chart's prices) in, map out.
+//! - Replay feeds the recorded batches to the same `decode` at their recorded times, so a
+//!   replay shows exactly the levels the live run showed.
+//!
+//! Fetching and decoding run on the levels runtime thread, never the UI thread.
+
+pub mod runtime;
+
+#[cfg(any(test, feature = "demo-levels"))]
+pub mod demo;
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use anyhow::{Result, bail};
+use bytes::Bytes;
+pub use futures_util::future::BoxFuture;
+use lines_core::{ContractKey, Price, Product, UtcMillis};
+use parking_lot::RwLock;
+
+pub use lines_core::levels::{
+    LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape, LevelStyle, LevelValue,
+};
+
+/// How a source refreshes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RefreshMode {
+    /// [`LevelTransport::fetch`] every interval.
+    Poll(Duration),
+    /// A stream: [`LevelTransport::next_event`] until it ends, then reconnect.
+    Sse,
+    /// One fetch per connection (static maps).
+    OneShot,
+}
+
+/// One setting a source needs (decision 0021: settings are data). The settings window will
+/// render these; until it lands, values come from the command line or defaults.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SettingSpec {
+    /// Stable key, e.g. `service_url`.
+    pub key: &'static str,
+    pub label: &'static str,
+    pub kind: SettingKind,
+    /// Default, as text (`""`: none).
+    pub default: &'static str,
+    pub help: &'static str,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SettingKind {
+    Text,
+    Url,
+    /// Never stored in workspace files or recordings, never displayed; the adapter reads it
+    /// from the OS keychain or its environment variable itself.
+    Secret,
+    Bool,
+    /// Whole seconds in `[min, max]`.
+    Seconds {
+        min: u32,
+        max: u32,
+    },
+    Choice(&'static [&'static str]),
+}
+
+/// Setting values by key (secrets excluded).
+pub type SettingValues = BTreeMap<String, String>;
+
+/// What a source is asked to serve.
+#[derive(Clone, Debug)]
+pub struct LevelContext {
+    pub product: Product,
+    /// The chart's contract (`None`: unknown, e.g. an old recording).
+    pub contract: Option<ContractKey>,
+    pub settings: SettingValues,
+}
+
+impl LevelContext {
+    /// A setting's value, else its declared default.
+    pub fn setting<'a>(&'a self, spec: &'a SettingSpec) -> &'a str {
+        self.settings
+            .get(spec.key)
+            .map_or(spec.default, String::as_str)
+    }
+}
+
+/// The chart's market data, for decoding (anchor translation: decision 0022). Also exported
+/// as [`PriceAtTime`].
+pub trait ChartPrices: Send + Sync {
+    /// The chart's price at `t` (`lines_core::levels::price_at`): `None` when the chart's
+    /// data doesn't cover `t`. Translation must then be withheld.
+    fn price_at(&self, t: UtcMillis, tolerance_ms: i64) -> Option<Price>;
+    /// The chart's market clock (the replay clock in a replay), if it has data.
+    fn now(&self) -> Option<UtcMillis>;
+}
+
+/// The price-at-time interface adapters translate with (decision 0022): the same trait as
+/// [`ChartPrices`], under the name adapters use. The helper itself is public too:
+/// [`price_at`] (`lines_core::levels::price_at`).
+pub use self::ChartPrices as PriceAtTime;
+pub use lines_core::levels::price_at;
+
+/// [`ChartPrices`] over a chart's store: its bars (history + live, stitched) and its market
+/// clock. Locks the store briefly; used on the levels thread only.
+pub struct StorePrices(pub Arc<crate::store::ChartStore>);
+
+impl ChartPrices for StorePrices {
+    fn price_at(&self, t: UtcMillis, tolerance_ms: i64) -> Option<Price> {
+        let d = self.0.read();
+        lines_core::levels::price_at(d.series.bars(), t, tolerance_ms)
+    }
+    fn now(&self) -> Option<UtcMillis> {
+        self.0.read().market_time
+    }
+}
+
+/// One response or event, as recorded: a topic (the request path or event name; never a
+/// secret, never a query string carrying one) and the body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LevelFrame {
+    pub topic: String,
+    pub body: Bytes,
+}
+
+impl LevelFrame {
+    pub fn new(topic: impl Into<String>, body: impl Into<Bytes>) -> LevelFrame {
+        LevelFrame {
+            topic: topic.into(),
+            body: body.into(),
+        }
+    }
+}
+
+/// A source's connection, opened by [`LevelSource::connect`]. Methods must be cancel-safe.
+pub trait LevelTransport: Send {
+    /// Poll and one-shot sources: perform one refresh and return its responses.
+    fn fetch(&mut self) -> BoxFuture<'_, Result<Vec<LevelFrame>>>;
+    /// SSE sources: the next event; `Ok(None)` ends the stream (the runtime reconnects).
+    fn next_event(&mut self) -> BoxFuture<'_, Result<Option<LevelFrame>>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+/// A source of external levels (decision 0022). Implemented by adapters outside this repo
+/// (and by the synthetic [`demo`] source in tests and `demo-levels` builds).
+pub trait LevelSource: Send + Sync + 'static {
+    /// Stable id: lowercase letters, digits, `-`. Persisted with panes, stored in recordings.
+    fn id(&self) -> &'static str;
+    /// Short display name (legend, menus).
+    fn label(&self) -> &'static str;
+    /// Whether this source has levels for `product`.
+    fn serves(&self, product: &Product) -> bool;
+    fn refresh(&self) -> RefreshMode;
+    /// A map older than this (since it was last received or confirmed) shows as stale.
+    fn stale_after(&self) -> Duration;
+    fn settings(&self) -> &'static [SettingSpec] {
+        &[]
+    }
+    /// Open a connection (live only; runs on the levels runtime).
+    fn connect(&self, ctx: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>>;
+    /// Turn one batch of frames into a map. Pure: the same frames, previous map and chart
+    /// prices give the same result (replays depend on it). `Ok(None)`: nothing changed (e.g.
+    /// a keepalive); the current map is confirmed as current. `Err`: the batch is refused and
+    /// shown as an error; the previous map stays, marked stale.
+    fn decode(
+        &self,
+        ctx: &LevelContext,
+        prices: &dyn ChartPrices,
+        prev: Option<&LevelMap>,
+        frames: &[LevelFrame],
+    ) -> Result<Option<LevelMap>, String>;
+}
+
+fn table() -> &'static RwLock<Vec<Arc<dyn LevelSource>>> {
+    static T: OnceLock<RwLock<Vec<Arc<dyn LevelSource>>>> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// Register a level source for this process (official builds: through the extension
+/// point's `Extensions`, decision 0020). The same id again replaces it.
+pub fn register(source: Arc<dyn LevelSource>) -> Result<()> {
+    let id = source.id();
+    let ok = !id.is_empty()
+        && id.len() <= 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !ok {
+        bail!("level source id {id:?}: use 1-32 lowercase letters, digits and '-'");
+    }
+    let mut t = table().write();
+    t.retain(|s| s.id() != id);
+    t.push(source);
+    Ok(())
+}
+
+/// Every registered source, in registration order.
+pub fn registered() -> Vec<Arc<dyn LevelSource>> {
+    table().read().clone()
+}
+
+/// The registered sources that serve `product`.
+pub fn serving(product: &Product) -> Vec<Arc<dyn LevelSource>> {
+    table()
+        .read()
+        .iter()
+        .filter(|s| s.serves(product))
+        .cloned()
+        .collect()
+}
+
+pub fn by_id(id: &str) -> Option<Arc<dyn LevelSource>> {
+    table().read().iter().find(|s| s.id() == id).cloned()
+}
+
+/// Recorded batch encoding: per frame `u32 topic len | topic | u32 body len | body` (LE).
+pub fn encode_batch(frames: &[LevelFrame], out: &mut Vec<u8>) {
+    for f in frames {
+        out.extend_from_slice(&(f.topic.len() as u32).to_le_bytes());
+        out.extend_from_slice(f.topic.as_bytes());
+        out.extend_from_slice(&(f.body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&f.body);
+    }
+}
+
+/// Inverse of [`encode_batch`]; malformed input is an error, never a panic.
+pub fn decode_batch(mut b: &[u8]) -> Result<Vec<LevelFrame>, String> {
+    let mut out = Vec::new();
+    let take = |b: &mut &[u8]| -> Result<Vec<u8>, String> {
+        let n = b
+            .get(..4)
+            .ok_or("truncated length")?
+            .try_into()
+            .map(u32::from_le_bytes)
+            .map_err(|_| "bad length")? as usize;
+        let v = b.get(4..4 + n).ok_or("truncated field")?.to_vec();
+        *b = &b[4 + n..];
+        Ok(v)
+    };
+    while !b.is_empty() {
+        let topic = String::from_utf8(take(&mut b)?).map_err(|_| "topic is not UTF-8")?;
+        let body = take(&mut b)?;
+        out.push(LevelFrame::new(topic, body));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests;

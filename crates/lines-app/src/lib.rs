@@ -8,6 +8,7 @@ mod commands;
 mod dom_view;
 mod feeds;
 mod layout;
+mod levels_layer;
 mod menu;
 mod pane;
 mod pane_columns;
@@ -40,6 +41,7 @@ use lines_core::UtcMillis;
 use lines_feed::cqg::mock::MockConfig;
 use lines_feed::extension::ExtensionSource;
 pub use lines_feed::extension::{BoxFuture, DynTransport, SourceExtension, Timing};
+pub use lines_feed::levels::LevelSource;
 use lines_feed::registry::FeedRegistry;
 use lines_feed::{FeedConfig, Source, catalog};
 use profile::{ProfileConfig, ProfileMode, ProfileSession};
@@ -74,6 +76,7 @@ enum SourceKind {
 #[derive(Default, Clone)]
 pub struct Extensions {
     sources: Vec<Arc<dyn SourceExtension>>,
+    level_sources: Vec<Arc<dyn LevelSource>>,
 }
 
 impl Extensions {
@@ -89,6 +92,17 @@ impl Extensions {
 
     pub fn sources(&self) -> &[Arc<dyn SourceExtension>] {
         &self.sources
+    }
+
+    /// Add an external level source (decision 0022): its levels show on the charts of the
+    /// products it serves.
+    pub fn with_level_source(mut self, source: Arc<dyn LevelSource>) -> Self {
+        self.level_sources.push(source);
+        self
+    }
+
+    pub fn level_sources(&self) -> &[Arc<dyn LevelSource>] {
+        &self.level_sources
     }
 }
 
@@ -286,6 +300,18 @@ struct Cli {
     /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
     #[arg(long, requires = "screenshot")]
     hide_hints: bool,
+    /// External levels (decision 0022): record every level source's responses into this
+    /// directory (`<source>-<PRODUCT>.lfr`), so a replay shows the same levels.
+    #[arg(long, conflicts_with = "replay_levels")]
+    record_levels: Option<PathBuf>,
+    /// External levels: replay the level recordings in this directory on the chart's replay
+    /// clock instead of fetching (use with --replay).
+    #[arg(long)]
+    replay_levels: Option<PathBuf>,
+    /// Show the synthetic demo level source on ES/MES charts (builds with `demo-levels`).
+    #[cfg(feature = "demo-levels")]
+    #[arg(long)]
+    demo_levels: bool,
     /// Add a VWAP to the first chart (repeatable): eth (default reset), rth, week, month or
     /// anchor@2026-11-06T14:30:00Z, optionally with σ bands after a slash: eth/1,2,3 (quote it
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
@@ -549,11 +575,23 @@ where
     for e in &ext.sources {
         lines_feed::extension::register(e.clone())?;
     }
+    for l in &ext.level_sources {
+        lines_feed::levels::register(l.clone())?;
+    }
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
     let choice = SourceChoice::parse(&cli.source, &ext)
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source))?;
     let config = feed_config(&cli, &choice)?;
+    lines_feed::levels::runtime::set_mode(match (&cli.record_levels, &cli.replay_levels) {
+        (Some(d), _) => lines_feed::levels::runtime::LevelMode::Record(d.clone()),
+        (_, Some(d)) => lines_feed::levels::runtime::LevelMode::Replay(d.clone()),
+        _ => lines_feed::levels::runtime::LevelMode::Live,
+    });
+    #[cfg(feature = "demo-levels")]
+    if cli.demo_levels {
+        lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
+    }
 
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));
@@ -883,6 +921,16 @@ fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Level sources (decision 0022) register through the same extension point as market data.
+    #[test]
+    fn extensions_carry_level_sources() {
+        let ext =
+            Extensions::new().with_level_source(Arc::new(lines_feed::levels::demo::DemoLevels));
+        assert_eq!(ext.level_sources().len(), 1);
+        assert_eq!(ext.level_sources()[0].id(), "demo");
+        assert!(ext.sources().is_empty());
+    }
 
     fn help() -> String {
         command(&Extensions::new()).render_long_help().to_string()

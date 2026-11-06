@@ -1069,6 +1069,36 @@ impl WindowView {
                 let hide = !cx.global::<Workspace>().hide_hints;
                 set_hide_hints(hide, cx);
             }
+            Command::ToggleLevels
+            | Command::ToggleLevelLabels
+            | Command::ToggleLevelSource(_)
+            | Command::ToggleLevelKind(..) => {
+                let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+                    return; // levels are on charts only
+                };
+                let (sources, mut c) = {
+                    let v = chart.read(cx);
+                    (v.level_sources(), v.levels_config())
+                };
+                match cmd {
+                    Command::ToggleLevels => c.hidden = !c.hidden,
+                    Command::ToggleLevelLabels => c.hide_labels = !c.hide_labels,
+                    Command::ToggleLevelSource(i) => {
+                        if let Some((id, ..)) = sources.get(i as usize) {
+                            c.toggle_source(id);
+                        }
+                    }
+                    Command::ToggleLevelKind(i, k) => {
+                        if let Some((id, _, kinds)) = sources.get(i as usize)
+                            && let Some(kind) = kinds.get(k as usize)
+                        {
+                            c.toggle_kind(id, kind);
+                        }
+                    }
+                    _ => {}
+                }
+                chart.update(cx, |v, cx| v.set_levels_config(c, cx));
+            }
             Command::Menu => {
                 let area = self.content_area(window, cx);
                 let bar = self.bar_h();
@@ -1622,6 +1652,34 @@ impl WindowView {
                     Command::CleanChart,
                     v.hide_study_labels && hints_hidden,
                 ));
+                // External levels: all, labels, then each source and its kinds.
+                let (sources, lc) = {
+                    let c = chart.read(cx);
+                    (c.level_sources(), c.levels_config())
+                };
+                if !sources.is_empty() {
+                    items.push(MenuItem::sep());
+                    items.push(MenuItem::named("Levels", Command::ToggleLevels, !lc.hidden));
+                    items.push(MenuItem::named(
+                        "Level labels",
+                        Command::ToggleLevelLabels,
+                        !lc.hide_labels,
+                    ));
+                    for (i, (id, label, kinds)) in sources.iter().enumerate().take(16) {
+                        items.push(MenuItem::named(
+                            &format!("Levels: {label}"),
+                            Command::ToggleLevelSource(i as u8),
+                            lc.source_shown(id),
+                        ));
+                        for (k, kind) in kinds.iter().enumerate().take(32) {
+                            items.push(MenuItem::named(
+                                &format!("    {label} · {kind}"),
+                                Command::ToggleLevelKind(i as u8, k as u8),
+                                lc.kind_shown(id, kind),
+                            ));
+                        }
+                    }
+                }
             }
         } else {
             items.push(MenuItem::named(

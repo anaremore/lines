@@ -11,6 +11,9 @@ publish.workspace = true
 # protocol session, the in-process mock and cqg-proto stay in every build so the mock and
 # replays of CQG-format recordings work.
 vendor-cqg = []
+# A synthetic level source (`levels::demo`) for screenshots of the levels layer. Never
+# registered unless asked for (`--levels demo`).
+demo-levels = []
 
 [dependencies]
 lines-core.workspace = true
