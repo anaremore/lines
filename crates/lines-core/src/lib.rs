@@ -5,19 +5,26 @@
 
 pub mod bars;
 pub mod book;
+pub mod calendar;
+pub mod continuous;
 pub mod fixed_str;
 pub mod geometry;
 pub mod instrument;
 pub mod price;
 pub mod qty;
+pub mod roll;
 pub mod time;
 pub mod viewport;
 
 pub use bars::{Bar, BarSeries, TradeOutcome};
 pub use book::{Level, OrderBook, Side};
+pub use calendar::CivilDate;
 pub use fixed_str::FixedStr;
 pub use geometry::{Candle, PriceGridLine, Scene, TimeGridLine};
-pub use instrument::{Capabilities, Currency, Instrument, InstrumentId};
+pub use instrument::{
+    Capabilities, ContractKey, Currency, Delivery, ExpiryRule, MicroEquivalent, Month, MonthCycle,
+    Product, ProductId, ProductKind, Ratio, RollRule,
+};
 pub use price::{DisplayStyle, Price, PriceFormat, PriceScale, UnitConverter, UnitError};
 pub use qty::{Qty, QtyFormat};
 pub use time::UtcMillis;

@@ -21,7 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use lines_core::{Instrument, UtcMillis};
+use lines_core::{CivilDate, ContractKey, Product, UtcMillis};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
@@ -56,7 +56,7 @@ pub enum Source {
     },
     /// Coinbase Exchange public feed.
     Coinbase { url: String },
-    /// Replay a `.lfr` recording (provider and instrument come from its header).
+    /// Replay a `.lfr` recording (provider, product and contract come from its header).
     /// `speed` 1.0 = real time, 0 = as fast as possible. `stop_at` ends the replay before
     /// the first frame recorded after that instant.
     Replay {
@@ -69,8 +69,9 @@ pub enum Source {
 #[derive(Clone, Debug)]
 pub struct FeedConfig {
     pub source: Source,
-    /// Catalog instrument; `None` = the source's default (or the recording's).
-    pub instrument: Option<Instrument>,
+    /// A product (followed to its front month) or one contract; `None` = the source's
+    /// default product (or the recording's contract).
+    pub target: Option<catalog::Target>,
     /// Tee all raw frames to this `.lfr` file.
     pub record: Option<PathBuf>,
     pub bar_period_ms: i64,
@@ -81,7 +82,7 @@ impl FeedConfig {
     pub fn new(source: Source) -> Self {
         FeedConfig {
             source,
-            instrument: None,
+            target: None,
             record: None,
             bar_period_ms: UtcMillis::MINUTE,
             max_bars: 50_000,
@@ -89,10 +90,21 @@ impl FeedConfig {
     }
 }
 
-/// A validated plan: which provider serves which instrument.
+/// A validated plan: which provider serves which product and contract.
 struct Plan {
     provider: Arc<dyn Provider>,
-    instrument: Instrument,
+    product: Product,
+    /// `None` only for replays of recordings that don't name their contract (v2).
+    contract: Option<ContractKey>,
+    /// Re-resolve the front month on every (re)connect (the target was a product).
+    follow_front: bool,
+}
+
+/// Front month for a product today. Volume isn't known before connecting, so this uses the
+/// calendar rule (decision 0013's fallback); `current` keeps it from moving backwards.
+pub fn front_month(product: &Product, current: Option<ContractKey>) -> Option<ContractKey> {
+    let today = CivilDate::from_utc(now_utc());
+    lines_core::roll::resolve_front(product, today, current, None, &[]).map(|f| f.contract)
 }
 
 fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
@@ -125,29 +137,72 @@ fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
 }
 
 fn plan(config: &FeedConfig) -> Result<Plan> {
+    use catalog::Target;
     let provider = provider_for(&config.source)?;
-    let instrument = match (&config.source, &config.instrument) {
+    let get = |id| catalog::get(id).ok_or_else(|| anyhow!("unknown product {id}"));
+    let (product, contract, follow_front) = match (&config.source, &config.target) {
         (Source::Replay { path, .. }, requested) => {
             let h = transport::read_header(path)?;
-            let recorded = catalog::by_symbol(&h.instrument)
-                .ok_or_else(|| anyhow!("recording is for unknown instrument {:?}", h.instrument))?;
-            if let Some(r) = requested
-                && r.id != recorded.id
+            let product = catalog::by_symbol(&h.product)
+                .ok_or_else(|| anyhow!("recording is for unknown product {:?}", h.product))?;
+            if let Some(k) = h.contract
+                && k.product != product.id
             {
-                bail!("recording is for {}, not {}", recorded.symbol, r.symbol);
+                bail!(
+                    "corrupt recording header: contract {k:?} is not a {} contract",
+                    product.symbol
+                );
             }
-            recorded
+            let label = |k: ContractKey| k.label(&product).as_str().to_owned();
+            match requested {
+                Some(Target::Product(id)) if *id != product.id => {
+                    bail!(
+                        "recording is for {}, not {}",
+                        product.symbol,
+                        get(*id)?.symbol
+                    )
+                }
+                Some(Target::Contract(k)) => match h.contract {
+                    _ if k.product != product.id => {
+                        bail!(
+                            "recording is for {}, not {}",
+                            product.symbol,
+                            get(k.product)?.symbol
+                        )
+                    }
+                    Some(c) if c != *k => bail!("recording is for {}, not {}", label(c), label(*k)),
+                    None => bail!(
+                        "this v{} recording doesn't say which contract it holds; request the product ({}) instead",
+                        h.version,
+                        product.symbol
+                    ),
+                    _ => {}
+                },
+                _ => {}
+            }
+            (product, h.contract, false)
         }
-        (_, Some(i)) => i.clone(),
-        (Source::Coinbase { .. }, None) => catalog::get(catalog::BTC_USD).expect("catalog"),
-        (_, None) => catalog::get(catalog::ES).expect("catalog"),
+        (_, Some(Target::Contract(k))) => (get(k.product)?, Some(*k), false),
+        (source, target) => {
+            let id = match (target, source) {
+                (Some(Target::Product(id)), _) => *id,
+                (_, Source::Coinbase { .. }) => catalog::BTC_USD,
+                _ => catalog::ES,
+            };
+            let product = get(id)?;
+            let front = front_month(&product, None)
+                .ok_or_else(|| anyhow!("no listed contract for {}", product.symbol))?;
+            (product, Some(front), true)
+        }
     };
-    if !provider.supports(&instrument) {
-        bail!("{} does not provide {}", provider.id(), instrument.symbol);
+    if !provider.supports(&product) {
+        bail!("{} does not provide {}", provider.id(), product.symbol);
     }
     Ok(Plan {
         provider,
-        instrument,
+        product,
+        contract,
+        follow_front,
     })
 }
 
@@ -173,11 +228,12 @@ impl Drop for FeedHandle {
     }
 }
 
-/// Create the store for a config (validates provider/instrument up front).
+/// Create the store for a config (validates provider, product and contract up front).
 pub fn new_store(config: &FeedConfig) -> Result<Arc<ChartStore>> {
     let p = plan(config)?;
     Ok(Arc::new(ChartStore::new(
-        p.instrument,
+        p.product,
+        p.contract,
         p.provider.capabilities(),
         p.provider.id(),
         config.bar_period_ms,
@@ -228,12 +284,13 @@ pub async fn run_feed(
             return;
         }
     };
-    let recorder = match &config.record {
+    let mut recorder = match &config.record {
         Some(path) => match Recorder::create(
             path,
             plan.provider.id(),
             &plan.provider.protocol(),
-            plan.instrument.symbol,
+            plan.product.symbol,
+            plan.contract,
         ) {
             Ok(r) => {
                 tracing::info!("recording raw frames to {}", path.display());
@@ -271,7 +328,30 @@ pub async fn run_feed(
         }
         store.set_status(FeedStatus::Connecting);
         let started = tokio::time::Instant::now();
-        let mut session = match plan.provider.new_session(&plan.instrument) {
+        // Following a product: re-resolve the front month on every (re)connect. A roll only
+        // moves the *chart* to the next contract (old bars retired, not mixed). Nothing here
+        // touches positions; rolling a position is always an explicit pair of orders.
+        let current = store.read().contract;
+        let contract = if plan.follow_front {
+            let next = front_month(&plan.product, current).or(current);
+            if next != current
+                && let Some(k) = next
+            {
+                tracing::info!("front month rolled to {}", k.label(&plan.product));
+                store.update(|d| d.switch_contract(k));
+                // Recordings hold exactly one contract: stop rather than mix two.
+                if let Some(r) = recorder.take() {
+                    tracing::warn!("recording stopped at the roll (recordings hold one contract)");
+                    if let Err(e) = r.finish() {
+                        tracing::error!("recording incomplete: {e}");
+                    }
+                }
+            }
+            next
+        } else {
+            current
+        };
+        let mut session = match plan.provider.new_session(&plan.product, contract) {
             Ok(s) => s,
             Err(e) => {
                 store.set_status(FeedStatus::Failed(e.to_string()));

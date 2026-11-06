@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lines_core::{ContractKey, Month};
 use lines_core::{Price, Qty, UtcMillis};
-use lines_feed::catalog;
+use lines_feed::catalog::{self, Target};
 use lines_feed::cqg::mock::MockConfig;
 use lines_feed::provider::Frame;
 use lines_feed::recording::{Direction, Recorder};
@@ -51,9 +52,11 @@ async fn cqg_mock_end_to_end_at_5k() {
     let store = run_for(mock(cfg), Duration::from_secs(3)).await;
     let d = store.read();
     assert_eq!(
-        d.instrument.symbol, "ES",
-        "catalog instrument, not the CQG symbol"
+        d.product.symbol, "ES",
+        "catalog product, not the CQG symbol"
     );
+    // Following the product: the store is keyed by its front-month contract.
+    assert_eq!(d.contract, lines_feed::front_month(&d.product, None));
     assert_eq!(d.provider, "cqg");
     assert!(
         d.series.len() >= 600,
@@ -69,7 +72,7 @@ async fn cqg_mock_end_to_end_at_5k() {
     assert!(d.stats.trades_in > 0);
     assert_eq!((d.stats.decode_errors, d.stats.rejected), (0, 0));
     assert!(d.bid.is_some() && d.ask.is_some() && d.last_trade.is_some());
-    let tick = d.instrument.price.tick;
+    let tick = d.product.price.tick;
     for b in d.series.bars() {
         for p in [b.open, b.high, b.low, b.close] {
             assert_eq!(p.0 % tick, 0, "off-tick price in {b:?}");
@@ -102,8 +105,9 @@ async fn record_then_replay_reproduces_bars_exactly() {
     let (a, b) = (live_store.read(), replay_store.read());
     assert_eq!(b.status, FeedStatus::ReplayFinished);
     assert_eq!(
-        b.instrument, a.instrument,
-        "instrument restored from the recording header"
+        (&b.product, b.contract),
+        (&a.product, a.contract),
+        "product and contract restored from the recording header"
     );
     assert!(
         a.stats.updates_in > 5_000,
@@ -196,14 +200,14 @@ async fn unmapped_or_unknown_instruments_fail_cleanly() {
     let mut c = FeedConfig::new(Source::Coinbase {
         url: "wss://invalid.example".into(),
     });
-    c.instrument = catalog::get(catalog::ES);
+    c.target = Some(Target::Product(catalog::ES));
     assert!(new_store(&c).is_err());
     // CQG maps NQ, but the mock only knows EP: server says not found -> Failed, no retry loop.
     let mut c = mock(MockConfig {
         history_bars: 10,
         ..Default::default()
     });
-    c.instrument = catalog::get(catalog::NQ);
+    c.target = Some(Target::Product(catalog::NQ));
     let store = run_to_end(c).await;
     assert!(
         matches!(&store.read().status, FeedStatus::Failed(m) if m.contains("not found") || m.contains("knows only"))
@@ -225,7 +229,14 @@ async fn replay_of_missing_file_fails_cleanly() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn coinbase_replay_from_synthetic_recording() {
     let path = temp_path("coinbase.lfr");
-    let rec = Recorder::create(&path, "coinbase", "coinbase-exchange-ws-1", "BTC/USD").unwrap();
+    let rec = Recorder::create(
+        &path,
+        "coinbase",
+        "coinbase-exchange-ws-1",
+        "BTC/USD",
+        Some(ContractKey::spot(catalog::BTC_USD)),
+    )
+    .unwrap();
     // Recording "starts" now; candles must predate the start minute to count as history.
     let start_min = lines_feed::now_utc().floor_to(60_000).0 / 1000;
     let candles = format!(
@@ -260,7 +271,8 @@ async fn coinbase_replay_from_synthetic_recording() {
     let d = store.read();
     assert_eq!(d.status, FeedStatus::ReplayFinished);
     assert_eq!(d.provider, "coinbase");
-    assert_eq!(d.instrument.symbol, "BTC/USD");
+    assert_eq!(d.product.symbol, "BTC/USD");
+    assert_eq!(d.contract, Some(ContractKey::spot(catalog::BTC_USD)));
     assert!(d.capabilities.fractional_qty);
     let bars = d.series.bars();
     assert_eq!(bars.len(), 3, "{bars:?}");
@@ -328,4 +340,49 @@ async fn ws_transport_requires_wss() {
 #[test]
 fn tls_config_builds_with_ring_and_os_roots() {
     lines_feed::transport::tls_config().expect("rustls config");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_contract_is_requested_and_recorded() {
+    // ES March 2027: CQG symbol EPH7 by rule; the mock resolves it as asked.
+    let h27 = ContractKey::monthly(catalog::ES, 2027, Month::new(3).unwrap());
+    let path = temp_path("es-h27.lfr");
+    let mut c = mock(MockConfig {
+        history_bars: 30,
+        ..Default::default()
+    });
+    c.target = Some(Target::Contract(h27));
+    c.record = Some(path.clone());
+    let store = run_for(c, Duration::from_millis(1_200)).await;
+    {
+        let d = store.read();
+        assert_eq!(d.contract, Some(h27));
+        assert!(d.stats.trades_in > 0, "{:?}", d.status);
+    }
+    let h = lines_feed::transport::read_header(&path).unwrap();
+    assert_eq!(
+        (h.version, h.product.as_str(), h.contract),
+        (3, "ES", Some(h27))
+    );
+
+    // Replaying asks for the recorded contract only.
+    let replay = |target| {
+        let mut c = FeedConfig::new(Source::Replay {
+            path: path.clone(),
+            speed: 0.0,
+            stop_at: None,
+        });
+        c.target = target;
+        c
+    };
+    assert!(new_store(&replay(Some(Target::Contract(h27)))).is_ok());
+    assert!(new_store(&replay(Some(Target::Product(catalog::ES)))).is_ok());
+    let z26 = ContractKey::monthly(catalog::ES, 2026, Month::new(12).unwrap());
+    let err = new_store(&replay(Some(Target::Contract(z26))))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("ESH27") && err.contains("ESZ26"), "{err}");
+    assert!(new_store(&replay(Some(Target::Product(catalog::NQ)))).is_err());
+    let _ = std::fs::remove_file(&path);
 }

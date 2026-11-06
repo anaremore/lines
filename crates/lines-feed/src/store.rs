@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lines_core::{BarSeries, Capabilities, Instrument, OrderBook, Price, UtcMillis};
+use lines_core::{BarSeries, Capabilities, ContractKey, OrderBook, Price, Product, UtcMillis};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::provider::MarketEvent;
@@ -59,7 +59,13 @@ pub struct FeedStats {
 
 #[derive(Debug)]
 pub struct ChartData {
-    pub instrument: Instrument,
+    pub product: Product,
+    /// The contract all of the data below belongs to (decision 0013: stored bars, depth and
+    /// recordings are always per contract). `None` = unknown, e.g. a pre-v3 recording.
+    pub contract: Option<ContractKey>,
+    /// Bars of contracts this chart rolled away from, newest last (bounded), kept for
+    /// continuous display. Never adjusted.
+    pub retired: Vec<(ContractKey, BarSeries)>,
     pub capabilities: Capabilities,
     /// Provider id ("cqg", "coinbase"); for status display, not for feature switches.
     pub provider: &'static str,
@@ -82,12 +88,7 @@ impl ChartData {
         for e in events {
             match *e {
                 MarketEvent::Ready => self.status = FeedStatus::Live,
-                MarketEvent::ContractChanged => {
-                    self.series.clear();
-                    self.last_trade = None;
-                    self.bid = None;
-                    self.ask = None;
-                }
+                MarketEvent::ContractChanged(next) => self.switch_contract(next),
                 MarketEvent::Bar(bar) => {
                     self.series.upsert(bar);
                     self.bump_time(bar.time);
@@ -138,12 +139,44 @@ impl ChartData {
         }
     }
 
+    /// Display label of the active contract (`ESZ26`, `BTC/USD`), or `None` if unknown.
+    pub fn contract_label(&self) -> Option<lines_core::FixedStr<24>> {
+        self.contract.map(|k| k.label(&self.product))
+    }
+
+    /// Make `next` the active contract. The previous contract's bars are retired (kept for
+    /// continuous charts), never mixed with the new contract's.
+    pub fn switch_contract(&mut self, next: ContractKey) {
+        if self.contract == Some(next) {
+            return;
+        }
+        let period = self.series.period_ms();
+        let cap = self.series.max_len();
+        let old = std::mem::replace(&mut self.series, BarSeries::new(period, cap));
+        if let Some(prev) = self.contract
+            && !old.is_empty()
+        {
+            self.retired.push((prev, old));
+            if self.retired.len() > MAX_RETIRED {
+                self.retired.remove(0);
+            }
+        }
+        self.contract = Some(next);
+        self.last_trade = None;
+        self.bid = None;
+        self.ask = None;
+        self.book.clear();
+    }
+
     fn bump_time(&mut self, t: UtcMillis) {
         if self.market_time.is_none_or(|m| t > m) {
             self.market_time = Some(t);
         }
     }
 }
+
+/// Retired contracts kept per chart (a year of quarterly rolls).
+const MAX_RETIRED: usize = 4;
 
 #[derive(Debug)]
 pub struct ChartStore {
@@ -153,7 +186,8 @@ pub struct ChartStore {
 
 impl ChartStore {
     pub fn new(
-        instrument: Instrument,
+        product: Product,
+        contract: Option<ContractKey>,
         capabilities: Capabilities,
         provider: &'static str,
         period_ms: i64,
@@ -161,7 +195,9 @@ impl ChartStore {
     ) -> Self {
         ChartStore {
             data: Mutex::new(ChartData {
-                instrument,
+                product,
+                contract,
+                retired: Vec::new(),
                 capabilities,
                 provider,
                 series: BarSeries::new(period_ms, max_bars),
@@ -203,5 +239,45 @@ impl ChartStore {
 
     pub fn set_status(&self, status: FeedStatus) {
         self.update(|d| d.status = status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog;
+    use lines_core::{Month, Qty};
+
+    #[test]
+    fn contract_change_retires_bars_instead_of_mixing() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let z25 = ContractKey::monthly(es.id, 2025, Month::new(12).unwrap());
+        let h26 = ContractKey::monthly(es.id, 2026, Month::new(3).unwrap());
+        let store = ChartStore::new(es, Some(z25), Capabilities::default(), "test", 60_000, 100);
+        let mut d = store.read();
+        let trade = |p| MarketEvent::Trade {
+            time: UtcMillis(0),
+            price: Price(p),
+            qty: Qty(1),
+        };
+        d.apply(&[trade(600_000), MarketEvent::Bid(Price(599_975))]);
+        d.apply(&[MarketEvent::ContractChanged(z25)]);
+        assert_eq!(d.series.len(), 1, "same contract: no-op");
+        d.apply(&[MarketEvent::ContractChanged(h26), trade(605_000)]);
+        assert_eq!(d.contract, Some(h26));
+        assert_eq!(
+            d.series.bars()[0].close,
+            Price(605_000),
+            "new contract starts clean"
+        );
+        assert_eq!(d.series.len(), 1);
+        assert_eq!(d.bid, None);
+        assert_eq!(d.retired.len(), 1);
+        assert_eq!(d.retired[0].0, z25);
+        assert_eq!(
+            d.retired[0].1.bars()[0].close,
+            Price(600_000),
+            "old bars kept, unadjusted"
+        );
     }
 }

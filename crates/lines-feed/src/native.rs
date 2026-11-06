@@ -3,7 +3,7 @@
 //!
 //! A recording with provider id [`PROVIDER`] holds one binary frame per *atomic batch*
 //! (e.g. one depth update batch); replay applies each frame to the store under one lock, so
-//! the book is never observed mid-batch. All values are already in catalog-instrument units.
+//! the book is never observed mid-batch. All values are already in catalog-product units.
 //!
 //! Frame layout: a sequence of events, little-endian:
 //! ```text
@@ -14,7 +14,7 @@
 //! ```
 //! Times are microseconds since the Unix epoch (UTC); the store keeps milliseconds.
 
-use lines_core::{Capabilities, Instrument, Price, Qty, Side, UtcMillis};
+use lines_core::{Capabilities, ContractKey, Price, Product, Qty, Side, UtcMillis};
 
 use crate::catalog;
 use crate::provider::{
@@ -205,12 +205,13 @@ impl Provider for NativeProvider {
             always_open: false,
         }
     }
-    fn supports(&self, instrument: &Instrument) -> bool {
-        catalog::get(instrument.id).is_some()
+    fn supports(&self, product: &Product) -> bool {
+        catalog::get(product.id).is_some()
     }
     fn new_session(
         &self,
-        _instrument: &Instrument,
+        _product: &Product,
+        _contract: Option<ContractKey>,
     ) -> Result<Box<dyn ProviderSession>, SessionError> {
         Ok(Box::new(NativeSession {
             ready: false,
@@ -339,7 +340,7 @@ mod tests {
     #[test]
     fn session_maps_to_market_events() {
         let mut s = NativeProvider
-            .new_session(&catalog::get(catalog::NQ).unwrap())
+            .new_session(&catalog::get(catalog::NQ).unwrap(), None)
             .unwrap();
         let mut buf = Vec::new();
         encode(&NativeEvent::BookClear { time_us: 0 }, &mut buf);

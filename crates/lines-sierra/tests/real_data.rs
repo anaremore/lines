@@ -77,7 +77,14 @@ async fn nqz5_2025_09_11_imports_and_replays() {
     {
         let d = store.read();
         assert_eq!(d.status, FeedStatus::ReplayFinished);
-        assert_eq!(d.instrument.symbol, "NQ");
+        assert_eq!(d.product.symbol, "NQ");
+        // NQZ5.CME: 1-digit year resolved from the file's data (decision 0013).
+        assert_eq!(
+            d.contract
+                .map(|k| k.label(&d.product).as_str().to_owned())
+                .as_deref(),
+            Some("NQZ25")
+        );
         assert_eq!(d.stats.trades_in, r.trades_written);
         assert_eq!(d.stats.book_crossed, r.book_crossed_after_batch);
         assert_eq!(d.stats.rejected + d.stats.decode_errors, 0);

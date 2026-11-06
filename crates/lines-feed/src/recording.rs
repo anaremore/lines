@@ -6,14 +6,20 @@
 //! `lines` (normalized events incl. order-book depth, see `native.rs`; used for imported
 //! data such as Sierra Chart files). The container format is unchanged by `lines`.
 //!
-//! Format v2 (little-endian):
+//! Format v3 (little-endian):
 //! ```text
-//! header:  b"LINESFR\0" | u16 format_version=2 | i64 start_wall_ms
-//!          | str provider | str protocol | str instrument_symbol      (str = u16 len + UTF-8)
+//! header:  b"LINESFR\0" | u16 format_version=3 | i64 start_wall_ms
+//!          | str provider | str protocol | str product_symbol         (str = u16 len + UTF-8)
+//!          | contract                                                  (v3 only)
+//! contract: u8 kind (0 = unknown, 1 = monthly, 2 = spot)
+//!          | if kind != 0: u32 product_id | if kind == 1: u16 year | u8 month
 //! record:  u8 tag | u64 nanos_since_start | u32 len | len bytes
 //!          tag bit 0: direction (0 = server->client, 1 = client->server)
 //!          tag bits 1-2: kind (0 = binary, 1 = text, 2 = http response)
 //! ```
+//! v3 adds the contract key (decision 0013). v2 files (same layout without `contract`) are
+//! still read, with the contract reported as unknown. v1 files are rejected.
+//!
 //! Recordings can contain licensed exchange data: keep them out of git (decision 0010).
 
 use std::fs::File;
@@ -25,10 +31,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 
+use lines_core::{ContractKey, Delivery, Month, ProductId};
+
 use crate::provider::{Frame, FrameKind};
 
 pub const MAGIC: &[u8; 8] = b"LINESFR\0";
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
+/// Oldest version this build still reads (as "contract unknown").
+pub const OLDEST_READABLE: u16 = 2;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -44,8 +54,13 @@ pub struct Header {
     pub provider: String,
     /// Provider wire protocol version, e.g. "cqg-webapi-2.230".
     pub protocol: String,
-    /// Internal (catalog) instrument symbol, e.g. "ES". Never a vendor symbol.
-    pub instrument: String,
+    /// Catalog product symbol, e.g. "ES". Never a vendor symbol.
+    pub product: String,
+    /// The contract the data belongs to. `None` = unknown (v2 files, or a writer that
+    /// didn't know it).
+    pub contract: Option<ContractKey>,
+    /// Format version the file was written with (writers always write the current one).
+    pub version: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,7 +131,8 @@ impl<W: Write> Writer<W> {
         w.write_all(&header.start_wall_ms.to_le_bytes())?;
         write_str(&mut w, &header.provider)?;
         write_str(&mut w, &header.protocol)?;
-        write_str(&mut w, &header.instrument)?;
+        write_str(&mut w, &header.product)?;
+        write_contract(&mut w, header.contract)?;
         Ok(Writer { w })
     }
 
@@ -157,7 +173,8 @@ impl Recorder {
         path: &Path,
         provider: &str,
         protocol: &str,
-        instrument: &str,
+        product: &str,
+        contract: Option<ContractKey>,
     ) -> io::Result<Recorder> {
         let start_wall_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -167,7 +184,9 @@ impl Recorder {
             start_wall_ms,
             provider: provider.into(),
             protocol: protocol.into(),
-            instrument: instrument.into(),
+            product: product.into(),
+            contract,
+            version: FORMAT_VERSION,
         };
         let mut w = Writer::create(path, &header)?;
         let (tx, rx) = mpsc::channel::<Msg>();
@@ -261,22 +280,29 @@ impl<R: Read> Reader<R> {
             return Err(bad("not a Lines feed recording"));
         }
         let version = u16::from_le_bytes(read_n(&mut r)?);
-        if version != FORMAT_VERSION {
+        if !(OLDEST_READABLE..=FORMAT_VERSION).contains(&version) {
             return Err(bad(format!(
-                "recording format v{version} is not supported (this build reads v{FORMAT_VERSION}); re-record it"
+                "recording format v{version} is not supported (this build reads v{OLDEST_READABLE}..=v{FORMAT_VERSION}); re-record it"
             )));
         }
         let start_wall_ms = i64::from_le_bytes(read_n(&mut r)?);
         let provider = read_str(&mut r)?;
         let protocol = read_str(&mut r)?;
-        let instrument = read_str(&mut r)?;
+        let product = read_str(&mut r)?;
+        let contract = if version >= 3 {
+            read_contract(&mut r)?
+        } else {
+            None
+        };
         Ok(Reader {
             r,
             header: Header {
                 start_wall_ms,
                 provider,
                 protocol,
-                instrument,
+                product,
+                contract,
+                version,
             },
         })
     }
@@ -335,6 +361,41 @@ fn read_n<const N: usize, R: Read>(r: &mut R) -> io::Result<[u8; N]> {
     Ok(b)
 }
 
+fn write_contract(w: &mut impl Write, c: Option<ContractKey>) -> io::Result<()> {
+    let Some(k) = c else {
+        return w.write_all(&[0]);
+    };
+    let kind = match k.delivery {
+        Delivery::Monthly { .. } => 1u8,
+        Delivery::Spot => 2,
+    };
+    w.write_all(&[kind])?;
+    w.write_all(&k.product.0.to_le_bytes())?;
+    if let Delivery::Monthly { year, month } = k.delivery {
+        w.write_all(&year.to_le_bytes())?;
+        w.write_all(&[month.number()])?;
+    }
+    Ok(())
+}
+
+fn read_contract<R: Read>(r: &mut R) -> io::Result<Option<ContractKey>> {
+    let kind = read_n::<1, _>(r)?[0];
+    if kind == 0 {
+        return Ok(None);
+    }
+    let product = ProductId(u32::from_le_bytes(read_n(r)?));
+    match kind {
+        1 => {
+            let year = u16::from_le_bytes(read_n(r)?);
+            let month =
+                Month::new(read_n::<1, _>(r)?[0]).ok_or_else(|| bad("bad contract month"))?;
+            Ok(Some(ContractKey::monthly(product, year, month)))
+        }
+        2 => Ok(Some(ContractKey::spot(product))),
+        k => Err(bad(format!("bad contract kind {k}"))),
+    }
+}
+
 fn read_str<R: Read>(r: &mut R) -> io::Result<String> {
     let len = u16::from_le_bytes(read_n(r)?) as usize;
     let mut buf = vec![0u8; len];
@@ -350,8 +411,14 @@ mod tests {
     fn roundtrip_and_truncation() {
         let dir = std::env::temp_dir().join(format!("lines-rec-test-{}", std::process::id()));
         let path = dir.join("t.lfr");
-        let rec =
-            Recorder::create(&path, "coinbase", "coinbase-exchange-ws-v1", "BTC/USD").unwrap();
+        let rec = Recorder::create(
+            &path,
+            "coinbase",
+            "coinbase-exchange-ws-v1",
+            "BTC/USD",
+            Some(ContractKey::spot(ProductId(1001))),
+        )
+        .unwrap();
         let frames: Vec<Frame> = (0..1000u32)
             .map(|i| match i % 3 {
                 0 => Frame::binary(i.to_le_bytes().repeat(i as usize % 7 + 1)),
@@ -374,7 +441,9 @@ mod tests {
         let mut r = Reader::open(&path).unwrap();
         assert_eq!(r.header.provider, "coinbase");
         assert_eq!(r.header.protocol, "coinbase-exchange-ws-v1");
-        assert_eq!(r.header.instrument, "BTC/USD");
+        assert_eq!(r.header.product, "BTC/USD");
+        assert_eq!(r.header.contract, Some(ContractKey::spot(ProductId(1001))));
+        assert_eq!(r.header.version, 3);
         let mut prev = Duration::ZERO;
         for (i, f) in frames.iter().enumerate() {
             let rec = r.next_record().unwrap().unwrap();
@@ -404,5 +473,71 @@ mod tests {
         v1.extend_from_slice(&1u16.to_le_bytes());
         let err = Reader::new(&v1[..]).err().unwrap();
         assert!(err.to_string().contains("v1"));
+    }
+
+    fn header(contract: Option<ContractKey>) -> Header {
+        Header {
+            start_wall_ms: 1,
+            provider: "lines".into(),
+            protocol: "lines-events-1".into(),
+            product: "NQ".into(),
+            contract,
+            version: FORMAT_VERSION,
+        }
+    }
+
+    #[test]
+    fn v3_contract_roundtrip() {
+        let z = Month::new(12).unwrap();
+        for c in [
+            None,
+            Some(ContractKey::monthly(ProductId(2), 2025, z)),
+            Some(ContractKey::spot(ProductId(1001))),
+        ] {
+            let mut buf = Vec::new();
+            let mut w = Writer::new(&mut buf, &header(c)).unwrap();
+            w.write(
+                Direction::FromServer,
+                Duration::from_millis(5),
+                &Frame::binary(vec![1, 2, 3]),
+            )
+            .unwrap();
+            w.finish().unwrap();
+            let mut r = Reader::new(&buf[..]).unwrap();
+            assert_eq!(r.header, header(c));
+            assert_eq!(
+                r.next_record().unwrap().unwrap().frame,
+                Frame::binary(vec![1, 2, 3])
+            );
+        }
+    }
+
+    #[test]
+    fn v2_files_read_as_contract_unknown() {
+        // A v2 file: the same layout without the contract field.
+        let mut v2 = MAGIC.to_vec();
+        v2.extend_from_slice(&2u16.to_le_bytes());
+        v2.extend_from_slice(&7i64.to_le_bytes());
+        for s in ["cqg", "cqg-webapi-2.230", "ES"] {
+            v2.extend_from_slice(&(s.len() as u16).to_le_bytes());
+            v2.extend_from_slice(s.as_bytes());
+        }
+        v2.push(0); // record tag: from server, binary
+        v2.extend_from_slice(&0u64.to_le_bytes());
+        v2.extend_from_slice(&1u32.to_le_bytes());
+        v2.push(42);
+        let mut r = Reader::new(&v2[..]).unwrap();
+        assert_eq!(
+            (
+                r.header.version,
+                r.header.product.as_str(),
+                r.header.contract
+            ),
+            (2, "ES", None)
+        );
+        assert_eq!(r.next_record().unwrap().unwrap().frame.data.as_ref(), &[42]);
+        let mut v4 = MAGIC.to_vec();
+        v4.extend_from_slice(&4u16.to_le_bytes());
+        assert!(Reader::new(&v4[..]).is_err(), "newer than this build");
     }
 }

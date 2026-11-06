@@ -3,13 +3,13 @@
 //! Request ids restart at 1 per connection and contract ids are re-resolved, because CQG
 //! contract ids are only valid for the session that issued them. This is the CQG *edge*
 //! (decision 0002): `scaled_price × correct_price_scale` is converted exactly into the
-//! catalog instrument's units, and metadata that disagrees with the catalog is rejected.
-
-use std::sync::Arc;
+//! catalog product's units, and metadata that disagrees with the catalog is rejected.
 
 use cqg_proto::{cqg, historical_2, market_data_2, metadata_2, user_session_2, web_api_2};
-use lines_core::{Bar, Instrument, Price, PriceScale, Qty, UnitConverter, UtcMillis};
-use parking_lot::Mutex;
+use lines_core::calendar::resolve_expiry;
+use lines_core::{
+    Bar, CivilDate, ContractKey, Price, PriceScale, Product, Qty, UnitConverter, UtcMillis,
+};
 use prost::Message;
 
 use crate::provider::{
@@ -42,17 +42,20 @@ enum State {
 }
 
 pub struct CqgSession {
-    cqg_symbol: String,
-    instrument: Instrument,
+    /// Product root (e.g. `EP`); requested as-is when the contract is unknown.
+    root: &'static str,
+    /// The contract this session is for and its CQG symbol (e.g. `EPZ6`). `None` = unknown
+    /// (replay of a pre-v3 recording): request the root and accept what CQG resolves.
+    expect: Option<(ContractKey, String)>,
+    product: Product,
     logon: LogonParams,
-    last_contract: Arc<Mutex<Option<String>>>,
     state: State,
     base_time: UtcMillis,
     next_id: u32,
     symbol_request_id: u32,
     bar_request_id: u32,
     contract_id: Option<u32>,
-    /// CQG scaled units → instrument units (exact).
+    /// CQG scaled units → catalog units (exact).
     price_conv: Option<UnitConverter>,
     /// CQG `correct_price_scale` the converter was built from.
     cqg_scale: f64,
@@ -67,16 +70,16 @@ fn encode(msg: &ClientMsg) -> Outgoing {
 
 impl CqgSession {
     pub fn new(
-        cqg_symbol: String,
-        instrument: Instrument,
+        root: &'static str,
+        expect: Option<(ContractKey, String)>,
+        product: Product,
         logon: LogonParams,
-        last_contract: Arc<Mutex<Option<String>>>,
     ) -> Self {
         CqgSession {
-            cqg_symbol,
-            instrument,
+            root,
+            expect,
+            product,
             logon,
-            last_contract,
             state: State::AwaitLogon,
             base_time: UtcMillis(0),
             next_id: 1,
@@ -112,7 +115,7 @@ impl CqgSession {
     /// CQG volume: prefer `cqg.Decimal volume`; fall back to deprecated `scaled_volume`
     /// (volume_scale assumed 1, true for futures).
     fn qty(&self, decimal: Option<&cqg::Decimal>, scaled: Option<u64>) -> Option<Qty> {
-        let q = self.instrument.qty;
+        let q = self.product.qty;
         match (decimal, scaled) {
             (Some(d), _) => q
                 .from_parts(d.significand.unwrap_or(0) as i128, d.exponent.unwrap_or(0))
@@ -154,7 +157,11 @@ impl CqgSession {
                 id: self.symbol_request_id,
                 subscribe: Some(false),
                 symbol_resolution_request: Some(metadata_2::SymbolResolutionRequest {
-                    symbol: Some(self.cqg_symbol.clone()),
+                    symbol: Some(
+                        self.expect
+                            .as_ref()
+                            .map_or_else(|| self.root.to_owned(), |(_, s)| s.clone()),
+                    ),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -169,22 +176,30 @@ impl CqgSession {
         let bad = |m: String| {
             SessionError::BadMetadata(format!(
                 "{} ({}): {m}",
-                self.instrument.symbol, meta.contract_symbol
+                self.product.symbol, meta.contract_symbol
             ))
         };
         let cqg_scale = PriceScale::from_f64(meta.correct_price_scale)
             .map_err(|e| bad(format!("correct_price_scale {e}")))?;
-        let conv = UnitConverter::new(cqg_scale, self.instrument.price.scale);
+        if let Some((_, want)) = &self.expect
+            && meta.contract_symbol != *want
+        {
+            return Err(bad(format!(
+                "asked for contract {want}, CQG resolved {}",
+                meta.contract_symbol
+            )));
+        }
+        let conv = UnitConverter::new(cqg_scale, self.product.price.scale);
         let tick = self
-            .instrument
+            .product
             .price
             .scale
             .exact_units_from_f64(meta.tick_size)
             .map_err(|e| bad(format!("tick_size {e}")))?;
-        if tick != self.instrument.price.tick {
+        if tick != self.product.price.tick {
             return Err(bad(format!(
                 "tick_size {} = {tick} units, catalog says {}",
-                meta.tick_size, self.instrument.price.tick
+                meta.tick_size, self.product.price.tick
             )));
         }
         if !meta.tick_sizes_by_price.is_empty() {
@@ -194,6 +209,21 @@ impl CqgSession {
             );
         }
         Ok(conv)
+    }
+
+    /// Decision 0013: provider expiry wins over the calendar rule; disagreement is logged.
+    fn check_expiry(&self, meta: &metadata_2::ContractMetadata) {
+        let (Some((key, sym)), Some(ltd)) = (&self.expect, meta.last_trading_date) else {
+            return;
+        };
+        let provider = CivilDate::from_utc(self.time_at_offset(ltd));
+        if let Some(e) = resolve_expiry(&self.product, *key, Some(provider))
+            && let Some(cal) = e.calendar_disagrees
+        {
+            tracing::warn!(
+                "{sym}: CQG last trading date {provider} differs from the calendar rule ({cal}); using CQG's"
+            );
+        }
     }
 
     fn on_symbol_report(
@@ -221,14 +251,7 @@ impl CqgSession {
         self.price_conv = Some(self.validate(meta)?);
         self.cqg_scale = meta.correct_price_scale;
         self.contract_id = Some(meta.contract_id);
-        {
-            let mut last = self.last_contract.lock();
-            if last.as_deref().is_some_and(|c| c != meta.contract_symbol) {
-                tracing::warn!(old = ?*last, new = %meta.contract_symbol, "contract changed; dropping bars");
-                events.push(MarketEvent::ContractChanged);
-            }
-            *last = Some(meta.contract_symbol.clone());
-        }
+        self.check_expiry(meta);
 
         let ctx = self.ctx.expect("start() runs before frames");
         let from = ctx.history_from.unwrap_or_else(|| {
@@ -480,13 +503,11 @@ mod tests {
         UtcMillis::parse_iso(BASE).unwrap().0
     }
 
-    fn session(id: lines_core::InstrumentId, sym: &str) -> CqgSession {
-        let mut s = CqgSession::new(
-            sym.into(),
-            catalog::get(id).unwrap(),
-            LogonParams::default(),
-            Arc::new(Mutex::new(None)),
-        );
+    /// A session for the product's root (contract unknown), as for a pre-v3 replay.
+    fn session(id: lines_core::ProductId, _root: &str) -> CqgSession {
+        let product = catalog::get(id).unwrap();
+        let root = catalog::roots(id).cqg.unwrap();
+        let mut s = CqgSession::new(root, None, product, LogonParams::default());
         s.start(
             StartContext {
                 now: UtcMillis(base_ms() + 5_000),
@@ -744,45 +765,62 @@ mod tests {
         assert!(err.to_string().contains("bad password"));
     }
 
-    #[test]
-    fn reconnect_backfills_and_roll_is_detected() {
-        let last = Arc::new(Mutex::new(Some("EPZ6".to_string())));
-        let es = catalog::get(catalog::ES).unwrap();
-        let mut s = CqgSession::new(
-            "EP".into(),
-            es.clone(),
-            LogonParams::default(),
-            last.clone(),
-        );
-        let from = UtcMillis(base_ms() + 3 * 60_000);
+    fn contract_session(key: ContractKey, history_from: Option<UtcMillis>) -> CqgSession {
+        let product = catalog::get(key.product).unwrap();
+        let root = catalog::roots(key.product).cqg.unwrap();
+        let sym = super::super::contract_symbol(root, key).unwrap();
+        let mut s = CqgSession::new(root, Some((key, sym)), product, LogonParams::default());
         s.start(
             StartContext {
                 now: UtcMillis(base_ms()),
-                history_from: Some(from),
+                history_from,
                 bar_period_ms: 60_000,
             },
             &mut Vec::new(),
         );
-        feed(&mut s, logon_ok());
+        s
+    }
+
+    #[test]
+    fn requests_the_exact_contract_and_backfills() {
+        let z26 = ContractKey::monthly(catalog::ES, 2026, lines_core::Month::new(12).unwrap());
+        let from = UtcMillis(base_ms() + 3 * 60_000);
+        let mut s = contract_session(z26, Some(from));
+        let (_, out) = feed(&mut s, logon_ok());
+        let req = &out[0].information_requests[0];
+        assert_eq!(
+            req.symbol_resolution_request
+                .as_ref()
+                .unwrap()
+                .symbol
+                .as_deref(),
+            Some("EPZ6")
+        );
         let (ev, out) = feed(&mut s, symbol_ok(1, 42, "EPZ6", 0.01, 0.25));
-        assert_eq!(ev, vec![MarketEvent::Ready], "same contract: keep bars");
+        assert_eq!(ev, vec![MarketEvent::Ready]);
         let p = out[0].time_bar_requests[0]
             .time_bar_parameters
             .as_ref()
             .unwrap();
         assert_eq!(s.time_at_offset(p.from_utc_time), from);
+    }
 
-        let mut s = CqgSession::new("EP".into(), es, LogonParams::default(), last);
-        s.start(
-            StartContext {
-                now: UtcMillis(base_ms()),
-                history_from: Some(from),
-                bar_period_ms: 60_000,
-            },
-            &mut Vec::new(),
-        );
+    #[test]
+    fn a_different_resolved_contract_is_rejected() {
+        let z26 = ContractKey::monthly(catalog::ES, 2026, lines_core::Month::new(12).unwrap());
+        let mut s = contract_session(z26, None);
         feed(&mut s, logon_ok());
-        let (ev, _) = feed(&mut s, symbol_ok(1, 43, "EPH7", 0.01, 0.25));
-        assert_eq!(ev, vec![MarketEvent::ContractChanged, MarketEvent::Ready]);
+        let err = s
+            .on_frame(
+                &frame(symbol_ok(1, 43, "EPH7", 0.01, 0.25)),
+                UtcMillis(0),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, SessionError::BadMetadata(ref m) if m.contains("EPZ6") && m.contains("EPH7")),
+            "{err}"
+        );
     }
 }

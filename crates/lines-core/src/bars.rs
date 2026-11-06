@@ -80,6 +80,11 @@ impl BarSeries {
         }
     }
 
+    /// Maximum bars kept (older ones are trimmed).
+    pub fn max_len(&self) -> usize {
+        self.max_len
+    }
+
     pub fn period_ms(&self) -> i64 {
         self.period_ms
     }

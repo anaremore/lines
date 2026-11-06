@@ -4,10 +4,7 @@
 pub mod mock;
 pub mod session;
 
-use std::sync::Arc;
-
-use lines_core::{Capabilities, Instrument, InstrumentId};
-use parking_lot::Mutex;
+use lines_core::{Capabilities, ContractKey, Delivery, Product};
 
 use crate::catalog;
 use crate::provider::{self, Provider, ProviderSession, SessionError};
@@ -16,29 +13,23 @@ pub use session::{CqgSession, LogonParams};
 /// Default CQG demo endpoint (requires CQG-issued demo credentials).
 pub const DEMO_URL: &str = "wss://demoapi.cqg.com:443";
 
-/// Internal instrument → CQG symbol. CQG's own naming; verify with CQG symbol
-/// resolution before relying on anything beyond ES.
-fn cqg_symbol(id: InstrumentId) -> Option<&'static str> {
-    match id {
-        catalog::ES => Some("EP"),
-        catalog::NQ => Some("ENQ"),
-        catalog::ZN => Some("TYA"),
-        _ => None,
+/// CQG contract symbol by rule (decision 0013): root + month code + last digit of the year,
+/// e.g. ES Dec 2026 → `EPZ6`. CQG resolves the single year digit to the nearest listed
+/// contract, which is unambiguous because listings span far less than ten years.
+pub(crate) fn contract_symbol(root: &str, key: ContractKey) -> Option<String> {
+    match key.delivery {
+        Delivery::Monthly { year, month } => Some(format!("{root}{}{}", month.code(), year % 10)),
+        Delivery::Spot => None,
     }
 }
 
 pub struct CqgProvider {
     logon: LogonParams,
-    /// Contract the symbol resolved to on the previous connection (roll detection).
-    last_contract: Arc<Mutex<Option<String>>>,
 }
 
 impl CqgProvider {
     pub fn new(logon: LogonParams) -> Self {
-        CqgProvider {
-            logon,
-            last_contract: Arc::new(Mutex::new(None)),
-        }
+        CqgProvider { logon }
     }
 }
 
@@ -65,22 +56,32 @@ impl Provider for CqgProvider {
         }
     }
 
-    fn supports(&self, instrument: &Instrument) -> bool {
-        cqg_symbol(instrument.id).is_some()
+    fn supports(&self, product: &Product) -> bool {
+        catalog::roots(product.id).cqg.is_some() && !product.is_spot()
     }
 
     fn new_session(
         &self,
-        instrument: &Instrument,
+        product: &Product,
+        contract: Option<ContractKey>,
     ) -> Result<Box<dyn ProviderSession>, SessionError> {
-        let symbol = cqg_symbol(instrument.id).ok_or_else(|| {
-            SessionError::Unavailable(format!("{} is not mapped for CQG", instrument.symbol))
+        let root = catalog::roots(product.id).cqg.ok_or_else(|| {
+            SessionError::Unavailable(format!("{} is not mapped for CQG", product.symbol))
         })?;
+        let expect = match contract {
+            Some(k) => {
+                let sym = contract_symbol(root, k).ok_or_else(|| {
+                    SessionError::Unavailable(format!("{} has no dated contracts", product.symbol))
+                })?;
+                Some((k, sym))
+            }
+            None => None,
+        };
         Ok(Box::new(CqgSession::new(
-            symbol.to_owned(),
-            instrument.clone(),
+            root,
+            expect,
+            product.clone(),
             self.logon.clone(),
-            self.last_contract.clone(),
         )))
     }
 }
@@ -103,10 +104,30 @@ mod tests {
         assert!(p.supports(&catalog::get(catalog::ES).unwrap()));
         assert!(!p.supports(&catalog::get(catalog::BTC_USD).unwrap()));
         assert!(
-            p.new_session(&catalog::get(catalog::BTC_USD).unwrap())
+            !p.supports(&catalog::get(catalog::MNQ).unwrap()),
+            "unverified CQG root"
+        );
+        let btc = catalog::get(catalog::BTC_USD).unwrap();
+        assert!(
+            p.new_session(&btc, Some(ContractKey::spot(btc.id)))
                 .is_err()
         );
         assert!(protocol_compatible(&p.protocol()));
         assert!(!protocol_compatible("cqg-webapi-3.1"));
+    }
+
+    #[test]
+    fn contract_symbol_rule() {
+        let z = lines_core::Month::new(12).unwrap();
+        let h = lines_core::Month::new(3).unwrap();
+        assert_eq!(
+            contract_symbol("EP", ContractKey::monthly(catalog::ES, 2026, z)).as_deref(),
+            Some("EPZ6")
+        );
+        assert_eq!(
+            contract_symbol("ENQ", ContractKey::monthly(catalog::NQ, 2030, h)).as_deref(),
+            Some("ENQH0")
+        );
+        assert_eq!(contract_symbol("EP", ContractKey::spot(catalog::ES)), None);
     }
 }

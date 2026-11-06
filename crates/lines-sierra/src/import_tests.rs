@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use lines_core::{DisplayStyle, Instrument, Price, PriceFormat, PriceScale, Side, UtcMillis};
+use lines_core::{
+    ContractKey, DisplayStyle, Month, Price, PriceFormat, PriceScale, Product, Side, UtcMillis,
+};
 
 use crate::format::synth::*;
 use crate::format::{FIRST_SUB_TRADE, LAST_SUB_TRADE, ScidRecord, unix_us_to_sc};
@@ -160,7 +162,7 @@ fn price_conversion() {
     );
     // A decimal price stored as f32 carries float error; the f32-relative tolerance accepts it
     // (a double-precision tolerance would reject 75.43f32 = 75.43000030517578).
-    let cents = Instrument {
+    let cents = Product {
         price: PriceFormat::new(
             PriceScale::decimal(2),
             DisplayStyle::Decimal { digits: 2 },
@@ -181,7 +183,10 @@ async fn synthetic_import_report_replay_and_reproducibility() {
     write_fixture(&dir);
 
     let r = import(&opts(&dir, "a.lfr")).unwrap();
-    assert_eq!(r.instrument, "NQ");
+    assert_eq!(
+        (r.instrument.as_str(), r.contract.as_str()),
+        ("NQ", "NQZ25")
+    );
     assert_eq!(r.tick_records_in_day, 11, "{r}");
     assert_eq!(r.trades_written, 7, "{r}");
     assert_eq!(
@@ -248,7 +253,13 @@ async fn synthetic_import_report_replay_and_reproducibility() {
     {
         let d = store.read();
         assert_eq!(d.status, lines_feed::store::FeedStatus::ReplayFinished);
-        assert_eq!(d.instrument.symbol, "NQ");
+        assert_eq!(d.product.symbol, "NQ");
+        let nqz25 = ContractKey::monthly(lines_feed::catalog::NQ, 2025, Month::new(12).unwrap());
+        assert_eq!(
+            d.contract,
+            Some(nqz25),
+            "contract carried through the v3 header"
+        );
         assert!(d.capabilities.depth);
         assert_eq!(d.stats.trades_in, 7);
         assert_eq!(d.stats.book_crossed, 1);
@@ -278,7 +289,7 @@ fn missing_files_and_bad_symbols() {
         import(&o)
             .unwrap_err()
             .to_string()
-            .contains("no catalog instrument")
+            .contains("no catalog product")
     );
     // Header-only scid (as on disk for some contracts) and no depth: clean error.
     std::fs::write(dir.join("NQZ5.CME.scid"), scid_header()).unwrap();

@@ -22,7 +22,7 @@ use gpui::{
     point, prelude::*, px, size,
 };
 use lines_core::geometry::{Crosshair, crosshair, snap, write_ohlcv};
-use lines_core::{Bar, FixedStr, Instrument, Price, Scene, Viewport};
+use lines_core::{Bar, FixedStr, Price, Product, Scene, Viewport};
 use lines_feed::FeedHandle;
 use lines_feed::store::{ChartStore, FeedStatus};
 
@@ -59,7 +59,7 @@ pub struct ChartView {
     seen_revision: u64,
     vp: Viewport,
     scene: Scene,
-    instrument: Instrument,
+    instrument: Product,
     last_trade: Option<Price>,
     series_len: usize,
     series_trimmed: u64,
@@ -89,7 +89,7 @@ impl ChartView {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = feed.store.clone();
-        let instrument = store.read().instrument.clone();
+        let instrument = store.read().product.clone();
         // Poll the lock-free revision counter at ~120 Hz; redraw only on change.
         let poll_store = store.clone();
         cx.spawn(async move |this, cx| {
@@ -619,16 +619,20 @@ impl ChartView {
         let Some(d) = self.store.try_read() else {
             return div(); // feed busy this instant; header refreshes next frame
         };
-        let i = &d.instrument;
+        let i = &d.product;
         let f = i.price;
         let fp = |p: Option<Price>| p.map(|p| f.format::<32>(p)).unwrap_or_default();
-        let _ = write!(
-            left,
-            "{}  {}    last {}",
-            i.symbol,
-            i.description,
-            fp(d.last_trade)
-        );
+        // The active contract is always shown (decision 0013); unknown is labelled, not hidden.
+        let _ = match d.contract_label() {
+            Some(c) => write!(left, "{c}  {}    last {}", i.description, fp(d.last_trade)),
+            None => write!(
+                left,
+                "{} (contract unknown)  {}    last {}",
+                i.symbol,
+                i.description,
+                fp(d.last_trade)
+            ),
+        };
         if d.capabilities.bbo {
             let _ = write!(left, "   bid {}   ask {}", fp(d.bid), fp(d.ask));
         }

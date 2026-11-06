@@ -2,9 +2,9 @@
 //!
 //! Coinbase sends prices and sizes as decimal *strings* on the websocket and as JSON
 //! *numbers* in REST candles. Both are parsed from their text exactly into the catalog
-//! instrument's units (decision 0002); nothing goes through `f64`.
+//! product's units (decision 0002); nothing goes through `f64`.
 
-use lines_core::{Bar, Instrument, Price, Qty, UtcMillis};
+use lines_core::{Bar, Price, Product, Qty, UtcMillis};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -17,7 +17,8 @@ const MAX_CANDLES: i64 = 300;
 
 pub struct CoinbaseSession {
     product: String,
-    instrument: Instrument,
+    /// Catalog spec of the spot product (units for exact parsing).
+    spec: Product,
     rest_url: String,
     last_trade_id: Option<u64>,
     /// Candles at or after this time are the forming bar; live matches build it instead.
@@ -63,10 +64,10 @@ struct HeartbeatMsg {
 }
 
 impl CoinbaseSession {
-    pub fn new(product: String, instrument: Instrument, rest_url: String) -> Self {
+    pub fn new(product: String, spec: Product, rest_url: String) -> Self {
         CoinbaseSession {
             product,
-            instrument,
+            spec,
             rest_url,
             last_trade_id: None,
             history_cutoff: UtcMillis(i64::MAX),
@@ -74,11 +75,11 @@ impl CoinbaseSession {
     }
 
     fn price(&self, s: &str) -> Option<Price> {
-        self.instrument.price.scale.parse_decimal(s).ok().map(Price)
+        self.spec.price.scale.parse_decimal(s).ok().map(Price)
     }
 
     fn qty(&self, s: &str) -> Option<Qty> {
-        self.instrument.qty.parse_decimal(s).ok()
+        self.spec.qty.parse_decimal(s).ok()
     }
 
     /// Track trade ids: returns false for duplicates; reports gaps.

@@ -25,7 +25,7 @@ enum SourceKind {
     Cqg,
     /// Coinbase Exchange public feed (free, 24/7; dev tool).
     Coinbase,
-    /// A `.lfr` recording (provider + instrument come from the file).
+    /// A `.lfr` recording (provider, product and contract come from the file).
     Replay,
 }
 
@@ -42,7 +42,8 @@ struct Cli {
     /// Where market data comes from.
     #[arg(long, value_enum, default_value_t = SourceKind::Mock)]
     source: SourceKind,
-    /// Catalog instrument (ES, NQ, ZN, BTC/USD, ETH/USD). Default: ES, or BTC/USD for coinbase.
+    /// A product followed to its front month (ES, NQ, MES, MNQ, ZN, BTC/USD, ETH/USD) or one
+    /// contract (ESZ26, MNQH2027). Default: ES, or BTC/USD for coinbase.
     #[arg(long)]
     instrument: Option<String>,
     /// Record every raw feed frame to this .lfr file.
@@ -180,9 +181,12 @@ fn feed_config(cli: &Cli) -> Result<FeedConfig> {
     };
     let mut cfg = FeedConfig::new(source);
     if let Some(sym) = &cli.instrument {
-        cfg.instrument = Some(catalog::by_symbol(sym).with_context(|| {
-            let known: Vec<_> = catalog::all().iter().map(|i| i.symbol).collect();
-            format!("unknown instrument {sym:?}; known: {}", known.join(", "))
+        cfg.target = Some(catalog::parse_target(sym).with_context(|| {
+            let known: Vec<_> = catalog::all().iter().map(|p| p.symbol).collect();
+            format!(
+                "unknown instrument {sym:?}; use a product ({}) or a contract like ESZ26",
+                known.join(", ")
+            )
         })?);
     }
     cfg.record = cli.record.clone();
@@ -269,7 +273,10 @@ fn run_headless(config: FeedConfig, dur: Duration) -> Result<()> {
         println!(
             "[{:>4.1}s] {} {:<16} bars={:<6} updates={:<9} trades={:<8} frames={:<7} gaps={} rejected={} reconnects={}",
             start.elapsed().as_secs_f64(),
-            d.instrument.symbol,
+            d.contract_label().map_or_else(
+                || format!("{} (contract unknown)", d.product.symbol),
+                |l| l.to_string()
+            ),
             d.status.label(),
             d.series.len(),
             d.stats.updates_in,

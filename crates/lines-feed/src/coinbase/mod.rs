@@ -7,7 +7,7 @@
 
 pub mod session;
 
-use lines_core::{Capabilities, Instrument, InstrumentId};
+use lines_core::{Capabilities, ContractKey, Delivery, Product};
 
 use crate::catalog;
 use crate::provider::{self, Provider, ProviderSession, SessionError};
@@ -17,13 +17,9 @@ pub const WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
 pub const REST_URL: &str = "https://api.exchange.coinbase.com";
 const PROTOCOL: &str = "coinbase-exchange-ws-1";
 
-/// Internal instrument → Coinbase product id.
-fn product_id(id: InstrumentId) -> Option<&'static str> {
-    match id {
-        catalog::BTC_USD => Some("BTC-USD"),
-        catalog::ETH_USD => Some("ETH-USD"),
-        _ => None,
-    }
+/// Coinbase product id (its root symbol; spot products have no contract months).
+fn product_id(product: &Product) -> Option<&'static str> {
+    catalog::roots(product.id).coinbase
 }
 
 #[derive(Default)]
@@ -48,20 +44,28 @@ impl Provider for CoinbaseProvider {
         }
     }
 
-    fn supports(&self, instrument: &Instrument) -> bool {
-        product_id(instrument.id).is_some()
+    fn supports(&self, product: &Product) -> bool {
+        product.is_spot() && product_id(product).is_some()
     }
 
     fn new_session(
         &self,
-        instrument: &Instrument,
+        product: &Product,
+        contract: Option<ContractKey>,
     ) -> Result<Box<dyn ProviderSession>, SessionError> {
-        let product = product_id(instrument.id).ok_or_else(|| {
-            SessionError::Unavailable(format!("{} is not mapped for Coinbase", instrument.symbol))
+        let id = product_id(product).ok_or_else(|| {
+            SessionError::Unavailable(format!("{} is not mapped for Coinbase", product.symbol))
         })?;
+        if let Some(k) = contract
+            && (k.product != product.id || k.delivery != Delivery::Spot)
+        {
+            return Err(SessionError::Unavailable(format!(
+                "Coinbase has only spot contracts, not {k:?}"
+            )));
+        }
         Ok(Box::new(CoinbaseSession::new(
-            product.to_owned(),
-            instrument.clone(),
+            id.to_owned(),
+            product.clone(),
             REST_URL.to_owned(),
         )))
     }

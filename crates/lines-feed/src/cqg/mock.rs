@@ -50,6 +50,21 @@ impl Default for MockConfig {
 
 /// The CQG symbol the mock resolves (CQG naming for E-mini S&P 500).
 pub const MOCK_SYMBOL: &str = "EP";
+/// What the root resolves to (CQG resolves a bare root to its front month).
+pub const MOCK_FRONT_CONTRACT: &str = "EPZ6";
+
+/// The mock resolves `EP` and any `EP` contract symbol (`EP` + month code + year digit).
+fn mock_knows(sym: &str) -> bool {
+    match sym.strip_prefix(MOCK_SYMBOL) {
+        Some("") => true,
+        Some(rest) => {
+            let mut c = rest.chars();
+            matches!((c.next(), c.next(), c.next()), (Some(m), Some(d), None)
+                if lines_core::Month::from_code(m).is_some() && d.is_ascii_digit())
+        }
+        None => false,
+    }
+}
 pub const MOCK_CONTRACT_ID: u32 = 1;
 const SCALE: f64 = 0.01; // E-mini S&P style: scaled units are cents
 const TICK: i64 = 25; // 0.25 index points
@@ -222,12 +237,14 @@ impl MockTransport {
         }
         for req in msg.information_requests {
             if let Some(sym) = req.symbol_resolution_request.and_then(|r| r.symbol) {
-                if sym != MOCK_SYMBOL {
+                if !mock_knows(&sym) {
                     self.push(web_api_2::ServerMsg {
                         information_reports: vec![web_api_2::InformationReport {
                             id: req.id,
                             status_code: 104, // STATUS_CODE_NOT_FOUND
-                            text_message: Some(format!("mock knows only {MOCK_SYMBOL}, not {sym}")),
+                            text_message: Some(format!(
+                                "mock knows only {MOCK_SYMBOL} and its contracts, not {sym}"
+                            )),
                             ..Default::default()
                         }],
                         ..Default::default()
@@ -241,7 +258,11 @@ impl MockTransport {
                         symbol_resolution_report: Some(metadata_2::SymbolResolutionReport {
                             contract_metadata: metadata_2::ContractMetadata {
                                 contract_id: MOCK_CONTRACT_ID,
-                                contract_symbol: format!("{sym}Z6"),
+                                contract_symbol: if sym == MOCK_SYMBOL {
+                                    MOCK_FRONT_CONTRACT.to_owned()
+                                } else {
+                                    sym.clone()
+                                },
                                 title: format!("{sym} (mock E-mini S&P 500)"),
                                 description: "Mock contract".into(),
                                 correct_price_scale: SCALE,

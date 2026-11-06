@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use lines_core::{Instrument, OrderBook, Price, PriceScale, Qty, Side, UtcMillis};
+use lines_core::{CivilDate, OrderBook, Price, PriceScale, Product, Qty, Side, UtcMillis};
 use lines_feed::native::{self, Aggressor, NativeEvent};
 use lines_feed::provider::Frame;
 use lines_feed::recording::{Direction, Header, Writer};
@@ -54,7 +54,7 @@ pub struct PriceConv {
 }
 
 impl PriceConv {
-    pub fn new(instrument: &Instrument, multiplier: f64) -> Self {
+    pub fn new(instrument: &Product, multiplier: f64) -> Self {
         PriceConv {
             scale: instrument.price.scale,
             tick: instrument.price.tick,
@@ -86,6 +86,8 @@ impl PriceConv {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImportReport {
     pub instrument: String,
+    /// Canonical contract label, e.g. `NQZ25`.
+    pub contract: String,
     pub depth_file_found: bool,
     pub depth_version: u32,
     pub scid_version: u16,
@@ -164,7 +166,11 @@ impl ImportReport {
 
 impl fmt::Display for ImportReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "instrument            {}", self.instrument)?;
+        writeln!(
+            f,
+            "instrument            {} ({})",
+            self.instrument, self.contract
+        )?;
         writeln!(
             f,
             "events                {:?} .. {:?}",
@@ -600,7 +606,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
     let sym = symbol::parse(&opts.symbol)
         .with_context(|| format!("cannot parse Sierra symbol {:?}", opts.symbol))?;
     let (instrument, default_mult) = symbol::map_root(&sym.root)
-        .with_context(|| format!("no catalog instrument for root {:?}", sym.root))?;
+        .with_context(|| format!("no catalog product for root {:?}", sym.root))?;
     let multiplier = opts.price_multiplier.unwrap_or(default_mult);
     let day_start = UtcMillis::parse_iso(&format!("{}T00:00:00", opts.date))
         .with_context(|| format!("bad --date {:?} (want YYYY-MM-DD)", opts.date))?;
@@ -609,6 +615,19 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
     let scid_file = scid_path(&opts.data_dir, &opts.symbol);
     let mut scid =
         ScidReader::open(&scid_file).with_context(|| format!("open {}", scid_file.display()))?;
+    // Contract from the file name; a 1-digit year is resolved from the newest data in the
+    // file (or the imported day, if later).
+    let last_data_year = scid
+        .last_time()?
+        .map(|t| CivilDate::from_utc(UtcMillis(sc_to_unix_us(t).div_euclid(1000))).year)
+        .unwrap_or(0)
+        .max(CivilDate::from_utc(day_start).year);
+    let contract = symbol::contract_for(&sym, &instrument, last_data_year).with_context(|| {
+        format!(
+            "cannot derive a {} contract from {:?}",
+            instrument.symbol, opts.symbol
+        )
+    })?;
     scid.seek_to_time(unix_us_to_sc(day_start_us))?;
     let depth_file = depth_path(&opts.data_dir, &opts.symbol, &opts.date);
     let mut depth = match DepthReader::open(&depth_file) {
@@ -629,6 +648,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         book: OrderBook::default(),
         report: ImportReport {
             instrument: instrument.symbol.to_owned(),
+            contract: contract.label(&instrument).as_str().to_owned(),
             depth_file_found: depth.is_some(),
             depth_version: depth.as_ref().map_or(0, |d| d.version),
             scid_version: scid.version,
@@ -675,7 +695,9 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         start_wall_ms: first_us.div_euclid(1000),
         provider: native::PROVIDER.into(),
         protocol: native::PROTOCOL.into(),
-        instrument: instrument.symbol.into(),
+        product: instrument.symbol.into(),
+        contract: Some(contract),
+        version: lines_feed::recording::FORMAT_VERSION,
     };
     let mut writer = Writer::create(&opts.out, &header)
         .with_context(|| format!("create {}", opts.out.display()))?;

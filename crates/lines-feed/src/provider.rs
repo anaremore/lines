@@ -5,12 +5,12 @@
 //!   for per-connection sessions. Vendor symbol mapping lives behind this trait (decision
 //!   0003), so nothing above `lines-feed` sees vendor symbols.
 //! - [`ProviderSession`]: I/O-free protocol logic for one connection. It turns wire frames
-//!   into normalized [`MarketEvent`]s in *instrument units* (decision 0002) and says what to
+//!   into normalized [`MarketEvent`]s in *catalog units* (decision 0002) and says what to
 //!   send. The generic driver (`connection.rs`) owns all I/O, so live, mock and replay run
 //!   the identical session code.
 
 use bytes::Bytes;
-use lines_core::{Bar, Capabilities, Instrument, Price, Qty, Side, UtcMillis};
+use lines_core::{Bar, Capabilities, ContractKey, Price, Product, Qty, Side, UtcMillis};
 
 /// Wire frame kinds. HTTP responses (e.g. REST history) travel through the same pipe so
 /// recordings capture them and replays are deterministic.
@@ -56,14 +56,14 @@ pub enum Outgoing {
     HttpGet(String),
 }
 
-/// Normalized market data, already converted into instrument units.
+/// Normalized market data, already converted into catalog units.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MarketEvent {
     /// Subscribed and streaming.
     Ready,
-    /// The provider resolved to a different underlying contract than last time (e.g. a
-    /// futures roll): existing bars are not comparable and must be dropped.
-    ContractChanged,
+    /// Data from here on belongs to this contract (e.g. after a front-month roll). The store
+    /// retires the previous contract's bars rather than mixing them (decision 0013).
+    ContractChanged(ContractKey),
     /// A complete, authoritative bar (history or a server bar update).
     Bar(Bar),
     Trade {
@@ -161,11 +161,14 @@ pub trait Provider: Send + Sync {
     /// Wire protocol version, stored in recordings (e.g. `"cqg-webapi-2.230"`).
     fn protocol(&self) -> String;
     fn capabilities(&self) -> Capabilities;
-    /// Whether this provider maps the instrument to one of its symbols.
-    fn supports(&self, instrument: &Instrument) -> bool;
-    /// Fresh protocol state for one connection.
+    /// Whether this provider maps the product to one of its root symbols.
+    fn supports(&self, product: &Product) -> bool;
+    /// Fresh protocol state for one connection to `contract` (derived by the provider into its
+    /// own symbol by rule). `None` = contract unknown (replay of a pre-v3 recording); the
+    /// session then accepts whatever contract the data is for.
     fn new_session(
         &self,
-        instrument: &Instrument,
+        product: &Product,
+        contract: Option<ContractKey>,
     ) -> Result<Box<dyn ProviderSession>, SessionError>;
 }

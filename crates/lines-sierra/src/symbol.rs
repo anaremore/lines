@@ -4,7 +4,7 @@
 //! Seen on disk: `NQZ5.CME`, `MNQZ6.CME`, `NQH25-CME`, `NQH25_FUT_CME`, and single-digit-year
 //! files such as `NQH2.CME` (ambiguous decade).
 
-use lines_core::Instrument;
+use lines_core::{ContractKey, Month, Product, ProductKind};
 use lines_feed::catalog;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +52,7 @@ pub fn parse(symbol: &str) -> Option<SierraSymbol> {
 /// Observed on the owner's Apex/Rithmic data: NQ stored ×100 (24128.75 → 2412875).
 /// Assumed the same for ES/MES/MNQ until checked; `--price-multiplier` overrides it, and
 /// off-grid rejections would expose a wrong value.
-pub fn map_root(root: &str) -> Option<(Instrument, f64)> {
+pub fn map_root(root: &str) -> Option<(Product, f64)> {
     let id = match root {
         "ES" => catalog::ES,
         "NQ" => catalog::NQ,
@@ -61,6 +61,41 @@ pub fn map_root(root: &str) -> Option<(Instrument, f64)> {
         _ => return None,
     };
     Some((catalog::get(id)?, 100.0))
+}
+
+/// The contract a Sierra file holds (decision 0013): month from the code, year from the
+/// digits. Two digits mean 20YY. A single digit is resolved from the data: the earliest year
+/// ending in that digit that is not before `last_data_year`, because a contract stops
+/// trading at expiry, so its last record falls in or before its delivery year.
+///
+/// This differs from decision 0013's wording ("nearest decade at or before the file's data
+/// dates"), which picks the wrong decade for a contract expiring early in a decade whose data
+/// was recorded in the previous one: `NQH0` traded in December 2029 is the March 2030
+/// contract, not March 2020.
+pub fn contract_for(
+    sym: &SierraSymbol,
+    product: &Product,
+    last_data_year: u16,
+) -> Option<ContractKey> {
+    let month = Month::from_code(sym.month)?;
+    let year = match sym.year.len() {
+        2 => 2000 + sym.year.parse::<u16>().ok()?,
+        1 => {
+            let d: u16 = sym.year.parse().ok()?;
+            let mut y = last_data_year - last_data_year % 10 + d;
+            if y < last_data_year {
+                y += 10;
+            }
+            y
+        }
+        _ => return None,
+    };
+    let key = ContractKey::monthly(product.id, year, month);
+    // Must be a listed month of the product (e.g. ES has no January contract).
+    match product.kind {
+        ProductKind::Future { cycle, .. } if cycle.contains(month) => Some(key),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +113,29 @@ mod tests {
         assert_eq!(p("NQ.CME"), None);
         assert_eq!(p("NQA5.CME"), None, "A is not a month code");
         assert_eq!(p("Z5.CME"), None);
+    }
+
+    #[test]
+    fn contracts_from_file_names() {
+        let label = |s: &str, last_year: u16| {
+            let sym = parse(s).unwrap();
+            let (p, _) = map_root(&sym.root).unwrap();
+            contract_for(&sym, &p, last_year).map(|k| k.label(&p).as_str().to_owned())
+        };
+        assert_eq!(label("NQZ5.CME", 2025).as_deref(), Some("NQZ25"));
+        assert_eq!(label("NQH25-CME", 2025).as_deref(), Some("NQH25"));
+        assert_eq!(label("NQH25_FUT_CME", 2025).as_deref(), Some("NQH25"));
+        assert_eq!(label("MNQZ6.CME", 2026).as_deref(), Some("MNQZ26"));
+        // Data recorded only in the year before expiry still resolves forward.
+        assert_eq!(label("NQH5.CME", 2024).as_deref(), Some("NQH25"));
+        // The decade boundary case the decision's wording gets wrong.
+        assert_eq!(label("NQH0.CME", 2029).as_deref(), Some("NQH30"));
+        assert_eq!(label("NQH2.CME", 2022).as_deref(), Some("NQH22"));
+        assert_eq!(
+            label("NQF6.CME", 2026),
+            None,
+            "January is not a listed NQ month"
+        );
     }
 
     #[test]

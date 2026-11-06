@@ -163,6 +163,18 @@ impl<R: Read + Seek> ScidReader<R> {
 
     /// Position at the first record with `time >= sc_time` (records are time-ordered, so a
     /// lower-bound binary search: O(log n) positioned reads).
+    /// Time of the last record (Sierra time), `None` for a header-only file.
+    pub fn last_time(&mut self) -> io::Result<Option<i64>> {
+        if self.records == 0 {
+            return Ok(None);
+        }
+        let t = self.read_at(self.records - 1)?.time;
+        self.r.seek(SeekFrom::Start(
+            SCID_HEADER as u64 + self.pos * SCID_RECORD as u64,
+        ))?;
+        Ok(Some(t))
+    }
+
     pub fn seek_to_time(&mut self, sc_time: i64) -> io::Result<()> {
         let (mut lo, mut hi) = (0u64, self.records);
         while lo < hi {
