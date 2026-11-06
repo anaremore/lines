@@ -16,12 +16,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-use lines_core::{ContractKey, Price, ProductId, Qty, UtcMillis};
+use lines_core::sessions::SessionKind;
+use lines_core::{CivilDate, ContractKey, Price, ProductId, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::{Broker, BrokerEvent, BrokerRequest, PaneContext, RequestContext};
 use crate::command::{Command, Envelope, OrderSpec, Reject, RejectCode, Source};
 use crate::event::{AccountView, Event, FillEvent, PositionView};
+use crate::guardrails::{Entry, GuardChange, GuardState, GuardrailTracker};
 use crate::market::MarketInput;
 use crate::order::{Order, OrderState, Role};
 use crate::position::Position;
@@ -71,6 +73,10 @@ struct AccountCache {
     balance: Money,
     positions: BTreeMap<ContractKey, Position>,
     tracker: RuleTracker,
+    /// The trader's guardrails and their progress (roadmap 8b).
+    guard: GuardrailTracker,
+    /// The guardrail state last reported (an event when it changes).
+    guard_seen: GuardChange,
     /// When recent new orders and modifies were sent (rate limits, decision 0006).
     submits: VecDeque<UtcMillis>,
     modifies: VecDeque<UtcMillis>,
@@ -229,6 +235,8 @@ impl TradingCore {
             cfg.id.clone(),
             AccountCache {
                 tracker: tracker.unwrap_or_else(|| RuleTracker::new(start)),
+                guard: GuardrailTracker::default(),
+                guard_seen: GuardrailTracker::default().change(),
                 balance: start,
                 positions: BTreeMap::new(),
                 cfg,
@@ -236,6 +244,26 @@ impl TradingCore {
                 modifies: VecDeque::new(),
             },
         );
+    }
+
+    /// Restore an account's saved guardrail progress (a restart keeps a lockout).
+    pub fn restore_guardrails(&mut self, account: &AccountId, guard: GuardrailTracker) {
+        if let Some(a) = self.accounts.get_mut(account) {
+            a.guard_seen = guard.change();
+            a.guard = guard;
+        }
+    }
+
+    /// An account's guardrails and their progress (saved with the account).
+    pub fn guardrails(&self, account: &AccountId) -> Option<&GuardrailTracker> {
+        self.accounts.get(account).map(|a| &a.guard)
+    }
+
+    /// The account's guardrail state (active, cooldown, locked).
+    pub fn guard_state(&self, account: &AccountId) -> GuardState {
+        self.accounts
+            .get(account)
+            .map_or(GuardState::Active, |a| a.guard.state())
     }
 
     pub fn accounts(&self) -> impl Iterator<Item = (&AccountConfig, &RuleTracker)> {
@@ -494,6 +522,23 @@ impl TradingCore {
                         "new quantity is not above the filled quantity",
                     ));
                 }
+                // More quantity is more exposure: the guardrails see the increase as an order
+                // of its own (less quantity, or a price change, always passes).
+                if let Some(q) = qty
+                    && q.0 > o.qty.0
+                    && !o.reduce_only
+                {
+                    self.check_guardrails(
+                        now,
+                        &OrderSpec {
+                            account: account.clone(),
+                            contract: o.contract,
+                            side: o.side,
+                            qty: Qty(q.0 - o.qty.0),
+                            kind: o.kind,
+                        },
+                    )?;
+                }
                 let spec = self.spec(o.contract).expect("known");
                 if let Some(p) = price {
                     if !spec.on_tick_grid(p) {
@@ -541,6 +586,12 @@ impl TradingCore {
             }
             Command::CancelAll { contract, .. } => {
                 Ok(self.cancel_all(env, now, &account, contract))
+            }
+            Command::SetGuardrails { guardrails, .. } => {
+                let a = self.accounts.get_mut(&account).expect("checked");
+                a.guard.request(guardrails);
+                self.guard_report(&account);
+                Ok(Vec::new())
             }
             Command::Flatten { contract, .. } => {
                 let mut ids = self.cancel_all(env, now, &account, contract);
@@ -642,6 +693,8 @@ impl TradingCore {
                 "this broker has no market orders",
             ));
         }
+        // The trader's guardrails (exits always pass), then prop rules.
+        self.check_guardrails(now, spec)?;
         let acct = &self.accounts[&spec.account];
         // Prop rules: a breach restricts the account (reducing only, or halted); the contract
         // cap counts micro-equivalents.
@@ -692,6 +745,55 @@ impl TradingCore {
             }
         }
         self.check_risk(now, spec, &cs)
+    }
+
+    /// The trader's guardrails (roadmap 8b) for a new order (or a quantity increase).
+    fn check_guardrails(&mut self, now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
+        self.roll_day(now, &spec.account);
+        self.guard_report(&spec.account);
+        let position = self.position(&spec.account, spec.contract);
+        let (open_buy, open_sell) = self.open_qty(&spec.account, spec.contract);
+        let session_close = lines_feed::catalog::sessions(spec.contract.product)
+            .and_then(|cal| cal.session_at(now, SessionKind::Eth))
+            .map(|s| s.close);
+        let entry = Entry {
+            side: spec.side,
+            qty: spec.qty.0,
+            position,
+            open_buy,
+            open_sell,
+            session_close,
+        };
+        self.accounts[&spec.account]
+            .guard
+            .check(now, &entry)
+            .map_err(|m| Reject::new(RejectCode::Guardrail, m))
+    }
+
+    /// Report the account's guardrail state if it changed since last reported.
+    fn guard_report(&mut self, account: &AccountId) {
+        let Some(a) = self.accounts.get_mut(account) else {
+            return;
+        };
+        let now = a.guard.change();
+        if now != a.guard_seen {
+            a.guard_seen = now.clone();
+            self.events.push(Event::Guardrail {
+                account: account.clone(),
+                state: now.state,
+                reason: now.reason,
+                until: now.until,
+            });
+        }
+    }
+
+    /// The account's trade date at `t` and when it ends (its day product's calendar).
+    fn trade_day(&self, account: &AccountId, t: UtcMillis) -> Option<(CivilDate, UtcMillis)> {
+        let a = self.accounts.get(account)?;
+        let product = lines_feed::catalog::get(ProductId(a.cfg.day_product))?;
+        let date = lines_feed::disk::partition::trade_date(&product, t);
+        let (_, end) = lines_feed::disk::partition::trade_date_span(&product, date);
+        Some((date, end))
     }
 
     /// Pre-trade risk (decision 0006) for a new order. Counts it toward the submit rate when
@@ -848,10 +950,29 @@ impl TradingCore {
 
     /// When the broker next needs a tick.
     pub fn next_wake(&self) -> Option<UtcMillis> {
-        self.broker.next_wake()
+        // A lockout's end too (its event goes out on time).
+        let cooldowns = self.accounts.values().filter_map(|a| a.guard.next_wake());
+        self.broker.next_wake().into_iter().chain(cooldowns).min()
     }
 
     fn poll(&mut self, now: UtcMillis) {
+        // Lockouts that have run out end (reported): a cooldown at its time, a day lock with
+        // its trade date.
+        let ending: Vec<AccountId> = self
+            .accounts
+            .iter()
+            .filter(|(_, a)| a.guard.next_wake().is_some_and(|t| t <= now))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in ending {
+            self.roll_day(now, &k);
+            // Still the same trade date (never wake in a loop): wait for its real end.
+            let end = self.trade_day(&k, now).map_or(now, |(_, e)| e);
+            if let Some(a) = self.accounts.get_mut(&k) {
+                a.guard.extend_lock(now, end);
+            }
+            self.guard_report(&k);
+        }
         let mut evs = std::mem::take(&mut self.broker_events);
         self.broker.poll(now, &mut evs);
         let mut touched: Vec<AccountId> = Vec::new();
@@ -963,12 +1084,21 @@ impl TradingCore {
                     self.finish(id);
                 }
                 let spec = self.spec(o.contract)?;
+                let day = self.trade_day(&o.account, at);
                 let acct = self.accounts.get_mut(&o.account)?;
                 let pos = acct.positions.entry(o.contract).or_default();
+                let before = pos.qty();
                 let realised = spec.money(pos.apply_fill(o.side, price, qty), 1);
+                let after = pos.qty();
                 acct.balance += realised - fee;
                 if pos.is_flat() {
                     acct.positions.remove(&o.contract);
+                }
+                // Guardrails: round trips, losing streaks (a fill's P&L net of its fee).
+                if let Some((date, end)) = day {
+                    acct.guard.roll_day(date);
+                    acct.guard
+                        .on_fill(o.contract, before, after, realised - fee, at, end);
                 }
                 self.events.push(Event::Order(o.clone()));
                 self.events.push(Event::Fill(FillEvent {
@@ -1073,6 +1203,9 @@ impl TradingCore {
         let a = self.accounts.get_mut(account).expect("checked");
         let preset = a.cfg.rules.clone().unwrap_or_else(no_rules);
         a.tracker.roll_day(&preset, date, balance);
+        // Guardrails: a new trade date ends a lock and brings in looser settings.
+        a.guard.roll_day(date);
+        a.guard.expire(now);
     }
 
     /// Equity changed: rules, breaches (and liquidation), and the account event.
@@ -1106,6 +1239,14 @@ impl TradingCore {
                 .map_or(TradingState::Active, |r| a.tracker.trading_state(r)),
         };
         self.events.push(Event::Account(view));
+        // Guardrails: the day's loss (realised + unrealised, fees included).
+        let day_pnl = equity - self.accounts[account].tracker.day_open_balance;
+        if let Some((_, end)) = self.trade_day(account, now)
+            && let Some(a) = self.accounts.get_mut(account)
+        {
+            a.guard.on_day_pnl(day_pnl, end);
+        }
+        self.guard_report(account);
         for b in breaches {
             self.events.push(Event::Breach {
                 account: account.clone(),
