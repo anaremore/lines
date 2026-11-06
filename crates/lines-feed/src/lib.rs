@@ -13,6 +13,7 @@ pub mod cqg;
 pub mod disk;
 pub mod indicators;
 pub mod kraken;
+pub mod listen;
 pub mod native;
 pub mod provider;
 pub mod recording;
@@ -432,6 +433,11 @@ pub async fn run_feed(
             None => &mut no_sink,
         };
         let mut tee = indicators::Tee(store_sink, &mut tap);
+        // Listeners (e.g. the trading core's paper broker) get every batch too.
+        let mut listen_tap = listen::ListenTap {
+            feed: store.feed_id(),
+        };
+        let mut tee = indicators::Tee(&mut tee, &mut listen_tap);
         let sink: &mut dyn EventSink = &mut tee;
 
         let result = match &config.source {

@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-app", "crates/lines-sierra", "crates/lines-fuzz"]
+members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-trading", "crates/lines-app", "crates/lines-sierra", "crates/lines-fuzz"]
 # The cargo-fuzz targets are their own workspace (libFuzzer stays out of this graph).
 exclude = ["fuzz"]
 # lines-sierra (personal Sierra Chart importer) is a member so `cargo test --workspace` covers it,
 # but not a default member: plain `cargo build`/`cargo run` never build it, and nothing depends on it.
 # lines-fuzz (fuzz harnesses + smoke tests) likewise: tested with the workspace, never built by default.
-default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-app"]
+default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-trading", "crates/lines-app"]
 
 [workspace.package]
 edition = "2024"
