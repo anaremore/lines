@@ -337,7 +337,7 @@ impl PickerUi {
             .border_color(t.axis_line)
             .text_size(px(11.0))
             .text_color(t.text_dim)
-            .child("↑↓ select   Tab month   Alt+M micro/mini   Ctrl+D favourite   Enter open   Esc close")
+            .child("↑↓ select   Tab month   Alt+M micro/mini   Ctrl+D favorite   Enter open   Esc close")
             .when_some(self.error.clone(), |d, err| {
                 d.child(div().text_color(t.text_main).child(err))
             });

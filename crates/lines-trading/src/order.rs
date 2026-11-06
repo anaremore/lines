@@ -69,7 +69,7 @@ impl OrderState {
             OrderState::Working => "working",
             OrderState::PartiallyFilled => "partially filled",
             OrderState::Filled => "filled",
-            OrderState::Cancelled => "cancelled",
+            OrderState::Cancelled => "canceled",
             OrderState::Rejected { .. } => "rejected",
             OrderState::Unresolved => "unresolved",
         }

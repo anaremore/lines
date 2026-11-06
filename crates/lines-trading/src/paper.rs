@@ -265,7 +265,7 @@ impl PaperBroker {
                 self.place(now, entry);
             }
             BrokerRequest::Modify { id, qty, price } => self.modify(now, id, qty, price),
-            BrokerRequest::Cancel { id } => self.cancel(now, id, "cancelled"),
+            BrokerRequest::Cancel { id } => self.cancel(now, id, "canceled"),
         }
     }
 
@@ -617,7 +617,7 @@ impl PaperBroker {
                 .map(|p| p.order.id)
                 .collect();
             for x in exits {
-                self.cancel(now, x, "bracket entry cancelled");
+                self.cancel(now, x, "bracket entry canceled");
             }
         }
     }

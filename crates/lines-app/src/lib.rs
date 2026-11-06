@@ -149,12 +149,12 @@ impl SourceChoice {
     }
 }
 
-/// Up/down colour preset.
+/// Up/down color preset.
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum PaletteKind {
     /// Mint up, rose down.
     Standard,
-    /// Blue up, orange down (red-green colour blindness).
+    /// Blue up, orange down (red-green color blindness).
     #[value(alias = "cb", alias = "colourblind")]
     Colorblind,
 }
@@ -241,8 +241,8 @@ struct Cli {
     /// Color theme.
     #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
     theme: ThemeKind,
-    /// Up/down colour preset (`--palette cb` for the colourblind-safe one). Rising candle
-    /// bodies are hollow in every preset, so direction never relies on colour alone.
+    /// Up/down color preset (`--palette cb` for the colorblind-safe one). Rising candle
+    /// bodies are hollow in every preset, so direction never relies on color alone.
     #[arg(long, value_enum, default_value_t = PaletteKind::Standard)]
     palette: PaletteKind,
     /// Which direction's candle bodies are hollow (the other is filled).
@@ -314,7 +314,7 @@ struct Cli {
     /// top-left corner of the plot area, i.e. below the header).
     #[arg(long, requires = "screenshot", value_parser = parse_point)]
     cursor: Option<(f32, f32)>,
-    /// Screenshot: zoom the auto-fitted price range by this factor around the plot's centre
+    /// Screenshot: zoom the auto-fitted price range by this factor around the plot's center
     /// (as Ctrl+wheel would), which switches the price axis to manual scale.
     #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
     price_zoom: Option<f64>,
