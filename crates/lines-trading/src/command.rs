@@ -156,6 +156,8 @@ pub struct Envelope {
     pub source: Source,
     pub issued: Instant,
     pub command: Command,
+    /// The pane the command came from (handed to the broker with each request).
+    pub pane: Option<crate::broker::PaneContext>,
 }
 
 /// Why a command was **denied**: refused by the core (validation, broker capabilities, risk,

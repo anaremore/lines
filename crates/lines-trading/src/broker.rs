@@ -13,6 +13,7 @@
 use lines_core::{ContractKey, Price, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
+use crate::command::Source;
 use crate::market::MarketInput;
 use crate::order::Order;
 use crate::position::Position;
@@ -117,10 +118,98 @@ pub struct BrokerSnapshot {
     pub accounts: Vec<BrokerAccount>,
 }
 
+/// Who issued an order: a person (DOM, chart, hotkey, palette) or automation (rules, API).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    Manual,
+    Automated,
+}
+
+impl Origin {
+    /// `Rule` (prop-rule liquidation) and `Api` are automated; everything else is a person.
+    pub fn of(source: Source) -> Origin {
+        match source {
+            Source::Rule | Source::Api => Origin::Automated,
+            Source::Dom | Source::Chart | Source::Hotkey | Source::Palette | Source::Test => {
+                Origin::Manual
+            }
+        }
+    }
+}
+
+/// How the issuing pane chose its contract (decision 0013).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractSelection {
+    /// The pane follows a product to its front month.
+    FollowsProduct,
+    /// The pane is pinned to one contract.
+    Pinned,
+}
+
+/// The pane (DOM or chart) an order was issued from, as it was at that moment. Live brokers
+/// check it against their venue (decision 0024); the paper broker ignores it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PaneContext {
+    #[serde(with = "contract_serde")]
+    pub contract: ContractKey,
+    pub selection: ContractSelection,
+    /// Lines' front-month resolver's answer for the pane's product at issue time (`None`: no
+    /// answer, e.g. a spot product or no calendar).
+    #[serde(default, with = "opt_contract_serde")]
+    pub front_month: Option<ContractKey>,
+}
+
+/// Per-request context the core hands a broker with every [`BrokerRequest`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RequestContext {
+    pub source: Source,
+    pub origin: Origin,
+    /// `None` when the command didn't come from a pane (API, rules, a palette with no pane).
+    pub pane: Option<PaneContext>,
+}
+
+impl RequestContext {
+    pub fn new(source: Source, pane: Option<PaneContext>) -> RequestContext {
+        RequestContext {
+            source,
+            origin: Origin::of(source),
+            pane,
+        }
+    }
+}
+
+mod opt_contract_serde {
+    use lines_core::ContractKey;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::types::ContractDoc;
+    pub fn serialize<S: Serializer>(k: &Option<ContractKey>, s: S) -> Result<S::Ok, S::Error> {
+        k.map(ContractDoc::from_key).serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<ContractKey>, D::Error> {
+        match Option::<ContractDoc>::deserialize(d)? {
+            Some(c) => c
+                .to_key()
+                .map(Some)
+                .ok_or_else(|| serde::de::Error::custom("bad contract")),
+            None => Ok(None),
+        }
+    }
+}
+
 pub trait Broker: Send {
     fn name(&self) -> &str;
     fn capabilities(&self) -> BrokerCaps;
     fn request(&mut self, now: UtcMillis, req: BrokerRequest);
+    /// A request with its context (issuing pane, front month, manual vs automated). The core
+    /// always calls this; the default ignores the context (the paper broker), so implementing
+    /// only [`Broker::request`] stays enough.
+    fn request_in_context(&mut self, now: UtcMillis, req: BrokerRequest, ctx: &RequestContext) {
+        let _ = ctx;
+        self.request(now, req);
+    }
     /// Market data for a contract (paper and replay brokers simulate fills from it; live
     /// brokers ignore it).
     fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput);

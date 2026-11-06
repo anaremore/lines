@@ -32,7 +32,10 @@ pub mod rules;
 pub mod service;
 pub mod types;
 
-pub use broker::{Broker, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot};
+pub use broker::{
+    Broker, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot, ContractSelection, Origin,
+    PaneContext, RequestContext,
+};
 pub use command::{BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
 pub use core::{AccountConfig, TradingCore};
 pub use event::{AccountView, Event, FillEvent, PositionView};
