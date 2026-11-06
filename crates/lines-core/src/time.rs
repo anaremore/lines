@@ -1,4 +1,5 @@
-//! UTC timestamps in milliseconds. No time-zone database yet: everything is UTC.
+//! UTC timestamps in milliseconds. Everything is UTC; exchange-local time exists only inside
+//! [`crate::sessions`].
 
 use std::fmt;
 

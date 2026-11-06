@@ -7,3 +7,4 @@ publish.workspace = true
 description = "Pure charting/pricing logic. Must not depend on GPUI, Tokio or protobuf."
 
 [dependencies]
+jiff.workspace = true
