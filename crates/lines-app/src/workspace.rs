@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gpui::{
@@ -46,6 +46,7 @@ use crate::layout::{
     trading_group,
 };
 use crate::menu::{Menu, MenuItem, MenuKey};
+use crate::notice::Notices;
 use crate::pane::{FeedChanged, Pane};
 use crate::pane_columns::{ColumnCmd, ColumnMenu, Columns};
 use crate::pane_window::{self, PaneWindow};
@@ -121,8 +122,12 @@ pub struct Workspace {
     closed_tabs: tabstate::ClosedTabs<TabDoc>,
     /// The chart that last had focus in a main window (where "Dock beside chart" goes).
     last_chart: Option<PaneId>,
-    /// A problem to show inline (e.g. a workspace file that couldn't be read), until dismissed.
-    pub report: Option<String>,
+    /// Problems and refusals shown inline in the footer (`crate::notice`: repeats counted,
+    /// refusals expire, problems that need action stay until dismissed).
+    pub notices: Notices,
+    /// Show the chart header's performance stats (feed rate, paints/s, paint time): a
+    /// workspace preference, off by default.
+    pub show_perf_stats: bool,
     autosave: Option<Autosave>,
     config_dir: Option<PathBuf>,
     writer: Option<Writer>,
@@ -141,7 +146,8 @@ impl Workspace {
             pane_windows: Vec::new(),
             closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
             last_chart: None,
-            report: None,
+            notices: Notices::default(),
+            show_perf_stats: false,
             autosave: None,
             config_dir: None,
             writer: None,
@@ -162,12 +168,11 @@ impl Workspace {
         self
     }
 
+    /// A problem the trader needs to act on (e.g. a workspace file that couldn't be read):
+    /// shown until dismissed. Refused actions go through [`notice`], which expires.
     pub fn add_report(&mut self, r: String) {
         tracing::warn!("{r}");
-        self.report = Some(match self.report.take() {
-            Some(old) => format!("{old}  ·  {r}"),
-            None => r,
-        });
+        self.notices.push(r, true, Instant::now());
     }
 }
 
@@ -263,6 +268,11 @@ impl PaneHandle {
 
     pub fn paints(&self, cx: &mut App) -> u64 {
         each!(self, e => e.update(cx, |p, _| p.common().paints))
+    }
+
+    /// Call `f` whenever this pane notifies (asks for a redraw). The benchmark's frame demand.
+    pub fn on_notify(&self, cx: &mut App, f: impl Fn() + 'static) -> gpui::Subscription {
+        each!(self, e => cx.observe(e, move |_, _| f()))
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -805,9 +815,10 @@ impl WindowView {
         cx.notify();
     }
 
-    /// Report a refused action inline (docs/design.md: errors where they happened).
+    /// Report a refused action inline (docs/design.md: errors where they happened). It expires
+    /// on its own; the same refusal again replaces it with a count.
     fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
-        cx.global_mut::<Workspace>().add_report(why.to_owned());
+        notice(why.to_owned(), cx);
         cx.notify();
     }
 
@@ -864,7 +875,7 @@ impl WindowView {
     /// panes, crosshair sync and reports always bring it back (docs/design.md §3, §7).
     fn footer_shown(&self, cx: &App) -> bool {
         let ws = cx.global::<Workspace>();
-        let report = ws.report.is_some() && !ws.windows.is_empty();
+        let report = !ws.notices.is_empty() && !ws.windows.is_empty();
         let panes = self.tabs.get(self.active).is_some_and(|t| {
             !t.in_state(PaneState::is_hidden).is_empty()
                 || !t.in_state(|s| s == PaneState::Detached).is_empty()
@@ -954,7 +965,7 @@ impl WindowView {
                 let tab = self.tab();
                 match tabstate::chart_only(&tab.order(), &tab.leaves(cx), tab.focused) {
                     Ok(c) => self.apply_states(c, window, cx),
-                    Err(e) => self.refuse(e, cx),
+                    Err(e) => self.refuse(&e, cx),
                 }
             }
             Command::ShowHidden => {
@@ -1098,6 +1109,10 @@ impl WindowView {
                     _ => {}
                 }
                 chart.update(cx, |v, cx| v.set_levels_config(c, cx));
+            }
+            Command::TogglePerfStats => {
+                let show = !cx.global::<Workspace>().show_perf_stats;
+                set_show_perf_stats(show, cx);
             }
             Command::Menu => {
                 let area = self.content_area(window, cx);
@@ -1784,6 +1799,11 @@ impl WindowView {
             Command::ToggleHints,
             !cx.global::<Workspace>().hide_hints,
         ));
+        items.push(MenuItem::named(
+            "Performance stats",
+            Command::TogglePerfStats,
+            cx.global::<Workspace>().show_perf_stats,
+        ));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.menu = Some(Menu::new(at, items));
         cx.notify();
@@ -2133,7 +2153,7 @@ impl WindowView {
     fn status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let ws = cx.global::<Workspace>();
-        let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.report.clone());
+        let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
         let is_first = ws.windows.first().map(|w| w.window_id());
         // What this tab isn't showing, as text that brings it back.
         let (hidden, detached) = match self.tabs.get(self.active) {
@@ -2198,7 +2218,7 @@ impl WindowView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|_, _, _, cx| {
-                                cx.global_mut::<Workspace>().report = None;
+                                cx.global_mut::<Workspace>().notices.clear();
                                 cx.stop_propagation();
                                 cx.notify();
                             }),
@@ -2920,6 +2940,43 @@ pub fn open_doc_window(
     open_window(tabs, doc.active_tab, bounds, options, cx)
 }
 
+/// Show a notice that needs no action: it replaces an identical one (counted) and goes away
+/// after `notice::NOTICE_TTL`. One timer per notice, nothing ticking in between, so an idle
+/// window stays idle.
+pub(crate) fn notice(text: String, cx: &mut App) {
+    tracing::info!("{text}");
+    cx.global_mut::<Workspace>()
+        .notices
+        .push(text, false, Instant::now());
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(crate::notice::NOTICE_TTL + Duration::from_millis(20))
+            .await;
+        cx.update(|cx| {
+            if cx.global_mut::<Workspace>().notices.expire(Instant::now()) {
+                notify_windows(cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// Redraw every main window's own chrome (footer, tab bar); panes repaint only if they changed.
+fn notify_windows(cx: &mut App) {
+    for w in cx.global::<Workspace>().windows.clone() {
+        let _ = w.update(cx, |_, _, cx| cx.notify());
+    }
+}
+
+/// Show or hide the chart headers' performance stats (a workspace preference, saved with it).
+fn set_show_perf_stats(show: bool, cx: &mut App) {
+    let ws = cx.global_mut::<Workspace>();
+    if ws.show_perf_stats != show {
+        ws.show_perf_stats = show;
+        cx.refresh_windows();
+    }
+}
+
 /// Show or hide the key-hint bar in every window (a workspace preference, saved with it).
 fn set_hide_hints(hide: bool, cx: &mut App) {
     let ws = cx.global_mut::<Workspace>();
@@ -2935,6 +2992,7 @@ pub fn set_meta(doc: &WorkspaceDoc, cx: &mut App) {
     ws.name = doc.name.clone();
     ws.crosshair_sync = doc.crosshair_sync;
     ws.hide_hints = doc.hide_hints;
+    ws.show_perf_stats = doc.show_perf_stats;
 }
 
 /// Open a whole workspace (startup).
@@ -2965,6 +3023,7 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
         ws.name = doc.name.clone();
         ws.crosshair_sync = doc.crosshair_sync;
         ws.hide_hints = doc.hide_hints;
+        ws.show_perf_stats = doc.show_perf_stats;
     }
     for w in &doc.windows {
         if let Err(e) = open_doc_window(w, None, cx) {
@@ -3048,8 +3107,10 @@ pub(crate) fn reattach_pane(id: PaneId, cx: &mut App) {
 pub(crate) fn dock_beside_chart(id: PaneId, cx: &mut App) {
     let chart = cx.global::<Workspace>().last_chart;
     let (Some(chart), Some(from)) = (chart, window_with(id, cx)) else {
-        cx.global_mut::<Workspace>()
-            .add_report("no chart to dock beside yet: re-attached instead".into());
+        notice(
+            "no chart to dock beside yet: re-attached instead".into(),
+            cx,
+        );
         reattach_pane(id, cx);
         return;
     };
@@ -3148,10 +3209,11 @@ fn snapshot_with(
     cx: &mut App,
 ) -> Option<WorkspaceDoc> {
     let ws = cx.global::<Workspace>();
-    let (name, sync, hide_hints, windows) = (
+    let (name, sync, hide_hints, show_perf_stats, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
         ws.hide_hints,
+        ws.show_perf_stats,
         ws.windows.clone(),
     );
     let mut docs = Vec::new();
@@ -3167,6 +3229,7 @@ fn snapshot_with(
         name,
         crosshair_sync: sync,
         hide_hints,
+        show_perf_stats,
         windows: docs,
     })
 }
@@ -3174,10 +3237,11 @@ fn snapshot_with(
 /// The whole workspace as a document (from outside any window update).
 pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     let ws = cx.global::<Workspace>();
-    let (name, sync, hide_hints, windows) = (
+    let (name, sync, hide_hints, show_perf_stats, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
         ws.hide_hints,
+        ws.show_perf_stats,
         ws.windows.clone(),
     );
     let windows = windows
@@ -3188,6 +3252,7 @@ pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
         name,
         crosshair_sync: sync,
         hide_hints,
+        show_perf_stats,
         windows,
     }
 }

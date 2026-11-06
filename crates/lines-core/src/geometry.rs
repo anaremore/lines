@@ -389,10 +389,67 @@ pub fn write_ohlcv<W: std::fmt::Write>(
     qty.write(bar.volume, out)
 }
 
+/// A vertical span on an axis, `[top, bottom)` in logical px: a label's or a tag's box.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Span {
+    pub top: f32,
+    pub bottom: f32,
+}
+
+impl Span {
+    /// The box `half` above and below `centre`.
+    pub fn around(centre: f32, half: f32) -> Span {
+        Span {
+            top: centre - half,
+            bottom: centre + half,
+        }
+    }
+
+    /// The boxes share some height (touching edges don't count).
+    pub fn overlaps(self, o: Span) -> bool {
+        self.top < o.bottom && o.top < self.bottom
+    }
+}
+
+/// An axis label is drawn only where no tag (last price, crosshair price) covers any of it:
+/// a half-hidden number under a tag reads as a different price. Allocation-free.
+pub fn label_clear_of_tags(label: Span, tags: &[Option<Span>]) -> bool {
+    tags.iter().flatten().all(|t| !label.overlaps(*t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{DisplayStyle, PriceScale, Qty};
+
+    #[test]
+    fn axis_labels_under_a_tag_are_hidden() {
+        // Label boxes are 15.6 px tall (12 px text), tags 18 px; labels every 20 px.
+        let label = |y: f32| Span::around(y, 7.8);
+        let last = Some(Span::around(103.0, 9.0)); // 94..112
+        let cross = Some(Span::around(160.0, 9.0)); // 151..169
+        let tags = [last, cross];
+        // The owner's case: "23885.50" tag just above "23885.00", partly covering it.
+        assert!(!label_clear_of_tags(label(110.0), &tags));
+        assert!(!label_clear_of_tags(label(100.0), &tags));
+        assert!(!label_clear_of_tags(label(155.0), &tags));
+        // Clear of both, including a label that only touches a tag's edge.
+        assert!(label_clear_of_tags(label(80.0), &tags));
+        assert!(
+            label_clear_of_tags(label(120.0), &tags),
+            "starts just below the tag"
+        );
+        assert!(label_clear_of_tags(
+            Span {
+                top: 112.0,
+                bottom: 127.6
+            },
+            &tags
+        ));
+        assert!(label_clear_of_tags(label(200.0), &tags));
+        // No tags: every label shows.
+        assert!(label_clear_of_tags(label(110.0), &[None, None]));
+    }
 
     fn bars(n: usize) -> Vec<Bar> {
         (0..n)

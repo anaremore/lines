@@ -7,6 +7,9 @@
 //!   slow; the UI only *samples* the latest state.
 //! - The UI checks [`ChartStore::revision`] (an atomic, no lock) once per frame and uses
 //!   `try_lock`, so a contended frame simply redraws the previous scene.
+//! - [`ChartStore::chart_revision`] moves on everything *except* depth that leaves the best
+//!   bid and offer alone: charts and time & sales follow it, so a busy book (hundreds of depth
+//!   batches a second) repaints only the DOM.
 //!
 //! Stale (docs/design.md §7): every update stamps a monotonic "last data" time, also an
 //! atomic, so panes can tell a live feed that went quiet from one that is ticking without
@@ -132,13 +135,32 @@ pub struct ChartData {
     pub market_time: Option<UtcMillis>,
     pub status: FeedStatus,
     pub stats: FeedStats,
+    /// Moves when [`ChartData::apply`] changed anything but depth below the touch (trades,
+    /// bars, quotes, status, counters shown in headers). See [`ChartStore::chart_revision`].
+    pub chart_epoch: u64,
 }
 
 impl ChartData {
     /// Fold normalized events into the chart state.
     pub fn apply(&mut self, events: &[MarketEvent]) {
         let mut book_touched = false;
+        // Anything a chart or time & sales shows changed (not only depth).
+        let mut chart = false;
+        // Quotes count only if they changed (compared after the batch): a feed that repeats
+        // its BBO with every depth batch doesn't repaint charts.
+        let quote = (self.bid, self.ask, self.last_trade);
         for e in events {
+            chart |= !matches!(
+                e,
+                MarketEvent::BookClear
+                    | MarketEvent::BookLevel { .. }
+                    | MarketEvent::BookChecksumOk
+                    | MarketEvent::BookChecksumMismatch
+                    | MarketEvent::BookResync
+                    | MarketEvent::Bid(_)
+                    | MarketEvent::Ask(_)
+                    | MarketEvent::LastPrice(_)
+            );
             match *e {
                 MarketEvent::Ready => self.status = FeedStatus::Live,
                 MarketEvent::ContractChanged(next) => self.switch_contract(next),
@@ -224,6 +246,9 @@ impl ChartData {
                 self.stats.book_crossed += 1;
             }
         }
+        if chart || (self.bid, self.ask, self.last_trade) != quote {
+            self.chart_epoch += 1;
+        }
     }
 
     /// Bars from the local store's cache, shown before the feed connects (decision 0019).
@@ -298,6 +323,8 @@ const MAX_RETIRED: usize = 4;
 pub struct ChartStore {
     data: Mutex<ChartData>,
     revision: AtomicU64,
+    /// Like `revision`, but not moved by depth that left the best bid/offer alone.
+    chart_revision: AtomicU64,
     /// Monotonic ms (see [`mono_ms`]) of the last update; 0 = never.
     last_data: AtomicU64,
     /// The feed is live (status `Live`).
@@ -358,8 +385,10 @@ impl ChartStore {
                 market_time: None,
                 status: FeedStatus::Connecting,
                 stats: FeedStats::default(),
+                chart_epoch: 0,
             }),
             revision: AtomicU64::new(0),
+            chart_revision: AtomicU64::new(0),
             last_data: AtomicU64::new(0),
             live: AtomicBool::new(false),
             stale_after_ms: AtomicU64::new(5_000),
@@ -409,16 +438,38 @@ impl ChartStore {
         self.revision.load(Ordering::Acquire)
     }
 
-    /// Feed side: mutate and publish.
+    /// Lock-free change detector for panes that don't show depth (charts, time & sales):
+    /// moves on every change except depth below the touch.
+    #[inline]
+    pub fn chart_revision(&self) -> u64 {
+        self.chart_revision.load(Ordering::Acquire)
+    }
+
+    /// Feed side: mutate and publish (both revisions move).
     pub fn update<R>(&self, f: impl FnOnce(&mut ChartData) -> R) -> R {
+        self.publish(f, true)
+    }
+
+    /// Feed side: apply one feed frame. The chart revision moves only if the frame changed
+    /// more than depth below the touch ([`ChartData::chart_epoch`]).
+    pub fn update_frame<R>(&self, f: impl FnOnce(&mut ChartData) -> R) -> R {
+        self.publish(f, false)
+    }
+
+    fn publish<R>(&self, f: impl FnOnce(&mut ChartData) -> R, chart: bool) -> R {
         let mut d = self.data.lock();
+        let epoch = d.chart_epoch;
         let r = f(&mut d);
+        let chart = chart || d.chart_epoch != epoch;
         let live = d.status == FeedStatus::Live;
         let market = d.market_time.map_or(i64::MIN, |t| t.0);
         drop(d);
         self.market_ms.store(market, Ordering::Release);
         self.last_data.store(mono_ms(), Ordering::Release);
         self.live.store(live, Ordering::Release);
+        if chart {
+            self.chart_revision.fetch_add(1, Ordering::Release);
+        }
         self.revision.fetch_add(1, Ordering::Release);
         r
     }
@@ -449,7 +500,59 @@ impl Drop for ChartStore {
 mod tests {
     use super::*;
     use crate::catalog;
-    use lines_core::{Month, Qty};
+    use lines_core::{Month, Qty, Side};
+
+    /// Depth that leaves the touch alone repaints only the DOM (the chart revision stays);
+    /// a new best bid, a trade or any other update moves both.
+    #[test]
+    fn chart_revision_ignores_depth_below_the_touch() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        let level = |side, p, q| MarketEvent::BookLevel {
+            side,
+            price: Price(p),
+            qty: Qty(q),
+            orders: 1,
+        };
+        store.update_frame(|d| {
+            d.apply(&[
+                MarketEvent::BookClear,
+                level(Side::Bid, 600_000, 5),
+                level(Side::Ask, 600_025, 5),
+            ])
+        });
+        let (r, c) = (store.revision(), store.chart_revision());
+        assert_eq!(store.read().bid, Some(Price(600_000)));
+        // Size at the touch and a level behind it: the quote is unchanged.
+        store.update_frame(|d| {
+            d.apply(&[
+                level(Side::Bid, 600_000, 9),
+                level(Side::Bid, 599_975, 3),
+                MarketEvent::BookChecksumOk,
+            ])
+        });
+        assert_eq!(store.revision(), r + 1);
+        assert_eq!(store.chart_revision(), c, "depth below the touch");
+        // A better bid moves the quote.
+        store.update_frame(|d| d.apply(&[level(Side::Bid, 600_025 - 25, 0)]));
+        assert_eq!(store.read().bid, Some(Price(599_975)));
+        assert_eq!(store.chart_revision(), c + 1, "best bid changed");
+        let trade = MarketEvent::Trade {
+            time: UtcMillis(1),
+            price: Price(600_000),
+            qty: Qty(1),
+            aggressor: None,
+        };
+        store.update_frame(|d| d.apply(&[trade]));
+        assert_eq!(store.chart_revision(), c + 2, "trade");
+        // A repeated quote (BBO sent with every depth batch) is not a change.
+        store.update_frame(|d| d.apply(&[MarketEvent::Bid(Price(599_975))]));
+        assert_eq!(store.chart_revision(), c + 2, "same bid again");
+        store.update_frame(|d| d.apply(&[MarketEvent::Ask(Price(600_050))]));
+        assert_eq!(store.chart_revision(), c + 3, "new ask");
+        store.set_status(FeedStatus::Live);
+        assert_eq!(store.chart_revision(), c + 4, "any other update moves both");
+    }
 
     /// docs/design.md §7: silence while the market is closed is not staleness.
     #[test]

@@ -110,6 +110,11 @@ impl Pane for TapeView {
         &mut self.seen_revision
     }
 
+    /// Prints only: depth below the touch doesn't change the tape.
+    fn revision(&self) -> u64 {
+        self.store.chart_revision()
+    }
+
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
         self.picker.close();
         self.store = feed.store().clone();
