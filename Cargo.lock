@@ -2923,6 +2923,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lines-fuzz"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cqg-proto",
+ "lines-core",
+ "lines-feed",
+ "lines-sierra",
+ "prost",
+ "tokio",
+]
+
+[[package]]
 name = "lines-sierra"
 version = "0.1.0"
 dependencies = [

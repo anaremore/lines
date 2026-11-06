@@ -1,0 +1,73 @@
+# cargo-fuzz targets (nightly + libFuzzer): thin wrappers over the harnesses in
+# crates/lines-fuzz. Its own workspace (excluded from the root one) so libfuzzer-sys stays out of
+# the product's dependency graph and licence checks. Never shipped.
+#   cargo run -p lines-fuzz --example gen_corpus -- fuzz/corpus
+#   cargo +nightly fuzz run cqg_session fuzz/corpus/cqg_session -- -max_total_time=300
+[package]
+name = "lines-fuzz-targets"
+version = "0.0.0"
+edition = "2024"
+license = "FSL-1.1-ALv2"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+lines-fuzz = { path = "../crates/lines-fuzz" }
+libfuzzer-sys = "0.4"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "cqg_decode"
+path = "fuzz_targets/cqg_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cqg_session"
+path = "fuzz_targets/cqg_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "coinbase_session"
+path = "fuzz_targets/coinbase_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_session"
+path = "fuzz_targets/native_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recording"
+path = "fuzz_targets/recording.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sierra_import"
+path = "fuzz_targets/sierra_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "disk_store"
+path = "fuzz_targets/disk_store.rs"
+test = false
+doc = false
+bench = false

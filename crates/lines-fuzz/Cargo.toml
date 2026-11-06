@@ -1,0 +1,23 @@
+[package]
+name = "lines-fuzz"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+description = "Fuzz harnesses for every decoder of untrusted bytes, their synthetic seed corpora, and stable smoke tests. The libFuzzer targets live in /fuzz (own workspace)."
+
+# Workspace member (the harnesses build and smoke-test with everything else on every PR), not a
+# default member. No libFuzzer here: /fuzz wraps these functions in cargo-fuzz targets, in its
+# own workspace, so libfuzzer-sys (NCSA-licensed libFuzzer) never enters this dependency graph.
+# Seed corpora are generated from synthetic fixtures (decision 0010), never committed:
+#   cargo run -p lines-fuzz --example gen_corpus -- fuzz/corpus
+
+[dependencies]
+lines-core.workspace = true
+lines-feed.workspace = true
+lines-sierra = { path = "../lines-sierra" }
+cqg-proto.workspace = true
+prost.workspace = true
+bytes.workspace = true
+# Seed generation drives the in-process CQG mock, which is async.
+tokio.workspace = true
