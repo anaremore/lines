@@ -26,6 +26,15 @@ pub const MES: ProductId = ProductId(4);
 pub const MNQ: ProductId = ProductId(5);
 pub const BTC_USD: ProductId = ProductId(1001);
 pub const ETH_USD: ProductId = ProductId(1002);
+/// Kraken spot. A crypto spot market belongs to its exchange (its own book and prices), so
+/// each exchange's pair is its own product; the `.KR` suffix keeps symbols unique.
+pub const BTC_USD_KR: ProductId = ProductId(1003);
+pub const ETH_USD_KR: ProductId = ProductId(1004);
+/// Kraken Futures perpetual swaps (USD-margined "flexible" perps). A perpetual has one
+/// contract that never expires or rolls, which is exactly `Delivery::Spot`'s meaning, so no
+/// new delivery variant is needed (`ProductKind::Spot`, `Delivery::Spot`).
+pub const BTC_PERP_KR: ProductId = ProductId(1101);
+pub const ETH_PERP_KR: ProductId = ProductId(1102);
 
 fn decimal(digits: u32, tick_units: i64) -> PriceFormat {
     PriceFormat::new(
@@ -71,12 +80,25 @@ fn index_future(
 }
 
 fn spot(id: ProductId, symbol: &'static str, description: &'static str) -> Product {
+    crypto(id, symbol, description, decimal(2, 1), 8)
+}
+
+/// A crypto product quoted in USD with a decimal price grid and fractional quantity.
+fn crypto(
+    id: ProductId,
+    symbol: &'static str,
+    description: &'static str,
+    price: PriceFormat,
+    qty_decimals: u8,
+) -> Product {
     Product {
         id,
         symbol,
         description,
-        price: decimal(2, 1),
-        qty: QtyFormat { decimals: 8 },
+        price,
+        qty: QtyFormat {
+            decimals: qty_decimals,
+        },
         currency: Currency::USD,
         point_value: Ratio::new(1, 1),
         kind: ProductKind::Spot,
@@ -84,7 +106,7 @@ fn spot(id: ProductId, symbol: &'static str, description: &'static str) -> Produ
     }
 }
 
-pub fn all() -> [Product; 7] {
+pub fn all() -> [Product; 11] {
     [
         index_future(ES, "ES", "E-mini S&P 500", 50, MES, 10),
         index_future(NQ, "NQ", "E-mini Nasdaq-100", 20, MNQ, 10),
@@ -116,6 +138,36 @@ pub fn all() -> [Product; 7] {
         },
         spot(BTC_USD, "BTC/USD", "Bitcoin / US Dollar (spot)"),
         spot(ETH_USD, "ETH/USD", "Ether / US Dollar (spot)"),
+        // Kraken: tick and lot size match Kraken's AssetPairs / instruments metadata, which
+        // the sessions check on every connect (mismatch = fatal BadMetadata).
+        crypto(
+            BTC_USD_KR,
+            "BTC/USD.KR",
+            "Bitcoin / US Dollar (spot)",
+            decimal(1, 1),
+            8,
+        ),
+        crypto(
+            ETH_USD_KR,
+            "ETH/USD.KR",
+            "Ether / US Dollar (spot)",
+            decimal(2, 1),
+            8,
+        ),
+        crypto(
+            BTC_PERP_KR,
+            "BTC-PERP.KR",
+            "Bitcoin perpetual (USD)",
+            decimal(0, 1),
+            4,
+        ),
+        crypto(
+            ETH_PERP_KR,
+            "ETH-PERP.KR",
+            "Ether perpetual (USD)",
+            decimal(1, 1),
+            3,
+        ),
     ]
 }
 
@@ -123,12 +175,15 @@ pub fn get(id: ProductId) -> Option<Product> {
     all().into_iter().find(|p| p.id == id)
 }
 
-/// Case-insensitive lookup by product symbol; `BTC-USD` is accepted for `BTC/USD`.
+/// Case-insensitive lookup by product symbol; `BTC-USD` is also accepted for `BTC/USD`.
 pub fn by_symbol(symbol: &str) -> Option<Product> {
-    let want = symbol.trim().replace('-', "/");
-    all()
-        .into_iter()
-        .find(|p| p.symbol.eq_ignore_ascii_case(&want))
+    let symbol = symbol.trim();
+    let find = |want: &str| {
+        all()
+            .into_iter()
+            .find(|p| p.symbol.eq_ignore_ascii_case(want))
+    };
+    find(symbol).or_else(|| find(&symbol.replace('-', "/")))
 }
 
 /// Where a product trades, for display and search (e.g. the symbol picker). An exchange name,
@@ -138,6 +193,8 @@ pub fn exchange(id: ProductId) -> &'static str {
         ES | NQ | MES | MNQ => "CME",
         ZN => "CBOT",
         BTC_USD | ETH_USD => "Coinbase",
+        BTC_USD_KR | ETH_USD_KR => "Kraken",
+        BTC_PERP_KR | ETH_PERP_KR => "Kraken Futures",
         _ => "",
     }
 }
@@ -172,8 +229,11 @@ pub fn session_spec(id: ProductId) -> Option<SessionSpec> {
             hours: globex(LocalTime::hm(7, 20), LocalTime::hm(14, 0)),
             holidays: Some("cbot-treasury"),
         }),
-        // Coinbase spot trades 24/7; the session day is the UTC day.
-        BTC_USD | ETH_USD => Some(SessionSpec::continuous_utc(LocalTime::MIDNIGHT)),
+        // Coinbase and Kraken spot and Kraken perpetuals trade 24/7; the session day is the
+        // UTC day.
+        BTC_USD | ETH_USD | BTC_USD_KR | ETH_USD_KR | BTC_PERP_KR | ETH_PERP_KR => {
+            Some(SessionSpec::continuous_utc(LocalTime::MIDNIGHT))
+        }
         _ => None,
     }
 }
@@ -291,6 +351,16 @@ mod tests {
     fn lookup_and_targets() {
         assert_eq!(by_symbol("es").unwrap().id, ES);
         assert_eq!(by_symbol("BTC-USD").unwrap().id, BTC_USD);
+        assert_eq!(
+            by_symbol("btc-perp.kr").unwrap().id,
+            BTC_PERP_KR,
+            "exact match first"
+        );
+        assert_eq!(by_symbol("ETH/USD.KR").unwrap().id, ETH_USD_KR);
+        assert_eq!(
+            parse_target("eth-perp.kr"),
+            Some(Target::Product(ETH_PERP_KR))
+        );
         assert_eq!(get(ZN).unwrap().symbol, "ZN");
         assert!(
             by_symbol("EP").is_none(),

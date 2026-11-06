@@ -89,6 +89,12 @@ pub struct FeedStats {
     pub decode_errors: u64,
     /// Frames (batches) after which the book had bid >= ask.
     pub book_crossed: u64,
+    /// Book messages whose rebuilt book matched the exchange's checksum (Kraken spot).
+    pub book_checksums_ok: u64,
+    /// Book messages whose rebuilt book did not match: each triggers a resync.
+    pub book_checksum_mismatches: u64,
+    /// Fresh book snapshots requested (checksum mismatch or book sequence gap).
+    pub book_resyncs: u64,
     pub reconnects: u64,
 }
 
@@ -184,6 +190,9 @@ impl ChartData {
                     self.stats.updates_in += 1;
                 }
                 MarketEvent::Gap { missed } => self.stats.gaps += missed,
+                MarketEvent::BookChecksumOk => self.stats.book_checksums_ok += 1,
+                MarketEvent::BookChecksumMismatch => self.stats.book_checksum_mismatches += 1,
+                MarketEvent::BookResync => self.stats.book_resyncs += 1,
                 MarketEvent::Rejected { count } => self.stats.rejected += count,
                 MarketEvent::CorrectionsIgnored { count } => {
                     self.stats.corrections_ignored += count
