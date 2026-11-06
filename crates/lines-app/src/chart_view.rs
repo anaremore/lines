@@ -58,6 +58,7 @@ use lines_feed::store::{ChartStore, FeedStatus};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
+use crate::profile::{ProfileConfig, VolumeProfileLayer};
 use crate::theme::Theme;
 use crate::wsdoc::{ChartState, PaneDoc};
 
@@ -116,6 +117,9 @@ pub struct Fixture {
     pub picker: Option<String>,
     /// Indicators to start with (screenshots, `--vwap`).
     pub indicators: Vec<lines_indicators::IndicatorConfig>,
+    /// Initial volume profile settings (CLI). A profile saved with the pane in the workspace
+    /// file (`ChartState::profile`) takes precedence.
+    pub profile: ProfileConfig,
 }
 
 enum Drag {
@@ -140,6 +144,9 @@ pub struct CrosshairTime(pub Option<UtcMillis>);
 pub struct ChartView {
     feed: PaneFeed,
     common: PaneCommon,
+    /// The volume profile, painted first (under other studies). Kept typed, not in `layers`,
+    /// so its settings can be read and changed.
+    profile: VolumeProfileLayer,
     /// Studies over the plot, painted in order.
     layers: Vec<Box<dyn ChartLayer>>,
     /// Indicators (VWAP …) from the shared engine (`crate::studies`), saved with the pane.
@@ -205,6 +212,7 @@ impl ChartView {
         ChartView {
             feed,
             common: PaneCommon::default(),
+            profile: VolumeProfileLayer::new(fixture.profile),
             layers: Vec::new(),
             studies,
             seen_studies: u64::MAX,
@@ -353,6 +361,15 @@ impl ChartView {
             self.open_picker("", cx);
         } else if k.key == "home" {
             self.vp.reset(self.series_len);
+        } else if m.alt && !m.control && !m.platform && {
+            let mut c = self.profile.config();
+            let changed = c.on_alt_key(&k.key);
+            if changed {
+                self.profile.set_config(c);
+            }
+            changed
+        } {
+            // Volume profile keys (`crate::profile`).
         } else if let Some(letter) = k.key_char.as_deref().filter(|c| {
             !m.control
                 && !m.alt
@@ -434,6 +451,10 @@ impl ChartView {
     pub fn restore(&mut self, state: &ChartState) {
         if state.bar_px.is_finite() {
             self.vp.bar_px = state.bar_px.clamp(MIN_BAR_PX, MAX_BAR_PX);
+        }
+        // A saved profile wins; a pane without one keeps its initial (CLI) settings.
+        if !state.profile.is_default() {
+            self.profile.set_config(state.profile);
         }
         // Saved indicators, then any given on the command line (`--vwap`) not among them.
         let mut configs = state.indicators.clone();
@@ -610,6 +631,7 @@ impl ChartView {
                 let x = slot_x(&self.vp, slot as f64, scale);
                 (x >= 0.0 && f64::from(x) < self.vp.width).then_some((x, t))
             });
+            self.profile.prepare(&d, &self.vp);
             for l in &mut self.layers {
                 l.prepare(&d, &self.vp);
             }
@@ -672,6 +694,10 @@ impl ChartView {
             for l in &self.scene.time_lines {
                 window.paint_quad(fill(rect(l.x, 0.0, hair, ph), t.grid));
             }
+            // Paint order inside the plot: grid, volume profile (behind the candles), candles,
+            // `layers`, indicator studies (VWAP lines above), the profile's label, last-price
+            // line, crosshair.
+            self.profile.paint(plot, &self.vp, &t, window, cx);
             for c in &self.scene.candles {
                 let color = if c.up { t.up } else { t.down };
                 let (bx, bw) = (c.x - c.half_width, c.half_width * 2.0);
@@ -716,6 +742,7 @@ impl ChartView {
                 l.paint(plot, &self.vp, &t, window, cx);
             }
             self.studies.paint((ox, oy), &t, window);
+            self.profile.paint_label(plot, &t, window, cx);
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
                 window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
@@ -1183,6 +1210,7 @@ impl Pane for ChartView {
         doc.chart = Some(ChartState {
             bar_px: self.vp.bar_px,
             indicators: self.indicator_configs(),
+            profile: self.profile.config(),
         });
     }
 
@@ -1221,7 +1249,7 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
 }
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I indicators";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I indicators  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

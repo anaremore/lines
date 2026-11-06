@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::{Axis, Layout, LinkGroup, PaneKind, Preset, Rect, trading_group};
 use crate::tabstate::PaneState;
+use crate::profile::ProfileConfig;
 use crate::versioned::{Format, Migration};
 
 /// Version 0 never existed for workspaces (the first file format is 1); an unversioned file
@@ -212,6 +213,10 @@ pub struct ChartState {
     /// The chart's indicators (roadmap 5c). Optional: files without it load with none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indicators: Vec<lines_indicators::IndicatorConfig>,
+    /// Volume profile settings. Optional in the file: absent (older files, or a chart that
+    /// never changed them) means the defaults, so the field is written only when it differs.
+    #[serde(default, skip_serializing_if = "ProfileConfig::is_default")]
+    pub profile: ProfileConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -534,6 +539,7 @@ mod tests {
                 },
                 color: 1,
             }],
+            profile: ProfileConfig::default(),
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""indicators""#), "{json}");
@@ -542,6 +548,7 @@ mod tests {
         let none = serde_json::to_string(&ChartState {
             bar_px: 7.0,
             indicators: vec![],
+            profile: ProfileConfig::default(),
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -617,6 +624,7 @@ mod tests {
                         chart: Some(ChartState {
                             bar_px: 9.5,
                             indicators: vec![],
+                            profile: ProfileConfig::default(),
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -654,6 +662,64 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains(r#""version": 2"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
+    }
+
+    #[test]
+    fn chart_volume_profile_is_saved_per_pane_only_when_set() {
+        use crate::profile::{ProfileMode, ProfileSession};
+        let chart = |profile| PaneDoc {
+            chart: Some(ChartState {
+                bar_px: 7.0,
+                indicators: vec![],
+                profile,
+            }),
+            ..PaneDoc::new(PaneKind::Chart, None, None)
+        };
+        // Defaults are not written: files of charts that never touched the profile are
+        // unchanged (and older readers never see the field).
+        let plain = serde_json::to_string(&chart(ProfileConfig::default())).unwrap();
+        assert!(!plain.contains("profile"), "{plain}");
+        let set = ProfileConfig {
+            mode: ProfileMode::Composite,
+            session: ProfileSession::Rth,
+            split: true,
+            ..ProfileConfig::default()
+        };
+        let json = serde_json::to_string(&chart(set)).unwrap();
+        assert!(
+            json.contains(r#""profile":{"mode":"composite","session":"rth""#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<PaneDoc>(&json).unwrap(), chart(set));
+        // Beside VWAP: two independent optional fields; each loads without the other.
+        let both = ChartState {
+            bar_px: 7.0,
+            indicators: vec![lines_indicators::IndicatorConfig::Vwap {
+                spec: lines_indicators::VwapSpec::default(),
+                color: 0,
+            }],
+            profile: set,
+        };
+        let json = serde_json::to_string(&both).unwrap();
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
+        let only_vwap: ChartState =
+            serde_json::from_str(&json.replace(r#","profile":"#, r#","ignored":"#)).unwrap();
+        assert_eq!(
+            (only_vwap.indicators, only_vwap.profile),
+            (both.indicators.clone(), ProfileConfig::default())
+        );
+        // A partial profile object fills in defaults.
+        let partial: PaneDoc = serde_json::from_str(
+            r#"{"kind": "chart", "chart": {"bar_px": 7.0, "profile": {"mode": "session"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            partial.chart.unwrap().profile,
+            ProfileConfig {
+                mode: ProfileMode::Session,
+                ..ProfileConfig::default()
+            }
+        );
     }
 
     #[test]
@@ -696,7 +762,8 @@ mod tests {
             leaves[0].chart,
             Some(ChartState {
                 bar_px: 6.0,
-                indicators: vec![]
+                indicators: vec![],
+                profile: ProfileConfig::default()
             })
         );
         assert_eq!(
