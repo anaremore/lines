@@ -17,8 +17,9 @@ Status: `done` · `current` · `next` · `later`
 | 3b | Sierra Chart importer (`.scid` ticks, `.depth` depth) → replay format | done | Local futures data replays with depth. Never committed (licensed data) |
 | 4 | Historical bars + live stitch | done | Backfill then live with no gap or double-count |
 | 4b | Symbol search & picker | done | Keyboard-first fuzzy search over products → contracts (decision 0013), recents/favourites, micro↔mini toggle, results <16 ms locally, provider lookups async |
-| 5 | Depth model + read-only DOM, price grouping, time & sales, volume profile | current | Tick-indexed ladder, per-frame coalescing, fixed rows, no allocs in paint; T&S with aggressor side; session/visible-range volume profile |
-| 5b | Workspaces: grid, tabs, windows, link groups | next | Panes (chart/DOM/T&S) in custom grids and presets, tabs, drag-out windows across monitors; link groups; opt-in crosshair time sync; shared data per contract; autosave/restore (decision 0016). Owner's default: NQ and ES side by side |
+| 5 | Depth model + read-only DOM, price grouping, time & sales, volume profile | current | Tick-indexed ladder, per-frame coalescing, fixed rows, no allocs in paint; T&S with aggressor side; session/visible-range volume profile; visible **stale** state when a feed goes quiet during market hours |
+| 5a | Local market-data store | next | Per-contract append-only segments in `lines-events-1`, partitioned by session trade date; CRC blocks, torn-tail truncation, gap tracking, retention budget; instant cached startup then stitch-fill (decision 0019) |
+| 5b | Workspaces: grid, tabs, windows, link groups | next | Panes (chart/DOM/T&S) in custom grids and presets, tabs, drag-out windows across monitors; link groups; opt-in crosshair time sync; shared data per contract; autosave/restore (decision 0016). Owner's default: NQ and ES side by side. Settings and workspace files are versioned with forward migrations and a backup of the previous file; user data is never silently discarded |
 | 5c | Sessions + indicator engine + VWAP | next | Product trading-hours calendars (TZ/DST, ETH/RTH, holidays); composable series graph with shared nodes (decision 0017); VWAP (session/weekly/monthly/anchored resets, σ bands, exact accumulators, approximate flag on bar-only history) on charts and as an input to other indicators |
 | 5d | Kraken public data provider | next | Spot + public perps; L2 book verified against Kraken's CRC32 checksum on every update (mismatch → resync, counted); history via REST; exact decimal parsing; free, no account |
 | 6 | Command layer + OMS + Broker trait + PaperBroker + prop-firm rules + Connections/accounts (decision 0018) | later | Order lifecycle, positions, P&L, risk layer, account groups, rule presets as data. OMS isolated from UI (decision 0012); state reconciled from broker on reconnect, no orphaned brackets; click/hotkey → order-sent latency measured and tracked |
@@ -34,6 +35,15 @@ Status: `done` · `current` · `next` · `later`
 | 13 | Second live connection (whichever of CQG/Rithmic wasn't first) | later | |
 | 14 | Trade copier across account groups | later | Rule-aware per account/firm |
 | — | Not planned: Tradovate, equities, crypto trading, international | later | Kept possible by decisions 0002–0003; nothing built |
+
+## Before the first outside users
+
+| # | Milestone | Status | Done when |
+|---|-----------|--------|-----------|
+| U1 | Diagnostics | later | Rotating bounded local logs; one command exports a support bundle (logs, version, settings with credentials stripped, recent feed stats); opt-in crash reports after |
+| U2 | Auto-update | later | Signature-verified updates, never applied during market hours, one-click rollback; depends on owner code signing |
+| U3 | Legal | later | Owner completes `docs/legal-checklist.md` (required before 12) |
+| — | Parser fuzzing | current | `cargo-fuzz` targets for every network decoder (CQG protobuf, Coinbase/Kraken JSON, recordings), run in CI on a schedule |
 
 ## Cross-cutting requirements (apply to every milestone)
 
