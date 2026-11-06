@@ -38,7 +38,7 @@ impl Provider for CoinbaseProvider {
         Capabilities {
             history: true,
             bbo: true,
-            depth: false,
+            depth: true,
             fractional_qty: true,
             always_open: true,
         }

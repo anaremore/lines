@@ -1,6 +1,6 @@
 //! Price-level order book (aggregated depth), indexed by exact integer price units.
 //!
-//! Lives on the feed thread; the UI will read snapshots of the top levels (roadmap 5).
+//! Lives in the feed's store; the DOM reads the visible price range under the store lock.
 
 use std::collections::BTreeMap;
 
@@ -71,6 +71,22 @@ impl OrderBook {
 
     pub fn is_empty(&self) -> bool {
         self.bids.is_empty() && self.asks.is_empty()
+    }
+
+    /// Levels with prices in `[lo, hi)`, ascending. Allocation-free (the DOM reads this in
+    /// paint).
+    pub fn range(
+        &self,
+        side: Side,
+        lo: Price,
+        hi: Price,
+    ) -> std::collections::btree_map::Range<'_, i64, Level> {
+        let map = match side {
+            Side::Bid => &self.bids,
+            Side::Ask => &self.asks,
+        };
+        // An empty range must still be well-formed (`BTreeMap::range` panics if lo > hi).
+        map.range(lo.0..hi.0.max(lo.0))
     }
 
     /// Levels from the inside out (best first).

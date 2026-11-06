@@ -11,7 +11,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lines_core::{
-    BarSeries, Capabilities, ContractKey, OrderBook, Price, Product, Stitcher, UtcMillis,
+    BarSeries, Capabilities, ContractKey, OrderBook, Price, Print, Product, Stitcher, Tape,
+    UtcMillis, VolumeAtPrice,
 };
 use parking_lot::{Mutex, MutexGuard};
 
@@ -103,6 +104,12 @@ pub struct ChartData {
     pub ask: Option<Price>,
     /// Aggregated depth (empty unless the provider has the `depth` capability).
     pub book: OrderBook,
+    /// Time & sales: the newest live prints (bounded ring).
+    pub tape: Tape,
+    /// Traded volume per price since data start for this contract (trading sessions are not
+    /// modelled yet). Only trades the stitch counts as new, so a re-delivered trade is never
+    /// counted twice.
+    pub vap: VolumeAtPrice,
     /// Stitches history snapshots and live trades (`lines_core::stitch`).
     pub stitch: Stitcher,
     pub history: HistoryState,
@@ -141,8 +148,21 @@ impl ChartData {
                         _ => HistoryState::Incomplete { gaps: 1 },
                     };
                 }
-                MarketEvent::Trade { time, price, qty } => {
-                    self.stitch.trade(&mut self.series, time, price, qty);
+                MarketEvent::Trade {
+                    time,
+                    price,
+                    qty,
+                    aggressor,
+                } => {
+                    if self.stitch.trade(&mut self.series, time, price, qty) {
+                        self.tape.push(Print {
+                            time,
+                            price,
+                            qty,
+                            aggressor,
+                        });
+                        self.vap.add(price, qty);
+                    }
                     self.last_trade = Some(price);
                     self.stats.trades_in += 1;
                     self.stats.updates_in += 1;
@@ -226,6 +246,8 @@ impl ChartData {
         self.bid = None;
         self.ask = None;
         self.book.clear();
+        self.tape.clear();
+        self.vap.clear();
     }
 
     fn bump_time(&mut self, t: UtcMillis) {
@@ -234,6 +256,9 @@ impl ChartData {
         }
     }
 }
+
+/// Prints kept for time & sales (a few minutes of a busy open).
+pub const TAPE_PRINTS: usize = 8192;
 
 /// Retired contracts kept per chart (a year of quarterly rolls).
 const MAX_RETIRED: usize = 4;
@@ -265,6 +290,8 @@ impl ChartStore {
                 bid: None,
                 ask: None,
                 book: OrderBook::default(),
+                tape: Tape::new(TAPE_PRINTS),
+                vap: VolumeAtPrice::default(),
                 // Journal cap: ~ one busy hour of trades while history is outstanding.
                 stitch: Stitcher::new(period_ms, 500_000),
                 history: if capabilities.history {
@@ -326,6 +353,7 @@ mod tests {
             time: UtcMillis(0),
             price: Price(p),
             qty: Qty(1),
+            aggressor: None,
         };
         d.apply(&[trade(600_000), MarketEvent::Bid(Price(599_975))]);
         d.apply(&[MarketEvent::ContractChanged(z25)]);

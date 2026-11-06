@@ -78,6 +78,16 @@ pub struct Theme {
     pub accent: Hsla,
     /// Shape cue for direction (in addition to colour).
     pub hollow: HollowBodies,
+    /// DOM: depth bars behind bid / ask sizes (subtle; text sits on them).
+    pub bid_bar: Hsla,
+    pub ask_bar: Hsla,
+    /// DOM: the best bid / best ask cells (inside market), stronger than the bars.
+    pub inside_bid: Hsla,
+    pub inside_ask: Hsla,
+    /// DOM: traded-volume bars.
+    pub volume_bar: Hsla,
+    /// T&S: background of a large print (with bold text).
+    pub large_print: Hsla,
 }
 
 fn c(hex: u32) -> Hsla {
@@ -111,6 +121,12 @@ impl Theme {
             on_cross_tag: c(brand::PAPER),
             accent: c(brand::VIOLET),
             hollow: HollowBodies::Up,
+            bid_bar: c(up).opacity(0.16),
+            ask_bar: c(down).opacity(0.16),
+            inside_bid: c(up).opacity(0.30),
+            inside_ask: c(down).opacity(0.30),
+            volume_bar: c(0x9a9fb2).opacity(0.18),
+            large_print: c(0x262b39),
         }
     }
 
@@ -141,6 +157,12 @@ impl Theme {
             on_cross_tag: c(brand::PAPER),
             accent: c(violet),
             hollow: HollowBodies::Up,
+            bid_bar: c(up).opacity(0.12),
+            ask_bar: c(down).opacity(0.12),
+            inside_bid: c(up).opacity(0.22),
+            inside_ask: c(down).opacity(0.22),
+            volume_bar: c(0x565b6e).opacity(0.14),
+            large_print: c(brand::PAPER),
         }
     }
 
@@ -154,6 +176,20 @@ impl Theme {
             Theme::light(Palette::Colorblind),
         ]
     }
+}
+
+/// `top` (possibly translucent) composited over opaque `bottom`, as drawn.
+#[cfg(test)]
+pub fn over(top: Hsla, bottom: Hsla) -> Hsla {
+    let (t, b) = (Rgba::from(top), Rgba::from(bottom));
+    let a = t.a;
+    let mix = |x: f32, y: f32| x * a + y * (1.0 - a);
+    Hsla::from(Rgba {
+        r: mix(t.r, b.r),
+        g: mix(t.g, b.g),
+        b: mix(t.b, b.b),
+        a: 1.0,
+    })
 }
 
 /// WCAG 2.x relative luminance.
@@ -198,6 +234,47 @@ mod tests {
             ("accent", t.accent, "panel", t.panel),
             ("on_last", t.on_last, "last", t.last),
             ("on_cross_tag", t.on_cross_tag, "cross_tag", t.cross_tag),
+            // DOM: sizes and prices over depth bars and inside-market cells.
+            (
+                "text_main",
+                t.text_main,
+                "bid_bar/bg",
+                over(t.bid_bar, t.bg),
+            ),
+            (
+                "text_main",
+                t.text_main,
+                "ask_bar/bg",
+                over(t.ask_bar, t.bg),
+            ),
+            (
+                "text_main",
+                t.text_main,
+                "inside_bid/bg",
+                over(t.inside_bid, t.bg),
+            ),
+            (
+                "text_main",
+                t.text_main,
+                "inside_ask/bg",
+                over(t.inside_ask, t.bg),
+            ),
+            (
+                "text_main",
+                t.text_main,
+                "volume_bar/bg",
+                over(t.volume_bar, t.bg),
+            ),
+            (
+                "text_dim",
+                t.text_dim,
+                "volume_bar/bg",
+                over(t.volume_bar, t.bg),
+            ),
+            // T&S: aggressor-coloured prints, also on a large-print row.
+            ("up", t.up, "large_print", t.large_print),
+            ("down", t.down, "large_print", t.large_print),
+            ("text_main", t.text_main, "large_print", t.large_print),
         ]
     }
 
@@ -284,6 +361,10 @@ mod tests {
         // docs/design.md §5: all colours come from theme tokens.
         for (file, src) in [
             ("chart_view.rs", include_str!("chart_view.rs")),
+            ("dom_view.rs", include_str!("dom_view.rs")),
+            ("tape_view.rs", include_str!("tape_view.rs")),
+            ("workspace.rs", include_str!("workspace.rs")),
+            ("text.rs", include_str!("text.rs")),
             ("main.rs", include_str!("main.rs")),
             ("screenshot.rs", include_str!("screenshot.rs")),
         ] {

@@ -400,6 +400,60 @@ async fn coinbase_reconnect_mid_bar() {
     assert_eq!(d.history, HistoryState::Complete);
 }
 
+/// Reconnect inside the same minute (backoff starts at 0.5 s): no candles are due, and REST
+/// trades rebuild the forming bar. They must replace it, not add to the trades connection 1
+/// already applied (regression: the bar's early volume was counted twice).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coinbase_reconnect_within_the_same_minute_counts_once() {
+    let tape = tape();
+    let product = btc();
+    let spot = ContractKey::spot(catalog::BTC_USD);
+    let store = Arc::new(ChartStore::new(
+        product.clone(),
+        Some(spot),
+        lines_feed::coinbase::CoinbaseProvider.capabilities(),
+        "coinbase",
+        60_000,
+        10_000,
+    ));
+    let c1 = at("14:05:10");
+    let rest1 = id_at(&tape, c1);
+    let mut f1 = vec![
+        subscribed(),
+        candles(&tape, at("14:00:00"), at("14:05:00")),
+        rest_trades(&tape, rest1, 1000),
+    ];
+    f1.extend(
+        ids(&tape, rest1 + 1, id_at(&tape, at("14:05:30")))
+            .iter()
+            .map(ws_match),
+    );
+    // Back at 14:05:40, still in the 14:05 bar.
+    let c2 = at("14:05:40");
+    let rest2 = id_at(&tape, c2);
+    let mut f2 = vec![subscribed(), rest_trades(&tape, rest2, 1000)];
+    f2.extend(ids(&tape, rest2 + 1, u64::MAX).iter().map(ws_match));
+
+    let opts = ConnectionOptions {
+        idle_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+    let (_tx, mut rx) = watch::channel(false);
+    for (name, start, frames) in [("same1.lfr", c1, f1), ("same2.lfr", c2, f2)] {
+        let path = record(name, start, &frames);
+        let mut t = ReplayTransport::open(&path, 0.0, None).unwrap();
+        let mut session = lines_feed::coinbase::CoinbaseProvider
+            .new_session(&product, Some(spot))
+            .unwrap();
+        run_connection(&mut t, session.as_mut(), &store, &opts, &mut rx)
+            .await
+            .unwrap();
+    }
+    let d = store.read();
+    assert_eq!(d.series.bars(), truth(&tape).as_slice(), "counted once");
+    assert_eq!(d.history, HistoryState::Complete);
+}
+
 fn last_match(t: &T) -> Frame {
     Frame::text(
         ws_match(t)
@@ -555,6 +609,16 @@ async fn coinbase_live_stitch_matches_exchange_candles() {
             d.stats,
             d.history
         );
+        // Roadmap 5: public level2_batch depth and aggressor-tagged prints arrived too.
+        assert!(
+            d.book.len(lines_core::Side::Bid) > 100 && d.book.len(lines_core::Side::Ask) > 100,
+            "level2_batch book"
+        );
+        assert_eq!(
+            d.stats.book_crossed, 0,
+            "the book is never crossed at a frame boundary"
+        );
+        assert!(d.tape.iter_newest().take(50).all(|p| p.aggressor.is_some()));
         (d.series.bars().to_vec(), d.history)
     };
     assert_eq!(history, HistoryState::Complete);

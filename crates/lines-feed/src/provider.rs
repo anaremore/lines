@@ -10,7 +10,7 @@
 //!   the identical session code.
 
 use bytes::Bytes;
-use lines_core::{Bar, Capabilities, ContractKey, Price, Product, Qty, Side, UtcMillis};
+use lines_core::{Aggressor, Bar, Capabilities, ContractKey, Price, Product, Qty, Side, UtcMillis};
 
 /// Wire frame kinds. HTTP responses (e.g. REST history) travel through the same pipe so
 /// recordings capture them and replays are deterministic.
@@ -106,6 +106,8 @@ pub enum MarketEvent {
         time: UtcMillis,
         price: Price,
         qty: Qty,
+        /// Who initiated, if the source says (time & sales).
+        aggressor: Option<Aggressor>,
     },
     /// Most recent trade price from a snapshot: updates "last", not volume.
     LastPrice(Price),

@@ -10,11 +10,14 @@ pub mod continuous;
 pub mod fixed_str;
 pub mod geometry;
 pub mod instrument;
+pub mod ladder;
 pub mod price;
 pub mod qty;
 pub mod roll;
 pub mod stitch;
+pub mod tape;
 pub mod time;
+pub mod vap;
 pub mod viewport;
 
 pub use bars::{Bar, BarSeries, TradeOutcome};
@@ -29,5 +32,7 @@ pub use instrument::{
 pub use price::{DisplayStyle, Price, PriceFormat, PriceScale, UnitConverter, UnitError};
 pub use qty::{Qty, QtyFormat};
 pub use stitch::{StitchStats, Stitcher};
+pub use tape::{Aggressor, Print, Tape};
 pub use time::UtcMillis;
+pub use vap::VolumeAtPrice;
 pub use viewport::Viewport;

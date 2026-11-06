@@ -257,11 +257,16 @@ impl ProviderSession for NativeSession {
                     time_us,
                     price,
                     qty,
-                    ..
+                    aggressor,
                 } => events.push(MarketEvent::Trade {
                     time: UtcMillis(time_us.div_euclid(1000)),
                     price,
                     qty,
+                    aggressor: match aggressor {
+                        Aggressor::Buy => Some(lines_core::Aggressor::Buy),
+                        Aggressor::Sell => Some(lines_core::Aggressor::Sell),
+                        Aggressor::Unknown => None,
+                    },
                 }),
                 NativeEvent::BookClear { .. } => events.push(MarketEvent::BookClear),
                 NativeEvent::BookLevel {
@@ -364,7 +369,8 @@ mod tests {
                 MarketEvent::Trade {
                     time: UtcMillis(1_500),
                     price: Price(10),
-                    qty: Qty(2)
+                    qty: Qty(2),
+                    aggressor: Some(lines_core::Aggressor::Buy),
                 }
             ]
         );

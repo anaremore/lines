@@ -51,7 +51,7 @@ impl Provider for CqgProvider {
         Capabilities {
             history: true,
             bbo: true,
-            depth: false,
+            depth: true,
             fractional_qty: false,
             always_open: false,
         }

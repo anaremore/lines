@@ -8,7 +8,8 @@
 use cqg_proto::{cqg, historical_2, market_data_2, metadata_2, user_session_2, web_api_2};
 use lines_core::calendar::resolve_expiry;
 use lines_core::{
-    Bar, CivilDate, ContractKey, Price, PriceScale, Product, Qty, UnitConverter, UtcMillis,
+    Aggressor, Bar, CivilDate, ContractKey, Price, PriceScale, Product, Qty, Side, UnitConverter,
+    UtcMillis,
 };
 use prost::Message;
 
@@ -274,7 +275,7 @@ impl CqgSession {
             market_data_subscriptions: vec![MarketDataSubscription {
                 contract_id: meta.contract_id,
                 request_id: Some(md_request_id),
-                level: market_data_subscription::Level::TradesBba as u32,
+                level: market_data_subscription::Level::TradesBbaDom as u32,
                 ..Default::default()
             }],
             ..Default::default()
@@ -356,6 +357,10 @@ impl CqgSession {
             return;
         }
         let snapshot = md.is_snapshot.unwrap_or(false);
+        if snapshot {
+            // "All previously known quotes ... detailed DOM ... should be cleaned."
+            events.push(MarketEvent::BookClear);
+        }
         let mut rejected = 0u64;
         for q in &md.quotes {
             if let Some(qt) = q.quote_utc_time {
@@ -394,8 +399,27 @@ impl CqgSession {
                     events.push(MarketEvent::LastPrice(price));
                 } else {
                     let qty = self.qty(q.volume.as_ref(), q.scaled_volume)?;
-                    events.push(MarketEvent::Trade { time, price, qty });
+                    events.push(MarketEvent::Trade {
+                        time,
+                        price,
+                        qty,
+                        aggressor: aggressor(q.sales_condition),
+                    });
                 }
+            }
+            // DOM: the new total volume at a price; zero removes it.
+            x if x == quote::Type::Bid as u32 || x == quote::Type::Ask as u32 => {
+                let side = if x == quote::Type::Bid as u32 {
+                    Side::Bid
+                } else {
+                    Side::Ask
+                };
+                events.push(MarketEvent::BookLevel {
+                    side,
+                    price: self.price(q.scaled_price)?,
+                    qty: self.qty(q.volume.as_ref(), q.scaled_volume)?,
+                    orders: 0,
+                });
             }
             x if x == quote::Type::Bestbid as u32 => {
                 events.push(MarketEvent::Bid(self.price(q.scaled_price)?))
@@ -406,6 +430,17 @@ impl CqgSession {
             _ => {}
         }
         Some(())
+    }
+}
+
+/// CQG sales conditions: HIT and SELL_SIDE_AGGRESSOR are sells into the bid, TAKE and
+/// BUY_SIDE_AGGRESSOR buys from the offer.
+fn aggressor(sales_condition: Option<u32>) -> Option<Aggressor> {
+    use quote::SalesCondition as C;
+    match sales_condition? {
+        c if c == C::Hit as u32 || c == C::SellSideAggressor as u32 => Some(Aggressor::Sell),
+        c if c == C::Take as u32 || c == C::BuySideAggressor as u32 => Some(Aggressor::Buy),
+        _ => None,
     }
 }
 
@@ -642,12 +677,14 @@ mod tests {
                 MarketEvent::Trade {
                     time: t,
                     price: Price(492_525),
-                    qty: Qty(2)
+                    qty: Qty(2),
+                    aggressor: None,
                 },
                 MarketEvent::Trade {
                     time: t,
                     price: Price(492_550),
-                    qty: Qty(3)
+                    qty: Qty(3),
+                    aggressor: None,
                 },
             ]
         );
@@ -673,7 +710,8 @@ mod tests {
             MarketEvent::Trade {
                 time: UtcMillis(base_ms()),
                 price: Price(492_525),
-                qty: Qty(1)
+                qty: Qty(1),
+                aggressor: None,
             }
         );
         assert_eq!(
@@ -738,8 +776,77 @@ mod tests {
         };
         assert_eq!(
             feed(&mut s, snap).0,
-            vec![MarketEvent::LastPrice(Price(123_400))]
+            vec![
+                MarketEvent::BookClear,
+                MarketEvent::LastPrice(Price(123_400))
+            ],
+            "a snapshot clears the DOM; its trade is the last price, not volume"
         );
+    }
+
+    #[test]
+    fn dom_quotes_set_levels_and_trades_carry_the_aggressor() {
+        let mut s = session(catalog::ES, "EP");
+        let (_, out) = feed(&mut s, logon_ok());
+        let id = out[0].information_requests[0].id;
+        let (_, out) = feed(&mut s, symbol_ok(id, 9, "EPZ6", 0.01, 0.25));
+        assert_eq!(
+            out[0].market_data_subscriptions[0].level,
+            market_data_subscription::Level::TradesBbaDom as u32,
+            "subscribes with DOM"
+        );
+        let level = |t: quote::Type, p: i64, v: i64| Quote {
+            r#type: t as u32,
+            scaled_price: p,
+            volume: Some(cqg::Decimal {
+                significand: Some(v),
+                exponent: Some(0),
+            }),
+            ..Default::default()
+        };
+        let mut buy = trade(Some(0), 600_025, 4);
+        buy.sales_condition = Some(quote::SalesCondition::BuySideAggressor as u32);
+        let mut hit = trade(None, 600_000, 1);
+        hit.sales_condition = Some(quote::SalesCondition::Hit as u32);
+        let md = ServerMsg {
+            real_time_market_data: vec![RealTimeMarketData {
+                contract_id: 9,
+                quotes: vec![
+                    level(quote::Type::Bid, 600_000, 12),
+                    level(quote::Type::Ask, 600_025, 0),
+                    buy,
+                    hit,
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (ev, _) = feed(&mut s, md);
+        assert_eq!(
+            ev[..2],
+            [
+                MarketEvent::BookLevel {
+                    side: Side::Bid,
+                    price: Price(600_000),
+                    qty: Qty(12),
+                    orders: 0
+                },
+                MarketEvent::BookLevel {
+                    side: Side::Ask,
+                    price: Price(600_025),
+                    qty: Qty(0),
+                    orders: 0
+                },
+            ]
+        );
+        let sides: Vec<_> = ev[2..]
+            .iter()
+            .map(|e| match e {
+                MarketEvent::Trade { aggressor, .. } => *aggressor,
+                e => panic!("{e:?}"),
+            })
+            .collect();
+        assert_eq!(sides, vec![Some(Aggressor::Buy), Some(Aggressor::Sell)]);
     }
 
     #[test]
