@@ -46,9 +46,35 @@ jobs:
           fi
           echo "version=$tag_version" >> "$GITHUB_OUTPUT"
 
+  licenses:
+    name: third-party licence notices
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-about@0.9.3
+      - name: Generate THIRD_PARTY_LICENSES.txt
+        # Config about.toml, template .github/release/about.hbs. Fails if a dependency's licence
+        # is not on the accepted list.
+        run: |
+          cargo about generate --locked --fail -c about.toml             -o THIRD_PARTY_LICENSES.txt .github/release/about.hbs
+          wc -c THIRD_PARTY_LICENSES.txt
+          head -40 THIRD_PARTY_LICENSES.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: third-party-licenses
+          path: THIRD_PARTY_LICENSES.txt
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: build (${{ matrix.name }})
-    needs: version
+    needs: [version, licenses]
     strategy:
       fail-fast: false
       matrix:
@@ -86,6 +112,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: third-party-licenses
+
       - name: Build (public, release profile)
         # Default features only: never `vendor-cqg` in a release (docs/release.md).
         run: cargo build --release --locked -p lines-app
@@ -118,6 +148,11 @@ jobs:
           ./target/release/lines --source mock >window.out 2>window.err &
           pid=$!
           sleep 8
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "app still running after 8 s (window up)"
+          else
+            echo "::warning::app exited within 8 s; this check saw only its startup"
+          fi
           kill "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
           cat window.err
@@ -133,7 +168,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force dist/$env:PKG, out | Out-Null
-          Copy-Item target/release/lines.exe, LICENSE.md dist/$env:PKG/
+          Copy-Item target/release/lines.exe, LICENSE.md, THIRD_PARTY_LICENSES.txt dist/$env:PKG/
           (Get-Content .github/release/README-windows.txt -Raw).Replace('@VERSION@', $env:VERSION) |
             Set-Content -NoNewline dist/$env:PKG/README.txt
           # Flat zip: lines.exe, LICENSE.md, README.txt at the top level.
@@ -147,7 +182,7 @@ jobs:
           app="$root/Lines.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" out
           cp target/release/lines "$app/Contents/MacOS/lines"
-          cp target/release/lines LICENSE.md "$root/"
+          cp target/release/lines LICENSE.md THIRD_PARTY_LICENSES.txt "$root/"
           sed "s/@VERSION@/$VERSION/g" .github/release/Info.plist >"$app/Contents/Info.plist"
           sed "s/@VERSION@/$VERSION/g" .github/release/README-macos.txt >"$root/README.txt"
           plutil -lint "$app/Contents/Info.plist"
@@ -173,7 +208,7 @@ jobs:
           set -euo pipefail
           root="dist/$PKG"
           mkdir -p "$root" out
-          cp target/release/lines LICENSE.md "$root/"
+          cp target/release/lines LICENSE.md THIRD_PARTY_LICENSES.txt "$root/"
           sed "s/@VERSION@/$VERSION/g" .github/release/README-linux.txt >"$root/README.txt"
           tar -C dist -czf "out/$PKG.tar.gz" "$PKG"
 

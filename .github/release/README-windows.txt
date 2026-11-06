@@ -12,4 +12,4 @@ Run
 The executable is not code-signed yet. Windows SmartScreen may warn on first run:
 choose "More info", then "Run anyway".
 
-Licence: FSL-1.1-ALv2, see LICENSE.md.
+Licence: FSL-1.1-ALv2, see LICENSE.md. Third-party notices: THIRD_PARTY_LICENSES.txt.
