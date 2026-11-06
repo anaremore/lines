@@ -1,0 +1,72 @@
+# cargo-deny policy (run in CI: .github/workflows/ci.yml). Licences must be compatible with
+# distributing Lines under FSL-1.1-ALv2 (decision 0014); every third-party notice ships in
+# THIRD_PARTY_LICENSES with each release (about.toml).
+
+[graph]
+# The platforms we build and ship. All features, so optional ones (screenshot, vendor-cqg)
+# are policed too, even though releases use default features only.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+all-features = true
+
+[licenses]
+# Permissive licences, plus MPL-2.0 (file-level copyleft: fine for unmodified dependencies;
+# modifying an MPL file obliges us to publish that file).
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.93
+
+# Crate-scoped exceptions, each reviewed (not added to the global list):
+[[licenses.exceptions]]
+# Mozilla's CA root certificate data (via ureq -> lines-feed, Coinbase REST over TLS).
+# CDLA-Permissive-2.0 is a permissive data licence; its condition (ship the licence text)
+# is met by THIRD_PARTY_LICENSES.txt.
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+[licenses.private]
+# Our own crates are `publish = false` and FSL-licensed.
+ignore = true
+
+[advisories]
+# RustSec advisory database. Unmaintained-crate notices from deep in GPUI's tree are warnings
+# for now (we can't swap them without forking GPUI); vulnerabilities fail the build.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[bans]
+# GPUI pulls several versions of some crates; report, don't fail.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # GPUI, pinned to one rev in Cargo.toml.
+    "https://github.com/zed-industries/zed",
+    # Pinned by exact commit in Zed's own Cargo.toml at that rev (transitive via GPUI).
+    "https://github.com/gfx-rs/wgpu",
+    "https://github.com/zed-industries/font-kit",
+    "https://github.com/zed-industries/oo7",
+    # Also in Cargo.lock but unreachable on our targets: zed-industries/scap,
+    # zed-industries/wasm_thread. Add them here only if they ever enter the graph.
+]
