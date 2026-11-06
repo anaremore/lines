@@ -26,7 +26,7 @@ use gpui::{
 use lines_feed::FeedConfig;
 use lines_feed::store::FeedStatus;
 
-use crate::chart_view::{ChartView, Fixture};
+use crate::chart_view::{ChartView, Feed, Fixture};
 use crate::theme::Theme;
 
 /// Everything besides the data that determines the image.
@@ -42,12 +42,12 @@ pub struct Shot {
 }
 
 pub fn run(config: FeedConfig, shot: Shot) -> Result<i32> {
-    let feed = lines_feed::spawn(config)?;
+    let feed = Feed::start(config)?;
 
     // 1. Replay to the cut-off before any UI exists: the frame depends only on the data.
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        match feed.store.read().status.clone() {
+        match feed.handle.store.read().status.clone() {
             FeedStatus::ReplayFinished => break,
             FeedStatus::Failed(e) => bail!("replay failed: {e}"),
             _ if Instant::now() > deadline => bail!("replay did not finish within 120 s"),
@@ -69,12 +69,7 @@ pub fn run(config: FeedConfig, shot: Shot) -> Result<i32> {
     Ok(code.load(Ordering::SeqCst))
 }
 
-fn capture(
-    cx: &mut App,
-    feed: lines_feed::FeedHandle,
-    shot: Shot,
-    exit: Arc<AtomicI32>,
-) -> Result<()> {
+fn capture(cx: &mut App, feed: Feed, shot: Shot, exit: Arc<AtomicI32>) -> Result<()> {
     let Shot {
         out,
         size: (w, h),

@@ -26,6 +26,10 @@ anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Symbol picker fuzzy matching (Helix's matcher). MPL-2.0, used unmodified.
+nucleo-matcher = "0.3.1"
 # Same major as GPUI's `image` so `RgbaImage` is one type. PNG only: decodes the window icon
 # (X11) and encodes screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }

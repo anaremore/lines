@@ -127,6 +127,17 @@ pub fn by_symbol(symbol: &str) -> Option<Product> {
         .find(|p| p.symbol.eq_ignore_ascii_case(&want))
 }
 
+/// Where a product trades, for display and search (e.g. the symbol picker). An exchange name,
+/// not a vendor symbol.
+pub fn exchange(id: ProductId) -> &'static str {
+    match id {
+        ES | NQ | MES | MNQ => "CME",
+        ZN => "CBOT",
+        BTC_USD | ETH_USD => "Coinbase",
+        _ => "",
+    }
+}
+
 /// What a user asked for: a product (resolved to its front month) or one contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -188,6 +199,13 @@ pub(crate) fn roots(id: ProductId) -> Roots {
 mod tests {
     use super::*;
     use lines_core::{Month, Qty};
+
+    #[test]
+    fn every_product_has_an_exchange() {
+        for p in all() {
+            assert!(!exchange(p.id).is_empty(), "{}", p.symbol);
+        }
+    }
 
     #[test]
     fn ids_and_symbols_are_unique() {
