@@ -301,3 +301,83 @@ fn missing_files_and_bad_symbols() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One aggressor buy order sweeping three ask levels, written as Sierra writes it: the
+/// sub-trade markers (`0xfd709ef9` opens, `0xfd709f01` closes), trade times made unique by
+/// +1 µs within the millisecond, and that millisecond's depth (the book after the sweep,
+/// with the order's remainder resting as the new bid) stamped at the whole ms. A standalone
+/// sell then hits the new bid in the same millisecond.
+#[test]
+fn sweep_bracket_and_same_millisecond_fills() {
+    let dir = std::env::temp_dir().join(format!("lines-sierra-sweep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("MarketDepthData")).unwrap();
+    let t0 = sc(13, 45, 0, 0);
+    let t1 = sc(13, 45, 0, 7); // the sweep's millisecond
+
+    let mut d = depth_header();
+    let mut r =
+        |time, cmd, flags, price, qty| d.extend(depth_record(time, cmd, flags, 1, price, qty));
+    r(t0, 1, 0, 0.0, 0);
+    r(t0, 2, 0, px(24000.0), 5);
+    r(t0, 3, 0, px(24000.25), 1);
+    r(t0, 3, 0, px(24000.5), 1);
+    r(t0, 3, 0, px(24000.75), 3);
+    r(t0, 3, 1, px(24001.0), 2);
+    // Buy 6 at 24000.75: fills 1 + 1 + 3, the last lot rests as the new bid.
+    r(t1, 7, 0, px(24000.25), 0);
+    r(t1, 7, 0, px(24000.5), 0);
+    r(t1, 7, 0, px(24000.75), 0);
+    r(t1, 2, 1, px(24000.75), 1);
+    std::fs::write(
+        dir.join("MarketDepthData")
+            .join(format!("NQZ5.CME.{DAY}.depth")),
+        d,
+    )
+    .unwrap();
+
+    let mut scid = scid_header();
+    let mut t = |r: ScidRecord| scid.extend(scid_record(&r));
+    let (bid, ask) = (px(24000.0), px(24000.25)); // Sierra's stored quote: before the ms
+    t(ScidRecord {
+        open: f32::from_bits(0xfd70_9ef9),
+        ..tick(t1, px(24000.25), bid, ask, 1, true)
+    });
+    t(tick(t1 + 1, px(24000.5), bid, ask, 1, true));
+    t(ScidRecord {
+        open: f32::from_bits(0xfd70_9f01),
+        ..tick(t1 + 2, px(24000.75), bid, ask, 3, true)
+    });
+    t(tick(t1 + 3, px(24000.75), bid, ask, 1, false));
+    std::fs::write(dir.join("NQZ5.CME.scid"), scid).unwrap();
+
+    let r = import(&opts(&dir, "s.lfr")).unwrap();
+    assert_eq!(
+        (
+            r.trades_standalone,
+            r.trades_first_sub,
+            r.trades_middle_sub,
+            r.trades_last_sub
+        ),
+        (1, 1, 1, 1),
+        "{r}"
+    );
+    // First fills: the sweep's first (t1 + 0 µs) ties with the ms's depth and is checked
+    // before it, at the old ask; the standalone sell (t1 + 3 µs) after it, at the new bid.
+    // Both inside. With the markers read the other way round, the sweep's middle fill
+    // (24000.50, below the new bid) would be taken for a standalone trade: outside. Merging
+    // at whole milliseconds would check the sell against the old book (above its ask).
+    assert_eq!(
+        (r.touch_checked, r.touch_within, r.touch_outside),
+        (2, 2, 0),
+        "{r}"
+    );
+    // Later sweep fills are only counted, against the book after the ms's depth
+    // (24000.75 / 24001.00): 24000.50 is through it, 24000.75 at it.
+    assert_eq!(
+        (r.sweep_fills_checked, r.sweep_fills_through_touch),
+        (2, 1),
+        "{r}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

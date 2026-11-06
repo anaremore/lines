@@ -33,10 +33,18 @@ fn main() -> anyhow::Result<()> {
     for (bits, (n, v)) in &opens {
         println!("  {bits:#010x} {n:>7} {v}");
     }
-    // Pair structure: for each A (first marker) find the next B (second marker).
+    // Pair structure, both ways round: for each A find the next B. The true opener gives
+    // brackets inside one millisecond (Sierra unbundles one aggressor order); the wrong one
+    // pairs the end of one bracket with the start of the next. (On NQ the opener is
+    // 0xfd709ef9: see `format::FIRST_SUB_TRADE`.)
     let markers: Vec<u32> = opens.keys().copied().filter(|b| *b != 0).collect();
-    if markers.len() >= 2 {
-        let (a, b) = (markers[0].max(markers[1]), markers[0].min(markers[1])); // A = -1.999001e37 (smaller magnitude)
+    for (a, b) in markers
+        .first()
+        .zip(markers.get(1))
+        .map(|(&x, &y)| [(x, y), (y, x)])
+        .into_iter()
+        .flatten()
+    {
         let (mut gaps, mut same_price, mut diff_price, mut same_time, mut unmatched) =
             (BTreeMap::<usize, u64>::new(), 0, 0, 0, 0);
         let mut vol_inside = 0u64;
