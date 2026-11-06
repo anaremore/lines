@@ -1,0 +1,127 @@
+# Lines exchange holiday table: holidays and early closes as versioned data (decision 0017).
+# Parsed and validated by lines_core::sessions::HolidayTable (format documented there);
+# embedded in lines-feed by catalog::HOLIDAYS. Times are exchange-local (America/Chicago).
+#
+# Rules:  closed       no trading that calendar day; not a trade date
+#         halt HH:MM   trades from the usual 17:00 CT evening open until HH:MM, then halts;
+#                      not a trade date: its trades carry the NEXT trade date
+#         early HH:MM  a trade date that closes at HH:MM
+#
+# VERIFICATION STATUS (2026-11-06): nothing here is verified against CME's own calendar yet.
+# cmegroup.com refused automated access (HTTP 403), so the dates come from:
+#   - CME documents seen only as search excerpts (marked CME-EXCERPT), and
+#   - broker pages republishing CME's notices (marked BROKER), and
+#   - the pattern of earlier years where 2027 notices don't exist yet (marked PATTERN).
+# To verify: open the CME holiday calendar in a browser, compare, and flip `unverified` to
+# `verified` per line (and the coverage line once the list is known to be complete). Days that
+# are only bond-market (SIFMA) early closes, such as Columbus Day and Veterans Day, are not CME
+# holidays and are deliberately absent.
+#
+# Source key:
+#   CME-CAL   https://www.cmegroup.com/tools-information/holiday-calendar.html (blocked)
+#   CME-GF26  https://www.cmegroup.com/tools-information/holiday-calendar/files/2026/2026-good-friday-clearing-advisory.pdf
+#   CME-9590  https://www.cmegroup.com/content/dam/cmegroup/notices/ser/2025/08/ser-9590.pdf
+#   IB        https://www.ironbeam.com/ (per-holiday 2026 pages, e.g. /good-friday-2026-futures-trading-hours/,
+#             /labor-day-trading-schedule-2026/, /memorial-day-2026-futures-trading-hours/,
+#             /juneteenth-2026-futures-trading-schedule/, /independence-day-2026-futures-trading-schedule/,
+#             /dr-martin-luther-king-jr-holiday-trading-schedule/, /presidents-day-holiday-trading-schedule/;
+#             2024 pattern: /thanksgiving-holiday-futures-trading-hours-2024/,
+#             /christmas-holiday-futures-trading-hours-2024/)
+
+format 1
+version 2026-11-06
+
+# CME equity index futures: ES, NQ, MES, MNQ. Globex Sun-Fri 17:00-16:00 CT; RTH 08:30-15:00 CT.
+calendar cme-equity-index
+coverage 2026 2027 unverified
+source https://www.cmegroup.com/tools-information/holiday-calendar.html
+source https://www.cmegroup.com/tools-information/holiday-calendar/files/2026/2026-good-friday-clearing-advisory.pdf
+source https://www.ironbeam.com/ (CME holiday schedules republished per holiday, 2024 and 2026)
+# BROKER (topstep, quantvps)
+2026-01-01 closed      unverified New Year's Day
+# BROKER (IB); holiday trades dated the next business day per IB and crosstrade
+2026-01-19 halt 12:00  unverified Martin Luther King Jr. Day
+# BROKER (IB)
+2026-02-16 halt 12:00  unverified Presidents Day
+# CME-EXCERPT (CME-GF26): equities open for an abbreviated session, trades dated April 3,
+# not settled (April 2 settlement used). Close time BROKER (IB): 08:15 CT, so no RTH.
+2026-04-03 early 08:15 unverified Good Friday (March jobs report)
+# BROKER (IB: Sunday open labelled "Tuesday Trade Date")
+2026-05-25 halt 12:00  unverified Memorial Day
+# BROKER (IB: "Trading Close @ 12:00 CT"); trades dated Monday 06-22
+2026-06-19 halt 12:00  unverified Juneteenth
+# BROKER (IB); trades dated Monday 07-06
+2026-07-03 halt 12:00  unverified Independence Day (observed)
+# BROKER (IB: "From 16:00 CT on 9/6/26 to 16:00 CT on 9/8/26, the official trade date ... 9/8/26")
+2026-09-07 halt 12:00  unverified Labor Day
+# PATTERN (IB 2024; topstep 2026)
+2026-11-26 halt 12:00  unverified Thanksgiving
+# PATTERN (IB 2024; tradesearcher, discounttrading)
+2026-11-27 early 12:15 unverified Day after Thanksgiving
+# PATTERN (IB 2024): early close, no evening reopen (Christmas is closed)
+2026-12-24 early 12:15 unverified Christmas Eve
+# BROKER
+2026-12-25 closed      unverified Christmas
+# 2026-12-31 (Thu): regular 16:00 close; no evening reopen follows from 2027-01-01 closed.
+# BROKER (topstep, tradesearcher)
+2027-01-01 closed      unverified New Year's Day
+# PATTERN
+2027-01-18 halt 12:00  unverified Martin Luther King Jr. Day
+# PATTERN
+2027-02-15 halt 12:00  unverified Presidents Day
+# BROKER (tradesearcher); no jobs report that day (NFP falls on 2027-04-02)
+2027-03-26 closed      unverified Good Friday
+# PATTERN
+2027-05-31 halt 12:00  unverified Memorial Day
+# PATTERN
+2027-06-18 halt 12:00  unverified Juneteenth (observed)
+# PATTERN
+2027-07-05 halt 12:00  unverified Independence Day (observed)
+# PATTERN
+2027-09-06 halt 12:00  unverified Labor Day
+# PATTERN
+2027-11-25 halt 12:00  unverified Thanksgiving
+# PATTERN
+2027-11-26 early 12:15 unverified Day after Thanksgiving
+# CONFLICTING: Christmas (Sat) observed Friday; tradesearcher says closed, others suggest a
+# ~12:15 halt. Modelled as closed. 2027-12-23 (Thu) may close early: unknown, not modelled.
+2027-12-24 closed      unverified Christmas (observed)
+# 2027-12-31 (Fri): 2028-01-01 is a Saturday with no observed weekday holiday; assumed regular.
+
+# CBOT Treasury futures: ZN. Globex Sun-Fri 17:00-16:00 CT; RTH 07:20-14:00 CT.
+# Halt/closed days match the equity calendar (IB lists the same times for interest rates);
+# Good Friday 2026 and early closes differ.
+calendar cbot-treasury
+coverage 2026 2027 unverified
+source https://www.cmegroup.com/tools-information/holiday-calendar.html
+source https://www.cmegroup.com/content/dam/cmegroup/notices/ser/2025/08/ser-9590.pdf
+source https://www.ironbeam.com/ (CME holiday schedules republished per holiday, 2024 and 2026)
+2026-01-01 closed      unverified New Year's Day
+2026-01-19 halt 12:00  unverified Martin Luther King Jr. Day
+2026-02-16 halt 12:00  unverified Presidents Day
+# CME-EXCERPT (CME-GF26, CME-9590): April 3 is a Treasury trade date with a settlement.
+# Close time BROKER (IB): 10:15 CT.
+2026-04-03 early 10:15 unverified Good Friday (March jobs report)
+2026-05-25 halt 12:00  unverified Memorial Day
+2026-06-19 halt 12:00  unverified Juneteenth
+2026-07-03 halt 12:00  unverified Independence Day (observed)
+2026-09-07 halt 12:00  unverified Labor Day
+2026-11-26 halt 12:00  unverified Thanksgiving
+# PATTERN (IB 2022, 2024 interest-rate rows: 12:15); topstep and discounttrading say 12:00
+2026-11-27 early 12:15 unverified Day after Thanksgiving
+# PATTERN (IB 2024 interest-rate row)
+2026-12-24 early 12:15 unverified Christmas Eve
+2026-12-25 closed      unverified Christmas
+# 2026-12-31: CONFLICTING (discounttrading: rates close 12:00 CT; others: regular). Modelled
+# as regular until checked.
+2027-01-01 closed      unverified New Year's Day
+2027-01-18 halt 12:00  unverified Martin Luther King Jr. Day
+2027-02-15 halt 12:00  unverified Presidents Day
+2027-03-26 closed      unverified Good Friday
+2027-05-31 halt 12:00  unverified Memorial Day
+2027-06-18 halt 12:00  unverified Juneteenth (observed)
+2027-07-05 halt 12:00  unverified Independence Day (observed)
+2027-09-06 halt 12:00  unverified Labor Day
+2027-11-25 halt 12:00  unverified Thanksgiving
+2027-11-26 early 12:15 unverified Day after Thanksgiving
+2027-12-24 closed      unverified Christmas (observed)
