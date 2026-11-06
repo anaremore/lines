@@ -168,6 +168,11 @@ impl Workspace {
         self
     }
 
+    /// Where settings and workspace files live (diagnostics bundles read them from here).
+    pub fn config_dir(&self) -> Option<&std::path::Path> {
+        self.config_dir.as_deref()
+    }
+
     /// A problem the trader needs to act on (e.g. a workspace file that couldn't be read):
     /// shown until dismissed. Refused actions go through [`notice`], which expires.
     pub fn add_report(&mut self, r: String) {
@@ -228,7 +233,19 @@ impl PaneHandle {
         each!(self, e => e.update(cx, |p, cx| p.set_feed(feed, cx)))
     }
 
-    fn feed(&self, cx: &App) -> PaneFeed {
+    /// Whether it is shown, frames painted, and (charts) smoothed paint time in µs.
+    pub(crate) fn perf(&self, cx: &mut App) -> (bool, u64, Option<f64>) {
+        let us = match self {
+            PaneHandle::Chart(e) => Some(e.read(cx).paint_us()),
+            _ => None,
+        };
+        each!(self, e => e.update(cx, |p, _| {
+            let c = p.common();
+            (c.visible, c.paints, us)
+        }))
+    }
+
+    pub(crate) fn feed(&self, cx: &App) -> PaneFeed {
         each!(self, e => e.read(cx).feed().clone())
     }
 
@@ -992,6 +1009,7 @@ impl WindowView {
                     self.reattach(id, window, cx);
                 }
             }
+            Command::ExportDiagnostics => crate::diagnostics::export(window, cx),
             Command::ShowSourceHere => match self.tab().focused_handle().cloned() {
                 Some(h) if h.switchable(cx) => h.show_suggested(cx),
                 _ => self.refuse("this pane already shows data", cx),
@@ -1741,6 +1759,7 @@ impl WindowView {
         if !cx.global::<Workspace>().closed_tabs.is_empty() {
             items.push(MenuItem::of(Command::ReopenTab, false));
         }
+        items.push(MenuItem::of(Command::ExportDiagnostics, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.menu = Some(Menu::new(at, items));
         cx.notify();
@@ -1812,6 +1831,7 @@ impl WindowView {
             Command::TogglePerfStats,
             cx.global::<Workspace>().show_perf_stats,
         ));
+        items.push(MenuItem::of(Command::ExportDiagnostics, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.menu = Some(Menu::new(at, items));
         cx.notify();
@@ -3243,6 +3263,21 @@ fn snapshot_with(
 }
 
 /// The whole workspace as a document (from outside any window update).
+/// Every pane in every window, with its id (diagnostics).
+pub fn all_panes(cx: &App) -> Vec<(PaneId, PaneHandle)> {
+    cx.global::<Workspace>()
+        .windows
+        .iter()
+        .filter_map(|w| w.read(cx).ok())
+        .flat_map(|wv| {
+            wv.tabs
+                .iter()
+                .flat_map(|t| t.panes.iter().map(|(id, s)| (*id, s.handle.clone())))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     let ws = cx.global::<Workspace>();
     let (name, sync, hide_hints, show_perf_stats, windows) = (

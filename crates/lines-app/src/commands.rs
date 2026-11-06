@@ -69,6 +69,8 @@ pub enum Command {
     ShowSourceHere,
     /// Every unavailable pane in the tab shows the source's own symbol.
     ShowSourceInTab,
+    /// Write a diagnostics zip (logs, versions, redacted settings, feed and frame stats).
+    ExportDiagnostics,
     /// The focused chart: hide (or show) all external levels (decision 0022).
     ToggleLevels,
     /// The focused chart: hide (or show) level labels and level legend rows.
@@ -253,6 +255,7 @@ pub fn label(c: Command) -> String {
         Command::Palette => "Command palette".into(),
         Command::SaveAs => "Save workspace as…".into(),
         Command::Open => "Open workspace…".into(),
+        Command::ExportDiagnostics => "Export diagnostics…".into(),
         Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
         Command::ToggleStudies => "Chart: hide/show studies".into(),
         Command::CleanChart => "Clean chart (no study labels, no key hints)".into(),
@@ -325,6 +328,7 @@ pub fn palette() -> Vec<Command> {
             ]),
     );
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
+    v.push(Command::ExportDiagnostics);
     v
 }
 

@@ -5,10 +5,12 @@
 mod bench;
 mod chart_view;
 mod commands;
+mod diagnostics;
 mod dom_view;
 mod feeds;
 mod layout;
 mod levels_layer;
+mod logs;
 mod menu;
 mod notice;
 mod pane;
@@ -18,6 +20,7 @@ mod persist;
 mod picker;
 mod picker_view;
 mod profile;
+mod redact;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 mod studies;
@@ -30,6 +33,7 @@ mod theme;
 mod versioned;
 mod workspace;
 mod wsdoc;
+mod zipw;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -599,13 +603,13 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    // A second call in one process (tests) keeps the first subscriber.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,naga=warn,wgpu=warn".into()),
-        )
-        .try_init();
+    // --help/--version print and exit 0; usage errors print and exit 2, as before.
+    let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
+    // Logs (roadmap U1): stderr always; rotating files only for the interactive app, never
+    // for headless, screenshot or benchmark runs (tests run those). A second call in one
+    // process (tests) keeps the first setup.
+    let interactive = cli.headless.is_none() && cli.screenshot.is_none() && cli.bench.is_none();
+    logs::init(interactive.then(logs::LogConfig::from_env).flatten());
     for e in &ext.sources {
         lines_feed::extension::register(e.clone())?;
     }
@@ -626,8 +630,7 @@ where
             s.tradable
         );
     }
-    // --help/--version print and exit 0; usage errors print and exit 2, as before.
-    let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
+
     let choice = SourceChoice::parse(&cli.source, &ext)
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source))?;
     let config = feed_config(&cli, &choice)?;
@@ -851,6 +854,7 @@ where
             return;
         }
         workspace::start_autosave(cx);
+        diagnostics::start_sampler(cx);
         cx.activate(true);
     });
     writer.flush(Duration::from_secs(3));
