@@ -13,7 +13,7 @@
 //! taking the lock: [`ChartStore::stale_for`].
 
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lines_core::{
@@ -298,19 +298,21 @@ pub struct ChartStore {
     /// The feed is live (status `Live`).
     live: AtomicBool,
     stale_after_ms: AtomicU64,
+    /// Market time (newest trade) at the last update, `i64::MIN` = none yet.
+    market_ms: AtomicI64,
+    /// The product's trading hours: a closed market is never stale.
+    calendar: Option<&'static lines_core::sessions::SessionCalendar>,
+    /// This store's feed in the indicator engine (unique per process).
+    feed_id: u64,
 }
+
+static NEXT_FEED_ID: AtomicU64 = AtomicU64::new(1);
 
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Monotonic milliseconds since the first use (never 0).
 fn mono_ms() -> u64 {
     EPOCH.elapsed().as_millis() as u64 + 1
-}
-
-/// Whether the market is open now. TODO(m5c-sessions): from the product's sessions calendar;
-/// until it lands every market counts as open, so a quiet closed market can show as stale.
-fn market_open(_d: &ChartData) -> bool {
-    true
 }
 
 impl ChartStore {
@@ -322,7 +324,11 @@ impl ChartStore {
         period_ms: i64,
         max_bars: usize,
     ) -> Self {
+        let calendar = crate::catalog::sessions(product.id);
         ChartStore {
+            calendar,
+            feed_id: NEXT_FEED_ID.fetch_add(1, Ordering::Relaxed),
+            market_ms: AtomicI64::new(i64::MIN),
             data: Mutex::new(ChartData {
                 product,
                 contract,
@@ -354,13 +360,19 @@ impl ChartStore {
         }
     }
 
+    /// Identifies this store's feed to the indicator engine (`crate::indicators`).
+    pub fn feed_id(&self) -> u64 {
+        self.feed_id
+    }
+
     /// How long a live feed may be silent before it is stale.
     pub fn set_stale_after(&self, d: Duration) {
         self.stale_after_ms
             .store(d.as_millis() as u64, Ordering::Relaxed);
     }
 
-    /// `Some(time since the last data)` when the feed is live, its market open, and nothing
+    /// `Some(time since the last data)` when the feed is live, its market open (per the
+    /// product's sessions calendar), and nothing
     /// has arrived for longer than its expected cadence; `None` otherwise. Lock-free.
     pub fn stale_for(&self) -> Option<Duration> {
         if !self.live.load(Ordering::Acquire) {
@@ -368,8 +380,21 @@ impl ChartStore {
         }
         let last = self.last_data.load(Ordering::Acquire);
         let quiet = mono_ms().saturating_sub(last);
-        (last != 0 && quiet > self.stale_after_ms.load(Ordering::Relaxed))
-            .then(|| Duration::from_millis(quiet))
+        if last == 0 || quiet <= self.stale_after_ms.load(Ordering::Relaxed) {
+            return None;
+        }
+        // Is the market open *now*, on the feed's own clock: the last market time plus the
+        // silence (a replay keeps its recorded time; live, that is about the wall clock).
+        let market = self.market_ms.load(Ordering::Acquire);
+        let now = if market == i64::MIN {
+            crate::now_utc()
+        } else {
+            UtcMillis(market.saturating_add(quiet as i64))
+        };
+        if self.calendar.is_some_and(|c| !c.is_open(now)) {
+            return None;
+        }
+        Some(Duration::from_millis(quiet))
     }
 
     /// Lock-free change detector for the UI.
@@ -382,8 +407,10 @@ impl ChartStore {
     pub fn update<R>(&self, f: impl FnOnce(&mut ChartData) -> R) -> R {
         let mut d = self.data.lock();
         let r = f(&mut d);
-        let live = d.status == FeedStatus::Live && market_open(&d);
+        let live = d.status == FeedStatus::Live;
+        let market = d.market_time.map_or(i64::MIN, |t| t.0);
         drop(d);
+        self.market_ms.store(market, Ordering::Release);
         self.last_data.store(mono_ms(), Ordering::Release);
         self.live.store(live, Ordering::Release);
         self.revision.fetch_add(1, Ordering::Release);
@@ -406,11 +433,43 @@ impl ChartStore {
     }
 }
 
+impl Drop for ChartStore {
+    fn drop(&mut self) {
+        crate::indicators::store_dropped(self.feed_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::catalog;
     use lines_core::{Month, Qty};
+
+    /// docs/design.md §7: silence while the market is closed is not staleness.
+    #[test]
+    fn quiet_is_stale_only_while_the_market_is_open() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        store.set_stale_after(Duration::ZERO);
+        let at = |iso: &str| UtcMillis::parse_iso(iso).unwrap();
+        let trade_at = |t: UtcMillis| MarketEvent::Trade {
+            time: t,
+            price: Price(600_000),
+            qty: Qty(1),
+            aggressor: None,
+        };
+        // Saturday: CME closed.
+        store.update(|d| {
+            d.status = FeedStatus::Live;
+            d.apply(&[trade_at(at("2026-11-07T15:00:00Z"))]);
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(store.stale_for(), None, "closed: not stale");
+        // Wednesday mid-session: open.
+        store.update(|d| d.apply(&[trade_at(at("2026-11-11T15:00:00Z"))]));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(store.stale_for().is_some(), "open and quiet: stale");
+    }
 
     #[test]
     fn contract_change_retires_bars_instead_of_mixing() {

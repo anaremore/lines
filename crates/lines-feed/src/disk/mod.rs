@@ -198,9 +198,8 @@ impl ContractDir {
         let claimed = self.coverage().trades;
         let mut present = Ranges::default();
         for d in self.dates() {
-            // TODO(m5c-sessions): a trade date's span comes from the sessions calendar.
-            let start = d.start_utc().0;
-            present.add(start, start + 86_400_000 - 1);
+            let (open, close) = partition::trade_date_span(&self.product, d);
+            present.add(open.0, close.0 - 1);
         }
         let mut out = Ranges::default();
         for &(a, b) in claimed.ranges() {

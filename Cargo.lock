@@ -2886,6 +2886,7 @@ dependencies = [
  "image",
  "lines-core",
  "lines-feed",
+ "lines-indicators",
  "nucleo-matcher",
  "serde",
  "serde_json",
@@ -2909,6 +2910,7 @@ dependencies = [
  "cqg-proto",
  "futures-util",
  "lines-core",
+ "lines-indicators",
  "parking_lot",
  "prost",
  "rustls",
@@ -2920,6 +2922,15 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "lines-indicators"
+version = "0.1.0"
+dependencies = [
+ "lines-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

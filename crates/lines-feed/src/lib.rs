@@ -11,6 +11,7 @@ pub mod coinbase;
 pub mod connection;
 pub mod cqg;
 pub mod disk;
+pub mod indicators;
 pub mod kraken;
 pub mod native;
 pub mod provider;
@@ -346,6 +347,16 @@ pub async fn run_feed(
     // The local store: cached bars first (panes show them at once), then the feed fills from
     // where they end. One writer per contract; a roll switches it.
     let mut writer = open_writer(&config, &plan.product, plan.contract, &store);
+    // Indicators see every batch of this feed from the start (decision 0017).
+    let mut tap = indicators::engine().tap(
+        indicators::FeedInfo {
+            feed: store.feed_id(),
+            product: plan.product.id,
+            period_ms: config.bar_period_ms,
+            max_bars: config.max_bars,
+        },
+        plan.provider.capabilities().history,
+    );
     store.set_stale_after(
         config
             .stale_after
@@ -393,6 +404,7 @@ pub async fn run_feed(
                 store.update(|d| d.switch_contract(k));
                 drop(writer.take());
                 writer = open_writer(&config, &plan.product, Some(k), &store);
+                tap.reset();
                 // Recordings hold exactly one contract: stop rather than mix two.
                 if let Some(r) = recorder.take() {
                     tracing::warn!("recording stopped at the roll (recordings hold one contract)");
@@ -415,10 +427,12 @@ pub async fn run_feed(
         let session = session.as_mut();
         let rec = recorder.as_ref();
         let mut no_sink = NoSink;
-        let sink: &mut dyn EventSink = match writer.as_mut() {
+        let store_sink: &mut dyn EventSink = match writer.as_mut() {
             Some(w) => w,
             None => &mut no_sink,
         };
+        let mut tee = indicators::Tee(store_sink, &mut tap);
+        let sink: &mut dyn EventSink = &mut tee;
 
         let result = match &config.source {
             Source::CqgMock(m) => {

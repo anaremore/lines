@@ -91,6 +91,8 @@ pub struct Theme {
     /// Link group swatches A..D (decision 0016). Always shown with the group's letter, so a
     /// group never relies on colour alone; none of them is violet or up/down.
     pub link: [Hsla; 4],
+    /// Study lines (VWAP, …), picked per instance. Never up/down or the accent.
+    pub study: [Hsla; 4],
 }
 
 fn c(hex: u32) -> Hsla {
@@ -132,6 +134,8 @@ impl Theme {
             large_print: c(0x262b39),
             // amber, teal, orchid, slate
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
+            // sand, teal, silver, orchid
+            study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
         }
     }
 
@@ -169,6 +173,7 @@ impl Theme {
             volume_bar: c(0x565b6e).opacity(0.14),
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
+            study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
         }
     }
 
@@ -281,6 +286,15 @@ mod tests {
             ("up", t.up, "large_print", t.large_print),
             ("down", t.down, "large_print", t.large_print),
             ("text_main", t.text_main, "large_print", t.large_print),
+            // Study legends name each line in its colour.
+            ("study0", t.study[0], "bg", t.bg),
+            ("study1", t.study[1], "bg", t.bg),
+            ("study2", t.study[2], "bg", t.bg),
+            ("study3", t.study[3], "bg", t.bg),
+            ("study0", t.study[0], "panel", t.panel),
+            ("study1", t.study[1], "panel", t.panel),
+            ("study2", t.study[2], "panel", t.panel),
+            ("study3", t.study[3], "panel", t.panel),
         ]
     }
 
@@ -317,6 +331,9 @@ mod tests {
     #[test]
     fn violet_is_never_up_or_down_and_shape_differs() {
         for t in Theme::all() {
+            for s in t.study {
+                assert!(s != t.up && s != t.down && s != t.accent, "{}", t.name);
+            }
             assert_ne!(t.up, t.accent, "{}", t.name);
             assert_ne!(t.down, t.accent, "{}", t.name);
             assert_ne!(t.up, t.down, "{}", t.name);
@@ -395,6 +412,7 @@ mod tests {
             ("picker_view.rs", include_str!("picker_view.rs")),
             ("bench.rs", include_str!("bench.rs")),
             ("text.rs", include_str!("text.rs")),
+            ("studies.rs", include_str!("studies.rs")),
             ("main.rs", include_str!("main.rs")),
             ("screenshot.rs", include_str!("screenshot.rs")),
         ] {
