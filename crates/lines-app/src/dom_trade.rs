@@ -401,6 +401,41 @@ pub fn position_row(avg_price: f64, tick: i64, units: i64) -> i64 {
     row_of(on_tick, units)
 }
 
+// ---- rejections on a row ---------------------------------------------------------------
+
+/// A refusal's reason in a word or two, for the tag on its row in the orders column (the
+/// full message stays in the header). Known reasons by their wording, else the message's
+/// first word, at most 9 characters.
+pub fn short_reason(message: &str) -> &str {
+    const KNOWN: [(&str, &str); 16] = [
+        ("market is closed", "closed"),
+        ("tick grid", "tick"),
+        ("trading halted", "halted"),
+        ("reducing only", "reduce"),
+        ("daily loss", "day loss"),
+        ("drawdown", "drawdown"),
+        ("micro-equivalent", "max size"),
+        ("position could reach", "max pos"),
+        ("over the maximum", "max qty"),
+        ("ticks from the market", "far"),
+        ("order value", "notional"),
+        ("in a second", "rate"),
+        ("no market price", "no price"),
+        ("liquidity", "no liq"),
+        ("disarmed", "disarmed"),
+        ("filled", "filled"),
+    ];
+    let lower = message.to_ascii_lowercase();
+    for (needle, short) in KNOWN {
+        if lower.contains(needle) {
+            return short;
+        }
+    }
+    let word = message.split_whitespace().next().unwrap_or("");
+    let end = word.char_indices().nth(9).map_or(word.len(), |(i, _)| i);
+    &word[..end]
+}
+
 // ---- rule strip --------------------------------------------------------------------------
 
 /// How close an account is to a prop rule's limit.
@@ -829,6 +864,36 @@ mod tests {
         assert_eq!(open_ticks(0, 600_000.0, Price(600_025), ES), None);
         // Grouped: the marker sits on the row containing the average.
         assert_eq!(position_row(avg, ES, 4 * ES), row_of(599_975, 4 * ES));
+    }
+
+    #[test]
+    fn row_tags_are_short() {
+        // The owner's case: a bracket on a closed market.
+        assert_eq!(
+            short_reason("bracket entry rejected: ES market is closed"),
+            "closed"
+        );
+        assert_eq!(
+            short_reason("price 6000.10 is not on the ES tick grid"),
+            "tick"
+        );
+        assert_eq!(
+            short_reason("price 6100.00 is more than 40 ticks from the market"),
+            "far"
+        );
+        assert_eq!(
+            short_reason("reducing only: daily loss limit reached; ..."),
+            "reduce"
+        );
+        // Unknown: the first word, at most 9 characters.
+        assert_eq!(short_reason("insufficient margin"), "insuffici");
+        assert_eq!(short_reason(""), "");
+        for m in [
+            "bracket entry rejected: ES market is closed",
+            "insufficient margin for this order at this time",
+        ] {
+            assert!(short_reason(m).chars().count() <= 9, "{m}");
+        }
     }
 
     #[test]

@@ -29,12 +29,13 @@ use crate::text::Glyphs;
 use crate::theme::Theme;
 use crate::trading::TradeCache;
 
-/// A rejection to show on its row.
+/// A refusal to tag on its row: `KIND: short` (`text[start..mid]`) or, if that doesn't fit
+/// the orders column, just `short` (`text[mid..end]`).
 #[derive(Clone, Copy, Debug)]
 struct RowFlash {
     price: Price,
-    /// Byte range of the message in `OrdersLayer::text`.
     start: usize,
+    mid: usize,
     end: usize,
 }
 
@@ -104,14 +105,19 @@ impl OrdersLayer {
         let now = Instant::now();
         for f in s.flashes(account, Some(contract), now) {
             if let Some(price) = f.price {
+                // Whose refusal (the core's: denied, never sent; the broker's: rejected) and
+                // why, in a word. The full message is in the header.
+                let short = crate::dom_trade::short_reason(&f.message);
                 let start = self.text.len();
-                // Whose refusal: the core's (denied, never sent) or the broker's (rejected).
                 self.text.push_str(f.kind.label());
                 self.text.push_str(": ");
-                self.text.push_str(&f.message);
+                self.text.push_str(short);
+                let mid = self.text.len();
+                self.text.push_str(short);
                 self.flashes.push(RowFlash {
                     price,
                     start,
+                    mid,
                     end: self.text.len(),
                 });
             }
@@ -136,7 +142,8 @@ impl OrdersLayer {
     }
 
     /// Paint over the ladder. `orders`: the orders column's cell (x, w), if shown; `price`:
-    /// the price column's cell; `x0..x1`: the ladder's width (for rejection bars).
+    /// the price column's cell. Nothing here draws outside those two cells, and refusal tags
+    /// stay inside the orders cell (clipped): the price column is never covered.
     #[allow(clippy::too_many_arguments)]
     pub fn paint(
         &self,
@@ -147,7 +154,6 @@ impl OrdersLayer {
         tick: i64,
         orders: Option<(f32, f32)>,
         price: Option<(f32, f32)>,
-        (x0, x1): (f32, f32),
         oy: f32,
         row_h: f32,
         hair: f32,
@@ -264,24 +270,29 @@ impl OrdersLayer {
                 );
             }
         }
-        // Rejections: a warning bar across their row with the reason.
+        // Refusals: a short tag in the orders cell of their row (`DENIED: closed`, or just
+        // `closed` when the column is narrow), clipped to the cell. Without an orders column
+        // the header's list is where they show.
+        let Some((ox, ow)) = orders else {
+            return;
+        };
         for f in &self.flashes {
             let row = row_of(f.price.0, units);
             let Some(i) = rows.iter().position(|r| row_of(r.price.0, units) == row) else {
                 continue;
             };
             let y = oy + i as f32 * row_h;
-            window.paint_quad(fill(rect(x0, y, x1 - x0, row_h), t.warn));
-            glyphs.paint(
-                &self.text[f.start..f.end],
-                x0 + 4.0,
-                y,
-                row_h,
-                t.on_warn,
-                true,
-                window,
-                cx,
-            );
+            let long = &self.text[f.start..f.mid];
+            let text = if glyphs.width(long, t.on_warn, true, window) + 6.0 <= ow {
+                long
+            } else {
+                &self.text[f.mid..f.end]
+            };
+            let cell = rect(ox, y + 1.0, ow, row_h - 2.0);
+            window.with_content_mask(Some(gpui::ContentMask { bounds: cell }), |window| {
+                window.paint_quad(fill(cell, t.warn));
+                glyphs.paint(text, ox + 3.0, y, row_h, t.on_warn, true, window, cx);
+            });
         }
     }
 }

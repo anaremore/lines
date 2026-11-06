@@ -805,7 +805,6 @@ impl DomView {
                 self.product.price.tick,
                 orders,
                 price,
-                (table_l, ox + w),
                 oy,
                 ROW_H,
                 hair,

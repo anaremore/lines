@@ -389,6 +389,16 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
     Some(data)
 }
 
+/// The header's refusal line: the newest (label, text), with `×N` when there were N
+/// refusals in the last few seconds (like the footer's notices), so a burst never stacks rows.
+pub fn flash_line(flashes: &[(&'static str, String)]) -> Option<(&'static str, String)> {
+    let (label, text) = flashes.last()?;
+    Some(match flashes.len() {
+        1 => (*label, text.clone()),
+        n => (*label, format!("{text} ×{n}")),
+    })
+}
+
 /// `+125.00` / `-4.00`, with the currency sign.
 pub fn signed_money(m: Money) -> String {
     let s = m.to_string();
@@ -626,32 +636,27 @@ pub fn dom_bar<V: TradePane>(
     {
         rows = rows.child(rule_strip(d, t));
     }
-    // Refusals and rejections, inline and brief.
-    if let Some(d) = &data {
-        for (label, f) in d.flashes.iter().rev().take(2) {
-            rows = rows.child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(
-                        div()
-                            .px_1()
-                            .bg(t.warn)
-                            .text_color(t.on_warn)
-                            .font_weight(FontWeight::BOLD)
-                            .child(*label),
-                    )
-                    .child(
-                        div()
-                            .text_color(t.text_main)
-                            .overflow_hidden()
-                            .child(f.clone()),
-                    ),
-            );
-        }
+    // Refusals and rejections, inline and brief: one line, the newest, with a count.
+    if let Some(d) = &data
+        && let Some((label, f)) = flash_line(&d.flashes)
+    {
+        rows = rows.child(
+            div()
+                .px_2()
+                .pb_1()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(
+                    div()
+                        .px_1()
+                        .bg(t.warn)
+                        .text_color(t.on_warn)
+                        .font_weight(FontWeight::BOLD)
+                        .child(label),
+                )
+                .child(div().text_color(t.text_main).overflow_hidden().child(f)),
+        );
     }
     Some(rows.into_any_element())
 }
@@ -870,6 +875,35 @@ mod tests {
         assert_eq!(avg_text(&es, 599_950.0), "5999.50");
         // Between ticks: one more decimal than the product shows.
         assert_eq!(avg_text(&es, 599_962.5), "5999.625");
+    }
+
+    #[test]
+    fn refusals_are_one_line_with_a_count() {
+        assert_eq!(flash_line(&[]), None);
+        let one = vec![("DENIED", "6000.00: ES market is closed".to_owned())];
+        assert_eq!(
+            flash_line(&one),
+            Some(("DENIED", "6000.00: ES market is closed".to_owned()))
+        );
+        // A rejected bracket: entry and both exits refused at once: one line, ×3.
+        let three = vec![
+            ("REJECTED", "6000.00: ES market is closed".to_owned()),
+            (
+                "REJECTED",
+                "6004.00: bracket entry rejected: ES market is closed".to_owned(),
+            ),
+            (
+                "REJECTED",
+                "5998.00: bracket entry rejected: ES market is closed".to_owned(),
+            ),
+        ];
+        assert_eq!(
+            flash_line(&three),
+            Some((
+                "REJECTED",
+                "5998.00: bracket entry rejected: ES market is closed ×3".to_owned()
+            ))
+        );
     }
 
     #[test]
