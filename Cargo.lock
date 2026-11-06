@@ -2960,6 +2960,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lines-trading"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lines-core",
+ "lines-feed",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "link-section"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
