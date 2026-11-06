@@ -10,6 +10,12 @@
 //! - **Replay**: read that file and decode each batch when the chart's market clock reaches
 //!   its recorded time, with the same `decode`. [`replay_settled`] tells screenshot mode when
 //!   every due batch has been applied, so screenshots are deterministic.
+//! - **Not recorded**: a market replay without level recordings. Nothing is fetched; every
+//!   source is missing, [`NOT_RECORDED`].
+//!
+//! A market replay never runs a source live ([`mode_for`]): today's live map shown against a
+//! replay's clock would claim to be the levels of that day. A source with no recorded
+//! batches for the replay is missing ("not recorded for this replay") and draws nothing.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -39,6 +45,29 @@ pub enum LevelMode {
     Record(PathBuf),
     /// Replay batches recorded in this directory.
     Replay(PathBuf),
+    /// A market replay with no level recordings: nothing is fetched, every source is
+    /// missing ([`NOT_RECORDED`]).
+    NotRecorded,
+}
+
+/// Why a source shows as missing in a replay that has no batches recorded for it.
+pub const NOT_RECORDED: &str = "not recorded for this replay";
+
+/// The levels mode for a run. `market_replay`: the chart data is a replay (a recording,
+/// a stored session, screenshots). A replay only ever replays recorded levels (or none);
+/// live fetching and recording are for live market data only.
+pub fn mode_for(
+    market_replay: bool,
+    record: Option<PathBuf>,
+    replay_levels: Option<PathBuf>,
+) -> LevelMode {
+    match (market_replay, record, replay_levels) {
+        (true, _, Some(dir)) => LevelMode::Replay(dir),
+        (true, _, None) => LevelMode::NotRecorded,
+        (false, Some(dir), _) => LevelMode::Record(dir),
+        // Recorded levels without a market replay have no clock to follow: live.
+        (false, None, _) => LevelMode::Live,
+    }
 }
 
 fn mode() -> &'static RwLock<LevelMode> {
@@ -230,8 +259,12 @@ pub fn acquire(
     if let Some(e) = map.get(&key).and_then(Weak::upgrade) {
         return LevelHandle { entry: e };
     }
-    let m = mode().read().clone();
-    let replaying = matches!(m, LevelMode::Replay(_));
+    let m = match mode().read().clone() {
+        // A synthetic source has no day to be wrong about: it runs as live in a replay.
+        LevelMode::NotRecorded if source.synthetic() => LevelMode::Live,
+        m => m,
+    };
+    let replaying = matches!(m, LevelMode::Replay(_) | LevelMode::NotRecorded);
     let cell = Arc::new(LevelCell::new(&*source, replaying));
     let next_due = Arc::new(AtomicI64::new(i64::MAX));
     let loaded = Arc::new(AtomicBool::new(!replaying));
@@ -243,7 +276,10 @@ pub fn acquire(
                 LevelMode::Live => live(source, ctx, prices, cell, None).await,
                 LevelMode::Record(dir) => live(source, ctx, prices, cell, Some(dir)).await,
                 LevelMode::Replay(dir) => {
-                    replay(source, ctx, prices, cell, dir, next_due, loaded).await
+                    replay(source, ctx, prices, cell, Some(dir), next_due, loaded).await
+                }
+                LevelMode::NotRecorded => {
+                    replay(source, ctx, prices, cell, None, next_due, loaded).await
                 }
             }
         })
@@ -482,15 +518,19 @@ pub(crate) async fn replay(
     ctx: LevelContext,
     prices: Arc<dyn ChartPrices>,
     cell: Arc<LevelCell>,
-    dir: PathBuf,
+    dir: Option<PathBuf>,
     next_due: Arc<AtomicI64>,
     loaded: Arc<AtomicBool>,
 ) {
-    let path = recording_path(&dir, source.id(), ctx.product.symbol);
-    let batches = if path.exists() {
-        read_recording(&path, source.id(), ctx.product.symbol)
-    } else {
-        Ok(Vec::new()) // nothing recorded for this source: missing, not an error
+    let path = dir.map(|d| recording_path(&d, source.id(), ctx.product.symbol));
+    let batches = match path.filter(|p| p.exists()) {
+        Some(p) => read_recording(&p, source.id(), ctx.product.symbol),
+        None => {
+            // Nothing recorded for this source: missing, and never fetched live.
+            cell.update(|s| s.error = Some(NOT_RECORDED.into()));
+            loaded.store(true, Ordering::Release);
+            return;
+        }
     };
     let batches = match batches {
         Ok(b) => b,

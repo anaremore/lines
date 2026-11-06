@@ -635,11 +635,13 @@ where
     let choice = SourceChoice::parse(&cli.source, &ext)
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source))?;
     let config = feed_config(&cli, &choice)?;
-    lines_feed::levels::runtime::set_mode(match (&cli.record_levels, &cli.replay_levels) {
-        (Some(d), _) => lines_feed::levels::runtime::LevelMode::Record(d.clone()),
-        (_, Some(d)) => lines_feed::levels::runtime::LevelMode::Replay(d.clone()),
-        _ => lines_feed::levels::runtime::LevelMode::Live,
-    });
+    // A market replay never runs a level source live (only its recorded batches, if any).
+    let market_replay = matches!(config.source, lines_feed::Source::Replay { .. });
+    lines_feed::levels::runtime::set_mode(lines_feed::levels::runtime::mode_for(
+        market_replay,
+        cli.record_levels.clone(),
+        cli.replay_levels.clone(),
+    ));
     #[cfg(feature = "demo-levels")]
     if cli.demo_levels {
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
