@@ -19,4 +19,4 @@ Run from Terminal
   ./lines --source coinbase      live BTC/USD from Coinbase's public feed (internet)
   ./lines --help                 all options
 
-Licence: FSL-1.1-ALv2, see LICENSE.md.
+Licence: FSL-1.1-ALv2, see LICENSE.md. Third-party notices: THIRD_PARTY_LICENSES.txt.

@@ -79,3 +79,18 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+  deny:
+    name: cargo-deny (licences, advisories, bans, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-deny@0.20.2
+      # Policy in deny.toml. Licence, source and vulnerability findings fail; duplicate
+      # versions and unmaintained crates deep in GPUI's tree are warnings.
+      - run: cargo deny --locked check
