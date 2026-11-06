@@ -7,6 +7,7 @@ Desktop futures charting terminal. Rust + GPUI. Market data through provider ada
 - `ROADMAP.md`: milestones and status. Update the status in the change that finishes a milestone.
 - `docs/decisions/`: decision records. Accepted ones are binding; supersede, never rewrite.
 - `docs/briefs/`: task briefs for upcoming milestones (e.g. the Sierra Chart importer).
+- `docs/design.md`: UI design principles and budgets. Binding for every UI change.
 
 ## Crate layout
 
