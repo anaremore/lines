@@ -2341,21 +2341,25 @@ impl WindowView {
             let r = p.rect;
             let kind = h.kind();
             let controls = (hovered == Some(id)).then(|| {
-                let buttons = match kind {
+                // Labels from `pane::control_labels` (the gutter headers keep free is sized
+                // for them), commands in the same order.
+                let labels = crate::pane::control_labels(kind, false);
+                let buttons: Vec<(&'static str, Command, bool)> = match kind {
                     PaneKind::Chart => {
                         let on = tabstate::is_chart_only(&tab.leaves(cx), id);
                         vec![
-                            ("chart only", Command::ChartOnly, on),
-                            ("pop out", Command::PopOut, false),
+                            (labels[0], Command::ChartOnly, on),
+                            (labels[1], Command::PopOut, false),
                         ]
                     }
                     _ => vec![
-                        ("pop out", Command::PopOut, false),
-                        ("hide", Command::HidePane, false),
+                        (labels[0], Command::PopOut, false),
+                        (labels[1], Command::HidePane, false),
                     ],
                 };
                 header_controls(
                     &t,
+                    kind,
                     buttons,
                     |this: &mut Self, cmd, id, window, cx| {
                         this.focus_pane(id, window, cx);
@@ -2816,16 +2820,22 @@ impl Render for WindowView {
 /// only" while active). `run` issues the command on pane `id`.
 pub(crate) fn header_controls<V: 'static>(
     t: &Theme,
+    kind: PaneKind,
     buttons: Vec<(&'static str, Command, bool)>,
     run: fn(&mut V, Command, PaneId, &mut Window, &mut Context<V>),
     id: PaneId,
     cx: &mut Context<V>,
 ) -> AnyElement {
+    // Exactly the gutter every pane header keeps free (`pane::controls_gutter`): the controls
+    // never cover header content.
     let mut row = div()
         .absolute()
         .top_0()
         .right_0()
         .h(px(HEADER_H))
+        .w(px(crate::pane::controls_gutter(kind)))
+        .overflow_hidden()
+        .justify_end()
         .px_1()
         .flex()
         .flex_row()

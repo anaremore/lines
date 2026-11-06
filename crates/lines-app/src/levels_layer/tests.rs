@@ -176,3 +176,29 @@ fn layer_places_filters_and_reports_freshness() {
     layer.force_status(i, LevelStatus::Missing);
     assert_eq!(layer.legend()[i].text, "missing");
 }
+
+#[test]
+fn legend_reason_does_not_repeat_the_source_name() {
+    use super::without_name;
+    // The owner's report: "OptionIdea missing · OptionIdea: not translated: …".
+    assert_eq!(
+        without_name("OptionIdea", "OptionIdea: not translated: unknown symbol"),
+        "not translated: unknown symbol"
+    );
+    assert_eq!(
+        without_name("OptionIdea", "optionidea : timeout"),
+        "timeout",
+        "any case, spaces before the colon"
+    );
+    // Other errors, or the name not followed by a colon, are kept whole.
+    assert_eq!(without_name("OptionIdea", "timeout"), "timeout");
+    assert_eq!(
+        without_name("OptionIdea", "OptionIdeas unavailable"),
+        "OptionIdeas unavailable"
+    );
+    assert_eq!(
+        without_name("Lévels", "Lé"),
+        "Lé",
+        "no panic on short or non-ASCII"
+    );
+}

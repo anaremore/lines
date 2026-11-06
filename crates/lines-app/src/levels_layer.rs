@@ -558,7 +558,7 @@ impl LevelsLayer {
                 let (text, warn) = match (s.status, &s.map) {
                     (LevelStatus::Missing, _) => (
                         match &s.error {
-                            Some(e) => format!("missing · {e}"),
+                            Some(e) => format!("missing · {}", without_name(s.label, e)),
                             None => "missing".into(),
                         },
                         true,
@@ -579,6 +579,22 @@ impl LevelsLayer {
                 }
             })
             .collect()
+    }
+}
+
+/// A source's error without its own name in front (`"OptionIdea: not translated: …"` on the
+/// `OptionIdea` row reads `not translated: …`): the legend row already names the source.
+pub fn without_name<'a>(label: &str, error: &'a str) -> &'a str {
+    let e = error.trim_start();
+    match e.get(..label.len()) {
+        Some(head) if head.eq_ignore_ascii_case(label) => {
+            let rest = &e[label.len()..];
+            match rest.trim_start().strip_prefix(':') {
+                Some(r) => r.trim_start(),
+                None => error,
+            }
+        }
+        _ => error,
     }
 }
 

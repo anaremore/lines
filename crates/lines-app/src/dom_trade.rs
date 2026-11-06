@@ -288,6 +288,46 @@ pub struct OrderMark {
     pub role: Role,
 }
 
+/// What an order is for, as the orders column shows it (docs/design.md §3: by text, colour
+/// and shape, never colour alone).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MarkRole {
+    /// An entry or a plain order: the side's colour, a plain block.
+    Entry,
+    /// A bracket's take-profit: `T`, the target colour, a notch on its top edge.
+    Target,
+    /// A bracket's stop-loss: `S`, the stop colour, a notch on its bottom edge.
+    Stop,
+}
+
+impl MarkRole {
+    pub fn of(m: &OrderMark) -> MarkRole {
+        match m.role {
+            Role::TakeProfit => MarkRole::Target,
+            Role::StopLoss => MarkRole::Stop,
+            _ => MarkRole::Entry,
+        }
+    }
+}
+
+/// A mark's text: role or stop prefix (`T`, `S`), then what is left (`T1`, `S1`, `2`), or
+/// `filled/qty` while partially filled. Writes into a fixed buffer (paint path, no
+/// allocation).
+pub fn mark_text(m: &OrderMark, out: &mut impl std::fmt::Write) -> std::fmt::Result {
+    let prefix = match MarkRole::of(m) {
+        MarkRole::Target => "T",
+        MarkRole::Stop => "S",
+        MarkRole::Entry if m.stop => "S",
+        MarkRole::Entry => "",
+    };
+    out.write_str(prefix)?;
+    if m.style == MarkStyle::Partial {
+        write!(out, "{}/{}", m.filled.0, m.qty.0)
+    } else {
+        write!(out, "{}", m.qty.0 - m.filled.0)
+    }
+}
+
 /// The price an order is shown (and dragged) at; `None` for market orders.
 pub fn order_price(o: &Order) -> Option<Price> {
     match o.kind {
@@ -864,6 +904,52 @@ mod tests {
         assert_eq!(open_ticks(0, 600_000.0, Price(600_025), ES), None);
         // Grouped: the marker sits on the row containing the average.
         assert_eq!(position_row(avg, ES, 4 * ES), row_of(599_975, 4 * ES));
+    }
+
+    #[test]
+    fn bracket_exits_are_labelled_and_told_apart() {
+        let mk = |role, kind| {
+            let mut o = order(OrderState::Working, kind);
+            o.role = role;
+            o.qty = Qty(1);
+            order_mark(&o).unwrap()
+        };
+        let lim = OrderKind::Limit {
+            price: Price(600_400),
+        };
+        let stp = OrderKind::Stop {
+            trigger: Price(599_800),
+        };
+        let text = |m: &OrderMark| {
+            let mut s = String::new();
+            mark_text(m, &mut s).unwrap();
+            s
+        };
+        let target = mk(Role::TakeProfit, lim);
+        let stop = mk(Role::StopLoss, stp);
+        let entry = mk(Role::Entry, lim);
+        // The owner's case: the target read "1" and the stop "S1", in one colour.
+        assert_eq!(text(&target), "T1");
+        assert_eq!(text(&stop), "S1");
+        assert_eq!(text(&entry), "1");
+        assert_eq!(
+            text(&mk(Role::Single, stp)),
+            "S1",
+            "a stop entry is still a stop"
+        );
+        // Three roles, each with its own look (colour token and edge notch follow the role).
+        let roles = [
+            MarkRole::of(&target),
+            MarkRole::of(&stop),
+            MarkRole::of(&entry),
+        ];
+        assert_eq!(roles, [MarkRole::Target, MarkRole::Stop, MarkRole::Entry]);
+        // Partial: filled/qty, with the prefix.
+        let mut p = target;
+        p.style = MarkStyle::Partial;
+        p.qty = Qty(3);
+        p.filled = Qty(1);
+        assert_eq!(text(&p), "T1/3");
     }
 
     #[test]

@@ -24,7 +24,9 @@ use lines_core::ladder::LadderRow;
 use lines_core::{ContractKey, Price};
 use lines_trading::{AccountId, OrderId, Side};
 
-use crate::dom_trade::{Ghost, MarkStyle, OrderMark, order_mark, position_row, row_of};
+use crate::dom_trade::{
+    Ghost, MarkRole, MarkStyle, OrderMark, mark_text, order_mark, position_row, row_of,
+};
 use crate::text::Glyphs;
 use crate::theme::Theme;
 use crate::trading::TradeCache;
@@ -191,7 +193,13 @@ impl OrdersLayer {
             for (k, m) in [first, second].into_iter().flatten().enumerate() {
                 let w = (ow - 2.0) / n as f32;
                 let (x, yy, h) = (ox + 1.0 + k as f32 * w, y + 2.0, row_h - 4.0);
-                let c = side_colour(m.side);
+                // Colour by role: entries take their side's, exits their own.
+                let role = MarkRole::of(m);
+                let c = match role {
+                    MarkRole::Entry => side_colour(m.side),
+                    MarkRole::Target => t.order_target,
+                    MarkRole::Stop => t.order_stop,
+                };
                 let text_colour = match m.style {
                     MarkStyle::Working => {
                         window.paint_quad(fill(rect(x, yy, w - 1.0, h), c));
@@ -208,21 +216,30 @@ impl OrdersLayer {
                         c
                     }
                     MarkStyle::Held => {
-                        outline(window, rect(x, yy, w - 1.0, h), t.text_dim, hair, true);
+                        // Dashed in the role's colour: held, and still recognisably a target
+                        // or a stop.
+                        outline(window, rect(x, yy, w - 1.0, h), c, hair, true);
                         t.text_dim
                     }
                 };
+                // Shape by role: a target is notched along its top edge, a stop along its
+                // bottom edge, an entry is a plain block.
+                let notch = 2.0 * hair.max(0.5);
+                let notch_y = match role {
+                    MarkRole::Target => Some(yy),
+                    MarkRole::Stop => Some(yy + h - notch),
+                    MarkRole::Entry => None,
+                };
+                if let Some(ny) = notch_y {
+                    let cut = if m.style == MarkStyle::Working {
+                        t.panel
+                    } else {
+                        c
+                    };
+                    window.paint_quad(fill(rect(x + 2.0, ny, w - 5.0, notch), cut));
+                }
                 buf.clear();
-                let _ = if m.stop {
-                    std::fmt::Write::write_fmt(&mut buf, format_args!("S"))
-                } else {
-                    Ok(())
-                };
-                let _ = if m.style == MarkStyle::Partial {
-                    std::fmt::Write::write_fmt(&mut buf, format_args!("{}/{}", m.filled.0, m.qty.0))
-                } else {
-                    std::fmt::Write::write_fmt(&mut buf, format_args!("{}", m.qty.0 - m.filled.0))
-                };
+                let _ = mark_text(m, &mut buf);
                 if more && k == 1 {
                     let _ = std::fmt::Write::write_str(&mut buf, "+");
                 }

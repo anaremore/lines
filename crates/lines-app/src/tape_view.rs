@@ -462,6 +462,7 @@ impl TapeView {
             .whitespace_nowrap()
             .overflow_hidden()
             .px_2()
+            .pr(px(pane::controls_gutter(crate::layout::PaneKind::Tape)))
             .py_1()
             .bg(t.panel)
             .border_b_1()
@@ -469,21 +470,24 @@ impl TapeView {
             .border_color(t.axis_line)
             .text_size(px(12.0))
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .items_center()
-                    .children(pane::link_chip(self.common.link, &t))
-                    .child(div().text_color(t.text_main).child(left))
-                    .children(pane::stale_badge(&self.store, &t)),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(t.text_dim)
-                    .child(right),
+                pane::header_content()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .items_center()
+                            .children(pane::link_chip(self.common.link, &t))
+                            .child(div().text_color(t.text_main).child(left))
+                            .children(pane::stale_badge(&self.store, &t)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t.text_dim)
+                            .child(right),
+                    ),
             )
     }
 }
