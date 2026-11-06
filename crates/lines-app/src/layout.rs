@@ -1,103 +1,196 @@
-//! Window layout as a value: a split tree of panes (roadmap 5; the workspace milestone extends
-//! it with tabs, more windows, drag-to-resize and saving).
+//! A tab's layout as a value: a split tree of panes (decision 0016).
 //!
-//! A [`Layout`] is either one pane or a split of two layouts along an axis at a ratio. It is
-//! plain data: the workspace view renders whatever tree it is given, and nothing in a pane
-//! knows where it sits. Panes in the same link group follow each other's symbol changes.
+//! [`Layout<T>`] is either one leaf or a split of two layouts along an axis at a ratio. The
+//! live workspace uses `Layout<PaneId>` (panes live elsewhere, keyed by id); the saved file
+//! uses `Layout<PaneDoc>` (each leaf describes its pane). Everything here is pure geometry and
+//! tree surgery, unit-tested: placing leaves in a rectangle, splitting and closing a leaf,
+//! dragging a divider, moving focus to the neighbour in a direction, and the presets.
+//!
+//! The workspace renders exactly the rectangles [`Layout::place`] computes, so hit-testing
+//! (dividers, focus) and drawing can never disagree.
+
+use serde::{Deserialize, Serialize};
 
 /// What kind of pane a leaf holds.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PaneKind {
     Chart,
     Dom,
     Tape,
 }
 
-/// Panes sharing a link group switch symbol together (`None` = independent).
+impl PaneKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            PaneKind::Chart => "Chart",
+            PaneKind::Dom => "DOM",
+            PaneKind::Tape => "Time & sales",
+        }
+    }
+}
+
+/// Panes sharing a link group switch symbol together (`None` = unlinked). Groups are
+/// `0..LINK_GROUPS`, shown as A, B, C, D with a colour each.
 pub type LinkGroup = Option<u8>;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct PaneSpec {
-    pub kind: PaneKind,
-    pub link: LinkGroup,
+pub const LINK_GROUPS: u8 = 4;
+
+/// "A".."D", or "-" for unlinked.
+pub fn link_letter(link: LinkGroup) -> &'static str {
+    match link {
+        Some(0) => "A",
+        Some(1) => "B",
+        Some(2) => "C",
+        Some(3) => "D",
+        _ => "-",
+    }
+}
+
+/// The next link setting: unlinked → A → B → C → D → unlinked.
+pub fn next_link(link: LinkGroup) -> LinkGroup {
+    match link {
+        None => Some(0),
+        Some(g) if g + 1 < LINK_GROUPS => Some(g + 1),
+        Some(_) => None,
+    }
 }
 
 /// `Row`: side by side (first on the left). `Column`: stacked (first on top).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Axis {
     Row,
     Column,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Layout {
-    Pane(PaneSpec),
+/// Smallest and largest share a split gives its first child.
+pub const MIN_RATIO: f32 = 0.05;
+pub const MAX_RATIO: f32 = 0.95;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout<T> {
+    Pane(T),
     Split {
         axis: Axis,
-        /// The first child's share of the space, `0 < ratio < 1`.
+        /// The first child's share of the space, `MIN_RATIO..=MAX_RATIO`.
         ratio: f32,
-        first: Box<Layout>,
-        second: Box<Layout>,
+        first: Box<Layout<T>>,
+        second: Box<Layout<T>>,
     },
 }
 
-/// A leaf's rectangle in a layout of a given size (logical px, origin top-left). Pure geometry
-/// for tests and for the workspace milestone's split dragging; rendering uses flex ratios.
-#[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct Placed {
-    /// Index of the leaf in [`Layout::panes`] order.
-    pub index: usize,
+/// Which child of a split: a path from the root to a node is a list of these.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Side {
+    First,
+    Second,
+}
+
+/// A rectangle in logical px, origin top-left.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+pub struct Rect {
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
 }
 
-impl Layout {
-    pub fn pane(kind: PaneKind, link: LinkGroup) -> Layout {
-        Layout::Pane(PaneSpec { kind, link })
+impl Rect {
+    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect { x, y, w, h }
+    }
+    pub fn right(&self) -> f32 {
+        self.x + self.w
+    }
+    pub fn bottom(&self) -> f32 {
+        self.y + self.h
+    }
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+    pub fn centre(&self) -> (f32, f32) {
+        (self.x + self.w * 0.5, self.y + self.h * 0.5)
+    }
+}
+
+/// A leaf's rectangle: `index` is its position in [`Layout::leaves`] order.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Placed {
+    pub index: usize,
+    pub rect: Rect,
+}
+
+/// A split's draggable boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Divider {
+    /// Path to the split node.
+    pub path: Vec<Side>,
+    pub axis: Axis,
+    /// The whole split's rectangle (the ratio is relative to it).
+    pub area: Rect,
+    /// The boundary's position: x for `Row`, y for `Column`.
+    pub at: f32,
+}
+
+impl Divider {
+    /// The ratio that puts the boundary at pointer position `x, y`.
+    pub fn ratio_at(&self, x: f32, y: f32) -> f32 {
+        let r = match self.axis {
+            Axis::Row => (x - self.area.x) / self.area.w.max(1.0),
+            Axis::Column => (y - self.area.y) / self.area.h.max(1.0),
+        };
+        clamp_ratio(r)
     }
 
-    pub fn split(axis: Axis, ratio: f32, first: Layout, second: Layout) -> Layout {
+    /// The divider's grab handle, `grab` px wide, centred on the boundary.
+    pub fn handle(&self, grab: f32) -> Rect {
+        match self.axis {
+            Axis::Row => Rect::new(self.at - grab * 0.5, self.area.y, grab, self.area.h),
+            Axis::Column => Rect::new(self.area.x, self.at - grab * 0.5, self.area.w, grab),
+        }
+    }
+}
+
+/// Focus movement.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Ratios from files or drags: finite and inside the allowed range.
+pub fn clamp_ratio(r: f32) -> f32 {
+    if r.is_finite() {
+        r.clamp(MIN_RATIO, MAX_RATIO)
+    } else {
+        0.5
+    }
+}
+
+impl<T> Layout<T> {
+    pub fn split(axis: Axis, ratio: f32, first: Layout<T>, second: Layout<T>) -> Layout<T> {
         Layout::Split {
             axis,
-            ratio: ratio.clamp(0.05, 0.95),
+            ratio: clamp_ratio(ratio),
             first: Box::new(first),
             second: Box::new(second),
         }
     }
 
-    /// The default trading layout: chart | (DOM over time & sales), all linked.
-    pub fn trading() -> Layout {
-        let link = Some(0);
-        Layout::split(
-            Axis::Row,
-            0.68,
-            Layout::pane(PaneKind::Chart, link),
-            Layout::split(
-                Axis::Column,
-                0.64,
-                Layout::pane(PaneKind::Dom, link),
-                Layout::pane(PaneKind::Tape, link),
-            ),
-        )
-    }
-
-    pub fn chart_only() -> Layout {
-        Layout::pane(PaneKind::Chart, Some(0))
-    }
-
     /// Leaves in order (depth-first, first before second).
-    pub fn panes(&self) -> Vec<PaneSpec> {
+    pub fn leaves(&self) -> Vec<&T> {
         let mut out = Vec::new();
         self.collect(&mut out);
         out
     }
 
-    fn collect(&self, out: &mut Vec<PaneSpec>) {
+    fn collect<'a>(&'a self, out: &mut Vec<&'a T>) {
         match self {
-            Layout::Pane(p) => out.push(*p),
+            Layout::Pane(p) => out.push(p),
             Layout::Split { first, second, .. } => {
                 first.collect(out);
                 second.collect(out);
@@ -105,96 +198,549 @@ impl Layout {
         }
     }
 
-    #[allow(dead_code)]
-    /// Every leaf's rectangle in a `w × h` area (what the rendered tree produces, minus
-    /// separators). Leaves tile the area exactly.
-    pub fn place(&self, w: f32, h: f32) -> Vec<Placed> {
-        let mut out = Vec::new();
-        let mut next = 0;
-        self.place_into(0.0, 0.0, w, h, &mut next, &mut out);
-        out
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            Layout::Pane(_) => 1,
+            Layout::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
+        }
     }
 
-    #[allow(dead_code)]
-    fn place_into(&self, x: f32, y: f32, w: f32, h: f32, next: &mut usize, out: &mut Vec<Placed>) {
+    /// The same tree with every leaf mapped.
+    pub fn map<U>(&self, f: &mut impl FnMut(&T) -> U) -> Layout<U> {
         match self {
-            Layout::Pane(_) => {
-                out.push(Placed {
-                    index: *next,
-                    x,
-                    y,
-                    w,
-                    h,
-                });
-                *next += 1;
-            }
+            Layout::Pane(p) => Layout::Pane(f(p)),
             Layout::Split {
                 axis,
                 ratio,
                 first,
                 second,
-            } => match axis {
-                Axis::Row => {
-                    let a = (w * ratio).round();
-                    first.place_into(x, y, a, h, next, out);
-                    second.place_into(x + a, y, w - a, h, next, out);
-                }
-                Axis::Column => {
-                    let a = (h * ratio).round();
-                    first.place_into(x, y, w, a, next, out);
-                    second.place_into(x, y + a, w, h - a, next, out);
-                }
+            } => Layout::Split {
+                axis: *axis,
+                ratio: *ratio,
+                first: Box::new(first.map(f)),
+                second: Box::new(second.map(f)),
             },
         }
     }
+
+    /// Clamp every ratio (e.g. after reading a file).
+    pub fn normalise(&mut self) {
+        if let Layout::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        {
+            *ratio = clamp_ratio(*ratio);
+            first.normalise();
+            second.normalise();
+        }
+    }
+
+    /// Every leaf's rectangle in `area`. Leaves tile the area exactly; edges are whole px.
+    pub fn place(&self, area: Rect) -> Vec<Placed> {
+        let mut out = Vec::new();
+        self.walk(area, &mut Vec::new(), &mut |node, rect, _| {
+            if let Layout::Pane(_) = node {
+                out.push(Placed {
+                    index: out.len(),
+                    rect,
+                });
+            }
+        });
+        out
+    }
+
+    /// Every split's boundary in `area`, outermost first.
+    pub fn dividers(&self, area: Rect) -> Vec<Divider> {
+        let mut out = Vec::new();
+        self.walk(area, &mut Vec::new(), &mut |node, rect, path| {
+            if let Layout::Split { axis, ratio, .. } = node {
+                let (a, _) = cut(rect, *axis, *ratio);
+                out.push(Divider {
+                    path: path.to_vec(),
+                    axis: *axis,
+                    area: rect,
+                    at: match axis {
+                        Axis::Row => a.right(),
+                        Axis::Column => a.bottom(),
+                    },
+                });
+            }
+        });
+        out
+    }
+
+    fn walk(
+        &self,
+        rect: Rect,
+        path: &mut Vec<Side>,
+        f: &mut impl FnMut(&Layout<T>, Rect, &[Side]),
+    ) {
+        f(self, rect, path);
+        if let Layout::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            let (a, b) = cut(rect, *axis, *ratio);
+            path.push(Side::First);
+            first.walk(a, path, f);
+            path.pop();
+            path.push(Side::Second);
+            second.walk(b, path, f);
+            path.pop();
+        }
+    }
+
+    fn node_mut(&mut self, path: &[Side]) -> Option<&mut Layout<T>> {
+        let Some((side, rest)) = path.split_first() else {
+            return Some(self);
+        };
+        match self {
+            Layout::Pane(_) => None,
+            Layout::Split { first, second, .. } => match side {
+                Side::First => first.node_mut(rest),
+                Side::Second => second.node_mut(rest),
+            },
+        }
+    }
+
+    /// Set the ratio of the split at `path` (clamped). `false` if `path` isn't a split.
+    pub fn set_ratio(&mut self, path: &[Side], r: f32) -> bool {
+        match self.node_mut(path) {
+            Some(Layout::Split { ratio, .. }) => {
+                *ratio = clamp_ratio(r);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The leaf whose rectangle lies next to leaf `from` in `dir`: of the leaves across that
+    /// edge that overlap it, the one overlapping most (ties: the one nearest its centre).
+    pub fn neighbour(&self, from: usize, dir: Direction, area: Rect) -> Option<usize> {
+        let placed = self.place(area);
+        let src = placed.get(from)?.rect;
+        let (cx, cy) = src.centre();
+        let eps = 0.5;
+        placed
+            .iter()
+            .filter(|p| p.index != from)
+            .filter_map(|p| {
+                let r = p.rect;
+                let (adjacent, overlap, dist) = match dir {
+                    Direction::Left => (
+                        (r.right() - src.x).abs() < eps,
+                        span_overlap(r.y, r.bottom(), src.y, src.bottom()),
+                        (r.centre().1 - cy).abs(),
+                    ),
+                    Direction::Right => (
+                        (r.x - src.right()).abs() < eps,
+                        span_overlap(r.y, r.bottom(), src.y, src.bottom()),
+                        (r.centre().1 - cy).abs(),
+                    ),
+                    Direction::Up => (
+                        (r.bottom() - src.y).abs() < eps,
+                        span_overlap(r.x, r.right(), src.x, src.right()),
+                        (r.centre().0 - cx).abs(),
+                    ),
+                    Direction::Down => (
+                        (r.y - src.bottom()).abs() < eps,
+                        span_overlap(r.x, r.right(), src.x, src.right()),
+                        (r.centre().0 - cx).abs(),
+                    ),
+                };
+                (adjacent && overlap > 0.0).then_some((p.index, overlap, dist))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.2.total_cmp(&a.2)))
+            .map(|(i, _, _)| i)
+    }
+}
+
+impl<T: PartialEq> Layout<T> {
+    /// Leaf position of `leaf` in [`Layout::leaves`] order.
+    pub fn index_of(&self, leaf: &T) -> Option<usize> {
+        self.leaves().iter().position(|l| *l == leaf)
+    }
+
+    /// Replace leaf `target` with a split holding it and `new` (new second: right or below).
+    /// `Err` gives both back if `target` isn't a leaf here.
+    pub fn split_leaf(self, target: &T, axis: Axis, new: T) -> Result<Layout<T>, (Layout<T>, T)> {
+        match self {
+            Layout::Pane(p) if &p == target => {
+                Ok(Layout::split(axis, 0.5, Layout::Pane(p), Layout::Pane(new)))
+            }
+            Layout::Pane(p) => Err((Layout::Pane(p), new)),
+            Layout::Split {
+                axis: a,
+                ratio,
+                first,
+                second,
+            } => match first.split_leaf(target, axis, new) {
+                Ok(f) => Ok(Layout::Split {
+                    axis: a,
+                    ratio,
+                    first: Box::new(f),
+                    second,
+                }),
+                Err((f, new)) => match second.split_leaf(target, axis, new) {
+                    Ok(s) => Ok(Layout::Split {
+                        axis: a,
+                        ratio,
+                        first: Box::new(f),
+                        second: Box::new(s),
+                    }),
+                    Err((s, new)) => Err((
+                        Layout::Split {
+                            axis: a,
+                            ratio,
+                            first: Box::new(f),
+                            second: Box::new(s),
+                        },
+                        new,
+                    )),
+                },
+            },
+        }
+    }
+
+    /// Remove leaf `target`; its sibling takes the parent split's place. Returns the layout
+    /// without it, or `None` if `target` was the only leaf (or isn't here: then `self`).
+    pub fn remove_leaf(self, target: &T) -> Result<Option<Layout<T>>, Layout<T>> {
+        match self {
+            Layout::Pane(p) if &p == target => Ok(None),
+            Layout::Pane(p) => Err(Layout::Pane(p)),
+            Layout::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => match first.remove_leaf(target) {
+                Ok(None) => Ok(Some(*second)),
+                Ok(Some(f)) => Ok(Some(Layout::Split {
+                    axis,
+                    ratio,
+                    first: Box::new(f),
+                    second,
+                })),
+                Err(f) => match second.remove_leaf(target) {
+                    Ok(None) => Ok(Some(f)),
+                    Ok(Some(s)) => Ok(Some(Layout::Split {
+                        axis,
+                        ratio,
+                        first: Box::new(f),
+                        second: Box::new(s),
+                    })),
+                    Err(s) => Err(Layout::Split {
+                        axis,
+                        ratio,
+                        first: Box::new(f),
+                        second: Box::new(s),
+                    }),
+                },
+            },
+        }
+    }
+}
+
+/// Split `r` along `axis` at `ratio`, at a whole pixel.
+fn cut(r: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
+    match axis {
+        Axis::Row => {
+            let a = (r.w * ratio).round();
+            (
+                Rect::new(r.x, r.y, a, r.h),
+                Rect::new(r.x + a, r.y, r.w - a, r.h),
+            )
+        }
+        Axis::Column => {
+            let a = (r.h * ratio).round();
+            (
+                Rect::new(r.x, r.y, r.w, a),
+                Rect::new(r.x, r.y + a, r.w, r.h - a),
+            )
+        }
+    }
+}
+
+fn span_overlap(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
+    (a1.min(b1) - a0.max(b0)).max(0.0)
+}
+
+/// Built-in layouts (decision 0016: a grid is just a generated split tree).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Preset {
+    /// One chart.
+    Chart,
+    /// Two charts side by side, linked separately (A, B).
+    OneByTwo,
+    /// Four charts in a 2×2 grid (A, B, C, D).
+    TwoByTwo,
+    /// A large chart on the left (A), two stacked on the right (B, C).
+    OnePlusTwo,
+    /// Chart beside the DOM, time & sales under the DOM, all one group (A).
+    Trading,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 5] = [
+        Preset::OneByTwo,
+        Preset::TwoByTwo,
+        Preset::OnePlusTwo,
+        Preset::Trading,
+        Preset::Chart,
+    ];
+
+    /// The name used on the command line and in menus.
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::Chart => "chart",
+            Preset::OneByTwo => "1x2",
+            Preset::TwoByTwo => "2x2",
+            Preset::OnePlusTwo => "1+2",
+            Preset::Trading => "trading",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::Chart => "Chart",
+            Preset::OneByTwo => "1×2 charts",
+            Preset::TwoByTwo => "2×2 charts",
+            Preset::OnePlusTwo => "1+2 charts",
+            Preset::Trading => "Chart + DOM + T&S",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Preset> {
+        Preset::ALL
+            .into_iter()
+            .find(|p| p.name().eq_ignore_ascii_case(s))
+    }
+
+    /// The tree, with each leaf made by `leaf(kind, link)`.
+    pub fn build<T>(self, mut leaf: impl FnMut(PaneKind, LinkGroup) -> T) -> Layout<T> {
+        use PaneKind::*;
+        let mut p = |k, l| Layout::Pane(leaf(k, l));
+        match self {
+            Preset::Chart => p(Chart, Some(0)),
+            Preset::OneByTwo => Layout::split(Axis::Row, 0.5, p(Chart, Some(0)), p(Chart, Some(1))),
+            Preset::TwoByTwo => {
+                let top = Layout::split(Axis::Row, 0.5, p(Chart, Some(0)), p(Chart, Some(1)));
+                let bottom = Layout::split(Axis::Row, 0.5, p(Chart, Some(2)), p(Chart, Some(3)));
+                Layout::split(Axis::Column, 0.5, top, bottom)
+            }
+            Preset::OnePlusTwo => {
+                let big = p(Chart, Some(0));
+                let right = Layout::split(Axis::Column, 0.5, p(Chart, Some(1)), p(Chart, Some(2)));
+                Layout::split(Axis::Row, 0.62, big, right)
+            }
+            Preset::Trading => trading_group(Some(0), &mut leaf),
+        }
+    }
+}
+
+/// Chart | (DOM over time & sales), all in `link`: one market's trading trio.
+pub fn trading_group<T>(
+    link: LinkGroup,
+    leaf: &mut impl FnMut(PaneKind, LinkGroup) -> T,
+) -> Layout<T> {
+    let chart = Layout::Pane(leaf(PaneKind::Chart, link));
+    let dom = Layout::Pane(leaf(PaneKind::Dom, link));
+    let tape = Layout::Pane(leaf(PaneKind::Tape, link));
+    Layout::split(
+        Axis::Row,
+        0.68,
+        chart,
+        Layout::split(Axis::Column, 0.64, dom, tape),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn trading_layout_is_chart_beside_dom_over_tape() {
-        let l = Layout::trading();
-        let kinds: Vec<_> = l.panes().iter().map(|p| p.kind).collect();
-        assert_eq!(kinds, vec![PaneKind::Chart, PaneKind::Dom, PaneKind::Tape]);
-        let r = l.place(1000.0, 800.0);
-        assert_eq!((r[0].x, r[0].w, r[0].h), (0.0, 680.0, 800.0));
-        assert_eq!((r[1].x, r[1].y, r[1].w, r[1].h), (680.0, 0.0, 320.0, 512.0));
-        assert_eq!((r[2].y, r[2].h), (512.0, 288.0));
-        assert!(l.panes().iter().all(|p| p.link == Some(0)));
+    fn area(w: f32, h: f32) -> Rect {
+        Rect::new(0.0, 0.0, w, h)
+    }
+
+    fn kinds(l: &Layout<(PaneKind, LinkGroup)>) -> Vec<PaneKind> {
+        l.leaves().iter().map(|p| p.0).collect()
     }
 
     #[test]
-    fn leaves_tile_the_area_exactly() {
-        // Two charts side by side, each with its own DOM (e.g. NQ and ES).
-        let pair = |link| {
-            Layout::split(
-                Axis::Row,
-                0.7,
-                Layout::pane(PaneKind::Chart, link),
-                Layout::pane(PaneKind::Dom, link),
-            )
+    fn trading_preset_is_chart_beside_dom_over_tape() {
+        let l = Preset::Trading.build(|k, g| (k, g));
+        assert_eq!(
+            kinds(&l),
+            vec![PaneKind::Chart, PaneKind::Dom, PaneKind::Tape]
+        );
+        let r = l.place(area(1000.0, 800.0));
+        assert_eq!(r[0].rect, Rect::new(0.0, 0.0, 680.0, 800.0));
+        assert_eq!(r[1].rect, Rect::new(680.0, 0.0, 320.0, 512.0));
+        assert_eq!(r[2].rect, Rect::new(680.0, 512.0, 320.0, 288.0));
+        assert!(l.leaves().iter().all(|p| p.1 == Some(0)));
+    }
+
+    #[test]
+    fn leaves_tile_the_area_exactly_in_every_preset() {
+        for preset in Preset::ALL {
+            let l = preset.build(|k, g| (k, g));
+            let a = Rect::new(10.0, 20.0, 1601.0, 899.0);
+            let placed = l.place(a);
+            assert_eq!(placed.len(), l.leaf_count(), "{preset:?}");
+            let total: f32 = placed.iter().map(|p| p.rect.w * p.rect.h).sum();
+            assert_eq!(total, a.w * a.h, "{preset:?}");
+            for p in &placed {
+                assert!(p.rect.x >= a.x && p.rect.right() <= a.right(), "{preset:?}");
+                assert!(
+                    p.rect.y >= a.y && p.rect.bottom() <= a.bottom(),
+                    "{preset:?}"
+                );
+                assert_eq!(p.rect.x.fract(), 0.0, "whole-pixel edges");
+            }
+        }
+    }
+
+    #[test]
+    fn presets_have_the_documented_shapes_and_links() {
+        let links = |p: Preset| -> Vec<LinkGroup> {
+            p.build(|k, g| (k, g))
+                .leaves()
+                .iter()
+                .map(|x| x.1)
+                .collect()
         };
-        let l = Layout::split(Axis::Row, 0.5, pair(Some(1)), pair(Some(2)));
-        let placed = l.place(1601.0, 900.0);
-        assert_eq!(placed.len(), 4);
-        let area: f32 = placed.iter().map(|p| p.w * p.h).sum();
-        assert_eq!(area, 1601.0 * 900.0);
-        let links: Vec<_> = l.panes().iter().map(|p| p.link).collect();
-        assert_eq!(links, vec![Some(1), Some(1), Some(2), Some(2)]);
+        assert_eq!(links(Preset::OneByTwo), vec![Some(0), Some(1)]);
+        assert_eq!(
+            links(Preset::TwoByTwo),
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(links(Preset::OnePlusTwo), vec![Some(0), Some(1), Some(2)]);
+        let grid = Preset::TwoByTwo
+            .build(|k, g| (k, g))
+            .place(area(800.0, 600.0));
+        assert_eq!(grid[3].rect, Rect::new(400.0, 300.0, 400.0, 300.0));
+        for p in Preset::ALL {
+            assert_eq!(Preset::from_name(p.name()), Some(p));
+        }
+        assert_eq!(Preset::from_name("2X2"), Some(Preset::TwoByTwo));
+        assert_eq!(Preset::from_name("nope"), None);
     }
 
     #[test]
-    fn ratios_are_kept_inside_the_area() {
-        let Layout::Split { ratio, .. } = Layout::split(
-            Axis::Column,
-            7.0,
-            Layout::pane(PaneKind::Tape, None),
-            Layout::pane(PaneKind::Dom, None),
-        ) else {
+    fn split_and_close_a_leaf() {
+        let l = Layout::Pane(1);
+        let l = l.split_leaf(&1, Axis::Row, 2).unwrap();
+        let l = l.split_leaf(&2, Axis::Column, 3).unwrap();
+        let (l, back) = l.split_leaf(&9, Axis::Row, 4).unwrap_err();
+        assert_eq!(back, 4);
+        assert_eq!(l.leaves(), vec![&1, &2, &3]);
+        let r = l.place(area(800.0, 600.0));
+        assert_eq!(r[1].rect, Rect::new(400.0, 0.0, 400.0, 300.0));
+        assert_eq!(r[2].rect, Rect::new(400.0, 300.0, 400.0, 300.0));
+
+        // Closing 2: 3 takes the right half.
+        let l = l.remove_leaf(&2).unwrap().unwrap();
+        assert_eq!(l.leaves(), vec![&1, &3]);
+        assert_eq!(
+            l.place(area(800.0, 600.0))[1].rect,
+            Rect::new(400.0, 0.0, 400.0, 600.0)
+        );
+        // Not here: unchanged.
+        let l = l.remove_leaf(&7).unwrap_err();
+        assert_eq!(l.leaves(), vec![&1, &3]);
+        let l = l.remove_leaf(&1).unwrap().unwrap();
+        assert_eq!(l, Layout::Pane(3));
+        assert_eq!(l.remove_leaf(&3), Ok(None), "the last leaf");
+    }
+
+    #[test]
+    fn dragging_a_divider_sets_its_ratio_within_limits() {
+        let mut l = Preset::Trading.build(|k, _| k);
+        let a = area(1000.0, 800.0);
+        let d = l.dividers(a);
+        assert_eq!(d.len(), 2);
+        assert_eq!(
+            (d[0].axis, d[0].at, d[0].path.clone()),
+            (Axis::Row, 680.0, vec![])
+        );
+        assert_eq!(
+            (d[1].axis, d[1].at, d[1].path.clone()),
+            (Axis::Column, 512.0, vec![Side::Second])
+        );
+        assert_eq!(d[0].handle(6.0), Rect::new(677.0, 0.0, 6.0, 800.0));
+        // Drag the inner divider to y = 400 (of the right column, 0..800).
+        let r = d[1].ratio_at(0.0, 400.0);
+        assert!(l.set_ratio(&d[1].path, r));
+        assert_eq!(l.dividers(a)[1].at, 400.0);
+        // Dragged past the edge: clamped, never collapsing a pane.
+        assert!(l.set_ratio(&d[0].path, d[0].ratio_at(-50.0, 0.0)));
+        assert_eq!(l.dividers(a)[0].at, 50.0);
+        assert!(!l.set_ratio(&[Side::First], 0.5), "a leaf has no ratio");
+        assert_eq!(d[0].ratio_at(f32::NAN, 0.0), 0.5);
+    }
+
+    #[test]
+    fn focus_moves_to_the_adjacent_pane() {
+        // [0 | 1/2]: chart, DOM over tape.
+        let l = Preset::Trading.build(|k, _| k);
+        let a = area(1000.0, 800.0);
+        assert_eq!(
+            l.neighbour(0, Direction::Right, a),
+            Some(1),
+            "the larger overlap"
+        );
+        assert_eq!(l.neighbour(1, Direction::Down, a), Some(2));
+        assert_eq!(l.neighbour(2, Direction::Up, a), Some(1));
+        assert_eq!(l.neighbour(2, Direction::Left, a), Some(0));
+        assert_eq!(l.neighbour(0, Direction::Left, a), None, "edge");
+        assert_eq!(l.neighbour(1, Direction::Up, a), None);
+        // 2×2: straight lines.
+        let g = Preset::TwoByTwo.build(|k, _| k);
+        assert_eq!(g.neighbour(0, Direction::Right, a), Some(1));
+        assert_eq!(g.neighbour(0, Direction::Down, a), Some(2));
+        assert_eq!(g.neighbour(3, Direction::Up, a), Some(1));
+        assert_eq!(g.neighbour(3, Direction::Left, a), Some(2));
+    }
+
+    #[test]
+    fn link_cycle_and_ratio_clamps() {
+        let mut l = None;
+        let mut seen = vec![];
+        for _ in 0..5 {
+            l = next_link(l);
+            seen.push(link_letter(l));
+        }
+        assert_eq!(seen, vec!["A", "B", "C", "D", "-"]);
+        let Layout::Split { ratio, .. } =
+            Layout::split(Axis::Column, 7.0, Layout::Pane(1), Layout::Pane(2))
+        else {
             panic!()
         };
-        assert_eq!(ratio, 0.95);
+        assert_eq!(ratio, MAX_RATIO);
+        let mut bad = Layout::Split {
+            axis: Axis::Row,
+            ratio: f32::NAN,
+            first: Box::new(Layout::Pane(1)),
+            second: Box::new(Layout::Pane(2)),
+        };
+        bad.normalise();
+        assert_eq!(bad.dividers(area(100.0, 10.0))[0].at, 50.0);
+    }
+
+    #[test]
+    fn serialises_as_a_readable_tree() {
+        let l = Layout::split(Axis::Row, 0.5, Layout::Pane(1u32), Layout::Pane(2u32));
+        let s = serde_json::to_string(&l).unwrap();
+        assert_eq!(
+            s,
+            r#"{"split":{"axis":"row","ratio":0.5,"first":{"pane":1},"second":{"pane":2}}}"#
+        );
+        assert_eq!(serde_json::from_str::<Layout<u32>>(&s).unwrap(), l);
     }
 }

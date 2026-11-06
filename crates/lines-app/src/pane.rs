@@ -5,32 +5,69 @@
 //! itself (decision 0001: never per tick). The workspace renders panes as cached views, so a
 //! pane whose market didn't move replays its previous frame instead of repainting: N panes
 //! don't cost N× when one market ticks. The same poll notices a live feed going quiet
-//! (`ChartStore::stale_for`, lock-free) and redraws the pane with its stale marker.
+//! (`ChartStore::stale_for`, lock-free) and redraws the pane with its stale marker. A pane
+//! that isn't visible (a background tab, a
+//! minimised window) doesn't notify at all, so it does no paint work; it catches up on the
+//! first poll after it is shown again (decision 0016).
+//!
+//! The workspace tells a pane its link group (shown as a coloured letter in the header) and
+//! whether it is visible; panes never reference each other.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, EventEmitter};
+use gpui::{Context, Div, EventEmitter, FocusHandle, FontWeight, ParentElement, Styled, div, px};
+use lines_core::CivilDate;
 use lines_feed::store::ChartStore;
 
 use crate::feeds::PaneFeed;
+use crate::layout::{LinkGroup, link_letter};
+use crate::theme::Theme;
+use crate::wsdoc::PaneDoc;
 
-/// A pane switched itself to another feed (e.g. the chart's symbol picker). The workspace
-/// forwards it to the other panes in the same link group.
+/// A pane switched itself to another feed (e.g. its symbol picker). The workspace forwards it
+/// to the other panes in the same link group.
 #[derive(Clone)]
 pub struct FeedChanged(pub PaneFeed);
 
+/// State the workspace sets on every pane.
+#[derive(Clone, Debug)]
+pub struct PaneCommon {
+    /// Shown in a visible window's active tab. Hidden panes skip their poll's notify.
+    pub visible: bool,
+    pub link: LinkGroup,
+    /// Frames painted (the benchmark checks hidden panes paint nothing).
+    pub paints: u64,
+}
+
+impl Default for PaneCommon {
+    fn default() -> Self {
+        PaneCommon {
+            visible: true,
+            link: None,
+            paints: 0,
+        }
+    }
+}
+
 pub trait Pane: EventEmitter<FeedChanged> + Sized + 'static {
     fn store(&self) -> &Arc<ChartStore>;
+    fn feed(&self) -> &PaneFeed;
+    fn common(&mut self) -> &mut PaneCommon;
     /// The revision this pane last drew.
     fn seen_revision(&mut self) -> &mut u64;
     /// Follow another feed (a linked pane switched). Resets per-market view state.
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>);
-    /// Called on every poll tick (e.g. rate counters); default nothing.
+    /// Called on every poll tick while visible (e.g. rate counters); default nothing.
     fn on_tick(&mut self) {}
+    /// Where keyboard input goes when this pane has focus.
+    fn focus_handle(&self) -> &FocusHandle;
+    /// Write this pane's view state into its saved form.
+    fn save_state(&self, doc: &mut PaneDoc);
 }
 
-/// Start the pane's revision poll: notify when its store changed, nothing otherwise.
+/// Start the pane's revision poll: notify when its store changed, nothing otherwise, and
+/// nothing at all while hidden.
 pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
     cx.spawn(async move |this, cx| {
         // Whole seconds the feed has been stale (redraw when it changes: the marker counts).
@@ -40,6 +77,9 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
                 .timer(Duration::from_millis(8))
                 .await;
             let alive = this.update(cx, |pane, cx| {
+                if !pane.common().visible {
+                    return;
+                }
                 pane.on_tick();
                 let rev = pane.store().revision();
                 let seen = pane.seen_revision();
@@ -70,17 +110,92 @@ pub fn contract_text(d: &lines_feed::ChartData) -> String {
     }
 }
 
+/// The link group marker for a pane header: a colour swatch plus the group's letter, so the
+/// group never relies on colour alone. Nothing for unlinked panes.
+pub fn link_chip(link: LinkGroup, theme: &Theme) -> Option<Div> {
+    let g = link?;
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .w(px(8.0))
+                    .h(px(8.0))
+                    .rounded_sm()
+                    .bg(theme.link[g as usize % theme.link.len()]),
+            )
+            .child(
+                div()
+                    .text_color(theme.text_dim)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(link_letter(link)),
+            ),
+    )
+}
+
+/// The body of a pane whose target the source can't serve: the symbol and the reason, greyed.
+pub fn unavailable_body(feed: &PaneFeed, theme: &Theme) -> Option<Div> {
+    let u = feed.unavailable.as_ref()?;
+    Some(
+        div()
+            .flex_1()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .bg(theme.bg)
+            .text_color(theme.text_dim)
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(u.symbol.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .child(format!("unavailable: {}", u.reason)),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .child("Ctrl+K: choose another symbol"),
+            ),
+    )
+}
+
+/// The header's left text for an unavailable pane.
+pub fn unavailable_title(feed: &PaneFeed) -> Option<String> {
+    feed.unavailable
+        .as_ref()
+        .map(|u| format!("{}  ·  unavailable", u.symbol))
+}
+
+/// The date contract choices are computed for: the replay's market date when the clock is
+/// frozen (screenshots, reproducible), else today (UTC).
+pub fn today(frozen: bool, store: &ChartStore) -> CivilDate {
+    let market = frozen
+        .then(|| store.try_read().and_then(|d| d.market_time))
+        .flatten();
+    CivilDate::from_utc(market.unwrap_or_else(lines_feed::now_utc))
+}
+
 /// The stale marker for a pane header (docs/design.md §7): shown while the pane's live feed
 /// has delivered nothing for longer than its cadence, so a frozen pane never looks live.
-pub fn stale_badge(store: &ChartStore, t: &crate::theme::Theme) -> Option<gpui::AnyElement> {
-    use gpui::{IntoElement, ParentElement, Styled, div};
+pub fn stale_badge(store: &ChartStore, t: &Theme) -> Option<gpui::AnyElement> {
+    use gpui::IntoElement;
     let quiet = store.stale_for()?;
     Some(
         div()
             .px_1()
             .bg(t.last)
             .text_color(t.on_last)
-            .font_weight(gpui::FontWeight::BOLD)
+            .font_weight(FontWeight::BOLD)
             .child(format!("STALE · no data {} s", quiet.as_secs()))
             .into_any_element(),
     )
@@ -90,7 +205,7 @@ pub fn stale_badge(store: &ChartStore, t: &crate::theme::Theme) -> Option<gpui::
 pub fn paint_stale_veil(
     store: &ChartStore,
     bounds: gpui::Bounds<gpui::Pixels>,
-    t: &crate::theme::Theme,
+    t: &Theme,
     window: &mut gpui::Window,
 ) {
     if store.stale_for().is_some() {

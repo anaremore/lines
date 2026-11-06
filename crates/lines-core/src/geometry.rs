@@ -322,6 +322,25 @@ pub fn slot_time(bars: &[Bar], slot: i64, period_ms: i64) -> Option<UtcMillis> {
     Some(UtcMillis(t))
 }
 
+/// The bar slot whose period contains `t`: the inverse of [`slot_time`], for marking another
+/// chart's crosshair time (crosshair sync). Inside the series it is the bar with
+/// `time <= t < time + period`; beyond either end, whole periods from the nearest bar. `None`
+/// when there are no bars, or `t` falls between two bars (no bar covers that time here: the
+/// marker shows as missing rather than on a neighbour).
+pub fn time_slot(bars: &[Bar], t: UtcMillis, period_ms: i64) -> Option<i64> {
+    let (first, last) = (bars.first()?, bars.last()?);
+    let p = period_ms.max(1);
+    if t.0 < first.time.0 {
+        return Some((t.0 - first.time.0).div_euclid(p));
+    }
+    let last_index = (bars.len() - 1) as i64;
+    if t.0 >= last.time.0 {
+        return Some(last_index + (t.0 - last.time.0) / p);
+    }
+    let i = bars.partition_point(|b| b.time.0 <= t.0) - 1;
+    (t.0 < bars[i].time.0 + p).then_some(i as i64)
+}
+
 /// Hit-test the pointer at plot-local logical (`x`, `y`). `None` when the pointer is outside
 /// the plot `[0, width) × [0, height)` or not a finite position. Pure and allocation-free.
 pub fn crosshair(
@@ -763,5 +782,28 @@ mod tests {
         s.clear();
         write_ohlcv(&bar, &zn, QtyFormat { decimals: 8 }, &mut s).unwrap();
         assert_eq!(s.as_str(), "O 112'16  H 112'17  L 112'00  C 112'01  V 1.5");
+    }
+
+    #[test]
+    fn time_slot_inverts_slot_time() {
+        let b = bars(10);
+        let p = 60_000;
+        for slot in -5..15 {
+            let t = slot_time(&b, slot, p).unwrap();
+            assert_eq!(time_slot(&b, t, p), Some(slot), "slot {slot}");
+            // Anywhere inside the period maps to the same slot.
+            assert_eq!(
+                time_slot(&b, UtcMillis(t.0 + p - 1), p),
+                Some(slot),
+                "slot {slot}"
+            );
+        }
+        assert_eq!(time_slot(&[], UtcMillis(0), p), None);
+        // A minute with no bar (gap): missing, not the neighbour.
+        let mut gap = b.clone();
+        gap.remove(4);
+        let t = b[4].time;
+        assert_eq!(time_slot(&gap, t, p), None);
+        assert_eq!(time_slot(&gap, b[5].time, p), Some(4));
     }
 }
