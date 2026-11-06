@@ -4,13 +4,16 @@ mod commands;
 mod dom_view;
 mod feeds;
 mod layout;
+mod menu;
 mod pane;
+mod pane_window;
 mod persist;
 mod picker;
 mod picker_view;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 mod studies;
+mod tabstate;
 mod tape_view;
 mod text;
 mod theme;
@@ -168,6 +171,9 @@ struct Cli {
     /// then print frame-time percentiles and memory and exit.
     #[arg(long, conflicts_with = "screenshot")]
     bench: Option<u64>,
+    /// Benchmark: hide the workspace's DOMs (they must paint nothing).
+    #[arg(long, requires = "bench")]
+    bench_hide_doms: bool,
     /// DOM price grouping in ticks per row (G cycles 1, 2, 5, 10, 25 in the app).
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     dom_grouping: u32,
@@ -471,7 +477,14 @@ fn main() -> Result<()> {
         doc.normalise().map_err(|e| anyhow!("--workspace: {e}"))?;
         let size = cli.size.unwrap_or((1280.0, 800.0));
         if let Some(secs) = cli.bench {
-            let code = bench::run(registry, Workspace::new(env), doc, size, secs)?;
+            let code = bench::run(
+                registry,
+                Workspace::new(env),
+                doc,
+                size,
+                secs,
+                cli.bench_hide_doms,
+            )?;
             std::process::exit(code);
         }
         let out = cli.screenshot.clone().expect("screenshot mode");

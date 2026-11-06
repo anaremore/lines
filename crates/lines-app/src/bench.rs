@@ -13,6 +13,10 @@
 //! in the background: it must paint nothing (hidden tabs do no paint work), and the report
 //! checks it.
 //!
+//! `--bench-hide-doms` runs the same workspace with its two DOMs hidden (roadmap 5b): the
+//! chart columns reflow over their space, the DOMs keep their feeds, and they must paint
+//! nothing.
+//!
 //! Memory is the process's resident set (working set on Windows) at start (before the UI
 //! and the feeds) and at the end. Use a release build for numbers worth comparing.
 
@@ -27,8 +31,9 @@ use lines_feed::{Source, front_month, now_utc};
 use crate::feeds::Feeds;
 use crate::layout::PaneKind;
 use crate::picker_view::AppSettings;
+use crate::tabstate::PaneState;
 use crate::workspace::{self, Workspace};
-use crate::wsdoc::{TargetDoc, WorkspaceDoc};
+use crate::wsdoc::{PaneDoc, TargetDoc, WorkspaceDoc};
 
 const WARMUP: Duration = Duration::from_secs(2);
 const FRAME: Duration = Duration::from_millis(8);
@@ -39,10 +44,24 @@ pub fn run(
     mut doc: WorkspaceDoc,
     size: (f32, f32),
     seconds: u64,
+    hide_doms: bool,
 ) -> Result<i32> {
     let mock = matches!(ws.env.base.source, Source::CqgMock(_));
     if mock && doc.name == "6c2d" {
         spread_over_two_contracts(&mut doc);
+    }
+    if hide_doms {
+        for t in &mut doc.windows[0].tabs {
+            t.layout = t.layout.map(&mut |p: &PaneDoc| PaneDoc {
+                state: if p.kind == PaneKind::Dom {
+                    PaneState::Hidden
+                } else {
+                    p.state
+                },
+                ..p.clone()
+            });
+        }
+        doc.normalise().map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     // The background tab: an identical copy that is never shown.
     let mut window = doc.windows[0].clone();
@@ -100,22 +119,28 @@ pub fn run(
                     }
                 }
             }
-            let paints = cx.update(|cx| {
-                let tabs: Vec<Vec<_>> = handle
+            // (tab, state, paints) for every pane.
+            let paints: Vec<(usize, PaneState, u64)> = cx.update(|cx| {
+                let panes: Vec<(usize, PaneState, workspace::PaneHandle)> = handle
                     .read(cx)
-                    .map(|wv| {
-                        wv.tabs()
-                            .iter()
-                            .map(|t| t.handles().cloned().collect())
-                            .collect()
-                    })
+                    .map(|wv| wv.panes_by_state())
                     .unwrap_or_default();
-                tabs.into_iter()
-                    .map(|hs: Vec<workspace::PaneHandle>| {
-                        hs.iter().map(|h| h.paints(cx)).collect::<Vec<u64>>()
-                    })
-                    .collect::<Vec<_>>()
+                panes
+                    .into_iter()
+                    .map(|(t, s, h)| (t, s, h.paints(cx)))
+                    .collect()
             });
+            let shown: u64 = paints
+                .iter()
+                .filter(|(t, s, _)| *t == 0 && s.is_shown())
+                .map(|p| p.2)
+                .sum();
+            let hidden_in_tab: Vec<u64> = paints
+                .iter()
+                .filter(|(t, s, _)| *t == 0 && !s.is_shown())
+                .map(|p| p.2)
+                .collect();
+            let background: u64 = paints.iter().filter(|(t, _, _)| *t > 0).map(|p| p.2).sum();
             report(
                 &times,
                 seconds,
@@ -124,10 +149,14 @@ pub fn run(
                 doms,
                 rss_start,
                 resident_bytes(),
-                &paints,
+                Paints {
+                    shown,
+                    hidden_in_tab: &hidden_in_tab,
+                    background,
+                },
             );
-            let hidden: u64 = paints.iter().skip(1).flatten().sum();
-            std::process::exit(if hidden == 0 { 0 } else { 2 });
+            let wasted = background + hidden_in_tab.iter().sum::<u64>();
+            std::process::exit(if wasted == 0 { 0 } else { 2 });
         })
         .detach();
     });
@@ -179,6 +208,14 @@ fn percentile(sorted: &[Duration], p: f64) -> f64 {
     sorted[i].as_secs_f64() * 1e3
 }
 
+/// Frames painted by the shown panes, by each hidden pane of the shown tab, and by the
+/// background tab.
+struct Paints<'a> {
+    shown: u64,
+    hidden_in_tab: &'a [u64],
+    background: u64,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn report(
     times: &[Duration],
@@ -188,7 +225,7 @@ fn report(
     doms: usize,
     rss_start: Option<u64>,
     rss_end: Option<u64>,
-    paints: &[Vec<u64>],
+    paints: Paints,
 ) {
     let mut sorted = times.to_vec();
     sorted.sort();
@@ -205,10 +242,13 @@ fn report(
             |b| format!("{:.1} MB", b as f64 / 1048576.0),
         )
     };
-    let shown: u64 = paints.first().map_or(0, |p| p.iter().sum());
-    let hidden: u64 = paints.iter().skip(1).flatten().sum();
     println!(
-        "benchmark: {charts} charts + {doms} DOMs, {}x{} logical px, {seconds} s after a {} s warm-up ({})",
+        "benchmark: {charts} charts + {doms} DOMs{}, {}x{} logical px, {seconds} s after a {} s warm-up ({})",
+        if paints.hidden_in_tab.is_empty() {
+            ""
+        } else {
+            " (DOMs hidden)"
+        },
         size.0,
         size.1,
         WARMUP.as_secs(),
@@ -231,12 +271,26 @@ fn report(
         mb(rss_start),
         mb(rss_end)
     );
+    if !paints.hidden_in_tab.is_empty() {
+        let n = paints.hidden_in_tab.len();
+        let sum: u64 = paints.hidden_in_tab.iter().sum();
+        println!(
+            "hidden panes in the shown tab: {n}, {sum} paints ({})",
+            if sum == 0 {
+                "ok: hidden panes do no paint work"
+            } else {
+                "FAIL: hidden panes painted"
+            }
+        );
+    }
     println!(
-        "pane paints: {shown} in the shown tab, {hidden} in the hidden tab ({})",
-        if hidden == 0 {
+        "pane paints: {} by shown panes, {} in the background tab ({})",
+        paints.shown,
+        paints.background,
+        if paints.background == 0 {
             "ok: hidden tabs do no paint work"
         } else {
-            "FAIL: hidden panes painted"
+            "FAIL: hidden tab painted"
         }
     );
 }
