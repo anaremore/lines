@@ -21,13 +21,15 @@ use std::path::Path;
 pub const SC_EPOCH_OFFSET_US: i64 = 25_569 * 86_400 * 1_000_000;
 
 /// `open` marker on the first record of an unbundled trade (one aggressor order split into
-/// its fills). Determined empirically (Sierra removed its format docs): on 2025-09-11 and
-/// 2025-10-15 NQZ5 data it always opens a bracket closed by [`LAST_SUB_TRADE`], with 0–98
-/// `open == 0` records between, mostly at different prices (sweeps). Not duplicates.
-pub const FIRST_SUB_TRADE: f32 = f32::from_bits(0xfd70_9f01); // -1.99900197e37
+/// its fills). Determined empirically (Sierra removed its format docs). On NQU5 2025-09-11,
+/// all 69,626 brackets it opens are closed by [`LAST_SUB_TRADE`] in the same millisecond,
+/// with 0–98 `open == 0` fills between, one aggressor side and monotone prices (a sweep).
+/// Read the other way round (as before 2026-11-06), only 19% of "brackets" fit in one
+/// millisecond and standalone trades between sweeps were taken for sweep fills.
+pub const FIRST_SUB_TRADE: f32 = f32::from_bits(0xfd70_9ef9); // -1.99900095e37
 
 /// `open` marker on the last record of an unbundled trade.
-pub const LAST_SUB_TRADE: f32 = f32::from_bits(0xfd70_9ef9); // -1.99900095e37
+pub const LAST_SUB_TRADE: f32 = f32::from_bits(0xfd70_9f01); // -1.99900197e37
 
 /// Sierra time → Unix microseconds.
 #[inline]
@@ -465,8 +467,8 @@ mod tests {
             .kind(),
             TickKind::LastSubTrade
         );
-        assert_eq!(FIRST_SUB_TRADE, -1.999_002e37_f32);
-        assert_eq!(LAST_SUB_TRADE, -1.999_001e37_f32);
+        assert_eq!(FIRST_SUB_TRADE, -1.999_001e37_f32);
+        assert_eq!(LAST_SUB_TRADE, -1.999_002e37_f32);
         assert!(
             !ScidRecord {
                 open: 100.0,
@@ -526,6 +528,19 @@ mod tests {
         );
         assert_eq!(b[0].command, DepthCommand::Unknown(9));
         assert_eq!(rd.next_batch(&mut b).unwrap(), None);
+    }
+
+    /// The markers as they appear in real files: a bracket opens with `0xfd709ef9`
+    /// (-1.99900095e37) and closes with `0xfd709f01` (-1.99900197e37).
+    #[test]
+    fn sub_trade_marker_bits() {
+        let rec = |bits: u32| ScidRecord {
+            open: f32::from_bits(bits),
+            ..tick(0, 100.0, 99.0, 101.0, 1, true)
+        };
+        assert_eq!(rec(0xfd70_9ef9).kind(), TickKind::FirstSubTrade);
+        assert_eq!(rec(0xfd70_9f01).kind(), TickKind::LastSubTrade);
+        assert_eq!(rec(0).kind(), TickKind::Plain);
     }
 
     #[test]
