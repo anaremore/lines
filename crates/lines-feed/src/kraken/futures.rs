@@ -352,14 +352,22 @@ impl FuturesSession {
     ) -> Result<(), SessionError> {
         let page: Candles = serde_json::from_slice(body).map_err(|e| bad_json("candles", e))?;
         // The request's own range decides the snapshot (0011: interpret by URL).
+        // URL and candle times come off the wire (or a recording): checked, and candles must
+        // sit on the store's bar grid (else rejected, never stored misaligned).
         let to = query_param(url, "to")
             .and_then(|s| s.parse::<i64>().ok())
-            .map(|s| UtcMillis((s + 1) * 1000));
+            .and_then(|s| s.checked_add(1)?.checked_mul(1000))
+            .map(UtcMillis);
+        let bar_period = self.ctx.map_or(60_000, |c| c.bar_period_ms).max(1);
         let mut bars = Vec::with_capacity(page.candles.len());
         let mut rejected = 0;
         for c in &page.candles {
             let time = UtcMillis(c.time);
             if to.is_some_and(|t| time >= t) {
+                continue;
+            }
+            if time.0.rem_euclid(bar_period) != 0 || time.0 > i64::MAX - 60_000 {
+                rejected += 1;
                 continue;
             }
             match (
@@ -910,6 +918,39 @@ mod tests {
         );
         let again = r#"{"feed":"trade","product_id":"PF_XBTUSD","uid":"b","side":"buy","time":2000,"qty":0.0045,"price":75647.0}"#;
         assert_eq!(text(&mut s, again).0, []);
+    }
+
+    #[test]
+    fn candles_off_the_bar_grid_or_overflowing_are_rejected() {
+        // Fuzz regression: an unaligned candle reached BarSeries::upsert (debug assertion;
+        // misaligned bar in release); `to` and the paging step could overflow.
+        let (mut s, out) = ready(Some(UtcMillis(NOW - 5 * 60_000)));
+        let Some(Outgoing::HttpGet(candles)) = out.last().cloned() else {
+            panic!()
+        };
+        let boundary = NOW - NOW % 60_000 - 60_000;
+        let c = |t: i64| {
+            format!(r#"{{"time":{t},"open":"1","high":"1","low":"1","close":"1","volume":"1"}}"#)
+        };
+        let body = format!(
+            r#"{{"candles":[{},{},{}],"more_candles":true}}"#,
+            c(boundary - 120_000),
+            c(boundary - 90_000),
+            c(i64::MAX - 7)
+        );
+        let (ev, _) = feed(&mut s, http(&candles, &body)).unwrap();
+        let MarketEvent::History { bars, .. } = &ev[1] else {
+            panic!("{ev:?}")
+        };
+        assert_eq!(bars.len(), 1);
+        assert_eq!(ev[0], MarketEvent::Rejected { count: 1 });
+        // A hostile `to` in the URL does not overflow.
+        let mut s = ready(None).0;
+        let url = format!(
+            "{REST}/api/charts/v1/trade/PF_XBTUSD/1m?from=0&to={}",
+            i64::MAX
+        );
+        feed(&mut s, http(&url, r#"{"candles":[],"more_candles":false}"#)).unwrap();
     }
 
     #[test]

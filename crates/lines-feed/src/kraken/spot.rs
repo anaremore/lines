@@ -350,25 +350,41 @@ impl SpotSession {
     ) -> Result<(), SessionError> {
         type Row = (i64, String, String, String, String, String, String, i64);
         let rows: Vec<Row> = serde_json::from_str(rows).map_err(|e| bad_json("OHLC", e))?;
+        // Times come off the wire (or a recording): checked, and candles must sit on the bar
+        // grid the store uses, or they are rejected rather than stored misaligned.
+        let secs = |s: i64| s.checked_mul(1000).map(UtcMillis);
+        let out_of_range = || SessionError::Protocol("OHLC time out of range".into());
+        let bar_period = self.ctx.map_or(60_000, |c| c.bar_period_ms).max(1);
         let from = query_param(url, "since")
             .and_then(|s| s.parse::<i64>().ok())
-            .map(|s| UtcMillis(s * 1000));
+            .and_then(secs);
         let period = query_param(url, "interval")
             .and_then(|m| m.parse::<i64>().ok())
-            .map_or(60_000, |m| m * 60_000);
+            .filter(|m| *m > 0)
+            .and_then(|m| m.checked_mul(60_000))
+            .unwrap_or(60_000);
         let Some(last) = rows.last() else {
             // No candles at all: rebuild from trades starting at the requested time.
             self.boundary = from;
             out.push(Outgoing::HttpGet(
-                self.trades_url(&from.map_or(0, |f| f.0 * 1_000_000).to_string()),
+                self.trades_url(
+                    &from
+                        .and_then(|f| f.0.checked_mul(1_000_000))
+                        .unwrap_or(0)
+                        .to_string(),
+                ),
             ));
             return Ok(());
         };
-        let boundary = UtcMillis(last.0 * 1000);
+        let boundary = secs(last.0).ok_or_else(out_of_range)?;
+        let boundary_ns = boundary.0.checked_mul(1_000_000).ok_or_else(out_of_range)?;
         let mut bars = Vec::with_capacity(rows.len());
         let mut rejected = 0;
         for r in &rows[..rows.len() - 1] {
-            let time = UtcMillis(r.0 * 1000);
+            let Some(time) = secs(r.0).filter(|t| t.0.rem_euclid(bar_period) == 0) else {
+                rejected += 1;
+                continue;
+            };
             if from.is_some_and(|f| time < f.floor_to(period)) {
                 continue;
             }
@@ -394,7 +410,7 @@ impl SpotSession {
             events.push(MarketEvent::Rejected { count: rejected });
         }
         // Kraken keeps only the newest 720 candles: older history is missing, not invented.
-        let first = UtcMillis(rows[0].0 * 1000);
+        let first = secs(rows[0].0).ok_or_else(out_of_range)?;
         if let Some(f) = from
             && first > f.floor_to(period)
         {
@@ -405,9 +421,7 @@ impl SpotSession {
             as_of: Some(UtcMillis(boundary.0 - 1)),
         });
         self.boundary = Some(boundary);
-        out.push(Outgoing::HttpGet(
-            self.trades_url(&(boundary.0 * 1_000_000).to_string()),
-        ));
+        out.push(Outgoing::HttpGet(self.trades_url(&boundary_ns.to_string())));
         Ok(())
     }
 
@@ -1068,6 +1082,49 @@ mod tests {
 
     fn rest_trade(id: u64, secs: &str, price: &str) -> String {
         format!(r#"["{price}","0.10000000",{secs},"b","l","",{id}]"#)
+    }
+
+    #[test]
+    fn ohlc_off_the_bar_grid_or_overflowing_is_rejected() {
+        // Fuzz regression: an unaligned candle reached BarSeries::upsert (debug assertion;
+        // misaligned bar in release), and times overflowed `* 1000` / `* 1_000_000`.
+        let (mut s, out) = ready(None);
+        let Some(Outgoing::HttpGet(ohlc)) = out.last().cloned() else {
+            panic!()
+        };
+        let b = 1_793_988_060i64;
+        let body = format!(
+            r#"{{"error":[],"result":{{"XXBTZUSD":[{},{},{},{}],"last":{}}}}}"#,
+            ohlc_row(b - 120, "100.0"),
+            ohlc_row(b - 100, "100.1"),
+            ohlc_row(9_223_372_036_854_776, "100.2"),
+            ohlc_row(b, "100.3"),
+            b - 60
+        );
+        let (ev, _) = feed(&mut s, http(&ohlc, &body)).unwrap();
+        let bars = ev
+            .iter()
+            .find_map(|e| match e {
+                MarketEvent::History { bars, .. } => Some(bars.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].time, UtcMillis((b - 120) * 1000));
+        assert!(ev.contains(&MarketEvent::Rejected { count: 2 }));
+        // A newest row whose time overflows is a protocol error, not a panic.
+        let (mut s, out) = ready(None);
+        let Some(Outgoing::HttpGet(ohlc)) = out.last().cloned() else {
+            panic!()
+        };
+        let body = format!(
+            r#"{{"error":[],"result":{{"XXBTZUSD":[{}],"last":0}}}}"#,
+            ohlc_row(i64::MAX, "100.0")
+        );
+        assert!(matches!(
+            feed(&mut s, http(&ohlc, &body)),
+            Err(SessionError::Protocol(_))
+        ));
     }
 
     #[test]
