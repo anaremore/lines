@@ -1,6 +1,6 @@
 # 0018: One trading surface: commands, trading core, connectors, accounts
 
-**Status:** Proposed (consolidates 0003, 0004, 0006, 0011, 0012)
+**Status:** Accepted
 
 **Context:** Lines should feel like one elegant platform: flexible charts, a first-class DOM, and execution triggered from either, while data sources and execution venues stay pluggable and invisible to the user.
 

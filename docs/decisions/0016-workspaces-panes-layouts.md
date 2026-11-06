@@ -1,6 +1,6 @@
 # 0016: Workspaces, panes, layouts and link groups
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Context:** Traders watch several markets at once. The owner's everyday setup is NQ and ES side by side. Users need custom grids, tabs, and separate windows across monitors, and all of it must stay fast (decision 0001, `docs/design.md`).
 

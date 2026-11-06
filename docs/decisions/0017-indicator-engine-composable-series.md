@@ -1,6 +1,6 @@
 # 0017: Indicator engine: composable series graph; VWAP first
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Context:** VWAP is an early, critical indicator. Users must be able to add it to charts **and** use it as an input when building their own indicators (built-in or WASM plugins, decision 0008). That needs a real indicator system, not one-off chart code. Decision 0007 already makes indicators pure, incremental and I/O-free.
 
@@ -20,7 +20,7 @@
 - Products gain **trading-hours calendars** (exchange time zone with DST, ETH and RTH windows, holidays, early closes). VWAP resets, volume profile (roadmap 5) and daily bars all depend on them. This closes the gap 0013 left ("product trading hours").
 
 *VWAP specifically*
-- **Resets:** session (ETH or RTH, per product calendar), weekly, monthly, and **anchored** (from a user-chosen bar, very common).
+- **Resets:** session (ETH or RTH, per product calendar), weekly, monthly, and **anchored** (from a user-chosen bar, very common). **Default: full session (ETH).** Every reset type is selectable per VWAP instance, and several can be shown at once (e.g. ETH and RTH together).
 - **Bands:** ±1/2/3 standard deviations (volume-weighted), optional.
 - **Source:** computed from **trades** when available (exact). When only bars exist (e.g. older history), it uses bar typical price × volume and **marks the output as approximate** until trade data takes over. Never silently mixed.
 - **Exactness (extends 0002):** accumulators Σ(price×volume) and Σvolume are exact integers (`i128`). The VWAP value itself is a derived analytic, not a tradable price: it's carried as `f64` (bands need a square root) and is never snapped to the tick grid or used as an order price without explicit rounding by the order layer.
