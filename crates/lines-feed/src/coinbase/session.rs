@@ -499,7 +499,12 @@ impl CoinbaseSession {
                 let [t, low, high, open, close, vol] = row.as_slice() else {
                     return None;
                 };
-                let time = UtcMillis(t.get().parse::<i64>().ok()? * 1000);
+                // A bucket start: whole seconds on the bar period's grid. Anything else
+                // (overflowing or unaligned) is not a candle we asked for.
+                let time = UtcMillis(t.get().parse::<i64>().ok()?.checked_mul(1000)?);
+                if self.period_ms <= 0 || time.0.rem_euclid(self.period_ms) != 0 {
+                    return None;
+                }
                 Some(Bar {
                     time,
                     open: self.price(open.get())?,
@@ -808,8 +813,13 @@ impl ProviderSession for CoinbaseSession {
                         let window = (|| {
                             let start = UtcMillis::parse_iso(query_param(u, "start")?)?;
                             let end = UtcMillis::parse_iso(query_param(u, "end")?)?;
-                            let g = query_param(u, "granularity")?.parse::<i64>().ok()? * 1000;
-                            Some((start, UtcMillis(end.0 + g)))
+                            // The URL comes off the wire (or a recording): checked arithmetic.
+                            let g = query_param(u, "granularity")?
+                                .parse::<i64>()
+                                .ok()
+                                .filter(|g| *g > 0)?
+                                .checked_mul(1000)?;
+                            Some((start, UtcMillis(end.0.checked_add(g)?)))
                         })()
                         .ok_or_else(|| SessionError::Protocol(format!("bad candles URL {u}")))?;
                         self.on_candles(body, window.0, window.1, events)?
@@ -1291,5 +1301,41 @@ mod tests {
         );
         assert_eq!(b.volume, Qty(3_069_151_416));
         assert!(bars[0].time < b.time, "sorted oldest first");
+    }
+
+    #[test]
+    fn candles_url_with_a_hostile_granularity_is_a_protocol_error() {
+        // Fuzz regression (libFuzzer, coinbase_session and recording): `granularity * 1000`
+        // overflowed.
+        for g in ["9223372036854775807", "0", "-60"] {
+            let mut s = session();
+            let f = Frame::http(format!(
+                "https://x/products/BTC-USD/candles?granularity={g}&start=2026-11-06T14:00:00Z&end=2026-11-06T14:01:00Z
+[]"
+            ));
+            let r = s.on_frame(&f, UtcMillis(0), &mut Vec::new(), &mut Vec::new());
+            assert!(matches!(r, Err(SessionError::Protocol(_))), "{g}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn candles_off_the_bar_grid_or_overflowing_are_rejected() {
+        // Fuzz regression: an unaligned candle time reached BarSeries::upsert (a debug
+        // assertion; a misaligned bar in release), and a huge one overflowed `* 1000`.
+        let mut s = session(); // window [09:05, 14:05), 1-minute bars
+        let t = iso("2026-11-06T14:00:00Z").0 / 1000;
+        let body = format!(
+            "[[{},1,2,1,2,1],[{},1,2,1,2,1],[9223372036854775807,1,2,1,2,1]]",
+            t,
+            t + 20
+        );
+        let f = reply(&s, &body);
+        let (ev, _) = feed(&mut s, f);
+        let MarketEvent::History { bars, .. } = &ev[0] else {
+            panic!("{ev:?}")
+        };
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].time.0, t * 1000);
+        assert_eq!(ev[1], MarketEvent::Rejected { count: 2 });
     }
 }

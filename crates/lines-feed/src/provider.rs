@@ -51,16 +51,14 @@ impl Frame {
 /// Split an HTTP frame into its request URL and body. Frames carry `URL\nbody`; frames from
 /// older recordings carry only the body (`None` URL).
 pub fn split_http(data: &[u8]) -> (Option<&str>, &[u8]) {
-    let first = data
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(data, |i| &data[..i]);
-    match std::str::from_utf8(first) {
-        Ok(url) if url.starts_with("http://") || url.starts_with("https://") => {
-            (Some(url), &data[first.len() + 1..])
-        }
-        _ => (None, data),
+    // A URL line needs its newline: a bare URL without one is a (pre-URL) body.
+    if let Some(i) = data.iter().position(|&b| b == b'\n')
+        && let Ok(url) = std::str::from_utf8(&data[..i])
+        && (url.starts_with("http://") || url.starts_with("https://"))
+    {
+        return (Some(url), &data[i + 1..]);
     }
+    (None, data)
 }
 
 /// One query parameter's value from a URL (no decoding; Lines' own URLs need none).
@@ -220,4 +218,23 @@ pub trait Provider: Send + Sync {
         product: &Product,
         contract: Option<ContractKey>,
     ) -> Result<Box<dyn ProviderSession>, SessionError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_http_frames() {
+        assert_eq!(
+            split_http(b"https://x/a?b=1\n[1]"),
+            (Some("https://x/a?b=1"), &b"[1]"[..])
+        );
+        assert_eq!(split_http(b"https://x\n"), (Some("https://x"), &b""[..]));
+        assert_eq!(split_http(b"[1]"), (None, &b"[1]"[..]));
+        assert_eq!(split_http(b""), (None, &b""[..]));
+        // Fuzz regression: a URL with no newline used to slice past the end and panic.
+        assert_eq!(split_http(b"https://x"), (None, &b"https://x"[..]));
+        assert_eq!(split_http(b"\xff\n[]"), (None, &b"\xff\n[]"[..]));
+    }
 }
