@@ -1,4 +1,5 @@
 mod chart_view;
+mod picker;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 mod theme;
@@ -127,6 +128,9 @@ struct Cli {
     /// (as Ctrl+wheel would), which switches the price axis to manual scale.
     #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
     price_zoom: Option<f64>,
+    /// Screenshot: render with the symbol picker open on this query (e.g. "nq").
+    #[arg(long, requires = "screenshot")]
+    picker: Option<String>,
 }
 
 fn parse_time(s: &str) -> Result<UtcMillis, String> {
@@ -269,6 +273,7 @@ fn main() -> Result<()> {
                 fixture: chart_view::Fixture {
                     cursor: cli.cursor,
                     price_zoom: cli.price_zoom,
+                    picker: cli.picker.clone(),
                 },
             };
             let code = screenshot::run(config, shot)?;
@@ -283,7 +288,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let feed = lines_feed::spawn(config)?;
+    let feed = chart_view::Feed::start(config)?;
     let (w, h) = cli.size;
     gpui_platform::application().run(move |cx: &mut App| {
         cx.on_window_closed(|cx, _| {
