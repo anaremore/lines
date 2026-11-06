@@ -5,7 +5,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use lines_core::geometry::{crosshair, write_ohlcv};
+use lines_core::geometry::{CrosshairMode, crosshair, write_ohlcv};
 use lines_core::viewport::{ScaleDrag, ScaleMode};
 use lines_core::{
     Bar, BarSeries, DisplayStyle, FixedStr, Price, PriceFormat, PriceScale, Qty, QtyFormat, Scene,
@@ -108,7 +108,7 @@ fn paint_path_does_not_allocate() {
             }
             for line in &scene.time_lines {
                 label.clear();
-                line.time.write_axis_label(&mut label).unwrap();
+                line.label.write(line.time, &mut label).unwrap();
             }
             std::hint::black_box(&label);
             // Crosshair: sweep the pointer across the plot (including outside it and past
@@ -119,8 +119,16 @@ fn paint_path_does_not_allocate() {
                 let y = -20.0 + k as f64 * (vp.height + 40.0) / 40.0;
                 let scale = [1.0, 1.5, 2.0][k % 3];
                 let bars = series.bars();
-                let Some(ch) = crosshair(bars, &vp, fmt.tick, series.period_ms(), scale, x, y)
-                else {
+                let Some(ch) = crosshair(
+                    bars,
+                    &vp,
+                    fmt.tick,
+                    series.period_ms(),
+                    scale,
+                    [CrosshairMode::Normal, CrosshairMode::Magnet][k % 2],
+                    x,
+                    y,
+                ) else {
                     continue;
                 };
                 hits += 1;

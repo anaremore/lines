@@ -33,7 +33,7 @@ use gpui::{
     Subscription as GpuiSubscription, TitlebarOptions, Window, WindowBounds, WindowHandle,
     WindowOptions, div, point, prelude::*, px, relative, size,
 };
-use lines_core::UtcMillis;
+use lines_core::{Price, UtcMillis};
 use lines_feed::FeedConfig;
 use lines_feed::availability::Availability;
 
@@ -113,6 +113,8 @@ pub struct Workspace {
     pub env: Rc<PaneEnv>,
     pub name: String,
     pub crosshair_sync: bool,
+    /// Crosshair sync includes the price between charts of the same product.
+    pub crosshair_sync_price: bool,
     /// The key-hint bar is hidden in every window (workspace preference; shown by default).
     pub hide_hints: bool,
     pub windows: Vec<WindowHandle<WindowView>>,
@@ -141,6 +143,7 @@ impl Workspace {
             env: Rc::new(env),
             name: "default".into(),
             crosshair_sync: false,
+            crosshair_sync_price: false,
             hide_hints: false,
             windows: Vec::new(),
             pane_windows: Vec::new(),
@@ -300,11 +303,11 @@ impl PaneHandle {
         }
     }
 
-    fn set_synced_time(&self, t: Option<UtcMillis>, cx: &mut App) {
+    fn set_synced_time(&self, t: Option<UtcMillis>, price: Option<Price>, cx: &mut App) {
         if let PaneHandle::Chart(e) = self {
             e.update(cx, |c, cx| {
                 if c.common().visible {
-                    c.set_synced_time(t, cx);
+                    c.set_synced_time(t, price, cx);
                 }
             });
         }
@@ -707,7 +710,7 @@ impl WindowView {
                     feed_changed(this, ev, cx)
                 }),
                 cx.subscribe(e, move |_, _, ev: &CrosshairTime, cx| {
-                    forward_crosshair(id, ev.0, cx)
+                    forward_crosshair(id, *ev, cx)
                 }),
             ],
             PaneHandle::Dom(e) => vec![
@@ -1050,6 +1053,20 @@ impl WindowView {
                 ws.crosshair_sync = !ws.crosshair_sync;
                 if !ws.crosshair_sync {
                     clear_synced_times(cx);
+                }
+            }
+            Command::ToggleCrosshairSyncPrice => {
+                let ws = cx.global_mut::<Workspace>();
+                ws.crosshair_sync_price = !ws.crosshair_sync_price;
+                // Price sync needs sync: turning it on turns sync on too.
+                if ws.crosshair_sync_price {
+                    ws.crosshair_sync = true;
+                }
+                clear_synced_times(cx);
+            }
+            Command::ToggleMagnet => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.toggle_magnet(cx));
                 }
             }
             Command::ToggleStudyLabels | Command::ToggleStudies | Command::CleanChart => {
@@ -1661,6 +1678,11 @@ impl WindowView {
                 let hints_hidden = cx.global::<Workspace>().hide_hints;
                 items.push(MenuItem::named("Studies…", Command::Studies, false));
                 items.push(MenuItem::named(
+                    "Magnet crosshair (snap to OHLC)",
+                    Command::ToggleMagnet,
+                    chart.read(cx).magnet(),
+                ));
+                items.push(MenuItem::named(
                     "Hide study labels",
                     Command::ToggleStudyLabels,
                     v.hide_study_labels,
@@ -1796,9 +1818,14 @@ impl WindowView {
         }
         items.push(MenuItem::sep());
         items.push(MenuItem::named(
-            "Crosshair sync",
+            "Crosshair sync (link group)",
             Command::ToggleCrosshairSync,
             sync,
+        ));
+        items.push(MenuItem::named(
+            "Crosshair sync: price too (same product)",
+            Command::ToggleCrosshairSyncPrice,
+            cx.global::<Workspace>().crosshair_sync_price,
         ));
         items.push(it(Command::SaveAs, false));
         items.push(it(Command::Open, false));
@@ -3030,6 +3057,7 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
         let ws = cx.global_mut::<Workspace>();
         ws.name = doc.name.clone();
         ws.crosshair_sync = doc.crosshair_sync;
+        ws.crosshair_sync_price = doc.crosshair_sync_price;
         ws.hide_hints = doc.hide_hints;
         ws.show_perf_stats = doc.show_perf_stats;
     }
@@ -3217,9 +3245,10 @@ fn snapshot_with(
     cx: &mut App,
 ) -> Option<WorkspaceDoc> {
     let ws = cx.global::<Workspace>();
-    let (name, sync, hide_hints, show_perf_stats, windows) = (
+    let (name, sync, sync_price, hide_hints, show_perf_stats, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
+        ws.crosshair_sync_price,
         ws.hide_hints,
         ws.show_perf_stats,
         ws.windows.clone(),
@@ -3236,6 +3265,7 @@ fn snapshot_with(
     Some(WorkspaceDoc {
         name,
         crosshair_sync: sync,
+        crosshair_sync_price: sync_price,
         hide_hints,
         show_perf_stats,
         windows: docs,
@@ -3245,9 +3275,10 @@ fn snapshot_with(
 /// The whole workspace as a document (from outside any window update).
 pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     let ws = cx.global::<Workspace>();
-    let (name, sync, hide_hints, show_perf_stats, windows) = (
+    let (name, sync, sync_price, hide_hints, show_perf_stats, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
+        ws.crosshair_sync_price,
         ws.hide_hints,
         ws.show_perf_stats,
         ws.windows.clone(),
@@ -3259,6 +3290,7 @@ pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     WorkspaceDoc {
         name,
         crosshair_sync: sync,
+        crosshair_sync_price: sync_price,
         hide_hints,
         show_perf_stats,
         windows,
@@ -3329,28 +3361,45 @@ fn load_named(name: &str, cx: &mut App) -> Result<WorkspaceDoc, String> {
     wsdoc::builtin(name).ok_or_else(|| format!("no workspace named {name:?}"))
 }
 
-/// Crosshair sync: chart `from` has `t` under its pointer.
-fn forward_crosshair(from: PaneId, t: Option<UtcMillis>, cx: &mut App) {
-    if !cx.global::<Workspace>().crosshair_sync {
+/// Crosshair sync: chart `from` has `ev` under its pointer. Only the charts of its link group
+/// are told (`tabstate::crosshair_peers`), and the price only those of the same product with
+/// price sync on (`tabstate::syncs_price`).
+fn forward_crosshair(from: PaneId, ev: CrosshairTime, cx: &mut App) {
+    let ws = cx.global::<Workspace>();
+    if !ws.crosshair_sync {
         return;
     }
-    let windows = cx.global::<Workspace>().windows.clone();
+    let (with_price, windows) = (ws.crosshair_sync_price, ws.windows.clone());
     cx.defer(move |cx| {
-        for w in windows {
-            let charts: Vec<PaneHandle> = w
-                .read(cx)
-                .map(|wv| {
+        let mut charts: Vec<(PaneId, PaneHandle)> = Vec::new();
+        for w in &windows {
+            if let Ok(wv) = w.read(cx) {
+                charts.extend(
                     wv.tabs
                         .iter()
                         .flat_map(|t| t.panes.iter())
-                        .filter(|(id, s)| **id != from && s.handle.kind() == PaneKind::Chart)
-                        .map(|(_, s)| s.handle.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            for h in charts {
-                h.set_synced_time(t, cx);
+                        .filter(|(_, s)| s.handle.kind() == PaneKind::Chart)
+                        .map(|(id, s)| (*id, s.handle.clone())),
+                );
             }
+        }
+        let Some(link) = charts
+            .iter()
+            .find(|(id, _)| *id == from)
+            .map(|(_, h)| h.link(cx))
+        else {
+            return;
+        };
+        for (id, h) in charts {
+            if id == from || !tabstate::crosshair_peers(link, h.link(cx)) {
+                continue;
+            }
+            let PaneHandle::Chart(e) = &h else { continue };
+            let product = e.read(cx).product();
+            let price = ev
+                .price
+                .filter(|_| tabstate::syncs_price(with_price, ev.product, product));
+            h.set_synced_time(ev.time, price, cx);
         }
     });
 }
@@ -3364,7 +3413,7 @@ fn clear_synced_times(cx: &mut App) {
                 .map(|wv| wv.tabs.iter().flat_map(|t| t.handles().cloned()).collect())
                 .unwrap_or_default();
             for h in charts {
-                h.set_synced_time(None, cx);
+                h.set_synced_time(None, None, cx);
             }
         }
     });
