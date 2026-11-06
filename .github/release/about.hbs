@@ -6,19 +6,20 @@ third-party components, distributed under their own licences, reproduced below.
 
 Overview
 --------
+{{!-- Plain text: triple braces everywhere, so nothing is HTML-escaped. --}}
 {{#each overview}}
-{{name}}: {{count}}
+{{{name}}}: {{count}}
 {{/each}}
 
 {{#each licenses}}
 ================================================================================
-{{name}} ({{id}})
+{{{name}}} ({{{id}}})
 
 Used by:
 {{#each used_by}}
-  - {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
 {{/each}}
 
-{{text}}
+{{{text}}}
 
 {{/each}}
