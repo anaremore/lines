@@ -1,0 +1,81 @@
+# CI for the public build (roadmap 1b): Windows, macOS and Linux.
+# No vendor features, no secrets. Tests marked #[ignore] (internet, owner's local data) stay
+# ignored. Toolchain comes from rust-toolchain.toml (rustup installs it on first use).
+name: CI
+
+# Pushes to main plus PRs, so a PR commit runs the matrix once (not once for the push and
+# again for the PR). Other branches can be run by hand from the Actions tab.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Smaller target dirs and faster links than full debug info; backtraces keep line numbers.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  test:
+    name: clippy + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    # Cold builds (empty cache) take ~16 min on macOS; leave plenty of headroom.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # cqg-proto generates code from the CQG protos at build time (decision 0010).
+          submodules: true
+
+      - name: Install GPUI system libraries (Linux)
+        if: runner.os == 'Linux'
+        # Subset of script/linux at the pinned Zed rev that GPUI itself links against.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
+            libvulkan1 libglib2.0-dev libzstd-dev libasound2-dev
+
+      - name: Install pinned toolchain
+        shell: bash
+        run: rustup toolchain install
+
+      # Key = job + OS + rustc + Cargo.lock/Cargo.toml hashes, so unchanged dependencies
+      # reuse the previous build. PR runs read caches saved on main and on their own branch.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: clippy (screenshot feature)
+        # Screenshot mode (decision 0009) is developed on Windows; build it there.
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
