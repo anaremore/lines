@@ -6,12 +6,17 @@
 //! - `VERSIONINFO`: product name "Lines", version from Cargo.
 //!
 //! Compiled with the MSVC resource compiler (`rc.exe`) through `embed-resource`, pinned to the
-//! version GPUI already uses. On non-Windows targets this script does nothing.
+//! version GPUI already uses. On non-Windows targets only the build revision is set.
+//!
+//! `LINES_BUILD_REV` (for logs and diagnostics bundles): the environment's value if set (CI),
+//! else `git rev-parse --short=12 HEAD` plus `-dirty` for uncommitted changes, else
+//! `unknown`.
 
 use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    build_rev();
     // Target, not host: the check works when cross-compiling too.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -70,4 +75,46 @@ END
     embed_resource::compile(&out, embed_resource::NONE)
         .manifest_optional()
         .expect("compile Windows resources (needs the MSVC resource compiler, rc.exe)");
+}
+
+fn build_rev() {
+    println!("cargo:rerun-if-env-changed=LINES_BUILD_REV");
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
+    let repo = manifest_dir.join("../..");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    };
+    // Rerun when HEAD moves (checkout, commit) or the index changes (dirty state). Paths come
+    // from git, so this also works in worktrees (where `.git` is a file).
+    let mut watch = vec!["HEAD".to_owned(), "index".to_owned()];
+    if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watch.push(r);
+    }
+    for w in watch {
+        if let Some(p) = git(&["rev-parse", "--git-path", &w]) {
+            let p = repo.join(p);
+            if p.exists() {
+                println!("cargo:rerun-if-changed={}", p.display());
+            }
+        }
+    }
+    let rev = std::env::var("LINES_BUILD_REV")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            let head = git(&["rev-parse", "--short=12", "HEAD"])?;
+            let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+                .is_some_and(|s| !s.is_empty());
+            Some(if dirty { format!("{head}-dirty") } else { head })
+        });
+    println!(
+        "cargo:rustc-env=LINES_BUILD_REV={}",
+        rev.unwrap_or_else(|| "unknown".into())
+    );
 }
