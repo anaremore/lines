@@ -11,7 +11,8 @@
 //!
 //! Centring follows the inside market, but never while the pointer is over the ladder
 //! (docs/design.md §7); C re-centres, the wheel moves by rows, G / Shift+G change the price
-//! grouping (1, 2, 5, 10, 25 ticks, or any value via `--dom-grouping`).
+//! grouping (1, 2, 5, 10, 25 ticks, or any value via `--dom-grouping`). Ctrl+K opens the
+//! symbol picker (letters are DOM commands here, so typing a symbol needs Ctrl+K first).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -25,12 +26,15 @@ use lines_core::ladder::{
     self, GROUPING_PRESETS, Inside, LadderRow, LadderStats, LadderView, build_ladder, inside_row,
 };
 use lines_core::{FixedStr, Product};
+use lines_feed::catalog::Target;
 use lines_feed::store::ChartStore;
 
-use crate::feeds::PaneFeed;
-use crate::pane::{self, FeedChanged, Pane};
+use crate::feeds::{Feeds, PaneFeed};
+use crate::pane::{self, FeedChanged, Pane, PaneCommon};
+use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
+use crate::wsdoc::{DomState, PaneDoc};
 
 /// Most rows a ladder shows (the row buffer is allocated once at this size).
 const MAX_ROWS: usize = 256;
@@ -54,6 +58,8 @@ impl Default for DomOptions {
 
 pub struct DomView {
     feed: PaneFeed,
+    common: PaneCommon,
+    picker: PickerUi,
     store: Arc<ChartStore>,
     theme: Theme,
     /// Screenshot mode: no pointer, nothing time-dependent.
@@ -80,12 +86,31 @@ impl Pane for DomView {
         &self.store
     }
 
+    fn feed(&self) -> &PaneFeed {
+        &self.feed
+    }
+
+    fn common(&mut self) -> &mut PaneCommon {
+        &mut self.common
+    }
+
+    fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    fn save_state(&self, doc: &mut PaneDoc) {
+        doc.dom = Some(DomState {
+            grouping: self.grouping,
+        });
+    }
+
     fn seen_revision(&mut self) -> &mut u64 {
         &mut self.seen_revision
     }
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
-        self.store = feed.sub.store().clone();
+        self.picker.close();
+        self.store = feed.store().clone();
         {
             let d = self.store.read();
             self.product = d.product.clone();
@@ -109,7 +134,7 @@ impl DomView {
         opts: DomOptions,
         cx: &mut Context<Self>,
     ) -> Self {
-        let store = feed.sub.store().clone();
+        let store = feed.store().clone();
         let (product, has_depth) = {
             let d = store.read();
             (d.product.clone(), d.capabilities.depth)
@@ -117,6 +142,8 @@ impl DomView {
         pane::watch_store(cx);
         DomView {
             feed,
+            common: PaneCommon::default(),
+            picker: PickerUi::new(None, cx),
             store,
             theme,
             frozen,
@@ -135,6 +162,35 @@ impl DomView {
         }
     }
 
+    /// Restore saved view state (price grouping).
+    pub fn restore(&mut self, state: &DomState) {
+        self.set_grouping(state.grouping.clamp(1, 10_000));
+    }
+
+    fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
+        let today = pane::today(self.frozen, &self.store);
+        let outcome = self.picker.click(row, today, &self.feed.availability);
+        self.picked(outcome, cx);
+    }
+
+    /// The picker confirmed a target: switch and tell linked panes.
+    fn picked(&mut self, outcome: PickerKey, cx: &mut Context<Self>) {
+        let PickerKey::Confirm(target, product) = outcome else {
+            return;
+        };
+        match self.switch_to(target, cx) {
+            Ok(()) => self.picker.switched(product, cx),
+            Err(e) => self.picker.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        self.set_feed(feed.clone(), cx);
+        cx.emit(FeedChanged(feed));
+        Ok(())
+    }
+
     fn row_units(&self) -> i64 {
         self.grouping as i64 * self.product.price.tick
     }
@@ -147,6 +203,9 @@ impl DomView {
 
     fn on_mouse_down(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        if self.picker.close() {
+            cx.notify();
+        }
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -163,6 +222,20 @@ impl DomView {
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
+        if self.picker.is_open() {
+            let today = pane::today(self.frozen, &self.store);
+            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            self.picked(outcome, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if k.modifiers.control && !k.modifiers.alt && k.key == "k" {
+            self.picker.open("", cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if k.modifiers.control || k.modifiers.alt || k.modifiers.platform {
             return;
         }
@@ -191,6 +264,7 @@ impl DomView {
     // ---- paint ---------------------------------------------------------------------
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        self.common.paints += 1;
         self.bounds = bounds;
         let rows = self.visible_rows();
         // Hit-tested here, after layout, from the pointer's actual position: nothing the
@@ -364,7 +438,9 @@ impl DomView {
         let t = self.theme;
         let mut left = String::with_capacity(64);
         let mut right = String::with_capacity(64);
-        if let Some(d) = self.store.try_read() {
+        if let Some(title) = pane::unavailable_title(&self.feed) {
+            let _ = write!(left, "{title}  DOM");
+        } else if let Some(d) = self.store.try_read() {
             let _ = write!(left, "{}  DOM", pane::contract_text(&d));
         }
         let ticks = if self.grouping == 1 { "tick" } else { "ticks" };
@@ -379,6 +455,9 @@ impl DomView {
             .flex()
             .flex_row()
             .justify_between()
+            .gap_2()
+            .whitespace_nowrap()
+            .overflow_hidden()
             .px_2()
             .py_1()
             .bg(t.panel)
@@ -389,7 +468,9 @@ impl DomView {
                 div()
                     .flex()
                     .flex_row()
-                    .gap_3()
+                    .gap_2()
+                    .items_center()
+                    .children(pane::link_chip(self.common.link, &t))
                     .child(div().text_color(t.text_main).child(left))
                     .children(pane::stale_badge(&self.store, &t)),
             )
@@ -398,6 +479,8 @@ impl DomView {
                     .flex()
                     .flex_row()
                     .gap_2()
+                    .min_w_0()
+                    .overflow_hidden()
                     .text_color(t.text_dim)
                     .when_some(state, |d, s| {
                         // The book's state is text, not only colour.
@@ -434,29 +517,39 @@ pub fn next_grouping(g: u32, back: bool) -> u32 {
 impl Render for DomView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let t = self.theme;
+        let today = pane::today(self.frozen, &self.store);
+        let overlay =
+            self.picker
+                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+        let body = match pane::unavailable_body(&self.feed, &t) {
+            Some(b) => b.into_any_element(),
+            None => canvas(
+                |_, _, _| (),
+                move |bounds, (), window, cx| {
+                    entity.update(cx, |view, cx| view.paint(bounds, window, cx));
+                },
+            )
+            .size_full()
+            .into_any_element(),
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(self.theme.bg)
+            .bg(t.bg)
             .child(self.header())
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .size_full()
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_scroll(cx.listener(Self::on_scroll))
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, (), window, cx| {
-                                entity.update(cx, |view, cx| view.paint(bounds, window, cx));
-                            },
-                        )
-                        .size_full(),
-                    ),
+                    .child(body)
+                    .when_some(overlay, |d, o| d.child(o)),
             )
     }
 }

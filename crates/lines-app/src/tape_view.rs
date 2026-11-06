@@ -8,22 +8,28 @@
 //! Prints come from the store's bounded ring (`lines_core::Tape`). Paint copies the visible
 //! rows into a fixed buffer under a `try_lock` and draws them with cached glyphs: no
 //! allocation.
+//!
+//! Typing a symbol (or Ctrl+K) opens the symbol picker, as on the chart.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, Context, EventEmitter, IntoElement, ParentElement, Pixels, Render, Styled, Window,
-    canvas, div, fill, point, px, size,
+    App, Bounds, Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Render, Styled, Window, canvas, div, fill, point,
+    prelude::*, px, size,
 };
 use lines_core::tape::write_tape_time;
 use lines_core::{Aggressor, FixedStr, Print, Product, Qty};
+use lines_feed::catalog::Target;
 use lines_feed::store::ChartStore;
 
-use crate::feeds::PaneFeed;
-use crate::pane::{self, FeedChanged, Pane};
+use crate::feeds::{Feeds, PaneFeed};
+use crate::pane::{self, FeedChanged, Pane, PaneCommon};
+use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
+use crate::wsdoc::{PaneDoc, TapeState};
 
 const MAX_ROWS: usize = 256;
 const ROW_H: f32 = 17.0;
@@ -48,6 +54,11 @@ pub fn default_large_print(p: &Product) -> Qty {
 
 pub struct TapeView {
     feed: PaneFeed,
+    common: PaneCommon,
+    picker: PickerUi,
+    focus: FocusHandle,
+    /// Screenshot mode: contract choices use the replay's date.
+    frozen: bool,
     store: Arc<ChartStore>,
     theme: Theme,
     seen_revision: u64,
@@ -65,12 +76,31 @@ impl Pane for TapeView {
         &self.store
     }
 
+    fn feed(&self) -> &PaneFeed {
+        &self.feed
+    }
+
+    fn common(&mut self) -> &mut PaneCommon {
+        &mut self.common
+    }
+
+    fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    fn save_state(&self, doc: &mut PaneDoc) {
+        doc.tape = self.custom_large.map(|q| TapeState {
+            large_print: Some(q.0),
+        });
+    }
+
     fn seen_revision(&mut self) -> &mut u64 {
         &mut self.seen_revision
     }
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
-        self.store = feed.sub.store().clone();
+        self.picker.close();
+        self.store = feed.store().clone();
         self.product = self.store.read().product.clone();
         self.large = self
             .custom_large
@@ -83,12 +113,22 @@ impl Pane for TapeView {
 }
 
 impl TapeView {
-    pub fn new(feed: PaneFeed, theme: Theme, opts: TapeOptions, cx: &mut Context<Self>) -> Self {
-        let store = feed.sub.store().clone();
+    pub fn new(
+        feed: PaneFeed,
+        theme: Theme,
+        frozen: bool,
+        opts: TapeOptions,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let store = feed.store().clone();
         let product = store.read().product.clone();
         pane::watch_store(cx);
         TapeView {
             feed,
+            common: PaneCommon::default(),
+            picker: PickerUi::new(None, cx),
+            focus: cx.focus_handle(),
+            frozen,
             store,
             theme,
             seen_revision: u64::MAX,
@@ -102,7 +142,70 @@ impl TapeView {
         }
     }
 
+    /// Restore saved view state (a custom large-print size).
+    pub fn restore(&mut self, state: &TapeState) {
+        if let Some(q) = state.large_print.filter(|&q| q > 0) {
+            self.custom_large = Some(Qty(q));
+            self.large = Qty(q);
+        }
+    }
+
+    fn on_mouse_down(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        if self.picker.close() {
+            cx.notify();
+        }
+    }
+
+    fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        let m = k.modifiers;
+        if self.picker.is_open() {
+            let today = pane::today(self.frozen, &self.store);
+            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            self.picked(outcome, cx);
+        } else if m.control && !m.alt && k.key == "k" {
+            self.picker.open("", cx);
+        } else if let Some(letter) = k.key_char.as_deref().filter(|c| {
+            !m.control
+                && !m.alt
+                && !m.platform
+                && c.len() == 1
+                && c.as_bytes()[0].is_ascii_alphabetic()
+        }) {
+            self.picker.open(letter, cx);
+        } else {
+            return;
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
+        let today = pane::today(self.frozen, &self.store);
+        let outcome = self.picker.click(row, today, &self.feed.availability);
+        self.picked(outcome, cx);
+    }
+
+    fn picked(&mut self, outcome: PickerKey, cx: &mut Context<Self>) {
+        let PickerKey::Confirm(target, product) = outcome else {
+            return;
+        };
+        match self.switch_to(target, cx) {
+            Ok(()) => self.picker.switched(product, cx),
+            Err(e) => self.picker.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        self.set_feed(feed.clone(), cx);
+        cx.emit(FeedChanged(feed));
+        Ok(())
+    }
+
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        self.common.paints += 1;
         let rows = ((f(bounds.size.height) / ROW_H).floor() as usize).clamp(1, MAX_ROWS);
         if let Some(d) = self.store.try_read() {
             self.prints.clear();
@@ -188,7 +291,9 @@ impl TapeView {
     fn header(&self) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(48);
-        if let Some(d) = self.store.try_read() {
+        if let Some(title) = pane::unavailable_title(&self.feed) {
+            let _ = write!(left, "{title}  Time & sales");
+        } else if let Some(d) = self.store.try_read() {
             let _ = write!(left, "{}  Time & sales", pane::contract_text(&d));
         }
         let mut right = String::with_capacity(32);
@@ -199,6 +304,9 @@ impl TapeView {
             .flex()
             .flex_row()
             .justify_between()
+            .gap_2()
+            .whitespace_nowrap()
+            .overflow_hidden()
             .px_2()
             .py_1()
             .bg(t.panel)
@@ -210,33 +318,57 @@ impl TapeView {
                 div()
                     .flex()
                     .flex_row()
-                    .gap_3()
+                    .gap_2()
+                    .items_center()
+                    .children(pane::link_chip(self.common.link, &t))
                     .child(div().text_color(t.text_main).child(left))
                     .children(pane::stale_badge(&self.store, &t)),
             )
-            .child(div().text_color(t.text_dim).child(right))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_dim)
+                    .child(right),
+            )
     }
 }
 
 impl Render for TapeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let t = self.theme;
+        let today = pane::today(self.frozen, &self.store);
+        let overlay =
+            self.picker
+                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+        let body = match pane::unavailable_body(&self.feed, &t) {
+            Some(b) => b.into_any_element(),
+            None => canvas(
+                |_, _, _| (),
+                move |bounds, (), window, cx| {
+                    entity.update(cx, |view, cx| view.paint(bounds, window, cx));
+                },
+            )
+            .size_full()
+            .into_any_element(),
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(self.theme.bg)
+            .bg(t.bg)
             .child(self.header())
             .child(
-                div().flex_1().size_full().child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, (), window, cx| {
-                            entity.update(cx, |view, cx| view.paint(bounds, window, cx));
-                        },
-                    )
-                    .size_full(),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .size_full()
+                    .track_focus(&self.focus)
+                    .on_key_down(cx.listener(Self::on_key_down))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .child(body)
+                    .when_some(overlay, |d, o| d.child(o)),
             )
     }
 }

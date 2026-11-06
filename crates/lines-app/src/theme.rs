@@ -88,6 +88,9 @@ pub struct Theme {
     pub volume_bar: Hsla,
     /// T&S: background of a large print (with bold text).
     pub large_print: Hsla,
+    /// Link group swatches A..D (decision 0016). Always shown with the group's letter, so a
+    /// group never relies on colour alone; none of them is violet or up/down.
+    pub link: [Hsla; 4],
 }
 
 fn c(hex: u32) -> Hsla {
@@ -127,6 +130,8 @@ impl Theme {
             inside_ask: c(down).opacity(0.30),
             volume_bar: c(0x9a9fb2).opacity(0.18),
             large_print: c(0x262b39),
+            // amber, teal, orchid, slate
+            link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
         }
     }
 
@@ -163,6 +168,7 @@ impl Theme {
             inside_ask: c(down).opacity(0.22),
             volume_bar: c(0x565b6e).opacity(0.14),
             large_print: c(brand::PAPER),
+            link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
         }
     }
 
@@ -351,6 +357,27 @@ mod tests {
     }
 
     #[test]
+    fn link_colours_are_distinct_and_never_market_or_accent_colours() {
+        for t in Theme::all() {
+            for (i, l) in t.link.iter().enumerate() {
+                for (name, tok) in [("up", t.up), ("down", t.down), ("accent", t.accent)] {
+                    assert_ne!(*l, tok, "{}: link {i} is {name}", t.name);
+                }
+                for (j, m) in t.link.iter().enumerate() {
+                    assert!(i == j || l != m, "{}: links {i} and {j}", t.name);
+                }
+                // Swatches are non-text, but must still stand out from the header (3:1).
+                assert!(
+                    contrast(*l, t.panel) >= 3.0,
+                    "{}: link {i} on panel = {:.2}",
+                    t.name,
+                    contrast(*l, t.panel)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hollow_selection() {
         assert!(HollowBodies::Up.is_hollow(true) && !HollowBodies::Up.is_hollow(false));
         assert!(HollowBodies::Down.is_hollow(false) && !HollowBodies::Down.is_hollow(true));
@@ -364,6 +391,9 @@ mod tests {
             ("dom_view.rs", include_str!("dom_view.rs")),
             ("tape_view.rs", include_str!("tape_view.rs")),
             ("workspace.rs", include_str!("workspace.rs")),
+            ("pane.rs", include_str!("pane.rs")),
+            ("picker_view.rs", include_str!("picker_view.rs")),
+            ("bench.rs", include_str!("bench.rs")),
             ("text.rs", include_str!("text.rs")),
             ("main.rs", include_str!("main.rs")),
             ("screenshot.rs", include_str!("screenshot.rs")),

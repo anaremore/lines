@@ -1,13 +1,13 @@
 //! Symbol picker logic (roadmap 4b): fuzzy search, ranking, contract choices, micro/mini
 //! swapping and the recents/favourites settings file. Pure and GPUI-free so it is unit-tested;
-//! the only I/O is the explicit [`Settings::load`] / [`Settings::save`].
+//! the only I/O is the explicit [`Settings::load`]; saving goes through the app's writer.
 //!
 //! Ranking: recents first (most recent first), then favourites, then everything else; within
 //! favourites and the rest, best fuzzy score first, then catalog order. Products are picked;
 //! contracts are derived (decision 0013): row offset 0 follows the front month, Tab steps
 //! through the next listed months as fixed contracts.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lines_core::calendar::{calendar_expiry, calendar_roll_date};
 use lines_core::{CivilDate, ContractKey, FixedStr, Product, ProductId};
@@ -15,6 +15,8 @@ use lines_feed::catalog::{self, Target};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
+
+use crate::versioned::{self, Format};
 
 /// Recents kept in the settings file.
 pub const MAX_RECENTS: usize = 8;
@@ -77,58 +79,37 @@ pub struct Settings {
     pub favourites: Vec<u32>,
 }
 
+/// Files written before versioning (no `version` field) have exactly version 1's fields.
+fn settings_v0_to_v1(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
+/// `settings.json`'s format (`crate::versioned`).
+pub const SETTINGS_FORMAT: Format = Format {
+    what: "settings",
+    current: 1,
+    migrations: &[settings_v0_to_v1],
+};
+
 impl Settings {
-    /// `<config dir>/lines/settings.json`: `%APPDATA%` on Windows, `~/Library/Application
-    /// Support` on macOS, `$XDG_CONFIG_HOME` or `~/.config` elsewhere. `LINES_CONFIG_DIR`
-    /// overrides the directory (tests, portable installs).
-    pub fn default_path() -> Option<PathBuf> {
-        let var = |k| {
-            std::env::var_os(k)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        };
-        let dir = if let Some(d) = var("LINES_CONFIG_DIR") {
-            return Some(d.join("settings.json"));
-        } else if cfg!(windows) {
-            var("APPDATA")?
-        } else if cfg!(target_os = "macos") {
-            var("HOME")?.join("Library/Application Support")
-        } else {
-            var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|h| h.join(".config")))?
-        };
-        Some(dir.join("lines").join("settings.json"))
+    /// Missing file: defaults, no report. A file that can't be used is backed up and reported
+    /// (`crate::versioned::load`); the last value says whether saving over `path` is safe.
+    pub fn load(path: &Path) -> (Settings, Option<String>, bool) {
+        let l = versioned::load::<Settings>(&SETTINGS_FORMAT, path);
+        let mut s = l.value.unwrap_or_default();
+        s.normalise();
+        (s, l.report, l.writable)
     }
 
-    /// Missing file: defaults, no warning. Unreadable or corrupt: defaults plus a warning (the
-    /// file is left alone until the next save replaces it).
-    pub fn load(path: &Path) -> (Settings, Option<String>) {
-        match std::fs::read(path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Settings::default(), None),
-            Err(e) => (
-                Settings::default(),
-                Some(format!("can't read {}: {e}", path.display())),
-            ),
-            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
-                Ok(mut s) => {
-                    s.normalise();
-                    (s, None)
-                }
-                Err(e) => (
-                    Settings::default(),
-                    Some(format!("ignoring corrupt {}: {e}", path.display())),
-                ),
-            },
-        }
+    /// The file's bytes (versioned JSON).
+    pub fn encode(&self) -> Vec<u8> {
+        versioned::encode(&SETTINGS_FORMAT, self).unwrap_or_default()
     }
 
-    /// Write atomically (temp file + rename), creating the directory if needed.
+    /// Write synchronously (tests); the app saves through `crate::persist::Writer`.
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)
+        versioned::save(path, &self.encode())
     }
 
     fn normalise(&mut self) {
@@ -542,13 +523,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_file_roundtrip_missing_and_corrupt() {
+    fn settings_file_roundtrip_missing_corrupt_and_unversioned() {
         let dir = std::env::temp_dir().join(format!("lines-picker-test-{}", std::process::id()));
         let path = dir.join("nested").join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             Settings::load(&path),
-            (Settings::default(), None),
+            (Settings::default(), None, true),
             "missing = defaults"
         );
 
@@ -556,19 +537,34 @@ mod tests {
         s.push_recent(NQ);
         s.toggle_favourite(ZN);
         s.save(&path).unwrap();
-        assert_eq!(Settings::load(&path), (s.clone(), None));
+        assert_eq!(Settings::load(&path), (s.clone(), None, true));
+        assert!(
+            String::from_utf8(s.encode())
+                .unwrap()
+                .contains(r#""version": 1"#)
+        );
 
+        // Corrupt: defaults, reported, and the file kept aside (never silently discarded).
         std::fs::write(&path, b"{ not json").unwrap();
-        let (loaded, warning) = Settings::load(&path);
+        let (loaded, report, writable) = Settings::load(&path);
         assert_eq!(loaded, Settings::default());
-        assert!(warning.unwrap().contains("corrupt"));
+        assert!(writable);
+        assert!(report.unwrap().contains("couldn't be read"));
+        let kept: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("settings.unreadable-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
 
-        // Wrong shapes and duplicates are tolerated.
+        // A file from before versioning migrates (and is kept as settings.v0.json); wrong
+        // shapes and duplicates are tolerated.
         std::fs::write(&path, br#"{"recents":[2,2,1],"future_field":true}"#).unwrap();
-        let (loaded, warning) = Settings::load(&path);
-        assert_eq!(warning, None);
+        let (loaded, report, _) = Settings::load(&path);
+        assert_eq!(report, None);
         assert_eq!(loaded.recents, [2, 1]);
         assert!(loaded.favourites.is_empty());
+        assert!(path.with_file_name("settings.v0.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

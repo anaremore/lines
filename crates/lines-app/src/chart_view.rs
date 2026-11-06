@@ -22,11 +22,16 @@
 //! under the pointer.
 //!
 //! Symbol picker (roadmap 4b): any letter or Ctrl+K opens it over the chart. Its logic lives in
-//! `crate::picker` (pure, tested); this file only renders it and routes keys. Picking a symbol
+//! `crate::picker` (pure, tested) and its UI in `crate::picker_view`. Picking a symbol
 //! subscribes to the same source with a new target through the shared registry; the old
 //! subscription is dropped, and if no other pane watches it the registry stops that feed on a
 //! background thread (decision 0001: never on the UI thread). While closed it costs nothing
 //! per frame.
+//!
+//! Crosshair time sync (decision 0016, opt-in per workspace): after each paint the chart emits
+//! [`CrosshairTime`] when the time under its pointer changed; the workspace hands it to the
+//! other charts, which mark that time with a vertical line and a time tag (no price: the
+//! instruments differ). Mapping a time back to a bar is pure (`geometry::time_slot`).
 //!
 //! Layers (seam for the volume profile and other studies): a [`ChartLayer`] is prepared under
 //! the store lock with this frame's data and viewport, then painted inside the plot after the
@@ -34,31 +39,27 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, Font, FontFeatures, FontWeight,
-    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
-    Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
+    App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, Font, Hsla, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString, Styled, TextAlign,
+    TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
-use lines_core::geometry::{Crosshair, crosshair, snap, write_ohlcv};
-use lines_core::viewport::{ScaleDrag, ScaleMode};
-use lines_core::{Bar, CivilDate, FixedStr, Price, Product, Scene, Viewport};
+use lines_core::geometry::{Crosshair, crosshair, slot_x, snap, time_slot, write_ohlcv};
+use lines_core::viewport::{MAX_BAR_PX, MIN_BAR_PX, ScaleDrag, ScaleMode};
+use lines_core::{Bar, FixedStr, Price, Product, Scene, UtcMillis, Viewport};
 use lines_feed::ChartData;
-use lines_feed::catalog::{self, Target};
+use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
 
 use crate::feeds::{Feeds, PaneFeed};
-use crate::pane::{self, FeedChanged, Pane};
-use crate::picker::{self, Picker, Settings};
+use crate::pane::{self, FeedChanged, Pane, PaneCommon};
+use crate::picker_view::{PickerKey, PickerUi};
 use crate::theme::Theme;
-
-/// Result rows shown at once.
-const PICKER_ROWS: usize = 10;
-const PICKER_W: f32 = 600.0;
+use crate::wsdoc::{ChartState, PaneDoc};
 
 const AXIS_W: f32 = 78.0;
 const AXIS_H: f32 = 24.0;
@@ -129,22 +130,17 @@ struct Rates {
     frames_per_sec: f64,
 }
 
+/// The time under this chart's crosshair changed (`None`: it left the plot). The workspace
+/// forwards it to the other charts when crosshair sync is on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrosshairTime(pub Option<UtcMillis>);
+
 pub struct ChartView {
     feed: PaneFeed,
+    common: PaneCommon,
     /// Studies over the plot, painted in order.
     layers: Vec<Box<dyn ChartLayer>>,
-    entries: Vec<picker::Entry>,
-    settings: Settings,
-    /// `None` in screenshot mode: no user settings are read or written there.
-    settings_path: Option<PathBuf>,
-    /// Generation of the newest settings snapshot written (background saves skip stale ones).
-    settings_saved: Arc<Mutex<u64>>,
-    settings_gen: u64,
-    picker: Option<Picker>,
-    /// Shown inline in the picker (e.g. a switch that failed to start).
-    picker_error: Option<String>,
-    /// Tabular digits for the picker's dates and day counts.
-    tnum: FontFeatures,
+    picker: PickerUi,
     store: Arc<ChartStore>,
     theme: Theme,
     /// Screenshot mode: no wall-clock-dependent text (rates, paint time) is shown.
@@ -161,7 +157,12 @@ pub struct ChartView {
     chart: Bounds<Pixels>,
     drag: Option<Drag>,
     focus: FocusHandle,
-    focus_requested: bool,
+    /// Another chart's crosshair time (crosshair sync), drawn while this one has none.
+    synced_time: Option<UtcMillis>,
+    /// This frame's sync marker: plot-local x of the synced time's bar, and the time.
+    sync_marker: Option<(f32, UtcMillis)>,
+    /// The time this chart last reported under its own crosshair.
+    reported_time: Option<UtcMillis>,
     /// Screenshot fixture: price zoom to apply once, after the first auto-fit.
     pending_price_zoom: Option<f64>,
     /// Pointer position in plot-local logical px, while it is over the plot.
@@ -186,43 +187,18 @@ impl ChartView {
         fixture: Fixture,
         cx: &mut Context<Self>,
     ) -> Self {
-        let store = feed.sub.store().clone();
+        let store = feed.store().clone();
         let instrument = store.read().product.clone();
-        // Screenshots must not depend on (or change) the user's recents and favourites.
-        let settings_path = if frozen {
-            None
-        } else {
-            Settings::default_path()
-        };
-        let settings = settings_path
-            .as_deref()
-            .map_or_else(Settings::default, |p| {
-                let (s, warning) = Settings::load(p);
-                if let Some(w) = warning {
-                    tracing::warn!("{w}");
-                }
-                s
-            });
-        let entries = picker::entries(catalog::all());
-        let picker = fixture
-            .picker
-            .as_deref()
-            .map(|q| Picker::open(q, &entries, &settings));
+        let picker = PickerUi::new(fixture.picker.as_deref(), cx);
         // Poll the lock-free revision counter at ~120 Hz; redraw only on change. Reads the
         // view's current store, which changes when the picker switches symbols.
         pane::watch_store(cx);
 
         ChartView {
             feed,
+            common: PaneCommon::default(),
             layers: Vec::new(),
-            entries,
-            settings,
-            settings_path,
-            settings_saved: Arc::new(Mutex::new(0)),
-            settings_gen: 0,
             picker,
-            picker_error: None,
-            tnum: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
             store,
             theme,
             frozen,
@@ -237,7 +213,9 @@ impl ChartView {
             chart: Bounds::default(),
             drag: None,
             focus: cx.focus_handle(),
-            focus_requested: false,
+            synced_time: None,
+            sync_marker: None,
+            reported_time: None,
             hover: fixture.cursor,
             pending_price_zoom: fixture.price_zoom,
             cross: None,
@@ -313,7 +291,7 @@ impl ChartView {
             return;
         };
         self.focus.focus(window, cx);
-        if self.picker.take().is_some() {
+        if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
             cx.notify();
             return;
@@ -343,13 +321,16 @@ impl ChartView {
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let m = k.modifiers;
-        if self.picker.is_some() {
-            self.picker_key(ev, cx);
+        if self.picker.is_open() {
+            let today = pane::today(self.frozen, &self.store);
+            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            self.picked(outcome, cx);
             cx.stop_propagation();
+            cx.notify();
             return;
         }
         if m.control && !m.alt && k.key == "k" {
-            self.open_picker("");
+            self.open_picker("", cx);
         } else if k.key == "home" {
             self.vp.reset(self.series_len);
         } else if let Some(letter) = k.key_char.as_deref().filter(|c| {
@@ -360,106 +341,38 @@ impl ChartView {
                 && c.as_bytes()[0].is_ascii_alphabetic()
         }) {
             // Type a symbol straight onto the chart: the picker opens with that letter.
-            self.open_picker(letter);
+            self.open_picker(letter, cx);
         } else {
             return;
         }
+        cx.stop_propagation();
         cx.notify();
     }
 
-    fn open_picker(&mut self, query: &str) {
+    fn open_picker(&mut self, query: &str, cx: &mut Context<Self>) {
         self.end_drag();
-        self.picker_error = None;
-        self.picker = Some(Picker::open(query, &self.entries, &self.settings));
-    }
-
-    /// The date contract choices are computed for: the replay's market date in screenshot mode
-    /// (reproducible), else today (UTC).
-    fn today(&self) -> CivilDate {
-        let market = self
-            .frozen
-            .then(|| self.store.try_read().and_then(|d| d.market_time))
-            .flatten();
-        CivilDate::from_utc(market.unwrap_or_else(lines_feed::now_utc))
-    }
-
-    fn picker_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
-        let k = &ev.keystroke;
-        let m = k.modifiers;
-        let today = self.today();
-        let Some(p) = self.picker.as_mut() else {
-            return;
-        };
-        let (entries, settings) = (&self.entries, &self.settings);
-        self.picker_error = None;
-        match k.key.as_str() {
-            "escape" => self.picker = None,
-            "enter" => self.confirm_picker(cx),
-            "up" => p.move_selection(-1),
-            "down" => p.move_selection(1),
-            "tab" => p.cycle_contract(if m.shift { -1 } else { 1 }, entries, today),
-            "backspace" => p.backspace(entries, settings),
-            "m" if m.alt => p.toggle_size(entries, settings),
-            "d" if m.control => {
-                if let Some(id) = p.selected_entry(entries).map(|e| e.product.id) {
-                    self.settings.toggle_favourite(id);
-                    if let Some(p) = self.picker.as_mut() {
-                        p.refresh(&self.entries, &self.settings);
-                    }
-                    self.save_settings();
-                }
-            }
-            _ => {
-                if let Some(text) = k.key_char.as_deref().filter(|t| {
-                    !m.control && !m.alt && !m.platform && t.chars().all(|c| !c.is_control())
-                }) {
-                    p.push_str(text, entries, settings);
-                } else {
-                    return;
-                }
-            }
-        }
-        cx.notify();
+        self.picker.open(query, cx);
     }
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
-        if let Some(p) = self.picker.as_mut() {
-            if p.selected != row {
-                p.selected = row;
-                p.offset = 0;
-            }
-            self.confirm_picker(cx);
-            cx.notify();
-        }
+        let today = pane::today(self.frozen, &self.store);
+        let outcome = self.picker.click(row, today, &self.feed.availability);
+        self.picked(outcome, cx);
     }
 
-    /// Enter: switch to the selected row's product (front month) or contract. Disabled rows
-    /// stay open and say why; nothing is started that the source can't serve.
-    fn confirm_picker(&mut self, cx: &mut Context<Self>) {
-        let today = self.today();
-        let Some(row) = self
-            .picker
-            .as_ref()
-            .and_then(|p| p.selected_row(&self.entries, today))
-        else {
+    /// A picker confirmed a target: subscribe on the same source, swap it in and tell linked
+    /// panes. The old subscription is dropped (the registry stops its feed in the background
+    /// if unused).
+    fn picked(&mut self, outcome: PickerKey, cx: &mut Context<Self>) {
+        let PickerKey::Confirm(target, product) = outcome else {
             return;
         };
-        if let Err(reason) = self.feed.availability.check(&row.target) {
-            self.picker_error = Some(reason);
-            return;
-        }
-        match self.switch_to(row.target, cx) {
-            Ok(()) => {
-                self.picker = None;
-                self.settings.push_recent(row.contract.product);
-                self.save_settings();
-            }
-            Err(e) => self.picker_error = Some(format!("{e:#}")),
+        match self.switch_to(target, cx) {
+            Ok(()) => self.picker.switched(product, cx),
+            Err(e) => self.picker.error = Some(format!("{e:#}")),
         }
     }
 
-    /// Subscribe to `target` on the same source, swap it in and tell linked panes. The old
-    /// subscription is dropped (the registry stops its feed in the background if unused).
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
         self.apply_feed(feed.clone());
@@ -468,11 +381,14 @@ impl ChartView {
     }
 
     fn apply_feed(&mut self, feed: PaneFeed) {
-        self.store = feed.sub.store().clone();
+        self.store = feed.store().clone();
         self.feed = feed;
         self.instrument = self.store.read().product.clone();
         // A fresh view for the new series; price labels belong to the old product's format.
+        // The time zoom is the trader's choice, not the market's: keep it.
+        let bar_px = self.vp.bar_px;
         self.vp = Viewport::default();
+        self.vp.bar_px = bar_px;
         self.drag = None;
         self.series_len = 0;
         self.series_trimmed = 0;
@@ -484,30 +400,19 @@ impl ChartView {
         self.labels.clear();
     }
 
-    /// Persist recents/favourites off the UI thread. Saves can finish out of order, so each
-    /// carries a generation and only a newer one may overwrite the file.
-    fn save_settings(&mut self) {
-        let Some(path) = self.settings_path.clone() else {
-            return;
-        };
-        self.settings_gen += 1;
-        let (generation, snapshot, saved) = (
-            self.settings_gen,
-            self.settings.clone(),
-            self.settings_saved.clone(),
-        );
-        let _ = std::thread::Builder::new()
-            .name("lines-settings".into())
-            .spawn(move || {
-                let mut last = saved.lock().unwrap_or_else(|e| e.into_inner());
-                if generation <= *last {
-                    return;
-                }
-                match snapshot.save(&path) {
-                    Ok(()) => *last = generation,
-                    Err(e) => tracing::warn!("can't save {}: {e}", path.display()),
-                }
-            });
+    /// Another chart's crosshair time (crosshair sync); `None` clears it.
+    pub fn set_synced_time(&mut self, t: Option<UtcMillis>, cx: &mut Context<Self>) {
+        if self.synced_time != t {
+            self.synced_time = t;
+            cx.notify();
+        }
+    }
+
+    /// Restore saved view state (time zoom).
+    pub fn restore(&mut self, state: &ChartState) {
+        if state.bar_px.is_finite() {
+            self.vp.bar_px = state.bar_px.clamp(MIN_BAR_PX, MAX_BAR_PX);
+        }
     }
 
     /// Track the pointer for the crosshair; it shows only while the pointer is over the plot.
@@ -593,8 +498,9 @@ impl ChartView {
 
     // ---- paint ---------------------------------------------------------------------
 
-    fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let t0 = Instant::now();
+        self.common.paints += 1;
         let scale = window.scale_factor();
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let plot_w = (w - AXIS_W).max(10.0);
@@ -641,6 +547,12 @@ impl ChartView {
                 )
             });
             self.cross_bar = self.cross.and_then(|c| c.bar).map(|i| bars[i]);
+            // Another chart's crosshair time, where this chart has a bar for it.
+            self.sync_marker = self.synced_time.and_then(|t| {
+                let slot = time_slot(bars, t, self.period_ms)?;
+                let x = slot_x(&self.vp, slot as f64, scale);
+                (x >= 0.0 && f64::from(x) < self.vp.width).then_some((x, t))
+            });
             for l in &mut self.layers {
                 l.prepare(&d, &self.vp);
             }
@@ -660,6 +572,13 @@ impl ChartView {
             self.font = Some(window.text_style().font());
         }
         self.draw(bounds, window, cx);
+
+        // Crosshair sync: report this frame's time under the pointer when it changed.
+        let time = self.cross.and_then(|c| c.time);
+        if time != self.reported_time {
+            self.reported_time = time;
+            cx.emit(CrosshairTime(time));
+        }
 
         let us = t0.elapsed().as_secs_f64() * 1e6;
         self.paint_time_ewma_us = if self.paint_time_ewma_us == 0.0 {
@@ -740,6 +659,11 @@ impl ChartView {
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
                 window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
+            }
+            if self.cross.is_none()
+                && let Some((x, _)) = self.sync_marker
+            {
+                window.paint_quad(fill(rect(x - hair * 0.5, 0.0, hair, ph), t.crosshair));
             }
             if let Some(c) = self.cross {
                 // Vertical line through the wick; the horizontal one stops either side of it
@@ -822,6 +746,8 @@ impl ChartView {
         }
         if let Some(c) = self.cross {
             self.draw_crosshair_tags(c, bounds, window, cx);
+        } else if let Some((x, time)) = self.sync_marker {
+            self.draw_time_tag(x, time, bounds, window, cx);
         }
         if let Some(bar) = self.cross_bar {
             self.draw_readout(bar, bounds, window, cx);
@@ -912,8 +838,29 @@ impl ChartView {
             },
         );
 
-        // Time tag: centred on the vertical line, clamped to the time axis.
-        let Some(time) = c.time else { return };
+        if let Some(time) = c.time {
+            self.draw_time_tag(c.x, time, bounds, window, cx);
+        }
+    }
+
+    /// A time tag on the time axis, centred on `x` (plot-local) and clamped to the axis.
+    fn draw_time_tag(
+        &mut self,
+        x: f32,
+        time: UtcMillis,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        let scale = window.scale_factor();
+        let hair = 1.0 / scale;
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let (pw, ph) = (
+            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.height),
+        );
+        let line_h = px(LABEL_PX * 1.3);
         let period = self.period_ms;
         let text = move |s: &mut FixedStr<32>| {
             let _ = time.write_crosshair_label(period, s);
@@ -923,10 +870,7 @@ impl ChartView {
                 .width,
         );
         let box_w = text_w + 12.0;
-        let left = snap(
-            f64::from((c.x - box_w * 0.5).min(pw - box_w).max(0.0)),
-            scale,
-        );
+        let left = snap(f64::from((x - box_w * 0.5).min(pw - box_w).max(0.0)), scale);
         window.paint_quad(fill(
             Bounds::new(
                 point(px(ox + left), px(oy + ph + hair)),
@@ -1050,169 +994,36 @@ impl ChartView {
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
     }
 
-    /// The open picker: query line, ranked rows, key hints. Built only while open.
-    fn picker_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let p = self.picker.as_ref()?;
-        let t = self.theme;
-        let today = self.today();
-        let first = p.selected.saturating_sub(PICKER_ROWS - 1);
-        let mut rows = div().flex().flex_col().py_1();
-        for (i, hit) in p.hits.iter().enumerate().skip(first).take(PICKER_ROWS) {
-            let e = &self.entries[hit.index];
-            let selected = i == p.selected;
-            let row = picker::contract_row(&e.product, today, if selected { p.offset } else { 0 });
-            let unavailable = match &row {
-                Some(r) => self.feed.availability.check(&r.target).err(),
-                None => Some("no listed contract".to_owned()),
-            };
-            let fg = if unavailable.is_some() {
-                t.text_dim
-            } else {
-                t.text_main
-            };
-            let mut right = div().flex().flex_row().gap_2().text_color(t.text_dim);
-            match (&unavailable, &row) {
-                (Some(reason), _) => right = right.child(reason.clone()),
-                (None, Some(r)) => {
-                    right = right.child(div().text_color(fg).child(r.label.as_str().to_owned()));
-                    if r.is_front && !e.product.is_spot() {
-                        right = right.child("front");
-                    }
-                    if let Some(x) = r.expiry {
-                        right = right.child(format!("exp {x}"));
-                    }
-                    if let Some(d) = r.days_to_roll {
-                        let roll = div().child(if r.roll_soon {
-                            format!("roll soon · {d}d")
-                        } else {
-                            format!("roll {d}d")
-                        });
-                        right = right.child(if r.roll_soon {
-                            roll.text_color(t.text_main).font_weight(FontWeight::BOLD)
-                        } else {
-                            roll
-                        });
-                    }
-                }
-                (None, None) => {}
-            }
-            let star = if self.settings.is_favourite(e.product.id) {
-                "★"
-            } else {
-                ""
-            };
-            rows = rows.child(
-                div()
-                    .id(("picker-row", i))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .border_l_2()
-                    .border_color(if selected {
-                        t.accent
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .when(selected, |d| d.bg(t.accent.opacity(0.16)))
-                    .child(div().w(px(12.0)).text_color(t.text_dim).child(star))
-                    .child(
-                        div()
-                            .w(px(64.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg)
-                            .child(e.product.symbol),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_color(t.text_dim)
-                            .child(format!("{}  ·  {}", e.product.description, e.exchange)),
-                    )
-                    .child(right)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |view, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            view.picker_click(i, cx);
-                        }),
-                    ),
-            );
-        }
-        if p.hits.is_empty() {
-            rows = rows.child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_color(t.text_dim)
-                    .child("no matching symbols"),
-            );
-        }
-        let query = if p.query.is_empty() {
-            div().text_color(t.text_dim).child("Search symbols")
-        } else {
-            div().text_color(t.text_main).child(p.query.clone())
-        };
-        let hints = div()
-            .flex()
-            .flex_row()
-            .justify_between()
-            .px_3()
-            .py_1()
-            .border_t_1()
-            .border_color(t.axis_line)
-            .text_size(px(11.0))
-            .text_color(t.text_dim)
-            .child("↑↓ select   Tab month   Alt+M micro/mini   Ctrl+D favourite   Enter open   Esc close")
-            .when_some(self.picker_error.clone(), |d, err| {
-                d.child(div().text_color(t.text_main).child(err))
-            });
-        Some(
-            div()
-                .absolute()
-                .top(px(24.0))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .id("symbol-picker")
-                        .occlude()
-                        .w(px(PICKER_W))
-                        .flex()
-                        .flex_col()
-                        .bg(t.panel)
-                        .border_1()
-                        .border_color(t.axis_line)
-                        .rounded_md()
-                        .text_size(px(13.0))
-                        .font_features(self.tnum.clone())
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .px_3()
-                                .py_2()
-                                .border_b_1()
-                                .border_color(t.axis_line)
-                                .child(query)
-                                .child(div().w(px(2.0)).h(px(15.0)).bg(t.accent)),
-                        )
-                        .child(rows)
-                        .child(hints),
-                )
-                .into_any_element(),
-        )
-    }
-
     fn header(&self) -> impl IntoElement {
         let t = self.theme;
+        let bar = || {
+            div()
+                .flex()
+                .flex_row()
+                .justify_between()
+                .gap_2()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .px_3()
+                .py_1()
+                .bg(t.panel)
+                .border_b_1()
+                .border_color(t.axis_line)
+                .text_sm()
+        };
+        let chip = pane::link_chip(self.common.link, &t);
+        if let Some(title) = pane::unavailable_title(&self.feed) {
+            return bar().child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .text_color(t.text_dim)
+                    .children(chip)
+                    .child(title),
+            );
+        }
         let mut left = String::with_capacity(96);
         let mut right = String::with_capacity(160);
         let Some(d) = self.store.try_read() else {
@@ -1265,33 +1076,53 @@ impl ChartView {
         if let FeedStatus::Failed(msg) | FeedStatus::Reconnecting { reason: msg, .. } = &d.status {
             let _ = write!(right, "  ·  {msg}");
         }
-        div()
-            .flex()
-            .flex_row()
-            .justify_between()
-            .px_3()
-            .py_1()
-            .bg(t.panel)
-            .border_b_1()
-            .border_color(t.axis_line)
-            .text_sm()
+        bar()
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap_3()
+                    .gap_2()
+                    .items_center()
+                    .flex_shrink_0()
+                    .children(chip)
                     .child(div().text_color(t.text_main).child(left))
                     .children(pane::stale_badge(&self.store, &t)),
             )
-            .child(div().text_color(t.text_dim).child(right))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_dim)
+                    .child(right),
+            )
     }
 }
 
 impl EventEmitter<FeedChanged> for ChartView {}
 
+impl EventEmitter<CrosshairTime> for ChartView {}
+
 impl Pane for ChartView {
     fn store(&self) -> &Arc<ChartStore> {
         &self.store
+    }
+
+    fn feed(&self) -> &PaneFeed {
+        &self.feed
+    }
+
+    fn common(&mut self) -> &mut PaneCommon {
+        &mut self.common
+    }
+
+    fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    fn save_state(&self, doc: &mut PaneDoc) {
+        doc.chart = Some(ChartState {
+            bar_px: self.vp.bar_px,
+        });
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -1299,7 +1130,7 @@ impl Pane for ChartView {
     }
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
-        self.picker = None;
+        self.picker.close();
         self.apply_feed(feed);
         cx.notify();
     }
@@ -1309,18 +1140,36 @@ impl Pane for ChartView {
     }
 }
 
-/// Key and mouse hints for the chart, shown once per window by the workspace.
-pub const HINTS: &str = "drag: pan  ·  wheel: zoom time  ·  shift+wheel: scroll  ·  ctrl+wheel, ctrl+drag or drag an axis: scale  ·  double-click price axis: auto-scale  ·  Home: latest  ·  type a symbol or Ctrl+K: switch";
+/// Key and mouse hints for a focused chart, in the window's status line.
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.focus_requested {
-            // Keyboard shortcuts (Home) work without clicking the chart first.
-            self.focus_requested = true;
-            self.focus.focus(window, cx);
-        }
         let t = self.theme;
         let entity = cx.entity();
+        let today = pane::today(self.frozen, &self.store);
+        let overlay =
+            self.picker
+                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+        if let Some(body) = pane::unavailable_body(&self.feed, &t) {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(t.bg)
+                .child(self.header())
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .size_full()
+                        .track_focus(&self.focus)
+                        .on_key_down(cx.listener(Self::on_key_down))
+                        .child(body)
+                        .when_some(overlay, |d, o| d.child(o)),
+                );
+        }
+        let _ = window;
         div()
             .size_full()
             .flex()
@@ -1349,7 +1198,7 @@ impl Render for ChartView {
                         )
                         .size_full(),
                     )
-                    .when_some(self.picker_overlay(cx), |d, overlay| d.child(overlay)),
+                    .when_some(overlay, |d, overlay| d.child(overlay)),
             )
     }
 }

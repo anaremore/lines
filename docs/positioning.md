@@ -34,5 +34,6 @@ Measured the same way on every release, on stated reference hardware, from repla
 | Startup | Process start → trading-ready with workspace restored | ~2 s |
 | Replay stress | Worst frame time during a market-open replay at max speed | < 16 ms |
 | Memory | Resident memory with 6 charts + 2 DOMs open | Published, tracked for regressions |
+| Workspace frame | CPU time to build a frame (`Window::draw`, p50/p99/max) with 6 charts + 2 DOMs on two live feeds; hidden tabs paint nothing | Within the 8 ms budget; measured by `lines --bench` (release build) |
 
 Benchmarks run in CI on every platform where hardware allows; regressions beyond a threshold fail the build.
