@@ -349,7 +349,8 @@ mod tests {
         ] {
             assert_eq!(cmd(k), None, "{k}");
         }
-        for k in ["k", "d"] {
+        // Ctrl+I: the chart's indicator menu (roadmap 5c).
+        for k in ["k", "d", "i"] {
             assert_eq!(cmd(&format!("{}-{k}", ctrl())), None, "{k}");
         }
         assert_eq!(cmd("ctrl-alt-left"), None);
