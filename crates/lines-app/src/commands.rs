@@ -272,9 +272,9 @@ pub fn filter(query: &str, commands: &[Command]) -> Vec<Command> {
 /// The workspace's key hints for the status line.
 pub fn workspace_hints() -> &'static str {
     if cfg!(target_os = "macos") {
-        "⌥arrows: focus  ·  ⇧⌘P: all commands  ·  right-click or ⇧F10: pane menu"
+        "⇧⌘P: all commands  ·  ⌘T: new tab  ·  right-click: pane menu"
     } else {
-        "Alt+arrows: focus  ·  Ctrl+Shift+P: all commands  ·  right-click or Shift+F10: pane menu"
+        "Ctrl+Shift+P: all commands  ·  Ctrl+T: new tab  ·  right-click: pane menu"
     }
 }
 

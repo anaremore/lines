@@ -229,6 +229,12 @@ pub fn refocus<Id: Copy + Eq + Hash>(
 
 // ---- tabs -------------------------------------------------------------------------------
 
+/// A window shows its tab bar only with two tabs or more (one tab needs no bar; Ctrl+T, the
+/// pane menu and the palette still make a second one, and then the bar appears).
+pub fn shows_tab_bar(tabs: usize) -> bool {
+    tabs > 1
+}
+
 /// What closing a tab does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseTab {
@@ -565,6 +571,15 @@ mod tests {
         assert_eq!(tabs, vec!["fresh"]);
         assert_eq!(reopen(&mut tabs, &mut closed), 0);
         assert_eq!(tabs, vec!["only", "fresh"]);
+    }
+
+    #[test]
+    fn the_tab_bar_appears_with_a_second_tab() {
+        assert!(!shows_tab_bar(1));
+        assert!(shows_tab_bar(2));
+        // The last tab overall is replaced, never removed: one tab, no bar.
+        assert_eq!(close_tab(1, 1, 0, 0), CloseTab::ReplaceWithFresh);
+        assert!(!shows_tab_bar(1));
     }
 
     #[test]
