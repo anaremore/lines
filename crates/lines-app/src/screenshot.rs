@@ -131,6 +131,11 @@ fn capture(
             let _ = cx.update_window(handle.into(), |_, window, _| window.resize(size(px(dw), px(dh))));
             cx.background_executor().timer(Duration::from_millis(100)).await;
         }
+        // Indicators are computed on the indicator thread: wait until it has processed the
+        // whole replay and the panes' requests, then give the panes a poll tick to pick the
+        // values up, so the frame is deterministic.
+        lines_feed::indicators::engine().sync();
+        cx.background_executor().timer(Duration::from_millis(100)).await;
         // Warm-up frame in its own update, so what it emits (crosshair sync between charts)
         // is delivered before the frame that is read back.
         let _ = cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx));

@@ -139,10 +139,9 @@ impl ContractWriter {
                         );
                         opened.truncated_bytes += rep.truncated_bytes;
                         // Trades after the last valid block are gone: stop claiming them.
-                        let day_end = date.add_days(1).start_utc().0 - 1;
-                        let from = rep
-                            .last_time_us
-                            .map_or(date.start_utc().0, |t| t.div_euclid(1000) + 1);
+                        let (open, close) = super::partition::trade_date_span(product, date);
+                        let day_end = close.0 - 1;
+                        let from = rep.last_time_us.map_or(open.0, |t| t.div_euclid(1000) + 1);
                         coverage.trades.remove(from, day_end);
                     }
                 }
