@@ -6,7 +6,7 @@
 
 <p align="center">A native, fast futures charting and DOM platform for discretionary and prop-firm traders.</p>
 
-<!-- CI badge: added by the `ci` branch (PR #1). -->
+[![CI](https://github.com/anaremore/lines/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/anaremore/lines/actions/workflows/ci.yml)
 
 ![Lines charting synthetic mock data in the dark theme, with the crosshair and OHLCV readout](assets/readme/lines-dark.png)
 
