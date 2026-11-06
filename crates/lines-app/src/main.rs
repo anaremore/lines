@@ -10,6 +10,7 @@ mod picker;
 mod picker_view;
 #[cfg(feature = "screenshot")]
 mod screenshot;
+mod studies;
 mod tape_view;
 mod text;
 mod theme;
@@ -198,6 +199,52 @@ struct Cli {
     /// Screenshot: render with the symbol picker open on this query (e.g. "nq").
     #[arg(long, requires = "screenshot")]
     picker: Option<String>,
+    /// Add a VWAP to the first chart (repeatable): eth (default reset), rth, week, month or
+    /// anchor@2026-11-06T14:30:00Z, optionally with σ bands after a slash: eth/1,2,3 (quote it
+    /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
+    #[arg(long, value_parser = parse_vwap)]
+    vwap: Vec<lines_indicators::VwapSpec>,
+}
+
+fn parse_vwap(s: &str) -> Result<lines_indicators::VwapSpec, String> {
+    use lines_indicators::{Bands, Reset, VwapSpec};
+    let (reset, bands) = match s.split_once('/') {
+        Some((r, b)) => (r, Some(b)),
+        None => (s, None),
+    };
+    let reset = match reset.to_ascii_lowercase().as_str() {
+        "eth" => Reset::Eth,
+        "rth" => Reset::Rth,
+        "week" | "weekly" => Reset::Weekly,
+        "month" | "monthly" => Reset::Monthly,
+        r => match r.strip_prefix("anchor@") {
+            Some(t) => Reset::Anchored {
+                from: parse_time(&t.to_ascii_uppercase())?.0,
+            },
+            None => {
+                return Err(format!(
+                    "unknown VWAP reset {r:?} (eth, rth, week, month, anchor@TIME)"
+                ));
+            }
+        },
+    };
+    let mut mask = 0u8;
+    for k in bands
+        .into_iter()
+        .flat_map(|b| b.split(','))
+        .filter(|k| !k.is_empty())
+    {
+        match k.trim() {
+            "1" => mask |= 1,
+            "2" => mask |= 2,
+            "3" => mask |= 4,
+            k => return Err(format!("bands are 1, 2 or 3, not {k:?}")),
+        }
+    }
+    Ok(VwapSpec {
+        reset,
+        bands: Bands(mask),
+    })
 }
 
 fn parse_time(s: &str) -> Result<UtcMillis, String> {
@@ -396,6 +443,15 @@ fn main() -> Result<()> {
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),
+            indicators: cli
+                .vwap
+                .iter()
+                .enumerate()
+                .map(|(i, spec)| lines_indicators::IndicatorConfig::Vwap {
+                    spec: *spec,
+                    color: (i % 4) as u8,
+                })
+                .collect(),
         })),
         default_size: cli.size,
     };
@@ -645,6 +701,23 @@ mod tests {
     fn window_icon_decodes() {
         let icon = window_icon().expect("embedded PNG decodes");
         assert_eq!(icon.dimensions(), (256, 256));
+    }
+
+    #[test]
+    fn vwap_flags_parse() {
+        use lines_indicators::{Bands, Reset};
+        assert_eq!(parse_vwap("eth").unwrap().reset, Reset::Eth);
+        let v = parse_vwap("rth/1,3").unwrap();
+        assert_eq!((v.reset, v.bands), (Reset::Rth, Bands(0b101)));
+        let v = parse_vwap("anchor@2026-11-06T14:30:00Z/2").unwrap();
+        assert_eq!(
+            v.reset,
+            Reset::Anchored {
+                from: UtcMillis::parse_iso("2026-11-06T14:30:00Z").unwrap().0
+            }
+        );
+        assert!(parse_vwap("hourly").is_err());
+        assert!(parse_vwap("eth/4").is_err());
     }
 
     #[test]

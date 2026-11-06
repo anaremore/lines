@@ -160,10 +160,13 @@ impl TargetDoc {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChartState {
     /// Time zoom: logical px per bar.
     pub bar_px: f64,
+    /// The chart's indicators (roadmap 5c). Optional: files without it load with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indicators: Vec<lines_indicators::IndicatorConfig>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +456,33 @@ mod tests {
     use super::*;
     use crate::versioned::{Decoded, decode, encode};
 
+    /// Roadmap 5c: a chart's indicators are saved with it; files from before load with none.
+    #[test]
+    fn chart_indicators_are_optional_and_round_trip() {
+        let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
+        assert!(old.indicators.is_empty());
+        let state = ChartState {
+            bar_px: 7.0,
+            indicators: vec![lines_indicators::IndicatorConfig::Vwap {
+                spec: lines_indicators::VwapSpec {
+                    reset: lines_indicators::Reset::Rth,
+                    bands: lines_indicators::Bands(0b011),
+                },
+                color: 1,
+            }],
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains(r#""indicators""#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), state);
+        // None saved: the field is left out, so the file stays as before.
+        let none = serde_json::to_string(&ChartState {
+            bar_px: 7.0,
+            indicators: vec![],
+        })
+        .unwrap();
+        assert!(!none.contains("indicators"), "{none}");
+    }
+
     #[test]
     fn default_is_nq_and_es_side_by_side_each_with_chart_dom_and_tape() {
         let w = WorkspaceDoc::pair();
@@ -520,7 +550,10 @@ mod tests {
                 TabDoc {
                     focused: 0,
                     layout: Layout::Pane(PaneDoc {
-                        chart: Some(ChartState { bar_px: 9.5 }),
+                        chart: Some(ChartState {
+                            bar_px: 9.5,
+                            indicators: vec![],
+                        }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
                 },
@@ -583,7 +616,13 @@ mod tests {
         };
         assert_eq!(value.name, "desk");
         let leaves = value.windows[0].tabs[0].layout.leaves();
-        assert_eq!(leaves[0].chart, Some(ChartState { bar_px: 6.0 }));
+        assert_eq!(
+            leaves[0].chart,
+            Some(ChartState {
+                bar_px: 6.0,
+                indicators: vec![]
+            })
+        );
         assert_eq!(
             leaves[1].target.as_ref().unwrap().to_target(),
             Ok(Target::Contract(ContractKey::monthly(
