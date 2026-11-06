@@ -127,11 +127,14 @@ impl Render for PaneWindow {
         let t = self.theme;
         // Controls only while the pointer is over this window (no permanent chrome).
         let controls = window.is_window_hovered().then(|| {
+            let kind = self.handle.kind();
+            let labels = crate::pane::control_labels(kind, true);
             header_controls(
                 &t,
+                kind,
                 vec![
-                    ("dock beside chart", Command::DockBesideChart, false),
-                    ("re-attach", Command::Reattach, false),
+                    (labels[0], Command::DockBesideChart, false),
+                    (labels[1], Command::Reattach, false),
                 ],
                 |this: &mut Self, cmd, _, window, cx| this.run(cmd, window, cx),
                 self.id,

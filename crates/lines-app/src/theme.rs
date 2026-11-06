@@ -116,6 +116,10 @@ pub struct Theme {
     /// live accounts get a different badge).
     pub paper_badge: Hsla,
     pub on_paper_badge: Hsla,
+    /// DOM orders column: a bracket's take-profit and stop-loss (entries use the side's
+    /// up/down colour). Text on them is `bg`. They also differ by letter (T / S) and shape.
+    pub order_target: Hsla,
+    pub order_stop: Hsla,
 }
 
 fn c(hex: u32) -> Hsla {
@@ -169,6 +173,8 @@ impl Theme {
             on_warn: c(brand::INK),
             paper_badge: c(brand::PAPER),
             on_paper_badge: c(brand::INK),
+            order_target: c(0x67d0e0),
+            order_stop: c(0xe3a3f5),
         }
     }
 
@@ -217,6 +223,8 @@ impl Theme {
             on_warn: c(0xffffff),
             paper_badge: c(brand::INK),
             on_paper_badge: c(brand::PAPER),
+            order_target: c(0x006b7a),
+            order_stop: c(0x86399f),
         }
     }
 
@@ -363,6 +371,8 @@ mod tests {
             ("on_last", t.on_last, "accent", t.accent),
             ("bg", t.bg, "up", t.up),
             ("bg", t.bg, "down", t.down),
+            ("bg", t.bg, "order_target", t.order_target),
+            ("bg", t.bg, "order_stop", t.order_stop),
         ]
     }
 
@@ -513,6 +523,23 @@ mod tests {
                 assert_ne!(t.warn, tok, "{}: warn is {name}", t.name);
                 assert_ne!(t.paper_badge, tok, "{}: paper badge is {name}", t.name);
             }
+            // Bracket exits: their own colours, never the market's or the accent, and
+            // distinct from each other.
+            for (name, tok) in [
+                ("order_target", t.order_target),
+                ("order_stop", t.order_stop),
+            ] {
+                for (other, o) in [
+                    ("up", t.up),
+                    ("down", t.down),
+                    ("accent", t.accent),
+                    ("warn", t.warn),
+                ] {
+                    assert_ne!(tok, o, "{}: {name} is {other}", t.name);
+                }
+                assert!(contrast(tok, t.panel) >= 3.0, "{}: {name} on panel", t.name);
+            }
+            assert_ne!(t.order_target, t.order_stop, "{}", t.name);
             // The badge stands out from the header it sits on (non-text contrast, 3:1).
             assert!(contrast(t.paper_badge, t.panel) >= 3.0, "{}", t.name);
             assert!(contrast(t.warn, t.panel) >= 3.0, "{}", t.name);

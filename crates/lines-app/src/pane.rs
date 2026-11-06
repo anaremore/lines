@@ -24,7 +24,7 @@ use lines_core::CivilDate;
 use lines_feed::store::ChartStore;
 
 use crate::feeds::PaneFeed;
-use crate::layout::{LinkGroup, link_letter};
+use crate::layout::{LinkGroup, PaneKind, link_letter};
 use crate::theme::Theme;
 use crate::wsdoc::PaneDoc;
 
@@ -130,6 +130,42 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
         }
     })
     .detach();
+}
+
+/// The hover controls a pane's header shows, in drawing order: in a main window, or in its
+/// own window when popped out (`detached`). The workspace and the pane window draw them and
+/// run their commands; their labels live here so every header keeps room for them.
+pub fn control_labels(kind: PaneKind, detached: bool) -> &'static [&'static str] {
+    match (kind, detached) {
+        (_, true) => &["dock", "re-attach"],
+        (PaneKind::Chart, false) => &["chart only", "pop out"],
+        (PaneKind::Dom | PaneKind::Tape, false) => &["pop out", "hide"],
+    }
+}
+
+/// Logical px every pane header keeps free at its right end, where the hover controls draw:
+/// header content never reaches it (`header_content` clips there), so the controls never
+/// cover anything (the account chip, status text). Checked against the labels at a wide
+/// glyph width in the tests.
+pub fn controls_gutter(kind: PaneKind) -> f32 {
+    match kind {
+        PaneKind::Chart => 150.0,
+        PaneKind::Dom | PaneKind::Tape => 120.0,
+    }
+}
+
+/// A pane header's content row: left and right groups, clipped to the header's content box
+/// (the header's right padding is the controls' gutter).
+pub fn header_content() -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .justify_between()
+        .items_center()
+        .gap_2()
 }
 
 /// The pane header's contract text: the active contract is always shown (decision 0013);
@@ -290,5 +326,40 @@ pub fn paint_stale_veil(
 ) {
     if store.stale_for().is_some() {
         window.paint_quad(gpui::fill(bounds, t.bg.opacity(0.55)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The owner's report: "chart only" and "pop out" drew over the chart header's account
+    /// chip. The controls draw in a fixed gutter at the header's right end, and the gutter
+    /// must hold their labels even at a wide glyph width (11 px text: 7 px a character,
+    /// wider than the UI font's lowercase average), plus each button's padding, the gaps and
+    /// the row's padding as `workspace::header_controls` lays them out.
+    #[test]
+    fn hover_controls_fit_the_gutter_headers_keep_free() {
+        const CHAR: f32 = 7.0;
+        const BUTTON_PAD: f32 = 8.0; // px_1 each side
+        const GAP: f32 = 4.0; // gap_1
+        const ROW_PAD: f32 = 8.0; // px_1 each side
+        for (kind, detached) in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape]
+            .into_iter()
+            .flat_map(|k| [(k, false), (k, true)])
+        {
+            let labels = control_labels(kind, detached);
+            let need: f32 = labels
+                .iter()
+                .map(|l| l.chars().count() as f32 * CHAR + BUTTON_PAD)
+                .sum::<f32>()
+                + GAP * (labels.len() as f32 - 1.0)
+                + ROW_PAD;
+            assert!(
+                controls_gutter(kind) >= need,
+                "{kind:?} (detached: {detached}): gutter {} < {need}",
+                controls_gutter(kind)
+            );
+        }
     }
 }

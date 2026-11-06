@@ -864,11 +864,14 @@ impl ChartView {
         if studies.is_none() && rows.is_empty() {
             return None;
         }
+        // Level rows: the source's name, then its state; a long reason ends in an ellipsis at
+        // the legend's width, never running over the chart.
         let levels = (!rows.is_empty()).then(|| {
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
+                .max_w(px(LEGEND_MAX_W))
                 .px(px(8.0))
                 .py(px(4.0))
                 .bg(t.label_bg)
@@ -878,9 +881,12 @@ impl ChartView {
                         .flex()
                         .flex_row()
                         .gap_2()
-                        .child(div().text_color(t.text_main).child(r.label))
+                        .min_w_0()
+                        .child(div().flex_shrink_0().text_color(t.text_main).child(r.label))
                         .child(
                             div()
+                                .min_w_0()
+                                .truncate()
                                 .text_color(if r.warn { t.text_main } else { t.text_dim })
                                 .child(r.text),
                         )
@@ -1645,7 +1651,9 @@ impl ChartView {
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
     }
 
-    fn header(&self) -> gpui::Div {
+    /// The chart's header. `account`: its trading account chip (with the PAPER badge), shown
+    /// with the contract on the left; the right end is the hover controls' gutter.
+    fn header(&self, account: Option<gpui::AnyElement>) -> gpui::Div {
         let t = self.theme;
         let bar = || {
             div()
@@ -1656,6 +1664,7 @@ impl ChartView {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .px_3()
+                .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chart)))
                 .py_1()
                 .bg(t.panel)
                 .border_b_1()
@@ -1665,14 +1674,16 @@ impl ChartView {
         let chip = pane::link_chip(self.common.link, &t);
         if let Some(title) = pane::unavailable_title(&self.feed) {
             return bar().child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .items_center()
-                    .text_color(t.text_dim)
-                    .children(chip)
-                    .child(title),
+                pane::header_content().child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .items_center()
+                        .text_color(t.text_dim)
+                        .children(chip)
+                        .child(title),
+                ),
             );
         }
         let mut left = String::with_capacity(96);
@@ -1736,26 +1747,29 @@ impl ChartView {
         if let FeedStatus::Failed(msg) | FeedStatus::Reconnecting { reason: msg, .. } = &d.status {
             let _ = write!(right, "  ·  {msg}");
         }
-        bar()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .items_center()
-                    .flex_shrink_0()
-                    .children(chip)
-                    .child(div().text_color(t.text_main).child(left))
-                    .children(quotes)
-                    .children(pane::stale_badge(&self.store, &t)),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(t.text_dim)
-                    .child(right),
-            )
+        bar().child(
+            pane::header_content()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .items_center()
+                        .flex_shrink_0()
+                        .children(chip)
+                        .child(div().text_color(t.text_main).child(left))
+                        .children(account)
+                        .children(quotes)
+                        .children(pane::stale_badge(&self.store, &t)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(t.text_dim)
+                        .child(right),
+                ),
+        )
     }
 }
 
@@ -1895,6 +1909,9 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
     }
 }
 
+/// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
+const LEGEND_MAX_W: f32 = 360.0;
+
 /// Key and mouse hints for a focused chart, in the window's status line.
 pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I studies  ·  Alt+V profile";
 
@@ -1921,7 +1938,7 @@ impl Render for ChartView {
                 .flex()
                 .flex_col()
                 .bg(t.bg)
-                .child(self.header())
+                .child(self.header(None))
                 .child(
                     div()
                         .relative()
@@ -1941,7 +1958,7 @@ impl Render for ChartView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header().children(account))
+            .child(self.header(account))
             .child(
                 div()
                     .relative()
