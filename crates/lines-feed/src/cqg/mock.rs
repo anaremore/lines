@@ -33,6 +33,31 @@ pub struct MockConfig {
     pub disconnect_after: Option<Duration>,
     /// How often to push an updated server bar for the forming minute.
     pub bar_update_interval: Duration,
+    /// Stop generating trades this long after the market was created (across reconnects; bar
+    /// updates continue), so a test can let the client converge and compare with the mock.
+    pub stop_trading_after: Option<Duration>,
+    /// Use this market instead of creating one (tests read the mock's own bars as truth).
+    pub market: Option<SharedMockMarket>,
+}
+
+/// A mock market shared between the feed and a test.
+#[derive(Clone)]
+pub struct SharedMockMarket(pub Arc<Mutex<MockMarket>>);
+
+impl std::fmt::Debug for SharedMockMarket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedMockMarket")
+    }
+}
+
+impl SharedMockMarket {
+    pub fn new(cfg: &MockConfig, now: UtcMillis) -> Self {
+        SharedMockMarket(Arc::new(Mutex::new(MockMarket::new(cfg, now))))
+    }
+    /// The mock exchange's own bars: every trade it generated, aggregated (ground truth).
+    pub fn bars(&self) -> Vec<Bar> {
+        self.0.lock().bars.bars().to_vec()
+    }
 }
 
 impl Default for MockConfig {
@@ -44,6 +69,8 @@ impl Default for MockConfig {
             history_bars: 3 * 1440,
             disconnect_after: None,
             bar_update_interval: Duration::from_secs(1),
+            stop_trading_after: None,
+            market: None,
         }
     }
 }
@@ -93,6 +120,28 @@ pub struct MockMarket {
     rng: Rng,
     price: i64,
     bars: BarSeries,
+    created: Instant,
+    /// Newest trade time stamped so far.
+    last_trade: UtcMillis,
+    /// Newest `up_to_utc_time` reported. Trades are always stamped strictly after it, so every
+    /// snapshot is *closed*: it includes every trade at or before its time and none after
+    /// (CQG's documented semantics, and what the client's stitch rule relies on).
+    snapshot: UtcMillis,
+}
+
+impl MockMarket {
+    /// Time for the next trade: now, but never at or before the last snapshot.
+    fn stamp(&mut self, now: UtcMillis) -> UtcMillis {
+        let t = now.max(self.last_trade).max(UtcMillis(self.snapshot.0 + 1));
+        self.last_trade = t;
+        t
+    }
+
+    /// Close a snapshot now: all trades stamped so far are included.
+    fn close_snapshot(&mut self, now: UtcMillis) -> UtcMillis {
+        self.snapshot = now.max(self.last_trade).max(self.snapshot);
+        self.snapshot
+    }
 }
 
 impl MockMarket {
@@ -101,6 +150,9 @@ impl MockMarket {
             rng: Rng(cfg.seed | 1),
             price: 600_000, // 6000.00
             bars: BarSeries::new(UtcMillis::MINUTE, cfg.history_bars + 10_000),
+            created: Instant::now(),
+            last_trade: UtcMillis(i64::MIN),
+            snapshot: UtcMillis(i64::MIN + 1),
         };
         // Synthesize history ending one bar before `now`.
         let first = UtcMillis(now.0 - cfg.history_bars as i64 * UtcMillis::MINUTE)
@@ -288,14 +340,17 @@ impl MockTransport {
             let from = UtcMillis(self.base_time.0 + p.from_utc_time);
             let subscribe = req.request_type
                 == Some(historical_2::time_bar_request::RequestType::Subscribe as u32);
-            let bars: Vec<historical_2::TimeBar> = {
-                let m = self.market.lock();
-                m.bars
+            let (bars, up_to) = {
+                let mut m = self.market.lock();
+                let up_to = m.close_snapshot(now);
+                let bars: Vec<historical_2::TimeBar> = m
+                    .bars
                     .bars()
                     .iter()
                     .filter(|b| b.time >= from)
                     .map(|b| self.to_time_bar(b))
-                    .collect()
+                    .collect();
+                (bars, up_to)
             };
             // CQG splits large reports; mimic that.
             let chunks: Vec<_> = bars.chunks(1000).map(|c| c.to_vec()).collect();
@@ -307,6 +362,7 @@ impl MockTransport {
                         status_code: if subscribe { 1 } else { 0 },
                         time_bars: chunks.get(i).cloned().unwrap_or_default(),
                         is_report_complete: Some(i + 1 == n),
+                        up_to_utc_time: (i + 1 == n).then(|| self.off(up_to)),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -376,12 +432,17 @@ impl MockTransport {
         let per_frame = self.cfg.quotes_per_frame.max(1) as u64;
         // Cap per-call output so a stalled consumer doesn't make us build a huge burst.
         let mut budget = 200u32;
-        while self.quotes_sent < due && budget > 0 {
+        let trading = self
+            .cfg
+            .stop_trading_after
+            .is_none_or(|d| self.market.lock().created.elapsed() < d);
+        while trading && self.quotes_sent < due && budget > 0 {
             let n = (due - self.quotes_sent).min(per_frame);
-            let now = (self.clock)();
             let mut quotes = Vec::with_capacity(n as usize);
             {
                 let mut m = self.market.lock();
+                // One timestamp per frame, strictly after the last snapshot.
+                let now = m.stamp((self.clock)());
                 for i in 0..n {
                     let time = if i == 0 {
                         Some(now.0 - self.base_time.0)
@@ -433,7 +494,11 @@ impl MockTransport {
             && Instant::now() >= self.next_bar_push
         {
             self.next_bar_push = Instant::now() + self.cfg.bar_update_interval;
-            let last = self.market.lock().bars.last().copied();
+            let (last, up_to) = {
+                let mut m = self.market.lock();
+                let up_to = m.close_snapshot((self.clock)());
+                (m.bars.last().copied(), up_to)
+            };
             if let Some(b) = last {
                 let tb = self.to_time_bar(&b);
                 self.push(web_api_2::ServerMsg {
@@ -441,6 +506,7 @@ impl MockTransport {
                         request_id: id,
                         status_code: 3, // BAR_REPORT_STATUS_CODE_UPDATE
                         time_bars: vec![tb],
+                        up_to_utc_time: Some(self.off(up_to)),
                         ..Default::default()
                     }],
                     ..Default::default()

@@ -10,10 +10,38 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lines_core::{BarSeries, Capabilities, ContractKey, OrderBook, Price, Product, UtcMillis};
+use lines_core::{
+    BarSeries, Capabilities, ContractKey, OrderBook, Price, Product, Stitcher, UtcMillis,
+};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::provider::MarketEvent;
+
+/// History back-fill state, shown as state (docs/design.md: no spinners; missing data shows
+/// as missing).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum HistoryState {
+    /// The provider has no server-side history (e.g. a Sierra import replay).
+    Unsupported,
+    /// Requested on this connection, not complete yet.
+    Loading,
+    Complete,
+    /// Delivered, but with known holes (`gaps` ranges are missing, not filled in).
+    Incomplete {
+        gaps: u64,
+    },
+}
+
+impl HistoryState {
+    /// Short label for status display; `None` when there is nothing to say.
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            HistoryState::Loading => Some("loading history"),
+            HistoryState::Incomplete { .. } => Some("history incomplete"),
+            HistoryState::Unsupported | HistoryState::Complete => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedStatus {
@@ -75,6 +103,9 @@ pub struct ChartData {
     pub ask: Option<Price>,
     /// Aggregated depth (empty unless the provider has the `depth` capability).
     pub book: OrderBook,
+    /// Stitches history snapshots and live trades (`lines_core::stitch`).
+    pub stitch: Stitcher,
+    pub history: HistoryState,
     /// Exchange time of the newest trade/bar seen (the replay "clock").
     pub market_time: Option<UtcMillis>,
     pub status: FeedStatus,
@@ -89,12 +120,29 @@ impl ChartData {
             match *e {
                 MarketEvent::Ready => self.status = FeedStatus::Live,
                 MarketEvent::ContractChanged(next) => self.switch_contract(next),
-                MarketEvent::Bar(bar) => {
-                    self.series.upsert(bar);
-                    self.bump_time(bar.time);
+                MarketEvent::History { ref bars, as_of } => {
+                    self.stitch.history(&mut self.series, bars, as_of);
+                    if let Some(b) = bars.last() {
+                        self.bump_time(b.time);
+                    }
+                }
+                MarketEvent::HistoryComplete => {
+                    self.stitch.history_complete();
+                    if self.history == HistoryState::Loading {
+                        self.history = HistoryState::Complete;
+                    }
+                }
+                MarketEvent::HistoryGap { from, to } => {
+                    tracing::warn!("history missing from {from} to {to}");
+                    self.history = match self.history {
+                        HistoryState::Incomplete { gaps } => {
+                            HistoryState::Incomplete { gaps: gaps + 1 }
+                        }
+                        _ => HistoryState::Incomplete { gaps: 1 },
+                    };
                 }
                 MarketEvent::Trade { time, price, qty } => {
-                    self.series.apply_trade(time, price, qty);
+                    self.stitch.trade(&mut self.series, time, price, qty);
                     self.last_trade = Some(price);
                     self.stats.trades_in += 1;
                     self.stats.updates_in += 1;
@@ -144,6 +192,17 @@ impl ChartData {
         self.contract.map(|k| k.label(&self.product))
     }
 
+    /// A (re)connect starts: history, if the provider has it, is loading again.
+    pub fn begin_connection(&mut self) {
+        let expect = self.capabilities.history;
+        self.stitch.begin_connection(expect);
+        self.history = if expect {
+            HistoryState::Loading
+        } else {
+            HistoryState::Unsupported
+        };
+    }
+
     /// Make `next` the active contract. The previous contract's bars are retired (kept for
     /// continuous charts), never mixed with the new contract's.
     pub fn switch_contract(&mut self, next: ContractKey) {
@@ -162,6 +221,7 @@ impl ChartData {
             }
         }
         self.contract = Some(next);
+        self.stitch.reset();
         self.last_trade = None;
         self.bid = None;
         self.ask = None;
@@ -205,6 +265,13 @@ impl ChartStore {
                 bid: None,
                 ask: None,
                 book: OrderBook::default(),
+                // Journal cap: ~ one busy hour of trades while history is outstanding.
+                stitch: Stitcher::new(period_ms, 500_000),
+                history: if capabilities.history {
+                    HistoryState::Loading
+                } else {
+                    HistoryState::Unsupported
+                },
                 market_time: None,
                 status: FeedStatus::Connecting,
                 stats: FeedStats::default(),

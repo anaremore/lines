@@ -76,7 +76,11 @@ pub struct FeedConfig {
     /// Tee all raw frames to this `.lfr` file.
     pub record: Option<PathBuf>,
     pub bar_period_ms: i64,
+    /// Bars kept in memory (older ones are trimmed).
     pub max_bars: usize,
+    /// History requested when none is stored (default 3 days of 1-minute bars). Must fit in
+    /// `max_bars`; reconnects request only from the newest stored bar.
+    pub history_ms: i64,
 }
 
 impl FeedConfig {
@@ -87,6 +91,7 @@ impl FeedConfig {
             record: None,
             bar_period_ms: UtcMillis::MINUTE,
             max_bars: 50_000,
+            history_ms: 3 * 24 * 60 * UtcMillis::MINUTE,
         }
     }
 }
@@ -309,7 +314,10 @@ pub async fn run_feed(
         None => None,
     };
     let mock_market = match &config.source {
-        Source::CqgMock(m) => Some(Arc::new(Mutex::new(MockMarket::new(m, now_utc())))),
+        Source::CqgMock(m) => Some(match &m.market {
+            Some(shared) => shared.0.clone(),
+            None => Arc::new(Mutex::new(MockMarket::new(m, now_utc()))),
+        }),
         _ => None,
     };
     let is_replay = matches!(config.source, Source::Replay { .. });
@@ -318,9 +326,13 @@ pub async fn run_feed(
         ConnectionOptions {
             idle_timeout: Duration::from_secs(365 * 86_400),
             ping_every: Duration::from_secs(86_400),
+            history_ms: config.history_ms,
         }
     } else {
-        ConnectionOptions::default()
+        ConnectionOptions {
+            history_ms: config.history_ms,
+            ..ConnectionOptions::default()
+        }
     };
     let mut attempt: u32 = 0;
 

@@ -13,6 +13,7 @@ pub mod instrument;
 pub mod price;
 pub mod qty;
 pub mod roll;
+pub mod stitch;
 pub mod time;
 pub mod viewport;
 
@@ -27,5 +28,6 @@ pub use instrument::{
 };
 pub use price::{DisplayStyle, Price, PriceFormat, PriceScale, UnitConverter, UnitError};
 pub use qty::{Qty, QtyFormat};
+pub use stitch::{StitchStats, Stitcher};
 pub use time::UtcMillis;
 pub use viewport::Viewport;

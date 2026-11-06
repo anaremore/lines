@@ -48,6 +48,29 @@ impl Frame {
     }
 }
 
+/// Split an HTTP frame into its request URL and body. Frames carry `URL\nbody`; frames from
+/// older recordings carry only the body (`None` URL).
+pub fn split_http(data: &[u8]) -> (Option<&str>, &[u8]) {
+    let first = data
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(data, |i| &data[..i]);
+    match std::str::from_utf8(first) {
+        Ok(url) if url.starts_with("http://") || url.starts_with("https://") => {
+            (Some(url), &data[first.len() + 1..])
+        }
+        _ => (None, data),
+    }
+}
+
+/// One query parameter's value from a URL (no decoding; Lines' own URLs need none).
+pub fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
+    let query = url.split_once('?')?.1;
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+}
+
 /// Something a session wants the driver to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outgoing {
@@ -64,8 +87,21 @@ pub enum MarketEvent {
     /// Data from here on belongs to this contract (e.g. after a front-month roll). The store
     /// retires the previous contract's bars rather than mixing them (decision 0013).
     ContractChanged(ContractKey),
-    /// A complete, authoritative bar (history or a server bar update).
-    Bar(Bar),
+    /// A history snapshot (initial back-fill, reconnect back-fill, or a server bar update):
+    /// authoritative bars that include exactly the trades with `time <= as_of` (closed;
+    /// `None` = complete bars only, closed at the end of the last one). Stitched with live
+    /// trades by `lines_core::stitch`.
+    History {
+        bars: Vec<Bar>,
+        as_of: Option<UtcMillis>,
+    },
+    /// The provider has delivered all history requested on this connection.
+    HistoryComplete,
+    /// History known to be missing between these times (shown as missing, never invented).
+    HistoryGap {
+        from: UtcMillis,
+        to: UtcMillis,
+    },
     Trade {
         time: UtcMillis,
         price: Price,
@@ -127,9 +163,11 @@ impl SessionError {
 pub struct StartContext {
     pub now: UtcMillis,
     /// Start of the newest bar we already hold (re-request it; it may be incomplete).
-    /// `None` = no bars yet, request the provider's default history window.
+    /// `None` = no bars yet, request `history_ms` of history.
     pub history_from: Option<UtcMillis>,
     pub bar_period_ms: i64,
+    /// How much history to request when none is stored (bounded, configurable).
+    pub history_ms: i64,
 }
 
 pub trait ProviderSession: Send {

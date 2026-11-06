@@ -31,7 +31,7 @@ pub struct LogonParams {
     pub client_version: String,
 }
 
-/// Default history window when we hold no bars.
+#[cfg(test)]
 const DEFAULT_HISTORY_MS: i64 = 3 * 24 * 60 * 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,9 +254,9 @@ impl CqgSession {
         self.check_expiry(meta);
 
         let ctx = self.ctx.expect("start() runs before frames");
-        let from = ctx.history_from.unwrap_or_else(|| {
-            UtcMillis(ctx.now.0 - DEFAULT_HISTORY_MS).floor_to(ctx.bar_period_ms)
-        });
+        let from = ctx
+            .history_from
+            .unwrap_or_else(|| UtcMillis(ctx.now.0 - ctx.history_ms).floor_to(ctx.bar_period_ms));
         self.bar_request_id = self.id();
         let md_request_id = self.id();
         out.push(encode(&ClientMsg {
@@ -295,15 +295,27 @@ impl CqgSession {
             return;
         }
         let mut rejected = 0;
+        let mut bars = Vec::with_capacity(rep.time_bars.len());
         for tb in &rep.time_bars {
             match self.convert_bar(tb) {
-                Some(Some(bar)) => events.push(MarketEvent::Bar(bar)),
+                Some(Some(bar)) => bars.push(bar),
                 Some(None) => {} // no trades in this bar
                 None => rejected += 1,
             }
         }
+        bars.sort_by_key(|b| b.time);
+        // `up_to_utc_time` is closed: every quote stamped at or before it is in the bars
+        // (CQG's definition), which is exactly the stitch rule's `as_of`. Absent when the
+        // report holds only complete bars.
+        let as_of = rep.up_to_utc_time.map(|t| self.time_at_offset(t));
+        events.push(MarketEvent::History { bars, as_of });
         if rejected > 0 {
             events.push(MarketEvent::Rejected { count: rejected });
+        }
+        let initial = rep.status_code == historical_2::BarReportStatusCode::Success as u32
+            || rep.status_code == historical_2::BarReportStatusCode::Subscribed as u32;
+        if initial && rep.is_report_complete.unwrap_or(true) {
+            events.push(MarketEvent::HistoryComplete);
         }
     }
 
@@ -513,6 +525,7 @@ mod tests {
                 now: UtcMillis(base_ms() + 5_000),
                 history_from: None,
                 bar_period_ms: 60_000,
+                history_ms: DEFAULT_HISTORY_MS,
             },
             &mut Vec::new(),
         );
@@ -775,6 +788,7 @@ mod tests {
                 now: UtcMillis(base_ms()),
                 history_from,
                 bar_period_ms: 60_000,
+                history_ms: DEFAULT_HISTORY_MS,
             },
             &mut Vec::new(),
         );
