@@ -1,32 +1,41 @@
+mod bench;
 mod chart_view;
+mod commands;
 mod dom_view;
 mod feeds;
 mod layout;
 mod pane;
+mod persist;
 mod picker;
+mod picker_view;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 mod tape_view;
 mod text;
 mod theme;
+mod versioned;
 mod workspace;
+mod wsdoc;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
-use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::App;
 use lines_core::UtcMillis;
 use lines_feed::cqg::mock::MockConfig;
+use lines_feed::registry::FeedRegistry;
 use lines_feed::{FeedConfig, Source, catalog};
 
 use crate::dom_view::DomOptions;
-use crate::feeds::{Feeds, PaneFeed};
-use crate::layout::Layout;
+use crate::feeds::Feeds;
+use crate::layout::Preset;
+use crate::picker_view::AppSettings;
 use crate::tape_view::TapeOptions;
 use crate::theme::{HollowBodies, Palette, Theme};
-use crate::workspace::{PaneSetup, WorkspaceView};
+use crate::workspace::{PaneEnv, Workspace};
+use crate::wsdoc::{TargetDoc, WorkspaceDoc};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum SourceKind {
@@ -58,7 +67,7 @@ pub enum HollowKind {
     Down,
 }
 
-/// Window layout (the workspace milestone adds custom grids, tabs and windows).
+/// A one-tab layout for this run (`--workspace` for more).
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum LayoutKind {
     /// Chart beside the DOM, time & sales under the DOM.
@@ -80,8 +89,9 @@ struct Cli {
     /// Where market data comes from.
     #[arg(long, value_enum, default_value_t = SourceKind::Mock)]
     source: SourceKind,
-    /// A product followed to its front month (ES, NQ, MES, MNQ, ZN, BTC/USD, ETH/USD) or one
-    /// contract (ESZ26, MNQH2027). Default: ES, or BTC/USD for coinbase.
+    /// Show this product (followed to its front month: ES, NQ, MES, MNQ, ZN, BTC/USD,
+    /// ETH/USD) or contract (ESZ26, MNQH2027) in every pane, for this run only (the saved
+    /// workspace is left alone).
     #[arg(long)]
     instrument: Option<String>,
     /// Record every raw feed frame to this .lfr file.
@@ -139,9 +149,21 @@ struct Cli {
     /// Which direction's candle bodies are hollow (the other is filled).
     #[arg(long, value_enum, default_value_t = HollowKind::Up)]
     hollow: HollowKind,
-    /// Window layout.
-    #[arg(long, value_enum, default_value_t = LayoutKind::Trading)]
-    layout: LayoutKind,
+    /// A one-tab layout for this run only (the saved workspace is left alone). Screenshots
+    /// default to `trading`.
+    #[arg(long, value_enum)]
+    layout: Option<LayoutKind>,
+    /// Open a workspace: a saved one by name, or a built-in (`pair` = NQ and ES side by side,
+    /// `trading`, `chart`, `1x2`, `2x2`, `1+2`, `6c2d`). Screenshots take a built-in or a
+    /// workspace `.json` file (they never read user settings). Default: the autosaved
+    /// workspace (first run: `pair`).
+    #[arg(long)]
+    workspace: Option<String>,
+    /// Benchmark: open the workspace (default `6c2d`: 6 charts + 2 DOMs on two contracts)
+    /// in a hidden window, draw a frame every 8 ms for this many seconds while the feeds run,
+    /// then print frame-time percentiles and memory and exit.
+    #[arg(long, conflicts_with = "screenshot")]
+    bench: Option<u64>,
     /// DOM price grouping in ticks per row (G cycles 1, 2, 5, 10, 25 in the app).
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     dom_grouping: u32,
@@ -149,9 +171,10 @@ struct Cli {
     /// 20 or 0.5). Default: 10 contracts, or 1 unit of a fractional product.
     #[arg(long)]
     large_print: Option<String>,
-    /// Window size in logical pixels, WIDTHxHEIGHT.
-    #[arg(long, default_value = "1280x800", value_parser = parse_size)]
-    size: (f32, f32),
+    /// Window size in logical pixels, WIDTHxHEIGHT (screenshots and the benchmark: default
+    /// 1280x800; the app: saved per window, else 85% of the primary display).
+    #[arg(long, value_parser = parse_size)]
+    size: Option<(f32, f32)>,
     /// Screenshot mode (decision 0009): replay --replay up to --at at full speed, render one
     /// frame at --size/--theme with a frozen clock, write this PNG, exit.
     /// Requires building with `--features screenshot`.
@@ -334,94 +357,181 @@ fn main() -> Result<()> {
         HollowKind::Down => HollowBodies::Down,
     };
 
-    let registry = lines_feed::registry::FeedRegistry::new();
-    let feed = PaneFeed::subscribe(&registry, config)?;
+    // The source's (or `--instrument`'s) product sizes `--large-print`.
     let large_print = match &cli.large_print {
         Some(s) => {
-            let product = feed.sub.store().read().product.clone();
+            let product = lines_feed::new_store(&config)?.read().product.clone();
             Some(product.qty.parse_decimal(s).map_err(|e| {
-                anyhow::anyhow!("--large-print {s:?} is not a {} size: {e}", product.symbol)
+                anyhow!("--large-print {s:?} is not a {} size: {e}", product.symbol)
             })?)
         }
         None => None,
     };
-    let layout = match cli.layout {
-        LayoutKind::Trading => Layout::trading(),
-        LayoutKind::Chart => Layout::chart_only(),
-    };
-    let setup = PaneSetup {
-        feed,
+    let frozen = cli.screenshot.is_some();
+    let bench = cli.bench.is_some();
+    // Panes choose their own targets; the run fixes only the source.
+    let mut base = config.clone();
+    let instrument = base.target.take().map(|t| TargetDoc::from_target(&t));
+    let record = base.record.take();
+    let env = PaneEnv {
+        availability: lines_feed::availability::availability(&base.source)?,
+        base,
         theme,
-        frozen: cli.screenshot.is_some(),
-        fixture: chart_view::Fixture {
-            cursor: cli.cursor,
-            price_zoom: cli.price_zoom,
-            picker: cli.picker.clone(),
-        },
+        frozen,
+        track_visibility: !frozen && !bench,
         dom: DomOptions {
             grouping: cli.dom_grouping,
         },
         tape: TapeOptions { large_print },
+        record: std::cell::RefCell::new(record),
+        fixture: std::cell::RefCell::new(Some(chart_view::Fixture {
+            cursor: cli.cursor,
+            price_zoom: cli.price_zoom,
+            picker: cli.picker.clone(),
+        })),
+        default_size: cli.size,
     };
+    let registry = FeedRegistry::new();
 
-    if let Some(out) = cli.screenshot.clone() {
+    if frozen || bench {
+        // Built-ins or explicit files only: these modes never read user settings.
+        let mut doc = match (&cli.workspace, cli.layout) {
+            (Some(w), _) => fixed_workspace(w)?,
+            (None, Some(l)) => preset_doc(l),
+            (None, None) if bench => WorkspaceDoc::bench(),
+            (None, None) => preset_doc(LayoutKind::Trading),
+        };
+        if instrument.is_some() {
+            doc.retarget_all(instrument.clone());
+        }
+        doc.normalise().map_err(|e| anyhow!("--workspace: {e}"))?;
+        let size = cli.size.unwrap_or((1280.0, 800.0));
+        if let Some(secs) = cli.bench {
+            let code = bench::run(registry, Workspace::new(env), doc, size, secs)?;
+            std::process::exit(code);
+        }
+        let out = cli.screenshot.clone().expect("screenshot mode");
         #[cfg(feature = "screenshot")]
         {
             let shot = screenshot::Shot {
                 out,
-                size: cli.size,
+                size,
                 scale: cli.scale,
-                layout,
-                setup,
+                doc,
             };
-            let code = screenshot::run(registry, shot)?;
+            let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);
         }
         #[cfg(not(feature = "screenshot"))]
         {
-            let _ = (out, layout, setup);
+            let _ = (out, doc, size);
             bail!(
                 "this build has no screenshot support; rebuild with `cargo run -p lines-app --features screenshot`"
             );
         }
     }
 
-    let (w, h) = cli.size;
+    // The app: restore the autosaved workspace (or open the one asked for).
+    let dir = persist::config_dir();
+    let writer = persist::Writer::spawn();
+    let (settings, settings_report) = AppSettings::load(
+        dir.as_ref().map(|d| d.join("settings.json")),
+        Some(writer.clone()),
+    );
+    let mut reports: Vec<String> = settings_report.into_iter().collect();
+    // `--instrument` and `--layout` are for this run only: don't save over the workspace.
+    let ad_hoc = instrument.is_some() || cli.layout.is_some();
+    let mut autosave = !ad_hoc && dir.is_some();
+    let mut doc = match (&cli.workspace, cli.layout) {
+        (Some(name), _) => match &dir {
+            Some(d) if persist::named_path(d, name).exists() => {
+                let l = versioned::load::<WorkspaceDoc>(&wsdoc::FORMAT, &persist::named_path(d, name));
+                reports.extend(l.report);
+                l.value
+                    .ok_or_else(|| anyhow!("workspace {name:?} couldn't be read"))?
+            }
+            _ => wsdoc::builtin(name).ok_or_else(|| {
+                anyhow!("no workspace named {name:?} (built-ins: pair, trading, chart, 1x2, 2x2, 1+2, 6c2d)")
+            })?,
+        },
+        (None, Some(l)) => preset_doc(l),
+        (None, None) => match &dir {
+            Some(d) => {
+                let l = versioned::load::<WorkspaceDoc>(&wsdoc::FORMAT, &persist::workspace_path(d));
+                reports.extend(l.report);
+                if !l.writable {
+                    autosave = false;
+                }
+                l.value.unwrap_or_else(WorkspaceDoc::pair)
+            }
+            None => WorkspaceDoc::pair(),
+        },
+    };
+    if let Err(e) = doc.normalise() {
+        reports.push(format!("saved workspace: {e}; loaded the default"));
+        doc = WorkspaceDoc::pair();
+    }
+    if instrument.is_some() {
+        doc.retarget_all(instrument);
+    }
+    let mut ws = Workspace::new(env);
+    if let Some(d) = dir {
+        ws = ws.with_files(d, writer.clone(), autosave);
+    }
+    for r in reports {
+        ws.add_report(r);
+    }
+    if ad_hoc {
+        tracing::info!("--instrument/--layout: this run's layout is not autosaved");
+    }
+
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(Feeds(registry));
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Lines".into()),
-                    ..Default::default()
-                }),
-                icon: window_icon(),
-                ..Default::default()
-            },
-            move |_, cx| cx.new(|cx| WorkspaceView::new(layout, setup, cx)),
-        );
-        if let Err(e) = opened {
-            tracing::error!("failed to open window: {e:#}");
+        cx.set_global(settings);
+        cx.set_global(ws);
+        workspace::install(cx);
+        if let Err(e) = workspace::open_workspace(&doc, cx) {
+            tracing::error!("failed to open the workspace: {e:#}");
             cx.quit();
             return;
         }
+        workspace::start_autosave(cx);
         cx.activate(true);
     });
+    writer.flush(Duration::from_secs(3));
     Ok(())
+}
+
+/// A one-tab workspace from `--layout`, on the source's default (or `--instrument`'s) target.
+fn preset_doc(l: LayoutKind) -> WorkspaceDoc {
+    let p = match l {
+        LayoutKind::Trading => Preset::Trading,
+        LayoutKind::Chart => Preset::Chart,
+    };
+    wsdoc::builtin(p.name()).expect("presets are built in")
+}
+
+/// Screenshot/benchmark workspaces: a built-in, or a workspace file given by path.
+fn fixed_workspace(w: &str) -> Result<WorkspaceDoc> {
+    if let Some(doc) = wsdoc::builtin(w) {
+        return Ok(doc);
+    }
+    let path = std::path::Path::new(w);
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("--workspace {w:?} is neither a built-in nor a readable file"))?;
+    match versioned::decode::<WorkspaceDoc>(&wsdoc::FORMAT, &bytes) {
+        versioned::Decoded::Ok { value, .. } => Ok(value),
+        versioned::Decoded::Newer { found } => {
+            bail!("{w} is workspace version {found}, newer than this build reads")
+        }
+        versioned::Decoded::Corrupt { reason } => bail!("{w}: {reason}"),
+    }
 }
 
 /// Runtime window icon from `assets/icon/png/lines-256.png`. GPUI applies it on X11 only; on
 /// Windows the window/taskbar icon comes from the executable's icon resource 1 (`build.rs`),
 /// and on macOS from the app bundle.
-fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+pub(crate) fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
     const PNG: &[u8] = include_bytes!("../../../assets/icon/png/lines-256.png");
     match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
         Ok(img) => Some(std::sync::Arc::new(img.into_rgba8())),
