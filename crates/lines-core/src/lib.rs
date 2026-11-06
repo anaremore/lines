@@ -21,6 +21,7 @@ pub mod sessions;
 pub mod stitch;
 pub mod tape;
 pub mod time;
+pub mod trail;
 pub mod vap;
 pub mod viewport;
 

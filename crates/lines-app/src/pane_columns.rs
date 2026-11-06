@@ -44,25 +44,30 @@ pub enum DomCol {
     Orders,
     Bid,
     Price,
+    /// The price trail beside the price (`crate::dom_trail`): fill only, no text. Shown while
+    /// the trail is on.
+    Trail,
     Ask,
     /// Traded volume at price.
     Volume,
 }
 
 impl DomCol {
-    pub const ALL: [DomCol; 5] = [
+    pub const ALL: [DomCol; 6] = [
         DomCol::Orders,
         DomCol::Bid,
         DomCol::Price,
+        DomCol::Trail,
         DomCol::Ask,
         DomCol::Volume,
     ];
 
-    /// The header row's text (the orders column is still empty: no title).
+    /// The header row's text (the trail is too narrow for a title).
     pub fn header(self) -> &'static str {
         match self {
             DomCol::Orders => "Ord",
             DomCol::Volume => "Vol",
+            DomCol::Trail => "",
             c => c.label(),
         }
     }
@@ -72,6 +77,7 @@ impl DomCol {
             DomCol::Orders => "Orders",
             DomCol::Bid => "Bid",
             DomCol::Price => "Price",
+            DomCol::Trail => "Trail",
             DomCol::Ask => "Ask",
             DomCol::Volume => "Volume",
         }
@@ -82,16 +88,18 @@ impl DomCol {
     }
 }
 
-pub const DOM_SPECS: [ColumnSpec; 5] = [
+pub const DOM_SPECS: [ColumnSpec; 6] = [
     // Orders (milestone 7): shown, wide enough for `S10` or `2/5`; grows with its content.
     spec(28.0, 40.0, true, true),
     spec(36.0, 64.0, true, true),
     spec(48.0, 76.0, false, true),
+    // Trail: narrow, hidden until the trail is turned on.
+    spec(8.0, 16.0, true, false),
     spec(36.0, 64.0, true, true),
     spec(36.0, 64.0, true, true),
 ];
 /// The volume column takes the DOM's leftover width.
-pub const DOM_FILL: usize = 4;
+pub const DOM_FILL: usize = 5;
 
 /// Time & sales columns, left to right.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -561,6 +569,10 @@ mod tests {
         let c = Columns::new(Table::Dom);
         assert!(c.set.is_shown(DomCol::Orders.index()));
         assert!(c.set.is_shown(DomCol::Price.index()));
+        assert!(
+            !c.set.is_shown(DomCol::Trail.index()),
+            "trail off by default"
+        );
         assert!(c.save(&DomCol::ALL).is_empty(), "defaults save nothing");
     }
 
@@ -575,7 +587,7 @@ mod tests {
             .unwrap();
         c.apply(ColumnCmd::Toggle(Column::Dom(DomCol::Orders)))
             .unwrap();
-        assert!(!c.set.is_shown(4) && !c.set.is_shown(0));
+        assert!(!c.set.is_shown(DomCol::Volume.index()) && !c.set.is_shown(0));
         assert!(
             c.apply(ColumnCmd::Toggle(Column::Tape(TapeCol::Side)))
                 .is_err()
@@ -586,7 +598,11 @@ mod tests {
         assert_eq!(c.set.width(1), Some(41.0));
         c.apply(ColumnCmd::Width(Column::Dom(DomCol::Ask), 5))
             .unwrap();
-        assert_eq!(c.set.width(3), Some(36.0), "clamped to the minimum");
+        assert_eq!(
+            c.set.width(DomCol::Ask.index()),
+            Some(36.0),
+            "clamped to the minimum"
+        );
         c.apply(ColumnCmd::Reset).unwrap();
         assert!(c.save(&DomCol::ALL).is_empty());
     }
@@ -702,7 +718,7 @@ mod tests {
         assert_eq!(d.set, c.set);
         // Hand-edited: every column hidden, a negative width: the price column stays.
         let bad: BTreeMap<DomCol, ColumnDoc> = serde_json::from_str(
-            r#"{"orders":{"shown":false},"bid":{"shown":false,"width":-4},"price":{"shown":false},"ask":{"shown":false},"volume":{"shown":false}}"#,
+            r#"{"orders":{"shown":false},"bid":{"shown":false,"width":-4},"price":{"shown":false},"trail":{"shown":false},"ask":{"shown":false},"volume":{"shown":false}}"#,
         )
         .unwrap();
         let mut e = Columns::new(Table::Dom);

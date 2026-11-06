@@ -86,6 +86,11 @@ pub enum Command {
     /// Show or hide the chart headers' performance stats (feed msgs/s, updates/s, paints/s,
     /// paint time): a workspace preference, off by default. No key: palette and menu only.
     TogglePerfStats,
+    /// The focused DOM's price trail on/off (its column comes with it). No key: pane keys
+    /// are reserved; palette and the DOM's pane menu.
+    DomTrail,
+    /// The focused DOM's trail half-life: the next preset (0.5, 1, 1.5, 3, 5 s).
+    DomTrailHalfLife,
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
     Studies,
     /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
@@ -343,6 +348,8 @@ pub fn label(c: Command) -> String {
             format!("Chart: hide/show level kind {} of source {}", k + 1, i + 1)
         }
         Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
+        Command::DomTrail => "DOM: price trail on/off".into(),
+        Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::Trade(t) => match t {
             TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
@@ -392,6 +399,8 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleLevels,
         Command::ToggleLevelLabels,
         Command::TogglePerfStats,
+        Command::DomTrail,
+        Command::DomTrailHalfLife,
         Command::Studies,
         Command::SaveAs,
         Command::Open,
@@ -622,5 +631,15 @@ mod tests {
         assert_eq!(filter("performance", &p), vec![Command::TogglePerfStats]);
         // A palette/menu command: no key of its own.
         assert!(BINDINGS.iter().all(|b| b.cmd != Command::TogglePerfStats));
+        // The DOM trail: palette and pane menu only, never a key (pane keys are reserved).
+        assert_eq!(
+            filter("price trail", &p),
+            vec![Command::DomTrail, Command::DomTrailHalfLife]
+        );
+        assert!(
+            BINDINGS
+                .iter()
+                .all(|b| !matches!(b.cmd, Command::DomTrail | Command::DomTrailHalfLife))
+        );
     }
 }
