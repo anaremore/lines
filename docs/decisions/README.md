@@ -28,3 +28,4 @@ Format: Status · Context · Decision · Consequences.
 | 0020 | Official builds wrap the public app; connectors register through an extension point |
 | 0021 | Settings: in context first, one searchable Settings window, settings as data (Proposed) |
 | 0022 | External level sources: a public levels layer, private adapters |
+| 0023 | Trade execution via Sierra Chart's DTC server |
