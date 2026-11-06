@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed", "crates/lines-app", "crates/lines-sierra"]
+members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-app", "crates/lines-sierra"]
 # lines-sierra (personal Sierra Chart importer) is a member so `cargo test --workspace` covers it,
 # but not a default member: plain `cargo build`/`cargo run` never build it, and nothing depends on it.
-default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed", "crates/lines-app"]
+default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-app"]
 
 [workspace.package]
 edition = "2024"
@@ -15,6 +15,7 @@ publish = false
 lines-core = { path = "crates/lines-core" }
 cqg-proto = { path = "crates/cqg-proto" }
 lines-feed = { path = "crates/lines-feed" }
+lines-indicators = { path = "crates/lines-indicators" }
 
 # GPUI is pinned to an exact Zed commit. The crates.io release (0.2.2, Oct 2025) is
 # far behind main. Bump deliberately: change BOTH revs together, rebuild, fix API drift.

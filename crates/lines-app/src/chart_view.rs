@@ -114,6 +114,8 @@ pub struct Fixture {
     pub price_zoom: Option<f64>,
     /// Render with the symbol picker open on this query.
     pub picker: Option<String>,
+    /// Indicators to start with (screenshots, `--vwap`).
+    pub indicators: Vec<lines_indicators::IndicatorConfig>,
 }
 
 enum Drag {
@@ -140,6 +142,10 @@ pub struct ChartView {
     common: PaneCommon,
     /// Studies over the plot, painted in order.
     layers: Vec<Box<dyn ChartLayer>>,
+    /// Indicators (VWAP …) from the shared engine (`crate::studies`), saved with the pane.
+    studies: crate::studies::Studies,
+    /// `studies.revision()` last drawn.
+    seen_studies: u64,
     picker: PickerUi,
     store: Arc<ChartStore>,
     theme: Theme,
@@ -193,11 +199,15 @@ impl ChartView {
         // Poll the lock-free revision counter at ~120 Hz; redraw only on change. Reads the
         // view's current store, which changes when the picker switches symbols.
         pane::watch_store(cx);
+        let mut studies = crate::studies::Studies::new(fixture.indicators.clone());
+        studies.attach(feed_info(&store));
 
         ChartView {
             feed,
             common: PaneCommon::default(),
             layers: Vec::new(),
+            studies,
+            seen_studies: u64::MAX,
             picker,
             store,
             theme,
@@ -329,7 +339,17 @@ impl ChartView {
             cx.notify();
             return;
         }
-        if m.control && !m.alt && k.key == "k" {
+        if self.studies.menu_open() {
+            let anchor = self.anchor_hint();
+            self.studies.key(ev, anchor);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if (m.control || m.platform) && !m.alt && k.key == "i" {
+            // Indicators (Cmd+I on macOS).
+            self.studies.toggle_menu();
+        } else if m.control && !m.alt && k.key == "k" {
             self.open_picker("", cx);
         } else if k.key == "home" {
             self.vp.reset(self.series_len);
@@ -382,6 +402,8 @@ impl ChartView {
 
     fn apply_feed(&mut self, feed: PaneFeed) {
         self.store = feed.store().clone();
+        // The same indicators on the new feed (new shared nodes).
+        self.studies.attach(feed_info(&self.store));
         self.feed = feed;
         self.instrument = self.store.read().product.clone();
         // A fresh view for the new series; price labels belong to the old product's format.
@@ -408,11 +430,46 @@ impl ChartView {
         }
     }
 
-    /// Restore saved view state (time zoom).
+    /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
         if state.bar_px.is_finite() {
             self.vp.bar_px = state.bar_px.clamp(MIN_BAR_PX, MAX_BAR_PX);
         }
+        // Saved indicators, then any given on the command line (`--vwap`) not among them.
+        let mut configs = state.indicators.clone();
+        for c in self.studies.configs() {
+            if !configs.contains(&c) {
+                configs.push(c);
+            }
+        }
+        self.set_indicator_configs(configs);
+    }
+
+    /// This chart's indicators, as the workspace saves them.
+    pub fn indicator_configs(&self) -> Vec<lines_indicators::IndicatorConfig> {
+        self.studies.configs()
+    }
+
+    /// Replace this chart's indicators.
+    pub fn set_indicator_configs(&mut self, configs: Vec<lines_indicators::IndicatorConfig>) {
+        self.studies = crate::studies::Studies::new(configs);
+        self.studies.attach(feed_info(&self.store));
+        self.seen_studies = u64::MAX;
+    }
+
+    /// A click on indicator-menu row `i`.
+    pub fn studies_click(&mut self, i: usize, cx: &mut Context<Self>) {
+        self.studies.click(i);
+        cx.notify();
+    }
+
+    /// Where an anchored VWAP starts: the bar under the crosshair, else the newest bar.
+    fn anchor_hint(&self) -> Option<i64> {
+        self.cross_bar.map(|b| b.time.0).or_else(|| {
+            self.store
+                .try_read()
+                .and_then(|d| d.series.last().map(|b| b.time.0))
+        })
     }
 
     /// Track the pointer for the crosshair; it shows only while the pointer is over the plot.
@@ -556,6 +613,8 @@ impl ChartView {
             for l in &mut self.layers {
                 l.prepare(&d, &self.vp);
             }
+            let max_columns = crate::studies::Studies::max_columns(self.plot.size.width);
+            self.studies.prepare(&d, &self.vp, max_columns);
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -656,6 +715,7 @@ impl ChartView {
             for l in &mut self.layers {
                 l.paint(plot, &self.vp, &t, window, cx);
             }
+            self.studies.paint((ox, oy), &t, window);
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
                 window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
@@ -1122,6 +1182,7 @@ impl Pane for ChartView {
     fn save_state(&self, doc: &mut PaneDoc) {
         doc.chart = Some(ChartState {
             bar_px: self.vp.bar_px,
+            indicators: self.indicator_configs(),
         });
     }
 
@@ -1138,10 +1199,29 @@ impl Pane for ChartView {
     fn on_tick(&mut self) {
         self.update_rates();
     }
+
+    /// New indicator values (they arrive from the indicator thread after the store's).
+    fn changed(&mut self) -> bool {
+        let r = self.studies.revision();
+        let changed = r != self.seen_studies;
+        self.seen_studies = r;
+        changed
+    }
+}
+
+/// The indicator engine's view of a chart store's feed.
+fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
+    let d = store.read();
+    lines_feed::indicators::FeedInfo {
+        feed: store.feed_id(),
+        product: d.product.id,
+        period_ms: d.series.period_ms(),
+        max_bars: d.series.max_len(),
+    }
 }
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  Ctrl+I indicators";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1198,6 +1278,8 @@ impl Render for ChartView {
                         )
                         .size_full(),
                     )
+                    .when_some(self.studies.legend(&t, &self.instrument), |d, l| d.child(l))
+                    .when_some(self.studies.menu_overlay(&t, cx), |d, m| d.child(m))
                     .when_some(overlay, |d, overlay| d.child(overlay)),
             )
     }

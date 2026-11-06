@@ -25,6 +25,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 lines-core.workspace = true
 lines-feed.workspace = true
+lines-indicators.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

@@ -60,6 +60,11 @@ pub trait Pane: EventEmitter<FeedChanged> + Sized + 'static {
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>);
     /// Called on every poll tick while visible (e.g. rate counters); default nothing.
     fn on_tick(&mut self) {}
+    /// Something besides the store changed (e.g. indicator values from the indicator
+    /// thread); polled every visible tick, redraws when true. Default: nothing.
+    fn changed(&mut self) -> bool {
+        false
+    }
     /// Where keyboard input goes when this pane has focus.
     fn focus_handle(&self) -> &FocusHandle;
     /// Write this pane's view state into its saved form.
@@ -90,6 +95,9 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
                 let stale = pane.store().stale_for().map(|d| d.as_secs());
                 if stale != stale_secs {
                     stale_secs = stale;
+                    cx.notify();
+                }
+                if pane.changed() {
                     cx.notify();
                 }
             });
