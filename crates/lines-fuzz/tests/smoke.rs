@@ -161,6 +161,29 @@ fn disk_store() {
 }
 
 #[test]
+fn kraken_session() {
+    run("kraken_session", lines_fuzz::kraken_session);
+}
+
+/// Seeds are only useful if the session accepts them: each session seed must leave bars and a
+/// book in the store, not a rejected first frame.
+#[test]
+fn session_seeds_reach_deep_state() {
+    for s in seeds::all() {
+        let Some((bars, book, errors)) = lines_fuzz::session_depth(s.target, &s.data) else {
+            continue;
+        };
+        if s.name == "pre-url-candles" {
+            assert!(bars > 0, "{}/{}: no bars", s.target, s.name);
+            continue;
+        }
+        assert!(bars > 0, "{}/{}: no bars", s.target, s.name);
+        assert!(book > 0, "{}/{}: empty book", s.target, s.name);
+        assert_eq!(errors, 0, "{}/{}: decode errors", s.target, s.name);
+    }
+}
+
+#[test]
 fn every_target_has_seeds_and_a_harness() {
     let all = seeds::all();
     for t in seeds::TARGETS {

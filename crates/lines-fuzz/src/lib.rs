@@ -19,11 +19,12 @@ use lines_core::{ContractKey, Month, Product, UtcMillis};
 use lines_feed::catalog;
 use lines_feed::coinbase::CoinbaseProvider;
 use lines_feed::cqg::{CqgProvider, LogonParams};
+use lines_feed::kraken::KrakenProvider;
 use lines_feed::native::{self, NativeProvider};
 use lines_feed::provider::{self, FrameKind, Provider, StartContext};
 use lines_feed::recording::Reader;
 use lines_feed::store::ChartStore;
-use lines_feed::{coinbase, cqg};
+use lines_feed::{coinbase, cqg, kraken};
 use lines_sierra::format::{DepthReader, ScidReader};
 use prost::Message;
 
@@ -67,6 +68,27 @@ pub fn coinbase_session(data: &[u8]) {
     drive(&CoinbaseProvider, product, contract, frames::Ops::new(ops));
 }
 
+/// Kraken: spot (WebSocket v2 JSON, checksummed book, REST AssetPairs/OHLC/Trades) or
+/// perpetuals (Futures feed JSON, sequenced book, REST instruments/charts/history), chosen by
+/// config bits 0-1 (BTC spot, ETH spot, BTC perp, ETH perp).
+pub fn kraken_session(data: &[u8]) {
+    let (cfg, ops) = frames::split(data);
+    let id = [
+        catalog::BTC_USD_KR,
+        catalog::ETH_USD_KR,
+        catalog::BTC_PERP_KR,
+        catalog::ETH_PERP_KR,
+    ][cfg as usize % 4];
+    let product = catalog::get(id).expect("Kraken product");
+    let contract = Some(ContractKey::spot(id));
+    drive(
+        &KrakenProvider::default(),
+        product,
+        contract,
+        frames::Ops::new(ops),
+    );
+}
+
 /// `lines-events-1` frames through the native (replay-only) session.
 pub fn native_session(data: &[u8]) {
     let (cfg, ops) = frames::split(data);
@@ -106,6 +128,9 @@ pub fn recording(data: &[u8]) {
             Box::new(CoinbaseProvider)
         }
         native::PROVIDER if native::protocol_compatible(&h.protocol) => Box::new(NativeProvider),
+        provider::KRAKEN if kraken::protocol_compatible(&h.protocol) => {
+            Box::new(KrakenProvider::default())
+        }
         _ => return,
     };
     let Some(product) = catalog::by_symbol(&h.product) else {
@@ -172,7 +197,7 @@ fn drive(
     product: Product,
     contract: Option<ContractKey>,
     ops: impl IntoIterator<Item = frames::Op>,
-) {
+) -> ChartStore {
     let store = ChartStore::new(
         product.clone(),
         contract,
@@ -192,11 +217,11 @@ fn drive(
             Some(s) => s,
             None => {
                 if reconnects > MAX_RECONNECTS {
-                    return;
+                    break;
                 }
                 reconnects += 1;
                 let Ok(mut s) = provider.new_session(&product, contract) else {
-                    return;
+                    break;
                 };
                 let history_from = store.update(|d| {
                     d.begin_connection();
@@ -230,6 +255,57 @@ fn drive(
         }
     }
     // What the UI reads after a frame.
+    {
+        let d = store.read();
+        let _ = (d.series.len(), d.contract_label(), d.history.label());
+    }
+    store
+}
+
+/// How deep an input drove a session harness: (bars, book levels, decode errors). For tests
+/// that check seeds reach real state rather than being rejected at the first frame.
+#[doc(hidden)]
+pub fn session_depth(target: &str, data: &[u8]) -> Option<(usize, usize, u64)> {
+    let (cfg, ops) = frames::split(data);
+    let ops = frames::Ops::new(ops);
+    let store = match target {
+        "cqg_session" => {
+            let es = catalog::get(catalog::ES)?;
+            let k = (cfg & 1 == 1)
+                .then(|| ContractKey::monthly(es.id, 2026, Month::new(12).expect("Z")));
+            drive(&CqgProvider::new(LogonParams::default()), es, k, ops)
+        }
+        "coinbase_session" => {
+            let id = if cfg & 1 == 1 {
+                catalog::ETH_USD
+            } else {
+                catalog::BTC_USD
+            };
+            drive(
+                &CoinbaseProvider,
+                catalog::get(id)?,
+                Some(ContractKey::spot(id)),
+                ops,
+            )
+        }
+        "kraken_session" => {
+            let id = [
+                catalog::BTC_USD_KR,
+                catalog::ETH_USD_KR,
+                catalog::BTC_PERP_KR,
+                catalog::ETH_PERP_KR,
+            ][cfg as usize % 4];
+            let p = catalog::get(id)?;
+            drive(
+                &KrakenProvider::default(),
+                p,
+                Some(ContractKey::spot(id)),
+                ops,
+            )
+        }
+        _ => return None,
+    };
     let d = store.read();
-    let _ = (d.series.len(), d.contract_label(), d.history.label());
+    let book = d.book.len(lines_core::Side::Bid) + d.book.len(lines_core::Side::Ask);
+    Some((d.series.len(), book, d.stats.decode_errors))
 }
