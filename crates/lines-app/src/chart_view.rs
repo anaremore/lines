@@ -1863,6 +1863,10 @@ impl Render for ChartView {
         self.perf_stats = cx
             .try_global::<crate::workspace::Workspace>()
             .is_some_and(|w| w.show_perf_stats);
+        // This frame's level-source snapshot: the legend below and the levels painted later
+        // in this frame both describe it.
+        let market_time = self.store.try_read().and_then(|d| d.market_time);
+        self.levels.snapshot(market_time);
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
