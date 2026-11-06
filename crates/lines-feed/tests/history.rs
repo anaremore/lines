@@ -992,8 +992,15 @@ mod store {
         );
     }
 
-    /// docs/design.md §7: a live feed that goes quiet is stale until data resumes; a finished
-    /// replay is not.
+    /// docs/design.md §7, end to end: a live feed that goes quiet is stale until data resumes; a
+    /// finished replay is not. The decision itself is tested without a clock
+    /// (`store::tests::staleness_decision_is_deterministic`); here a real-time replay (frames
+    /// every 20 ms, a 1.2 s pause, `stale_after` 400 ms) is observed by what it delivered, not by
+    /// wall-clock windows, so a loaded machine only makes it slower:
+    /// - right after a frame arrives, the feed is never stale;
+    /// - while the newest data is from before the pause, it becomes stale (the replay waits
+    ///   at least 1.2 s there, three times `stale_after`, however slow the machine);
+    /// - after the replay ends, it is not stale.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pausing_feed_shows_stale_until_data_resumes() {
         use lines_feed::native::{self, NativeEvent};
@@ -1045,27 +1052,43 @@ mod store {
         let store = new_store(&config).unwrap();
         let (_tx, rx) = watch::channel(false);
         let task = tokio::spawn(run_feed(config, store.clone(), rx));
-        let (mut seen_live, mut stale_in_pause, mut stale_late) = (false, false, false);
-        let t0 = std::time::Instant::now();
+        let pause_from = at("14:00:00").0 + 280; // the newest data before the pause
+        let resumed = at("14:00:01").0 + 500;
+        let (mut seen_live, mut stale_in_pause, mut fresh_after_resume) = (false, false, 0);
+        let mut seen = store.revision();
+        let start = std::time::Instant::now();
+        let mut polled = std::time::Instant::now();
         while !task.is_finished() {
-            let ms = t0.elapsed().as_millis();
-            let stale = store.stale_for().is_some();
-            if ms < 250 {
-                seen_live |= store.read().status == lines_feed::store::FeedStatus::Live;
-                assert!(!stale, "ticking: not stale ({ms} ms)");
+            assert!(start.elapsed() < Duration::from_secs(60), "replay too slow");
+            let rev = store.revision();
+            let (live, market) = {
+                let d = store.read();
+                let live = d.status == lines_feed::store::FeedStatus::Live;
+                (live, d.market_time.map(|t| t.0))
+            };
+            seen_live |= live;
+            if rev != seen && live {
+                // A frame arrived since the last poll, so the silence started after it: data
+                // resets staleness (whatever the machine's load).
+                let since_poll = polled.elapsed();
+                if let Some(quiet) = store.stale_for() {
+                    assert!(quiet <= since_poll, "{quiet:?} > {since_poll:?}");
+                }
+                if market.is_some_and(|m| m >= resumed) {
+                    fresh_after_resume += 1;
+                }
             }
-            if (950..1350).contains(&ms) {
-                stale_in_pause |= stale;
+            seen = rev;
+            polled = std::time::Instant::now();
+            if market == Some(pause_from) && store.stale_for().is_some() {
+                stale_in_pause = true;
             }
-            if (1650..1750).contains(&ms) {
-                stale_late |= stale;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         task.await.unwrap();
         assert!(seen_live);
         assert!(stale_in_pause, "the pause shows as stale");
-        assert!(!stale_late, "data resumed: not stale");
+        assert!(fresh_after_resume > 0, "data resumed and was seen fresh");
         assert_eq!(store.stale_for(), None, "a finished replay is not stale");
     }
 }
