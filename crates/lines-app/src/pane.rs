@@ -63,6 +63,11 @@ pub trait Pane: EventEmitter<FeedChanged> + Sized + 'static {
     fn common(&mut self) -> &mut PaneCommon;
     /// The revision this pane last drew.
     fn seen_revision(&mut self) -> &mut u64;
+    /// The store revision this pane redraws on. Default: every change. Panes that don't
+    /// show depth use `ChartStore::chart_revision`, so a busy book repaints only the DOM.
+    fn revision(&self) -> u64 {
+        self.store().revision()
+    }
     /// Follow another feed (a linked pane switched). Resets per-market view state.
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>);
     /// Called on every poll tick while visible (e.g. rate counters); default nothing.
@@ -104,7 +109,7 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
                     return;
                 }
                 pane.on_tick();
-                let rev = pane.store().revision();
+                let rev = pane.revision();
                 let seen = pane.seen_revision();
                 if rev != *seen {
                     *seen = rev;

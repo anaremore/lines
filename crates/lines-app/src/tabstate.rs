@@ -160,17 +160,21 @@ pub fn is_chart_only<Id: Copy + Eq + Hash>(leaves: &HashMap<Id, Leaf>, chart: Id
 /// Toggle "chart only" on `chart`: hide the DOMs and tapes in its link group in this tab
 /// (marked as hidden by chart only), or show exactly those again. Panes the trader hid
 /// themselves stay hidden; detached panes are left alone.
+///
+/// A refusal says what is actually there: no linked DOM/T&S in this tab, or linked ones that
+/// are already hidden or popped out (chart only leaves pop-outs alone), never "none shown"
+/// while the trader can see them in their own windows.
 pub fn chart_only<Id: Copy + Eq + Hash>(
     order: &[Id],
     leaves: &HashMap<Id, Leaf>,
     chart: Id,
-) -> Result<Changes<Id>, &'static str> {
+) -> Result<Changes<Id>, String> {
     let c = leaves.get(&chart).ok_or("no such pane")?;
     if c.kind != PaneKind::Chart {
-        return Err("chart only acts on a chart");
+        return Err("chart only acts on a chart".into());
     }
     if c.link.is_none() {
-        return Err("this chart isn't linked to a DOM or time & sales");
+        return Err("this chart isn't linked to a DOM or time & sales".into());
     }
     let mine = |id: &Id| {
         let l = leaves[id];
@@ -191,9 +195,23 @@ pub fn chart_only<Id: Copy + Eq + Hash>(
         .map(|id| (id, PaneState::ChartOnly))
         .collect();
     if changes.is_empty() {
-        return Err("no linked DOM or time & sales is shown");
+        let linked: Vec<PaneState> = order
+            .iter()
+            .filter(|id| mine(id))
+            .map(|id| leaves[id].state)
+            .collect();
+        return Err(if linked.is_empty() {
+            format!(
+                "chart only: no DOM or time & sales in link group {} in this tab",
+                crate::layout::link_letter(c.link)
+            )
+        } else if linked.iter().all(|s| *s == PaneState::Detached) {
+            "chart only: the linked DOM and time & sales are popped out (left as they are)".into()
+        } else {
+            "chart only: the linked DOM and time & sales are already hidden or popped out".into()
+        });
     }
-    keep_one(order, leaves, changes)
+    Ok(keep_one(order, leaves, changes)?)
 }
 
 /// Whether pane `id` can go into its own window (some other pane stays shown).
@@ -458,6 +476,26 @@ mod tests {
         assert_eq!(leaves[&6].state, PaneState::Hidden);
         apply(&mut leaves, vec![(6, PaneState::Shown)]);
         assert_eq!(geometry(&l, &leaves), before);
+        // Nothing to hide: the refusal says why, accurately.
+        apply(
+            &mut leaves,
+            vec![(5, PaneState::Detached), (6, PaneState::Detached)],
+        );
+        assert_eq!(
+            chart_only(&o, &leaves, 4).unwrap_err(),
+            "chart only: the linked DOM and time & sales are popped out (left as they are)"
+        );
+        apply(&mut leaves, vec![(5, PaneState::Hidden)]);
+        assert!(
+            chart_only(&o, &leaves, 4)
+                .unwrap_err()
+                .contains("already hidden")
+        );
+        leaves.get_mut(&4).unwrap().link = Some(3);
+        assert_eq!(
+            chart_only(&o, &leaves, 4).unwrap_err(),
+            "chart only: no DOM or time & sales in link group D in this tab"
+        );
         // Only on linked charts.
         leaves.get_mut(&1).unwrap().link = None;
         assert!(chart_only(&o, &leaves, 1).is_err());

@@ -10,6 +10,7 @@ mod feeds;
 mod layout;
 mod levels_layer;
 mod menu;
+mod notice;
 mod pane;
 mod pane_columns;
 mod pane_window;
@@ -252,13 +253,18 @@ struct Cli {
     #[arg(long)]
     workspace: Option<String>,
     /// Benchmark: open the workspace (default `6c2d`: 6 charts + 2 DOMs on two contracts)
-    /// in a hidden window, draw a frame every 8 ms for this many seconds while the feeds run,
-    /// then print frame-time percentiles and memory and exit.
+    /// in a hidden window for this many seconds while the feeds run, drawing a frame at most
+    /// every 8 ms when something changed, then print frames/s, frame-time percentiles, CPU
+    /// and memory and exit.
     #[arg(long, conflicts_with = "screenshot")]
     bench: Option<u64>,
     /// Benchmark: hide the workspace's DOMs (they must paint nothing).
     #[arg(long, requires = "bench")]
     bench_hide_doms: bool,
+    /// Benchmark: fail (exit 3) if any frame is drawn after the warm-up, i.e. something
+    /// repaints without new data or input. Use with a replay that finishes in the warm-up.
+    #[arg(long, requires = "bench")]
+    bench_expect_idle: bool,
     /// DOM price grouping in ticks per row (G cycles 1, 2, 5, 10, 25 in the app).
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     dom_grouping: u32,
@@ -733,6 +739,7 @@ where
                 size,
                 secs,
                 cli.bench_hide_doms,
+                cli.bench_expect_idle,
             )?;
             std::process::exit(code);
         }

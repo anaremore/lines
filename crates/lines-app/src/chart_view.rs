@@ -48,7 +48,9 @@ use gpui::{
     ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString, Styled, TextAlign,
     TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
-use lines_core::geometry::{Crosshair, crosshair, slot_x, snap, time_slot, write_ohlcv};
+use lines_core::geometry::{
+    Crosshair, Span, crosshair, label_clear_of_tags, slot_x, snap, time_slot, write_ohlcv,
+};
 use lines_core::viewport::{MAX_BAR_PX, MIN_BAR_PX, ScaleDrag, ScaleMode};
 use lines_core::{Bar, FixedStr, Price, Product, Scene, UtcMillis, Viewport};
 use lines_feed::ChartData;
@@ -67,6 +69,8 @@ const AXIS_W: f32 = 78.0;
 const AXIS_H: f32 = 24.0;
 const LABEL_PX: f32 = 12.0;
 const MAX_CACHED_LABELS: usize = 4096;
+/// Height of the last-price and crosshair price tags on the price axis.
+const TAG_H: f32 = LABEL_PX * 1.5;
 /// Shown in the price-axis corner while price auto-scale is off.
 const MANUAL_LABEL: &str = "manual";
 
@@ -131,12 +135,18 @@ enum Drag {
     Scale(ScaleDrag),
 }
 
+/// Performance stats for the header (off by default: the "Performance stats" command).
 struct Rates {
     at: Instant,
     updates: u64,
-    frames: u64,
+    msgs: u64,
+    paints: u64,
     updates_per_sec: f64,
-    frames_per_sec: f64,
+    /// Feed messages (wire frames) per second: depth batches included, so this is far above
+    /// the paint rate on a busy book.
+    msgs_per_sec: f64,
+    /// Frames this chart actually painted per second.
+    paints_per_sec: f64,
 }
 
 /// The time under this chart's crosshair changed (`None`: it left the plot). The workspace
@@ -201,6 +211,10 @@ pub struct ChartView {
     font: Option<Font>,
     rates: Rates,
     paint_time_ewma_us: f64,
+    /// Show `rates` in the header (workspace preference, read at render).
+    perf_stats: bool,
+    /// The rates changed since the last paint (redraw once a second while shown).
+    rates_changed: bool,
 }
 
 impl ChartView {
@@ -261,11 +275,15 @@ impl ChartView {
             rates: Rates {
                 at: Instant::now(),
                 updates: 0,
-                frames: 0,
+                msgs: 0,
+                paints: 0,
                 updates_per_sec: 0.0,
-                frames_per_sec: 0.0,
+                msgs_per_sec: 0.0,
+                paints_per_sec: 0.0,
             },
             paint_time_ewma_us: 0.0,
+            perf_stats: false,
+            rates_changed: false,
         }
     }
 
@@ -275,19 +293,29 @@ impl ChartView {
         self.layers.push(layer);
     }
 
-    fn update_rates(&mut self) {
+    /// Once a second while the performance stats are shown; `true` if they changed.
+    fn update_rates(&mut self) -> bool {
         let dt = self.rates.at.elapsed().as_secs_f64();
         if dt < 1.0 {
-            return;
+            return false;
         }
-        if let Some(d) = self.store.try_read() {
-            let (u, f) = (d.stats.updates_in, d.stats.frames_in);
-            self.rates.updates_per_sec = (u - self.rates.updates.min(u)) as f64 / dt;
-            self.rates.frames_per_sec = (f - self.rates.frames.min(f)) as f64 / dt;
-            self.rates.updates = u;
-            self.rates.frames = f;
-            self.rates.at = Instant::now();
-        }
+        let Some(d) = self.store.try_read() else {
+            return false;
+        };
+        let (u, m, p) = (d.stats.updates_in, d.stats.frames_in, self.common.paints);
+        drop(d);
+        let r = &mut self.rates;
+        let per_sec = |now: u64, then: u64| (now - then.min(now)) as f64 / dt;
+        let next = (
+            per_sec(u, r.updates),
+            per_sec(m, r.msgs),
+            per_sec(p, r.paints),
+        );
+        let changed = next != (r.updates_per_sec, r.msgs_per_sec, r.paints_per_sec);
+        (r.updates_per_sec, r.msgs_per_sec, r.paints_per_sec) = next;
+        (r.updates, r.msgs, r.paints) = (u, m, p);
+        r.at = Instant::now();
+        changed
     }
 
     // ---- input ---------------------------------------------------------------------
@@ -896,9 +924,20 @@ impl ChartView {
         window.paint_quad(fill(rect(0.0, ph, pw, hair), t.axis_line));
 
         let line_h = px(LABEL_PX * 1.3);
+        // The tags drawn over the price axis below; a label any of them would cover isn't
+        // drawn at all (a half-covered number reads as another price).
+        let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
+        let tags = [
+            last_y.map(|y| Span::around(y, TAG_H * 0.5)),
+            self.cross
+                .map(|c| Span::around(cross_tag_y(c.y, ph), TAG_H * 0.5)),
+        ];
         for i in 0..self.scene.price_lines.len() {
             let l = self.scene.price_lines[i];
             if l.y < 0.0 || l.y > ph {
+                continue;
+            }
+            if !label_clear_of_tags(Span::around(l.y, LABEL_PX * 0.65), &tags) {
                 continue;
             }
             let origin = point(px(ox + pw + 8.0), px(oy + l.y - LABEL_PX * 0.65));
@@ -934,13 +973,9 @@ impl ChartView {
                 },
             );
         }
-        if let Some(p) = self.last_trade {
-            // `max` first: the plot can be shorter than a label (tiny windows).
-            let y = (self.vp.price_to_y(p.0 as f64) as f32)
-                .min(ph - LABEL_PX)
-                .max(0.0);
+        if let (Some(p), Some(y)) = (self.last_trade, last_y) {
             window.paint_quad(fill(
-                rect(pw + hair, y - LABEL_PX * 0.75, AXIS_W, LABEL_PX * 1.5),
+                rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
                 t.last,
             ));
             let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
@@ -1028,15 +1063,14 @@ impl ChartView {
         );
         let line_h = px(LABEL_PX * 1.3);
         let fmt = self.instrument.price;
-        let tag_h = LABEL_PX * 1.5;
 
         // Price tag: same box as the last-price tag, kept fully inside the plot's height.
-        let y = c.y.min(ph - tag_h * 0.5).max(tag_h * 0.5);
-        let top = snap(f64::from(y - tag_h * 0.5), scale);
+        let y = cross_tag_y(c.y, ph);
+        let top = snap(f64::from(y - TAG_H * 0.5), scale);
         window.paint_quad(fill(
             Bounds::new(
                 point(px(ox + pw + hair), px(oy + top)),
-                size(px(AXIS_W), px(tag_h)),
+                size(px(AXIS_W), px(TAG_H)),
             ),
             t.cross_tag,
         ));
@@ -1279,11 +1313,13 @@ impl ChartView {
             if let Some(mt) = d.market_time {
                 let _ = write!(right, "  ·  {mt}");
             }
-        } else {
+        } else if self.perf_stats {
+            // Debug detail, not data (docs/design.md §1): only behind "Performance stats".
+            let r = &self.rates;
             let _ = write!(
                 right,
-                "  ·  {:.0} updates/s  ·  {:.0} frames/s  ·  paint {:.0} µs",
-                self.rates.updates_per_sec, self.rates.frames_per_sec, self.paint_time_ewma_us
+                "  ·  {:.0} msgs/s  ·  {:.0} updates/s  ·  {:.0} paints/s  ·  paint {:.0} µs",
+                r.msgs_per_sec, r.updates_per_sec, r.paints_per_sec, self.paint_time_ewma_us
             );
         }
         if d.stats.reconnects > 0 {
@@ -1364,22 +1400,43 @@ impl Pane for ChartView {
     }
 
     fn on_tick(&mut self) {
-        self.update_rates();
+        if self.perf_stats && !self.frozen {
+            self.rates_changed |= self.update_rates();
+        }
     }
 
-    /// New indicator values (they arrive from the indicator thread after the store's).
-    /// Hidden studies never ask for a repaint.
+    /// Charts don't show depth: a depth batch that leaves the quote alone doesn't repaint.
+    fn revision(&self) -> u64 {
+        self.store.chart_revision()
+    }
+
+    /// New indicator values (they arrive from the indicator thread after the store's), or new
+    /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
+        let rates = std::mem::take(&mut self.rates_changed);
         if !self.visibility.draws_studies() {
-            return false;
+            return rates;
         }
         let r = self.studies.revision();
         let l = self.levels.revision();
         let changed = r != self.seen_studies || l != self.seen_levels;
         self.seen_studies = r;
         self.seen_levels = l;
-        changed
+        changed || rates
     }
+}
+
+/// Centre of the last-price tag (plot-local y). `max` last: the plot can be shorter than a
+/// label (tiny windows).
+fn last_tag_y(vp: &Viewport, p: Price, plot_h: f32) -> f32 {
+    (vp.price_to_y(p.0 as f64) as f32)
+        .min(plot_h - LABEL_PX)
+        .max(0.0)
+}
+
+/// Centre of the crosshair's price tag, kept fully inside the plot's height.
+fn cross_tag_y(y: f32, plot_h: f32) -> f32 {
+    y.min(plot_h - TAG_H * 0.5).max(TAG_H * 0.5)
 }
 
 /// A header quote: `bid 6005.25`, or `bid —` (and `true`: show it dimmed) without a value.
@@ -1433,6 +1490,10 @@ impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let entity = cx.entity();
+        // The workspace refreshes every window when this preference changes.
+        self.perf_stats = cx
+            .try_global::<crate::workspace::Workspace>()
+            .is_some_and(|w| w.show_perf_stats);
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
