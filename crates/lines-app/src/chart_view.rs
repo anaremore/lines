@@ -1,4 +1,4 @@
-//! The chart window: header + candlestick canvas with pan/zoom and a crosshair.
+//! The chart window: header + candlestick canvas with pan/zoom/scaling and a crosshair.
 //!
 //! Frame flow (decision 0001): a UI-thread timer compares the store's atomic revision and
 //! calls `cx.notify()` only when data changed (so 5k msgs/s never means 5k redraws). In
@@ -9,6 +9,13 @@
 //! Crosshair: input handlers only record the pointer position (plot-local logical px). Paint
 //! hit-tests it against the viewport *after* this frame's pan/zoom/data update
 //! (`lines_core::geometry::crosshair`), so the crosshair can never lag or fight the view.
+//!
+//! Input map: drag = pan; Ctrl+drag (plot) or drag on an axis = scale (`ScaleDrag`);
+//! wheel = time zoom (pinned to the right edge while the newest bar is visible);
+//! Ctrl+wheel = price zoom; Shift+wheel or horizontal scroll = pan through time;
+//! double-click plot / Home = newest bar + auto-scale; double-click price axis = auto-scale.
+//! While any drag is active the viewport is `held`, so arriving bars can't move the axes
+//! under the pointer.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -16,12 +23,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, ContentMask, Context, Font, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
-    ScrollEvent, ShapedLine, SharedString, Styled, TextAlign, TextRun, Window, canvas, div, fill,
-    point, prelude::*, px, size,
+    App, Bounds, ContentMask, Context, FocusHandle, Font, Hsla, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString, Styled, TextAlign, TextRun,
+    Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::geometry::{Crosshair, crosshair, snap, write_ohlcv};
+use lines_core::viewport::{ScaleDrag, ScaleMode};
 use lines_core::{Bar, FixedStr, Instrument, Price, Scene, Viewport};
 use lines_feed::FeedHandle;
 use lines_feed::store::{ChartStore, FeedStatus};
@@ -32,6 +40,8 @@ const AXIS_W: f32 = 78.0;
 const AXIS_H: f32 = 24.0;
 const LABEL_PX: f32 = 12.0;
 const MAX_CACHED_LABELS: usize = 4096;
+/// Shown in the price-axis corner while price auto-scale is off.
+const MANUAL_LABEL: &str = "manual";
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum LabelKind {
@@ -40,6 +50,32 @@ enum LabelKind {
     LastPrice,
     CrossPrice,
     CrossTime,
+    Indicator,
+}
+
+/// Where a pointer event landed.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Region {
+    Plot,
+    /// The price axis column, including the corner below it.
+    PriceAxis,
+    TimeAxis,
+}
+
+/// Deterministic input for screenshot mode (decision 0009), standing in for the mouse.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Fixture {
+    /// Fixed pointer position, plot-local logical px.
+    pub cursor: Option<(f32, f32)>,
+    /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
+    /// would (turns auto-scale off).
+    pub price_zoom: Option<f64>,
+}
+
+enum Drag {
+    /// Last pointer position.
+    Pan(Point<Pixels>),
+    Scale(ScaleDrag),
 }
 
 struct Rates {
@@ -64,7 +100,13 @@ pub struct ChartView {
     series_len: usize,
     series_trimmed: u64,
     plot: Bounds<Pixels>,
-    drag_from: Option<Point<Pixels>>,
+    /// The whole canvas: plot plus axes.
+    chart: Bounds<Pixels>,
+    drag: Option<Drag>,
+    focus: FocusHandle,
+    focus_requested: bool,
+    /// Screenshot fixture: price zoom to apply once, after the first auto-fit.
+    pending_price_zoom: Option<f64>,
     /// Pointer position in plot-local logical px, while it is over the plot.
     hover: Option<(f32, f32)>,
     /// This frame's crosshair (from `hover`), and a copy of the bar under it.
@@ -80,12 +122,11 @@ pub struct ChartView {
 }
 
 impl ChartView {
-    /// `cursor`: a fixed pointer position (plot-local logical px) for screenshots.
     pub fn new(
         feed: FeedHandle,
         theme: Theme,
         frozen: bool,
-        cursor: Option<(f32, f32)>,
+        fixture: Fixture,
         cx: &mut Context<Self>,
     ) -> Self {
         let store = feed.store.clone();
@@ -125,8 +166,12 @@ impl ChartView {
             series_len: 0,
             series_trimmed: 0,
             plot: Bounds::default(),
-            drag_from: None,
-            hover: cursor,
+            chart: Bounds::default(),
+            drag: None,
+            focus: cx.focus_handle(),
+            focus_requested: false,
+            hover: fixture.cursor,
+            pending_price_zoom: fixture.price_zoom,
             cross: None,
             cross_bar: None,
             period_ms: 60_000,
@@ -161,16 +206,65 @@ impl ChartView {
 
     // ---- input ---------------------------------------------------------------------
 
-    fn on_mouse_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.plot.contains(&ev.position) {
+    fn region(&self, pos: Point<Pixels>) -> Option<Region> {
+        if !self.chart.contains(&pos) {
+            None
+        } else if self.plot.contains(&pos) {
+            Some(Region::Plot)
+        } else if pos.x >= self.plot.right() {
+            Some(Region::PriceAxis)
+        } else {
+            Some(Region::TimeAxis)
+        }
+    }
+
+    /// Plot-local logical px (may lie outside the plot, e.g. on an axis).
+    fn local(&self, pos: Point<Pixels>) -> (f64, f64) {
+        let l = pos - self.plot.origin;
+        (f64::from(l.x), f64::from(l.y))
+    }
+
+    fn start_drag(&mut self, drag: Drag) {
+        self.drag = Some(drag);
+        self.vp.set_held(true, self.series_len);
+    }
+
+    fn end_drag(&mut self) {
+        self.drag = None;
+        self.vp.set_held(false, self.series_len);
+    }
+
+    fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(region) = self.region(ev.position) else {
+            return;
+        };
+        self.focus.focus(window, cx);
+        self.end_drag();
+        let (x, y) = self.local(ev.position);
+        if ev.click_count >= 2 {
+            match region {
+                Region::Plot => self.vp.reset(self.series_len),
+                Region::PriceAxis => self.vp.restore_auto_price(),
+                Region::TimeAxis => return,
+            }
+            cx.notify();
             return;
         }
-        if ev.click_count >= 2 {
+        let drag = match region {
+            Region::Plot if ev.modifiers.control => {
+                Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Free, x, y))
+            }
+            Region::Plot => Drag::Pan(ev.position),
+            Region::PriceAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Price, x, y)),
+            Region::TimeAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Time, x, y)),
+        };
+        self.start_drag(drag);
+    }
+
+    fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.key == "home" {
             self.vp.reset(self.series_len);
-            self.drag_from = None;
             cx.notify();
-        } else {
-            self.drag_from = Some(ev.position);
         }
     }
 
@@ -194,19 +288,33 @@ impl ChartView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
-        let Some(from) = self.drag_from else { return };
-        if ev.pressed_button != Some(MouseButton::Left) {
-            self.drag_from = None;
+        if self.drag.is_none() {
             return;
         }
-        let d = ev.position - from;
-        self.drag_from = Some(ev.position);
-        self.vp.pan(f64::from(d.x), f64::from(d.y), self.series_len);
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.end_drag();
+            return;
+        }
+        let (x, y) = self.local(ev.position);
+        let len = self.series_len;
+        let tick = self.instrument.price.tick;
+        match &mut self.drag {
+            Some(Drag::Pan(from)) => {
+                let d = ev.position - *from;
+                *from = ev.position;
+                self.vp.pan(f64::from(d.x), f64::from(d.y), len);
+            }
+            Some(Drag::Scale(drag)) => drag.update(&mut self.vp, x, y, len, tick),
+            None => return,
+        }
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.drag_from = None;
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.drag.is_some() {
+            self.end_drag();
+            cx.notify();
+        }
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -214,17 +322,29 @@ impl ChartView {
         if !self.plot.contains(&ev.position) {
             return;
         }
-        let dy = f64::from(ev.delta.pixel_delta(window.line_height()).y);
-        if dy == 0.0 {
+        let d = ev.delta.pixel_delta(window.line_height());
+        let (dx, dy) = (f64::from(d.x), f64::from(d.y));
+        let (x, y) = self.local(ev.position);
+        let len = self.series_len;
+        if ev.modifiers.shift || dx.abs() > dy.abs() {
+            // Shift+wheel (GPUI on Windows already reports it as delta.x), tilt wheel and
+            // trackpad swipes pan through time; the content follows the delta.
+            let amount = if dx != 0.0 { dx } else { dy };
+            if amount == 0.0 {
+                return;
+            }
+            self.vp.pan(amount, 0.0, len);
+        } else if dy == 0.0 {
             return;
-        }
-        // Wheel up (positive delta) zooms in. ~10% per notch.
-        let factor = (dy * 0.005).exp();
-        let local = ev.position - self.plot.origin;
-        if ev.modifiers.control {
-            self.vp.zoom_price_at(f64::from(local.y), factor);
         } else {
-            self.vp.zoom_at(f64::from(local.x), factor, self.series_len);
+            // Wheel up (positive delta) zooms in. ~10% per notch.
+            let factor = (dy * 0.005).exp();
+            if ev.modifiers.control {
+                self.vp.zoom_price_at(y, factor, self.instrument.price.tick);
+            } else {
+                let anchor = self.vp.time_zoom_anchor(x, len);
+                self.vp.zoom_at(anchor, factor, len);
+            }
         }
         cx.notify();
     }
@@ -237,6 +357,7 @@ impl ChartView {
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let plot_w = (w - AXIS_W).max(10.0);
         let plot_h = (h - AXIS_H).max(10.0);
+        self.chart = bounds;
         self.plot = Bounds::new(bounds.origin, size(px(plot_w), px(plot_h)));
         self.vp.set_size(plot_w as f64, plot_h as f64);
         // Only allocates when the window grows wider than ever before.
@@ -245,7 +366,7 @@ impl ChartView {
         // Sample the feed. If it holds the lock this instant, redraw the previous scene.
         if let Some(d) = self.store.try_read() {
             let trimmed = d.series.trimmed();
-            if trimmed > self.series_trimmed && !self.vp.follow_live {
+            if trimmed > self.series_trimmed && (!self.vp.follow_live || self.vp.held) {
                 // Bars dropped from the front shift indices; keep the view anchored.
                 self.vp.right_index -= (trimmed - self.series_trimmed) as f64;
             }
@@ -256,6 +377,13 @@ impl ChartView {
             let bars = d.series.bars();
             self.vp.on_data(bars, fmt.tick);
             self.period_ms = d.series.period_ms();
+            // Only once bars are visible, i.e. auto-scale has fitted a real range (the first
+            // layout pass can paint at a placeholder size with nothing on screen).
+            if !self.vp.visible_range(bars.len()).is_empty()
+                && let Some(f) = self.pending_price_zoom.take()
+            {
+                self.vp.zoom_price_at(self.vp.height * 0.5, f, fmt.tick);
+            }
             self.scene
                 .build(bars, &self.vp, &fmt, scale, self.period_ms);
             // Hit-test after the viewport update so the crosshair matches this frame.
@@ -422,12 +550,55 @@ impl ChartView {
                 },
             );
         }
+        if !self.vp.auto_price {
+            self.draw_manual_scale_indicator(bounds, window, cx);
+        }
         if let Some(c) = self.cross {
             self.draw_crosshair_tags(c, bounds, window, cx);
         }
         if let Some(bar) = self.cross_bar {
             self.draw_readout(bar, bounds, window, cx);
         }
+    }
+
+    /// Price auto-scale is off: a small accent word in the empty corner under the price axis,
+    /// where it never covers a label or moves anything. Double-click the price axis or press
+    /// Home to restore auto-scale.
+    fn draw_manual_scale_indicator(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let (pw, ph) = (
+            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.height),
+        );
+        let accent = self.theme.accent;
+        let w = f32::from(
+            self.label(LabelKind::Indicator, 0, accent, window, |s| {
+                let _ = s.write_str(MANUAL_LABEL);
+            })
+            .width,
+        );
+        let corner_w = f32::from(bounds.size.width) - pw;
+        let origin = point(
+            px(ox + pw + ((corner_w - w) * 0.5).max(4.0)),
+            px(oy + ph + 4.0),
+        );
+        self.paint_label(
+            LabelKind::Indicator,
+            0,
+            origin,
+            px(LABEL_PX * 1.3),
+            accent,
+            window,
+            cx,
+            |s| {
+                let _ = s.write_str(MANUAL_LABEL);
+            },
+        );
     }
 
     /// Price tag on the price axis and time tag on the time axis, drawn over the axis labels.
@@ -674,8 +845,13 @@ impl ChartView {
 }
 
 impl Render for ChartView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = &self.feed; // the view owns the feed; dropping the view stops it
+        if !self.focus_requested {
+            // Keyboard shortcuts (Home) work without clicking the chart first.
+            self.focus_requested = true;
+            self.focus.focus(window, cx);
+        }
         let t = self.theme;
         let entity = cx.entity();
         div()
@@ -688,6 +864,8 @@ impl Render for ChartView {
                 div()
                     .flex_1()
                     .size_full()
+                    .track_focus(&self.focus)
+                    .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -705,7 +883,7 @@ impl Render for ChartView {
                     ),
             )
             .child(div().px_3().py_1().text_xs().text_color(t.text_dim).bg(t.panel).child(
-                "drag: pan   ·   wheel: zoom time   ·   ctrl+wheel: zoom price   ·   double-click: reset & follow live",
+                "drag: pan   ·   wheel: zoom time   ·   shift+wheel: scroll   ·   ctrl+wheel, ctrl+drag or drag an axis: scale   ·   double-click price axis: auto-scale   ·   double-click / Home: latest",
             ))
     }
 }

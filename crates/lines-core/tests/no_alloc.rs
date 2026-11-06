@@ -1,11 +1,12 @@
 //! Enforces "no heap allocation in the paint path" for everything Lines controls:
-//! viewport updates, candle/grid geometry, crosshair hit-testing, and label formatting
+//! viewport updates (pan, wheel zoom, drag scaling), candle/grid geometry, crosshair hit-testing, and label formatting
 //! (axis labels, crosshair price/time tags, OHLCV readout).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use lines_core::geometry::{crosshair, write_ohlcv};
+use lines_core::viewport::{ScaleDrag, ScaleMode};
 use lines_core::{
     Bar, BarSeries, DisplayStyle, FixedStr, Price, PriceFormat, PriceScale, Qty, QtyFormat, Scene,
     UtcMillis, Viewport,
@@ -81,6 +82,22 @@ fn paint_path_does_not_allocate() {
                 series.len(),
             );
             vp.pan(if frame % 3 == 0 { -5.0 } else { 5.0 }, 0.0, series.len());
+            // Wheel zoom pinned to the right edge, drag scaling, auto-scale restore.
+            let anchor = vp.time_zoom_anchor(700.0, series.len());
+            vp.zoom_at(
+                anchor,
+                if frame % 2 == 0 { 1.05 } else { 1.0 / 1.05 },
+                series.len(),
+            );
+            let mode = [ScaleMode::Free, ScaleMode::Time, ScaleMode::Price][frame as usize % 3];
+            let mut drag = ScaleDrag::new(&vp, mode, 600.0, 300.0);
+            for step in 0..4 {
+                let d = (frame % 7 + step * 3) as f64;
+                drag.update(&mut vp, 600.0 + d, 300.0 - d * 0.5, series.len(), fmt.tick);
+            }
+            if frame % 50 == 0 {
+                vp.restore_auto_price();
+            }
             // Frame.
             vp.on_data(series.bars(), fmt.tick);
             scene.build(series.bars(), &vp, &fmt, 1.25, series.period_ms());

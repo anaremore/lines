@@ -51,6 +51,7 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair.
+# --price-zoom F zooms the auto-fitted price range by F (as Ctrl+wheel), i.e. manual price scale.
 ```
 
 Catalog instruments (ids are permanent): `ES` 1, `NQ` 2, `ZN` 3, `MES` 4, `MNQ` 5, `BTC/USD` 1001, `ETH/USD` 1002. CQG maps ES→`EP`, NQ→`ENQ`, ZN→`TYA` (only `EP` verified, via the mock; MES/MNQ unmapped). Coinbase maps `BTC-USD`, `ETH-USD`. Sierra maps roots ES, NQ, MES, MNQ (`NQZ5.CME`, `NQH25-CME`, `NQH25_FUT_CME` forms). The mock resolves only `EP`.

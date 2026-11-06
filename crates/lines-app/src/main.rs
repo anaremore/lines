@@ -95,6 +95,10 @@ struct Cli {
     /// top-left corner of the plot area, i.e. below the header).
     #[arg(long, requires = "screenshot", value_parser = parse_point)]
     cursor: Option<(f32, f32)>,
+    /// Screenshot: zoom the auto-fitted price range by this factor around the plot's centre
+    /// (as Ctrl+wheel would), which switches the price axis to manual scale.
+    #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
+    price_zoom: Option<f64>,
 }
 
 fn parse_time(s: &str) -> Result<UtcMillis, String> {
@@ -113,6 +117,13 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
         return Err("size out of range".into());
     }
     Ok((w, h))
+}
+
+fn parse_zoom(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(f) if f.is_finite() && f > 0.0 => Ok(f),
+        _ => Err("expected a positive factor, e.g. 1.5 (>1 zooms in)".into()),
+    }
 }
 
 fn parse_point(s: &str) -> Result<(f32, f32), String> {
@@ -215,7 +226,10 @@ fn main() -> Result<()> {
                 size: cli.size,
                 scale: cli.scale,
                 theme,
-                cursor: cli.cursor,
+                fixture: chart_view::Fixture {
+                    cursor: cli.cursor,
+                    price_zoom: cli.price_zoom,
+                },
             };
             let code = screenshot::run(config, shot)?;
             std::process::exit(code);
@@ -248,7 +262,7 @@ fn main() -> Result<()> {
                 }),
                 ..Default::default()
             },
-            move |_, cx| cx.new(|cx| ChartView::new(feed, theme, false, None, cx)),
+            move |_, cx| cx.new(|cx| ChartView::new(feed, theme, false, Default::default(), cx)),
         );
         if let Err(e) = opened {
             tracing::error!("failed to open window: {e:#}");
