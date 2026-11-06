@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lines_core::{BarSeries, Capabilities, Instrument, Price, UtcMillis};
+use lines_core::{BarSeries, Capabilities, Instrument, OrderBook, Price, UtcMillis};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::provider::MarketEvent;
@@ -52,6 +52,8 @@ pub struct FeedStats {
     pub rejected: u64,
     pub corrections_ignored: u64,
     pub decode_errors: u64,
+    /// Frames (batches) after which the book had bid >= ask.
+    pub book_crossed: u64,
     pub reconnects: u64,
 }
 
@@ -65,6 +67,8 @@ pub struct ChartData {
     pub last_trade: Option<Price>,
     pub bid: Option<Price>,
     pub ask: Option<Price>,
+    /// Aggregated depth (empty unless the provider has the `depth` capability).
+    pub book: OrderBook,
     /// Exchange time of the newest trade/bar seen (the replay "clock").
     pub market_time: Option<UtcMillis>,
     pub status: FeedStatus,
@@ -74,6 +78,7 @@ pub struct ChartData {
 impl ChartData {
     /// Fold normalized events into the chart state.
     pub fn apply(&mut self, events: &[MarketEvent]) {
+        let mut book_touched = false;
         for e in events {
             match *e {
                 MarketEvent::Ready => self.status = FeedStatus::Live,
@@ -108,6 +113,27 @@ impl ChartData {
                 MarketEvent::CorrectionsIgnored { count } => {
                     self.stats.corrections_ignored += count
                 }
+                MarketEvent::BookClear => {
+                    self.book.clear();
+                    book_touched = true;
+                }
+                MarketEvent::BookLevel {
+                    side,
+                    price,
+                    qty,
+                    orders,
+                } => {
+                    self.book.set(side, price, qty, orders);
+                    book_touched = true;
+                }
+            }
+        }
+        if book_touched {
+            // A frame is one atomic depth batch: the book is consistent only here.
+            self.bid = self.book.best_bid().map(|(p, _)| p);
+            self.ask = self.book.best_ask().map(|(p, _)| p);
+            if self.book.is_crossed() {
+                self.stats.book_crossed += 1;
             }
         }
     }
@@ -142,6 +168,7 @@ impl ChartStore {
                 last_trade: None,
                 bid: None,
                 ask: None,
+                book: OrderBook::default(),
                 market_time: None,
                 status: FeedStatus::Connecting,
                 stats: FeedStats::default(),

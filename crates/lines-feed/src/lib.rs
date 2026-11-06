@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod coinbase;
 pub mod connection;
 pub mod cqg;
+pub mod native;
 pub mod provider;
 pub mod recording;
 pub mod store;
@@ -110,6 +111,9 @@ fn provider_for(source: &Source) -> Result<Arc<dyn Provider>> {
                 }
                 provider::COINBASE if coinbase::protocol_compatible(&h.protocol) => {
                     Arc::new(coinbase::CoinbaseProvider)
+                }
+                native::PROVIDER if native::protocol_compatible(&h.protocol) => {
+                    Arc::new(native::NativeProvider)
                 }
                 p => bail!(
                     "recording is from provider {p:?} protocol {:?}, which this build cannot decode",

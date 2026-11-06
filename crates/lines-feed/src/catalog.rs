@@ -13,6 +13,8 @@ use lines_core::{
 pub const ES: InstrumentId = InstrumentId(1);
 pub const NQ: InstrumentId = InstrumentId(2);
 pub const ZN: InstrumentId = InstrumentId(3);
+pub const MES: InstrumentId = InstrumentId(4);
+pub const MNQ: InstrumentId = InstrumentId(5);
 pub const BTC_USD: InstrumentId = InstrumentId(1001);
 pub const ETH_USD: InstrumentId = InstrumentId(1002);
 
@@ -26,7 +28,7 @@ fn decimal(digits: u32, tick_units: i64) -> PriceFormat {
     )
 }
 
-pub fn all() -> [Instrument; 5] {
+pub fn all() -> [Instrument; 7] {
     [
         Instrument {
             id: ES,
@@ -42,6 +44,22 @@ pub fn all() -> [Instrument; 5] {
             id: NQ,
             symbol: "NQ",
             description: "E-mini Nasdaq-100",
+            price: decimal(2, 25),
+            qty: QtyFormat::WHOLE,
+            currency: Currency::USD,
+        },
+        Instrument {
+            id: MES,
+            symbol: "MES",
+            description: "Micro E-mini S&P 500",
+            price: decimal(2, 25),
+            qty: QtyFormat::WHOLE,
+            currency: Currency::USD,
+        },
+        Instrument {
+            id: MNQ,
+            symbol: "MNQ",
+            description: "Micro E-mini Nasdaq-100",
             price: decimal(2, 25),
             qty: QtyFormat::WHOLE,
             currency: Currency::USD,

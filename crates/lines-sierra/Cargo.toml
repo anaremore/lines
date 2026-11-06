@@ -1,0 +1,22 @@
+[package]
+name = "lines-sierra"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+description = "PERSONAL DEV TOOL: imports local Sierra Chart .scid/.depth files into Lines replay files. Not a product feature; never ship (Sierra licence unreviewed). See docs/briefs/sierra-chart-importer.md."
+
+[[bin]]
+name = "lines-import-sierra"
+path = "src/main.rs"
+
+[dependencies]
+lines-core.workspace = true
+lines-feed.workspace = true
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

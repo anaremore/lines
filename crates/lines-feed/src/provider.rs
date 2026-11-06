@@ -10,7 +10,7 @@
 //!   the identical session code.
 
 use bytes::Bytes;
-use lines_core::{Bar, Capabilities, Instrument, Price, Qty, UtcMillis};
+use lines_core::{Bar, Capabilities, Instrument, Price, Qty, Side, UtcMillis};
 
 /// Wire frame kinds. HTTP responses (e.g. REST history) travel through the same pipe so
 /// recordings capture them and replays are deterministic.
@@ -75,6 +75,16 @@ pub enum MarketEvent {
     LastPrice(Price),
     Bid(Price),
     Ask(Price),
+    /// Remove every depth level (start of a book snapshot).
+    BookClear,
+    /// Set one aggregated depth level; `qty == 0` removes it. All book events in one frame
+    /// form one atomic batch: the book is only consistent at frame boundaries.
+    BookLevel {
+        side: Side,
+        price: Price,
+        qty: Qty,
+        orders: u32,
+    },
     /// Messages known to be missing (sequence gap).
     Gap {
         missed: u64,

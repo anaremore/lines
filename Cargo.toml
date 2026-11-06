@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed", "crates/lines-app"]
+members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed", "crates/lines-app", "crates/lines-sierra"]
+# lines-sierra (personal Sierra Chart importer) is a member so `cargo test --workspace` covers it,
+# but not a default member: plain `cargo build`/`cargo run` never build it, and nothing depends on it.
 default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-feed", "crates/lines-app"]
 
 [workspace.package]

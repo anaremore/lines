@@ -2,6 +2,10 @@
 //! monotonic timestamp. Replaying a file therefore exercises the exact same session code as
 //! a live connection, for any provider (the header says which one).
 //!
+//! Providers so far: `cqg` (raw protobuf frames), `coinbase` (JSON text + HTTP bodies), and
+//! `lines` (normalized events incl. order-book depth, see `native.rs`; used for imported
+//! data such as Sierra Chart files). The container format is unchanged by `lines`.
+//!
 //! Format v2 (little-endian):
 //! ```text
 //! header:  b"LINESFR\0" | u16 format_version=2 | i64 start_wall_ms
@@ -85,6 +89,69 @@ fn write_str(w: &mut impl Write, s: &str) -> io::Result<()> {
     w.write_all(s.as_bytes())
 }
 
+/// Synchronous `.lfr` writer with caller-supplied timestamps. Used directly by importers
+/// (whose "time since start" is market time) and by [`Recorder`]'s writer thread.
+pub struct Writer<W: Write> {
+    w: W,
+}
+
+impl Writer<BufWriter<File>> {
+    pub fn create(path: &Path, header: &Header) -> io::Result<Self> {
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(dir)?;
+        }
+        Writer::new(
+            BufWriter::with_capacity(1 << 20, File::create(path)?),
+            header,
+        )
+    }
+}
+
+impl<W: Write> Writer<W> {
+    pub fn new(mut w: W, header: &Header) -> io::Result<Self> {
+        w.write_all(MAGIC)?;
+        w.write_all(&FORMAT_VERSION.to_le_bytes())?;
+        w.write_all(&header.start_wall_ms.to_le_bytes())?;
+        write_str(&mut w, &header.provider)?;
+        write_str(&mut w, &header.protocol)?;
+        write_str(&mut w, &header.instrument)?;
+        Ok(Writer { w })
+    }
+
+    pub fn write(
+        &mut self,
+        direction: Direction,
+        since_start: Duration,
+        frame: &Frame,
+    ) -> io::Result<()> {
+        self.write_raw(
+            direction as u8 | (kind_bits(frame.kind) << 1),
+            since_start.as_nanos() as u64,
+            &frame.data,
+        )
+    }
+
+    fn write_raw(&mut self, tag: u8, nanos: u64, payload: &[u8]) -> io::Result<()> {
+        let len = u32::try_from(payload.len())
+            .map_err(|_| io::Error::other("frame larger than 4 GiB"))?;
+        self.w.write_all(&[tag])?;
+        self.w.write_all(&nanos.to_le_bytes())?;
+        self.w.write_all(&len.to_le_bytes())?;
+        self.w.write_all(payload)
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.w.flush()
+    }
+
+    pub fn finish(mut self) -> io::Result<W> {
+        self.w.flush()?;
+        Ok(self.w)
+    }
+}
+
 impl Recorder {
     pub fn create(
         path: &Path,
@@ -92,22 +159,17 @@ impl Recorder {
         protocol: &str,
         instrument: &str,
     ) -> io::Result<Recorder> {
-        if let Some(dir) = path.parent()
-            && !dir.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(dir)?;
-        }
-        let mut w = BufWriter::with_capacity(1 << 20, File::create(path)?);
         let start_wall_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        w.write_all(MAGIC)?;
-        w.write_all(&FORMAT_VERSION.to_le_bytes())?;
-        w.write_all(&start_wall_ms.to_le_bytes())?;
-        write_str(&mut w, provider)?;
-        write_str(&mut w, protocol)?;
-        write_str(&mut w, instrument)?;
+        let header = Header {
+            start_wall_ms,
+            provider: provider.into(),
+            protocol: protocol.into(),
+            instrument: instrument.into(),
+        };
+        let mut w = Writer::create(path, &header)?;
         let (tx, rx) = mpsc::channel::<Msg>();
         let worker = thread::Builder::new().name("lines-recorder".into()).spawn(
             move || -> io::Result<()> {
@@ -115,10 +177,7 @@ impl Recorder {
                 loop {
                     match rx.recv_timeout(Duration::from_millis(250)) {
                         Ok(Msg::Record(tag, nanos, payload)) => {
-                            w.write_all(&[tag])?;
-                            w.write_all(&nanos.to_le_bytes())?;
-                            w.write_all(&(payload.len() as u32).to_le_bytes())?;
-                            w.write_all(&payload)?;
+                            w.write_raw(tag, nanos, &payload)?
                         }
                         Ok(Msg::Flush) => w.flush()?,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -129,7 +188,7 @@ impl Recorder {
                         last_flush = Instant::now();
                     }
                 }
-                w.flush()
+                w.finish().map(|_| ())
             },
         )?;
         Ok(Recorder {

@@ -2841,6 +2841,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lines-sierra"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lines-core",
+ "lines-feed",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "link-section"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
