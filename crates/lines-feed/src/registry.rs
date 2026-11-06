@@ -58,6 +58,7 @@ fn source_key(source: &Source) -> String {
             spot_url,
             futures_url,
         } => format!("kraken {spot_url} {futures_url}"),
+        Source::Extension(e) => format!("extension {}", e.name()),
         Source::Replay {
             path,
             speed,

@@ -15,6 +15,7 @@ use anyhow::{Result, anyhow};
 use lines_core::{ContractKey, Product};
 
 use crate::catalog::{self, Target};
+use crate::extension::ExtensionSource;
 use crate::provider::Provider;
 use crate::{Source, cqg, provider_for, transport};
 
@@ -33,6 +34,8 @@ pub struct Availability {
     /// The CQG mock resolves only its one root symbol.
     mock: bool,
     recorded: Option<Recorded>,
+    /// An extension's own availability rules (decision 0020).
+    extension: Option<ExtensionSource>,
 }
 
 impl std::fmt::Debug for Availability {
@@ -63,6 +66,10 @@ pub fn availability(source: &Source) -> Result<Availability> {
         provider: provider_for(source)?,
         mock: matches!(source, Source::CqgMock(_)),
         recorded,
+        extension: match source {
+            Source::Extension(e) => Some(e.clone()),
+            _ => None,
+        },
     })
 }
 
@@ -112,6 +119,9 @@ impl Availability {
         }
         if self.mock && catalog::roots(id).cqg != Some(cqg::mock::MOCK_SYMBOL) {
             return Err("mock serves ES only".into());
+        }
+        if let Some(e) = &self.extension {
+            return e.check(&product);
         }
         Ok(())
     }
@@ -228,6 +238,7 @@ mod tests {
                 product: es.clone(),
                 contract: Some(z26),
             }),
+            extension: None,
         };
         assert_eq!(a.check(&Target::Product(catalog::ES)), Ok(()));
         assert_eq!(a.check(&Target::Contract(z26)), Ok(()));

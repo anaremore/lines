@@ -2881,6 +2881,7 @@ dependencies = [
  "anyhow",
  "clap",
  "embed-resource",
+ "futures-util",
  "gpui",
  "gpui_platform",
  "image",
@@ -2890,6 +2891,7 @@ dependencies = [
  "nucleo-matcher",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
