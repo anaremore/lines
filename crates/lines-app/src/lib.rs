@@ -856,11 +856,10 @@ where
     }
     let mut ws = Workspace::new(env);
     // The paper trading core (roadmap 7): its own thread, state per data source.
-    let trading = trading::Trading::start(
-        trading::TradingSetup::for_live(dir.as_deref(), &config.source),
-        registry.clone(),
-        config.clone(),
-    );
+    let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
+    // The trader's guardrails (roadmap 8b) from settings.json.
+    setup.guardrails = settings.settings.guardrails.clone();
+    let trading = trading::Trading::start(setup, registry.clone(), config.clone());
     if let Some(r) = &trading.report {
         reports.push(r.clone());
     }

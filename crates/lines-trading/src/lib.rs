@@ -22,6 +22,7 @@ pub mod command;
 pub mod core;
 pub mod event;
 pub mod extension;
+pub mod guardrails;
 pub mod market;
 pub mod order;
 pub mod paper;
@@ -39,6 +40,7 @@ pub use broker::{
 pub use command::{BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
 pub use core::{AccountConfig, TradingCore};
 pub use event::{AccountView, Event, FillEvent, PositionView};
+pub use guardrails::{GuardState, GuardrailTracker, Guardrails, LosingStreak};
 pub use market::MarketInput;
 pub use order::{Order, OrderState, Role};
 pub use paper::{FillModel, PaperBroker, PaperConfig};
