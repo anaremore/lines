@@ -8,6 +8,7 @@
 use gpui::Keystroke;
 
 use crate::layout::{Axis, Direction, LinkGroup, PaneKind, Preset, link_letter};
+use crate::pane_columns::{Column, ColumnCmd, DomCol, TapeCol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -62,6 +63,8 @@ pub enum Command {
     CleanChart,
     /// Show or hide the key-hint bar (a workspace preference; shown by default).
     ToggleHints,
+    /// A column action on the focused DOM or time & sales (`crate::pane_columns`).
+    Columns(ColumnCmd),
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -236,6 +239,11 @@ pub fn label(c: Command) -> String {
         Command::ToggleStudies => "Chart: hide/show studies".into(),
         Command::CleanChart => "Clean chart (no study labels, no key hints)".into(),
         Command::ToggleHints => "Hide/show key hints bar".into(),
+        Command::Columns(ColumnCmd::Toggle(c)) => format!("Show/hide {}", c.label()),
+        Command::Columns(ColumnCmd::AutoFit(c)) => format!("Fit {} to content", c.label()),
+        Command::Columns(ColumnCmd::AutoFitAll) => "Fit columns to content".into(),
+        Command::Columns(ColumnCmd::Reset) => "Reset columns".into(),
+        Command::Columns(ColumnCmd::Width(c, w)) => format!("Set {} width to {w} px", c.label()),
     }
 }
 
@@ -273,6 +281,17 @@ pub fn palette() -> Vec<Command> {
         Command::Open,
         Command::Menu,
     ]);
+    // Columns of the focused DOM or time & sales.
+    v.extend(
+        DomCol::ALL
+            .map(|c| Command::Columns(ColumnCmd::Toggle(Column::Dom(c))))
+            .into_iter()
+            .chain(TapeCol::ALL.map(|c| Command::Columns(ColumnCmd::Toggle(Column::Tape(c)))))
+            .chain([
+                Command::Columns(ColumnCmd::AutoFitAll),
+                Command::Columns(ColumnCmd::Reset),
+            ]),
+    );
     v
 }
 
@@ -422,9 +441,22 @@ mod tests {
     fn palette_filters_by_words() {
         let p = palette();
         assert_eq!(filter("reopen", &p), vec![Command::ReopenTab]);
-        assert_eq!(filter("show dom", &p), vec![Command::Toggle(PaneKind::Dom)]);
+        assert_eq!(
+            filter("hide/show dom", &p),
+            vec![Command::Toggle(PaneKind::Dom)]
+        );
         assert!(filter("layout", &p).len() >= 5);
         assert_eq!(filter("", &p).len(), p.len());
         assert!(filter("zzz", &p).is_empty());
+        assert_eq!(
+            filter("reset columns", &p),
+            vec![Command::Columns(ColumnCmd::Reset)]
+        );
+        assert_eq!(
+            filter("dom column vol", &p),
+            vec![Command::Columns(ColumnCmd::Toggle(Column::Dom(
+                DomCol::Volume
+            )))]
+        );
     }
 }

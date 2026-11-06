@@ -15,11 +15,14 @@
 //! Also here, pure and tested: where a restored window goes ([`restore_placement`]) and what
 //! dropping a dragged tab does ([`tab_drop`]).
 
+use std::collections::BTreeMap;
+
 use lines_core::{ContractKey, Delivery, Month, ProductId};
 use lines_feed::catalog::{self, Target};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{Axis, Layout, LinkGroup, PaneKind, Preset, Rect, trading_group};
+use crate::pane_columns::{ColumnDoc, DomCol, TapeCol};
 use crate::profile::ProfileConfig;
 use crate::tabstate::PaneState;
 use crate::versioned::{Format, Migration};
@@ -271,17 +274,24 @@ impl StudyVisibility {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DomState {
     /// Ticks per row.
     pub grouping: u32,
+    /// Column widths and visibility that differ from the defaults (optional: files without
+    /// it load with default columns).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub columns: BTreeMap<DomCol, ColumnDoc>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TapeState {
     /// Large-print threshold in the product's quantity units (`Qty`), if set by the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub large_print: Option<i64>,
+    /// Column widths and visibility that differ from the defaults (optional).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub columns: BTreeMap<TapeCol, ColumnDoc>,
 }
 
 /// A window's place on screen.
@@ -691,7 +701,16 @@ mod tests {
                         Axis::Column,
                         0.3,
                         Layout::Pane(PaneDoc {
-                            dom: Some(DomState { grouping: 5 }),
+                            dom: Some(DomState {
+                                grouping: 5,
+                                columns: BTreeMap::from([(
+                                    DomCol::Bid,
+                                    ColumnDoc {
+                                        width: Some(88.0),
+                                        shown: None,
+                                    },
+                                )]),
+                            }),
                             target: Some(TargetDoc::from_target(&Target::Contract(
                                 ContractKey::monthly(catalog::ES, 2027, Month::new(3).unwrap()),
                             ))),
@@ -700,6 +719,13 @@ mod tests {
                         Layout::Pane(PaneDoc {
                             tape: Some(TapeState {
                                 large_print: Some(25),
+                                columns: BTreeMap::from([(
+                                    TapeCol::Side,
+                                    ColumnDoc {
+                                        width: None,
+                                        shown: Some(false),
+                                    },
+                                )]),
                             }),
                             ..PaneDoc::new(PaneKind::Tape, Some(3), None)
                         }),
@@ -973,6 +999,64 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+    }
+
+    #[test]
+    fn panes_without_column_fields_load_with_default_columns() {
+        // Version 2 as written before column settings existed: no `columns` anywhere.
+        let v2 = br#"{"version": 2, "windows": [{"tabs": [{"layout": {"split": {"axis": "row", "ratio": 0.5,
+            "first": {"pane": {"kind": "dom", "state": "shown", "dom": {"grouping": 2}}},
+            "second": {"pane": {"kind": "tape", "state": "shown", "tape": {"large_print": 20}}}}}}]}]}"#;
+        let Decoded::Ok {
+            value,
+            migrated_from: None,
+        } = decode::<WorkspaceDoc>(&FORMAT, v2)
+        else {
+            panic!("reads")
+        };
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        let dom = leaves[0].dom.as_ref().unwrap();
+        assert_eq!((dom.grouping, dom.columns.is_empty()), (2, true));
+        let tape = leaves[1].tape.as_ref().unwrap();
+        assert_eq!(
+            (tape.large_print, tape.columns.is_empty()),
+            (Some(20), true)
+        );
+        // And defaults write no `columns` field: files stay as they were.
+        let text = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
+        assert!(!text.contains("columns"), "{text}");
+    }
+
+    #[test]
+    fn column_settings_round_trip_per_pane() {
+        let mut dom = crate::pane_columns::Columns::new(crate::pane_columns::Table::Dom);
+        use crate::pane_columns::{Column, ColumnCmd};
+        dom.apply(ColumnCmd::Width(Column::Dom(DomCol::Price), 110))
+            .unwrap();
+        dom.apply(ColumnCmd::Toggle(Column::Dom(DomCol::Volume)))
+            .unwrap();
+        dom.apply(ColumnCmd::Toggle(Column::Dom(DomCol::Orders)))
+            .unwrap();
+        let state = DomState {
+            grouping: 1,
+            columns: dom.save(&DomCol::ALL),
+        };
+        let w = WorkspaceDoc::single(
+            "cols",
+            Layout::Pane(PaneDoc {
+                dom: Some(state),
+                ..PaneDoc::new(PaneKind::Dom, None, None)
+            }),
+        );
+        let bytes = encode(&FORMAT, &w).unwrap();
+        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, &bytes) else {
+            panic!()
+        };
+        assert_eq!(value, w);
+        let mut back = crate::pane_columns::Columns::new(crate::pane_columns::Table::Dom);
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        back.load(&DomCol::ALL, &leaves[0].dom.as_ref().unwrap().columns);
+        assert_eq!(back.set, dom.set);
     }
 
     #[test]
