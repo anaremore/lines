@@ -71,3 +71,10 @@ path = "fuzz_targets/disk_store.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "kraken_session"
+path = "fuzz_targets/kraken_session.rs"
+test = false
+doc = false
+bench = false

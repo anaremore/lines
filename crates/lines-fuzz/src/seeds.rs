@@ -33,7 +33,7 @@ fn seed(target: &'static str, name: impl Into<String>, data: Vec<u8>) -> Seed {
     }
 }
 
-pub const TARGETS: [&str; 7] = [
+pub const TARGETS: [&str; 8] = [
     "cqg_decode",
     "cqg_session",
     "coinbase_session",
@@ -41,6 +41,7 @@ pub const TARGETS: [&str; 7] = [
     "recording",
     "sierra_import",
     "disk_store",
+    "kraken_session",
 ];
 
 /// Every target's seeds.
@@ -109,7 +110,146 @@ pub fn all() -> Vec<Seed> {
     v.push(seed("sierra_import", "ticks-depth", sierra_input(true)));
     v.push(seed("sierra_import", "ticks-only", sierra_input(false)));
     v.extend(disk_seeds(&nat));
+    let spot = kraken_script(catalog::BTC_USD_KR);
+    let perp = kraken_script(catalog::BTC_PERP_KR);
+    v.push(seed("kraken_session", "spot", encode_ops(0, &spot)));
+    v.push(seed("kraken_session", "perp", encode_ops(2, &perp)));
+    let protocol = lines_feed::kraken::KrakenProvider::default().protocol();
+    let frames_of =
+        |s: &[ScriptOp]| -> Vec<Frame> { s.iter().filter_map(|(_, _, f)| f.clone()).collect() };
+    v.push(seed(
+        "recording",
+        "kraken-spot-v3",
+        lfr(
+            "kraken",
+            &protocol,
+            "BTC/USD.KR",
+            Some(ContractKey::spot(catalog::BTC_USD_KR)),
+            &frames_of(&spot),
+        ),
+    ));
+    v.push(seed(
+        "recording",
+        "kraken-perp-v3",
+        lfr(
+            "kraken",
+            &protocol,
+            "BTC-PERP.KR",
+            Some(ContractKey::spot(catalog::BTC_PERP_KR)),
+            &frames_of(&perp),
+        ),
+    ));
     v
+}
+
+/// A Kraken-shaped exchange for BTC spot or the BTC perpetual: answers the session's own REST
+/// requests (metadata, candles, trades) with synthetic bodies, then streams websocket messages
+/// (book with a correct checksum for spot, sequenced deltas for futures, trades, ticker).
+fn kraken_script(id: lines_core::ProductId) -> Vec<ScriptOp> {
+    use lines_feed::kraken::num::book_checksum;
+    let product = catalog::get(id).expect("Kraken product");
+    let mut s = lines_feed::kraken::KrakenProvider::default()
+        .new_session(&product, Some(ContractKey::spot(id)))
+        .expect("session");
+    let mut out = Vec::new();
+    s.start(ctx(), &mut out);
+    let secs = BASE_MS / 1000;
+    let body_for = |url: &str| -> String {
+        if url.contains("AssetPairs") {
+            r#"{"error":[],"result":{"XXBTZUSD":{"altname":"XBTUSD","wsname":"XBT/USD","pair_decimals":1,"lot_decimals":8,"tick_size":"0.1"}}}"#.into()
+        } else if url.contains("OHLC") {
+            let row =
+                |t: i64, p: &str| format!(r#"[{t},"{p}","{p}","{p}","{p}","{p}","0.50000000",3]"#);
+            format!(
+                r#"{{"error":[],"result":{{"XXBTZUSD":[{},{},{}],"last":{}}}}}"#,
+                row(secs - 180, "75600.0"),
+                row(secs - 120, "75601.5"),
+                row(secs - 60, "75602.8"),
+                secs - 60
+            )
+        } else if url.contains("Trades") {
+            format!(
+                r#"{{"error":[],"result":{{"XXBTZUSD":[["75602.8","0.10000000",{}.25,"b","l","",101],["75602.9","0.20000000",{}.5,"s","m","",102]],"last":"{}000000000"}}}}"#,
+                secs + 1,
+                secs + 2,
+                secs + 2
+            )
+        } else if url.contains("instruments") {
+            r#"{"result":"success","instruments":[{"symbol":"PF_ETHUSD","tickSize":0.1,"contractValueTradePrecision":3},{"symbol":"PF_XBTUSD","type":"flexible_futures","tickSize":1,"contractValueTradePrecision":4}]}"#.into()
+        } else if url.contains("charts") {
+            let c = |t: i64, p: &str| {
+                format!(
+                    r#"{{"time":{t},"open":"{p}","high":"{p}","low":"{p}","close":"{p}","volume":"0.25"}}"#
+                )
+            };
+            format!(
+                r#"{{"candles":[{},{}],"more_candles":false}}"#,
+                c(BASE_MS - 120_000, "75600"),
+                c(BASE_MS - 60_000, "75601")
+            )
+        } else if url.contains("lastTime") {
+            // Older pages: nothing more (ends the backwards paging).
+            r#"{"result":"success","history":[]}"#.into()
+        } else {
+            // Futures trade history, newest page.
+            r#"{"result":"success","history":[{"time":"2026-11-06T14:00:02.000Z","trade_id":2,"price":75647,"size":0.0045,"side":"buy","type":"fill","uid":"h2"},{"time":"2026-11-06T14:00:01.000Z","trade_id":1,"price":75646,"size":0.0002,"side":"sell","type":"fill","uid":"h1"}]}"#.into()
+        }
+    };
+    let mut script = Vec::new();
+    let mut events = Vec::new();
+    for _ in 0..40 {
+        let Some(url) = out.iter().find_map(|o| match o {
+            Outgoing::HttpGet(u) => Some(u.clone()),
+            Outgoing::Frame(_) => None,
+        }) else {
+            break;
+        };
+        out.clear();
+        let f = Frame::http(format!("{url}\n{}", body_for(&url)));
+        events.clear();
+        let _ = s.on_frame(&f, UtcMillis(BASE_MS), &mut events, &mut out);
+        script.push((Some(FrameKind::Http), 0, Some(f)));
+    }
+    let text = |j: String| (Some(FrameKind::Text), 1u8, Some(Frame::text(j)));
+    if lines_feed::kraken::is_futures(&product) {
+        for j in [
+            r#"{"feed":"book_snapshot","product_id":"PF_XBTUSD","seq":100,"bids":[{"price":75647.0,"qty":0.0001},{"price":75646.0,"qty":0.25}],"asks":[{"price":75648.0,"qty":0.1436}]}"#,
+            r#"{"feed":"trade_snapshot","product_id":"PF_XBTUSD","trades":[{"uid":"b","side":"buy","time":1793368803000,"qty":0.0045,"price":75647.0,"seq":2},{"uid":"a","side":"sell","time":1793368802500,"qty":0.0002,"price":75646.0,"seq":1}]}"#,
+            r#"{"feed":"book","product_id":"PF_XBTUSD","side":"buy","seq":101,"price":75611.0,"qty":0.5156}"#,
+            r#"{"feed":"trade","product_id":"PF_XBTUSD","uid":"c","side":"sell","time":1793368804000,"qty":0.01,"price":75647.0}"#,
+            r#"{"feed":"ticker","product_id":"PF_XBTUSD","bid":75647.0,"ask":75648.0,"last":75647.0}"#,
+            r#"{"feed":"book","product_id":"PF_XBTUSD","side":"sell","seq":102,"price":75650.0,"qty":0}"#,
+        ] {
+            script.push(text(j.to_owned()));
+        }
+    } else {
+        // Spot book: price units of 0.1, quantity units of 1e-8; the checksum covers the book.
+        let check = book_checksum(
+            [(756_029i64, 100_000_000i64), (756_037, 13_879_137)].into_iter(),
+            [(756_028i64, 7_607_609i64)].into_iter(),
+        );
+        script.push(text(format!(
+            r#"{{"channel":"book","type":"snapshot","data":[{{"symbol":"BTC/USD","bids":[{{"price":75602.8,"qty":0.07607609}}],"asks":[{{"price":75602.9,"qty":1.0}},{{"price":75603.7,"qty":0.13879137}}],"checksum":{check},"timestamp":"2026-11-06T14:00:03.000000Z"}}]}}"#
+        )));
+        let check2 = book_checksum(
+            [(756_029i64, 100_000_000i64), (756_037, 13_879_137)].into_iter(),
+            [(756_028i64, 55_008_441i64)].into_iter(),
+        );
+        script.push(text(format!(
+            r#"{{"channel":"book","type":"update","data":[{{"symbol":"BTC/USD","bids":[{{"price":75602.8,"qty":0.55008441}}],"asks":[],"checksum":{check2},"timestamp":"2026-11-06T14:00:03.500000Z"}}]}}"#
+        )));
+        for j in [
+            r#"{"channel":"trade","type":"snapshot","data":[{"symbol":"BTC/USD","side":"buy","price":75602.9,"qty":0.01,"ord_type":"market","trade_id":102,"timestamp":"2026-11-06T14:00:02.500000Z"}]}"#,
+            r#"{"channel":"trade","type":"update","data":[{"symbol":"BTC/USD","side":"sell","price":75602.8,"qty":0.25,"ord_type":"limit","trade_id":103,"timestamp":"2026-11-06T14:00:04.000000Z"}]}"#,
+            r#"{"channel":"ticker","type":"update","data":[{"symbol":"BTC/USD","bid":75602.8,"bid_qty":0.55,"ask":75602.9,"ask_qty":1.0,"last":75602.8,"volume":10.0,"vwap":75600.0,"low":75000.0,"high":76000.0,"change":1.0,"change_pct":0.01}]}"#,
+            r#"{"channel":"heartbeat"}"#,
+            r#"{"channel":"status","type":"update","data":[{"system":"online","api_version":"v2"}]}"#,
+        ] {
+            script.push(text(j.to_owned()));
+        }
+    }
+    script.push((None, 30, None));
+    script
 }
 
 /// Store segments (blocks of `i64 time_us | lines-events-1`), coverage and bar caches.
