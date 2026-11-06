@@ -148,3 +148,118 @@ async fn replay_drives_shared_deterministic_vwaps() {
     // A replay has no history: every value comes from trades, after the first partial minute.
     assert!(eth1[1..].iter().all(|p| p.approx == eth1[1].approx));
 }
+
+/// A replay that starts at the session open holds every trade of the session, so its ETH VWAP
+/// is exact from the first bucket on: Σpv/Σv of the trades, never "≈ from bars". The first
+/// frame is a quote at the open; the first trade follows 250 ms later (before the fix, that
+/// trade started the "complete" run, so the open's minute and with it the whole session were
+/// approximate).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_from_the_session_open_is_exact() {
+    let dir = std::env::temp_dir().join(format!("lines-ind-open-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("es-open.lfr");
+    let es = catalog::get(catalog::ES).unwrap();
+    // Trade date 2026-11-05 (Thursday, CST): ETH opens 17:00 CT = 23:00 UTC the day before.
+    let open = at("2026-11-04T23:00:00Z");
+    let header = Header {
+        start_wall_ms: open.0,
+        provider: native::PROVIDER.into(),
+        protocol: native::PROTOCOL.into(),
+        product: "ES".into(),
+        contract: Some(ContractKey::monthly(es.id, 2026, Month::new(12).unwrap())),
+        version: FORMAT_VERSION,
+    };
+    let mut w = Writer::create(&path, &header).unwrap();
+    let mut frame = |t: i64, e: NativeEvent| {
+        let mut buf = Vec::new();
+        native::encode(&e, &mut buf);
+        w.write(
+            Direction::FromServer,
+            Duration::from_millis((t - open.0) as u64),
+            &Frame::binary(buf),
+        )
+        .unwrap();
+    };
+    frame(
+        open.0,
+        NativeEvent::Bbo {
+            time_us: open.0 * 1000,
+            bid: Some(Price(602_000)),
+            ask: Some(Price(602_025)),
+        },
+    );
+    // (ms after the open, price, qty) over three minutes.
+    let trades = [
+        (250, 602_000, 3),
+        (20_000, 602_025, 1),
+        (59_999, 602_050, 4),
+        (60_000, 601_975, 2),
+        (95_500, 602_100, 5),
+        (130_000, 602_000, 7),
+    ];
+    for (dt, p, q) in trades {
+        let t = open.0 + dt;
+        frame(
+            t,
+            NativeEvent::Trade {
+                time_us: t * 1000,
+                price: Price(p),
+                qty: Qty(q),
+                aggressor: native::Aggressor::Unknown,
+            },
+        );
+    }
+    w.finish().unwrap();
+
+    let config = FeedConfig::new(Source::Replay {
+        path,
+        speed: 0.0,
+        stop_at: None,
+    });
+    let store = new_store(&config).unwrap();
+    let info = FeedInfo {
+        feed: store.feed_id(),
+        product: catalog::ES,
+        period_ms: config.bar_period_ms,
+        max_bars: config.max_bars,
+    };
+    let h = engine().acquire(
+        info,
+        Spec::Vwap {
+            period_ms: 60_000,
+            vwap: VwapSpec {
+                reset: Reset::Eth,
+                bands: Bands::ALL,
+            },
+        },
+    );
+    let (_tx, rx) = watch::channel(false);
+    tokio::time::timeout(Duration::from_secs(60), run_feed(config, store.clone(), rx))
+        .await
+        .unwrap();
+    engine().sync();
+    let points = h.cell().read().points.clone();
+    assert_eq!(points.len(), 3, "{points:?}");
+    // Hand-computed: Σpv / Σv over the trades up to each bucket's end.
+    let vwap_through = |end_ms: i64| {
+        let (pv, v) = trades
+            .iter()
+            .filter(|t| t.0 < end_ms)
+            .fold((0i64, 0i64), |(pv, v), t| (pv + t.1 * t.2, v + t.2));
+        pv as f64 / v as f64
+    };
+    for (i, p) in points.iter().enumerate() {
+        assert!(!p.approx, "bucket {i} is exact (no ≈): {p:?}");
+        let want = vwap_through((i as i64 + 1) * 60_000);
+        assert!(
+            (p.vwap - want).abs() < 1e-9,
+            "bucket {i}: {} vs {want}",
+            p.vwap
+        );
+    }
+    // The last one, spelled out: (6020.00×3 + 6020.25×1 + 6020.50×4 + 6019.75×2 + 6021.00×5
+    // + 6020.00×7) / 22 contracts
+    // = 13_244_675 / 22 units = 6020.31 (price units are hundredths).
+    assert!((points[2].vwap - 13_244_675.0 / 22.0).abs() < 1e-9);
+}
