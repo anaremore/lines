@@ -316,6 +316,20 @@ pub mod time_serde {
     }
 }
 
+pub mod opt_time_serde {
+    use lines_core::UtcMillis;
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(t: &Option<UtcMillis>, s: S) -> Result<S::Ok, S::Error> {
+        match t {
+            Some(t) => s.serialize_some(&t.0),
+            None => s.serialize_none(),
+        }
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<UtcMillis>, D::Error> {
+        Option::<i64>::deserialize(d).map(|o| o.map(UtcMillis))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -219,7 +219,7 @@ pub struct RuleTracker {
     pub daily_breached: bool,
 }
 
-mod opt_date {
+pub(crate) mod opt_date {
     use lines_core::CivilDate;
     use serde::{Deserialize, Deserializer, Serializer};
     pub fn serialize<S: Serializer>(d: &Option<CivilDate>, s: S) -> Result<S::Ok, S::Error> {

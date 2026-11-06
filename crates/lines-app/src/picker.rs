@@ -84,6 +84,11 @@ pub struct Settings {
     /// Named study templates, in save order. Optional.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub study_templates: Vec<crate::study_menu::StudyTemplate>,
+    /// The trader's guardrails per trading account, keyed by the account's name (or id)
+    /// (roadmap 8b). Optional; no editor yet (the Settings window, decision 0021, will edit
+    /// it). Read at start: tighter limits apply at once, looser ones from the next trade date.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub guardrails: std::collections::BTreeMap<String, lines_trading::Guardrails>,
 }
 
 /// Files written before versioning (no `version` field) have exactly version 1's fields.

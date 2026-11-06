@@ -78,6 +78,13 @@ pub enum Command {
         )]
         contract: Option<ContractKey>,
     },
+    /// The trader's guardrails for the account (roadmap 8b): tighter rules apply at once,
+    /// looser ones with the next trade date (`guardrails::GuardrailTracker::request`). Never
+    /// clears a lockout.
+    SetGuardrails {
+        account: AccountId,
+        guardrails: crate::guardrails::Guardrails,
+    },
 }
 
 impl Command {
@@ -88,7 +95,8 @@ impl Command {
             Command::ModifyOrder { account, .. }
             | Command::CancelOrder { account, .. }
             | Command::CancelAll { account, .. }
-            | Command::Flatten { account, .. } => account,
+            | Command::Flatten { account, .. }
+            | Command::SetGuardrails { account, .. } => account,
         }
     }
 
@@ -182,6 +190,8 @@ pub enum RejectCode {
     Risk,
     /// A prop-firm rule (decision 0006).
     PropRule,
+    /// The trader's own guardrails (roadmap 8b): a lockout, or a limit they set.
+    Guardrail,
     /// The market is closed (sessions calendar).
     MarketClosed,
     /// The broker can't do it (capabilities) or refused it.
