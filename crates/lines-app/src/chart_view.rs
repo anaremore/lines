@@ -1681,18 +1681,39 @@ impl ChartView {
         self.space_measured = true;
     }
 
+    /// The crosshair time tag's text: date and time, or on daily and weekly charts the trade
+    /// date ("Mon 2026-11-09", "Week of 2026-11-09").
+    fn time_tag_text(&self, time: UtcMillis) -> impl FnOnce(&mut FixedStr<32>) + use<> {
+        let period = self.period_ms;
+        let tf = self.timeframe;
+        let calendar = lines_feed::catalog::sessions(self.instrument.id);
+        move |s: &mut FixedStr<32>| {
+            const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+            match tf {
+                Timeframe::Day => {
+                    let d = bar_date(tf, calendar, time);
+                    let _ = write!(s, "{} {d}", DAYS[usize::from(d.weekday())]);
+                }
+                Timeframe::Week => {
+                    let _ = write!(s, "Week of {}", bar_date(tf, calendar, time));
+                }
+                _ => {
+                    let _ = time.write_crosshair_label(period, s);
+                }
+            }
+        }
+    }
+
     /// The time tag's box for `time` at plot-local `x`: (left, width), centred on `x` and
     /// kept on the time axis.
     fn time_tag_box(&mut self, x: f32, time: UtcMillis, window: &mut Window) -> (f32, f32) {
         let scale = window.scale_factor();
         let pw = f32::from(self.plot.size.width);
-        let period = self.period_ms;
         let on = self.theme.on_cross_tag;
+        let text = self.time_tag_text(time);
         let text_w = f32::from(
-            self.label(LabelKind::CrossTime, time.0, on, window, |s| {
-                let _ = time.write_crosshair_label(period, s);
-            })
-            .width,
+            self.label(LabelKind::CrossTime, time.0, on, window, text)
+                .width,
         );
         let box_w = text_w + 12.0;
         let left = snap(f64::from((x - box_w * 0.5).min(pw - box_w).max(0.0)), scale);
@@ -1714,24 +1735,7 @@ impl ChartView {
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         let ph = f32::from(self.plot.size.height);
         let line_h = px(LABEL_PX * 1.3);
-        let period = self.period_ms;
-        let tf = self.timeframe;
-        let calendar = lines_feed::catalog::sessions(self.instrument.id);
-        let text = move |s: &mut FixedStr<32>| {
-            const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-            match tf {
-                Timeframe::Day => {
-                    let d = bar_date(tf, calendar, time);
-                    let _ = write!(s, "{} {d}", DAYS[usize::from(d.weekday())]);
-                }
-                Timeframe::Week => {
-                    let _ = write!(s, "Week of {}", bar_date(tf, calendar, time));
-                }
-                _ => {
-                    let _ = time.write_crosshair_label(period, s);
-                }
-            }
-        };
+        let text = self.time_tag_text(time);
         let (left, box_w) = self.time_tag_box(x, time, window);
         window.paint_quad(fill(
             Bounds::new(
