@@ -160,39 +160,6 @@ pub fn timeframe_chip_text(tf: lines_core::Timeframe) -> String {
     format!("{tf} ▾")
 }
 
-/// The narrowest chart header (logical px, gutter included) that still shows its chips whole:
-/// a chart pane narrower than this clips them at the gutter (never draws under it).
-pub const CHART_HEADER_MIN_W: f32 = 700.0;
-
-/// Logical px the chart header's left group takes through its chips, as the renderer lays it
-/// out: row padding, link chip, contract text, timeframe chip, account chip (and its PAPER
-/// badge), at `char_px` a character. The quotes and status that follow may be clipped at the
-/// controls' gutter; the chips must fit before it (`CHART_HEADER_MIN_W`).
-pub fn chart_header_chips_px(
-    linked: bool,
-    contract: &str,
-    timeframe: &str,
-    account: Option<(&str, bool)>,
-    char_px: f32,
-) -> f32 {
-    const ROW_PAD: f32 = 12.0; // px_3
-    const GAP: f32 = 8.0; // gap_2 between the group's items
-    const CHIP_PAD: f32 = 10.0; // px_1 each side + a 1 px border each side
-    let text = |s: &str| s.chars().count() as f32 * char_px;
-    let mut w = ROW_PAD + text(contract);
-    if linked {
-        w += 8.0 + 4.0 + char_px + GAP; // swatch, gap_1, letter
-    }
-    w += GAP + text(timeframe) + CHIP_PAD;
-    if let Some((name, paper)) = account {
-        w += GAP + text(name) + CHIP_PAD;
-        if paper {
-            w += 4.0 + text("PAPER") + 8.0; // gap_1, the badge (px_1, no border)
-        }
-    }
-    w
-}
-
 /// A pane header's content row: left and right groups, clipped to the header's content box
 /// (the header's right padding is the controls' gutter).
 pub fn header_content() -> Div {
@@ -400,6 +367,39 @@ mod tests {
                 controls_gutter(kind)
             );
         }
+    }
+
+    /// The narrowest chart header (logical px, gutter included) that still shows its chips whole:
+    /// a chart pane narrower than this clips them at the gutter (never draws under it).
+    const CHART_HEADER_MIN_W: f32 = 700.0;
+
+    /// Logical px the chart header's left group takes through its chips, as the renderer lays it
+    /// out: row padding, link chip, contract text, timeframe chip, account chip (and its PAPER
+    /// badge), at `char_px` a character. The quotes and status that follow may be clipped at the
+    /// controls' gutter; the chips must fit before it (`CHART_HEADER_MIN_W`).
+    fn chart_header_chips_px(
+        linked: bool,
+        contract: &str,
+        timeframe: &str,
+        account: Option<(&str, bool)>,
+        char_px: f32,
+    ) -> f32 {
+        const ROW_PAD: f32 = 12.0; // px_3
+        const GAP: f32 = 8.0; // gap_2 between the group's items
+        const CHIP_PAD: f32 = 10.0; // px_1 each side + a 1 px border each side
+        let text = |s: &str| s.chars().count() as f32 * char_px;
+        let mut w = ROW_PAD + text(contract);
+        if linked {
+            w += 8.0 + 4.0 + char_px + GAP; // swatch, gap_1, letter
+        }
+        w += GAP + text(timeframe) + CHIP_PAD;
+        if let Some((name, paper)) = account {
+            w += GAP + text(name) + CHIP_PAD;
+            if paper {
+                w += 4.0 + text("PAPER") + 8.0; // gap_1, the badge (px_1, no border)
+            }
+        }
+        w
     }
 
     /// The chart header's chips (timeframe, account) sit with the contract on the left and
