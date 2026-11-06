@@ -80,6 +80,25 @@ impl UtcMillis {
             write!(out, "{h:02}:{mi:02}")
         }
     }
+
+    /// Day of week, 0 = Sunday.
+    pub fn weekday(self) -> u32 {
+        // 1970-01-01 was a Thursday.
+        (self.0.div_euclid(86_400_000) + 4).rem_euclid(7) as u32
+    }
+
+    /// Write the full crosshair time tag, "Fri 2026-11-06 14:05" (plus ":SS" for bar periods
+    /// that aren't whole minutes), without allocating.
+    pub fn write_crosshair_label<W: fmt::Write>(self, period_ms: i64, out: &mut W) -> fmt::Result {
+        const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        let (y, mo, d, h, mi, s) = self.to_civil();
+        let day = DAYS[self.weekday() as usize];
+        write!(out, "{day} {y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")?;
+        if period_ms % Self::MINUTE != 0 {
+            write!(out, ":{s:02}")?;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for UtcMillis {
@@ -155,6 +174,19 @@ mod tests {
             let s = t.to_string();
             assert_eq!(UtcMillis::parse_iso(&s), Some(t), "{s}");
         }
+    }
+
+    #[test]
+    fn crosshair_label() {
+        let t = UtcMillis::parse_iso("2026-11-06T14:05:07Z").unwrap();
+        let mut s = crate::FixedStr::<32>::new();
+        t.write_crosshair_label(60_000, &mut s).unwrap();
+        assert_eq!(s.as_str(), "Fri 2026-11-06 14:05");
+        s.clear();
+        t.write_crosshair_label(5_000, &mut s).unwrap();
+        assert_eq!(s.as_str(), "Fri 2026-11-06 14:05:07");
+        assert_eq!(UtcMillis(0).weekday(), 4, "1970-01-01 was a Thursday");
+        assert_eq!(UtcMillis(-1).weekday(), 3);
     }
 
     #[test]

@@ -15,6 +15,11 @@ pub struct Theme {
     pub last: Hsla,
     /// Text drawn on top of `last`.
     pub on_last: Hsla,
+    /// Crosshair lines.
+    pub crosshair: Hsla,
+    /// Crosshair price/time tags on the axes, and the text on them.
+    pub cross_tag: Hsla,
+    pub on_cross_tag: Hsla,
 }
 
 impl Theme {
@@ -30,6 +35,9 @@ impl Theme {
             down: rgb(0xef5350).into(),
             last: rgb(0xf0b429).into(),
             on_last: rgb(0x0f1115).into(),
+            crosshair: Hsla::from(rgb(0x9aa4b2)).opacity(0.55),
+            cross_tag: rgb(0x3b4252).into(),
+            on_cross_tag: rgb(0xeceff4).into(),
         }
     }
 
@@ -45,6 +53,9 @@ impl Theme {
             down: rgb(0xf23645).into(),
             last: rgb(0x2962ff).into(),
             on_last: rgb(0xffffff).into(),
+            crosshair: Hsla::from(rgb(0x4b5563)).opacity(0.55),
+            cross_tag: rgb(0x374151).into(),
+            on_cross_tag: rgb(0xffffff).into(),
         }
     }
 }

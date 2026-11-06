@@ -48,6 +48,7 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 # Screenshot mode (decision 0009). Replays at full speed to --at, renders off-screen, writes PNG, exits.
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
+# --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair.
 ```
 
 Catalog instruments (ids are permanent): `ES` 1, `NQ` 2, `ZN` 3, `MES` 4, `MNQ` 5, `BTC/USD` 1001, `ETH/USD` 1002. CQG maps ES→`EP`, NQ→`ENQ`, ZN→`TYA` (only `EP` verified, via the mock; MES/MNQ unmapped). Coinbase maps `BTC-USD`, `ETH-USD`. Sierra maps roots ES, NQ, MES, MNQ (`NQZ5.CME`, `NQH25-CME`, `NQH25_FUT_CME` forms). The mock resolves only `EP`.
@@ -78,6 +79,7 @@ Catalog instruments (ids are permanent): `ES` 1, `NQ` 2, `ZN` 3, `MES` 4, `MNQ` 
 - `.lfr` v2 header = provider, protocol, catalog instrument symbol. Replay refuses unknown providers or protocols and instrument mismatches. Imported data uses provider `lines` / protocol `lines-events-1`. Each frame is one atomic batch, depth included, so the store applies it under one lock and checks for a crossed book only at frame boundaries.
 - Sierra import is deterministic (same inputs → byte-identical file). Trades are checked against the book at emit time, never against look-ahead state. Sweep fills (Sierra unbundled trades) are not expected at the touch.
 - All CQG `sint64` times are ms offsets from `LogonResult.base_time`.
+- Crosshair hit-testing and snapping are pure (`lines_core::geometry::crosshair`). Input handlers store only the pointer position; paint hit-tests after the frame's viewport update. Lines use device-pixel snapping: wicks, time gridlines and the crosshair's vertical line sit on device-pixel centres, and candle bodies are an odd number of device pixels wide.
 - No heap allocation in our paint path (`lines-core/tests/no_alloc.rs`, counting allocator). Label text is shaped once per value and cached; a cache miss allocates. GPUI allocates internally per frame.
 - The UI never blocks on the feed. Sessions decode outside the lock, the store applies events under a short lock, the UI polls an atomic revision every 8 ms and `try_lock`s in paint.
 - Transport `recv` must be cancel-safe.
@@ -85,7 +87,7 @@ Catalog instruments (ids are permanent): `ES` 1, `NQ` 2, `ZN` 3, `MES` 4, `MNQ` 
 
 ## Known gaps
 
-- Real CQG connection never exercised. Not implemented: session restore, variable tick tables, quote corrections (counted only), trading sessions/time zones (axis is UTC), crosshair, tick-arrival→frame latency measurement (decision 0001).
+- Real CQG connection never exercised. Not implemented: session restore, variable tick tables, quote corrections (counted only), trading sessions/time zones (axis is UTC), tick-arrival→frame latency measurement (decision 0001).
 - Screenshot DPI cannot be overridden on Windows (GPUI reads monitor DPI); `--scale` asserts it instead. Screenshots use the OS UI font, so they differ across machines.
 - Coinbase: trades in the forming minute that happened before the subscription are missing until the next bar; a trade on a minute boundary can be counted in both REST history and live (milestone 4).
 - Sierra: format docs are withdrawn. The sub-trade markers in `open` (`0xfd709f01` first, `0xfd709ef9` last) and the ×100 price multiplier were determined from NQ files only; ES/MES/MNQ are assumed the same. On NQZ5 2025-09-11, 90 of 775 first fills printed outside the rebuilt book (cause unknown). The contract month is dropped (recordings name only the product, e.g. `NQ`).
