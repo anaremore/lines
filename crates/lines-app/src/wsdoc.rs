@@ -307,6 +307,9 @@ pub struct DomState {
     /// it load with default columns).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub columns: BTreeMap<DomCol, ColumnDoc>,
+    /// The price trail (optional: written only when on or at a non-default half-life).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<crate::dom_trail::TrailDoc>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -768,6 +771,7 @@ mod tests {
                                         shown: None,
                                     },
                                 )]),
+                                trail: None,
                             }),
                             target: Some(TargetDoc::from_target(&Target::Contract(
                                 ContractKey::monthly(catalog::ES, 2027, Month::new(3).unwrap()),
@@ -1132,6 +1136,7 @@ mod tests {
         let state = DomState {
             grouping: 1,
             columns: dom.save(&DomCol::ALL),
+            trail: None,
         };
         let w = WorkspaceDoc::single(
             "cols",

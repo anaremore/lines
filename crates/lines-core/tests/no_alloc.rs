@@ -376,3 +376,43 @@ fn level_placement_does_not_allocate() {
     assert_eq!(n, 0, "level placement allocated {n} times");
     assert!(!out.is_empty());
 }
+
+/// The DOM price trail (`lines_core::trail`): taking trades (including recentering the ring
+/// and far jumps), decaying, re-targeting the scale, reading cells for every visible row and
+/// the animation check all run without allocating once the trail exists.
+#[test]
+fn dom_trail_does_not_allocate() {
+    use lines_core::tape::Aggressor;
+    use lines_core::trail::{DEFAULT_HALF_LIFE_MS, Trail};
+    let mut trail = Trail::new(25, DEFAULT_HALF_LIFE_MS);
+    let n = allocs_during(|| {
+        let mut sum = 0.0f32;
+        for i in 0..20_000i64 {
+            let ticks = (i * 7 % 41) - 20 + if i % 5_000 == 0 { 2_000 } else { 0 };
+            let side = match i % 3 {
+                0 => Some(Aggressor::Buy),
+                1 => Some(Aggressor::Sell),
+                _ => None,
+            };
+            trail.trade(
+                UtcMillis(i * 3),
+                Price(600_000 + ticks * 25),
+                Qty(1 + i % 4),
+                side,
+            );
+            if i % 10 == 0 {
+                trail.advance(UtcMillis(i * 3 + 1));
+                let row = trail.row_of(Price(600_000));
+                for r in row - 64..row + 64 {
+                    let c = trail.cell(r);
+                    sum += c.alpha + c.net;
+                }
+                let _ = trail.newest();
+                let _ = trail.needs_animation(UtcMillis(i * 3 + 2));
+            }
+        }
+        trail.clear(50);
+        std::hint::black_box(sum);
+    });
+    assert_eq!(n, 0, "the trail allocated {n} times");
+}
