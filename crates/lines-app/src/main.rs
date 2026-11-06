@@ -91,6 +91,10 @@ struct Cli {
     /// so the run fails if the actual scale differs (rather than silently differing).
     #[arg(long)]
     scale: Option<f32>,
+    /// Screenshot: draw the crosshair as if the pointer were at X,Y (logical pixels from the
+    /// top-left corner of the plot area, i.e. below the header).
+    #[arg(long, requires = "screenshot", value_parser = parse_point)]
+    cursor: Option<(f32, f32)>,
 }
 
 fn parse_time(s: &str) -> Result<UtcMillis, String> {
@@ -109,6 +113,18 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
         return Err("size out of range".into());
     }
     Ok((w, h))
+}
+
+fn parse_point(s: &str) -> Result<(f32, f32), String> {
+    let (x, y) = s.split_once(',').ok_or("expected X,Y")?;
+    let (x, y): (f32, f32) = (
+        x.trim().parse().map_err(|_| "bad x")?,
+        y.trim().parse().map_err(|_| "bad y")?,
+    );
+    if !(x.is_finite() && y.is_finite()) {
+        return Err("X,Y must be finite".into());
+    }
+    Ok((x, y))
 }
 
 fn feed_config(cli: &Cli) -> Result<FeedConfig> {
@@ -194,7 +210,14 @@ fn main() -> Result<()> {
     if let Some(out) = cli.screenshot.clone() {
         #[cfg(feature = "screenshot")]
         {
-            let code = screenshot::run(config, out, cli.size, cli.scale, theme)?;
+            let shot = screenshot::Shot {
+                out,
+                size: cli.size,
+                scale: cli.scale,
+                theme,
+                cursor: cli.cursor,
+            };
+            let code = screenshot::run(config, shot)?;
             std::process::exit(code);
         }
         #[cfg(not(feature = "screenshot"))]
@@ -225,7 +248,7 @@ fn main() -> Result<()> {
                 }),
                 ..Default::default()
             },
-            move |_, cx| cx.new(|cx| ChartView::new(feed, theme, false, cx)),
+            move |_, cx| cx.new(|cx| ChartView::new(feed, theme, false, None, cx)),
         );
         if let Err(e) = opened {
             tracing::error!("failed to open window: {e:#}");

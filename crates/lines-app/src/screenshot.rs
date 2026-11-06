@@ -7,6 +7,10 @@
 //! `Window::render_to_image` (DirectX staging-texture copy on Windows), so the window is
 //! never shown.
 //!
+//! `--cursor X,Y` places a fixed pointer (logical px from the plot's top-left corner) so the
+//! crosshair, its axis tags and the OHLCV readout appear in the image. No OS pointer is
+//! involved: the position is handed straight to the view.
+//!
 //! DPI scale cannot be forced: GPUI on Windows takes it from the monitor
 //! (`GetDpiForWindow`). `--scale` therefore *asserts* the scale and fails on mismatch.
 
@@ -25,13 +29,19 @@ use lines_feed::store::FeedStatus;
 use crate::chart_view::ChartView;
 use crate::theme::Theme;
 
-pub fn run(
-    config: FeedConfig,
-    out: PathBuf,
-    (w, h): (f32, f32),
-    scale: Option<f32>,
-    theme: Theme,
-) -> Result<i32> {
+/// Everything besides the data that determines the image.
+pub struct Shot {
+    pub out: PathBuf,
+    /// Window size in logical px.
+    pub size: (f32, f32),
+    /// Required DPI scale (asserted, not forced).
+    pub scale: Option<f32>,
+    pub theme: Theme,
+    /// Fixed pointer position, plot-local logical px.
+    pub cursor: Option<(f32, f32)>,
+}
+
+pub fn run(config: FeedConfig, shot: Shot) -> Result<i32> {
     let feed = lines_feed::spawn(config)?;
 
     // 1. Replay to the cut-off before any UI exists: the frame depends only on the data.
@@ -50,7 +60,7 @@ pub fn run(
     let code = Arc::new(AtomicI32::new(1));
     let exit = code.clone();
     gpui_platform::application().run(move |cx: &mut App| {
-        let result = capture(cx, feed, out, (w, h), scale, theme, exit.clone());
+        let result = capture(cx, feed, shot, exit.clone());
         if let Err(e) = result {
             eprintln!("screenshot failed: {e:#}");
             cx.quit();
@@ -62,12 +72,16 @@ pub fn run(
 fn capture(
     cx: &mut App,
     feed: lines_feed::FeedHandle,
-    out: PathBuf,
-    (w, h): (f32, f32),
-    scale: Option<f32>,
-    theme: Theme,
+    shot: Shot,
     exit: Arc<AtomicI32>,
 ) -> Result<()> {
+    let Shot {
+        out,
+        size: (w, h),
+        scale,
+        theme,
+        cursor,
+    } = shot;
     let bounds = Bounds {
         origin: point(px(0.0), px(0.0)),
         size: size(px(w), px(h)),
@@ -83,7 +97,7 @@ fn capture(
             focus: false,
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| ChartView::new(feed, theme, true, cx)),
+        move |_, cx| cx.new(|cx| ChartView::new(feed, theme, true, cursor, cx)),
     )?;
     cx.spawn(async move |cx| {
         // A hidden window's DirectX render target is only sized on WM_SIZE, which a window

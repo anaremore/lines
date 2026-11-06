@@ -1,10 +1,14 @@
-//! The chart window: header + candlestick canvas with pan/zoom.
+//! The chart window: header + candlestick canvas with pan/zoom and a crosshair.
 //!
 //! Frame flow (decision 0001): a UI-thread timer compares the store's atomic revision and
 //! calls `cx.notify()` only when data changed (so 5k msgs/s never means 5k redraws). In
 //! paint we `try_lock` the store, update the viewport and rebuild the reusable `Scene` (no
 //! heap allocation), release the lock, then emit quads. Text labels are shaped once and
 //! cached. Coordinates handed to GPUI are relative to the plot origin before the `f32` cast.
+//!
+//! Crosshair: input handlers only record the pointer position (plot-local logical px). Paint
+//! hit-tests it against the viewport *after* this frame's pan/zoom/data update
+//! (`lines_core::geometry::crosshair`), so the crosshair can never lag or fight the view.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -13,11 +17,12 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, ContentMask, Context, Font, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine,
-    SharedString, Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px,
-    size,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
+    ScrollEvent, ShapedLine, SharedString, Styled, TextAlign, TextRun, Window, canvas, div, fill,
+    point, prelude::*, px, size,
 };
-use lines_core::{FixedStr, Instrument, Price, Scene, Viewport};
+use lines_core::geometry::{Crosshair, crosshair, snap, write_ohlcv};
+use lines_core::{Bar, FixedStr, Instrument, Price, Scene, Viewport};
 use lines_feed::FeedHandle;
 use lines_feed::store::{ChartStore, FeedStatus};
 
@@ -33,6 +38,8 @@ enum LabelKind {
     Price,
     Time,
     LastPrice,
+    CrossPrice,
+    CrossTime,
 }
 
 struct Rates {
@@ -58,6 +65,14 @@ pub struct ChartView {
     series_trimmed: u64,
     plot: Bounds<Pixels>,
     drag_from: Option<Point<Pixels>>,
+    /// Pointer position in plot-local logical px, while it is over the plot.
+    hover: Option<(f32, f32)>,
+    /// This frame's crosshair (from `hover`), and a copy of the bar under it.
+    cross: Option<Crosshair>,
+    cross_bar: Option<Bar>,
+    period_ms: i64,
+    /// OHLCV readout, shaped once per distinct bar value.
+    readout: Option<(Bar, ShapedLine)>,
     labels: HashMap<(LabelKind, i64), ShapedLine>,
     font: Option<Font>,
     rates: Rates,
@@ -65,7 +80,14 @@ pub struct ChartView {
 }
 
 impl ChartView {
-    pub fn new(feed: FeedHandle, theme: Theme, frozen: bool, cx: &mut Context<Self>) -> Self {
+    /// `cursor`: a fixed pointer position (plot-local logical px) for screenshots.
+    pub fn new(
+        feed: FeedHandle,
+        theme: Theme,
+        frozen: bool,
+        cursor: Option<(f32, f32)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let store = feed.store.clone();
         let instrument = store.read().instrument.clone();
         // Poll the lock-free revision counter at ~120 Hz; redraw only on change.
@@ -104,6 +126,11 @@ impl ChartView {
             series_trimmed: 0,
             plot: Bounds::default(),
             drag_from: None,
+            hover: cursor,
+            cross: None,
+            cross_bar: None,
+            period_ms: 60_000,
+            readout: None,
             labels: HashMap::with_capacity(MAX_CACHED_LABELS),
             font: None,
             rates: Rates {
@@ -147,7 +174,26 @@ impl ChartView {
         }
     }
 
+    /// Track the pointer for the crosshair; it shows only while the pointer is over the plot.
+    fn set_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let hover = self.plot.contains(&pos).then(|| {
+            let l = pos - self.plot.origin;
+            (f32::from(l.x), f32::from(l.y))
+        });
+        if hover != self.hover {
+            self.hover = hover;
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.hover.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_hover(ev.position, cx);
         let Some(from) = self.drag_from else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             self.drag_from = None;
@@ -164,6 +210,7 @@ impl ChartView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_hover(ev.position, cx);
         if !self.plot.contains(&ev.position) {
             return;
         }
@@ -208,8 +255,32 @@ impl ChartView {
             let fmt = self.instrument.price;
             let bars = d.series.bars();
             self.vp.on_data(bars, fmt.tick);
+            self.period_ms = d.series.period_ms();
             self.scene
-                .build(bars, &self.vp, &fmt, scale, d.series.period_ms());
+                .build(bars, &self.vp, &fmt, scale, self.period_ms);
+            // Hit-test after the viewport update so the crosshair matches this frame.
+            self.cross = self.hover.and_then(|(x, y)| {
+                crosshair(
+                    bars,
+                    &self.vp,
+                    fmt.tick,
+                    self.period_ms,
+                    scale,
+                    f64::from(x),
+                    f64::from(y),
+                )
+            });
+            self.cross_bar = self.cross.and_then(|c| c.bar).map(|i| bars[i]);
+        }
+        if !self.frozen && !window.is_window_hovered() {
+            // GPUI on Windows reports leaving the window only through this flag (it redraws
+            // on change) and never sends `MouseExitEvent`. Screenshots keep their fixed cursor.
+            self.hover = None;
+        }
+        if self.hover.is_none() {
+            // Left the plot while the feed held the lock: still hide immediately.
+            self.cross = None;
+            self.cross_bar = None;
         }
 
         if self.font.is_none() {
@@ -274,6 +345,14 @@ impl ChartView {
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
                 window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
+            }
+            if let Some(c) = self.cross {
+                // Vertical line through the wick; the horizontal one stops either side of it
+                // so the translucent lines don't double up where they cross.
+                let (left, right) = (c.x - hair * 0.5, c.x + hair * 0.5);
+                window.paint_quad(fill(rect(left, 0.0, hair, ph), t.crosshair));
+                window.paint_quad(fill(rect(0.0, c.y, left.max(0.0), hair), t.crosshair));
+                window.paint_quad(fill(rect(right, c.y, pw - right, hair), t.crosshair));
             }
         });
 
@@ -343,10 +422,180 @@ impl ChartView {
                 },
             );
         }
+        if let Some(c) = self.cross {
+            self.draw_crosshair_tags(c, bounds, window, cx);
+        }
+        if let Some(bar) = self.cross_bar {
+            self.draw_readout(bar, bounds, window, cx);
+        }
     }
 
-    /// Paint a cached label. Shaping (and its allocation) happens only on a cache miss,
+    /// Price tag on the price axis and time tag on the time axis, drawn over the axis labels.
+    fn draw_crosshair_tags(
+        &mut self,
+        c: Crosshair,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        let scale = window.scale_factor();
+        let hair = 1.0 / scale;
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let (pw, ph) = (
+            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.height),
+        );
+        let line_h = px(LABEL_PX * 1.3);
+        let fmt = self.instrument.price;
+        let tag_h = LABEL_PX * 1.5;
+
+        // Price tag: same box as the last-price tag, kept fully inside the plot's height.
+        let y = c.y.min(ph - tag_h * 0.5).max(tag_h * 0.5);
+        let top = snap(f64::from(y - tag_h * 0.5), scale);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(ox + pw + hair), px(oy + top)),
+                size(px(AXIS_W), px(tag_h)),
+            ),
+            t.cross_tag,
+        ));
+        let price = c.price;
+        self.paint_label(
+            LabelKind::CrossPrice,
+            price.0,
+            point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65)),
+            line_h,
+            t.on_cross_tag,
+            window,
+            cx,
+            |s| {
+                let _ = fmt.write(price, s);
+            },
+        );
+
+        // Time tag: centred on the vertical line, clamped to the time axis.
+        let Some(time) = c.time else { return };
+        let period = self.period_ms;
+        let text = move |s: &mut FixedStr<32>| {
+            let _ = time.write_crosshair_label(period, s);
+        };
+        let text_w = f32::from(
+            self.label(LabelKind::CrossTime, time.0, t.on_cross_tag, window, text)
+                .width,
+        );
+        let box_w = text_w + 12.0;
+        let left = snap(
+            f64::from((c.x - box_w * 0.5).min(pw - box_w).max(0.0)),
+            scale,
+        );
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(ox + left), px(oy + ph + hair)),
+                size(px(box_w), px(AXIS_H - hair)),
+            ),
+            t.cross_tag,
+        ));
+        self.paint_label(
+            LabelKind::CrossTime,
+            time.0,
+            point(px(ox + left + 6.0), px(oy + ph + 4.0)),
+            line_h,
+            t.on_cross_tag,
+            window,
+            cx,
+            text,
+        );
+    }
+
+    /// OHLCV of the hovered bar, top-left of the plot. Re-shaped only when the bar changes
+    /// (a new bar is hovered, or the forming bar under the pointer ticks).
+    fn draw_readout(
+        &mut self,
+        bar: Bar,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        if self.readout.as_ref().is_none_or(|(b, _)| *b != bar) {
+            let mut s = FixedStr::<128>::new();
+            let _ = write_ohlcv(&bar, &self.instrument.price, self.instrument.qty, &mut s);
+            let line = self.shape(s.as_str(), t.text_main, window);
+            self.readout = Some((bar, line));
+        }
+        let Some((_, line)) = &self.readout else {
+            return;
+        };
+        let scale = window.scale_factor();
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let box_h = LABEL_PX * 1.6;
+        let (left, top) = (snap(6.0, scale), snap(6.0, scale));
+        let box_w = snap(f64::from(f32::from(line.width) + 12.0), scale);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(ox + left), px(oy + top)),
+                size(px(box_w), px(box_h)),
+            ),
+            t.panel.opacity(0.85),
+        ));
+        let origin = point(
+            px(ox + left + 6.0),
+            px(oy + top + box_h * 0.5 - LABEL_PX * 0.65),
+        );
+        let _ = line.paint(
+            origin,
+            px(LABEL_PX * 1.3),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    fn shape(&self, text: &str, color: Hsla, window: &mut Window) -> ShapedLine {
+        let run = TextRun {
+            len: text.len(),
+            font: self
+                .font
+                .clone()
+                .unwrap_or_else(|| window.text_style().font()),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window.text_system().shape_line(
+            SharedString::from(text.to_owned()),
+            px(LABEL_PX),
+            &[run],
+            None,
+        )
+    }
+
+    /// A cached shaped label. Shaping (and its allocation) happens only on a cache miss,
     /// i.e. the first time a given price/time label is shown.
+    fn label(
+        &mut self,
+        kind: LabelKind,
+        key: i64,
+        color: Hsla,
+        window: &mut Window,
+        text: impl FnOnce(&mut FixedStr<32>),
+    ) -> &ShapedLine {
+        if self.labels.len() >= MAX_CACHED_LABELS && !self.labels.contains_key(&(kind, key)) {
+            self.labels.clear();
+        }
+        if !self.labels.contains_key(&(kind, key)) {
+            let mut s = FixedStr::<32>::new();
+            text(&mut s);
+            let line = self.shape(s.as_str(), color, window);
+            self.labels.insert((kind, key), line);
+        }
+        &self.labels[&(kind, key)]
+    }
+
+    /// Paint a cached label (see [`Self::label`]).
     #[allow(clippy::too_many_arguments)]
     fn paint_label(
         &mut self,
@@ -359,28 +608,7 @@ impl ChartView {
         cx: &mut App,
         text: impl FnOnce(&mut FixedStr<32>),
     ) {
-        if self.labels.len() >= MAX_CACHED_LABELS {
-            self.labels.clear();
-        }
-        let font = self.font.clone();
-        let line = self.labels.entry((kind, key)).or_insert_with(|| {
-            let mut s = FixedStr::<32>::new();
-            text(&mut s);
-            let run = TextRun {
-                len: s.len(),
-                font: font.unwrap_or_else(|| window.text_style().font()),
-                color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            window.text_system().shape_line(
-                SharedString::from(s.as_str().to_owned()),
-                px(LABEL_PX),
-                &[run],
-                None,
-            )
-        });
+        let line = self.label(kind, key, color, window, text);
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
     }
 
@@ -464,6 +692,7 @@ impl Render for ChartView {
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_exit(cx.listener(Self::on_mouse_exit))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(
                         canvas(

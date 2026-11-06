@@ -1,12 +1,14 @@
 //! Enforces "no heap allocation in the paint path" for everything Lines controls:
-//! viewport updates, candle/grid geometry, and label formatting.
+//! viewport updates, candle/grid geometry, crosshair hit-testing, and label formatting
+//! (axis labels, crosshair price/time tags, OHLCV readout).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
+use lines_core::geometry::{crosshair, write_ohlcv};
 use lines_core::{
-    Bar, BarSeries, DisplayStyle, FixedStr, Price, PriceFormat, PriceScale, Qty, Scene, UtcMillis,
-    Viewport,
+    Bar, BarSeries, DisplayStyle, FixedStr, Price, PriceFormat, PriceScale, Qty, QtyFormat, Scene,
+    UtcMillis, Viewport,
 };
 
 struct Counting;
@@ -63,6 +65,7 @@ fn paint_path_does_not_allocate() {
     let mut scene = Scene::with_capacity(0);
     scene.ensure_capacity(vp.width); // done on resize, outside the paint path
 
+    let (mut hits, mut bar_hits) = (0usize, 0usize);
     let n = allocs_during(|| {
         for frame in 0..500 {
             // Feed side: a live trade into the forming bar.
@@ -91,8 +94,36 @@ fn paint_path_does_not_allocate() {
                 line.time.write_axis_label(&mut label).unwrap();
             }
             std::hint::black_box(&label);
+            // Crosshair: sweep the pointer across the plot (including outside it and past
+            // both ends of the data) at fractional and integer DPI scales.
+            let mut readout = FixedStr::<128>::new();
+            for k in 0..40 {
+                let x = -50.0 + k as f64 * (vp.width + 100.0) / 40.0;
+                let y = -20.0 + k as f64 * (vp.height + 40.0) / 40.0;
+                let scale = [1.0, 1.5, 2.0][k % 3];
+                let bars = series.bars();
+                let Some(ch) = crosshair(bars, &vp, fmt.tick, series.period_ms(), scale, x, y)
+                else {
+                    continue;
+                };
+                hits += 1;
+                label.clear();
+                fmt.write(ch.price, &mut label).unwrap();
+                if let Some(t) = ch.time {
+                    label.clear();
+                    t.write_crosshair_label(series.period_ms(), &mut label)
+                        .unwrap();
+                }
+                if let Some(i) = ch.bar {
+                    bar_hits += 1;
+                    readout.clear();
+                    write_ohlcv(&bars[i], &fmt, QtyFormat::WHOLE, &mut readout).unwrap();
+                }
+                std::hint::black_box((&ch, &label, &readout));
+            }
         }
     });
+    assert!(hits > 0 && bar_hits > 0, "crosshair never hit a bar");
     assert!(!scene.candles.is_empty());
     assert!(!scene.price_lines.is_empty());
     assert_eq!(n, 0, "paint path allocated {n} times");
