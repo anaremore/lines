@@ -9,7 +9,8 @@
 //! shown. No user settings or workspaces are read or written.
 //!
 //! The first window is rendered (its active tab; other tabs show in the tab bar and, being
-//! hidden, paint nothing). Panes whose target the recording doesn't hold show greyed with the
+//! hidden, paint nothing). Popped-out panes of that window's tabs are rendered too, each into
+//! `<out stem>-pane-<n>.png` at its saved window size. Panes whose target the recording doesn't hold show greyed with the
 //! reason (e.g. `--workspace pair` on an ES recording greys NQ).
 //!
 //! `--cursor X,Y` places a fixed pointer (logical px from the plot's top-left corner) on the
@@ -20,15 +21,16 @@
 //! (`GetDpiForWindow`). `--scale` therefore *asserts* the scale and fails on mismatch.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
-use gpui::{App, AppContext, px, size};
+use gpui::{AnyWindowHandle, App, AppContext, AsyncApp, px, size};
 use lines_feed::registry::FeedRegistry;
 use lines_feed::store::FeedStatus;
 
 use crate::feeds::{Feeds, PaneFeed};
+use crate::pane_window;
 use crate::picker_view::AppSettings;
 use crate::workspace::{self, Workspace};
 use crate::wsdoc::{WindowDoc, WorkspaceDoc};
@@ -125,61 +127,92 @@ fn capture(
         cx,
     )?;
     cx.spawn(async move |cx| {
-        // A hidden window's DirectX render target is only sized on WM_SIZE, which a window
-        // created at its final size never receives. Nudge the size and set it back.
-        for (dw, dh) in [(w + 1.0, h + 1.0), (w, h)] {
-            let _ = cx.update_window(handle.into(), |_, window, _| window.resize(size(px(dw), px(dh))));
-            cx.background_executor().timer(Duration::from_millis(100)).await;
-        }
-        // Indicators are computed on the indicator thread: wait until it has processed the
-        // whole replay and the panes' requests, then give the panes a poll tick to pick the
-        // values up, so the frame is deterministic.
-        lines_feed::indicators::engine().sync();
-        cx.background_executor().timer(Duration::from_millis(100)).await;
-        // Warm-up frame in its own update, so what it emits (crosshair sync between charts)
-        // is delivered before the frame that is read back.
-        let _ = cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx));
-        let result = cx.update_window(handle.into(), |_, window, cx| -> Result<(u32, u32)> {
-            let actual = window.scale_factor();
-            if let Some(want) = scale
-                && (actual - want).abs() > 1e-3
-            {
-                bail!(
-                    "display scale is {actual}, --scale requested {want}; GPUI cannot override DPI on this \
-                     platform, so run on a display at that scale (or omit --scale)"
-                );
-            }
-            // Two more frames: the first warms the glyph atlas and label cache; the second is
-            // what we read back. All draw the identical, already-final data.
-            window.draw(cx).clear(cx);
-            window.draw(cx).clear(cx);
-            let img = window.render_to_image()?;
-            let want = ((w * actual).round() as u32, (h * actual).round() as u32);
-            if (img.width(), img.height()) != want {
-                bail!(
-                    "rendered {}x{} px, expected {}x{} (render target not sized); refusing to write a bad screenshot",
-                    img.width(),
-                    img.height(),
-                    want.0,
-                    want.1
-                );
-            }
-            if let Some(dir) = out.parent()
-                && !dir.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(dir)?;
-            }
-            img.save(&out).map_err(|e| anyhow!("write {}: {e}", out.display()))?;
-            Ok((img.width(), img.height()))
+        let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
+        // Popped-out panes: their windows opened (hidden) with the main window's tabs.
+        // At the size each was opened at (a hidden window reports no size of its own).
+        let panes: Vec<(AnyWindowHandle, (f32, f32))> = cx.update(|cx| {
+            pane_window::all(cx)
+                .into_iter()
+                .map(|(hw, size)| (hw.into(), size))
+                .collect()
         });
-        match result.and_then(|r| r) {
-            Ok((pw, ph)) => {
-                println!("wrote {} ({pw}x{ph} px)", out.display());
-                exit(0)
-            }
-            Err(e) => fail(&e),
+        let stem = out
+            .file_stem()
+            .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        for (n, (hw, size)) in panes.into_iter().enumerate() {
+            let path = out.with_file_name(format!("{stem}-pane-{}.png", n + 1));
+            wrote.push(shoot(cx, hw, size, &path, scale).await);
         }
+        for r in wrote {
+            match r {
+                Ok((path, pw, ph)) => println!("wrote {} ({pw}x{ph} px)", path.display()),
+                Err(e) => fail(&e),
+            }
+        }
+        exit(0)
     })
     .detach();
     Ok(())
+}
+
+/// Size, warm up, draw and read back one hidden window, then write it to `out`.
+async fn shoot(
+    cx: &mut AsyncApp,
+    handle: AnyWindowHandle,
+    (w, h): (f32, f32),
+    out: &Path,
+    scale: Option<f32>,
+) -> Result<(PathBuf, u32, u32)> {
+    // A hidden window's DirectX render target is only sized on WM_SIZE, which a window
+    // created at its final size never receives. Nudge the size and set it back.
+    for (dw, dh) in [(w + 1.0, h + 1.0), (w, h)] {
+        let _ = cx.update_window(handle, |_, window, _| window.resize(size(px(dw), px(dh))));
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    // Indicators are computed on the indicator thread: wait until it has processed the whole
+    // replay and the panes' requests, then give the panes a poll tick to pick the values up,
+    // so the frame is deterministic.
+    lines_feed::indicators::engine().sync();
+    cx.background_executor()
+        .timer(Duration::from_millis(100))
+        .await;
+    // Warm-up frame in its own update, so what it emits (crosshair sync between charts) is
+    // delivered before the frame that is read back.
+    let _ = cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx));
+    cx.update_window(handle, |_, window, cx| -> Result<(PathBuf, u32, u32)> {
+        let actual = window.scale_factor();
+        if let Some(want) = scale
+            && (actual - want).abs() > 1e-3
+        {
+            bail!(
+                "display scale is {actual}, --scale requested {want}; GPUI cannot override DPI on this \
+                 platform, so run on a display at that scale (or omit --scale)"
+            );
+        }
+        // Two more frames: the first warms the glyph atlas and label cache; the second is
+        // what we read back. All draw the identical, already-final data.
+        window.draw(cx).clear(cx);
+        window.draw(cx).clear(cx);
+        let img = window.render_to_image()?;
+        let want = ((w * actual).round() as u32, (h * actual).round() as u32);
+        if (img.width(), img.height()) != want {
+            bail!(
+                "rendered {}x{} px, expected {}x{} (render target not sized); refusing to write a bad screenshot",
+                img.width(),
+                img.height(),
+                want.0,
+                want.1
+            );
+        }
+        if let Some(dir) = out.parent()
+            && !dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(dir)?;
+        }
+        img.save(out)
+            .map_err(|e| anyhow!("write {}: {e}", out.display()))?;
+        Ok((out.to_path_buf(), img.width(), img.height()))
+    })?
 }

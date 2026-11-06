@@ -238,61 +238,115 @@ impl<T> Layout<T> {
         }
     }
 
+    #[cfg(test)]
     /// Every leaf's rectangle in `area`. Leaves tile the area exactly; edges are whole px.
     pub fn place(&self, area: Rect) -> Vec<Placed> {
+        self.place_where(area, &|_| true)
+    }
+
+    /// The rectangles of the leaves for which `shown` is true; the others take no space.
+    /// A split with one side wholly hidden gives the other side its whole rectangle, and its
+    /// ratio is kept, so showing the hidden side again restores exactly the old geometry.
+    /// `Placed::index` is the leaf's position among *all* leaves.
+    pub fn place_where(&self, area: Rect, shown: &dyn Fn(&T) -> bool) -> Vec<Placed> {
         let mut out = Vec::new();
-        self.walk(area, &mut Vec::new(), &mut |node, rect, _| {
-            if let Layout::Pane(_) = node {
-                out.push(Placed {
-                    index: out.len(),
-                    rect,
-                });
-            }
-        });
+        let mut next = 0;
+        self.walk(
+            area,
+            shown,
+            &mut next,
+            &mut Vec::new(),
+            &mut |node, rect, _, index| {
+                if let Layout::Pane(_) = node {
+                    out.push(Placed { index, rect });
+                }
+            },
+        );
         out
     }
 
+    #[cfg(test)]
     /// Every split's boundary in `area`, outermost first.
     pub fn dividers(&self, area: Rect) -> Vec<Divider> {
+        self.dividers_where(area, &|_| true)
+    }
+
+    /// The boundaries between shown leaves: a split with a wholly hidden side has none.
+    pub fn dividers_where(&self, area: Rect, shown: &dyn Fn(&T) -> bool) -> Vec<Divider> {
         let mut out = Vec::new();
-        self.walk(area, &mut Vec::new(), &mut |node, rect, path| {
-            if let Layout::Split { axis, ratio, .. } = node {
-                let (a, _) = cut(rect, *axis, *ratio);
-                out.push(Divider {
-                    path: path.to_vec(),
-                    axis: *axis,
-                    area: rect,
-                    at: match axis {
-                        Axis::Row => a.right(),
-                        Axis::Column => a.bottom(),
-                    },
-                });
-            }
-        });
+        let mut next = 0;
+        self.walk(
+            area,
+            shown,
+            &mut next,
+            &mut Vec::new(),
+            &mut |node, rect, path, _| {
+                if let Layout::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } = node
+                    && first.any(shown)
+                    && second.any(shown)
+                {
+                    let (a, _) = cut(rect, *axis, *ratio);
+                    out.push(Divider {
+                        path: path.to_vec(),
+                        axis: *axis,
+                        area: rect,
+                        at: match axis {
+                            Axis::Row => a.right(),
+                            Axis::Column => a.bottom(),
+                        },
+                    });
+                }
+            },
+        );
         out
     }
 
+    /// Whether any leaf here is shown.
+    pub fn any(&self, shown: &dyn Fn(&T) -> bool) -> bool {
+        match self {
+            Layout::Pane(p) => shown(p),
+            Layout::Split { first, second, .. } => first.any(shown) || second.any(shown),
+        }
+    }
+
+    /// Visit shown nodes with their rectangles; `next` counts leaves (hidden ones too).
     fn walk(
         &self,
         rect: Rect,
+        shown: &dyn Fn(&T) -> bool,
+        next: &mut usize,
         path: &mut Vec<Side>,
-        f: &mut impl FnMut(&Layout<T>, Rect, &[Side]),
+        f: &mut impl FnMut(&Layout<T>, Rect, &[Side], usize),
     ) {
-        f(self, rect, path);
-        if let Layout::Split {
-            axis,
-            ratio,
-            first,
-            second,
-        } = self
-        {
-            let (a, b) = cut(rect, *axis, *ratio);
-            path.push(Side::First);
-            first.walk(a, path, f);
-            path.pop();
-            path.push(Side::Second);
-            second.walk(b, path, f);
-            path.pop();
+        if !self.any(shown) {
+            *next += self.leaf_count();
+            return;
+        }
+        f(self, rect, path, *next);
+        match self {
+            Layout::Pane(_) => *next += 1,
+            Layout::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let (a, b) = match (first.any(shown), second.any(shown)) {
+                    (true, true) => cut(rect, *axis, *ratio),
+                    _ => (rect, rect),
+                };
+                path.push(Side::First);
+                first.walk(a, shown, next, path, f);
+                path.pop();
+                path.push(Side::Second);
+                second.walk(b, shown, next, path, f);
+                path.pop();
+            }
         }
     }
 
@@ -320,11 +374,23 @@ impl<T> Layout<T> {
         }
     }
 
+    #[cfg(test)]
     /// The leaf whose rectangle lies next to leaf `from` in `dir`: of the leaves across that
     /// edge that overlap it, the one overlapping most (ties: the one nearest its centre).
     pub fn neighbour(&self, from: usize, dir: Direction, area: Rect) -> Option<usize> {
-        let placed = self.place(area);
-        let src = placed.get(from)?.rect;
+        self.neighbour_where(from, dir, area, &|_| true)
+    }
+
+    /// [`Layout::neighbour`] among shown leaves (`from` and the result index all leaves).
+    pub fn neighbour_where(
+        &self,
+        from: usize,
+        dir: Direction,
+        area: Rect,
+        shown: &dyn Fn(&T) -> bool,
+    ) -> Option<usize> {
+        let placed = self.place_where(area, shown);
+        let src = placed.iter().find(|p| p.index == from)?.rect;
         let (cx, cy) = src.centre();
         let eps = 0.5;
         placed
@@ -370,24 +436,38 @@ impl<T: PartialEq> Layout<T> {
     /// Replace leaf `target` with a split holding it and `new` (new second: right or below).
     /// `Err` gives both back if `target` isn't a leaf here.
     pub fn split_leaf(self, target: &T, axis: Axis, new: T) -> Result<Layout<T>, (Layout<T>, T)> {
+        self.split_leaf_at(target, axis, new, 0.5)
+    }
+
+    /// [`Layout::split_leaf`] giving `target` the share `share`.
+    pub fn split_leaf_at(
+        self,
+        target: &T,
+        axis: Axis,
+        new: T,
+        share: f32,
+    ) -> Result<Layout<T>, (Layout<T>, T)> {
         match self {
-            Layout::Pane(p) if &p == target => {
-                Ok(Layout::split(axis, 0.5, Layout::Pane(p), Layout::Pane(new)))
-            }
+            Layout::Pane(p) if &p == target => Ok(Layout::split(
+                axis,
+                share,
+                Layout::Pane(p),
+                Layout::Pane(new),
+            )),
             Layout::Pane(p) => Err((Layout::Pane(p), new)),
             Layout::Split {
                 axis: a,
                 ratio,
                 first,
                 second,
-            } => match first.split_leaf(target, axis, new) {
+            } => match first.split_leaf_at(target, axis, new, share) {
                 Ok(f) => Ok(Layout::Split {
                     axis: a,
                     ratio,
                     first: Box::new(f),
                     second,
                 }),
-                Err((f, new)) => match second.split_leaf(target, axis, new) {
+                Err((f, new)) => match second.split_leaf_at(target, axis, new, share) {
                     Ok(s) => Ok(Layout::Split {
                         axis: a,
                         ratio,

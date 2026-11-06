@@ -5,7 +5,9 @@
 //! source's default) and its view state. The market data *source* is not part of a workspace:
 //! it belongs to the run (`--source`), so one workspace works on mock, replay or live data.
 //!
-//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 1).
+//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 2).
+//! Version 2 adds each pane's `state` (shown, hidden, hidden by "chart only", detached) and a
+//! detached pane's `window` placement; version 1 files migrate (every pane shown).
 //! Product ids are the catalog's permanent ids; `symbol` is written beside them for people
 //! reading the file and ignored on load. A pane whose product this build doesn't know is kept
 //! as written and shown as unavailable, never dropped.
@@ -18,6 +20,7 @@ use lines_feed::catalog::{self, Target};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{Axis, Layout, LinkGroup, PaneKind, Preset, Rect, trading_group};
+use crate::tabstate::PaneState;
 use crate::versioned::{Format, Migration};
 
 /// Version 0 never existed for workspaces (the first file format is 1); an unversioned file
@@ -26,11 +29,45 @@ fn v0_never_written(_: serde_json::Value) -> Result<serde_json::Value, String> {
     Err("no version field (not a Lines workspace file)".into())
 }
 
-const MIGRATIONS: &[Migration] = &[v0_never_written];
+/// Version 2 added pane states. Every version 1 pane was shown: say so explicitly.
+fn v1_to_v2(mut v: serde_json::Value) -> Result<serde_json::Value, String> {
+    fn panes(node: &mut serde_json::Value) -> Result<(), String> {
+        let obj = node.as_object_mut().ok_or("layout node isn't an object")?;
+        if let Some(p) = obj.get_mut("pane") {
+            let p = p.as_object_mut().ok_or("pane isn't an object")?;
+            p.entry("state").or_insert_with(|| "shown".into());
+            return Ok(());
+        }
+        let split = obj
+            .get_mut("split")
+            .and_then(|s| s.as_object_mut())
+            .ok_or("layout node is neither a pane nor a split")?;
+        for side in ["first", "second"] {
+            panes(split.get_mut(side).ok_or("split without both sides")?)?;
+        }
+        Ok(())
+    }
+    let windows = v
+        .get_mut("windows")
+        .and_then(|w| w.as_array_mut())
+        .ok_or("no windows")?;
+    for w in windows {
+        let tabs = w
+            .get_mut("tabs")
+            .and_then(|t| t.as_array_mut())
+            .ok_or("window without tabs")?;
+        for t in tabs {
+            panes(t.get_mut("layout").ok_or("tab without a layout")?)?;
+        }
+    }
+    Ok(v)
+}
+
+const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 1,
+    current: 2,
     migrations: MIGRATIONS,
 };
 
@@ -80,6 +117,12 @@ pub struct PaneDoc {
     pub dom: Option<DomState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tape: Option<TapeState>,
+    /// Shown, hidden, hidden by its chart's "chart only", or detached (version 2).
+    #[serde(default)]
+    pub state: PaneState,
+    /// A detached pane's window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<Placement>,
 }
 
 impl PaneDoc {
@@ -91,6 +134,8 @@ impl PaneDoc {
             chart: None,
             dom: None,
             tape: None,
+            state: PaneState::Shown,
+            window: None,
         }
     }
 }
@@ -321,9 +366,28 @@ impl WorkspaceDoc {
                     if p.link.is_some_and(|g| g >= crate::layout::LINK_GROUPS) {
                         p.link = None;
                     }
+                    // Charts are never hidden (only closed or popped out).
+                    if p.kind == PaneKind::Chart && p.state.is_hidden() {
+                        p.state = PaneState::Shown;
+                    }
                     p
                 };
                 t.layout = t.layout.map(&mut fix);
+                // Something must be on screen: show the first hidden pane, else the first.
+                if !t.layout.any(&|p: &PaneDoc| p.state.is_shown()) {
+                    let first_hidden = t.layout.leaves().iter().position(|p| p.state.is_hidden());
+                    let target = first_hidden.unwrap_or(0);
+                    let mut i = 0;
+                    t.layout = t.layout.map(&mut |p: &PaneDoc| {
+                        let mut p = p.clone();
+                        if i == target {
+                            p.state = PaneState::Shown;
+                            p.window = None;
+                        }
+                        i += 1;
+                        p
+                    });
+                }
             }
         }
         Ok(())
@@ -588,14 +652,13 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 1"#), "{text}");
+        assert!(text.contains(r#""version": 2"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
     #[test]
-    fn a_version_1_file_as_written_today_still_reads() {
-        // Pinned: if this stops parsing, the format changed and needs a version bump plus a
-        // migration (crate::versioned), not an edit here.
+    fn a_version_1_file_migrates_to_version_2() {
+        // Pinned: exactly what version 1 wrote. It must keep migrating to the current format.
         let v1 = br#"{
           "version": 1,
           "name": "desk",
@@ -611,10 +674,23 @@ mod tests {
             }]
           }]
         }"#;
-        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, v1) else {
+        let Decoded::Ok {
+            value,
+            migrated_from,
+        } = decode::<WorkspaceDoc>(&FORMAT, v1)
+        else {
             panic!("v1 no longer reads")
         };
+        assert_eq!(migrated_from, Some(1));
         assert_eq!(value.name, "desk");
+        assert!(
+            value.windows[0].tabs[0]
+                .layout
+                .leaves()
+                .iter()
+                .all(|p| p.state == PaneState::Shown && p.window.is_none()),
+            "every v1 pane was shown"
+        );
         let leaves = value.windows[0].tabs[0].layout.leaves();
         assert_eq!(
             leaves[0].chart,
@@ -634,14 +710,76 @@ mod tests {
     }
 
     #[test]
+    fn a_version_2_file_as_written_today_still_reads() {
+        // Pinned: if this stops parsing, the format changed and needs a version bump plus a
+        // migration (crate::versioned), not an edit here.
+        let v2 = br#"{
+          "version": 2,
+          "name": "desk",
+          "windows": [{
+            "tabs": [{
+              "focused": 0,
+              "layout": {"split": {"axis": "row", "ratio": 0.68,
+                "first": {"pane": {"kind": "chart", "link": 1, "state": "shown"}},
+                "second": {"split": {"axis": "column", "ratio": 0.64,
+                  "first": {"pane": {"kind": "dom", "link": 1, "state": "detached",
+                    "window": {"display": "right", "state": "windowed", "x": 2000, "y": 80, "w": 320, "h": 900}}},
+                  "second": {"pane": {"kind": "tape", "link": 1, "state": "chart_only"}}}}}}
+            }, {
+              "layout": {"pane": {"kind": "dom", "state": "hidden"}}
+            }]
+          }]
+        }"#;
+        let Decoded::Ok {
+            value,
+            migrated_from: None,
+        } = decode::<WorkspaceDoc>(&FORMAT, v2)
+        else {
+            panic!("v2 no longer reads")
+        };
+        let states: Vec<_> = value.windows[0]
+            .tabs
+            .iter()
+            .flat_map(|t| t.layout.leaves())
+            .map(|p| p.state)
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                PaneState::Shown,
+                PaneState::Detached,
+                PaneState::ChartOnly,
+                PaneState::Hidden
+            ]
+        );
+        let dom = value.windows[0].tabs[0].layout.leaves()[1];
+        assert_eq!(dom.window.as_ref().unwrap().x, 2000.0);
+    }
+
+    #[test]
+    fn the_migration_rejects_shapes_it_cannot_follow() {
+        for bad in [
+            &br#"{"version": 1}"#[..],
+            br#"{"version": 1, "windows": [{"tabs": [{"layout": {"tree": 1}}]}]}"#,
+            br#"{"version": 1, "windows": [{"tabs": [{"layout": {"split": {"first": {"pane": {"kind": "dom"}}}}}]}]}"#,
+        ] {
+            assert!(
+                matches!(decode::<WorkspaceDoc>(&FORMAT, bad), Decoded::Corrupt { .. }),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    #[test]
     fn unversioned_and_newer_files_are_not_guessed_at() {
         assert!(matches!(
             decode::<WorkspaceDoc>(&FORMAT, br#"{"windows": []}"#),
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 2, "windows": 7}"#),
-            Decoded::Newer { found: 2 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 3, "windows": 7}"#),
+            Decoded::Newer { found: 3 }
         );
     }
 
@@ -695,6 +833,90 @@ mod tests {
             ..WorkspaceDoc::pair()
         };
         assert!(empty.normalise().is_err());
+    }
+
+    #[test]
+    fn normalise_keeps_a_pane_on_screen_and_charts_unhidden() {
+        let mut w = WorkspaceDoc::pair();
+        let all = |w: &mut WorkspaceDoc, s: PaneState| {
+            let t = &mut w.windows[0].tabs[0];
+            t.layout = t.layout.map(&mut |p: &PaneDoc| PaneDoc {
+                state: if p.kind == PaneKind::Chart {
+                    PaneState::Detached
+                } else {
+                    s
+                },
+                ..p.clone()
+            });
+        };
+        all(&mut w, PaneState::Hidden);
+        w.normalise().unwrap();
+        let states: Vec<_> = w.windows[0].tabs[0]
+            .layout
+            .leaves()
+            .iter()
+            .map(|p| p.state)
+            .collect();
+        assert_eq!(
+            states[1],
+            PaneState::Shown,
+            "the first hidden pane comes back"
+        );
+        assert_eq!(states.iter().filter(|s| s.is_shown()).count(), 1);
+        // A chart saved as hidden (hand-edited) is shown.
+        let t = &mut w.windows[0].tabs[0];
+        t.layout = t.layout.map(&mut |p: &PaneDoc| PaneDoc {
+            state: if p.kind == PaneKind::Chart {
+                PaneState::ChartOnly
+            } else {
+                p.state
+            },
+            ..p.clone()
+        });
+        w.normalise().unwrap();
+        assert!(
+            w.windows[0].tabs[0]
+                .layout
+                .leaves()
+                .iter()
+                .filter(|p| p.kind == PaneKind::Chart)
+                .all(|p| p.state.is_shown())
+        );
+    }
+
+    #[test]
+    fn hidden_and_detached_panes_survive_a_restart() {
+        // What autosave writes and the next start reads back: states and the detached window.
+        let mut w = WorkspaceDoc::pair();
+        let t = &mut w.windows[0].tabs[0];
+        let mut i = 0;
+        t.layout = t.layout.map(&mut |p: &PaneDoc| {
+            i += 1;
+            let mut p = p.clone();
+            match i {
+                2 => {
+                    p.state = PaneState::Detached;
+                    p.window = Some(Placement {
+                        display: Some("right".into()),
+                        state: WindowState::Windowed,
+                        x: 2000.0,
+                        y: 100.0,
+                        w: 320.0,
+                        h: 800.0,
+                    });
+                }
+                3 => p.state = PaneState::Hidden,
+                5 | 6 => p.state = PaneState::ChartOnly,
+                _ => {}
+            }
+            p
+        });
+        let bytes = encode(&FORMAT, &w).unwrap();
+        let Decoded::Ok { mut value, .. } = decode::<WorkspaceDoc>(&FORMAT, &bytes) else {
+            panic!()
+        };
+        value.normalise().unwrap();
+        assert_eq!(value, w);
     }
 
     #[test]
