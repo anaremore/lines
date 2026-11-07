@@ -54,7 +54,7 @@ Run on the exact HEAD you push. Report the SHA and each result.
    plus before/after PNGs from one screenshot command (give the command and the paths).
 7. Cargo.toml / Cargo.lock / deny.toml touched: `cargo deny --locked check` (if it isn't
    installed locally, say that CI runs it).
-8. `.claude/` touched: `python .claude/hooks/test_guard.py`.
+8. `.claude/` touched: `python .claude/hooks/test_guard.py` (`python3` on macOS; needs Git Bash on Windows).
 - Never skip, `#[ignore]`, or weaken a failing test to pass. A failure that looks load-related:
   rerun that test alone once and report both runs.
 - The passed count must not drop versus origin/main unless the PR lists removed tests and why.
@@ -68,16 +68,17 @@ Run on the exact HEAD you push. Report the SHA and each result.
 - Parallel threads: name the shared files you touch (`chart_view.rs`, `dom_view.rs`, `commands.rs`,
   `workspace.rs`, `trading.rs`, `ROADMAP.md`, `docs/invariants.md`) and keep edits there small.
 - Skills: `review-loop` (fresh-context review), `full-send` (to merged), `full-stop` (to a green PR,
-  for the owner to merge). A thread full-sends when the owner says "full send"; the planning thread
-  may merge any green, reviewed tier A/B PR (owner's standing instruction, 2026-11-06).
+  for the owner to merge). Who merges tier A/B: a thread the owner told "full send", or the planning
+  thread (owner's standing instruction, 2026-11-06). Other threads stop at a green PR and report.
 
 ## Risk tiers (state the tier in the PR)
 - A: docs; tests; pane UI with screenshot evidence; chart layers, studies, indicators; picker;
   theme tokens; feed parsing covered by fuzz smoke tests; benches. Agents merge when green.
 - B: `crates/lines-trading/**`; DOM/chart click-to-order paths (`dom_trade.rs`, `trade_bar.rs`,
   `trading.rs`); any saved format or migration (workspace, settings, trading file, `.lfr`, store
-  segments); dependencies, `deny.toml`, toolchain, GPUI pin; anything needing a decision record. Agents merge when green, with extra proof: a "Risk" section
-  in the PR (what could go wrong, which tests cover it) and a clean final review round.
+  segments); dependencies, `deny.toml`, toolchain, GPUI pin; anything needing a decision record.
+  Agents merge when green, with extra proof: a "Risk" section in the PR (what could go wrong,
+  which tests cover it) and a clean final review round.
 - C: everything under "Owner only", plus any change to the agent rules and guardrails:
   `CLAUDE.md`, `.claude/**` (hooks, settings, skills, agents) and `.github/**` (the hook asks).
   Ask the owner first and say exactly what and why. Proceed (including merging) only on an explicit
@@ -106,12 +107,13 @@ Run on the exact HEAD you push. Report the SHA and each result.
 - Commit or print credentials, account IDs, vendor usernames or API keys, or anything from
   `recordings/`, `*.lfr`, `*.scid`, `*.depth`, the Sierra Chart folder, or vendor kits and protos
   (decisions 0010, 0014).
-- Edit `third_party/`, `LICENSE.md`, or an accepted decision record.
+- Edit `third_party/`, `LICENSE.md`, or an accepted decision record (except adding
+  "Superseded by NNNN" with the owner's yes, per `docs/decisions/README.md`).
 - Add `vendor-cqg` to default features or release builds, or put live connectors in this repo
   (they belong in private `lines-connectors`, decision 0020).
 - Drive the real mouse or keyboard, or capture the screen. Verify UI with screenshot mode and tests.
-- Touch Sierra Chart settings or files, or send any order to Sierra (Sim included) without the
-  owner's approval for that specific run.
+- Touch Sierra Chart settings or files, or send any order to Sierra (Sim included): the owner runs
+  Sim tests (`sim-once` builds are hook-blocked).
 - Force-push main, delete branches/tags/releases, rewrite history, `git clean -x`, `git add -f`,
   `--no-verify`.
 
