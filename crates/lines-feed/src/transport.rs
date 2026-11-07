@@ -157,7 +157,9 @@ impl Transport for WsTransport {
 }
 
 // ---------------------------------------------------------------------------------------
-// Recording wrapper: tees every frame (both directions, incl. HTTP bodies) to a `.lfr` file.
+// Recording wrapper: tees every inbound frame (incl. HTTP bodies) to a `.lfr` file. Outbound
+// frames are never recorded: they can carry credentials (a CQG logon's user name and
+// password), and replay never reads them (decision 0020: no credentials in recordings).
 
 pub struct Recording<'r, T> {
     inner: T,
@@ -172,7 +174,6 @@ impl<'r, T: Transport> Recording<'r, T> {
 
 impl<T: Transport> Transport for Recording<'_, T> {
     async fn send(&mut self, frame: Frame) -> Result<()> {
-        self.recorder.record(Direction::ToServer, &frame);
         self.inner.send(frame).await
     }
 
@@ -290,5 +291,59 @@ impl Transport for ReplayTransport {
 
     fn clock(&self) -> Option<UtcMillis> {
         self.clock
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+    use crate::recording::Reader;
+
+    /// Sends nothing anywhere; yields one inbound frame.
+    struct Echo(Option<Frame>);
+
+    impl Transport for Echo {
+        async fn send(&mut self, _frame: Frame) -> Result<()> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> Result<Option<Frame>> {
+            Ok(self.0.take())
+        }
+    }
+
+    /// Audit finding 5: a logon sent through a recording connection never reaches the file
+    /// (outbound frames aren't recorded); inbound frames still are.
+    #[test]
+    fn outbound_frames_such_as_a_logon_are_never_recorded() {
+        let dir = std::env::temp_dir().join(format!("lines-rec-out-{}", std::process::id()));
+        let path = dir.join("logon.lfr");
+        let rec = Recorder::create(&path, "cqg", "cqg-webapi-2", "ES", None).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut t = Recording::new(Echo(Some(Frame::binary(b"market data".to_vec()))), &rec);
+            t.send(Frame::binary(
+                b"logon user_name=jsmith password=hunter2".to_vec(),
+            ))
+            .await
+            .unwrap();
+            assert!(t.recv().await.unwrap().is_some());
+        });
+        rec.finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            !has(b"hunter2") && !has(b"jsmith"),
+            "no credentials in the file"
+        );
+        let mut r = Reader::new(&bytes[..]).unwrap();
+        let mut n = 0;
+        while let Some(rec) = r.next_record().unwrap() {
+            assert_eq!(rec.direction, Direction::FromServer);
+            n += 1;
+        }
+        assert_eq!(n, 1, "the inbound frame is recorded");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

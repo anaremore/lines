@@ -23,13 +23,28 @@ use market_data_2::{
 };
 use web_api_2::{ClientMsg, InformationRequest, ServerMsg};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct LogonParams {
     pub user_name: Option<String>,
     pub password: Option<String>,
     pub private_label: Option<String>,
     pub client_app_id: Option<String>,
     pub client_version: String,
+}
+
+/// Credentials never reach logs or `Debug` output (`Source::Cqg` prints through this): only
+/// whether each is set.
+impl std::fmt::Debug for LogonParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = |v: &Option<String>| if v.is_some() { "<set>" } else { "<none>" };
+        f.debug_struct("LogonParams")
+            .field("user_name", &set(&self.user_name))
+            .field("password", &set(&self.password))
+            .field("private_label", &set(&self.private_label))
+            .field("client_app_id", &self.client_app_id)
+            .field("client_version", &self.client_version)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +648,29 @@ mod tests {
         s.on_frame(&frame(msg), UtcMillis(base_ms() + 5_000), &mut ev, &mut out)
             .unwrap();
         (ev, decode_out(&out))
+    }
+
+    /// Audit finding 5: credentials never show in `Debug` (logs), here or through
+    /// `Source::Cqg`.
+    #[test]
+    fn logon_debug_hides_credentials() {
+        let p = LogonParams {
+            user_name: Some("jsmith".into()),
+            password: Some("hunter2".into()),
+            ..Default::default()
+        };
+        let d = format!("{p:?}");
+        assert!(!d.contains("jsmith") && !d.contains("hunter2"), "{d}");
+        assert!(d.contains("<set>"));
+        #[cfg(feature = "vendor-cqg")]
+        {
+            let src = crate::Source::Cqg {
+                url: "wss://x".into(),
+                logon: p,
+            };
+            let d = format!("{src:?}");
+            assert!(!d.contains("jsmith") && !d.contains("hunter2"), "{d}");
+        }
     }
 
     #[test]
