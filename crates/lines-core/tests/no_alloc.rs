@@ -285,6 +285,53 @@ fn volume_profile_rows_do_not_allocate() {
     assert_eq!(n, 0, "volume profile rows allocated {n} times");
 }
 
+/// The footprint chart (roadmap 10e) builds every visible bar's cells each frame, on 1-minute
+/// and higher timeframes (the merge of the bucket's minutes), with imbalances and POCs.
+#[test]
+fn footprint_cells_do_not_allocate() {
+    use lines_core::footprint::{FootprintFrame, ImbalanceRule, fit_grouping};
+    use lines_core::profile::Footprint;
+    use lines_core::{Aggressor, Derived, Timeframe};
+
+    let mut fp = Footprint::new(60_000, 10_000);
+    let mut series = BarSeries::new(60_000, 10_000);
+    for k in 0..120_000i64 {
+        let price = Price(600_000 + (k * 37 % 120 - 60) * 25);
+        let side = match k % 5 {
+            0 => None,
+            1 | 3 => Some(Aggressor::Buy),
+            _ => Some(Aggressor::Sell),
+        };
+        let t = UtcMillis(k * 250);
+        fp.add(t, price, Qty(k % 7 + 1), side);
+        series.apply_trade(t, price, Qty(k % 7 + 1));
+    }
+    let mut derived = Derived::new(Timeframe::Minutes(15), series.capacity());
+    derived.update(&series, None);
+    let mut frame = FootprintFrame::with_capacity(512, 60_000, 2_048);
+    let mut vp = Viewport::default();
+    vp.set_size(1600.0, 900.0);
+    vp.price_lo = 598_000.0;
+    vp.price_hi = 602_000.0;
+    vp.bar_px = 40.0;
+    let rule = ImbalanceRule::default();
+    let view1 = lines_core::BarsView::fixed(series.bars(), 60_000);
+    // Warm up once (the buffers are reserved up front; this only runs the code).
+    frame.build(&fp, view1, vp.visible_range(view1.len()), 25, rule);
+    let mut cells = 0;
+    let n = allocs_during(|| {
+        for f in 0..200usize {
+            vp.right_index = 499.0 - (f % 40) as f64;
+            let g = fit_grouping(1, 25, 0.1 + (f % 4) as f64 * 0.1, 9.0);
+            let view = if f % 2 == 0 { view1 } else { derived.view() };
+            frame.build(&fp, view, vp.visible_range(view.len()), g as i64 * 25, rule);
+            cells += frame.cells.len();
+        }
+    });
+    assert!(cells > 0);
+    assert_eq!(n, 0, "footprint cells allocated {n} times");
+}
+
 #[test]
 fn column_layout_and_resizing_do_not_allocate() {
     use lines_core::columns::{Cell, ColumnSet, ColumnSpec, MAX_COLS};

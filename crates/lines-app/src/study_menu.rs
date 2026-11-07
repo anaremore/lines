@@ -1,5 +1,6 @@
 //! The studies menu (Ctrl+I, the chart's "Studies…", the palette): one place for everything
-//! drawn on a chart: VWAPs, the volume profile and external level sources. Pure (no GPUI):
+//! drawn on a chart: VWAPs, cumulative delta, the footprint, the volume profile and external
+//! level sources. Pure (no GPUI):
 //! the chart renders [`StudyMenu::items`] and feeds keys and clicks back as [`MenuCmd`]s.
 //!
 //! - **On this chart:** each study with a hide toggle (eye) and an editor (gear). The editor
@@ -13,8 +14,10 @@
 //! [`StudySet::apply`] (pure), so menus, keys and tests share one path.
 
 use lines_core::{Bar, Viewport};
-use lines_indicators::{Bands, IndicatorConfig, Reset, VwapSpec};
+use lines_indicators::{Bands, DeltaReset, DeltaSpec, IndicatorConfig, Reset, VwapSpec};
 use serde::{Deserialize, Serialize};
+
+use crate::footprint::{FootprintConfig, FootprintMode};
 
 use crate::levels_layer::LevelsConfig;
 use crate::profile::{ProfileConfig, ProfileMode, ProfileSession};
@@ -29,6 +32,8 @@ pub struct StudySet {
     pub profile: ProfileConfig,
     #[serde(skip_serializing_if = "LevelsConfig::is_default")]
     pub levels: LevelsConfig,
+    #[serde(skip_serializing_if = "FootprintConfig::is_default")]
+    pub footprint: FootprintConfig,
 }
 
 /// A named study set (saved in the app settings).
@@ -42,6 +47,9 @@ pub struct StudyTemplate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StudyRef {
     Vwap(usize),
+    /// Cumulative delta at this index of the indicators.
+    Delta(usize),
+    Footprint,
     Profile,
     Levels(String),
 }
@@ -56,6 +64,13 @@ pub enum StudyAction {
         from: i64,
     },
     AddProfile(ProfileMode),
+    AddDelta(DeltaReset),
+    SetDeltaReset(usize, DeltaReset),
+    AddFootprint(FootprintMode),
+    SetFootprintMode(FootprintMode),
+    SetImbalanceRatio(u32),
+    SetImbalanceMin(i64),
+    SetFootprintGrouping(Option<u32>),
     ToggleHidden(StudyRef),
     Remove(StudyRef),
     SetReset(usize, Reset),
@@ -77,8 +92,9 @@ fn next_color(set: &StudySet) -> u8 {
     let used: Vec<u8> = set
         .indicators
         .iter()
-        .map(|c| match c {
-            IndicatorConfig::Vwap { color, .. } => *color,
+        .filter_map(|c| match c {
+            IndicatorConfig::Vwap { color, .. } => Some(*color),
+            IndicatorConfig::CumDelta { .. } => None,
         })
         .collect();
     (0..4u8).find(|c| !used.contains(c)).unwrap_or(0)
@@ -95,6 +111,14 @@ impl StudySet {
                 color,
                 display,
             } => Some((spec, color, display)),
+            IndicatorConfig::CumDelta { .. } => None,
+        }
+    }
+
+    fn delta(&mut self, i: usize) -> Option<&mut DeltaSpec> {
+        match self.indicators.get_mut(i)? {
+            IndicatorConfig::CumDelta { spec, .. } => Some(spec),
+            IndicatorConfig::Vwap { .. } => None,
         }
     }
 
@@ -127,20 +151,46 @@ impl StudySet {
                 self.profile.mode = *mode;
                 self.profile.hidden = false;
             }
+            StudyAction::AddDelta(reset) => {
+                // One cumulative delta per chart (one sub-pane): adding again replaces it.
+                self.indicators.retain(|c| !c.in_subpane());
+                self.indicators.push(IndicatorConfig::CumDelta {
+                    spec: DeltaSpec { reset: *reset },
+                    display: Default::default(),
+                });
+            }
+            StudyAction::SetDeltaReset(i, reset) => {
+                if let Some(spec) = self.delta(*i) {
+                    spec.reset = *reset;
+                }
+            }
+            StudyAction::AddFootprint(mode) | StudyAction::SetFootprintMode(mode) => {
+                self.footprint.mode = *mode;
+                self.footprint.hidden = false;
+            }
+            StudyAction::SetImbalanceRatio(r) => self.footprint.imbalance_pct = (*r).max(100),
+            StudyAction::SetImbalanceMin(m) => self.footprint.imbalance_min = (*m).max(1),
+            StudyAction::SetFootprintGrouping(g) => self.footprint.grouping = *g,
             StudyAction::ToggleHidden(r) => match r {
-                StudyRef::Vwap(i) => {
-                    if let Some((.., d)) = self.vwap(*i) {
+                StudyRef::Vwap(i) | StudyRef::Delta(i) => {
+                    if let Some(c) = self.indicators.get_mut(*i) {
+                        let d = c.display_mut();
                         d.hidden = !d.hidden;
                     }
                 }
+                StudyRef::Footprint => self.footprint.hidden = !self.footprint.hidden,
                 StudyRef::Profile => self.profile.hidden = !self.profile.hidden,
                 StudyRef::Levels(id) => self.levels.toggle_source(id),
             },
             StudyAction::Remove(r) => match r {
-                StudyRef::Vwap(i) => {
+                StudyRef::Vwap(i) | StudyRef::Delta(i) => {
                     if *i < self.indicators.len() {
                         self.indicators.remove(*i);
                     }
+                }
+                StudyRef::Footprint => {
+                    self.footprint.mode = FootprintMode::Off;
+                    self.footprint.hidden = false;
                 }
                 StudyRef::Profile => {
                     self.profile.mode = ProfileMode::Off;
@@ -176,7 +226,8 @@ impl StudySet {
                 }
             }
             StudyAction::ToggleLabel(i) => {
-                if let Some((.., d)) = self.vwap(*i) {
+                if let Some(c) = self.indicators.get_mut(*i) {
+                    let d = c.display_mut();
                     d.label = !d.label;
                 }
             }
@@ -325,6 +376,34 @@ fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
         "Anchored VWAP (click a bar)".into(),
         MenuCmd::BeginAnchor(None),
     ));
+    if !input.set.indicators.iter().any(|c| c.in_subpane()) {
+        v.push((
+            "Cumulative delta · ETH session".into(),
+            set(StudyAction::AddDelta(DeltaReset::Eth)),
+        ));
+        if input.has_rth {
+            v.push((
+                "Cumulative delta · RTH session".into(),
+                set(StudyAction::AddDelta(DeltaReset::Rth)),
+            ));
+        }
+        v.push((
+            "Cumulative delta · no reset".into(),
+            set(StudyAction::AddDelta(DeltaReset::None)),
+        ));
+    }
+    if input.set.footprint.mode == FootprintMode::Off {
+        for m in [
+            FootprintMode::BidAsk,
+            FootprintMode::Delta,
+            FootprintMode::Volume,
+        ] {
+            v.push((
+                format!("Footprint · {}", m.label()),
+                set(StudyAction::AddFootprint(m)),
+            ));
+        }
+    }
     if input.set.profile.mode == ProfileMode::Off {
         for (m, name) in [
             (ProfileMode::Session, "session"),
@@ -368,6 +447,84 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
         })
     };
     match r {
+        StudyRef::Delta(i) => {
+            let Some(IndicatorConfig::CumDelta { spec, display }) = input.set.indicators.get(*i)
+            else {
+                return;
+            };
+            let i = *i;
+            let mut resets = vec![(DeltaReset::Eth, "ETH")];
+            if input.has_rth {
+                resets.push((DeltaReset::Rth, "RTH"));
+            }
+            resets.push((DeltaReset::None, "None"));
+            for (r, name) in resets {
+                c(
+                    "Reset",
+                    name.into(),
+                    spec.reset == r,
+                    Swatch::None,
+                    set(StudyAction::SetDeltaReset(i, r)),
+                );
+            }
+            c(
+                "Label",
+                "Show title".into(),
+                display.label,
+                Swatch::None,
+                set(StudyAction::ToggleLabel(i)),
+            );
+        }
+        StudyRef::Footprint => {
+            let f = &input.set.footprint;
+            for m in [
+                FootprintMode::BidAsk,
+                FootprintMode::Delta,
+                FootprintMode::Volume,
+            ] {
+                c(
+                    "Show",
+                    m.label().into(),
+                    f.mode == m,
+                    Swatch::None,
+                    set(StudyAction::SetFootprintMode(m)),
+                );
+            }
+            for r in [200u32, 300, 400] {
+                c(
+                    "Imbalance",
+                    format!("{}%", r),
+                    f.imbalance_pct == r,
+                    Swatch::None,
+                    set(StudyAction::SetImbalanceRatio(r)),
+                );
+            }
+            for m in [1i64, 5, 10, 25] {
+                c(
+                    "Min volume",
+                    format!("{m}"),
+                    f.imbalance_min == m,
+                    Swatch::None,
+                    set(StudyAction::SetImbalanceMin(m)),
+                );
+            }
+            c(
+                "Grouping",
+                "Auto".into(),
+                f.grouping.is_none(),
+                Swatch::None,
+                set(StudyAction::SetFootprintGrouping(None)),
+            );
+            for g in lines_core::ladder::GROUPING_PRESETS {
+                c(
+                    "Grouping",
+                    format!("{g}"),
+                    f.grouping == Some(g),
+                    Swatch::None,
+                    set(StudyAction::SetFootprintGrouping(Some(g))),
+                );
+            }
+        }
         StudyRef::Vwap(i) => {
             let Some(IndicatorConfig::Vwap {
                 spec,
@@ -516,16 +673,32 @@ impl StudyMenu {
         let mut v = vec![Item::Header("On this chart")];
         let mut studies: Vec<(StudyRef, String, Swatch, bool)> = Vec::new();
         for (i, c) in input.set.indicators.iter().enumerate() {
-            let IndicatorConfig::Vwap {
-                spec,
-                color,
-                display,
-            } = c;
+            match c {
+                IndicatorConfig::Vwap {
+                    spec,
+                    color,
+                    display,
+                } => studies.push((
+                    StudyRef::Vwap(i),
+                    vwap_label(spec),
+                    Swatch::Study(*color),
+                    display.hidden,
+                )),
+                IndicatorConfig::CumDelta { spec, display } => studies.push((
+                    StudyRef::Delta(i),
+                    format!("Cumulative delta · {}", spec.reset.label()),
+                    Swatch::None,
+                    display.hidden,
+                )),
+            }
+        }
+        let f = &input.set.footprint;
+        if f.mode != FootprintMode::Off {
             studies.push((
-                StudyRef::Vwap(i),
-                vwap_label(spec),
-                Swatch::Study(*color),
-                display.hidden,
+                StudyRef::Footprint,
+                format!("Footprint · {}", f.mode.label()),
+                Swatch::None,
+                f.hidden,
             ));
         }
         let p = &input.set.profile;

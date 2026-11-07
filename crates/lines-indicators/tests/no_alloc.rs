@@ -1,4 +1,5 @@
-//! The VWAP chart geometry runs in paint: it must not allocate (counting allocator).
+//! The VWAP and cumulative delta chart geometry runs in paint: it must not allocate
+//! (counting allocator).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -93,4 +94,66 @@ fn vwap_columns_do_not_allocate() {
     build_columns(&points, view, &vp, Bands::NONE, &mut out);
     assert!(out.iter().any(|c| !c.joins));
     assert!(out.iter().any(|c| c.joins));
+}
+
+/// Cumulative delta candles (roadmap 10e): built per frame for the visible bars, on 1-minute
+/// and higher timeframes, from the engine's points (the engine itself runs on its own thread,
+/// not in paint).
+#[test]
+fn delta_candles_do_not_allocate() {
+    use lines_core::Aggressor;
+    use lines_indicators::render::{DeltaCandle, build_delta_candles};
+    use lines_indicators::{CumDelta, DeltaReset, DeltaSpec, Input, MarketSeries};
+
+    let mut base = MarketSeries::new(60_000, 10_000);
+    base.apply(&[
+        Input::Connect {
+            expect_history: false,
+        },
+        Input::TradesFrom(UtcMillis(0)),
+    ]);
+    let trades: Vec<Input> = (0..20_000i64)
+        .map(|k| Input::Trade {
+            time: UtcMillis(k * 1_000),
+            price: Price(600_000 + (k % 40) * 25),
+            qty: Qty(k % 5 + 1),
+            aggressor: Some(if k % 3 == 0 {
+                Aggressor::Sell
+            } else {
+                Aggressor::Buy
+            }),
+        })
+        .collect();
+    base.apply(&trades);
+    let mut delta = CumDelta::new(
+        DeltaSpec {
+            reset: DeltaReset::None,
+        },
+        60_000,
+        None,
+    );
+    delta.update(&base, UtcMillis(i64::MIN));
+    let bars: Vec<Bar> = base.buckets().iter().map(|b| b.bar).collect();
+    let mut series = BarSeries::new(60_000, 10_000);
+    for b in &bars {
+        series.upsert(*b);
+    }
+    let mut derived = Derived::new(Timeframe::Minutes(5), series.capacity());
+    derived.update(&series, None);
+    let view = BarsView::fixed(&bars, 60_000);
+    let mut vp = Viewport::default();
+    vp.set_size(1600.0, 900.0);
+    let mut out: Vec<DeltaCandle> = Vec::with_capacity(4096);
+    let before = ALLOCS.with(|c| c.get());
+    let mut drawn = 0;
+    for frame in 0..300usize {
+        vp.right_index = 330.0 - (frame % 30) as f64;
+        vp.bar_px = [3.0, 8.0, 20.0][frame % 3];
+        let v = if frame % 2 == 0 { view } else { derived.view() };
+        build_delta_candles(delta.points(), v, vp.visible_range(v.len()), &mut out);
+        drawn += out.len();
+    }
+    let n = ALLOCS.with(|c| c.get()) - before;
+    assert!(drawn > 0);
+    assert_eq!(n, 0, "delta geometry allocated {n} times");
 }

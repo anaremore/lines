@@ -268,6 +268,16 @@ pub struct ChartState {
     /// 1 minute; a value this version doesn't offer also loads as 1 minute.
     #[serde(default, skip_serializing_if = "TimeframeDoc::is_default")]
     pub timeframe: TimeframeDoc,
+    /// The footprint chart mode (roadmap 10e). Optional: absent means off.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::footprint::FootprintConfig::is_default"
+    )]
+    pub footprint: crate::footprint::FootprintConfig,
+    /// The sub-pane's share of the chart's height (`crate::subpane`), when it was moved from
+    /// the default. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subpane: Option<f32>,
 }
 
 /// A chart timeframe in the workspace file, as its label (`"5m"`).
@@ -740,6 +750,8 @@ mod tests {
             }],
             profile: ProfileConfig::default(),
             magnet: false,
+            footprint: Default::default(),
+            subpane: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""indicators""#), "{json}");
@@ -753,6 +765,8 @@ mod tests {
             indicators: vec![],
             profile: ProfileConfig::default(),
             magnet: false,
+            footprint: Default::default(),
+            subpane: None,
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -833,6 +847,8 @@ mod tests {
                             indicators: vec![],
                             profile: ProfileConfig::default(),
                             magnet: false,
+                            footprint: Default::default(),
+                            subpane: None,
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -918,6 +934,8 @@ mod tests {
                 ..Default::default()
             },
             magnet: false,
+            footprint: Default::default(),
+            subpane: None,
         };
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(
@@ -1007,6 +1025,8 @@ mod tests {
                 indicators: vec![],
                 profile,
                 magnet: false,
+                footprint: Default::default(),
+                subpane: None,
             }),
             ..PaneDoc::new(PaneKind::Chart, None, None)
         };
@@ -1039,6 +1059,8 @@ mod tests {
             }],
             profile: set,
             magnet: false,
+            footprint: Default::default(),
+            subpane: None,
         };
         let json = serde_json::to_string(&both).unwrap();
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
@@ -1109,6 +1131,8 @@ mod tests {
                 indicators: vec![],
                 profile: ProfileConfig::default(),
                 magnet: false,
+                footprint: Default::default(),
+                subpane: None,
             })
         );
         assert_eq!(
