@@ -21,8 +21,12 @@
 //! - Each column has an open → close strip on its left (a candle body: hollow/filled as the
 //!   candles), so a bar's direction stays visible by shape.
 //! - Price and crosshair lines break where they cross cells (`hline_segments`).
-//! - **Imbalances** are marked by a bar on the cell's side (buy: right edge, sell: left
-//!   edge) as well as the number's colour, so they read without colour.
+//! - **Imbalances** are marked by an underline under the imbalanced number (sell: the left
+//!   half, buy: the right half) as well as the number's color: a horizontal mark inside the
+//!   cell, never mistaken for the column's vertical open → close strip on its left.
+//! - **Volume without an aggressor side** (a source that doesn't report it) is never dropped
+//!   silently: a cell holding only such volume shows it as `?N` instead of `0 | 0`, and the
+//!   legend counts it (`? N without aggressor side`). Mixed cells still show only their sell and buy numbers: the legend count covers their side-less share.
 //! - **POC** per bar: the cell is outlined.
 //! - **Rows** use the DOM grid and grouping, coarsened until a row is at least 15 px tall.
 
@@ -141,6 +145,7 @@ pub struct TextMetrics {
     pub digit: f32,
     pub minus: f32,
     pub dot: f32,
+    pub question: f32,
 }
 
 impl TextMetrics {
@@ -149,6 +154,7 @@ impl TextMetrics {
         digit: 7.0,
         minus: 7.0,
         dot: 4.0,
+        question: 7.0,
     };
 
     /// Width of `v` printed in `qty`'s format. No allocation.
@@ -160,6 +166,7 @@ impl TextMetrics {
             .map(|c| match c {
                 '-' => self.minus,
                 '.' => self.dot,
+                '?' => self.question,
                 _ => self.digit,
             })
             .sum()
@@ -192,14 +199,9 @@ impl Column {
         }
     }
 
-    /// The imbalance marker's width.
-    fn mark(&self) -> f32 {
-        (self.cell_w * 0.08).clamp(2.0, 4.0)
-    }
-
     /// Room for one number: each half in sell × buy, the whole cell otherwise.
     pub fn text_room(&self, mode: FootprintMode) -> f32 {
-        let inner = self.cell_w - 2.0 * (self.mark() + PAD);
+        let inner = self.cell_w - 2.0 * PAD;
         match mode {
             FootprintMode::BidAsk => (inner * 0.5 - GUTTER).max(0.0),
             _ => inner.max(0.0),
@@ -217,11 +219,32 @@ pub fn numbers_fit(
     room: f32,
 ) -> bool {
     cells.iter().all(|c| match mode {
+        // A cell of side-less volume only prints `?N` across the whole cell.
+        FootprintMode::BidAsk if only_unknown(c) => {
+            m.question + m.width(qty, c.unknown.0) <= 2.0 * (room + GUTTER)
+        }
+        FootprintMode::Delta if only_unknown(c) => m.question + m.width(qty, c.unknown.0) <= room,
         FootprintMode::BidAsk => m.width(qty, c.sell.0) <= room && m.width(qty, c.buy.0) <= room,
         FootprintMode::Delta => m.width(qty, c.delta()) <= room,
         FootprintMode::Volume => m.width(qty, c.total.0) <= room,
         FootprintMode::Off => true,
     })
+}
+
+/// All of a cell's volume came without an aggressor side.
+pub fn only_unknown(c: &Cell) -> bool {
+    c.buy.0 == 0 && c.sell.0 == 0 && c.unknown.0 > 0
+}
+
+/// The imbalance underline under the sell (left) or buy (right) half of a cell: `(x, w)`
+/// relative to the cell's left (one-number modes; sell × buy underlines the number itself).
+/// A horizontal mark under the number, so it never looks like the column's vertical open →
+/// close strip.
+pub fn imbalance_underline(cell_w: f32, buy: bool) -> (f32, f32) {
+    let half = cell_w * 0.5;
+    let inset = (half * 0.18).max(PAD);
+    let x = if buy { half + inset } else { inset };
+    (x, (half - 2.0 * inset).max(1.0))
 }
 
 /// A whole number of device pixels per row of `u` price units.
@@ -265,6 +288,9 @@ pub struct Fallbacks {
     pub at_edge: bool,
     /// More cells than one frame draws (bounded work).
     pub too_many: bool,
+    /// Drawn volume without an aggressor side (0: none). A count, so a change re-renders the
+    /// legend.
+    pub no_side: i64,
 }
 
 pub struct FootprintLayer {
@@ -338,27 +364,34 @@ impl FootprintLayer {
             return None;
         }
         let f = self.fallbacks;
-        let mut notes: Vec<&str> = Vec::new();
-        if f.narrow || f.rows_short {
-            notes.push("zoom in to see cells");
+        // Volume without a side first, then why some bars are candles, then the key (the line
+        // is capped at the legend's width: what matters most comes first).
+        let mut notes: Vec<String> = Vec::new();
+        if f.no_side > 0 {
+            let mut n = String::new();
+            let _ = self.qty.write(Qty(f.no_side), &mut n);
+            notes.push(format!("? {n} without aggressor side"));
         }
-        if f.too_wide {
-            notes.push("some bars: numbers too wide, zoom in");
+        for (on, text) in [
+            (f.narrow || f.rows_short, "zoom in to see cells"),
+            (f.too_wide, "some bars: numbers too wide, zoom in"),
+            (f.under_legend, "bars under the legend shown as candles"),
+            (f.at_edge, "bars cut by the plot's edge shown as candles"),
+            (f.too_many, "too many cells: some bars as candles"),
+            (f.no_trades, "footprint from live/replay trades only"),
+        ] {
+            if on {
+                notes.push(text.to_owned());
+            }
         }
-        if f.under_legend {
-            notes.push("bars under the legend shown as candles");
-        }
-        if f.at_edge {
-            notes.push("bars cut by the plot's edge shown as candles");
-        }
-        if f.too_many {
-            notes.push("too many cells: some bars as candles");
-        }
-        if f.no_trades {
-            notes.push("footprint from live/replay trades only");
-        }
-        let note = (!notes.is_empty()).then(|| notes.join(" · "));
-        Some((format!("Footprint · {}", self.config.mode.label()), note))
+        Some((
+            format!("Footprint · {}", self.config.mode.label()),
+            Some({
+                // The key last: if the capped line is cut, the count and reasons stay.
+                notes.push("underline = imbalance".to_owned());
+                notes.join(" · ")
+            }),
+        ))
     }
 
     /// Whether bar `i` (an index into the chart's bars) is drawn as cells this frame (its
@@ -581,6 +614,21 @@ impl ChartLayer for FootprintLayer {
         self.fallbacks.under_legend = under;
         self.fallbacks.at_edge = at_edge;
         self.fallbacks.too_many = self.frame.truncated;
+        // Count only cells on the plot (what the trader can find as `?N` or in a mixed cell).
+        // Volume mode has no sides to miss: side-less volume is in its totals, with no `?N`.
+        self.fallbacks.no_side = if self.config.mode == FootprintMode::Volume {
+            0
+        } else {
+            self.frame
+                .bars
+                .iter()
+                .flat_map(|b| self.frame.cells_of(b))
+                .filter(|c| {
+                    let top = cell_top(vp, c.row, u, tick, row_h, scale);
+                    top + row_h > 0.0 && f64::from(top) < vp.height
+                })
+                .fold(0i64, |a, c| a.saturating_add(c.unknown.0))
+        };
         self.open_close.clear();
         for bc in &self.frame.bars {
             if self.open_close.len() == self.open_close.capacity() {
@@ -609,6 +657,7 @@ impl ChartLayer for FootprintLayer {
                 digit: self.glyphs.width("0", c, false, window),
                 minus: self.glyphs.width("-", c, false, window),
                 dot: self.glyphs.width(".", c, false, window),
+                question: self.glyphs.width("?", c, false, window),
             };
         }
         self.drawn.clear();
@@ -653,7 +702,6 @@ impl ChartLayer for FootprintLayer {
                     window.paint_quad(fill(rect(col.strip_x, top, sw, h), color));
                 }
             }
-            let mark = col.mark();
             for k in 0..b.len {
                 let c = self.frame.cells[b.first + k];
                 let top = cell_top(vp, c.row, u, self.tick, row_h, scale);
@@ -670,12 +718,21 @@ impl ChartLayer for FootprintLayer {
                     _ => t.text_dim.opacity(0.06 + 0.22 * shade),
                 };
                 window.paint_quad(fill(rect(left, top, w, (row_h - hair).max(hair)), bg));
-                // Imbalance markers: a bar on the imbalanced side (shape, not only color).
-                if c.imbalance.sell {
-                    window.paint_quad(fill(rect(left, top, mark, row_h - hair), t.down));
-                }
-                if c.imbalance.buy {
-                    window.paint_quad(fill(rect(left + w - mark, top, mark, row_h - hair), t.up));
+                // Imbalance markers: an underline under the imbalanced number (shape and
+                // position, not only color). Sell × buy: exactly under the number (drawn with
+                // the text below); one-number modes: under the side's half.
+                let uh = snap(2.0).max(2.0 / scale); // 2 logical px, at least 2 device px
+                let uy = snap(f64::from(top + row_h - uh - 2.0));
+                if mode != FootprintMode::BidAsk {
+                    for (on, buy, color) in [
+                        (c.imbalance.sell, false, t.down),
+                        (c.imbalance.buy, true, t.up),
+                    ] {
+                        if on {
+                            let (x, uw) = imbalance_underline(w, buy);
+                            window.paint_quad(fill(rect(left + x, uy, uw, uh), color));
+                        }
+                    }
                 }
                 if b.poc == Some(k) {
                     // Outlined, one device pixel.
@@ -698,6 +755,24 @@ impl ChartLayer for FootprintLayer {
                     let _ = qty.write(Qty(v), s);
                 };
                 match mode {
+                    FootprintMode::BidAsk | FootprintMode::Delta if only_unknown(&c) => {
+                        // Side-less volume only: `?N`, neutral, across the cell (never 0 | 0).
+                        s.clear();
+                        let _ = std::fmt::Write::write_char(&mut s, '?');
+                        let _ = qty.write(c.unknown, &mut s);
+                        // Main text color (AA on any cell shade): the `?` marks it neutral.
+                        let wtxt = self.glyphs.width(s.as_str(), t.text_main, false, window);
+                        self.glyphs.paint(
+                            s.as_str(),
+                            ox + left + (w - wtxt) * 0.5,
+                            y,
+                            row_h,
+                            t.text_main,
+                            false,
+                            window,
+                            cx,
+                        );
+                    }
                     FootprintMode::BidAsk => {
                         // Two columns: sell right-aligned to the divider, buy left-aligned.
                         let mid_x = snap(f64::from(left + w * 0.5));
@@ -712,6 +787,11 @@ impl ChartLayer for FootprintLayer {
                         };
                         let buy = if c.imbalance.buy { t.up } else { t.text_main };
                         num(&mut s, c.sell.0);
+                        if c.imbalance.sell {
+                            let tw = self.glyphs.width(s.as_str(), sell, true, window);
+                            let x = mid_x - GUTTER - tw - 1.0;
+                            window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), t.down));
+                        }
                         self.glyphs.paint_right(
                             s.as_str(),
                             ox + mid_x - GUTTER,
@@ -723,6 +803,11 @@ impl ChartLayer for FootprintLayer {
                             cx,
                         );
                         num(&mut s, c.buy.0);
+                        if c.imbalance.buy {
+                            let tw = self.glyphs.width(s.as_str(), buy, true, window);
+                            let x = mid_x + GUTTER - 1.0;
+                            window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), t.up));
+                        }
                         self.glyphs.paint(
                             s.as_str(),
                             ox + mid_x + GUTTER,
@@ -850,7 +935,7 @@ mod tests {
         assert_eq!(label, "Footprint · sell × buy");
         assert_eq!(
             note.as_deref(),
-            Some("footprint from live/replay trades only")
+            Some("footprint from live/replay trades only · underline = imbalance")
         );
         fp.check_drawable(&vp).unwrap();
         // Narrow bars: no cells at all; the legend asks to zoom in.
@@ -859,7 +944,7 @@ mod tests {
         assert!(!fp.is_active() && !fp.covers(1));
         assert_eq!(
             fp.legend().unwrap().1.as_deref(),
-            Some("zoom in to see cells")
+            Some("zoom in to see cells · underline = imbalance")
         );
         // Off: nothing, and no legend line.
         fp.set_config(FootprintConfig::default());
@@ -992,6 +1077,118 @@ mod tests {
         fp.prepare(&d, bars, &vp);
         fp.check_drawable(&vp).unwrap();
         assert!(fp.covers(1) && !fp.fallbacks().under_legend);
+    }
+
+    /// Volume without an aggressor side is never dropped silently: a cell of only such volume
+    /// prints `?N`, and the legend counts it.
+    #[test]
+    fn side_less_volume_is_flagged() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let st = ChartStore::new(es, None, Capabilities::default(), "test", MIN, 100);
+        let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+        st.update(|d| {
+            for m in 0..3i64 {
+                d.apply(&[
+                    MarketEvent::Trade {
+                        time: UtcMillis(t0 + m * MIN),
+                        price: Price(600_000),
+                        qty: Qty(7),
+                        aggressor: None,
+                    },
+                    MarketEvent::Trade {
+                        time: UtcMillis(t0 + m * MIN + 1),
+                        price: Price(600_025),
+                        qty: Qty(2),
+                        aggressor: Some(Aggressor::Buy),
+                    },
+                ]);
+            }
+        });
+        let d = st.read();
+        let bars = BarsView::fixed(d.series.bars(), MIN);
+        let mut fp = FootprintLayer::new(FootprintConfig {
+            mode: FootprintMode::BidAsk,
+            ..Default::default()
+        });
+        fp.ensure_capacity(800.0);
+        let vp = around(600_000, 25, 80.0, 3.0);
+        fp.prepare(&d, bars, &vp);
+        fp.check_drawable(&vp).unwrap();
+        assert!(fp.covers(1));
+        let cells = fp.frame().cells_of(&fp.frame().bars[0]);
+        assert!(only_unknown(&cells[0]) && !only_unknown(&cells[1]));
+        assert_eq!(fp.fallbacks().no_side, 21);
+        let note = fp.legend().unwrap().1.unwrap();
+        assert!(note.starts_with("? 21 without aggressor side"), "{note}");
+        // With a reason too, the count comes first and the reason before the key, so the
+        // capped legend line cuts the key, never the count.
+        fp.fallbacks.under_legend = true;
+        let note = fp.legend().unwrap().1.unwrap();
+        assert_eq!(
+            note,
+            "? 21 without aggressor side · bars under the legend shown as candles · underline = imbalance"
+        );
+        // Bars cut at the plot's top: none drawn, nothing counted.
+        let mut cut = around(600_000, 25, 80.0, 3.0);
+        cut.price_hi = 600_000.0 + 5.0;
+        fp.prepare(&d, bars, &cut);
+        let note = fp.legend().unwrap().1.unwrap();
+        assert!(note.contains("cut by the plot's edge"), "{note}");
+        assert!(
+            !note.contains("? "),
+            "{note}: nothing drawn, nothing to count"
+        );
+        let mut wide = vp;
+        wide.right_index = 2.0; // bar 2 cut at the right edge: a candle; bars 0, 1 cells
+        fp.prepare(&d, bars, &wide);
+        let note = fp.legend().unwrap().1.unwrap();
+        assert!(note.starts_with("? 14 without aggressor side"), "{note}");
+        assert!(
+            note.ends_with("underline = imbalance"),
+            "the key last: {note}"
+        );
+        // Delta mode prints `?N` for side-less cells too (never a balanced-looking 0).
+        let mut dm = FootprintLayer::new(FootprintConfig {
+            mode: FootprintMode::Delta,
+            ..Default::default()
+        });
+        dm.ensure_capacity(800.0);
+        dm.prepare(&d, bars, &vp);
+        dm.check_drawable(&vp).unwrap();
+        assert!(dm.covers(1));
+        assert_eq!(dm.fallbacks().no_side, 21);
+        // Volume mode shows side-less volume in its totals: nothing to flag.
+        let mut vm = FootprintLayer::new(FootprintConfig {
+            mode: FootprintMode::Volume,
+            ..Default::default()
+        });
+        vm.ensure_capacity(800.0);
+        vm.prepare(&d, bars, &vp);
+        vm.check_drawable(&vp).unwrap();
+        assert_eq!(vm.fallbacks().no_side, 0);
+        assert_eq!(
+            vm.legend().unwrap().1.as_deref(),
+            Some("underline = imbalance")
+        );
+    }
+
+    /// The imbalance mark is a horizontal underline inside the cell, under its side's half:
+    /// never at the column's left edge where the vertical open/close strip is.
+    #[test]
+    fn imbalance_marks_sit_under_their_number() {
+        for w in [55.0f32, 60.0, 120.0, 200.0] {
+            let (sx, sw) = imbalance_underline(w, false);
+            let (bx, bw) = imbalance_underline(w, true);
+            assert!(sx >= PAD && sx + sw <= w * 0.5, "sell under the left half");
+            assert!(
+                bx >= w * 0.5 && bx + bw <= w - PAD,
+                "buy under the right half"
+            );
+            assert!(
+                sw >= 8.0 && bw >= 8.0,
+                "a horizontal mark, unlike the 3 px strip"
+            );
+        }
     }
 
     #[test]
