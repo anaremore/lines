@@ -1,6 +1,7 @@
 # Lines exchange holiday table: holidays and early closes as versioned data (decision 0017).
 # Parsed and validated by lines_core::sessions::HolidayTable (format documented there);
-# embedded in lines-feed by catalog::HOLIDAYS. Times are exchange-local (America/Chicago).
+# embedded in lines-feed by catalog::HOLIDAYS. Times are exchange-local: America/Chicago for the
+# CME calendars, America/New_York for us-equity.
 #
 # Rules:  closed       no trading that calendar day; not a trade date
 #         halt HH:MM   trades from the usual 17:00 CT evening open until HH:MM, then halts;
@@ -29,7 +30,7 @@
 #             /christmas-holiday-futures-trading-hours-2024/)
 
 format 1
-version 2026-11-06
+version 2026-11-07
 
 # CME equity index futures: ES, NQ, MES, MNQ. Globex Sun-Fri 17:00-16:00 CT; RTH 08:30-15:00 CT.
 calendar cme-equity-index
@@ -124,4 +125,38 @@ source https://www.ironbeam.com/ (CME holiday schedules republished per holiday,
 2027-09-06 halt 12:00  unverified Labor Day
 2027-11-25 halt 12:00  unverified Thanksgiving
 2027-11-26 early 12:15 unverified Day after Thanksgiving
+2027-12-24 closed      unverified Christmas (observed)
+
+# US equities and their options: SPY (NYSE Arca), QQQ (Nasdaq). Extended hours 04:00-20:00 ET,
+# regular 09:30-16:00 ET, same-day (decision 0028). Equity markets have no "halt" days: a
+# holiday is closed, an early close ends the day at 13:00 ET (extended hours too, in this
+# model; real after-hours on those days run to 17:00, see docs/known-gaps.md).
+# Source: the NYSE holiday and early-close schedule (nyse.com/markets/hours-calendars), seen
+# only as excerpts republished by brokers; 2027 partly by PATTERN (the observance rules). Not yet
+# verified against nyse.com.
+calendar us-equity
+coverage 2026 2027 unverified
+source https://www.nyse.com/markets/hours-calendars
+2026-01-01 closed      unverified New Year's Day
+2026-01-19 closed      unverified Martin Luther King Jr. Day
+2026-02-16 closed      unverified Washington's Birthday
+2026-04-03 closed      unverified Good Friday
+2026-05-25 closed      unverified Memorial Day
+2026-06-19 closed      unverified Juneteenth
+2026-07-03 closed      unverified Independence Day (observed)
+2026-09-07 closed      unverified Labor Day
+2026-11-26 closed      unverified Thanksgiving
+2026-11-27 early 13:00 unverified Day after Thanksgiving
+2026-12-24 early 13:00 unverified Christmas Eve
+2026-12-25 closed      unverified Christmas
+2027-01-01 closed      unverified New Year's Day
+2027-01-18 closed      unverified Martin Luther King Jr. Day
+2027-02-15 closed      unverified Washington's Birthday
+2027-03-26 closed      unverified Good Friday
+2027-05-31 closed      unverified Memorial Day
+2027-06-18 closed      unverified Juneteenth (observed)
+2027-07-05 closed      unverified Independence Day (observed)
+2027-09-06 closed      unverified Labor Day
+2027-11-25 closed      unverified Thanksgiving
+2027-11-26 early 13:00 unverified Day after Thanksgiving
 2027-12-24 closed      unverified Christmas (observed)

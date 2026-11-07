@@ -6,10 +6,13 @@
 //!   `accounts: [{id, starting_balance}]`. Migrated by filling in defaults.
 //! - **v1**: accounts, rule trackers, the paper broker, in-flight orders (roadmap 6/7). Builds
 //!   from roadmap 8b wrote an optional `guardrails` per account into v1 files too.
-//! - **v2**: the current format: the same layout, with each account's guardrails (roadmap 8b:
+//! - **v2**: the same layout, with each account's guardrails (roadmap 8b:
 //!   rules in force, pending looser ones, the day's counts, a lockout). The version moved so
 //!   that a build from before guardrails **refuses** the file instead of reading it and
 //!   silently dropping a lockout.
+//! - **v3**: the current format: the same layout, and contracts may be equities or options
+//!   (decision 0028, `types::ContractDoc`). The version moved so that an older build refuses
+//!   the file instead of reading an option position as spot.
 //!
 //! A file from a newer Lines is refused (never half-read), and a damaged file is reported,
 //! never silently replaced.
@@ -25,7 +28,7 @@ use crate::guardrails::GuardrailTracker;
 use crate::paper::{PaperConfig, PaperState};
 use crate::rules::RuleTracker;
 
-pub const VERSION: u64 = 2;
+pub const VERSION: u64 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAccount {
@@ -65,10 +68,22 @@ pub fn migrate(mut v: Value) -> Result<Value> {
         v = match version {
             0 => v0_to_v1(v)?,
             1 => v1_to_v2(v)?,
+            2 => v2_to_v3(v)?,
             n => bail!("no migration from version {n}"),
         };
         version += 1;
     }
+    Ok(v)
+}
+
+/// v2 → v3: the layout is unchanged (every v2 contract is a valid v3 contract, read back as
+/// the same key); only the version moves, so older builds refuse what this one writes.
+fn v2_to_v3(mut v: Value) -> Result<Value> {
+    let o = v.as_object_mut().context("v2 file is not an object")?;
+    if !o.get("accounts").is_some_and(Value::is_array) {
+        bail!("v2 file has no accounts");
+    }
+    o.insert("version".into(), json!(3));
     Ok(v)
 }
 
@@ -282,7 +297,7 @@ mod tests {
     #[test]
     fn a_v1_file_migrates_to_v2_and_keeps_its_lockout() {
         let f = read(V1);
-        assert_eq!(f.version, 2);
+        assert_eq!(f.version, VERSION);
         let g = &f.accounts[0].guardrails;
         assert_eq!(g.state(), GuardState::Locked);
         assert_eq!(g.lock.as_ref().unwrap().reason, "max 1 trade reached");
@@ -300,9 +315,9 @@ mod tests {
         let f = read(V2);
         assert_eq!(f.version, VERSION);
         assert_eq!(f.accounts[0].guardrails.state(), GuardState::Locked);
-        // Written back: v2, and the same content.
+        // Written back: v3 (decision 0028: contracts may be options), the same content.
         let again = serde_json::to_value(&f).unwrap();
-        assert_eq!(again["version"], json!(2));
+        assert_eq!(again["version"], json!(3));
         assert_eq!(read(&again.to_string()), f);
     }
 

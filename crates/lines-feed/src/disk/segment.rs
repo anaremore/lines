@@ -1,15 +1,18 @@
 //! Segment files: one contract, one trade date, append-only (decision 0019).
 //!
-//! Format v1 (little-endian):
+//! Format v1 and v2 (little-endian):
 //! ```text
-//! header:  b"LINESEG\0" | u16 version=1 | i64 created_wall_ms
+//! header:  b"LINESEG\0" | u16 version=1|2 | i64 created_wall_ms
 //!          | str source | str encoding | str product_symbol | contract | date
-//!          str = u16 len + UTF-8; contract as in `.lfr` v3; date = u16 year | u8 month | u8 day
+//!          str = u16 len + UTF-8; contract as in `.lfr` v3 (v1) or v4 (v2);
+//!          date = u16 year | u8 month | u8 day
 //! block:   u32 len | u32 crc32(payload) | payload
 //! payload: i64 time_us | lines-events-1 events   (one atomic batch = one feed frame)
 //! ```
 //! `source` names who supplied the data (`coinbase`, `cqg`, …); `encoding` is
-//! `lines-events-1`. A block is valid only if it is complete and its CRC matches.
+//! `lines-events-1`. v2 (decision 0028) only adds the equity and option contract kinds, so a
+//! segment is written as v2 only for those: futures and spot segments stay v1, as earlier
+//! builds wrote and read them. A block is valid only if it is complete and its CRC matches.
 //!
 //! **Torn tail.** A crash mid-append can leave a partial or garbled last block. Opening a
 //! segment for writing scans it and truncates at the first invalid block: it is never
@@ -30,7 +33,8 @@ use super::crc::crc32;
 use crate::recording::{read_contract, read_n, read_str, write_contract, write_str};
 
 pub const MAGIC: &[u8; 8] = b"LINESEG\0";
-pub const VERSION: u16 = 1;
+/// The newest segment version (written only for equity and option contracts).
+pub const VERSION: u16 = 2;
 pub const ENCODING: &str = crate::native::PROTOCOL;
 /// Largest block accepted (a sanity bound against a garbled length).
 const MAX_BLOCK: u32 = 64 * 1024 * 1024;
@@ -49,7 +53,12 @@ pub struct SegmentHeader {
 impl SegmentHeader {
     fn write(&self, w: &mut impl Write) -> io::Result<()> {
         w.write_all(MAGIC)?;
-        w.write_all(&VERSION.to_le_bytes())?;
+        let version: u16 = if crate::recording::needs_v4(self.contract) {
+            VERSION
+        } else {
+            1
+        };
+        w.write_all(&version.to_le_bytes())?;
         w.write_all(&self.created_wall_ms.to_le_bytes())?;
         write_str(w, &self.source)?;
         write_str(w, &self.encoding)?;
@@ -65,16 +74,16 @@ impl SegmentHeader {
             return Err(bad("not a Lines store segment"));
         }
         let version = u16::from_le_bytes(read_n(r)?);
-        if version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(bad(format!(
-                "segment format v{version} is not supported (this build reads v{VERSION})"
+                "segment format v{version} is not supported (this build reads v1..=v{VERSION})"
             )));
         }
         let created_wall_ms = i64::from_le_bytes(read_n(r)?);
         let source = read_str(r)?;
         let encoding = read_str(r)?;
         let product = read_str(r)?;
-        let contract = read_contract(r)?;
+        let contract = read_contract(r, version >= 2)?;
         let year = u16::from_le_bytes(read_n(r)?);
         let [month, day] = read_n::<2, _>(r)?;
         let date = CivilDate::new(year, month, day).ok_or_else(|| bad("bad segment date"))?;
@@ -410,6 +419,34 @@ mod tests {
                 Err(e) => return (v, e),
             }
         }
+    }
+
+    /// Decision 0028: a futures segment header is still v1 (as earlier builds read it); an
+    /// option's is v2 and round-trips; v1 claiming an option is refused.
+    #[test]
+    fn v2_only_for_equities_and_options() {
+        let mut v1 = Vec::new();
+        header().write(&mut v1).unwrap();
+        assert_eq!(&v1[8..10], &1u16.to_le_bytes());
+        assert_eq!(SegmentHeader::read(&mut &v1[..]).unwrap(), header());
+        let opt = SegmentHeader {
+            product: "SPY".into(),
+            contract: Some(ContractKey::option(
+                ProductId(2001),
+                CivilDate::new(2026, 12, 18).unwrap(),
+                lines_core::Price(45_000),
+                lines_core::Right::Call,
+            )),
+            ..header()
+        };
+        let mut v2 = Vec::new();
+        opt.write(&mut v2).unwrap();
+        assert_eq!(&v2[8..10], &2u16.to_le_bytes());
+        assert_eq!(SegmentHeader::read(&mut &v2[..]).unwrap(), opt);
+        v2[8..10].copy_from_slice(&1u16.to_le_bytes());
+        assert!(SegmentHeader::read(&mut &v2[..]).is_err());
+        v2[8..10].copy_from_slice(&3u16.to_le_bytes());
+        assert!(SegmentHeader::read(&mut &v2[..]).is_err(), "newer");
     }
 
     #[test]

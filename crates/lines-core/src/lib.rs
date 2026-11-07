@@ -38,8 +38,9 @@ pub use calendar::CivilDate;
 pub use fixed_str::FixedStr;
 pub use geometry::{Candle, PriceGridLine, Scene, TimeGridLine};
 pub use instrument::{
-    Capabilities, ContractKey, Currency, Delivery, ExpiryRule, MicroEquivalent, Month, MonthCycle,
-    Product, ProductId, ProductKind, Ratio, RollRule,
+    Capabilities, ContractKey, Currency, Delivery, ExerciseStyle, ExpiryRule, MicroEquivalent,
+    Month, MonthCycle, OptionKey, OptionRules, OptionTick, Product, ProductId, ProductKind, Ratio,
+    Right, RollRule,
 };
 pub use price::{DisplayStyle, Price, PriceFormat, PriceScale, UnitConverter, UnitError};
 pub use profile::{ProfileRows, SessionProfiles, SideVolume};

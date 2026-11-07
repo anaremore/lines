@@ -125,7 +125,16 @@ fn contract_key_dir(product: &Product, contract: Option<ContractKey>) -> String 
         Some(Delivery::Monthly { year, month }) => {
             format!("{sym}_{year:04}-{:02}", month.number())
         }
-        Some(Delivery::Spot) => sym,
+        Some(Delivery::Spot | Delivery::Equity) => sym,
+        // `SPY_2026-12-18_C45050`: expiry, right and the exact strike in price units.
+        Some(Delivery::Option(o)) => format!(
+            "{sym}_{:04}-{:02}-{:02}_{}{}",
+            o.expiry.year,
+            o.expiry.month,
+            o.expiry.day,
+            o.right.letter(),
+            o.strike.0
+        ),
         None => format!("{sym}_unknown"),
     }
 }

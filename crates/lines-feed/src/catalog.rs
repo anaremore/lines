@@ -14,9 +14,9 @@ use std::sync::OnceLock;
 
 use lines_core::sessions::{ExchangeHours, Hours};
 use lines_core::{
-    ContractKey, Currency, DisplayStyle, ExpiryRule, HolidayTable, LocalTime, MicroEquivalent,
-    MonthCycle, PriceFormat, PriceScale, Product, ProductId, ProductKind, QtyFormat, Ratio,
-    RollRule, SessionCalendar, SessionSpec,
+    ContractKey, Currency, DisplayStyle, ExerciseStyle, ExpiryRule, HolidayTable, LocalTime,
+    MicroEquivalent, MonthCycle, OptionRules, OptionTick, PriceFormat, PriceScale, Product,
+    ProductId, ProductKind, QtyFormat, Ratio, RollRule, SessionCalendar, SessionSpec,
 };
 
 pub const ES: ProductId = ProductId(1);
@@ -35,6 +35,35 @@ pub const ETH_USD_KR: ProductId = ProductId(1004);
 /// new delivery variant is needed (`ProductKind::Spot`, `Delivery::Spot`).
 pub const BTC_PERP_KR: ProductId = ProductId(1101);
 pub const ETH_PERP_KR: ProductId = ProductId(1102);
+/// US-listed ETFs and their options (decision 0028). An option is a `ContractKey` on the ETF's
+/// own product (`Delivery::Option`): no product per series.
+pub const SPY: ProductId = ProductId(2001);
+pub const QQQ: ProductId = ProductId(2002);
+
+/// SPY and QQQ options: 100 shares, American, in the penny interval program (0.01 at every
+/// premium). Providers report a chain's own increment, and theirs wins (decision 0028).
+const ETF_OPTIONS: OptionRules = OptionRules {
+    multiplier: 100,
+    style: ExerciseStyle::American,
+    tick: OptionTick::Flat(1),
+};
+
+/// A US-listed ETF: priced in cents, whole shares, with listed options.
+fn etf(id: ProductId, symbol: &'static str, description: &'static str) -> Product {
+    Product {
+        id,
+        symbol,
+        description,
+        price: decimal(2, 1),
+        qty: QtyFormat::WHOLE,
+        currency: Currency::USD,
+        point_value: Ratio::new(1, 1),
+        kind: ProductKind::Equity {
+            options: Some(ETF_OPTIONS),
+        },
+        micro: None,
+    }
+}
 
 fn decimal(digits: u32, tick_units: i64) -> PriceFormat {
     PriceFormat::new(
@@ -106,7 +135,7 @@ fn crypto(
     }
 }
 
-pub fn all() -> [Product; 11] {
+pub fn all() -> [Product; 13] {
     [
         index_future(ES, "ES", "E-mini S&P 500", 50, MES, 10),
         index_future(NQ, "NQ", "E-mini Nasdaq-100", 20, MNQ, 10),
@@ -168,6 +197,8 @@ pub fn all() -> [Product; 11] {
             decimal(1, 1),
             3,
         ),
+        etf(SPY, "SPY", "SPDR S&P 500 ETF"),
+        etf(QQQ, "QQQ", "Invesco QQQ (Nasdaq-100 ETF)"),
     ]
 }
 
@@ -195,6 +226,8 @@ pub fn exchange(id: ProductId) -> &'static str {
         BTC_USD | ETH_USD => "Coinbase",
         BTC_USD_KR | ETH_USD_KR => "Kraken",
         BTC_PERP_KR | ETH_PERP_KR => "Kraken Futures",
+        SPY => "NYSE Arca",
+        QQQ => "Nasdaq",
         _ => "",
     }
 }
@@ -234,6 +267,17 @@ pub fn session_spec(id: ProductId) -> Option<SessionSpec> {
         BTC_USD | ETH_USD | BTC_USD_KR | ETH_USD_KR | BTC_PERP_KR | ETH_PERP_KR => {
             Some(SessionSpec::continuous_utc(LocalTime::MIDNIGHT))
         }
+        // US equities: extended hours 04:00–20:00 ET, the regular session 09:30–16:00, on the
+        // trade date itself (same-day hours). Their options trade in RTH only (decision 0028).
+        SPY | QQQ => Some(SessionSpec {
+            time_zone: "America/New_York",
+            hours: Hours::Exchange(ExchangeHours {
+                eth_open: LocalTime::hm(4, 0),
+                eth_close: LocalTime::hm(20, 0),
+                rth: Some((LocalTime::hm(9, 30), LocalTime::hm(16, 0))),
+            }),
+            holidays: Some("us-equity"),
+        }),
         _ => None,
     }
 }
@@ -503,6 +547,52 @@ mod tests {
                 .holidays,
             HolidayData::NotCovered
         );
+    }
+
+    /// Decision 0028: SPY and QQQ, same-day NYSE hours, the us-equity holidays, options.
+    #[test]
+    fn us_equities() {
+        for id in [SPY, QQQ] {
+            let p = get(id).unwrap();
+            assert!(p.is_equity() && !p.is_spot());
+            let o = p.options().unwrap();
+            assert_eq!(
+                (o.multiplier, o.style, o.tick),
+                (100, ExerciseStyle::American, OptionTick::Flat(1))
+            );
+            assert_eq!(p.price.tick, 1, "0.01");
+            assert_eq!(parse_target(p.symbol), Some(Target::Product(id)));
+            assert_eq!(
+                p.contracts_from(d(2026, 11, 9)).next(),
+                Some(ContractKey::equity(id))
+            );
+        }
+        assert_eq!(session_spec(SPY), session_spec(QQQ));
+        let spy = sessions(SPY).unwrap();
+        // Monday 2026-11-09, EST: 04:00-20:00, RTH 09:30-16:00.
+        let s = spy.session(d(2026, 11, 9), SessionKind::Eth).unwrap();
+        assert_eq!(
+            (s.open, s.close),
+            (t("2026-11-09T09:00:00Z"), t("2026-11-10T01:00:00Z"))
+        );
+        let r = spy.session(d(2026, 11, 9), SessionKind::Rth).unwrap();
+        assert_eq!(
+            (r.open, r.close),
+            (t("2026-11-09T14:30:00Z"), t("2026-11-09T21:00:00Z"))
+        );
+        assert_eq!(r.holidays, HolidayData::Unverified);
+        // EDT in the summer: RTH 13:30-20:00 UTC.
+        let r = spy.session(d(2026, 7, 6), SessionKind::Rth).unwrap();
+        assert_eq!(r.open, t("2026-07-06T13:30:00Z"));
+        // Holidays: closed, and the early close at 13:00 ET.
+        for closed in [d(2026, 11, 26), d(2026, 12, 25), d(2027, 3, 26)] {
+            assert!(!spy.is_trade_date(closed), "{closed}");
+        }
+        let f = spy.session(d(2026, 11, 27), SessionKind::Rth).unwrap();
+        assert!(f.early_close && f.close == t("2026-11-27T18:00:00Z"));
+        assert!(!spy.is_open(t("2026-11-10T02:00:00Z")), "overnight");
+        assert_eq!(exchange(SPY), "NYSE Arca");
+        assert_eq!(exchange(QQQ), "Nasdaq");
     }
 
     #[test]
