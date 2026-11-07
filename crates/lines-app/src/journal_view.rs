@@ -467,6 +467,10 @@ impl Pane for JournalView {
 }
 
 impl JournalView {
+    /// A new look (the Settings window's appearance).
+    pub(crate) fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
     pub fn new(feed: PaneFeed, theme: Theme, frozen: bool, cx: &mut Context<Self>) -> Self {
         let store = feed.store().clone();
         pane::watch_store(cx);

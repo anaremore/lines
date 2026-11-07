@@ -39,6 +39,8 @@ mod profile;
 mod redact;
 #[cfg(feature = "screenshot")]
 mod screenshot;
+mod settings_schema;
+mod settings_view;
 mod studies;
 mod study_menu;
 mod study_menu_view;
@@ -79,7 +81,6 @@ use crate::feeds::Feeds;
 use crate::layout::Preset;
 use crate::picker_view::AppSettings;
 use crate::tape_view::TapeOptions;
-use crate::theme::{HollowBodies, Palette, Theme};
 use crate::workspace::{PaneEnv, Workspace};
 use crate::wsdoc::{TargetDoc, WorkspaceDoc};
 
@@ -309,16 +310,18 @@ struct Cli {
     /// Run the feed without a window for N seconds and print stats (useful for recording).
     #[arg(long)]
     headless: Option<u64>,
-    /// Color theme.
-    #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
-    theme: ThemeKind,
-    /// Up/down color preset (`--palette cb` for the colorblind-safe one). Rising candle
-    /// bodies are hollow in every preset, so direction never relies on color alone.
-    #[arg(long, value_enum, default_value_t = PaletteKind::Standard)]
-    palette: PaletteKind,
-    /// Which direction's candle bodies are hollow (the other is filled).
-    #[arg(long, value_enum, default_value_t = HollowKind::Up)]
-    hollow: HollowKind,
+    /// Color theme (default: Settings › Appearance, else dark). For this run only.
+    #[arg(long, value_enum)]
+    theme: Option<ThemeKind>,
+    /// Up/down color preset (`--palette cb` for the colorblind-safe one; default: Settings ›
+    /// Appearance, else standard). Rising candle bodies are hollow in every preset, so
+    /// direction never relies on color alone.
+    #[arg(long, value_enum)]
+    palette: Option<PaletteKind>,
+    /// Which direction's candle bodies are hollow, the other filled (default: Settings ›
+    /// Appearance, else up).
+    #[arg(long, value_enum)]
+    hollow: Option<HollowKind>,
     /// A one-tab layout for this run only (the saved workspace is left alone). Screenshots
     /// default to `trading`.
     #[arg(long, value_enum)]
@@ -342,9 +345,10 @@ struct Cli {
     /// repaints without new data or input. Use with a replay that finishes in the warm-up.
     #[arg(long, requires = "bench")]
     bench_expect_idle: bool,
-    /// DOM price grouping in ticks per row (G cycles 1, 2, 5, 10, 25 in the app).
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10_000))]
-    dom_grouping: u32,
+    /// DOM price grouping in ticks per row (G cycles 1, 2, 5, 10, 25 in the app; default:
+    /// Settings › DOM, else 1).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+    dom_grouping: Option<u32>,
     /// Start DOMs with the price trail on (a DOM's saved setting wins; screenshots and the
     /// benchmark). In the app: the DOM's pane menu or the palette.
     #[arg(long)]
@@ -416,6 +420,18 @@ struct Cli {
     /// pane (no OS pointer involved).
     #[arg(long, requires = "screenshot")]
     hover_header: bool,
+    /// Screenshot: also render the Settings window at this section (appearance, charts, dom,
+    /// trading, accounts, data, keys, diagnostics) into `<out stem>-settings.png`.
+    #[arg(long, requires = "screenshot")]
+    settings: Option<String>,
+    /// Screenshot: the Settings window's search text.
+    #[arg(long, requires = "settings")]
+    settings_search: Option<String>,
+    /// Screenshot: change settings in the window first, as the trader would (`KEY=VALUE`:
+    /// a number, `on`/`off`, or a choice's position from 0). A loosened guardrail shows its
+    /// confirmation. Repeatable.
+    #[arg(long, requires = "settings")]
+    settings_set: Vec<String>,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -880,18 +896,26 @@ where
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));
     }
-    let palette = match cli.palette {
-        PaletteKind::Standard => Palette::Standard,
-        PaletteKind::Colorblind => Palette::Colorblind,
+    // This run's look flags: over Settings › Appearance (the app reads it below), never saved.
+    let look_flags = {
+        use settings_schema::{HollowName, PaletteName, ThemeName};
+        settings_schema::Appearance {
+            theme: cli.theme.map(|t| match t {
+                ThemeKind::Dark => ThemeName::Dark,
+                ThemeKind::Light => ThemeName::Light,
+            }),
+            palette: cli.palette.map(|p| match p {
+                PaletteKind::Standard => PaletteName::Standard,
+                PaletteKind::Colorblind => PaletteName::Colorblind,
+            }),
+            hollow: cli.hollow.map(|h| match h {
+                HollowKind::Up => HollowName::Up,
+                HollowKind::Down => HollowName::Down,
+            }),
+        }
     };
-    let mut theme = match cli.theme {
-        ThemeKind::Dark => Theme::dark(palette),
-        ThemeKind::Light => Theme::light(palette),
-    };
-    theme.hollow = match cli.hollow {
-        HollowKind::Up => HollowBodies::Up,
-        HollowKind::Down => HollowBodies::Down,
-    };
+    let theme =
+        settings_schema::theme_for(&settings_schema::Appearance::default().with_flags(look_flags));
 
     // The source's (or `--instrument`'s) product sizes `--large-print`.
     let large_print = match &cli.large_print {
@@ -916,12 +940,15 @@ where
         fallback,
         availability: lines_feed::availability::availability(&base.source)?,
         base,
-        theme,
+        theme: std::cell::Cell::new(theme),
+        look_flags: std::cell::Cell::new(look_flags),
         frozen,
         track_visibility: !frozen && !bench,
         dom: DomOptions {
-            grouping: cli.dom_grouping,
+            grouping: cli.dom_grouping.unwrap_or(1),
             trail: cli.dom_trail,
+            grouping_from_cli: cli.dom_grouping.is_some(),
+            trail_from_cli: cli.dom_trail,
         },
         tape: TapeOptions { large_print },
         record: std::cell::RefCell::new(record),
@@ -1028,6 +1055,14 @@ where
                 bracket_editor: cli.bracket_editor,
                 hover_header: cli.hover_header,
                 layout_report: cli.layout_report,
+                settings: cli
+                    .settings
+                    .clone()
+                    .map(|section| screenshot::SettingsShot {
+                        section,
+                        search: cli.settings_search.clone(),
+                        set: cli.settings_set.clone(),
+                    }),
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);
@@ -1085,6 +1120,10 @@ where
         doc.retarget_all(instrument);
     }
     let mut ws = Workspace::new(env);
+    // Settings › Appearance, under any look flag given.
+    ws.env.theme.set(settings_schema::theme_for(
+        &settings.settings.appearance.with_flags(look_flags),
+    ));
     // The paper trading core (roadmap 7): its own thread, state per data source.
     let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.

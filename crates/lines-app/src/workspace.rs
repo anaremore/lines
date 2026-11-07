@@ -83,7 +83,12 @@ pub struct PaneEnv {
     /// The run's source; panes set the target.
     pub base: FeedConfig,
     pub availability: Availability,
-    pub theme: Theme,
+    /// The look every pane is created with; the Settings window changes it live
+    /// ([`set_theme`]).
+    pub theme: std::cell::Cell<Theme>,
+    /// This run's look flags (`--theme`, `--palette`, `--hollow`): over Settings ›
+    /// Appearance until the trader sets that field; never saved.
+    pub look_flags: std::cell::Cell<crate::settings_schema::Appearance>,
     /// Screenshot mode: frozen clock, no pointer, no user files.
     pub frozen: bool,
     /// Follow window visibility (off for screenshots and the benchmark, whose windows are
@@ -227,6 +232,14 @@ macro_rules! each {
 }
 
 impl PaneHandle {
+    /// A new look (the Settings window): the pane repaints with it.
+    pub(crate) fn set_theme(&self, theme: Theme, cx: &mut App) {
+        each!(self, e => e.update(cx, |v, cx| {
+            v.set_theme(theme);
+            cx.notify();
+        }))
+    }
+
     pub(crate) fn view(&self) -> AnyView {
         each!(self, e => e.clone().into())
     }
@@ -496,7 +509,7 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
         env.record.borrow_mut().take();
     }
     let available = feed.unavailable.is_none();
-    let theme = env.theme;
+    let theme = env.theme.get();
     let handle = match doc.kind {
         PaneKind::Chart => {
             let fixture = if available {
@@ -517,7 +530,16 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             }))
         }
         PaneKind::Dom => {
-            let opts = env.dom.clone();
+            let mut opts = env.dom.clone();
+            // New DOMs follow Settings › DOM unless a flag was given (a saved DOM's own
+            // state wins either way).
+            let np = &crate::picker_view::settings(cx).new_panes;
+            if !opts.grouping_from_cli {
+                opts.grouping = np.dom_grouping.unwrap_or(opts.grouping);
+            }
+            if !opts.trail_from_cli {
+                opts.trail |= np.dom_trail;
+            }
             let frozen = env.frozen;
             PaneHandle::Dom(cx.new(|cx| {
                 let mut v = DomView::new(feed, theme, frozen, opts, cx);
@@ -641,7 +663,7 @@ impl WindowView {
         let mut this = WindowView {
             tabs: Vec::new(),
             active: 0,
-            theme: env.theme,
+            theme: env.theme.get(),
             focus: cx.focus_handle(),
             window_visible: true,
             window_active: true,
@@ -1245,6 +1267,12 @@ impl WindowView {
                     dom.update(cx, |v, cx| v.toggle_trail(cx));
                 }
             }
+            Command::Settings => crate::settings_view::open(None, cx),
+            Command::Setting(c) => match crate::settings_view::run(c, cx) {
+                Ok(Some(text)) => notice(text, cx),
+                Ok(None) => {}
+                Err(e) => self.refuse(e, cx),
+            },
             Command::CyclePnl | Command::SetPnl(_) => {
                 let s = cx.global_mut::<crate::picker_view::AppSettings>();
                 let m = match cmd {
@@ -2001,6 +2029,7 @@ impl WindowView {
             items.push(MenuItem::of(Command::ReopenTab, false));
         }
         items.push(MenuItem::of(Command::ExportDiagnostics, false));
+        items.push(MenuItem::named("Settings…", Command::Settings, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.show_menu(Menu::new(at, items), cx);
     }
@@ -2081,6 +2110,7 @@ impl WindowView {
             cx.global::<Workspace>().show_latency_hud,
         ));
         items.push(MenuItem::of(Command::ExportDiagnostics, false));
+        items.push(MenuItem::named("Settings…", Command::Settings, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.show_menu(Menu::new(at, items), cx);
     }
@@ -3336,8 +3366,37 @@ pub fn set_show_latency_hud(show: bool, cx: &mut App) {
     }
 }
 
+/// Change the look of every window and pane now (the Settings window's appearance), and of
+/// panes created from now on.
+pub fn set_theme(theme: Theme, cx: &mut App) {
+    let Some(ws) = cx.try_global::<Workspace>() else {
+        return;
+    };
+    ws.env.theme.set(theme);
+    let windows = ws.windows.clone();
+    let pane_windows = ws.pane_windows.clone();
+    for w in windows {
+        let _ = w.update(cx, |v, _, cx| {
+            v.theme = theme;
+            let handles: Vec<PaneHandle> = v
+                .tabs
+                .iter()
+                .flat_map(|t| t.handles().cloned().collect::<Vec<_>>())
+                .collect();
+            for h in handles {
+                h.set_theme(theme, cx);
+            }
+            cx.notify();
+        });
+    }
+    for w in pane_windows {
+        let _ = w.update(cx, |v, _, cx| v.set_theme(theme, cx));
+    }
+    cx.refresh_windows();
+}
+
 /// Show or hide the key-hint bar in every window (a workspace preference, saved with it).
-fn set_hide_hints(hide: bool, cx: &mut App) {
+pub(crate) fn set_hide_hints(hide: bool, cx: &mut App) {
     let ws = cx.global_mut::<Workspace>();
     if ws.hide_hints != hide {
         ws.hide_hints = hide;

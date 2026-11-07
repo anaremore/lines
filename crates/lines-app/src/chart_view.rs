@@ -387,6 +387,10 @@ impl crate::trade_bar::TradePane for ChartView {
 }
 
 impl ChartView {
+    /// A new look (the Settings window's appearance).
+    pub(crate) fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
     /// Restore the pane's trading choices (its account).
     pub fn restore_trade(
         &mut self,
@@ -545,8 +549,20 @@ impl ChartView {
 
     /// A new chart (not restored from a workspace file): the saved defaults, if any.
     pub fn apply_new_chart_defaults(&mut self, cx: &mut Context<Self>) {
-        if let Some(set) = crate::picker_view::settings(cx).chart_defaults.clone() {
+        let s = crate::picker_view::settings(cx);
+        let set = s.chart_defaults.clone();
+        // Settings › Charts: the timeframe a new chart starts with.
+        let tf = s
+            .new_panes
+            .timeframe
+            .as_deref()
+            .and_then(lines_core::Timeframe::parse)
+            .filter(|t| t.is_valid());
+        if let Some(set) = set {
             self.set_study_set(set);
+        }
+        if let Some(tf) = tf {
+            self.set_timeframe(tf, cx);
         }
     }
 

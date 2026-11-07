@@ -43,12 +43,19 @@ pub struct PaneWindow {
 fn command(cmd: Command) -> Option<Command> {
     match cmd {
         Command::PopOut | Command::Reattach => Some(Command::Reattach),
-        Command::DockBesideChart | Command::Menu => Some(cmd),
+        Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
         _ => None,
     }
 }
 
 impl PaneWindow {
+    /// A new look (the Settings window's appearance): this window and its pane.
+    pub(crate) fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        self.handle.set_theme(theme, cx);
+        cx.notify();
+    }
+
     fn new(
         id: PaneId,
         handle: PaneHandle,
@@ -72,7 +79,7 @@ impl PaneWindow {
         PaneWindow {
             id,
             handle,
-            theme: env.theme,
+            theme: env.theme.get(),
             focus: cx.focus_handle(),
             placement: workspace::placement(window, cx),
             opened,
@@ -88,6 +95,7 @@ impl PaneWindow {
             Some(Command::Reattach) => cx.defer(move |cx| reattach_pane(id, cx)),
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
+            Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
             _ => {}
         }
         cx.notify();
@@ -105,6 +113,7 @@ impl PaneWindow {
             vec![
                 MenuItem::named("Re-attach to its previous spot", Command::Reattach, false),
                 MenuItem::of(Command::DockBesideChart, false),
+                MenuItem::named("Settings…", Command::Settings, false),
             ],
         ));
         cx.notify();

@@ -111,6 +111,11 @@ pub enum Command {
     Trade(TradeCmd),
     /// The app-wide P&L display: the next mode (off, ticks, currency, both).
     CyclePnl,
+    /// The Settings window (decision 0021; Ctrl+,).
+    Settings,
+    /// One setting from the schema (`crate::settings_schema`): set a value, or open the
+    /// Settings window at it.
+    Setting(crate::settings_schema::SettingCmd),
     /// The app-wide P&L display: this mode.
     SetPnl(crate::pnl::PnlDisplay),
     /// The focused chart's timeframe (roadmap 9). No key: typed on the chart (`5`, `1h` +
@@ -262,6 +267,7 @@ const fn b(cmd: Command, ctrl: bool, shift: bool, alt: bool, key: &'static str) 
 /// Every key binding (the first one for a command is its hint). Focus (Alt+arrows) and tab
 /// selection (Ctrl+1..9) are patterns, handled in [`command_for`].
 pub const BINDINGS: &[Binding] = &[
+    b(Command::Settings, true, false, false, ","),
     b(Command::Split(Axis::Row), true, true, false, "right"),
     b(Command::Split(Axis::Column), true, true, false, "down"),
     b(Command::ClosePane, true, false, false, "w"),
@@ -562,6 +568,8 @@ pub fn label(c: Command) -> String {
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
+        Command::Settings => "Settings…".into(),
+        Command::Setting(c) => c.label(),
         Command::Timeframe(tf) => format!("Timeframe: {tf}"),
         Command::TimeframeMenu => "Chart: timeframe…".into(),
         Command::Draw(d) => match d {
@@ -675,6 +683,13 @@ pub fn palette() -> Vec<Command> {
     v.push(Command::ExportDiagnostics);
     v.extend(Timeframe::ALL.map(Command::Timeframe));
     v.extend(DrawCmd::ALL.map(Command::Draw));
+    // Settings last: an existing command's words pick it first.
+    v.push(Command::Settings);
+    v.extend(
+        crate::settings_schema::palette()
+            .into_iter()
+            .map(Command::Setting),
+    );
     v
 }
 

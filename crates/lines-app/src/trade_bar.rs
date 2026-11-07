@@ -101,7 +101,16 @@ impl PaneTrade {
             .or_else(|| trading.and_then(Trading::default_account));
         PaneTrade {
             account,
-            qty: saved.and_then(|s| s.qty).filter(|&q| q > 0).unwrap_or(1),
+            // A new pane: Settings › Trading's default quantity.
+            qty: saved
+                .and_then(|s| s.qty)
+                .filter(|&q| q > 0)
+                .unwrap_or_else(|| {
+                    crate::picker_view::settings(cx)
+                        .new_panes
+                        .default_qty
+                        .map_or(1, i64::from)
+                }),
             bracket: saved.and_then(|s| s.bracket),
             // Sticky: restored as saved (new panes: disabled).
             arming: Arming::new(saved.is_some_and(|s| s.enabled)),

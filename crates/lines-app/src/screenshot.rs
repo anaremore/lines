@@ -64,6 +64,15 @@ pub struct Shot {
     /// Record the frame's layout and write the layout lint's findings beside each PNG
     /// (`<stem>.lint.txt`, empty when clean): `--layout-report`.
     pub layout_report: bool,
+    /// The Settings window, rendered into `<out stem>-settings.png` (`--settings`).
+    pub settings: Option<SettingsShot>,
+}
+
+/// `--settings`, `--settings-search`, `--settings-set`.
+pub struct SettingsShot {
+    pub section: String,
+    pub search: Option<String>,
+    pub set: Vec<String>,
 }
 
 /// `--layout-report` for this process (set once by `run`).
@@ -123,8 +132,12 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         bracket_editor,
         hover_header,
         layout_report,
+        settings: settings_shot,
     } = shot;
     LAYOUT_REPORT.store(layout_report, std::sync::atomic::Ordering::Relaxed);
+    if let Some(s) = &settings_shot {
+        crate::settings_view::check_shot(&s.section, &s.set)?;
+    }
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut trading = Trading::start(
         TradingSetup::manual(),
@@ -189,7 +202,16 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         ));
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);
-        if let Err(e) = capture(cx, window, out, size, scale, script, hover_header) {
+        if let Err(e) = capture(
+            cx,
+            window,
+            out,
+            size,
+            scale,
+            script,
+            hover_header,
+            settings_shot,
+        ) {
             fail(&e);
         }
     });
@@ -209,6 +231,8 @@ fn exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
+// One parameter per screenshot fixture: each is optional and independent.
+#[allow(clippy::too_many_arguments)]
 fn capture(
     cx: &mut App,
     window: WindowDoc,
@@ -217,6 +241,7 @@ fn capture(
     scale: Option<f32>,
     script: Option<(Vec<crate::trading::Step>, lines_core::UtcMillis)>,
     hover_header: bool,
+    settings_shot: Option<SettingsShot>,
 ) -> Result<()> {
     let handle = workspace::open_doc_window(
         &window,
@@ -234,8 +259,18 @@ fn capture(
     } else {
         t.settle();
     }
+    let settings_window = settings_shot.map(|s| {
+        crate::settings_view::open_for_screenshot(&s.section, s.search.as_deref(), &s.set, cx)
+    });
     cx.spawn(async move |cx| {
         let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
+        if let Some(Some(hw)) = settings_window {
+            let stem = out
+                .file_stem()
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            let path = out.with_file_name(format!("{stem}-settings.png"));
+            wrote.push(shoot(cx, hw, crate::settings_view::SIZE, &path, scale).await);
+        }
         // Popped-out panes: their windows opened (hidden) with the main window's tabs.
         // At the size each was opened at (a hidden window reports no size of its own).
         let panes: Vec<(AnyWindowHandle, (f32, f32))> = cx.update(|cx| {

@@ -67,6 +67,10 @@ pub struct DomOptions {
     pub grouping: u32,
     /// Start with the price trail on (`--dom-trail`; a DOM's saved `trail` wins).
     pub trail: bool,
+    /// `--dom-grouping` was given: it wins over Settings › DOM for this run.
+    pub grouping_from_cli: bool,
+    /// `--dom-trail` was given.
+    pub trail_from_cli: bool,
 }
 
 impl Default for DomOptions {
@@ -74,6 +78,8 @@ impl Default for DomOptions {
         DomOptions {
             grouping: 1,
             trail: false,
+            grouping_from_cli: false,
+            trail_from_cli: false,
         }
     }
 }
@@ -187,6 +193,10 @@ impl Pane for DomView {
 }
 
 impl DomView {
+    /// A new look (the Settings window's appearance).
+    pub(crate) fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
     pub fn new(
         feed: PaneFeed,
         theme: Theme,
