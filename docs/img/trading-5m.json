@@ -1,0 +1,4 @@
+{ "version": 3, "name": "readme", "crosshair_sync": false,
+  "windows": [ { "active_tab": 0, "tabs": [ { "focused": 1, "layout": { "split": { "axis": "row", "ratio": 0.66,
+    "first": { "pane": { "kind": "chart", "link": 0, "state": "shown", "target": { "product": 1, "symbol": "ES" }, "chart": { "bar_px": 10.0, "timeframe": "5m" } } },
+    "second": { "split": { "axis": "column", "ratio": 0.68, "first": { "pane": { "kind": "dom", "link": 0, "state": "shown", "target": { "product": 1, "symbol": "ES" } } }, "second": { "pane": { "kind": "tape", "link": 0, "state": "shown", "target": { "product": 1, "symbol": "ES" } } } } } } } } ] } ] }
