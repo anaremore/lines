@@ -1430,3 +1430,58 @@ fn checklist_12_unanswered_submits_are_unresolved_after_restart() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Chart trading (roadmap 8): a stop or target added for an open position is reduce-only at
+/// the broker: refused without a position, on the opening side or larger than the position;
+/// once placed it shrinks with the position and is cancelled when it is flat, so it can never
+/// open a new position after the other exit closed this one.
+#[test]
+fn place_exit_is_reduce_only_and_never_outlives_the_position() {
+    let exit = |side, qty, kind| {
+        Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side,
+            qty: Qty(qty),
+            kind,
+        })
+    };
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let stop = OrderKind::Stop {
+        trigger: px(5995.00),
+    };
+    let none = r.cmd(exit(Side::Sell, 1, stop)).unwrap_err();
+    assert!(
+        none.message.contains("no open position"),
+        "{}",
+        none.message
+    );
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert!(
+        r.cmd(exit(Side::Buy, 1, limit(5990.00))).is_err(),
+        "a buy can't close a long"
+    );
+    assert!(
+        r.cmd(exit(Side::Sell, 3, stop)).is_err(),
+        "larger than the position"
+    );
+    let s = r.cmd(exit(Side::Sell, 2, stop)).unwrap()[0];
+    let t = r.cmd(exit(Side::Sell, 2, limit(6005.00))).unwrap()[0];
+    r.wait(LAT);
+    assert!(r.core.order(s).unwrap().reduce_only);
+    assert!(r.core.order(t).unwrap().reduce_only);
+    // The target fills: flat, and the stop is cancelled (it would have opened a short).
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 2);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(t), OrderState::Filled);
+    assert!(
+        matches!(r.state(s), OrderState::Cancelled { .. }),
+        "{:?}",
+        r.state(s)
+    );
+}

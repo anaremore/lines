@@ -172,6 +172,8 @@ pub struct TradingCore {
     marks: HashMap<ContractKey, Mark>,
     specs: HashMap<ContractKey, ContractSpec>,
     next_order: u64,
+    /// Set by `PlaceExit` for the order it is about to create: reduce-only at the broker.
+    next_reduce_only: bool,
     next_command: u64,
     latency: Latency,
     hud: Arc<Mutex<OrderLatency>>,
@@ -223,6 +225,7 @@ impl TradingCore {
             marks: HashMap::new(),
             specs: HashMap::new(),
             next_order: 1,
+            next_reduce_only: false,
             next_command: 1,
             latency: Latency::default(),
             hud: Arc::default(),
@@ -531,6 +534,27 @@ impl TradingCore {
         match env.command.clone() {
             Command::PlaceOrder(spec) => {
                 self.check_new(now, &spec)?;
+                let o = self.new_order(now, &spec, Role::Single, None);
+                let id = o.id;
+                self.send(env, now, BrokerRequest::Place(o));
+                Ok(vec![id])
+            }
+            Command::PlaceExit(spec) => {
+                let pos = self.position(&spec.account, spec.contract);
+                if pos == 0 || (pos > 0) == (spec.side == Side::Buy) {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "no open position for this exit to close",
+                    ));
+                }
+                if spec.qty.0 <= 0 || spec.qty.0 > pos.abs() {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "an exit can't be larger than the position",
+                    ));
+                }
+                self.check_new(now, &spec)?;
+                self.next_reduce_only = true;
                 let o = self.new_order(now, &spec, Role::Single, None);
                 let id = o.id;
                 self.send(env, now, BrokerRequest::Place(o));
@@ -1037,6 +1061,7 @@ impl TradingCore {
         // Flatten's orders, and anything placed while the account may only reduce, are
         // reduce-only at the broker too.
         let reduce_only = role == Role::Flatten
+            || std::mem::take(&mut self.next_reduce_only)
             || self.trading_state(&spec.account) == TradingState::ReducingOnly;
         let o = Order {
             id,

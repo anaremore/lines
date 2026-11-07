@@ -44,6 +44,10 @@ pub struct BracketSpec {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     PlaceOrder(OrderSpec),
+    /// An exit for the open position (a stop or target added on the chart): reduce-only at the
+    /// broker, so it shrinks with the position and is cancelled when it is flat; refused unless
+    /// it is on the closing side and no larger than the position.
+    PlaceExit(OrderSpec),
     PlaceBracket(BracketSpec),
     /// Change a working order's quantity and/or price (limit price, or stop trigger).
     ModifyOrder {
@@ -119,7 +123,7 @@ impl Command {
     /// The account the command acts on (`None`: strategy controls that name an instance).
     pub fn account(&self) -> Option<&AccountId> {
         match self {
-            Command::PlaceOrder(o) => Some(&o.account),
+            Command::PlaceOrder(o) | Command::PlaceExit(o) => Some(&o.account),
             Command::PlaceBracket(b) => Some(&b.entry.account),
             Command::ModifyOrder { account, .. }
             | Command::CancelOrder { account, .. }
