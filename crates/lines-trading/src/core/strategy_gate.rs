@@ -374,10 +374,12 @@ impl TradingCore {
             let Some(i) = self.strategies.get(&id) else {
                 continue;
             };
-            let state = i.state;
+            let (state, account) = (i.state, i.cfg.account.clone());
+            // The daily loss is `strategy_daily_loss`'s (it closes the trade), except for an
+            // account without a trade date, where it only pauses.
             if state == StrategyState::Armed
                 && let Some(why) = self.strategy_blocker(now, id)
-                && why != DAILY_LOSS
+                && (why != DAILY_LOSS || self.trade_day(&account, now).is_none())
             {
                 self.pause_strategy(now, id, StrategyState::Paused, why);
             }
@@ -394,11 +396,7 @@ impl TradingCore {
         let Some(i) = self.strategies.get(&id) else {
             return;
         };
-        let manual = i.taken_over
-            || i.reason
-                .as_deref()
-                .is_some_and(|r| r.starts_with("manual order activity"));
-        if i.state == StrategyState::Stopped || manual {
+        if i.state == StrategyState::Stopped || i.taken_over {
             return;
         }
         let (account, contract, limit, state) = (
@@ -450,10 +448,10 @@ impl TradingCore {
             Command::CancelAll { contract, .. } | Command::Flatten { contract, .. } => *contract,
             _ => return,
         };
-        // Paused or disarmed: the person is taking over its trade (the daily-loss close leaves
-        // it alone until it is armed again).
+        // The person is taking over its trade (the daily-loss close leaves it alone until it
+        // is armed again); an armed one is also paused below.
         for i in self.strategies.values_mut() {
-            if !matches!(i.state, StrategyState::Armed | StrategyState::Stopped)
+            if i.state != StrategyState::Stopped
                 && &i.cfg.account == account
                 && contract.is_none_or(|c| c == i.cfg.contract)
             {

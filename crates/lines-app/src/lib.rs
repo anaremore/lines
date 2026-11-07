@@ -901,22 +901,10 @@ fn run_strategy(
     let settings = strategy_settings(cli)?;
     let feed = lines_feed::spawn(config.clone())?;
     let store = feed.store.clone();
-    // Listen before anything else: a fast replay can deliver everything in moments.
+    // Listen, and attach the paper core, as soon as the feed exists (before waiting for its
+    // contract): a fast replay delivers a lot in moments, and the strategy and the paper
+    // broker must see the same trades.
     let market = lines_feed::listen::listen(store.feed_id());
-    // The contract comes from the feed (a recording's header, a source's front month).
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let (product, contract) = loop {
-        {
-            let d = store.read();
-            if let Some(k) = d.contract {
-                break (d.product.clone(), k);
-            }
-        }
-        if std::time::Instant::now() > deadline {
-            bail!("the feed never said which contract it carries");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
     let clock = if replay { Clock::Market } else { Clock::Wall };
     let account = AccountId::new("paper-strategy");
     let mut broker = PaperBroker::new(settings.paper.clone());
@@ -934,6 +922,20 @@ fn run_strategy(
     let events = handle.subscribe();
     let bridge = lines_trading::FeedBridge::new(lines_feed::registry::FeedRegistry::new(), config);
     bridge.follow_store(&store, &handle);
+    // The contract comes from the feed (a recording's header, a source's front month).
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let (product, contract) = loop {
+        {
+            let d = store.read();
+            if let Some(k) = d.contract {
+                break (d.product.clone(), k);
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("the feed never said which contract it carries");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     let mut levels: Vec<Box<dyn lines_strategy::host::LevelFeed>> = Vec::new();
     // The same level tasks, to arm only once every source is current.
     let mut watch: Vec<lines_feed::levels::runtime::LevelHandle> = Vec::new();

@@ -1065,3 +1065,22 @@ fn a_person_taking_over_a_paused_trade_keeps_it_at_the_daily_loss() {
     r.wait(30);
     assert_eq!(r.core.position(&acct(), es()), 2, "the person's trade now");
 }
+
+#[test]
+fn adding_it_again_after_a_person_took_over_keeps_the_trade_theirs() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    r.manual(sell(1, limit(6100.0))).unwrap();
+    r.wait(30);
+    // Its settings sent again (Disarmed, no reason) don't hand the trade back to it.
+    r.manual(Command::AddStrategy(config())).unwrap();
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        2,
+        "still the person's trade"
+    );
+}

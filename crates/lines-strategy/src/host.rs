@@ -410,7 +410,9 @@ impl Host {
         if r.fault.is_some() {
             return;
         }
-        // Before a replay's first trade, the wall clock (nothing is armed on it yet).
+        // Before a replay's first trade (market data without a trade, or the core's events
+        // about adding it), the wall clock: nothing can be armed or traded on it yet. Levels
+        // and the timer wait for the clock instead.
         let now = r.now(clock).unwrap_or_else(lines_feed::now_utc);
         let ctx = Ctx {
             now,
@@ -517,11 +519,19 @@ impl Host {
                 _ => None,
             })
             .max();
+        let unknown = r.market_time.is_none();
         if let Some(t) = newest
             && r.market_time.is_none_or(|(m, _)| t > m.0)
         {
             r.market_time = Some((UtcMillis(t), Instant::now()));
         }
+        // The clock is known now: the levels that waited for it go first, as in a backtest.
+        if unknown && r.market_time.is_some() {
+            self.levels_for(id);
+        }
+        let Some(r) = self.instances.get_mut(&id) else {
+            return;
+        };
         let moved = batch.iter().find_map(|e| match e {
             MarketEvent::ContractChanged(k) if *k != r.cfg.contract => Some(*k),
             _ => None,
@@ -600,23 +610,29 @@ impl Host {
     /// Level sources: a new revision or a freshness change goes to the strategy; missing or
     /// stale levels pause an armed instance.
     fn poll_levels(&mut self) {
-        let clock = self.clock;
         let ids: Vec<StrategyId> = self.instances.keys().copied().collect();
         for id in ids {
+            self.levels_for(id);
+        }
+    }
+
+    /// One instance's level sources (see `poll_levels`).
+    fn levels_for(&mut self, id: StrategyId) {
+        let clock = self.clock;
+        {
             let mut views = Vec::new();
             let mut bad: Option<String> = None;
             if let Some(r) = self.instances.get_mut(&id) {
                 // Freshness needs the instance's clock: before a replay's first trade it is
-                // unknown, so nothing pauses for it yet.
-                let known = r.now(clock);
-                let now = known.unwrap_or_else(lines_feed::now_utc);
+                // unknown, so the levels wait (they go to the strategy once it is known, at
+                // the feed's time, so a run is reproducible).
+                let Some(now) = r.now(clock) else {
+                    return;
+                };
                 for (i, l) in r.levels.iter().enumerate() {
                     let rev = l.revision();
                     let view = l.view(now);
-                    if known.is_some()
-                        && !matches!(view.status, LevelStatus::Current)
-                        && bad.is_none()
-                    {
+                    if !matches!(view.status, LevelStatus::Current) && bad.is_none() {
                         bad = Some(format!(
                             "levels {} are {}",
                             view.source,
@@ -644,16 +660,21 @@ impl Host {
 
     /// The timer input, and the feed's staleness.
     fn timer(&mut self) {
+        let clock = self.clock;
         let ids: Vec<StrategyId> = self.instances.keys().copied().collect();
         for id in ids {
-            let stale = self
-                .instances
-                .get(&id)
-                .is_some_and(|r| r.last_batch.elapsed() > r.stale_after);
+            let Some(r) = self.instances.get(&id) else {
+                continue;
+            };
+            let stale = r.last_batch.elapsed() > r.stale_after;
+            // No time passes for it before its clock is known (a replay's first trade).
+            let known = r.now(clock).is_some();
             if stale {
                 self.pause(id, "the market data is stale".into());
             }
-            self.input(id, Input::Timer);
+            if known {
+                self.input(id, Input::Timer);
+            }
         }
     }
 }
