@@ -3,8 +3,8 @@
 //! [`Extensions`]; nothing in this crate names them.
 
 mod bench;
-mod chart_draw;
 mod brackets;
+mod chart_draw;
 mod chart_view;
 mod commands;
 mod diagnostics;

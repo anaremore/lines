@@ -536,7 +536,8 @@ pub fn protective<'a>(
     };
     cands.sort_by_key(|o| (reached(o), role(o), o.id.0));
     // Every other order on the exit side that may fill (live, or still pending: sent and not
-    // yet acknowledged, or unresolved), held bracket exits aside (their entry adds as much
+    // yet acknowledged; unresolved orders live in another cache map and aren't seen here,
+    // docs/known-gaps.md), held bracket exits aside (their entry adds as much
     // first): a plain limit or scale-out, a triggered stop-limit resting as a limit, an
     // oversized stop, a bracket's target. Each also closes the position when it fills, so it
     // uses the budget first.
@@ -2781,11 +2782,56 @@ mod tests {
         s3.kind = OrderKind::Stop {
             trigger: Price(599_700),
         };
-        assert!(protective([&t2, &s2, &s3], 2).is_err());
+        assert_eq!(
+            protective([&t2, &s2, &s3], 2).map(|v| v.len()),
+            Err("other exit orders already cover the position: drag the stop instead")
+        );
         // An exit still pending (sent, not acknowledged) counts too.
         let mut pend = tp.clone();
         pend.state = OrderState::Submitted;
-        assert!(protective([&pend, &st], 1).is_err());
+        assert_eq!(
+            protective([&pend, &st], 1).map(|v| v.len()),
+            Err("other exit orders already cover the position: drag the stop instead")
+        );
+        // Scale-in: two filled brackets of 1 each, long 2: both stops move.
+        let mut ta = bt.clone();
+        ta.id = OrderId(60);
+        let mut sa = bs.clone();
+        sa.id = OrderId(61);
+        ta.oco = Some(sa.id);
+        sa.oco = Some(ta.id);
+        let mut tb = bt.clone();
+        tb.id = OrderId(62);
+        let mut sb = bs.clone();
+        sb.id = OrderId(63);
+        tb.oco = Some(sb.id);
+        sb.oco = Some(tb.id);
+        assert_eq!(protective([&ta, &sa, &tb, &sb], 2).unwrap().len(), 2);
+        // A filled bracket plus a second entry still working with its exits held (acked):
+        // the first bracket's stop moves; the held exits neither count nor move.
+        let mut entry2 = stop(Side::Buy, 1, Role::Entry, OrderState::Working);
+        entry2.id = OrderId(70);
+        entry2.kind = OrderKind::Limit {
+            price: Price(599_000),
+        };
+        let mut held_t = bt.clone();
+        held_t.id = OrderId(71);
+        held_t.state = OrderState::Acked;
+        held_t.parent = Some(entry2.id);
+        let mut held_s = bs.clone();
+        held_s.id = OrderId(72);
+        held_s.state = OrderState::Acked;
+        held_s.parent = Some(entry2.id);
+        held_t.oco = Some(held_s.id);
+        held_s.oco = Some(held_t.id);
+        assert_eq!(
+            protective([&bt, &bs, &entry2, &held_t, &held_s], 1)
+                .unwrap()
+                .iter()
+                .map(|o| o.id)
+                .collect::<Vec<_>>(),
+            vec![bs.id]
+        );
         // An oversized stop counts too.
         let mut x = stop(Side::Sell, 2, Role::Single, OrderState::Working);
         x.id = OrderId(42);
