@@ -137,6 +137,8 @@ pub struct AccountFact {
     pub id: String,
     pub name: String,
     pub paper: bool,
+    /// PAPER, SIM or LIVE (a broker's accounts carry their own kind).
+    pub kind: &'static str,
     pub rules: Option<String>,
 }
 
@@ -1006,7 +1008,7 @@ fn table() -> Vec<Setting> {
             "accounts.list",
             Sec::Accounts,
             "Trading accounts",
-            "Paper accounts for now; live ones come with the connectors.",
+            "Paper accounts, plus each broker's (read-only while observed).",
             Scope::ReadOnly,
             Normal,
             Info,
@@ -1018,9 +1020,11 @@ fn table() -> Vec<Setting> {
                         .iter()
                         .map(|a| {
                             let mut s = a.name.clone();
-                            if a.paper {
-                                s.push_str(" (paper)");
-                            }
+                            s.push_str(match a.kind {
+                                "PAPER" => " (paper)",
+                                "SIM" => " (sim)",
+                                _ => " (live)",
+                            });
                             if let Some(r) = &a.rules {
                                 s.push_str(" · ");
                                 s.push_str(r);
