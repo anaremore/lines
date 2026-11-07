@@ -1164,6 +1164,13 @@ impl ChartView {
                 EditorKey::Pass => {}
             }
         }
+        // Escape aborts an order tag drag (nothing sent).
+        if self.ct.drag.is_some() && k.key == "escape" {
+            self.ct.drag = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if self.anchoring.is_some() && k.key == "escape" {
             self.anchoring = None;
             cx.stop_propagation();
@@ -1736,7 +1743,10 @@ impl ChartView {
             return;
         }
         if let Some(d) = self.ct.drag.take() {
-            self.drop_order(d, cx);
+            // Released over the plot: move there. Outside it (another pane, the axes): abort.
+            if self.plot.contains(&ev.position) {
+                self.drop_order(d, cx);
+            }
             cx.notify();
             return;
         }
@@ -1875,6 +1885,12 @@ impl ChartView {
         let Some(o) = order else {
             return;
         };
+        // A stop never moves across the market (it would trigger at once): refused here, shown
+        // as a rejected drag, nothing sent.
+        if let Some(why) = crate::trade_bar::stop_move_check(&self.store, &o, d.to) {
+            self.trade.flash(why);
+            return;
+        }
         if let Some(cmd) = crate::dom_trade::drag_command(&o, d.to) {
             let id = t.submit(lines_trading::Source::Chart, issued, cmd);
             self.ct.ghosts.push(crate::dom_trade::Ghost {
