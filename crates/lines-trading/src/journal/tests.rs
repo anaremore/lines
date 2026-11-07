@@ -510,11 +510,13 @@ fn a_v1_journal_migrates_to_v2_when_written() {
     let path = dir.join("mock.jsonl");
     let trade = serde_json::to_string(&Record::Trade(Box::new(closed(10.0, 5, &["a"])))).unwrap();
     let v1 = format!("{{\"journal\":1,\"source\":\"mock\"}}\n{trade}\n");
-    std::fs::write(&path, &v1).unwrap();
+    // A torn tail too: cut before the migration, never carried into either file.
+    std::fs::write(&path, format!("{v1}{{\"trade\":{{\"id\"")).unwrap();
     let read = store::read(&path).unwrap().unwrap();
-    assert_eq!((read.version, read.records.len()), (1, 1));
+    assert_eq!((read.version, read.records.len(), read.torn), (1, 1, true));
     {
-        let w = JournalWriter::open(path.clone(), "mock", Some(&read)).unwrap();
+        // The caller's source doesn't replace the file's own.
+        let w = JournalWriter::open(path.clone(), "other", Some(&read)).unwrap();
         w.append(Record::Trade(Box::new(closed(-5.0, 20, &[]))));
         assert!(w.flush(std::time::Duration::from_secs(5)));
     }

@@ -144,7 +144,7 @@ impl JournalWriter {
                 .with_context(|| format!("cut the torn tail of {}", path.display()))?;
         }
         if parsed.version != 0 && parsed.version < VERSION {
-            migrate(&path, parsed.version, &bytes[..valid as usize], source)?;
+            migrate(&path, parsed.version, &bytes[..valid as usize])?;
         }
         let mut file = OpenOptions::new()
             .create(true)
@@ -183,38 +183,44 @@ impl JournalWriter {
 /// Bring an older journal to [`VERSION`]: keep a copy as it was, then swap in the same records
 /// under the current header (written whole beside it, then renamed: a crash leaves either
 /// file, never half of one).
-fn migrate(path: &Path, from: u32, valid: &[u8], source: &str) -> Result<()> {
+fn migrate(path: &Path, from: u32, valid: &[u8]) -> Result<()> {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let aside = path.with_file_name(format!("{stem}.v{from}.jsonl"));
     if !aside.exists() {
-        fs::write(&aside, valid).with_context(|| format!("keep {}", aside.display()))?;
+        write_whole(&aside, valid)?;
     }
-    let body = valid
+    let nl = valid
         .iter()
         .position(|&b| b == b'\n')
-        .map_or(&[][..], |nl| &valid[nl + 1..]);
-    let mut out = serde_json::to_vec(&Header {
-        journal: VERSION,
-        source: source.to_owned(),
-    })?;
+        .context("journal header")?;
+    // The file's own header, version moved (its source is kept as written).
+    let mut header: Header = serde_json::from_slice(&valid[..nl]).context("journal header")?;
+    header.journal = VERSION;
+    let mut out = serde_json::to_vec(&header)?;
     out.push(b'\n');
-    out.extend_from_slice(body);
-    let tmp = path.with_extension("jsonl.tmp");
-    {
-        let mut f = File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
-        f.write_all(&out)?;
-        f.sync_data()?;
-    }
-    fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+    out.extend_from_slice(&valid[nl + 1..]);
+    write_whole(path, &out)?;
     tracing::info!(
         "journal {}: migrated v{from} → v{VERSION} (the original is kept as {})",
         path.display(),
         aside.display()
     );
     Ok(())
+}
+
+/// Write `bytes` to a temporary file beside `path`, sync it, then rename it over `path`: a
+/// crash leaves the old file or the new one, never part of one.
+fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+        f.write_all(bytes)?;
+        f.sync_data()?;
+    }
+    fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))
 }
 
 fn write_loop(mut file: File, path: PathBuf, rx: Receiver<Job>) {
