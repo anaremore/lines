@@ -932,7 +932,7 @@ fn table() -> Vec<Setting> {
             "guard.cooldown",
             Sec::Trading,
             "Cooldown length",
-            "How long entries wait after the losing streak.",
+            "How long entries wait after the losing streak, in minutes.",
             Scope::Account,
             Trading,
             Number {

@@ -38,6 +38,45 @@ enum Tone {
     Problem,
 }
 
+/// One change Ctrl+Z can take back: the value before, for the account it was made for. A
+/// look change keeps the look as saved and this run's flags too: its undo puts both back
+/// (a flag is never saved, even by an undo).
+#[derive(Clone)]
+struct UndoEntry {
+    index: usize,
+    target: Target,
+    value: Value,
+    look: Option<(schema::Appearance, schema::Appearance)>,
+}
+
+/// The look as saved and this run's look flags.
+fn look_now(cx: &App) -> (schema::Appearance, schema::Appearance) {
+    (
+        settings(cx).appearance,
+        cx.try_global::<Workspace>()
+            .map(|w| w.env.look_flags.get())
+            .unwrap_or_default(),
+    )
+}
+
+/// Put the look back as it was saved, with its flags (an undo of a look change).
+fn restore_look(saved: schema::Appearance, flags: schema::Appearance, cx: &mut App) {
+    update_settings(cx, move |s| s.appearance = saved);
+    if let Some(w) = cx.try_global::<Workspace>() {
+        w.env.look_flags.set(flags);
+    }
+    let t = schema::theme_for(&saved.with_flags(flags));
+    cx.defer(move |cx| {
+        crate::workspace::set_theme(t, cx);
+        if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
+            let _ = h.update(cx, |v, _, cx| {
+                v.theme = t;
+                cx.notify();
+            });
+        }
+    });
+}
+
 /// A setting change waiting for the trader's yes (a guardrail loosened).
 struct Pending {
     index: usize,
@@ -46,7 +85,7 @@ struct Pending {
     target: Target,
     text: String,
     /// It is an undo's: a cancel puts the undo back; a yes adds no new undo entry.
-    undo: Option<(usize, Target, Value)>,
+    undo: Option<UndoEntry>,
     /// A guardrail: takes effect at the next trade date (else at once).
     tomorrow: bool,
 }
@@ -66,7 +105,7 @@ pub struct SettingsWindow {
     facts: Facts,
     products: Vec<&'static str>,
     /// Earlier values, newest last: (setting, its target, the value before).
-    undo: Vec<(usize, Target, Value)>,
+    undo: Vec<UndoEntry>,
     editor: Option<brackets::Editor>,
     editor_msg: Option<String>,
     /// The settings list's scroll (keeps the selected row in view).
@@ -431,12 +470,18 @@ impl SettingsWindow {
         let st = &schema::all()[i];
         let before = current_prefs(cx);
         let old = (st.get)(&before, &self.target, &self.facts);
+        if old == v && !st.key.starts_with("guard.") {
+            // The value shown already: nothing to change (nor to save over).
+            return;
+        }
         let mut after = before.clone();
         if let Err(e) = st.apply(&mut after, &self.target, v.clone()) {
             self.note = Some((i, e.to_owned(), Tone::Problem));
             cx.notify();
             return;
         }
+        // Whatever was waiting for a yes is dropped (an undo's goes back on the list).
+        self.cancel_pending();
         let guard = st.key.starts_with("guard.");
         let (g0, g1) = (
             self.target.guardrails(&before),
@@ -468,9 +513,18 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
+        let look = matches!(
+            st.key,
+            "appearance.theme" | "appearance.palette" | "appearance.hollow"
+        )
+        .then(|| look_now(cx));
         commit(&before, &after, &self.target, cx);
-        self.undo.push((i, self.target.clone(), old.clone()));
-        self.pending = None;
+        self.undo.push(UndoEntry {
+            index: i,
+            target: self.target.clone(),
+            value: old.clone(),
+            look,
+        });
         let text = if guard {
             if loosens {
                 format!(
@@ -520,19 +574,27 @@ impl SettingsWindow {
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
-        let Some((i, target, v)) = self.undo.pop() else {
+        let Some(entry) = self.undo.pop() else {
             self.note = None;
             return;
         };
+        let i = entry.index;
         // The setting it undoes, for its account: what is undone (or asked) is in view.
         self.show(i);
-        self.target = target.clone();
+        if let Some((saved, flags)) = entry.look {
+            // A look change: the look as saved and the run's flags, exactly as they were.
+            restore_look(saved, flags, cx);
+            self.note = Some((i, "Undone".to_owned(), Tone::Done));
+            cx.notify();
+            return;
+        }
+        self.target = entry.target.clone();
         let n = self.undo.len();
         // An undo that loosens asks like any other change.
-        self.set(i, v.clone(), false, cx);
+        self.set(i, entry.value.clone(), false, cx);
         self.undo.truncate(n);
         if let Some(p) = &mut self.pending {
-            p.undo = Some((i, target, v));
+            p.undo = Some(entry);
         } else if let Some(n) = &mut self.note {
             n.1 = format!("Undone · {}", n.1);
         }
@@ -662,7 +724,7 @@ impl SettingsWindow {
         if self.pending.is_some() {
             match key {
                 // Y, not Enter: an Enter typed out of habit after a number never says yes.
-                "y" => self.confirm(cx),
+                "y" if !m.control && !m.alt && !m.shift && !m.platform => self.confirm(cx),
                 "escape" => self.cancel_pending(),
                 _ => {}
             }
@@ -1048,6 +1110,11 @@ impl SettingsWindow {
             })
             .when(st.safety == Safety::Trading, |d| {
                 d.border_l_2().border_color(t.warn)
+            })
+            // A selected trading row keeps its warn bar: the selection shows as an accent bar
+            // beside it.
+            .when(selected && st.safety == Safety::Trading, |d| {
+                d.child(div().w(px(3.0)).h(px(28.0)).flex_none().bg(t.accent))
             })
             .child(left)
             .child(self.control(i, &value, cx))
