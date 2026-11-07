@@ -31,7 +31,7 @@ use crate::market::MarketInput;
 use crate::order::{Order, OrderState, Role};
 use crate::position::Position;
 use crate::risk::{self, RiskContext, RiskLimits};
-use crate::rules::{RulePreset, RuleTracker, TradingState};
+use crate::rules::{PendingRules, RulePreset, RuleTracker, TradingState};
 use crate::strategy::{Instance, StrategyId};
 use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind, Side};
 
@@ -85,6 +85,9 @@ struct AccountCache {
     guard: GuardrailTracker,
     /// The guardrail state last reported (an event when it changes).
     guard_seen: GuardChange,
+    /// Prop rules asked for that are looser than those in force: they take over with the
+    /// next trade date (`Command::SetRules`).
+    pending_rules: Option<PendingRules>,
     /// When recent new orders and modifies were sent (rate limits, decision 0006).
     submits: VecDeque<UtcMillis>,
     modifies: VecDeque<UtcMillis>,
@@ -310,6 +313,7 @@ impl TradingCore {
                 tracker: tracker.unwrap_or_else(|| RuleTracker::new(start)),
                 guard: GuardrailTracker::default(),
                 guard_seen: GuardrailTracker::default().change(),
+                pending_rules: None,
                 balance: start,
                 positions: BTreeMap::new(),
                 cfg,
@@ -317,6 +321,24 @@ impl TradingCore {
                 modifies: VecDeque::new(),
             },
         );
+    }
+
+    /// Prop rules asked for that wait for the next trade date (they are looser).
+    pub fn pending_rules(&self, account: &AccountId) -> Option<&PendingRules> {
+        self.accounts.get(account)?.pending_rules.as_ref()
+    }
+
+    /// Restore an account's saved prop rules and the looser ones still waiting.
+    pub fn restore_rules(
+        &mut self,
+        account: &AccountId,
+        rules: Option<RulePreset>,
+        pending: Option<PendingRules>,
+    ) {
+        if let Some(a) = self.accounts.get_mut(account) {
+            a.cfg.rules = rules;
+            a.pending_rules = pending;
+        }
     }
 
     /// Restore an account's saved guardrail progress (a restart keeps a lockout).
@@ -805,6 +827,27 @@ impl TradingCore {
                 let a = self.accounts.get_mut(&account).expect("checked");
                 a.guard.request(guardrails);
                 self.guard_report(&account);
+                Ok(Vec::new())
+            }
+            Command::SetRules { rules, .. } => {
+                let a = self.accounts.get_mut(&account).expect("checked");
+                if let (Some(cur), Some(w)) = (&a.cfg.rules, &rules)
+                    && cur.account_size != w.account_size
+                {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        format!(
+                            "the account size is fixed at ${}: choose rules for that size",
+                            cur.account_size
+                        ),
+                    ));
+                }
+                // Tighter now, looser with the next trade date (a breach can't be talked
+                // away): orders already sent keep the rules they were checked against.
+                let in_force = crate::rules::tightest_rules(a.cfg.rules.as_ref(), rules.as_ref());
+                a.pending_rules = (in_force != rules).then_some(PendingRules { rules });
+                a.cfg.rules = in_force;
+                self.account_changed(now, &account);
                 Ok(Vec::new())
             }
             Command::AddStrategy(_)
@@ -1615,6 +1658,12 @@ impl TradingCore {
         let date = lines_feed::disk::partition::trade_date(&product, now);
         let balance = a.balance;
         let a = self.accounts.get_mut(account).expect("checked");
+        // A new trade date brings in looser prop rules asked for earlier.
+        if a.tracker.day.is_some_and(|d| d != date)
+            && let Some(p) = a.pending_rules.take()
+        {
+            a.cfg.rules = p.rules;
+        }
         let preset = a.cfg.rules.clone().unwrap_or_else(no_rules);
         a.tracker.roll_day(&preset, date, balance);
         // Guardrails: a new trade date ends a lock and brings in looser settings.

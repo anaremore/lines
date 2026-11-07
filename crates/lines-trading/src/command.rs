@@ -90,6 +90,14 @@ pub enum Command {
         account: AccountId,
         guardrails: crate::guardrails::Guardrails,
     },
+    /// The account's prop rules (`None`: none). As for guardrails: what is tighter applies
+    /// at once (the next order is checked against it), what is looser with the next trade
+    /// date, during a breach too; open orders keep the rules they were checked against. The
+    /// account size can't change. Never from a strategy.
+    SetRules {
+        account: AccountId,
+        rules: Option<crate::rules::RulePreset>,
+    },
     /// Create or replace a strategy instance (decision 0025). It starts Disarmed; an armed
     /// instance must be stopped or paused first. Not from a strategy.
     AddStrategy(StrategyConfig),
@@ -129,7 +137,8 @@ impl Command {
             | Command::CancelOrder { account, .. }
             | Command::CancelAll { account, .. }
             | Command::Flatten { account, .. }
-            | Command::SetGuardrails { account, .. } => Some(account),
+            | Command::SetGuardrails { account, .. }
+            | Command::SetRules { account, .. } => Some(account),
             Command::AddStrategy(c) => Some(&c.account),
             Command::RemoveStrategy { .. }
             | Command::ArmStrategy { .. }

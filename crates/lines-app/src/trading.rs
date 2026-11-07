@@ -902,9 +902,12 @@ impl Trading {
                 let mut core = TradingCore::new(Box::new(PaperBroker::from_state(paper, f.broker)));
                 for a in f.accounts {
                     let id = a.config.id.clone();
+                    let rules = a.config.rules.clone();
                     core.add_account(a.config, Some(a.tracker));
-                    // A lockout survives the restart.
+                    // A lockout survives the restart, and so do looser prop rules waiting
+                    // for the next trade date.
                     core.restore_guardrails(&id, a.guardrails);
+                    core.restore_rules(&id, rules, a.pending_rules);
                 }
                 core.set_next_order_id(f.next_order_id);
                 // Sent before the app stopped, no answer: unresolved until the broker says.
@@ -1311,7 +1314,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::CancelOrder { account, .. } => (account.clone(), None, None),
         TradeCommand::CancelAll { account, contract }
         | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
-        TradeCommand::SetGuardrails { account, .. } => (account.clone(), None, None),
+        TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
+            (account.clone(), None, None)
+        }
         TradeCommand::AddStrategy(_)
         | TradeCommand::RemoveStrategy { .. }
         | TradeCommand::ArmStrategy { .. }

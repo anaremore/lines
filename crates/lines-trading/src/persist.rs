@@ -36,6 +36,10 @@ pub struct SavedAccount {
     /// (roadmap 8b). Optional: older files have none.
     #[serde(default, skip_serializing_if = "GuardrailTracker::is_default")]
     pub guardrails: GuardrailTracker,
+    /// Prop rules asked for that wait for the next trade date (looser than those in force,
+    /// which are in `config.rules`). Optional: older files have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_rules: Option<crate::rules::PendingRules>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
