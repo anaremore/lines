@@ -28,6 +28,9 @@ pub struct BrokerCaps {
     pub modify: bool,
     /// Brackets held by the broker (they survive the app closing).
     pub server_brackets: bool,
+    /// Honors `Order::oco` on `Place` (one fill cancels or shrinks the other) and
+    /// `Order::reduce_only` (never closes more than the position; cancelled when it is flat).
+    /// Chart exits (`Command::PlaceExit`) are refused without it.
     pub oco: bool,
     pub fractional_qty: bool,
     /// The broker reports executions of orders Lines didn't place as

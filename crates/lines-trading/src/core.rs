@@ -560,14 +560,20 @@ impl TradingCore {
                     spec.kind,
                     OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
                 );
+                // A sibling still holding the pair: open and not being cancelled (× then a quick
+                // re-add must pair the new exit, not leave it alone).
+                let cancelling = &self.cancelling;
                 let open = |id: Option<OrderId>, orders: &BTreeMap<OrderId, Order>| {
-                    id.and_then(|i| orders.get(&i)).is_some_and(|o| o.is_open())
+                    id.filter(|i| !cancelling.contains(i))
+                        .and_then(|i| orders.get(&i))
+                        .is_some_and(|o| o.is_open())
                 };
                 let sibling = self
                     .orders
                     .values()
                     .find(|o| {
                         o.is_open()
+                            && !cancelling.contains(&o.id)
                             && o.reduce_only
                             && !open(o.oco, &self.orders)
                             && o.account == spec.account
@@ -593,6 +599,9 @@ impl TradingCore {
                         let x = x.clone();
                         self.events.push(Event::Order(x));
                     }
+                    // The new exit was published before it was linked: publish it again, so the
+                    // app never holds half a pair.
+                    self.events.push(Event::Order(o.clone()));
                 }
                 let id = o.id;
                 self.send(env, now, BrokerRequest::Place(o));
@@ -970,6 +979,12 @@ impl TradingCore {
             ));
         }
         let caps = self.broker.capabilities();
+        if matches!(spec.kind, OrderKind::Market) && !caps.market_orders {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                "this broker has no market orders",
+            ));
+        }
         if !caps.oco {
             return Err(Reject::new(
                 RejectCode::Broker,
@@ -1249,8 +1264,39 @@ impl TradingCore {
             }
         }
         self.broker_events = evs;
+        for a in &touched {
+            self.cancel_stranded_exits(now, a);
+        }
         for a in touched {
             self.account_changed(now, &a);
+        }
+    }
+
+    /// Reduce-only orders left open on a contract the account is flat in can only open a
+    /// position: cancel them (the broker should already have; this is the core's own guard).
+    fn cancel_stranded_exits(&mut self, now: UtcMillis, account: &AccountId) {
+        let stranded: Vec<OrderId> = self
+            .orders
+            .values()
+            .filter(|o| {
+                &o.account == account
+                    && o.is_open()
+                    && o.reduce_only
+                    && !self.cancelling.contains(&o.id)
+                    && self.position(account, o.contract) == 0
+            })
+            .map(|o| o.id)
+            .collect();
+        for order in stranded {
+            self.submit(
+                now,
+                Source::Rule,
+                Instant::now(),
+                Command::CancelOrder {
+                    account: account.clone(),
+                    order,
+                },
+            );
         }
     }
 

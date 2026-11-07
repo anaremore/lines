@@ -1626,3 +1626,99 @@ fn place_exit_needs_a_broker_with_oco() {
         .unwrap_err();
     assert_eq!(e.code, RejectCode::Broker, "{}", e.message);
 }
+
+/// Focused review: an exit sent while the position is open but arriving after it closed
+/// (the target filled during the stop's latency) never opens a position: the broker cancels it
+/// on arrival, and a trade through its trigger leaves the account flat.
+#[test]
+fn place_exit_arriving_after_flat_never_opens_a_position() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let t = r
+        .cmd(place_exit_cmd(Side::Sell, 2, limit(6005.00)))
+        .unwrap()[0];
+    r.wait(LAT);
+    // The stop is sent; before it reaches the broker, the target fills: flat.
+    let s = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5995.00),
+            },
+        ))
+        .unwrap()[0];
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 5);
+    assert_eq!(r.state(t), OrderState::Filled);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    // A trade through the stop's trigger: nothing fills, nothing opens.
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 5);
+    r.wait(LAT);
+    assert_eq!(r.state(s), OrderState::Cancelled);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        0,
+        "the exit never opened a short"
+    );
+}
+
+/// Focused review: a guardrail lockout (daily loss) blocks entries, never the position's
+/// protection: both exits go in while locked.
+#[test]
+fn place_exit_protects_during_a_guardrail_lockout() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: lines_trading::Guardrails {
+            max_daily_loss: Some(50),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    // Down a point on 2 ES: -$100 + fees, past the $50 guardrail: locked.
+    r.book(&[(5999.00, 50)], &[(5999.25, 50)]);
+    r.trade(5999.00, 1);
+    r.wait(LAT);
+    let entry = r.cmd(spec(Side::Buy, 1, limit(5990.00)));
+    assert!(entry.is_err(), "entries are locked out");
+    assert!(r.cmd(place_exit_cmd(Side::Sell, 2, limit(6010.00))).is_ok());
+    let s = r.cmd(place_exit_cmd(
+        Side::Sell,
+        2,
+        OrderKind::Stop {
+            trigger: px(5990.00),
+        },
+    ));
+    assert!(s.is_ok(), "the stop is protection, not an entry: {s:?}");
+}
+
+/// Focused review: a halted account (prop drawdown) refuses even a protective exit; Flatten is
+/// the way out there (deliberate, `check_exit`).
+#[test]
+fn place_exit_refused_while_halted() {
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    r.wait(LAT);
+    r.book(&[(5997.00, 50)], &[(5997.25, 50)]);
+    r.trade(5997.00, 1);
+    assert_eq!(r.core.trading_state(&acct()), TradingState::Halted);
+    let e = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            3,
+            OrderKind::Stop {
+                trigger: px(5990.00),
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::PropRule, "{}", e.message);
+}

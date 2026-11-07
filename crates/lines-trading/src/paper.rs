@@ -278,6 +278,7 @@ impl PaperBroker {
         self.out.push(BrokerEvent::Acked { id: o.id, at: now });
         let id = o.id;
         let queue = self.queue_at(&o);
+        let reduce = o.reduce_only.then(|| (o.account.clone(), o.contract));
         self.orders.insert(
             id,
             PaperOrder {
@@ -286,6 +287,19 @@ impl PaperBroker {
                 held: false,
             },
         );
+        // A reduce-only order meets the position as it is *now* (it may have closed while the
+        // order was on its way): shrink it to what is left to close, or cancel it.
+        if let Some((account, contract)) = reduce {
+            let position = self
+                .accounts
+                .get(&account)
+                .and_then(|a| a.positions.iter().find(|p| p.contract == contract))
+                .map_or(0, |p| p.position.qty());
+            self.shrink_reduce_only(now, &account, contract, position);
+            if !self.orders.contains_key(&id) {
+                return;
+            }
+        }
         self.activate(now, id);
     }
 
