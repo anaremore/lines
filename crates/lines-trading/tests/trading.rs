@@ -1843,3 +1843,284 @@ fn core_cancels_reduce_only_orders_left_on_a_flat_contract() {
         .any(|q| matches!(q, BrokerRequest::Cancel { id } if *id == exit));
     assert!(sent_cancel, "the core cancels the stranded exit");
 }
+
+// ---- critical review 1, finding 1: bracket exits never outlive the position -----------------
+
+/// Long 2 through a bracket, entry filled: the exits are live and reduce-only.
+fn filled_bracket(r: &mut Rig, tp: f64, sl: f64) -> (OrderId, OrderId) {
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(2),
+                kind: limit(6000.00),
+            },
+            take_profit: Some(px(tp)),
+            stop_loss: Some(px(sl)),
+        }))
+        .unwrap();
+    r.wait(LAT);
+    r.trade(5999.75, 5);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert_eq!(r.state(ids[1]), OrderState::Working);
+    assert!(
+        r.core.order(ids[1]).unwrap().reduce_only,
+        "live: reduce-only"
+    );
+    assert!(r.core.order(ids[2]).unwrap().reduce_only);
+    (ids[1], ids[2])
+}
+
+/// A manual close (a plain sell, not Flatten) leaves no bracket exit working: a later move
+/// through the old stop or target never opens a short.
+#[test]
+fn a_manual_close_cancels_the_bracket_exits() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    let (tp, sl) = filled_bracket(&mut r, 6005.00, 5995.00);
+    r.place(Side::Sell, 2, limit(6001.00));
+    r.wait(LAT);
+    r.book(&[(6001.00, 50)], &[(6001.25, 50)]);
+    r.trade(6001.25, 5);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(tp), OrderState::Cancelled);
+    assert_eq!(r.state(sl), OrderState::Cancelled);
+    // Through the old target, then the old stop: still flat.
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 10);
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0, "never short");
+}
+
+/// With `max_position: 2`: close, go short 2, then the old stop's price trades. The account
+/// ends short 2 (its own order), never short 4 from a leftover exit.
+#[test]
+fn a_leftover_stop_never_exceeds_max_position() {
+    let mut cfg = AccountConfig::paper("paper-1", 50_000);
+    cfg.limits = RiskLimits {
+        max_position: Some(2),
+        ..Default::default()
+    };
+    let mut r = Rig::with(FillModel::TradeThrough, cfg);
+    let (_, sl) = filled_bracket(&mut r, 6005.00, 5995.00);
+    r.place(Side::Sell, 2, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    r.place(Side::Sell, 2, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), -2);
+    assert_eq!(r.state(sl), OrderState::Cancelled);
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), -2, "never -4");
+}
+
+/// Reducing only (daily loss): live bracket exits count as what already closes the position,
+/// so a second closing order is refused; the stop closes the position exactly, never short.
+#[test]
+fn a_bracket_never_opens_a_position_on_a_reducing_only_account() {
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    let (tp, sl) = filled_bracket(&mut r, 6005.00, 5997.50);
+    // Down 2.25 points × 2 × $50 = −$225: daily loss (200) reached, drawdown (400) not.
+    r.book(&[(5997.75, 50)], &[(5998.00, 50)]);
+    r.trade(5997.75, 1);
+    assert_eq!(r.core.trading_state(&acct()), TradingState::ReducingOnly);
+    let e = r.cmd(spec(Side::Sell, 2, limit(6001.00))).unwrap_err();
+    assert_eq!(e.code, RejectCode::PropRule, "the exits already close it");
+    // The stop closes the position; the target is cancelled; a later fall opens nothing.
+    r.book(&[(5997.25, 50)], &[(5997.50, 50)]);
+    r.trade(5997.25, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(sl), OrderState::Filled);
+    assert_eq!(r.state(tp), OrderState::Cancelled);
+    r.trade(5990.00, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0, "never short");
+}
+
+/// Review round 1: an entry partly filled and then cancelled leaves live exits; a manual
+/// partial close shrinks them, so the stop closes what is left and never flips the position.
+#[test]
+fn exits_of_a_partly_filled_cancelled_entry_follow_the_position() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(3),
+                kind: limit(6000.00),
+            },
+            take_profit: Some(px(6005.00)),
+            stop_loss: Some(px(5995.00)),
+        }))
+        .unwrap();
+    let (entry, sl) = (ids[0], ids[2]);
+    r.wait(LAT);
+    r.trade(5999.75, 2); // 2 of 3
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert!(
+        r.core.order(sl).unwrap().reduce_only,
+        "live from the first fill"
+    );
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: entry,
+    })
+    .unwrap();
+    r.wait(LAT);
+    r.place(Side::Sell, 1, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(
+        r.core.order(sl).unwrap().remaining(),
+        Qty(1),
+        "shrunk with the position"
+    );
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0, "closed, never short");
+}
+
+/// Review round 2: a manual close while the bracket's entry still works holds its exits (never
+/// cancels them): the entry's next fill is protected again, and the old stop closes exactly it.
+#[test]
+fn a_manual_close_while_the_entry_works_keeps_the_rest_protected() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(3),
+                kind: limit(6000.00),
+            },
+            take_profit: Some(px(6005.00)),
+            stop_loss: Some(px(5995.00)),
+        }))
+        .unwrap();
+    let (tp, sl) = (ids[1], ids[2]);
+    r.wait(LAT);
+    r.trade(5999.75, 2); // 2 of 3
+    r.place(Side::Sell, 2, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert!(r.core.order(sl).unwrap().is_open(), "held, not cancelled");
+    assert_eq!(r.core.order(sl).unwrap().remaining(), Qty(0));
+    r.trade(5999.75, 5); // the last 1 fills
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(
+        r.core.order(sl).unwrap().remaining(),
+        Qty(1),
+        "protected again"
+    );
+    assert_eq!(r.core.order(tp).unwrap().remaining(), Qty(1));
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0, "closed, never short");
+}
+
+// ---- critical review 1, finding 3: a quantity increase is checked as a new order -------------
+
+fn grow(r: &mut Rig, order: OrderId, qty: i64) -> Result<Vec<OrderId>, lines_trading::Reject> {
+    r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order,
+        qty: Some(Qty(qty)),
+        price: None,
+    })
+}
+
+/// The order-size limit holds for the whole order, the contract cap for what it would hold,
+/// and the price band for a stop's moved trigger.
+#[test]
+fn growing_an_order_meets_risk_limits_and_the_contract_cap() {
+    let preset = RulePreset {
+        name: "cap".into(),
+        label: APPROXIMATION.into(),
+        account_size: 50_000,
+        trailing_drawdown: None,
+        daily_loss_limit: None,
+        max_micro_contracts: Some(50), // 5 ES
+        profit_target: None,
+        consistency: None,
+        liquidate_on_breach: false,
+        on_breach: Default::default(),
+    };
+    let mut cfg = prop_account(preset);
+    cfg.limits = RiskLimits {
+        max_order_qty: Some(3),
+        price_band_ticks: Some(40),
+        ..Default::default()
+    };
+    let mut r = Rig::with(FillModel::TradeThrough, cfg);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.trade(6000.00, 1); // the band's reference
+    let buy = r.place(Side::Buy, 1, limit(5990.00));
+    r.wait(LAT);
+    let e = grow(&mut r, buy, 6).unwrap_err();
+    assert_eq!(
+        e.code,
+        RejectCode::PropRule,
+        "60 micro over 50: {}",
+        e.message
+    );
+    let e = grow(&mut r, buy, 4).unwrap_err();
+    assert_eq!(
+        e.code,
+        RejectCode::Risk,
+        "4 over the order maximum 3: {}",
+        e.message
+    );
+    grow(&mut r, buy, 3).expect("within both");
+    r.wait(LAT);
+    assert_eq!(r.core.order(buy).unwrap().qty, Qty(3));
+    // A stop's trigger moved outside the band (40 ticks = 10 points): refused.
+    let stop = r.place(
+        Side::Sell,
+        1,
+        OrderKind::Stop {
+            trigger: px(5995.00),
+        },
+    );
+    r.wait(LAT);
+    let e = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order: stop,
+            qty: None,
+            price: Some(px(5980.00)),
+        })
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Risk, "{}", e.message);
+}
+
+/// Halted (drawdown breach): an open order can't grow ("only Flatten and Cancel All").
+#[test]
+fn a_halted_account_cant_grow_an_order() {
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    let sell = r.place(Side::Sell, 1, limit(6010.00));
+    r.wait(LAT);
+    r.book(&[(5997.00, 50)], &[(5997.25, 50)]);
+    r.trade(5997.00, 1); // −$487.50: drawdown (400) breached
+    assert_eq!(r.core.trading_state(&acct()), TradingState::Halted);
+    let e = grow(&mut r, sell, 5).unwrap_err();
+    assert_eq!(e.code, RejectCode::PropRule);
+    assert!(e.message.contains("halted"), "{}", e.message);
+    assert_eq!(r.core.order(sell).unwrap().qty, Qty(1));
+}
