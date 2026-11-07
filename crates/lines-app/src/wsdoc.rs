@@ -386,6 +386,65 @@ pub struct JournalState {
     pub all_dates: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub columns: BTreeMap<JournalCol, ColumnDoc>,
+    /// What the table lists (phase 2): trades, or P&L by account or by tag. Optional; a
+    /// value this build doesn't know reads as the trade list.
+    #[serde(default, skip_serializing_if = "JournalGroup::is_trades")]
+    pub group: JournalGroup,
+}
+
+/// What a journal pane lists.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum JournalGroup {
+    /// Every closed trade.
+    #[default]
+    Trades,
+    /// P&L per account, with each prop account's consistency.
+    Accounts,
+    /// P&L per tag (setup).
+    Tags,
+}
+
+impl JournalGroup {
+    pub const ALL: [JournalGroup; 3] = [
+        JournalGroup::Trades,
+        JournalGroup::Accounts,
+        JournalGroup::Tags,
+    ];
+
+    pub fn is_trades(&self) -> bool {
+        *self == JournalGroup::Trades
+    }
+
+    /// The word on its tab in the pane's header.
+    pub fn label(self) -> &'static str {
+        match self {
+            JournalGroup::Trades => "Trades",
+            JournalGroup::Accounts => "By account",
+            JournalGroup::Tags => "By tag",
+        }
+    }
+}
+
+impl From<String> for JournalGroup {
+    fn from(s: String) -> JournalGroup {
+        match s.as_str() {
+            "accounts" => JournalGroup::Accounts,
+            "tags" => JournalGroup::Tags,
+            _ => JournalGroup::Trades,
+        }
+    }
+}
+
+impl From<JournalGroup> for String {
+    fn from(g: JournalGroup) -> String {
+        match g {
+            JournalGroup::Trades => "trades",
+            JournalGroup::Accounts => "accounts",
+            JournalGroup::Tags => "tags",
+        }
+        .to_owned()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1342,6 +1401,27 @@ mod tests {
         let j = leaves[1].journal.as_ref().unwrap();
         assert!(j.all_dates);
         assert_eq!(j.columns[&JournalCol::Tags].shown, Some(false));
+        assert_eq!(j.group, JournalGroup::Trades, "no group: the trade list");
+    }
+
+    /// The journal's group (phase 2) is an optional field: written only when not the trade
+    /// list, read back, and a value from a newer build reads as the trade list (never a
+    /// corrupt workspace).
+    #[test]
+    fn journal_group_is_optional_and_lenient() {
+        for g in JournalGroup::ALL {
+            let s = JournalState {
+                group: g,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&s).unwrap();
+            assert_eq!(json.contains("group"), !g.is_trades(), "{json}");
+            assert_eq!(serde_json::from_str::<JournalState>(&json).unwrap(), s);
+        }
+        let newer: JournalState =
+            serde_json::from_str(r#"{"group": "hours", "all_dates": true}"#).unwrap();
+        assert_eq!(newer.group, JournalGroup::Trades);
+        assert!(newer.all_dates);
     }
 
     #[test]
