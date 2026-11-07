@@ -1011,6 +1011,8 @@ impl Trading {
         } else {
             TradingCore::BEFORE_DATA
         };
+        // News blackouts read the calendar the UI shows.
+        core.set_econ_schedule(Some(crate::econ_ui::schedule()));
         // Orders the broker still holds (brackets survive restarts) come back through rebuild,
         // with the account's real balance: only then are settings applied.
         core.rebuild(at);
@@ -1130,6 +1132,7 @@ impl Trading {
             // Accounts join when the broker discovers them (the watcher), each with its saved
             // guardrail progress (a lockout survives a restart) and the trader's settings.
             let mut core = TradingCore::new(broker);
+            core.set_econ_schedule(Some(crate::econ_ui::schedule()));
             let mut guards_path = guards_dir
                 .as_ref()
                 .map(|d| d.join(format!("{}.guardrails.json", ext.name())));
@@ -1783,6 +1786,16 @@ pub fn parse_script(
                     "loss" => g.max_daily_loss = Some(n(value)?),
                     "position" => g.max_position = Some(n(value)?),
                     "close" => g.no_entries_before_close_min = Some(n(value)? as u32),
+                    "news" => {
+                        use lines_trading::news::{NewsAction, NewsBlackout};
+                        let action = match *value {
+                            "warn" => NewsAction::Warn,
+                            "block" => NewsAction::Block,
+                            "flatten" => NewsAction::Flatten,
+                            v => anyhow::bail!("guard news warn|block|flatten, not {v:?}"),
+                        };
+                        g.news = Some(NewsBlackout::new(action));
+                    }
                     "streak" => {
                         let (l, m) = value
                             .split_once('/')
@@ -2735,6 +2748,24 @@ mod tests {
             snap.trades[0].mfe > lines_trading::Money::ZERO,
             "MAE/MFE still follow"
         );
+    }
+
+    /// `guard news warn|block|flatten` sets the account's news blackout (screenshots).
+    #[test]
+    fn scripts_set_a_news_blackout() {
+        let es_product = catalog::get(catalog::ES).unwrap();
+        let a = AccountId::new("paper");
+        let steps = parse_script("guard news block", &es_product, es(), &a).unwrap();
+        assert!(
+            steps.iter().any(|s| matches!(
+                s,
+                Step::Command(TradeCommand::SetGuardrails { guardrails, .. })
+                    if guardrails.news.map(|n| n.action)
+                        == Some(lines_trading::news::NewsAction::Block)
+            )),
+            "{steps:?}"
+        );
+        assert!(parse_script("guard news loud", &es_product, es(), &a).is_err());
     }
 
     #[test]

@@ -506,7 +506,8 @@ impl ChartView {
             feed,
             common: PaneCommon::default(),
             profile: VolumeProfileLayer::new(fixture.profile),
-            layers: Vec::new(),
+            // Scheduled economic releases (roadmap 8b) on every chart; none where no release moves the product.
+            layers: vec![Box::new(crate::econ_layer::EconLayer::new())],
             studies,
             seen_studies: u64::MAX,
             levels,

@@ -497,6 +497,82 @@ fn guard<'a>(p: &'a Prefs, t: &Target) -> Option<&'a lines_trading::Guardrails> 
         .and_then(|a| p.app.guardrails.get(&a))
 }
 
+/// The news blackout's choices (index 0: none), in tightening order.
+pub const NEWS_CHOICES: &[&str] = &["Off", "Warn", "Block", "Flatten"];
+const NEWS_ACTIONS: [lines_trading::news::NewsAction; 3] = [
+    lines_trading::news::NewsAction::Warn,
+    lines_trading::news::NewsAction::Block,
+    lines_trading::news::NewsAction::Flatten,
+];
+
+fn news(p: &Prefs, t: &Target) -> Option<lines_trading::news::NewsBlackout> {
+    guard(p, t).and_then(|g| g.news)
+}
+
+fn g_news(p: &Prefs, t: &Target, _: &Facts) -> Value {
+    Value::Choice(news(p, t).map_or(0, |n| {
+        1 + NEWS_ACTIONS
+            .iter()
+            .position(|a| *a == n.action)
+            .unwrap_or(0)
+    }))
+}
+fn s_news(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
+    let Value::Choice(k) = v else {
+        return Err("expected a choice");
+    };
+    let g = guard_mut(p, t)?;
+    g.news = match (k, g.news) {
+        (0, _) => None,
+        (k, Some(n)) => Some(lines_trading::news::NewsBlackout {
+            action: NEWS_ACTIONS[k - 1],
+            ..n
+        }),
+        (k, None) => Some(lines_trading::news::NewsBlackout::new(NEWS_ACTIONS[k - 1])),
+    };
+    drop_empty_guardrails(p, t);
+    Ok(())
+}
+fn news_mut<'a>(
+    p: &'a mut Prefs,
+    t: &Target,
+) -> Result<&'a mut lines_trading::news::NewsBlackout, &'static str> {
+    guard_mut(p, t)?
+        .news
+        .as_mut()
+        .ok_or("turn the news blackout on first")
+}
+fn g_news_before(p: &Prefs, t: &Target, _: &Facts) -> Value {
+    Value::Number(news(p, t).map(|n| i64::from(n.before_min)))
+}
+fn s_news_before(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
+    let Value::Number(Some(m)) = v else {
+        return Err("expected minutes");
+    };
+    news_mut(p, t)?.before_min = m as u32;
+    Ok(())
+}
+fn g_news_after(p: &Prefs, t: &Target, _: &Facts) -> Value {
+    Value::Number(news(p, t).map(|n| i64::from(n.after_min)))
+}
+fn s_news_after(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
+    let Value::Number(Some(m)) = v else {
+        return Err("expected minutes");
+    };
+    news_mut(p, t)?.after_min = m as u32;
+    Ok(())
+}
+fn g_news_medium(p: &Prefs, t: &Target, _: &Facts) -> Value {
+    Value::Bool(news(p, t).is_some_and(|n| n.include_medium))
+}
+fn s_news_medium(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
+    let Value::Bool(b) = v else {
+        return Err("expected on or off");
+    };
+    news_mut(p, t)?.include_medium = b;
+    Ok(())
+}
+
 fn guard_mut<'a>(
     p: &'a mut Prefs,
     t: &Target,
@@ -1096,6 +1172,61 @@ fn table() -> Vec<Setting> {
             g_close,
             Some(s_close),
         ),
+        // Risk: the news blackout (roadmap 8b) around scheduled economic releases.
+        s(
+            "guard.news",
+            Sec::Risk,
+            "News blackout",
+            "Around high-importance releases that move the account's product (CPI, the jobs report, FOMC; official schedules bundled with Lines): Warn shows it; Block refuses new entries; Flatten also closes positions in affected products when the window opens. Exits are never blocked. While the calendar can't answer (out of date), Block and Flatten refuse entries.",
+            Scope::Account,
+            Trading,
+            Choice(NEWS_CHOICES),
+            g_news,
+            Some(s_news),
+        ),
+        s(
+            "guard.news_before",
+            Sec::Risk,
+            "News blackout: minutes before",
+            "The blackout starts this many minutes before the release.",
+            Scope::Account,
+            Trading,
+            Number {
+                min: 0,
+                max: 120,
+                optional: false,
+                unit: "min",
+            },
+            g_news_before,
+            Some(s_news_before),
+        ),
+        s(
+            "guard.news_after",
+            Sec::Risk,
+            "News blackout: minutes after",
+            "The blackout ends this many minutes after the release.",
+            Scope::Account,
+            Trading,
+            Number {
+                min: 0,
+                max: 120,
+                optional: false,
+                unit: "min",
+            },
+            g_news_after,
+            Some(s_news_after),
+        ),
+        s(
+            "guard.news_medium",
+            Sec::Risk,
+            "News blackout: medium releases too",
+            "The blackout also covers PPI, GDP and PCE (charts mark them either way).",
+            Scope::Account,
+            Trading,
+            Toggle,
+            g_news_medium,
+            Some(s_news_medium),
+        ),
         // Risk: lockouts and breaches, as the core reports them.
         s(
             "guard.status",
@@ -1536,6 +1667,8 @@ fn guard_field(key: &str, g: &lines_trading::Guardrails) -> Option<Option<i64>> 
         "guard.losing_streak" => g.losing_streak.map(|s| i64::from(s.losses)),
         "guard.cooldown" => g.losing_streak.map(|s| i64::from(s.cooldown_min)),
         "guard.no_entries_before_close" => g.no_entries_before_close_min.map(i64::from),
+        "guard.news_before" => g.news.map(|n| i64::from(n.before_min)),
+        "guard.news_after" => g.news.map(|n| i64::from(n.after_min)),
         _ => return None,
     })
 }
@@ -2231,6 +2364,44 @@ mod tests {
         let mut p = Prefs::default();
         daily.apply(&mut p, &t, Value::Number(Some(1_000))).unwrap();
         assert_eq!(status(daily, &p, &t, &f), None);
+    }
+
+    /// The news blackout rows: minutes need the rule on; changing the action keeps the
+    /// minutes; Warn and Off loosen (asked, next session), Flatten tightens; Off drops an
+    /// entry left empty.
+    #[test]
+    fn the_news_blackout_is_a_guardrail() {
+        let t = risk_target();
+        let mut p = Prefs::default();
+        let news = by_key("guard.news").unwrap();
+        let before = by_key("guard.news_before").unwrap();
+        assert_eq!(
+            before.apply(&mut p, &t, Value::Number(Some(5))),
+            Err("turn the news blackout on first")
+        );
+        news.apply(&mut p, &t, Value::Choice(2)).unwrap();
+        before.apply(&mut p, &t, Value::Number(Some(5))).unwrap();
+        by_key("guard.news_medium")
+            .unwrap()
+            .apply(&mut p, &t, Value::Bool(true))
+            .unwrap();
+        let g0 = t.guardrails(&p);
+        assert_eq!(
+            g0.news.map(|n| (n.action, n.before_min, n.include_medium)),
+            Some((lines_trading::news::NewsAction::Block, 5, true))
+        );
+        let with = |k: usize| {
+            let mut q = p.clone();
+            news.apply(&mut q, &t, Value::Choice(k)).unwrap();
+            q
+        };
+        let warn = with(1);
+        assert_eq!(t.guardrails(&warn).news.map(|n| n.before_min), Some(5));
+        assert!(loosens(&g0, &t.guardrails(&warn)));
+        assert!(!loosens(&g0, &t.guardrails(&with(3))), "flatten is tighter");
+        let off = with(0);
+        assert!(loosens(&g0, &t.guardrails(&off)));
+        assert!(off.app.guardrails.is_empty(), "an empty entry is dropped");
     }
 
     #[test]

@@ -17,6 +17,8 @@ mod dom_trail;
 mod dom_view;
 mod drawings_store;
 mod dropdown;
+mod econ_layer;
+mod econ_ui;
 mod feeds;
 mod footprint;
 #[cfg(feature = "screenshot")]
@@ -457,6 +459,10 @@ struct Cli {
     /// confirmation. Repeatable.
     #[arg(long, requires = "settings")]
     settings_set: Vec<String>,
+    /// Screenshot: read this economic calendar (the bundled file's format) instead of the
+    /// bundled one, for the app and its trading cores (synthetic releases on synthetic data).
+    #[arg(long, requires = "screenshot")]
+    econ_calendar: Option<PathBuf>,
     /// Screenshot: a synthetic read-only broker (observe mode) with a SIM and a LIVE account;
     /// the panes trade its SIM account, long 2 with a working order on the recording's contract.
     #[arg(long, requires = "screenshot")]
@@ -1168,6 +1174,9 @@ where
 {
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
+    if let Some(path) = &cli.econ_calendar {
+        econ_ui::set_override_from(path)?;
+    }
     if let Some(dir) = &cli.gallery {
         #[cfg(feature = "screenshot")]
         {
