@@ -731,8 +731,10 @@ impl ChartView {
             return;
         };
         self.focus.focus(window, cx);
-        if std::mem::take(&mut self.tf_menu) {
-            // Clicking the chart dismisses the timeframe list (its rows handle their clicks).
+        let tf = std::mem::take(&mut self.tf_menu);
+        if std::mem::take(&mut self.trade.account_menu) || tf {
+            // Clicking the chart dismisses the timeframe or account list (their rows handle
+            // their clicks).
             cx.notify();
             return;
         }

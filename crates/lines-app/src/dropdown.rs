@@ -2,7 +2,7 @@
 //!
 //! The rule (docs/invariants.md, lines-app UI): the list's left edge lines up with the trigger's left edge and
 //! its top sits `GAP` px under the trigger's bottom. It moves only when it would leave the
-//! window: left just far enough to fit (`MARGIN` from the edge), and up above the trigger when
+//! window: left just far enough to keep `MARGIN` from the right edge, and up above the trigger when
 //! there is no room below. `place` is that rule; [`dropdown`] applies it with the trigger's
 //! real bounds, in window coordinates, so a list escapes its pane's header and the pane itself.
 
@@ -15,15 +15,21 @@ use crate::layout::Rect;
 
 /// Space between the trigger and its list (logical px).
 pub const GAP: f32 = 2.0;
-/// Space a list moved by the window edge keeps from that edge (logical px).
+/// Space a list keeps from the window's right edge (logical px).
 pub const MARGIN: f32 = 4.0;
+/// Deferred-draw priority of an open list: over the panes.
+pub const PRIORITY: usize = 1;
+/// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
+/// prompts, the switch-all banner): over any open list, so a list never hides or takes the
+/// clicks of a menu opened after it.
+pub const OVERLAY_PRIORITY: usize = 2;
 
 /// Where a list `popup` (width, height) opens for a trigger at `trigger`, in a window
 /// `window` (width, height) big, all in window logical px: its top-left corner.
 pub fn place(trigger: Rect, popup: (f32, f32), window: (f32, f32)) -> (f32, f32) {
     let ((w, h), (ww, wh)) = (popup, window);
     let mut x = trigger.x;
-    if x + w > ww {
+    if x + w > ww - MARGIN {
         x = ww - MARGIN - w;
     }
     let below = trigger.bottom() + GAP;
@@ -97,13 +103,22 @@ impl Element for Dropdown {
         let Some(mut popup) = self.popup.take() else {
             return;
         };
-        // Its natural size: rows never wrap to fit a narrow pane.
+        // The part of the chip that shows: a header clips its content before the hover
+        // controls' gutter. A chip clipped away entirely opens nothing.
+        let bounds = bounds.intersect(&window.content_mask().bounds);
+        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
+            return;
+        }
+        // Its natural size, at most the window's width (a list's own `max_w` wraps its text).
+        let v = window.viewport_size();
         let s = popup.layout_as_root(
-            size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+            size(
+                AvailableSpace::Definite(v.width),
+                AvailableSpace::MaxContent,
+            ),
             window,
             cx,
         );
-        let v = window.viewport_size();
         let trigger = Rect::new(
             f32::from(bounds.origin.x),
             f32::from(bounds.origin.y),
@@ -117,7 +132,7 @@ impl Element for Dropdown {
         );
         // Deferred: drawn after (over) the rest of the window, and not clipped by the header
         // or the pane.
-        window.defer_draw(popup, point(px(x.round()), px(y.round())), 1, None);
+        window.defer_draw(popup, point(px(x.round()), px(y.round())), PRIORITY, None);
     }
 
     fn paint(
@@ -157,9 +172,12 @@ mod tests {
         let chip = Rect { x: 1300.0, ..CHIP };
         // 1300 + 150 > 1400: the right edge sits MARGIN in from the window's.
         assert_eq!(place(chip, (150.0, 300.0), WIN), (1246.0, 52.0));
-        // Exactly fits: not moved.
-        let chip = Rect { x: 1250.0, ..CHIP };
-        assert_eq!(place(chip, (150.0, 300.0), WIN).0, 1250.0);
+        // Within MARGIN of the edge: moved in to MARGIN.
+        let chip = Rect { x: 1248.0, ..CHIP };
+        assert_eq!(place(chip, (150.0, 300.0), WIN).0, 1246.0);
+        // Exactly fits with MARGIN: not moved.
+        let chip = Rect { x: 1246.0, ..CHIP };
+        assert_eq!(place(chip, (150.0, 300.0), WIN).0, 1246.0);
         // Wider than the window: the left edge stays in it.
         assert_eq!(place(chip, (1500.0, 300.0), WIN).0, 0.0);
     }
