@@ -1,6 +1,6 @@
 # 0028: Equities and listed options, starting with SPY/QQQ through a broker extension
 
-**Status:** Proposed (amends 0013; reverses the roadmap's "equities: not planned")
+**Status:** Accepted (amends 0013; reverses the roadmap's "equities: not planned"; owner accepted 2026-11-07)
 
 **Context:** The owner holds a Charles Schwab account and wants to see SPY and QQQ and their option chains in Lines, then trade them, by hand and from strategies (0025). Schwab's Trader API (Individual tier) provides quotes, price history, option chains, streaming level-one data (equities, options, futures, futures options), accounts and positions. Order placement is documented for stocks, ETFs and options only, not futures. Authorization is OAuth: the access token lasts 30 minutes and the refresh token 7 days, after which the user logs in again in a browser. Lines models futures contracts only today (0013). Options need a strike, an expiry and a right, plus multiplier, exercise style and Greeks. Equities have no contract month.
 
