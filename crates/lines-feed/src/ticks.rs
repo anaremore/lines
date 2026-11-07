@@ -591,7 +591,7 @@ impl ChartStore {
     /// threads (tests join them; the feed lets them run).
     pub fn end_orderflow_loading(self: &Arc<Self>) -> Vec<JoinHandle<()>> {
         let store = Arc::downgrade(self);
-        let jobs = self.update(|d| {
+        let jobs = self.update_derived(|d| {
             d.orderflow_loading = false;
             let mut jobs = Vec::new();
             let keys: Vec<TickKey> = d
@@ -702,7 +702,7 @@ impl Drop for Rebuilding {
         if !self.done
             && let Some(store) = self.store.upgrade()
         {
-            store.update(|d| from_tape(d, self.key, self.generation));
+            store.update_derived(|d| from_tape(d, self.key, self.generation));
         }
         REBUILDS.fetch_sub(1, Ordering::AcqRel);
     }
@@ -745,7 +745,8 @@ enum Held {
 /// the store's lock, so it is held only to hand them over and for the last few.
 fn land(store: &ChartStore, key: TickKey, generation: u64, mut bars: TickBars) {
     loop {
-        let held = store.update(|d| take_held(d, key, generation, &mut bars, LAND_UNDER_LOCK));
+        let held =
+            store.update_derived(|d| take_held(d, key, generation, &mut bars, LAND_UNDER_LOCK));
         match held {
             Held::Gone | Held::Landed => return,
             Held::Chunk(v) => {

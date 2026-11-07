@@ -926,6 +926,61 @@ fn a_failed_rebuild_falls_back_to_the_tape() {
     }
 }
 
+/// A rebuild landing (or falling back to the tape) on its helper thread changes derived data
+/// only: panes repaint, but the feed's clocks keep counting from the last real data. Else a
+/// finished replay's market clock (the trading core's clock under `Clock::Market`) would jump
+/// back, and a stale feed would look fresh.
+#[test]
+fn a_landing_rebuild_never_moves_the_feed_clocks() {
+    let dir = scratch("clock");
+    let frames = frames();
+    let path = recording(&dir, &frames);
+    let s = store();
+    s.update(|d| d.tick_source = Some(TickSource::Replay(path)));
+    for (_, e) in &frames[..6_000] {
+        s.update(|d| d.apply(&events(e)));
+    }
+    let last = s.last_data_ms();
+    let clock = s.market_clock_after_quiet(std::time::Duration::ZERO);
+    let feed = s.feed_clock();
+    let revision = s.revision();
+    let mut lease = s.acquire_ticks(KEY);
+    lease.join_rebuild();
+    {
+        let d = s.read();
+        assert_ne!(
+            d.ticks.status(KEY, &d.series, &d.product),
+            TickStatus::Building,
+            "landed"
+        );
+    }
+    assert_eq!(s.last_data_ms(), last, "landing is not feed data");
+    assert_eq!(s.market_clock_after_quiet(std::time::Duration::ZERO), clock);
+    assert_eq!(s.feed_clock(), feed);
+    assert!(s.revision() > revision, "panes repaint");
+    // The fallback to the tape (a rebuild that can't run) too.
+    drop(lease);
+    let alive = Arc::new(());
+    let generation = {
+        let mut d = s.read();
+        d.ticks.slots.clear();
+        d.ticks.generation += 1;
+        let g = d.ticks.generation;
+        d.ticks.slots.push(Slot::new(
+            KEY,
+            Arc::downgrade(&alive),
+            g,
+            TickBars::new(KEY.n, KEY.reset, None, 16),
+            Some(Vec::new()),
+            None,
+        ));
+        g
+    };
+    drop(Rebuilding::new(Arc::downgrade(&s), KEY, generation));
+    assert_eq!(s.last_data_ms(), last, "the fallback is not feed data");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Landing with many held trades applies them outside the lock in chunks: the same bars as
 /// applying them all at once.
 #[test]

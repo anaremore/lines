@@ -64,8 +64,9 @@ fn trades(day: usize) -> Vec<(i64, i64, i64, native::Aggressor)> {
 }
 
 /// A `lines` recording of these days' trades, a quote at each close (a live feed's last
-/// frame), first frame at the first day's open.
-fn record(path: &Path, days: &[usize]) {
+/// frame), first frame at the first day's open. `resend`: the previous day's last trades sent
+/// again first (as a reconnect's snapshot re-delivers them), received at the open.
+fn record(path: &Path, days: &[usize], resend: usize) {
     let start = at(DAYS[days[0]].0);
     let mut w = Writer::create(
         path,
@@ -79,6 +80,23 @@ fn record(path: &Path, days: &[usize]) {
         },
     )
     .unwrap();
+    if let Some(prev) = days[0].checked_sub(1) {
+        let old = trades(prev);
+        for &(t, p, q, a) in &old[old.len() - resend..] {
+            let mut buf = Vec::new();
+            native::encode(
+                &NativeEvent::Trade {
+                    time_us: t * 1000,
+                    price: Price(p),
+                    qty: Qty(q),
+                    aggressor: a,
+                },
+                &mut buf,
+            );
+            w.write(Direction::FromServer, Duration::ZERO, &Frame::binary(buf))
+                .unwrap();
+        }
+    }
     let mut frame = |t: i64, e: NativeEvent| {
         let mut buf = Vec::new();
         native::encode(&e, &mut buf);
@@ -160,9 +178,12 @@ async fn tick_bars_agree_with_the_stored_order_flow_across_a_restart() {
         dir.join("tue.lfr"),
         dir.join("both.lfr"),
     );
-    record(&mon, &[0]);
-    record(&tue, &[1]);
-    record(&both, &[0, 1]);
+    record(&mon, &[0], 0);
+    // Tuesday's recording starts by re-sending Monday's last trades: already stored and
+    // replayed at the warm start (at or before `stored_through`), so live drops them and the
+    // writer doesn't store them (`frame_counted`); a stored-source rebuild reads them once.
+    record(&tue, &[1], 25);
+    record(&both, &[0, 1], 0);
     let root = dir.join("store");
     launch(&mon, Some(&root), &[]).await;
     // Tuesday's launch: a tick chart open from startup, Monday from the store's warm start.

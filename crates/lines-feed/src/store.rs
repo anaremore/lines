@@ -842,6 +842,23 @@ impl ChartStore {
         self.publish(f, true)
     }
 
+    /// Derived data changed (tick bars rebuilt on a helper thread, the warm start's end): both
+    /// revisions move so panes repaint, but nothing arrived from the feed, so the feed's clocks
+    /// ([`Self::market_clock`], [`Self::feed_clock`]) and its staleness keep counting from the
+    /// last real data (a landing rebuild must never move the trading clock back).
+    pub fn update_derived<R>(&self, f: impl FnOnce(&mut ChartData) -> R) -> R {
+        let r = f(&mut self.data.lock());
+        self.chart_revision.fetch_add(1, Ordering::Release);
+        self.revision.fetch_add(1, Ordering::Release);
+        r
+    }
+
+    /// When the last feed data was published (`mono_ms`), for tests of the clocks.
+    #[cfg(test)]
+    pub(crate) fn last_data_ms(&self) -> u64 {
+        self.last_data.load(Ordering::Acquire)
+    }
+
     /// Feed side: apply one feed frame. The chart revision moves only if the frame changed
     /// more than depth below the touch ([`ChartData::chart_epoch`]).
     pub fn update_frame<R>(&self, f: impl FnOnce(&mut ChartData) -> R) -> R {
