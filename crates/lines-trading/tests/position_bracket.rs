@@ -50,6 +50,11 @@ struct Wrapped {
     inner: PaperBroker,
     drop_modifies: Arc<AtomicUsize>,
     oco: bool,
+    /// Reject every reduce-only placement (a broker that refuses the exits).
+    reject_exits: Arc<std::sync::atomic::AtomicBool>,
+    rejected: Vec<BrokerEvent>,
+    /// Exit placements that reached the broker.
+    exits_seen: Arc<AtomicUsize>,
 }
 
 impl Broker for Wrapped {
@@ -62,6 +67,19 @@ impl Broker for Wrapped {
         c
     }
     fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
+        if let BrokerRequest::Place(o) = &req
+            && o.reduce_only
+        {
+            self.exits_seen.fetch_add(1, Ordering::Relaxed);
+            if self.reject_exits.load(Ordering::Relaxed) {
+                self.rejected.push(BrokerEvent::Rejected {
+                    id: o.id,
+                    reason: "refused by the venue".into(),
+                    at: now,
+                });
+                return;
+            }
+        }
         if matches!(req, BrokerRequest::Modify { .. })
             && self
                 .drop_modifies
@@ -76,6 +94,7 @@ impl Broker for Wrapped {
         self.inner.market(now, contract, input)
     }
     fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
+        out.append(&mut self.rejected);
         self.inner.poll(now, out)
     }
     fn next_wake(&self) -> Option<UtcMillis> {
@@ -97,6 +116,8 @@ struct Rig {
     t: i64,
     events: Vec<Event>,
     drop_modifies: Arc<AtomicUsize>,
+    reject_exits: Arc<std::sync::atomic::AtomicBool>,
+    exits_seen: Arc<AtomicUsize>,
 }
 
 impl Rig {
@@ -108,10 +129,15 @@ impl Rig {
         let mut inner = PaperBroker::new(paper());
         inner.open_account(acct(), Money::whole(50_000));
         let drop_modifies = Arc::new(AtomicUsize::new(0));
+        let reject_exits = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exits_seen = Arc::new(AtomicUsize::new(0));
         let mut core = TradingCore::new(Box::new(Wrapped {
             inner,
             drop_modifies: drop_modifies.clone(),
             oco,
+            reject_exits: reject_exits.clone(),
+            rejected: Vec::new(),
+            exits_seen: exits_seen.clone(),
         }));
         core.add_account(account, None);
         let mut r = Rig {
@@ -120,6 +146,8 @@ impl Rig {
             t: UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0,
             events: Vec::new(),
             drop_modifies,
+            reject_exits,
+            exits_seen,
         };
         r.book(&[(6000.00, 50)], &[(6000.25, 50)]);
         r
@@ -433,12 +461,16 @@ fn a_resize_racing_an_add_ends_at_the_position() {
     r.wait(LAT);
     // An add of 2 fills: the resize to 3 is on its way (the core still sees the legs at 1)
     // when a sell of 1 fills, so the position is 2 before the broker answers.
+    // The sell goes out before the add's fill is seen, so it fills after the resize to 3 is
+    // sent and before the broker gets it: the resize arrives for a position of 2.
     r.order(Side::Buy, 2, OrderKind::Market);
-    r.wait(LAT);
-    assert_eq!(r.pos(), 3);
-    assert_eq!(r.exits()[0].1, 1, "the resize isn't answered yet");
-    r.wait(LAT / 4);
+    r.wait(LAT / 2);
     r.order(Side::Sell, 1, OrderKind::Market);
+    r.wait(LAT / 2);
+    assert_eq!(r.pos(), 3);
+    assert_eq!(r.exits()[0].1, 1, "the resize to 3 isn't answered yet");
+    r.wait(LAT / 2);
+    assert_eq!(r.pos(), 2, "the sell filled first");
     r.wait(LAT);
     r.wait(LAT);
     r.wait(LAT);
@@ -578,6 +610,8 @@ fn a_restart_adopts_the_pair_and_keeps_following_the_position() {
             t: UtcMillis::parse_iso("2026-11-10T15:30:00Z").unwrap().0,
             events: Vec::new(),
             drop_modifies: Arc::new(AtomicUsize::new(0)),
+            reject_exits: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            exits_seen: Arc::new(AtomicUsize::new(0)),
         };
         r.core.rebuild(r.now());
         r.collect();
@@ -701,10 +735,10 @@ fn a_strategy_on_the_contract_keeps_its_own_exits() {
     assert_eq!(r.core.bracket_mode(&acct(), es()), BracketMode::PerEntry);
 }
 
-/// Cancel All takes the pair; the trader's own exit is then accepted, and it becomes the leg
-/// the position follows.
+/// Cancel All takes the pair, and it stays taken; the trader's own exit is then accepted and
+/// is theirs (never resized, so a scale-out order is never grown).
 #[test]
-fn after_cancel_all_a_traders_own_exit_becomes_the_leg() {
+fn after_cancel_all_the_traders_own_exit_is_theirs() {
     let mut r = Rig::new();
     r.mode(MODE, false).unwrap();
     r.market_order(Side::Buy, 2);
@@ -732,7 +766,13 @@ fn after_cancel_all_a_traders_own_exit_becomes_the_leg() {
     r.wait(LAT);
     r.market_order(Side::Buy, 1);
     r.wait(LAT);
-    assert_eq!(r.exits(), [(Side::Sell, 3, stop(5995.00))]);
+    r.wait(2_000);
+    assert_eq!(r.pos(), 3);
+    assert_eq!(
+        r.exits(),
+        [(Side::Sell, 2, stop(5995.00))],
+        "theirs, as placed"
+    );
 }
 
 /// A leg the core refuses (here the submit rate: the entry and the stop use the second's two
@@ -839,4 +879,51 @@ fn a_strategy_cant_join_a_position_bracket() {
         "{}",
         no.message
     );
+}
+
+/// Flat and long again within one batch (the stop fills, the broker cancels the target, a
+/// resting buy fills): the new position gets a pair, never none.
+#[test]
+fn flat_and_reopened_in_one_batch_gets_a_pair() {
+    let mut r = Rig::new();
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 1);
+    r.wait(LAT);
+    r.order(Side::Buy, 1, limit(5997.00));
+    r.wait(LAT);
+    r.market(&[
+        MarketInput::Trade {
+            time: UtcMillis(r.t + 1),
+            price: px(5998.00),
+            qty: Qty(5),
+        },
+        MarketInput::Trade {
+            time: UtcMillis(r.t + 2),
+            price: px(5996.75),
+            qty: Qty(5),
+        },
+    ]);
+    r.wait(LAT);
+    r.wait(LAT);
+    assert_eq!(r.pos(), 1, "stopped out, then the resting buy filled");
+    assert_eq!(r.exits().len(), 2, "{:?}", r.exits());
+    assert!(r.exits().iter().all(|e| e.1 == 1));
+}
+
+/// A broker that refuses every exit: three tries a leg, then it is left (each refusal said).
+#[test]
+fn a_broker_refusing_the_legs_gets_three_tries_each() {
+    let mut r = Rig::new();
+    r.reject_exits.store(true, Ordering::Relaxed);
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 1);
+    for _ in 0..10 {
+        r.wait(1_000);
+    }
+    assert_eq!(
+        r.exits_seen.load(Ordering::Relaxed),
+        6,
+        "three per leg, no more"
+    );
+    assert!(r.exits().is_empty());
 }

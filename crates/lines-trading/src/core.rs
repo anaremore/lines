@@ -679,6 +679,7 @@ impl TradingCore {
                 (env, result)
             }
         };
+        self.bracket_note_cancel(&env, &result);
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
             if let Ok(ids) = &result {

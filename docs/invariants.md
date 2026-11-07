@@ -86,13 +86,16 @@ body` (pre-URL recordings: body only), so recordings contain them and sessions i
   - **Following the position:** every sync (after each command, tick and market batch) compares each leg's remaining quantity with the position and resizes it, keeping its price (a person may move it).
     - Resizes go straight to the broker (`BrokerRequest::Modify`), with no guardrail, rate or reduce-only-growth check: they are protection.
     - **The broker must cap a reduce-only order at the position**, as the paper broker does. This is required of any broker with `oco`.
-    - A resize still unanswered isn't sent again for a second. A resize the broker lost or refused is sent again, so a race with a fill settles at the position.
+    - A resize still unanswered is sent again a second later, three times in all, and then the miss is published once. A resize that races a fill settles at the position.
   - **Flat and flips:** flat cancels the pair. A flip cancels it, and the new side gets its own pair once those cancels are confirmed: a new pair is placed only while no other exit works on the contract, so exits never add up past the position.
-  - **Refused legs:** a leg the core or the broker refused is tried again once a second, three times in all, with each refusal published.
-  - **A person's cancel:** a leg a person cancelled (×, Cancel All) stays cancelled. An exit they then place becomes that leg, and the position follows it.
+  - **Legs that end:** a leg that ends while the position is still open is placed again:
+    - filled while the position grew: its count of tries starts again;
+    - ended by the broker, or flat and reopened within one poll: the leg is placed again.
+  - **Refused legs:** a placement the core or the broker refuses is tried again a second later, three tries per leg, each refusal published. A new pair waiting more than 5 s for other exits to finish says so.
+  - **A person's cancel:** a leg a person cancels (× or Cancel All, recorded from the command) stays cancelled until the position is flat. Exits they place then are their own: never resized or adopted, so a scale-out order is never grown.
   - **Entries and second exits:** in this mode a person's bracket order loses its exits (sent as the entry alone), and a person's exit of a kind whose leg is working is refused.
   - **Switching to position mode:**
-    - existing exits that already are one stop and one target, each for the whole position on the closing side, are adopted as the pair, as after a restart (the app sets the saved mode again);
+    - existing exits that already are one stop and one target, each for the whole position on the closing side, are adopted as the pair, as after a restart (the app sets the saved mode again); a missing one of the two is placed;
     - any other working exits are refused unless `replace`, with the count in the message (`exits_replaced_by_position_bracket`, what the confirmation names); with `replace` they are cancelled first.
   - **Back to per entry:** the pair stays, as two ordinary exits.
   - **Strategies:** the mode is refused, and does nothing, while a strategy instance trades the account and contract, and a strategy can't be added while the mode is on. A strategy's exits are its own.

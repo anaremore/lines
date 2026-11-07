@@ -8,9 +8,11 @@
 //! - It follows the position: every sync compares each leg with the position and resizes it
 //!   (prices kept, so a person's move stays); flat cancels the pair, a flip replaces it. Resizes
 //!   go to the broker directly, so guardrail lockouts and modify limits never hold back
-//!   protection; one still unanswered is not sent again for a second.
-//! - A leg the core or the broker refused is tried again, once a second, three times at most.
-//!   A leg a person cancelled stays cancelled; an exit they place instead becomes that leg.
+//!   protection; one still unanswered is sent again a second later, three times at most.
+//! - A leg that ends while the position is open (filled while the position grew, or ended by
+//!   the broker) is placed again; one refused (by the core or the broker) is tried again once a
+//!   second, three tries in all. A leg a person cancelled stays cancelled: their own exits are
+//!   theirs (not resized).
 //! - Entries carry no exits of their own in this mode (a bracket order's exits are dropped),
 //!   and a second exit of a kind whose leg stands is refused.
 //! - Strategies keep their own exits: the mode is refused, and does nothing, while a strategy
@@ -30,15 +32,22 @@ const RETRY_MS: i64 = 1_000;
 /// Tries per leg (the first placement included) before it is left to the person.
 const MAX_TRIES: u32 = 3;
 
+/// How long a new pair waits for other exits to finish before saying so (ms).
+const WAIT_REPORT_MS: i64 = 5_000;
+
 /// One leg of the pair.
 #[derive(Clone, Debug, Default)]
 struct Leg {
     /// The working order.
     id: Option<OrderId>,
-    /// Its placement was refused (by the core or the broker): when, and the tries so far.
-    refused: Option<(UtcMillis, u32)>,
-    /// A resize sent and not seen yet: the quantity asked for, and when.
-    asked: Option<(i64, UtcMillis)>,
+    /// Placements so far this position (a fill of the leg starts the count again).
+    tries: u32,
+    /// Place it (again) from this time on.
+    retry_at: Option<UtcMillis>,
+    /// A person cancelled it: it stays cancelled until the position is flat.
+    person_cancelled: bool,
+    /// A resize sent and not seen yet: the quantity asked for, when, and how many times.
+    asked: Option<(i64, UtcMillis, u32)>,
 }
 
 /// One account and contract in position mode.
@@ -50,6 +59,8 @@ pub(super) struct PositionBracket {
     target: Leg,
     /// The position side (`Buy`: long) this episode's pair was placed for; `None` until it is.
     placed_for: Option<Side>,
+    /// Since when a new pair has waited for other exits to finish, and whether that was said.
+    waiting: Option<(UtcMillis, bool)>,
 }
 
 fn is_stop_kind(k: &OrderKind) -> bool {
@@ -225,6 +236,7 @@ impl TradingCore {
             stop: Leg::default(),
             target: Leg::default(),
             placed_for: None,
+            waiting: None,
         };
         let pos = self.position(account, contract);
         let adopt = self.adoptable(account, contract, &exits);
@@ -266,6 +278,12 @@ impl TradingCore {
             }
             if !exits.is_empty() {
                 b.placed_for = Some(if pos > 0 { Side::Buy } else { Side::Sell });
+                // Only one of the two there: the other is placed (checked like any leg).
+                for leg in [&mut b.stop, &mut b.target] {
+                    if leg.id.is_none() {
+                        leg.retry_at = Some(now);
+                    }
+                }
             }
         } else {
             for id in exits {
@@ -328,8 +346,36 @@ impl TradingCore {
         }
     }
 
-    /// What became of a leg's order: still working, refused by the broker (tried again), or
-    /// gone (filled, or cancelled: by a person, or with the position).
+    /// A person's cancel (× or Cancel All) of a leg: it stays cancelled while the position is
+    /// open (called by `handle` with the command's result).
+    pub(super) fn bracket_note_cancel(
+        &mut self,
+        env: &Envelope,
+        result: &Result<Vec<OrderId>, Reject>,
+    ) {
+        if Origin::of(env.source) != Origin::Manual
+            || !matches!(
+                env.command,
+                Command::CancelOrder { .. } | Command::CancelAll { .. }
+            )
+        {
+            return;
+        }
+        let Ok(ids) = result else {
+            return;
+        };
+        for b in self.position_brackets.values_mut() {
+            for leg in [&mut b.stop, &mut b.target] {
+                if leg.id.is_some_and(|i| ids.contains(&i)) {
+                    leg.person_cancelled = true;
+                }
+            }
+        }
+    }
+
+    /// What became of a leg's order: still working; cancelled by a person (it stays so); or
+    /// ended otherwise (filled, refused or ended by the broker), so it is placed again for what
+    /// is still open (a fill starts the count of tries again; a refusal waits a second).
     fn leg_refresh(&self, now: UtcMillis, leg: &mut Leg) {
         let Some(id) = leg.id else {
             return;
@@ -337,13 +383,23 @@ impl TradingCore {
         if self.live_order(Some(id)).is_some() {
             return;
         }
-        let rejected = self
-            .orders
-            .get(&id)
-            .is_some_and(|o| matches!(o.state, OrderState::Rejected { .. }));
+        let state = self.orders.get(&id).map(|o| o.state.clone());
         leg.id = None;
         leg.asked = None;
-        leg.refused = rejected.then_some((now, 1));
+        if leg.person_cancelled {
+            leg.retry_at = None;
+            return;
+        }
+        match state {
+            Some(OrderState::Filled) => {
+                leg.tries = 0;
+                leg.retry_at = Some(now);
+            }
+            Some(OrderState::Rejected { .. }) => {
+                leg.retry_at = (leg.tries < MAX_TRIES).then_some(UtcMillis(now.0 + RETRY_MS));
+            }
+            _ => leg.retry_at = (leg.tries < MAX_TRIES).then_some(now),
+        }
     }
 
     fn position_bracket_sync(
@@ -374,6 +430,7 @@ impl TradingCore {
             b.stop = Leg::default();
             b.target = Leg::default();
             b.placed_for = None;
+            b.waiting = None;
             if pos == 0 {
                 self.position_brackets.insert(key, b);
                 return;
@@ -384,16 +441,38 @@ impl TradingCore {
         if b.placed_for.is_none() {
             // Wait for any exit still working here (one being replaced or cancelled) to go, so
             // exits never add up to more than the position.
-            if !self.exits_on(account, contract).is_empty() {
+            let waiting = self.exits_on(account, contract);
+            if !waiting.is_empty() {
+                let (since, said) = *b.waiting.get_or_insert((now, false));
+                if !said && now.0 - since.0 >= WAIT_REPORT_MS {
+                    // A cancel never confirmed: say so (the position has no pair yet).
+                    let env = self.bracket_envelope(Command::CancelAll {
+                        account: account.clone(),
+                        contract: Some(contract),
+                    });
+                    self.events.push(Event::Command {
+                        id: env.id,
+                        source: env.source,
+                        at: now,
+                        result: Err(Reject::new(
+                            RejectCode::Broker,
+                            format!(
+                                "the position's bracket waits for {} exit order{} to finish; this position has no bracket yet",
+                                waiting.len(),
+                                if waiting.len() == 1 { "" } else { "s" }
+                            ),
+                        )),
+                    });
+                    b.waiting = Some((since, true));
+                }
                 self.position_brackets.insert(key, b);
                 return;
             }
+            b.waiting = None;
             b.placed_for = Some(side);
             let mut stop = Leg::default();
             let mut target = Leg::default();
-            self.bracket_place(
-                now, account, contract, &b, true, closing, size, &mut stop, 1,
-            );
+            self.bracket_place(now, account, contract, &b, true, closing, size, &mut stop);
             self.bracket_place(
                 now,
                 account,
@@ -403,7 +482,6 @@ impl TradingCore {
                 closing,
                 size,
                 &mut target,
-                1,
             );
             b.stop = stop;
             b.target = target;
@@ -416,30 +494,10 @@ impl TradingCore {
             } else {
                 b.target.clone()
             };
-            if leg.id.is_none() {
-                // A person's own exit of this kind stands in for the leg.
-                leg.id = self
-                    .orders
-                    .values()
-                    .find(|o| {
-                        o.is_open()
-                            && !self.cancelling.contains(&o.id)
-                            && o.reduce_only
-                            && o.role == Role::Single
-                            && &o.account == account
-                            && o.contract == contract
-                            && o.side == closing
-                            && is_stop(o) == is_stop_leg
-                    })
-                    .map(|o| o.id);
-                if leg.id.is_some() {
-                    leg.refused = None;
-                }
-            }
             if leg.id.is_none()
-                && let Some((at, tries)) = leg.refused
-                && tries < MAX_TRIES
-                && now.0 - at.0 >= RETRY_MS
+                && !leg.person_cancelled
+                && leg.tries < MAX_TRIES
+                && leg.retry_at.is_some_and(|t| now.0 >= t.0)
             {
                 self.bracket_place(
                     now,
@@ -450,23 +508,47 @@ impl TradingCore {
                     closing,
                     size,
                     &mut leg,
-                    tries + 1,
                 );
             }
             if let Some(id) = leg.id {
                 // The leg to the position, prices kept. Straight to the broker (no guardrail,
                 // rate or growth checks: this is protection, and it never exceeds the
-                // position); a resize still unanswered is not sent again for a while.
+                // position); one unanswered is sent again a second later, three times in all,
+                // then the miss is said once.
                 let o = &self.orders[&id];
                 let want = o.filled.0 + size;
-                if o.qty.0 == want {
-                    leg.asked = None;
-                } else if !leg
-                    .asked
-                    .is_some_and(|(q, at)| q == want && now.0 - at.0 < RETRY_MS)
-                {
-                    self.bracket_resize(now, id, Qty(want));
-                    leg.asked = Some((want, now));
+                match leg.asked {
+                    _ if o.qty.0 == want => leg.asked = None,
+                    Some((q, at, n)) if q == want => {
+                        if n < MAX_TRIES && now.0 - at.0 >= RETRY_MS {
+                            self.bracket_resize(now, id, Qty(want));
+                            leg.asked = Some((want, now, n + 1));
+                        } else if n == MAX_TRIES && now.0 - at.0 >= RETRY_MS {
+                            let env = self.bracket_envelope(Command::ModifyOrder {
+                                account: account.clone(),
+                                order: id,
+                                qty: Some(Qty(want)),
+                                price: None,
+                            });
+                            self.events.push(Event::Command {
+                                id: env.id,
+                                source: env.source,
+                                at: now,
+                                result: Err(Reject::new(
+                                    RejectCode::Broker,
+                                    format!(
+                                        "the broker didn't resize the position's {} to {size}",
+                                        if is_stop_leg { "stop" } else { "target" }
+                                    ),
+                                )),
+                            });
+                            leg.asked = Some((want, at, n + 1));
+                        }
+                    }
+                    _ => {
+                        self.bracket_resize(now, id, Qty(want));
+                        leg.asked = Some((want, now, 1));
+                    }
                 }
             }
             if is_stop_leg {
@@ -479,8 +561,8 @@ impl TradingCore {
     }
 
     /// Place one leg for `size`, at its offset from the position's average; not sent when it
-    /// would fill or trigger at once. A refusal (published as the command's result) is kept on
-    /// the leg for another try.
+    /// would fill or trigger at once. A refusal (published as the command's result) is tried
+    /// again a second later while tries are left.
     #[allow(clippy::too_many_arguments)]
     fn bracket_place(
         &mut self,
@@ -492,8 +574,8 @@ impl TradingCore {
         closing: Side,
         size: i64,
         leg: &mut Leg,
-        tries: u32,
     ) {
+        leg.tries += 1;
         let (stop, target) = self.bracket_prices(account, contract, b.stop_ticks, b.target_ticks);
         let kind = if is_stop_leg {
             OrderKind::Stop { trigger: stop }
@@ -524,9 +606,11 @@ impl TradingCore {
         match result.ok().and_then(|ids| ids.first().copied()) {
             Some(id) => {
                 leg.id = Some(id);
-                leg.refused = None;
+                leg.retry_at = None;
             }
-            None => leg.refused = Some((now, tries)),
+            None => {
+                leg.retry_at = (leg.tries < MAX_TRIES).then_some(UtcMillis(now.0 + RETRY_MS));
+            }
         }
     }
 
