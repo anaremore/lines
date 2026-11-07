@@ -121,6 +121,15 @@ impl TradingCore {
                 other.cfg.label
             )));
         }
+        // A position bracket covers a person's trades there; a strategy's exits are its own.
+        if self
+            .position_brackets
+            .contains_key(&(cfg.account.clone(), cfg.contract))
+        {
+            return Err(deny(
+                "one bracket for the position is on for this account and contract: switch it back to per entry first",
+            ));
+        }
         let id = cfg.id;
         match self.strategies.get_mut(&id) {
             Some(i) if i.state == StrategyState::Armed => {

@@ -1,16 +1,19 @@
 //! Position brackets: one stop and one target for the whole manual position on an account and
 //! contract (`BracketMode::Position`), with the paper broker, scripted books, trades and time.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use lines_core::{ContractKey, Month, Price, Qty, Side as BookSide, UtcMillis};
 use lines_feed::catalog;
+use lines_trading::broker::{BrokerEvent, BrokerRequest, BrokerSnapshot};
 use lines_trading::persist;
 use lines_trading::service::trading_file;
 use lines_trading::{
-    AccountConfig, AccountId, BracketMode, BracketSpec, Command, Event, FillModel, MarketInput,
-    Money, OrderId, OrderKind, OrderSpec, OrderState, PaperBroker, PaperConfig, Side, Source,
-    TradingCore,
+    AccountConfig, AccountId, BracketMode, BracketSpec, Broker, BrokerCaps, Command, Event,
+    FillModel, MarketInput, Money, OrderId, OrderKind, OrderSpec, PaperBroker, PaperConfig,
+    RiskLimits, Side, Source, TradingCore,
 };
 
 const LAT: i64 = 20;
@@ -42,23 +45,81 @@ const MODE: BracketMode = BracketMode::Position {
     target_ticks: 16,
 };
 
+/// The paper broker, but it can drop modify requests (a venue that loses one) or lack OCO.
+struct Wrapped {
+    inner: PaperBroker,
+    drop_modifies: Arc<AtomicUsize>,
+    oco: bool,
+}
+
+impl Broker for Wrapped {
+    fn name(&self) -> &str {
+        "wrapped"
+    }
+    fn capabilities(&self) -> BrokerCaps {
+        let mut c = self.inner.capabilities();
+        c.oco = self.oco;
+        c
+    }
+    fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
+        if matches!(req, BrokerRequest::Modify { .. })
+            && self
+                .drop_modifies
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+        {
+            return;
+        }
+        self.inner.request(now, req)
+    }
+    fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput) {
+        self.inner.market(now, contract, input)
+    }
+    fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
+        self.inner.poll(now, out)
+    }
+    fn next_wake(&self) -> Option<UtcMillis> {
+        self.inner.next_wake()
+    }
+    fn snapshot(&self) -> BrokerSnapshot {
+        self.inner.snapshot()
+    }
+    fn simulated(&self) -> bool {
+        true
+    }
+    fn saved_state(&self) -> Option<serde_json::Value> {
+        self.inner.saved_state()
+    }
+}
+
 struct Rig {
     core: TradingCore,
     t: i64,
     events: Vec<Event>,
+    drop_modifies: Arc<AtomicUsize>,
 }
 
 impl Rig {
     fn new() -> Rig {
-        let mut b = PaperBroker::new(paper());
-        b.open_account(acct(), Money::whole(50_000));
-        let mut core = TradingCore::new(Box::new(b));
-        core.add_account(AccountConfig::paper("paper-1", 50_000), None);
+        Rig::with(AccountConfig::paper("paper-1", 50_000), true)
+    }
+
+    fn with(account: AccountConfig, oco: bool) -> Rig {
+        let mut inner = PaperBroker::new(paper());
+        inner.open_account(acct(), Money::whole(50_000));
+        let drop_modifies = Arc::new(AtomicUsize::new(0));
+        let mut core = TradingCore::new(Box::new(Wrapped {
+            inner,
+            drop_modifies: drop_modifies.clone(),
+            oco,
+        }));
+        core.add_account(account, None);
         let mut r = Rig {
             core,
             // Tuesday 2026-11-10 15:00 UTC: CME open.
             t: UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0,
             events: Vec::new(),
+            drop_modifies,
         };
         r.book(&[(6000.00, 50)], &[(6000.25, 50)]);
         r
@@ -370,16 +431,26 @@ fn a_resize_racing_an_add_ends_at_the_position() {
     r.mode(MODE, false).unwrap();
     r.market_order(Side::Buy, 1);
     r.wait(LAT);
-    // Two adds back to back: the first resize is still on its way when the second fills.
-    r.order(Side::Buy, 1, OrderKind::Market);
-    r.wait(LAT);
+    // An add of 2 fills: the resize to 3 is on its way (the core still sees the legs at 1)
+    // when a sell of 1 fills, so the position is 2 before the broker answers.
     r.order(Side::Buy, 2, OrderKind::Market);
-    r.wait(LAT / 2);
+    r.wait(LAT);
+    assert_eq!(r.pos(), 3);
+    assert_eq!(r.exits()[0].1, 1, "the resize isn't answered yet");
+    r.wait(LAT / 4);
+    r.order(Side::Sell, 1, OrderKind::Market);
     r.wait(LAT);
     r.wait(LAT);
-    assert_eq!(r.pos(), 4);
-    assert_eq!(r.exits()[0].1, 4);
-    assert_eq!(r.exits()[1].1, 4);
+    r.wait(LAT);
+    assert_eq!(r.pos(), 2);
+    assert_eq!(
+        r.exits(),
+        [
+            (Side::Sell, 2, stop(5998.25)),
+            (Side::Sell, 2, limit(6004.25))
+        ],
+        "settled at the position, never left larger"
+    );
 }
 
 #[test]
@@ -506,6 +577,7 @@ fn a_restart_adopts_the_pair_and_keeps_following_the_position() {
             core,
             t: UtcMillis::parse_iso("2026-11-10T15:30:00Z").unwrap().0,
             events: Vec::new(),
+            drop_modifies: Arc::new(AtomicUsize::new(0)),
         };
         r.core.rebuild(r.now());
         r.collect();
@@ -543,7 +615,6 @@ fn a_restart_adopts_the_pair_and_keeps_following_the_position() {
     assert_eq!(r2.exits().len(), 2);
     assert_eq!(r2.exits()[0].1, 3);
     let _ = std::fs::remove_dir_all(&dir);
-    let _ = OrderState::Filled;
 }
 
 /// A guardrail lockout refuses entries, never protection: a resting add that fills during the
@@ -628,4 +699,144 @@ fn a_strategy_on_the_contract_keeps_its_own_exits() {
         no.message
     );
     assert_eq!(r.core.bracket_mode(&acct(), es()), BracketMode::PerEntry);
+}
+
+/// Cancel All takes the pair; the trader's own exit is then accepted, and it becomes the leg
+/// the position follows.
+#[test]
+fn after_cancel_all_a_traders_own_exit_becomes_the_leg() {
+    let mut r = Rig::new();
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 2);
+    r.wait(LAT);
+    r.cmd(Command::CancelAll {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(LAT);
+    assert!(
+        r.exits().is_empty(),
+        "nothing put back over the trader's cancel"
+    );
+    r.wait(2_000);
+    assert!(r.exits().is_empty());
+    r.cmd(Command::PlaceExit(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(2),
+        kind: stop(5995.00),
+    }))
+    .expect("an exit of their own is accepted");
+    r.wait(LAT);
+    r.market_order(Side::Buy, 1);
+    r.wait(LAT);
+    assert_eq!(r.exits(), [(Side::Sell, 3, stop(5995.00))]);
+}
+
+/// A leg the core refuses (here the submit rate: the entry and the stop use the second's two
+/// submits) is tried again a second later.
+#[test]
+fn a_refused_leg_is_tried_again() {
+    let mut cfg = AccountConfig::paper("paper-1", 50_000);
+    cfg.limits = RiskLimits {
+        max_submits_per_sec: Some(2),
+        ..Default::default()
+    };
+    let mut r = Rig::with(cfg, true);
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 1);
+    r.wait(LAT);
+    assert_eq!(
+        r.exits(),
+        [(Side::Sell, 1, stop(5998.25))],
+        "the target was refused"
+    );
+    r.wait(1_000);
+    r.wait(LAT);
+    assert_eq!(
+        r.exits(),
+        [
+            (Side::Sell, 1, stop(5998.25)),
+            (Side::Sell, 1, limit(6004.25))
+        ]
+    );
+}
+
+/// The broker loses a resize: the legs are still short of the position, so they are asked
+/// again.
+#[test]
+fn a_lost_resize_is_sent_again() {
+    let mut r = Rig::new();
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 1);
+    r.wait(LAT);
+    r.drop_modifies.store(2, Ordering::Relaxed);
+    r.market_order(Side::Buy, 2);
+    r.wait(LAT);
+    assert_eq!(r.exits()[0].1, 1, "both resizes lost");
+    r.wait(1_000);
+    r.wait(LAT);
+    assert_eq!(r.exits()[0].1, 3);
+    assert_eq!(r.exits()[1].1, 3);
+}
+
+/// Switching on with a position whose target the market is already past is refused: the pair
+/// would close it at once.
+#[test]
+fn a_pair_that_would_fill_at_once_is_not_placed() {
+    let mut r = Rig::new();
+    r.market_order(Side::Buy, 2);
+    r.book(&[(6010.00, 50)], &[(6010.25, 50)]);
+    r.market(&[MarketInput::Bid(px(6010.00)), MarketInput::Ask(px(6010.25))]);
+    let no = r.mode(MODE, false).unwrap_err();
+    assert!(
+        no.message.contains("past the bracket's target"),
+        "{}",
+        no.message
+    );
+    assert_eq!(r.pos(), 2);
+    assert!(r.exits().is_empty());
+}
+
+#[test]
+fn a_broker_without_oco_cant_hold_one() {
+    let mut r = Rig::with(AccountConfig::paper("paper-1", 50_000), false);
+    let no = r.mode(MODE, false).unwrap_err();
+    assert!(
+        no.message.contains("can't hold a position bracket"),
+        "{}",
+        no.message
+    );
+}
+
+/// A strategy can't be added where the position bracket is on (its exits are its own).
+#[test]
+fn a_strategy_cant_join_a_position_bracket() {
+    use lines_trading::{HoursWindow, StrategyConfig, StrategyId, StrategyLimits, TradingHours};
+    let mut r = Rig::new();
+    r.mode(MODE, false).unwrap();
+    let no = r
+        .cmd(Command::AddStrategy(StrategyConfig {
+            id: StrategyId(7),
+            label: "example #7".into(),
+            account: acct(),
+            contract: es(),
+            limits: StrategyLimits {
+                max_position: 2,
+                max_daily_loss: 1_000,
+                max_orders_per_min: 5,
+                hours: TradingHours {
+                    tz: "America/New_York".into(),
+                    windows: vec![HoursWindow::new("09:30", "16:00")],
+                },
+            },
+        }))
+        .unwrap_err();
+    assert!(
+        no.message.contains("switch it back to per entry"),
+        "{}",
+        no.message
+    );
 }
