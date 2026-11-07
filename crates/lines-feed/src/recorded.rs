@@ -32,8 +32,9 @@ impl Frames {
                     Some(_) => continue,
                 }
             },
+            // `open` already read the first stored frame ahead: it comes first.
             Frames::Stored(s) => Ok(s
-                .next_frame()?
+                .next_unpaced()?
                 .map(|(us, f)| (UtcMillis(us.div_euclid(1000)), f))),
         }
     }
@@ -217,6 +218,61 @@ mod tests {
         }
         assert_eq!(got, vec![(0, 600_000), (500, 600_025), (1000, 600_050)]);
         assert_eq!(r.decode_errors(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stored session decodes from its first frame: `SegmentReplay::open` reads that frame
+    /// ahead, and it once got lost here (a backtest or tick-bar rebuild on a stored session
+    /// missed its first trades).
+    #[test]
+    fn a_stored_session_keeps_its_first_frame() {
+        use crate::disk::ContractDir;
+        use crate::disk::segment::{FlushPolicy, SegmentHeader, SegmentWriter};
+
+        let dir =
+            std::env::temp_dir().join(format!("lines-recorded-stored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let es = ContractKey::monthly(crate::catalog::ES, 2026, Month::new(12).unwrap());
+        let product = crate::catalog::get(crate::catalog::ES).unwrap();
+        let start = UtcMillis::parse_iso("2026-11-05T15:00:00Z").unwrap().0;
+        let cdir = ContractDir::new(&dir, "mock", &product, Some(es));
+        let date = crate::disk::partition::trade_date(&product, UtcMillis(start));
+        let header = SegmentHeader {
+            created_wall_ms: start,
+            source: "mock".into(),
+            encoding: native::PROTOCOL.into(),
+            product: "ES".into(),
+            contract: Some(es),
+            date,
+        };
+        let path = cdir.segment_path(date);
+        let (mut w, _) = SegmentWriter::open(&path, &header, FlushPolicy::default()).unwrap();
+        for i in 0..3i64 {
+            let mut buf = Vec::new();
+            native::encode(
+                &NativeEvent::Trade {
+                    time_us: (start + i * 500) * 1000,
+                    price: Price(600_000 + i * 25),
+                    qty: Qty(1),
+                    aggressor: Aggressor::Buy,
+                },
+                &mut buf,
+            );
+            w.append((start + i * 500) * 1000, &buf).unwrap();
+        }
+        w.close().unwrap();
+
+        let mut r = RecordedEvents::open(&path).unwrap();
+        let mut got = Vec::new();
+        while let Some((t, events)) = r.next_batch().unwrap() {
+            for e in events {
+                if let MarketEvent::Trade { price, .. } = e {
+                    got.push((t.0 - start, price.0));
+                }
+            }
+        }
+        assert_eq!(got, vec![(0, 600_000), (500, 600_025), (1000, 600_050)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

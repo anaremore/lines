@@ -20,7 +20,16 @@ pub struct Scene {
     pub args: Vec<String>,
     /// Windows the scene draws (a popped-out pane adds one): each must report.
     pub windows: usize,
+    /// Replays the sessions recorded only from mid-session on ([`LATE_FROM`]): a feed opened
+    /// late.
+    pub late: bool,
 }
+
+/// Where the late replay starts: mid-session on 2026-11-04.
+pub const LATE_FROM: &str = "2026-11-04T09:30:00Z";
+
+/// Twenty minutes into the 2026-11-04 evening session: the session break in view.
+const BREAK_AT: &str = "2026-11-04T23:20:00Z";
 
 /// Findings that are known and documented (`docs/known-gaps.md`): (scene, finding line). They
 /// are reported as known instead of failing; a known finding that no longer occurs fails, so
@@ -52,6 +61,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         at,
         args: a,
         windows: 1,
+        late: false,
     };
     let mut v = vec![
         // Every pane kind, both themes and palettes.
@@ -298,6 +308,89 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     let mut c = args("--layout chart --size 1200x700 --theme dark --timeframe 5m --drawings");
     c.push(ws("tags-near-last.json"));
     v.push(s("drawing-tags-near-last", false, end, c));
+    // Tick bars (roadmap 9b): both themes and palettes, the hovered forming bar's readout,
+    // continuous bars, footprints, the list with the tick presets (also on a short pane), and a
+    // feed opened mid-session (the "tick bars from" label).
+    let chart = |a: &str| args(&format!("--layout chart --size 1400x800 {a}"));
+    v.push(s(
+        "chart-233t",
+        true,
+        end,
+        chart("--theme dark --timeframe 233t --cursor 1290,150"),
+    ));
+    v.push(s(
+        "chart-1000t-light",
+        false,
+        end,
+        chart("--theme light --timeframe 1000t --cursor 1290,150"),
+    ));
+    v.push(s(
+        "chart-233t-cb",
+        false,
+        end,
+        chart("--theme dark --palette cb --timeframe 233t --cursor 1290,150"),
+    ));
+    v.push(s(
+        "chart-500t-light-cb",
+        false,
+        end,
+        chart("--theme light --palette cb --timeframe 500t --cursor 1290,150"),
+    ));
+    // Just after a session open: the crosshair on the previous session's short last bar
+    // ("partial (n of 233 trades)"), then on the new session's forming bar; the dashed divider
+    // between them.
+    v.push(s(
+        "chart-233t-break-partial",
+        false,
+        BREAK_AT,
+        chart("--theme dark --timeframe 233t --cursor 1274,150"),
+    ));
+    v.push(s(
+        "chart-233t-break-forming",
+        false,
+        BREAK_AT,
+        chart("--theme light --timeframe 233t --cursor 1298,400"),
+    ));
+    v.push(s(
+        "chart-1000t-continuous",
+        false,
+        end,
+        chart("--theme dark --timeframe 1000t --tick-continuous"),
+    ));
+    for (name, theme) in [
+        ("footprint-500t", "--theme dark"),
+        ("footprint-500t-light", "--theme light"),
+        ("footprint-500t-cb", "--theme dark --palette cb"),
+    ] {
+        let mut a = vec!["--workspace".into(), ws("footprint-500t.json")];
+        a.extend(args(&format!("--size 1400x800 {theme}")));
+        v.push(s(name, false, end, a));
+    }
+    v.push(s(
+        "timeframe-menu-ticks",
+        false,
+        end,
+        args("--layout chart --size 1000x700 --theme dark --timeframe 233t --timeframe-menu"),
+    ));
+    v.push(s(
+        "timeframe-menu-short",
+        false,
+        end,
+        args("--layout chart --size 900x420 --theme light --timeframe 500t --timeframe-menu"),
+    ));
+    for (name, theme) in [
+        ("chart-1000t-late", "--theme dark"),
+        ("chart-1000t-late-light", "--theme light"),
+    ] {
+        let mut sc = s(
+            name,
+            false,
+            end,
+            chart(&format!("{theme} --timeframe 1000t")),
+        );
+        sc.late = true;
+        v.push(sc);
+    }
     v
 }
 
@@ -322,6 +415,10 @@ fn write_workspaces(dir: &Path) -> Result<()> {
     let footprint = pane(
         "chart",
         r#", "chart": { "bar_px": 90.0, "timeframe": "30m", "footprint": { "mode": "bid_ask" } }"#,
+    );
+    let footprint_500t = pane(
+        "chart",
+        r#", "chart": { "bar_px": 90.0, "timeframe": "500t", "footprint": { "mode": "bid_ask" } }"#,
     );
     let journal = format!(
         r#"{{ "split": {{ "axis": "column", "ratio": 0.5, "first": {}, "second": {} }} }}"#,
@@ -425,6 +522,7 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ("chart-over-dom.json", chart_over_dom),
         ("popout.json", popout),
         ("footprint.json", footprint),
+        ("footprint-500t.json", footprint_500t),
         ("journal.json", journal),
     ] {
         std::fs::write(dir.join(f), doc(layout)).with_context(|| f.to_owned())?;
@@ -438,6 +536,10 @@ pub fn run(dir: &Path, full: bool) -> Result<i32> {
     std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
     let replay = dir.join("synth-es.lfr");
     lines_feed::synth::write_es_sessions(&replay, true, false).context("synthetic replay")?;
+    let late = dir.join("synth-es-late.lfr");
+    let from = lines_core::UtcMillis::parse_iso(LATE_FROM).context("late start")?;
+    lines_feed::synth::write_es_sessions_from(&late, true, false, Some(from))
+        .context("synthetic late replay")?;
     write_workspaces(dir)?;
     let exe = std::env::current_exe().context("current exe")?;
     let mut summary = String::new();
@@ -450,7 +552,7 @@ pub fn run(dir: &Path, full: bool) -> Result<i32> {
         }
         let out = Command::new(&exe)
             .arg("--replay")
-            .arg(&replay)
+            .arg(if scene.late { &late } else { &replay })
             .args(["--at", scene.at, "--layout-report", "--screenshot"])
             .arg(&png)
             .args(&scene.args)

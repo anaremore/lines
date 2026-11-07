@@ -485,6 +485,7 @@ fn timeframe_updates_do_not_allocate() {
     let mut series = BarSeries::new(UtcMillis::MINUTE, 2_000);
     let mut derived: Vec<Derived> = Timeframe::ALL
         .iter()
+        .filter(|tf| tf.source() == lines_core::timeframe::BarSource::OneMinute)
         .map(|&tf| Derived::new(tf, series.capacity()))
         .collect();
     let tick = |s: &mut BarSeries, i: i64| {
@@ -515,6 +516,78 @@ fn timeframe_updates_do_not_allocate() {
     assert_eq!(n, 0, "timeframe updates allocated {n} times");
 }
 
+/// Tick bars (roadmap 9b): once warm (bars dropped at capacity give their price lists to new
+/// bars), counting a trade into every preset, both reset modes, and reading the view never
+/// allocate.
+#[test]
+fn tick_bar_updates_do_not_allocate() {
+    use lines_core::sessions::{ExchangeHours, Hours, SessionSpec};
+    use lines_core::ticks::TICK_PRESETS;
+    use lines_core::{Aggressor, LocalTime, SessionCalendar, TickBars, TickReset};
+    let cal: &'static SessionCalendar = Box::leak(Box::new(
+        SessionCalendar::new(
+            SessionSpec {
+                time_zone: "America/Chicago",
+                hours: Hours::Exchange(ExchangeHours {
+                    eth_open: LocalTime::hm(17, 0),
+                    eth_close: LocalTime::hm(16, 0),
+                    rth: Some((LocalTime::hm(8, 30), LocalTime::hm(15, 0))),
+                }),
+                holidays: None,
+            },
+            None,
+        )
+        .unwrap(),
+    ));
+    let start = UtcMillis::parse_iso("2026-11-09T23:00:00Z").unwrap().0;
+    let mut bars: Vec<TickBars> = TICK_PRESETS
+        .iter()
+        .flat_map(|&n| {
+            [TickReset::Session, TickReset::Continuous].map(|r| TickBars::new(n, r, Some(cal), 64))
+        })
+        .collect();
+    // Trades every 40 s over 20 prices, crossing session closes.
+    let trade = |bars: &mut Vec<TickBars>, i: i64| {
+        let at = UtcMillis(start + i * 40_000);
+        let side = if i % 3 == 0 {
+            Aggressor::Sell
+        } else {
+            Aggressor::Buy
+        };
+        for b in bars.iter_mut() {
+            b.push(
+                at,
+                Price(500_000 + (i % 20) * 25),
+                Qty(1 + i % 3),
+                Some(side),
+            );
+        }
+    };
+    for i in 0..200_000 {
+        trade(&mut bars, i);
+    }
+    let mut sum = 0usize;
+    let n = allocs_during(|| {
+        for i in 200_000..400_000 {
+            trade(&mut bars, i);
+            let v = bars[i as usize % bars.len()].view();
+            sum += v.len() + v.slot(UtcMillis(start + i * 40_000)).unwrap_or(0) as usize;
+        }
+    });
+    std::hint::black_box(sum);
+    assert!(
+        bars.iter().all(|b| b.trimmed() > 0),
+        "the test covers trims"
+    );
+    assert!(
+        bars.iter().any(|b| (0..b.len()).any(|i| b.is_partial(i))),
+        "and resets"
+    );
+    assert_eq!(n, 0, "tick bar updates allocated {n} times");
+}
+
+/// Drawings (roadmap 11): projecting a product's drawings for a frame, hit-testing the
+/// pointer, snapping an anchor and writing a measure's text never allocate.
 /// Drawings (roadmap 11): projecting a product's drawings for a frame (styled: extended
 /// lines and zones, decision 0026), hit-testing the pointer, snapping an anchor, walking a
 /// line's dash pattern and writing a measure's text never allocate.

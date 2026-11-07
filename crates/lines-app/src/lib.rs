@@ -511,13 +511,20 @@ struct Cli {
     #[arg(long, value_parser = parse_vwap)]
     vwap: Vec<lines_indicators::VwapSpec>,
     /// The first chart's timeframe: 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w (a bare number is
-    /// minutes). Bars align to the product's session open. A timeframe saved with the chart
-    /// wins. In the app: type it on a chart (`5`, `1h`, `1d` + Enter) or use the header chip.
+    /// minutes; bars align to the product's session open), or tick bars `500t` (100t 233t 500t
+    /// 1000t 2000t, any 1t to 100000t; built from counted trades, reset at each session open). A
+    /// timeframe saved with the chart wins. In the app: type it on a chart (`5`, `1h`, `500t` +
+    /// Enter) or use the header chip.
     #[arg(long, value_parser = parse_timeframe)]
     timeframe: Option<lines_core::Timeframe>,
     /// Screenshot: the first chart with its timeframe list open (the header's "5m ▾" chip).
     #[arg(long, requires = "screenshot")]
     timeframe_menu: bool,
+    /// Tick bars (`--timeframe 500t`) run across sessions instead of restarting at each
+    /// session open. A mode saved with the chart wins. In the app: the palette or the pane
+    /// menu ("Tick bars run continuously").
+    #[arg(long)]
+    tick_continuous: bool,
     /// Screenshot: charts and DOMs with their account list open (the header's account chip).
     #[arg(long, requires = "screenshot")]
     account_menu: bool,
@@ -667,8 +674,11 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 }
 
 fn parse_timeframe(s: &str) -> Result<lines_core::Timeframe, String> {
-    lines_core::Timeframe::parse(s)
-        .ok_or_else(|| "expected 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d or 1w".into())
+    lines_core::Timeframe::parse(s).ok_or_else(|| {
+        "expected 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d or 1w, or tick bars 100t 233t 500t \
+             1000t 2000t (any 1t to 100000t)"
+            .into()
+    })
 }
 
 fn parse_zoom(s: &str) -> Result<f64, String> {
@@ -1029,6 +1039,7 @@ where
             timeframe: cli.timeframe.unwrap_or_default(),
             timeframe_menu: cli.timeframe_menu,
             style_editor: cli.style_editor,
+            tick_continuous: cli.tick_continuous,
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),

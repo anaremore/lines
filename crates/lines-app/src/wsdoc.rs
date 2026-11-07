@@ -285,6 +285,11 @@ pub struct ChartState {
     /// in `drawings/<PRODUCT>.json`, never here). Optional: written only when set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_drawings: bool,
+    /// Tick bars run across sessions (`true`) or restart at each session open (`false`)
+    /// (roadmap 9b). Optional: written for tick charts and charts set to continuous; absent,
+    /// the chart keeps the mode it started with (`--tick-continuous`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_continuous: Option<bool>,
 }
 
 /// A chart timeframe in the workspace file, as its label (`"5m"`).
@@ -751,6 +756,70 @@ mod tests {
         assert_eq!(future.timeframe.0, Timeframe::ONE_MINUTE);
     }
 
+    /// Roadmap 9b: a tick chart saves `"500t"` in the same optional field (no version bump).
+    /// A build from before tick bars reads it through its own parser, which doesn't know `t`:
+    /// the "absent or unknown = 1 minute" path, so an older build opens the chart on 1m.
+    #[test]
+    fn tick_timeframes_round_trip_and_fall_back_to_1m_in_older_builds() {
+        /// `Timeframe::parse` as it was before tick bars (minutes, hours, D, W only).
+        fn parse_before_ticks(s: &str) -> Option<Timeframe> {
+            let s = s.trim().to_ascii_lowercase();
+            let digits = s.chars().take_while(|c| c.is_ascii_digit()).count();
+            let (num, unit) = s.split_at(digits);
+            let n: u16 = if num.is_empty() { 1 } else { num.parse().ok()? };
+            let tf = match unit {
+                "" | "m" | "min" if !num.is_empty() => Timeframe::Minutes(n),
+                "h" | "hr" => Timeframe::Hours(n),
+                "d" if n == 1 => Timeframe::Day,
+                "w" if n == 1 => Timeframe::Week,
+                _ => return None,
+            };
+            Timeframe::ALL[..12].contains(&tf).then_some(tf)
+        }
+        let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
+        assert!(old.tick_continuous.is_none() && !json_has(&old, "tick_continuous"));
+        for tf in [
+            Timeframe::Ticks(500),
+            Timeframe::Ticks(233),
+            Timeframe::Ticks(777),
+        ] {
+            let state = ChartState {
+                timeframe: TimeframeDoc(tf),
+                tick_continuous: Some(tf == Timeframe::Ticks(777)),
+                ..old.clone()
+            };
+            let json = serde_json::to_string(&state).unwrap();
+            assert!(json.contains(&format!(r#""timeframe":"{tf}""#)), "{json}");
+            assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), state);
+            // The older build: its parser, then its "unknown = 1 minute" rule.
+            let label = tf.to_string();
+            let before =
+                parse_before_ticks(&label).map_or_else(TimeframeDoc::default, TimeframeDoc);
+            assert_eq!(before.0, Timeframe::ONE_MINUTE, "{label} in an older build");
+        }
+        for (mode, text) in [(Some(true), "true"), (Some(false), "false")] {
+            let json = serde_json::to_string(&ChartState {
+                tick_continuous: mode,
+                ..old.clone()
+            })
+            .unwrap();
+            assert!(
+                json.contains(&format!(r#""tick_continuous":{text}"#)),
+                "{json}"
+            );
+            assert_eq!(
+                serde_json::from_str::<ChartState>(&json)
+                    .unwrap()
+                    .tick_continuous,
+                mode
+            );
+        }
+        // Out of range in this build too: 1 minute, the file still loads.
+        let bad: ChartState =
+            serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "100001t"}"#).unwrap();
+        assert_eq!(bad.timeframe.0, Timeframe::ONE_MINUTE);
+    }
+
     /// Roadmap 5c: a chart's indicators are saved with it; files from before load with none.
     #[test]
     fn chart_indicators_are_optional_and_round_trip() {
@@ -759,6 +828,7 @@ mod tests {
         let state = ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -782,6 +852,7 @@ mod tests {
         let none = serde_json::to_string(&ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -865,6 +936,7 @@ mod tests {
                         chart: Some(ChartState {
                             timeframe: Default::default(),
                             hide_drawings: false,
+                            tick_continuous: None,
                             bar_px: 9.5,
                             visibility: StudyVisibility::default(),
                             levels: Default::default(),
@@ -939,6 +1011,7 @@ mod tests {
         let hidden = ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility {
                 hide_study_labels: true,
@@ -1059,6 +1132,7 @@ mod tests {
             chart: Some(ChartState {
                 timeframe: Default::default(),
                 hide_drawings: false,
+                tick_continuous: None,
                 bar_px: 7.0,
                 visibility: StudyVisibility::default(),
                 levels: Default::default(),
@@ -1090,6 +1164,7 @@ mod tests {
         let both = ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -1167,6 +1242,7 @@ mod tests {
             Some(ChartState {
                 timeframe: Default::default(),
                 hide_drawings: false,
+                tick_continuous: None,
                 bar_px: 6.0,
                 visibility: StudyVisibility::default(),
                 levels: Default::default(),

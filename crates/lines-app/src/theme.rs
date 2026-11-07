@@ -60,6 +60,8 @@ pub struct Theme {
     pub bg: Hsla,
     pub panel: Hsla,
     pub grid: Hsla,
+    /// A session's start on tick charts: a faint line behind the bars (stronger than `grid`).
+    pub session_divider: Hsla,
     pub axis_line: Hsla,
     /// A control's edge where the edge is what shows it (unselected chips, checkboxes,
     /// swatch rims, the style editor's warning box): 3:1 on `panel` and `bg` (WCAG 1.4.11).
@@ -303,6 +305,7 @@ impl Theme {
             bg: c(brand::INK),
             panel: c(0x171b24),
             grid: c(0x20242f),
+            session_divider: c(0x3a4256),
             axis_line: c(0x2a3040),
             control_edge: c(0x6e7489),
             text_dim: c(0x9a9fb2),
@@ -359,6 +362,7 @@ impl Theme {
             bg: c(0xfbfafd),
             panel: c(brand::PAPER),
             grid: c(0xe4e2ec),
+            session_divider: c(0xb4b0c6),
             axis_line: c(0xcdcad9),
             control_edge: c(0x7d7a8c),
             text_dim: c(0x565b6e),

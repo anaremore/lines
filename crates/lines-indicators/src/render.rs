@@ -10,8 +10,12 @@
 //! On a higher timeframe (roadmap 9) the engine still computes per 1-minute bar: each chart
 //! bar takes the line at its bucket's last 1-minute point (bands too), approximate if any
 //! point in the bucket is.
+//!
+//! On tick bars (roadmap 9b, [`BarsView::trades`]) each bar takes the line at its last trade:
+//! the 1-minute point holding that trade (the engine's resolution is the minute), approximate
+//! if that point is.
 
-use lines_core::{BarsView, Viewport};
+use lines_core::{BarsView, UtcMillis, Viewport};
 
 use crate::delta::DeltaPoint;
 use crate::vwap::{Bands, Point};
@@ -53,22 +57,37 @@ pub fn build_columns(
         if out.len() == out.capacity() {
             break;
         }
-        let t = bars.bars[i].time;
-        let end = bars.end(i);
-        while j < points.len() && points[j].time < t {
-            j += 1;
-        }
-        // The bucket's points: the last one is drawn, any approximate one flags the bar.
-        let mut last = None;
-        let mut approx = false;
-        while j < points.len() && points[j].time < end {
-            approx |= points[j].approx;
-            last = Some(&points[j]);
-            j += 1;
-        }
-        let Some(p) = last else {
-            continue;
+        let (last, approx) = match bars.trades {
+            Some(tb) => {
+                let Some(p) = tb
+                    .last_trade(i)
+                    .and_then(|t| point_at(points, t, |p| p.time))
+                else {
+                    continue;
+                };
+                (p, p.approx)
+            }
+            None => {
+                let t = bars.bars[i].time;
+                let end = bars.end(i);
+                while j < points.len() && points[j].time < t {
+                    j += 1;
+                }
+                // The bucket's points: the last one is drawn, any approximate one flags it.
+                let mut last = None;
+                let mut approx = false;
+                while j < points.len() && points[j].time < end {
+                    approx |= points[j].approx;
+                    last = Some(&points[j]);
+                    j += 1;
+                }
+                let Some(p) = last else {
+                    continue;
+                };
+                (p, approx)
+            }
         };
+        let p = last;
         let x = vp.index_to_x(i as f64) as f32;
         let y = vp.price_to_y(p.vwap) as f32;
         let mut up = [y; 3];
@@ -92,6 +111,13 @@ pub fn build_columns(
         });
         prev = Some((i, p.period));
     }
+}
+
+/// The 1-minute point holding `t` (points sorted by their minute's start), if there is one.
+fn point_at<P>(points: &[P], t: UtcMillis, time: impl Fn(&P) -> UtcMillis) -> Option<&P> {
+    let k = points.partition_point(|p| time(p) <= t).checked_sub(1)?;
+    let p = &points[k];
+    (t.0 - time(p).0 < UtcMillis::MINUTE).then_some(p)
 }
 
 /// One chart bar of cumulative delta (quantity units): the merge of its bucket's 1-minute
@@ -125,6 +151,38 @@ pub fn build_delta_candles(
     let first_t = bars.bars[range.start].time;
     let mut j = points.partition_point(|p| p.time < first_t);
     let mut extent: Option<(i64, i64)> = None;
+    // Tick bars: the delta at each bar's last trade (the minute point holding it), drawn from
+    // the previous bar's close in the same reset period.
+    if let Some(tb) = bars.trades {
+        let mut prev: Option<(usize, i64, i64)> = None; // (bar, period, close)
+        for i in range.start..range.end.min(bars.len()) {
+            if out.len() == out.capacity() {
+                break;
+            }
+            let Some(p) = tb
+                .last_trade(i)
+                .and_then(|t| point_at(points, t, |p| p.time))
+            else {
+                continue;
+            };
+            let open = match prev {
+                Some((b, period, close)) if b + 1 == i && period == p.period => close,
+                _ => p.open,
+            };
+            let k = DeltaCandle {
+                bar: i,
+                open,
+                high: open.max(p.close),
+                low: open.min(p.close),
+                close: p.close,
+                approx: p.approx,
+            };
+            extent = Some(extent.map_or((k.low, k.high), |(a, b)| (a.min(k.low), b.max(k.high))));
+            out.push(k);
+            prev = Some((i, p.period, p.close));
+        }
+        return extent;
+    }
     for i in range.start..range.end.min(bars.len()) {
         if out.len() == out.capacity() {
             break;
@@ -313,5 +371,54 @@ mod tests {
         let mut small = Vec::with_capacity(1);
         build_delta_candles(&points, d.view(), 0..2, &mut small);
         assert_eq!((small.len(), small.capacity()), (1, 1));
+    }
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use lines_core::{Price, Qty, TickBars, TickReset, UtcMillis, Viewport};
+
+    use super::*;
+
+    fn point(minute: i64, vwap: f64, approx: bool) -> Point {
+        Point {
+            time: UtcMillis(minute * 60_000),
+            vwap,
+            sd: 0.0,
+            approx,
+            period: 0,
+            forming: false,
+        }
+    }
+
+    /// On tick bars each bar takes the VWAP of the minute holding its last trade.
+    #[test]
+    fn tick_bars_sample_vwap_at_their_last_trade() {
+        // 3-trade bars: trades at 10 s, 40 s, 70 s | 100 s, 130 s, 190 s | 200 s.
+        let mut tb = TickBars::new(3, TickReset::Continuous, None, 100);
+        for s in [10, 40, 70, 100, 130, 190, 200] {
+            tb.push(UtcMillis(s * 1000), Price(100), Qty(1), None);
+        }
+        let points = [
+            point(0, 100.0, false),
+            point(1, 101.0, false),
+            point(2, 102.0, false),
+            point(3, 103.0, true),
+        ];
+        let mut vp = Viewport::default();
+        vp.set_size(300.0, 200.0);
+        vp.price_lo = 90.0;
+        vp.price_hi = 110.0;
+        vp.right_index = 2.0;
+        let mut out = Vec::with_capacity(8);
+        build_columns(&points, tb.view(), &vp, Bands::default(), &mut out);
+        let ys: Vec<f32> = out.iter().map(|c| c.y).collect();
+        // Last trades at 70 s (minute 1), 190 s (minute 3), 200 s (minute 3).
+        let y = |v: f64| vp.price_to_y(v) as f32;
+        assert_eq!(ys, [y(101.0), y(103.0), y(103.0)]);
+        assert_eq!(
+            out.iter().map(|c| c.approx).collect::<Vec<_>>(),
+            [false, true, true]
+        );
     }
 }

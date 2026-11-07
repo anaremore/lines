@@ -1206,6 +1206,23 @@ impl WindowView {
                     chart.update(cx, |c, cx| c.toggle_timeframe_menu(cx));
                 }
             }
+            Command::TickBarsContinuous => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    let (on, ticks, tf) = chart.update(cx, |c, cx| {
+                        let on = !c.tick_continuous();
+                        c.set_tick_continuous(on, cx);
+                        (on, c.on_ticks(), c.timeframe())
+                    });
+                    // A tick chart shows the mode in its chip; a time chart keeps it for its
+                    // next tick timeframe, so say so (else the toggle would change nothing
+                    // visible).
+                    if !ticks {
+                        notice(tick_mode_notice(on, tf), cx);
+                    }
+                } else {
+                    notice("tick bars: focus a chart first".into(), cx);
+                }
+            }
             // Drawings are on charts; they belong to the chart's product.
             Command::Draw(d) => match self.tab().focused_handle().cloned() {
                 Some(PaneHandle::Chart(chart)) => {
@@ -1895,6 +1912,13 @@ impl WindowView {
                     Command::TimeframeMenu,
                     false,
                 ));
+                if chart.read(cx).on_ticks() {
+                    items.push(MenuItem::named(
+                        "Tick bars run continuously (no session reset)",
+                        Command::TickBarsContinuous,
+                        chart.read(cx).tick_continuous(),
+                    ));
+                }
                 items.push(MenuItem::named("Studies…", Command::Studies, false));
                 let (hidden, symbol) = {
                     let c = chart.read(cx);
@@ -3301,6 +3325,31 @@ pub fn open_doc_window(
         })
     });
     open_window(tabs, doc.active_tab, bounds, options, cx)
+}
+
+/// What switching the tick mode on a time chart did: it shows on the chart's next tick
+/// timeframe ("1000t ∞" in the chip), not now.
+fn tick_mode_notice(on: bool, tf: lines_core::Timeframe) -> String {
+    let mode = if on {
+        "run continuously"
+    } else {
+        "restart at each session open"
+    };
+    format!("tick bars on this chart will {mode} (shown on a tick timeframe; now {tf})")
+}
+
+#[cfg(test)]
+#[test]
+fn tick_mode_notice_text() {
+    assert_eq!(
+        tick_mode_notice(true, lines_core::Timeframe::Minutes(5)),
+        "tick bars on this chart will run continuously (shown on a tick timeframe; now 5m)"
+    );
+    assert_eq!(
+        tick_mode_notice(false, lines_core::Timeframe::Hours(1)),
+        "tick bars on this chart will restart at each session open (shown on a tick \
+         timeframe; now 1h)"
+    );
 }
 
 /// Show a notice that needs no action: it replaces an identical one (counted) and goes away

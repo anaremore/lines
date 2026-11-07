@@ -337,6 +337,11 @@ async fn shoot(
     // replay and the panes' requests, then give the panes a poll tick to pick the values up,
     // so the frame is deterministic.
     lines_feed::indicators::engine().sync();
+    // Tick bars a chart asked for after the replay finished are rebuilt from its file: wait
+    // for them, so the frame shows finished bars.
+    if !lines_feed::ticks::wait_rebuilds(Duration::from_secs(60)) {
+        bail!("tick bars were not rebuilt within 60 s");
+    }
     // External levels: every source's first answer (live) or every batch due by the replay
     // clock (replay) is applied before the frame is read back.
     if !lines_feed::levels::runtime::wait_settled(Duration::from_secs(20)) {

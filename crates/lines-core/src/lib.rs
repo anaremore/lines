@@ -25,6 +25,7 @@ pub mod sessions;
 pub mod stitch;
 pub mod style;
 pub mod tape;
+pub mod ticks;
 pub mod time;
 pub mod timeframe;
 pub mod trail;
@@ -48,6 +49,7 @@ pub use sessions::{
 };
 pub use stitch::{StitchStats, Stitcher};
 pub use tape::{Aggressor, Print, Tape};
+pub use ticks::{TickBars, TickReset};
 pub use time::UtcMillis;
 pub use timeframe::{BarsView, Derived, Timeframe};
 pub use vap::VolumeAtPrice;

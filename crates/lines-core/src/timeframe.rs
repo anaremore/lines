@@ -22,11 +22,11 @@
 //! touched); a front trim or a lost log rebuilds. Buffers are reserved for the series' whole
 //! capacity, so steady-state updates never allocate (`tests/no_alloc.rs`).
 //!
-//! # Phase 2
-//! Seconds bars and tick / volume / range bars need trades, not 1-minute bars: they will be
-//! further [`Timeframe`] variants whose [`Timeframe::source`] is [`BarSource::Trades`], built
-//! only from counted trades (live or replay) with the history-only span labelled. The rest of
-//! the chart only sees a [`BarsView`], so they slot in without changes there.
+//! # Tick bars
+//! [`Timeframe::Ticks`] bars need trades, not 1-minute bars: their [`Timeframe::source`] is
+//! [`BarSource::Trades`] and they are built by [`crate::ticks::TickBars`] from counted trades
+//! only. The chart sees them through the same [`BarsView`] (with [`BarsView::trades`] set).
+//! Seconds, volume and range bars are phase 2 and will be further `Trades` variants.
 
 use std::fmt;
 
@@ -47,6 +47,8 @@ pub enum Timeframe {
     Hours(u16),
     Day,
     Week,
+    /// Tick bars: `n` counted trades each (1..=[`crate::ticks::MAX_TICKS`]).
+    Ticks(u32),
 }
 
 /// What a timeframe is built from.
@@ -54,7 +56,7 @@ pub enum Timeframe {
 pub enum BarSource {
     /// The store's 1-minute bars (every timeframe today).
     OneMinute,
-    /// Counted trades (phase 2: seconds, tick, volume and range bars).
+    /// Counted trades (tick bars; phase 2: seconds, volume and range bars).
     Trades,
 }
 
@@ -67,8 +69,9 @@ impl Default for Timeframe {
 impl Timeframe {
     pub const ONE_MINUTE: Timeframe = Timeframe::Minutes(1);
 
-    /// Every timeframe offered, shortest first.
-    pub const ALL: [Timeframe; 12] = [
+    /// Every timeframe offered in lists (header, palette): time-based shortest first, then the
+    /// tick presets. Any `Ticks(1..=100_000)` is valid too (typed).
+    pub const ALL: [Timeframe; 17] = [
         Timeframe::Minutes(1),
         Timeframe::Minutes(2),
         Timeframe::Minutes(3),
@@ -81,15 +84,35 @@ impl Timeframe {
         Timeframe::Hours(4),
         Timeframe::Day,
         Timeframe::Week,
+        Timeframe::Ticks(100),
+        Timeframe::Ticks(233),
+        Timeframe::Ticks(500),
+        Timeframe::Ticks(1000),
+        Timeframe::Ticks(2000),
     ];
 
-    /// Whether this is one of the offered timeframes.
+    /// Whether this is one of the offered timeframes (a listed one, or any tick count in
+    /// `1..=MAX_TICKS`).
     pub fn is_valid(self) -> bool {
-        Self::ALL.contains(&self)
+        match self {
+            Timeframe::Ticks(n) => (1..=crate::ticks::MAX_TICKS).contains(&n),
+            _ => Self::ALL.contains(&self),
+        }
     }
 
     pub fn source(self) -> BarSource {
-        BarSource::OneMinute
+        match self {
+            Timeframe::Ticks(_) => BarSource::Trades,
+            _ => BarSource::OneMinute,
+        }
+    }
+
+    /// The tick count of a tick timeframe.
+    pub fn ticks(self) -> Option<u32> {
+        match self {
+            Timeframe::Ticks(n) => Some(n),
+            _ => None,
+        }
     }
 
     pub fn is_one_minute(self) -> bool {
@@ -97,9 +120,11 @@ impl Timeframe {
     }
 
     /// The bucket length for minutes and hours; a nominal length for days (24 h) and weeks
-    /// (7 days), used for spacing and extrapolating past the data.
+    /// (7 days), used for spacing and extrapolating past the data. Tick bars have no length:
+    /// a minute here (their view uses the bars' own average, [`crate::ticks::TickBars::view`]).
     pub fn nominal_ms(self) -> i64 {
         match self {
+            Timeframe::Ticks(_) => MINUTE,
             Timeframe::Minutes(n) => i64::from(n) * MINUTE,
             Timeframe::Hours(n) => i64::from(n) * HOUR,
             Timeframe::Day => DAY,
@@ -112,18 +137,23 @@ impl Timeframe {
         matches!(self, Timeframe::Day | Timeframe::Week)
     }
 
-    /// `5`, `5m`, `1h`, `4h`, `d`, `1d`, `w`, `1w` (any case). A bare number is minutes.
-    /// Only offered timeframes parse.
+    /// `5`, `5m`, `1h`, `4h`, `d`, `1d`, `w`, `1w`, `500t` (any case). A bare number is
+    /// minutes; ticks need their count. Only offered timeframes parse.
     pub fn parse(s: &str) -> Option<Timeframe> {
         let s = s.trim().to_ascii_lowercase();
         let digits = s.chars().take_while(|c| c.is_ascii_digit()).count();
         let (num, unit) = s.split_at(digits);
-        let n: u16 = if num.is_empty() { 1 } else { num.parse().ok()? };
+        if digits > 6 {
+            return None;
+        }
+        let n: u32 = if num.is_empty() { 1 } else { num.parse().ok()? };
+        let short = u16::try_from(n).ok();
         let tf = match unit {
-            "" | "m" | "min" if !num.is_empty() => Timeframe::Minutes(n),
-            "h" | "hr" => Timeframe::Hours(n),
+            "" | "m" | "min" if !num.is_empty() => Timeframe::Minutes(short?),
+            "h" | "hr" => Timeframe::Hours(short?),
             "d" if n == 1 => Timeframe::Day,
             "w" if n == 1 => Timeframe::Week,
+            "t" if !num.is_empty() => Timeframe::Ticks(n),
             _ => return None,
         };
         tf.is_valid().then_some(tf)
@@ -131,9 +161,10 @@ impl Timeframe {
 }
 
 impl fmt::Display for Timeframe {
-    /// `1m`, `5m`, `1h`, `1D`, `1W`.
+    /// `1m`, `5m`, `1h`, `1D`, `1W`, `500t`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Timeframe::Ticks(n) => write!(f, "{n}t"),
             Timeframe::Minutes(n) => write!(f, "{n}m"),
             Timeframe::Hours(n) => write!(f, "{n}h"),
             Timeframe::Day => f.write_str("1D"),
@@ -283,6 +314,9 @@ pub struct BarsView<'a> {
     /// Bucket ends (`[time, end)`), one per bar; `None`: every bar is `period_ms` long.
     pub ends: Option<&'a [UtcMillis]>,
     pub period_ms: i64,
+    /// Bars built from counted trades (tick bars): each bar's own trade data (last trade,
+    /// count, per-price volume). `None` for time bars.
+    pub trades: Option<&'a crate::ticks::TickBars>,
 }
 
 impl<'a> BarsView<'a> {
@@ -292,6 +326,7 @@ impl<'a> BarsView<'a> {
             bars,
             ends: None,
             period_ms,
+            trades: None,
         }
     }
 
@@ -358,8 +393,14 @@ pub struct Derived {
 }
 
 impl Derived {
-    /// For a source of at most `capacity` bars (reserved now: updates never allocate).
+    /// For a source of at most `capacity` bars (reserved now: updates never allocate). Only
+    /// for timeframes built from 1-minute bars (tick bars are [`crate::ticks::TickBars`]).
     pub fn new(tf: Timeframe, capacity: usize) -> Derived {
+        debug_assert_eq!(
+            tf.source(),
+            BarSource::OneMinute,
+            "{tf} is not built from bars"
+        );
         Derived {
             tf,
             bars: Vec::with_capacity(capacity),
@@ -382,6 +423,7 @@ impl Derived {
             bars: &self.bars,
             ends: Some(&self.ends),
             period_ms: self.period_ms,
+            trades: None,
         }
     }
 

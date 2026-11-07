@@ -8,6 +8,9 @@
 //! **merge** of the 1-minute footprints in the bucket: exact integer sums, the same whatever
 //! the timeframe (a 5-minute bar's cells equal the sum of its five 1-minute bars' cells).
 //!
+//! Tick bars ([`BarsView::trades`]) carry their own per-price volume, from the same counted
+//! trades: their footprint is read from them directly ([`bar_levels`]).
+//!
 //! **Rows** group prices as the DOM and the volume profile do
 //! (`row = floor(price / (grouping × tick))`, [`crate::ladder::row_of`]); [`fit_grouping`]
 //! coarsens the grouping until a row is tall enough to read.
@@ -28,7 +31,8 @@
 use std::ops::Range;
 
 use crate::ladder::{GROUPING_PRESETS, row_of};
-use crate::profile::{Footprint, ProfileRow, ProfileRows};
+use crate::price::Price;
+use crate::profile::{Footprint, ProfileRow, ProfileRows, SideVolume};
 use crate::qty::Qty;
 use crate::timeframe::BarsView;
 
@@ -150,12 +154,11 @@ impl FootprintFrame {
                 self.truncated = true;
                 break;
             }
-            let (from, to) = (view.bars[i].time, view.end(i));
             // The rows the bucket's trades span (their own prices, not the bar's high/low,
             // which a history snapshot may have replaced) must fit the scratch buffer: checked
             // first, so `ProfileRows::build` never grows it.
             let mut extent: Option<(i64, i64)> = None;
-            for (p, v) in fp.range(from, to) {
+            for (p, v) in bar_levels(fp, view, i) {
                 if v.total().0 != 0 {
                     let r = row_of(p, u);
                     extent = Some(extent.map_or((r, r), |(a, b)| (a.min(r), b.max(r))));
@@ -169,7 +172,7 @@ impl FootprintFrame {
                 self.truncated = true;
                 continue;
             }
-            self.scratch.build(u, 70, || fp.range(from, to));
+            self.scratch.build(u, 70, || bar_levels(fp, view, i));
             let n = self.scratch.rows.len();
             if self.cells.len() + n > self.cells.capacity() {
                 self.truncated = true; // out of cells: this bar is a candle
@@ -202,6 +205,23 @@ impl FootprintFrame {
             });
         }
     }
+}
+
+/// Volume per exact price of bar `i` of `view`: its tick bar's own levels, else the merge of
+/// the store's per-period footprints over its bucket. Allocation-free.
+pub fn bar_levels<'a>(
+    fp: &'a Footprint,
+    view: BarsView<'a>,
+    i: usize,
+) -> impl Iterator<Item = (Price, SideVolume)> + 'a {
+    let (ticks, bucket) = match view.trades {
+        Some(t) => (Some(t.levels(i)), None),
+        None => (None, Some(fp.range(view.bars[i].time, view.end(i)))),
+    };
+    ticks
+        .into_iter()
+        .flatten()
+        .chain(bucket.into_iter().flatten())
 }
 
 /// The diagonal imbalances of row `k` of `rows` (ascending, consecutive rows).
