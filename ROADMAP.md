@@ -41,7 +41,8 @@ Status: `done` · `current` · `next` · `later`
 | 13 | Second live connection (whichever of CQG/Rithmic wasn't first) | later | |
 | 14 | Trade copier across account groups | later | Rule-aware per account/firm |
 | 15 | Strategies (decision 0025) | current | (a) the core's strategy gate, `lines-strategy` and deterministic backtests (`--backtest`); (b) private strategies backtested on recorded market data and levels; (c) the strategy panel, Stop all, chart markers and the in-app host; (d) Live, owner-gated |
-| — | Not planned: Tradovate, equities, crypto trading, international | later | Kept possible by decisions 0002–0003; nothing built |
+| 16 | Equities and options, SPY/QQQ first (decision 0028) | next | Option chain pane; equity/option instruments; private broker extension: data → observe → paper → owner-enabled live |
+| — | Not planned: Tradovate, crypto trading, international | later | Kept possible by decisions 0002–0003; nothing built |
 
 ## Before the first outside users
 

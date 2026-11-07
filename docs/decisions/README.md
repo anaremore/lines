@@ -33,3 +33,4 @@ Format: Status · Context · Decision · Consequences.
 | 0025 | Strategies: pure state machines behind the trading core, backtested on replays (Accepted; amended by 0027) |
 | 0026 | User styles for drawings and studies: one style model and editor, custom colors as user data (Accepted) |
 | 0027 | Strategy host heartbeat on the wall clock; the daily loss closes the trade, amends 0025 (Accepted) |
+| 0028 | Equities and listed options (SPY/QQQ first) through a broker extension, amends 0013 (Accepted) |
