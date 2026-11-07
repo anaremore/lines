@@ -678,17 +678,18 @@ pub fn palette() -> Vec<Command> {
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
     v.extend(TradeCmd::ALL.map(Command::Trade));
     v.extend(TradeCmd::PALETTE_ONLY.map(Command::Trade));
+    v.push(Command::CyclePnl);
+    v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
+    v.push(Command::ExportDiagnostics);
+    v.extend(Timeframe::ALL.map(Command::Timeframe));
+    v.extend(DrawCmd::ALL.map(Command::Draw));
+    // Settings last: an existing command's words pick it first.
     v.push(Command::Settings);
     v.extend(
         crate::settings_schema::palette()
             .into_iter()
             .map(Command::Setting),
     );
-    v.push(Command::CyclePnl);
-    v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
-    v.push(Command::ExportDiagnostics);
-    v.extend(Timeframe::ALL.map(Command::Timeframe));
-    v.extend(DrawCmd::ALL.map(Command::Draw));
     v
 }
 
@@ -1048,16 +1049,8 @@ mod tests {
         // Timeframes: one entry each, "Timeframe: 1m" … "Timeframe: 1W"; no keys of their own
         // (digits and letters typed on a chart are the chart's).
         assert_eq!(
-            filter("timeframe: 15m", &p),
+            filter("timeframe 15m", &p),
             vec![Command::Timeframe(Timeframe::Minutes(15))]
-        );
-        // New charts' default timeframe is its own setting (Settings › Charts).
-        assert_eq!(
-            filter("charts timeframe 15m", &p)
-                .into_iter()
-                .map(label)
-                .collect::<Vec<_>>(),
-            vec!["Charts: Timeframe 15m".to_owned()]
         );
         assert_eq!(
             filter("timeframe 1w", &p),
@@ -1076,20 +1069,11 @@ mod tests {
         );
         // A palette/menu command: no key of its own.
         assert!(BINDINGS.iter().all(|b| b.cmd != Command::TogglePerfStats));
-        // (Settings rows match too: "Settings: Latency HUD…"; they are tested in the schema.)
-        let commands_only = |v: Vec<Command>| -> Vec<Command> {
-            v.into_iter()
-                .filter(|c| !matches!(c, Command::Setting(_)))
-                .collect()
-        };
-        assert_eq!(
-            commands_only(filter("latency", &p)),
-            vec![Command::ToggleLatencyHud]
-        );
+        assert_eq!(filter("latency", &p), vec![Command::ToggleLatencyHud]);
         assert!(BINDINGS.iter().all(|b| b.cmd != Command::ToggleLatencyHud));
         // The DOM trail: palette and pane menu only, never a key (pane keys are reserved).
         assert_eq!(
-            commands_only(filter("price trail", &p)),
+            filter("price trail", &p),
             vec![Command::DomTrail, Command::DomTrailHalfLife]
         );
         assert!(

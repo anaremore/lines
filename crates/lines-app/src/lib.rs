@@ -951,7 +951,8 @@ where
         dom: DomOptions {
             grouping: cli.dom_grouping.unwrap_or(1),
             trail: cli.dom_trail,
-            from_cli: cli.dom_grouping.is_some() || cli.dom_trail,
+            grouping_from_cli: cli.dom_grouping.is_some(),
+            trail_from_cli: cli.dom_trail,
         },
         tape: TapeOptions { large_print },
         record: std::cell::RefCell::new(record),

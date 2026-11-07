@@ -164,8 +164,18 @@ pub struct Target {
 }
 
 impl Target {
-    fn guard_key(&self) -> Option<&String> {
-        self.account_name.as_ref().or(self.account.as_ref())
+    /// Where this account's guardrails are saved: under its name, else its id (as startup
+    /// reads them), else the name for a new entry.
+    fn guard_key(
+        &self,
+        saved: &std::collections::BTreeMap<String, lines_trading::Guardrails>,
+    ) -> Option<String> {
+        [&self.account_name, &self.account]
+            .into_iter()
+            .flatten()
+            .find(|k| saved.contains_key(*k))
+            .or(self.account_name.as_ref().or(self.account.as_ref()))
+            .cloned()
     }
 }
 
@@ -330,14 +340,17 @@ pub fn parse_number(s: &str) -> Result<Option<i64>, &'static str> {
 // ---- guardrails (per account; tighten now, loosen from the next trade date) --------------
 
 fn guard<'a>(p: &'a Prefs, t: &Target) -> Option<&'a lines_trading::Guardrails> {
-    t.guard_key().and_then(|a| p.app.guardrails.get(a))
+    t.guard_key(&p.app.guardrails)
+        .and_then(|a| p.app.guardrails.get(&a))
 }
 
 fn guard_mut<'a>(
     p: &'a mut Prefs,
     t: &Target,
 ) -> Result<&'a mut lines_trading::Guardrails, &'static str> {
-    let a = t.guard_key().cloned().ok_or("choose an account first")?;
+    let a = t
+        .guard_key(&p.app.guardrails)
+        .ok_or("choose an account first")?;
     Ok(p.app.guardrails.entry(a).or_default())
 }
 
@@ -349,13 +362,13 @@ pub fn loosens(old: &lines_trading::Guardrails, new: &lines_trading::Guardrails)
 }
 
 fn drop_empty_guardrails(p: &mut Prefs, t: &Target) {
-    if let Some(a) = t.guard_key()
+    if let Some(a) = t.guard_key(&p.app.guardrails)
         && p.app
             .guardrails
-            .get(a)
+            .get(&a)
             .is_some_and(|g| *g == lines_trading::Guardrails::default())
     {
-        p.app.guardrails.remove(a);
+        p.app.guardrails.remove(&a);
     }
 }
 
@@ -557,8 +570,8 @@ fn table() -> Vec<Setting> {
             s(
                 "charts.timeframe",
                 Sec::Charts,
-                "Timeframe",
-                "The bar period a new chart starts with.",
+                "Bar period",
+                "The timeframe a new chart starts with.",
                 Scope::NewPanes,
                 Normal,
                 Choice(&TIMEFRAME_NAMES),
@@ -619,7 +632,7 @@ fn table() -> Vec<Setting> {
             s(
                 "dom.trail",
                 Sec::Dom,
-                "Price trail",
+                "Trail in new DOMs",
                 "A new DOM starts with the price trail column on.",
                 Scope::NewPanes,
                 Normal,
@@ -1072,6 +1085,30 @@ impl Setting {
     }
 }
 
+/// Whether changing setting `st` from `old` to `new` loosens trading risk (decision 0021:
+/// it needs an explicit yes): a guardrail made looser or removed (`g0` to `g1`, the
+/// account's guardrails before and after), an opt-in "disable trading" turned off, a larger
+/// default quantity.
+pub fn loosening(
+    st: &Setting,
+    old: &Value,
+    new: &Value,
+    g0: &lines_trading::Guardrails,
+    g1: &lines_trading::Guardrails,
+) -> bool {
+    match st.key {
+        k if k.starts_with("guard.") => loosens(g0, g1),
+        k if k.starts_with("trading.disable_") => {
+            matches!((old, new), (Value::Bool(true), Value::Bool(false)))
+        }
+        "trading.default_qty" => matches!(
+            (old, new),
+            (Value::Number(Some(a)), Value::Number(Some(b))) if b > a
+        ),
+        _ => false,
+    }
+}
+
 /// Thousands separators: 1500 → "1,500".
 pub fn grouped(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
@@ -1167,9 +1204,9 @@ pub fn palette() -> Vec<SettingCmd> {
     for (i, st) in all().iter().enumerate() {
         let index = i as u16;
         match st.kind {
-            // Settings with commands of their own (P&L display: …, Toggle key hints, Toggle
-            // latency HUD) only add the way into the window.
-            _ if HAS_COMMAND.contains(&st.key) => v.push(SettingCmd { index, value: OPEN }),
+            // Settings with palette commands of their own (P&L display: …, Toggle key
+            // hints, Toggle latency HUD): those are their palette commands.
+            _ if HAS_COMMAND.contains(&st.key) => {}
             Kind::Choice(c) if !st.read_only() && st.scope != Scope::Account => {
                 v.extend((0..c.len()).map(|k| SettingCmd {
                     index,
@@ -1229,12 +1266,16 @@ mod tests {
     fn every_setting_has_a_palette_command() {
         let cmds = palette();
         for (i, st) in all().iter().enumerate() {
-            assert!(cmds.iter().any(|c| c.index as usize == i), "{}", st.key);
+            assert!(
+                HAS_COMMAND.contains(&st.key) || cmds.iter().any(|c| c.index as usize == i),
+                "{}",
+                st.key
+            );
         }
         let labels: HashSet<_> = cmds.iter().map(|c| c.label()).collect();
         assert_eq!(labels.len(), cmds.len(), "labels are distinct");
         assert!(labels.contains("Appearance: Theme Light"));
-        assert!(labels.contains("Settings: P&L display…"));
+        assert!(labels.contains("Charts: Bar period 15m"));
         assert!(labels.contains("Settings: Daily loss limit…"));
     }
 
@@ -1310,6 +1351,122 @@ mod tests {
             ..old.clone()
         };
         assert!(loosens(&old, &removed), "removing a limit loosens");
+    }
+
+    #[test]
+    fn trading_loosenings_need_a_yes() {
+        let g = lines_trading::Guardrails::default();
+        let st = |k| by_key(k).unwrap();
+        let (on, off) = (Value::Bool(true), Value::Bool(false));
+        assert!(loosening(
+            st("trading.disable_on_focus_loss"),
+            &on,
+            &off,
+            &g,
+            &g
+        ));
+        assert!(!loosening(
+            st("trading.disable_on_focus_loss"),
+            &off,
+            &on,
+            &g,
+            &g
+        ));
+        let (one, fifty) = (Value::Number(Some(1)), Value::Number(Some(50)));
+        assert!(loosening(st("trading.default_qty"), &one, &fifty, &g, &g));
+        assert!(!loosening(st("trading.default_qty"), &fifty, &one, &g, &g));
+        assert!(!loosening(
+            st("appearance.theme"),
+            &Value::Choice(0),
+            &Value::Choice(1),
+            &g,
+            &g
+        ));
+        let tight = lines_trading::Guardrails {
+            max_daily_loss: Some(500),
+            ..Default::default()
+        };
+        let loss = st("guard.max_daily_loss");
+        assert!(
+            loosening(loss, &one, &fifty, &tight, &g),
+            "removing a limit"
+        );
+        assert!(!loosening(loss, &one, &fifty, &g, &tight));
+    }
+
+    /// Guardrails saved under the account's id (as startup accepts) are read and edited there.
+    #[test]
+    fn guardrails_saved_by_id_are_found() {
+        let mut p = Prefs::default();
+        p.app.guardrails.insert(
+            "paper-eval".into(),
+            lines_trading::Guardrails {
+                max_daily_loss: Some(1000),
+                ..Default::default()
+            },
+        );
+        let t = Target {
+            account: Some("paper-eval".into()),
+            account_name: Some("Paper 50K eval".into()),
+            product: None,
+        };
+        let loss = by_key("guard.max_daily_loss").unwrap();
+        assert_eq!(
+            (loss.get)(&p, &t, &Facts::default()),
+            Value::Number(Some(1000))
+        );
+        loss.apply(&mut p, &t, Value::Number(Some(800))).unwrap();
+        assert_eq!(p.app.guardrails.len(), 1, "no second entry under the name");
+        assert_eq!(p.app.guardrails["paper-eval"].max_daily_loss, Some(800));
+    }
+
+    /// Every existing field still round-trips through the versioned format with the flattened
+    /// unknown-keys map beside it.
+    #[test]
+    fn a_full_settings_file_round_trips() {
+        let mut s = Settings {
+            recents: vec![1, 2],
+            favourites: vec![3],
+            chart_defaults: Some(Default::default()),
+            pnl_display: crate::pnl::PnlDisplay::Ticks,
+            ..Default::default()
+        };
+        s.trading_prefs.disarm_on_focus_loss = true;
+        s.guardrails.insert(
+            "Paper".into(),
+            lines_trading::Guardrails {
+                max_daily_loss: Some(1000),
+                losing_streak: Some(lines_trading::LosingStreak {
+                    losses: 3,
+                    cooldown_min: 15,
+                }),
+                ..Default::default()
+            },
+        );
+        s.bracket_presets
+            .entry("paper".into())
+            .or_default()
+            .products
+            .insert(
+                "ES".into(),
+                vec![crate::brackets::NamedBracket {
+                    name: "scalp".into(),
+                    stop_ticks: 8,
+                    target_ticks: 16,
+                }],
+            );
+        s.appearance.theme = Some(ThemeName::Light);
+        s.new_panes.dom_grouping = Some(5);
+        s.unknown.insert("later".into(), serde_json::json!([1, 2]));
+        let bytes = s.encode();
+        let dir = std::env::temp_dir().join(format!("lines-settings-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, &bytes).unwrap();
+        let (got, report, _) = Settings::load(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(report, None);
+        assert_eq!(got, s);
     }
 
     #[test]

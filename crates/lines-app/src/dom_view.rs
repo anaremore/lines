@@ -67,8 +67,10 @@ pub struct DomOptions {
     pub grouping: u32,
     /// Start with the price trail on (`--dom-trail`; a DOM's saved `trail` wins).
     pub trail: bool,
-    /// A DOM flag was given: it wins over Settings › DOM for this run.
-    pub from_cli: bool,
+    /// `--dom-grouping` was given: it wins over Settings › DOM for this run.
+    pub grouping_from_cli: bool,
+    /// `--dom-trail` was given.
+    pub trail_from_cli: bool,
 }
 
 impl Default for DomOptions {
@@ -76,7 +78,8 @@ impl Default for DomOptions {
         DomOptions {
             grouping: 1,
             trail: false,
-            from_cli: false,
+            grouping_from_cli: false,
+            trail_from_cli: false,
         }
     }
 }

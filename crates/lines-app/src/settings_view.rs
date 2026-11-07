@@ -42,6 +42,8 @@ enum Tone {
 struct Pending {
     index: usize,
     value: Value,
+    /// The account (and product) it was asked for: confirmed for that one only.
+    target: Target,
     text: String,
 }
 
@@ -65,6 +67,8 @@ pub struct SettingsWindow {
     editor_msg: Option<String>,
     /// The settings list's scroll (keeps the selected row in view).
     scroll: gpui::ScrollHandle,
+    /// The row last scrolled into view (only a new selection scrolls).
+    scrolled: Option<(Section, usize, bool)>,
 }
 
 /// The window's size (logical px).
@@ -212,10 +216,21 @@ pub fn run(c: schema::SettingCmd, cx: &mut App) -> Result<Option<String>, &'stat
     };
     match c.value() {
         Some(v) => {
-            let target = default_target(&gather_facts(cx));
+            let facts = gather_facts(cx);
+            let target = default_target(&facts);
             let before = current_prefs(cx);
+            let old = (st.get)(&before, &target, &facts);
             let mut after = before.clone();
             st.apply(&mut after, &target, v.clone())?;
+            if schema::loosening(st, &old, &v, &Default::default(), &Default::default()) {
+                // A loosening needs a yes: ask in the window.
+                let i = c.index as usize;
+                open(Some(i), cx);
+                if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
+                    let _ = h.update(cx, |w, _, cx| w.set(i, v, false, cx));
+                }
+                return Ok(None);
+            }
             commit(&before, &after, &target, cx);
             Ok(Some(format!("{}: {}", st.name, st.value_text(&v))))
         }
@@ -246,14 +261,18 @@ fn commit(before: &Prefs, after: &Prefs, target: &Target, cx: &mut App) {
         update_settings(cx, move |s| *s = app);
     }
     if after.app.appearance != before.app.appearance {
-        crate::workspace::set_theme(schema::theme_for(&after.app.appearance), cx);
-        if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
-            let t = schema::theme_for(&after.app.appearance);
-            let _ = h.update(cx, |v, _, cx| {
-                v.theme = t;
-                cx.notify();
-            });
-        }
+        // After the current update: the window that asked (the Settings window, or a main
+        // window running a palette command) can't be updated while it is being updated.
+        let t = schema::theme_for(&after.app.appearance);
+        cx.defer(move |cx| {
+            crate::workspace::set_theme(t, cx);
+            if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
+                let _ = h.update(cx, |v, _, cx| {
+                    v.theme = t;
+                    cx.notify();
+                });
+            }
+        });
     }
     if after.app.pnl_display != before.app.pnl_display {
         crate::pnl::display_changed();
@@ -340,7 +359,17 @@ impl SettingsWindow {
             editor: None,
             editor_msg: None,
             scroll: gpui::ScrollHandle::new(),
+            scrolled: None,
         }
+    }
+
+    /// Leave whatever is half done (a number being typed, a confirmation, the preset
+    /// editor): the account, product or section changed under it.
+    fn drop_unfinished(&mut self) {
+        self.edit = None;
+        self.pending = None;
+        self.editor = None;
+        self.editor_msg = None;
     }
 
     /// Show setting `i`: its section, selected, the search cleared.
@@ -383,27 +412,28 @@ impl SettingsWindow {
             return;
         }
         let guard = st.key.starts_with("guard.");
-        let key = self
-            .target
-            .account_name
-            .clone()
-            .or(self.target.account.clone());
-        let (g0, g1) = key.as_ref().map_or_else(Default::default, |k| {
-            (
-                before.app.guardrails.get(k).cloned().unwrap_or_default(),
-                after.app.guardrails.get(k).cloned().unwrap_or_default(),
-            )
-        });
-        let loosens = guard && schema::loosens(&g0, &g1);
+        let account = |p: &Prefs| {
+            [&self.target.account_name, &self.target.account]
+                .into_iter()
+                .flatten()
+                .find_map(|k| p.app.guardrails.get(k).cloned())
+                .unwrap_or_default()
+        };
+        let (g0, g1) = (account(&before), account(&after));
+        let loosens = schema::loosening(st, &old, &v, &g0, &g1);
         if loosens && !sure {
+            let (from, to) = (st.value_text(&old), st.value_text(&v));
             self.pending = Some(Pending {
                 index: i,
                 value: v.clone(),
-                text: format!(
-                    "Loosening ({} → {}) takes effect tomorrow, at the next trade date.",
-                    st.value_text(&old),
-                    st.value_text(&v)
-                ),
+                target: self.target.clone(),
+                text: if guard {
+                    format!(
+                        "Loosening ({from} → {to}) takes effect tomorrow, at the next trade date."
+                    )
+                } else {
+                    format!("This loosens a trading safeguard ({from} → {to}).")
+                },
             });
             self.note = None;
             cx.notify();
@@ -415,7 +445,7 @@ impl SettingsWindow {
         let text = if guard {
             if loosens {
                 format!(
-                    "Loosened {} → {}: from the next trade date.",
+                    "Loosened {} → {}: takes effect at the next trade date.",
                     st.value_text(&old),
                     st.value_text(&v)
                 )
@@ -437,6 +467,14 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    /// Yes to the pending loosening, for the account it was asked for.
+    fn confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.pending.take() else { return };
+        let keep = std::mem::replace(&mut self.target, p.target);
+        self.set(p.index, p.value, true, cx);
+        self.target = keep;
+    }
+
     fn undo(&mut self, cx: &mut Context<Self>) {
         let Some((i, target, v)) = self.undo.pop() else {
             self.note = None;
@@ -444,8 +482,8 @@ impl SettingsWindow {
         };
         let keep = std::mem::replace(&mut self.target, target);
         let n = self.undo.len();
-        // Undoing is never a loosening that needs a yes: it restores what was.
-        self.set(i, v, true, cx);
+        // An undo that loosens asks like any other change.
+        self.set(i, v, false, cx);
         self.undo.truncate(n);
         self.target = keep;
         if let Some(n) = &mut self.note {
@@ -470,7 +508,7 @@ impl SettingsWindow {
             .map_or(0, |k| (k + 1) % a.len());
         self.target.account = Some(a[k].id.clone());
         self.target.account_name = Some(a[k].name.clone());
-        self.editor = None;
+        self.drop_unfinished();
     }
 
     fn step_product(&mut self) {
@@ -480,7 +518,7 @@ impl SettingsWindow {
             .position(|p| Some(*p) == self.target.product.as_deref())
             .map_or(0, |k| (k + 1) % self.products.len());
         self.target.product = Some(self.products[k].to_owned());
-        self.editor = None;
+        self.drop_unfinished();
     }
 
     fn open_editor(&mut self, cx: &App) {
@@ -574,12 +612,9 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
-        if let Some(p) = &self.pending {
+        if self.pending.is_some() {
             match key {
-                "enter" => {
-                    let (i, v) = (p.index, p.value.clone());
-                    self.set(i, v, true, cx);
-                }
+                "enter" => self.confirm(cx),
                 "escape" => {
                     self.pending = None;
                     self.note = None;
@@ -609,6 +644,7 @@ impl SettingsWindow {
                 self.section = Section::ALL[if shift { (k + n - 1) % n } else { (k + 1) % n }];
                 self.query.clear();
                 self.row = 0;
+                self.drop_unfinished();
             }
             ("escape", ..) => {
                 if self.query.is_empty() {
@@ -643,11 +679,20 @@ impl SettingsWindow {
                     }
                 }
             }
+            // While searching, Space is a space and Enter goes to the selected setting:
+            // typing never changes a setting.
+            ("space", false, false, false) if !self.query.is_empty() => {
+                self.query.push(' ');
+                self.row = 0;
+            }
+            ("enter", false, false, false) if !self.query.trim().is_empty() => {
+                if let Some(i) = sel {
+                    self.show(i);
+                }
+            }
             ("enter" | "space", false, false, false) => {
                 if let (Some(i), Some(kind)) = (sel, kind) {
                     self.activate(i, kind, cx);
-                } else if key == "space" {
-                    self.query.push(' ');
                 }
             }
             _ => {
@@ -727,7 +772,7 @@ impl SettingsWindow {
                             v.section = s;
                             v.query.clear();
                             v.row = 0;
-                            v.edit = None;
+                            v.drop_unfinished();
                             cx.notify();
                         }),
                     ),
@@ -1023,11 +1068,7 @@ impl SettingsWindow {
                                 .child("Loosen from tomorrow · Enter")
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|v, _, _, cx| {
-                                        if let Some(p) = v.pending.take() {
-                                            v.set(p.index, p.value, true, cx);
-                                        }
-                                    }),
+                                    cx.listener(|v, _, _, cx| v.confirm(cx)),
                                 ),
                         )
                         .child(
@@ -1261,8 +1302,12 @@ impl Render for SettingsWindow {
                 child += 1;
             }
         }
-        if let Some(c) = selected_child {
+        let at = (self.section, self.row, searching);
+        if let Some(c) = selected_child
+            && self.scrolled != Some(at)
+        {
             self.scroll.scroll_to_item(c);
+            self.scrolled = Some(at);
         }
         let search = div()
             .flex_1()

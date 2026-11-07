@@ -43,7 +43,7 @@ pub struct PaneWindow {
 fn command(cmd: Command) -> Option<Command> {
     match cmd {
         Command::PopOut | Command::Reattach => Some(Command::Reattach),
-        Command::DockBesideChart | Command::Menu => Some(cmd),
+        Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
         _ => None,
     }
 }
@@ -95,6 +95,7 @@ impl PaneWindow {
             Some(Command::Reattach) => cx.defer(move |cx| reattach_pane(id, cx)),
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
+            Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
             _ => {}
         }
         cx.notify();

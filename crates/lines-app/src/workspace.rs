@@ -530,9 +530,11 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             let mut opts = env.dom.clone();
             // New DOMs follow Settings › DOM unless a flag was given (a saved DOM's own
             // state wins either way).
-            if !opts.from_cli {
-                let np = &crate::picker_view::settings(cx).new_panes;
+            let np = &crate::picker_view::settings(cx).new_panes;
+            if !opts.grouping_from_cli {
                 opts.grouping = np.dom_grouping.unwrap_or(opts.grouping);
+            }
+            if !opts.trail_from_cli {
                 opts.trail |= np.dom_trail;
             }
             let frozen = env.frozen;
@@ -2024,6 +2026,7 @@ impl WindowView {
             items.push(MenuItem::of(Command::ReopenTab, false));
         }
         items.push(MenuItem::of(Command::ExportDiagnostics, false));
+        items.push(MenuItem::named("Settings…", Command::Settings, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.show_menu(Menu::new(at, items), cx);
     }
@@ -2104,6 +2107,7 @@ impl WindowView {
             cx.global::<Workspace>().show_latency_hud,
         ));
         items.push(MenuItem::of(Command::ExportDiagnostics, false));
+        items.push(MenuItem::named("Settings…", Command::Settings, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
         self.show_menu(Menu::new(at, items), cx);
     }
