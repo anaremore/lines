@@ -1587,6 +1587,79 @@ mod tests {
         t.handle().latency()
     }
 
+    /// The header's order buttons go the same way as ladder clicks: built by
+    /// `dom_trade::quick`, submitted with the click's `Instant`, timed by the core. Join bid
+    /// rests at the bid; Buy Mkt fills at the ask; Reverse flips long 2 to short 2.
+    #[test]
+    fn header_buttons_are_timed_and_reach_the_core() {
+        use crate::dom_trade::{QuickOrder, quick};
+        let t = trading(vec![AccountConfig::paper("paper", 50_000)]);
+        let account = AccountId::new("paper");
+        let feed = batches("buttons");
+        for b in feed.iter().take(30) {
+            t.handle().market(es(), from_events(b));
+        }
+        t.settle();
+        // Fresh market data after each press, so time moves past the paper ack latency.
+        let next = std::cell::Cell::new(30);
+        let press = |q, pos| {
+            let mut ctx = entry("paper", pos, (5999.75, 6000.00));
+            ctx.qty = Qty(2);
+            let cmd = quick(q, armed(), &ctx).expect("armed: an order");
+            t.submit(Source::Dom, Instant::now(), cmd);
+            t.settle();
+            for b in feed.iter().skip(next.get()).take(2) {
+                t.handle().market(es(), from_events(b));
+            }
+            next.set(next.get() + 2);
+            t.settle();
+        };
+        press(QuickOrder::JoinBid, 0);
+        let resting: Vec<_> = t
+            .cache
+            .read()
+            .open_orders(&account, es())
+            .cloned()
+            .collect();
+        assert_eq!(resting.len(), 1);
+        assert_eq!(
+            resting[0].kind,
+            lines_trading::OrderKind::Limit { price: px(5999.75) }
+        );
+        t.submit(
+            Source::Hotkey,
+            Instant::now(),
+            TradeCommand::CancelAll {
+                account: account.clone(),
+                contract: Some(es()),
+            },
+        );
+        t.settle();
+        press(QuickOrder::BuyMarket, 0);
+        assert_eq!(
+            t.cache.read().position(&account, es()).map(|p| p.qty),
+            Some(2)
+        );
+        press(QuickOrder::Reverse, 2);
+        assert_eq!(
+            t.cache.read().position(&account, es()).map(|p| p.qty),
+            Some(-2),
+            "one market order for twice the position"
+        );
+        // Every order the buttons sent (and the cancel) carried a click time to the core.
+        let (_, _, n) = t.handle().latency();
+        assert_eq!(n, 4);
+        // Disarmed: nothing is built, so nothing is sent.
+        assert!(
+            quick(
+                QuickOrder::BuyMarket,
+                Arming::default(),
+                &entry("paper", 0, (1.0, 2.0))
+            )
+            .is_err()
+        );
+    }
+
     /// Every DOM click is timed (behaviour only; the budget is the perf test below).
     #[test]
     fn dom_clicks_record_click_to_order_sent() {
