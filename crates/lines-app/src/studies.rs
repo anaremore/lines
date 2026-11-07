@@ -226,6 +226,17 @@ impl Studies {
         }
     }
 
+    /// Text rows the legend shows (one per shown, labeled study).
+    pub fn legend_rows(&self) -> usize {
+        self.list
+            .iter()
+            .filter(|s| {
+                let d = s.config.display();
+                !d.hidden && d.label
+            })
+            .count()
+    }
+
     /// A shown study needs the sub-pane (cumulative delta).
     pub fn has_subpane(&self) -> bool {
         self.list
@@ -342,7 +353,8 @@ impl Studies {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(div().w(px(12.0)).h(px(3.0)).bg(theme.up))
+                    // Neutral: the series goes both ways (market colors mean direction only).
+                    .child(div().w(px(12.0)).h(px(3.0)).bg(theme.text_dim))
                     .child(
                         div()
                             .text_color(theme.text_main)

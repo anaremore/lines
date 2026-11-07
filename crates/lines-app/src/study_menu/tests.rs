@@ -52,7 +52,7 @@ fn cumulative_delta_and_footprint_are_studies() {
     let items = StudyMenu::default().items(&input(&set, &src, &[]));
     let l = labels(&items);
     assert!(l.contains(&"Cumulative delta · RTH".to_owned()), "{l:?}");
-    assert!(l.contains(&"Footprint · bid × ask".to_owned()), "{l:?}");
+    assert!(l.contains(&"Footprint · sell × buy".to_owned()), "{l:?}");
     assert!(
         !l.iter()
             .any(|x| x.starts_with("+ Cumulative delta") || x.starts_with("+ Footprint")),
@@ -130,7 +130,7 @@ fn menu_lists_studies_catalog_and_templates() {
             "+ Cumulative delta · ETH session",
             "+ Cumulative delta · RTH session",
             "+ Cumulative delta · no reset",
-            "+ Footprint · bid × ask",
+            "+ Footprint · sell × buy",
             "+ Footprint · delta",
             "+ Footprint · volume",
             "# Templates",
