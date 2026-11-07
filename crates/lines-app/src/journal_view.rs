@@ -997,6 +997,14 @@ impl JournalView {
     }
 }
 
+impl JournalView {
+    /// Taking typed text now (a note being edited): the workspace leaves drawing keys to it
+    /// (`commands::runs_while_typing`).
+    pub fn takes_text(&self) -> bool {
+        self.editor.is_some()
+    }
+}
+
 impl Render for JournalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = cx

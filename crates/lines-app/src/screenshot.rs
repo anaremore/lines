@@ -53,6 +53,8 @@ pub struct Shot {
     pub account_menu: bool,
     /// The P&L display (`--pnl`; default: the app's default).
     pub pnl: Option<crate::pnl::PnlDisplay>,
+    /// Drawings to show (`--drawings FILE`), in memory only.
+    pub drawings: Option<(lines_core::Product, Vec<lines_core::drawings::Drawing>)>,
 }
 
 pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
@@ -102,6 +104,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         arm,
         account_menu,
         pnl,
+        drawings: seed,
     } = shot;
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut trading = Trading::start(
@@ -150,6 +153,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             settings.settings.pnl_display = m;
         }
         cx.set_global(settings);
+        cx.set_global(crate::drawings_store::Drawings::ephemeral(
+            seed.into_iter().collect(),
+        ));
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);
         if let Err(e) = capture(cx, window, out, size, scale, script) {
