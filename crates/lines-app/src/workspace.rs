@@ -1292,18 +1292,24 @@ impl WindowView {
         cx.notify();
     }
 
-    /// A fresh trading tab on the focused pane's market, in its link group.
-    /// Show the journal: focus a journal pane of this window if there is one, else open one
-    /// in a new tab.
+    /// Show the journal: a journal pane of this window (shown again if it was hidden; a
+    /// popped-out one is said to be in its own window), else a new tab with one.
     fn open_journal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let found = self.tabs.iter().enumerate().find_map(|(i, t)| {
             t.panes
                 .iter()
-                .find(|(id, s)| s.handle.kind() == PaneKind::Journal && t.is_shown(id))
-                .map(|(id, _)| (i, *id))
+                .find(|(_, s)| s.handle.kind() == PaneKind::Journal)
+                .map(|(id, _)| (i, *id, t.state(*id)))
         });
-        if let Some((i, id)) = found {
+        if let Some((i, id, state)) = found {
+            if state == PaneState::Detached {
+                self.refuse("the journal is popped out: it is in its own window", cx);
+                return;
+            }
             self.activate_tab(i, window, cx);
+            if state.is_hidden() {
+                self.apply_states(vec![(id, PaneState::Shown)], window, cx);
+            }
             self.focus_pane(id, window, cx);
             return;
         }
@@ -1319,6 +1325,7 @@ impl WindowView {
         self.activate_tab(i, window, cx);
     }
 
+    /// A fresh trading tab on the focused pane's market, in its link group.
     fn fresh_tab(&self, cx: &mut App) -> Tab {
         let (target, link) = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
             Some(h) => (h.feed(cx).target_doc, h.link(cx)),

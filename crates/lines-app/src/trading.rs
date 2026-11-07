@@ -726,7 +726,6 @@ fn first_price(k: &OrderKind) -> Option<Price> {
     k.prices().next()
 }
 
-/// Move a damaged paper file aside (never overwrite it) and say so.
 /// The journal from its file (if any): its trades and edits, and a writer appending to it.
 /// A file this build can't read is left alone and not written this run (reported).
 fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option<String>) {
@@ -763,6 +762,7 @@ fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option
     }
 }
 
+/// Move a damaged paper file aside (never overwrite it) and say so.
 fn set_aside(path: &Path, e: &anyhow::Error) -> String {
     let ms = lines_feed::now_utc().0;
     let aside = path.with_extension(format!("unreadable-{ms}.json"));
@@ -1639,6 +1639,63 @@ mod tests {
         assert_eq!(trades[1].side, lines_trading::Side::Sell);
         assert_eq!(trades[1].realized, lines_trading::Money::cents(-1250));
         assert_eq!(snap.open, 0);
+    }
+
+    /// Review round 2: the core reports positions on every market batch while one is open.
+    /// Those must not republish the journal (the pane would re-format every row per batch);
+    /// only opening, closing or editing a trade does.
+    #[test]
+    fn market_batches_with_an_open_position_dont_republish_the_journal() {
+        let t = trading(vec![AccountConfig::paper("paper", 50_000)]);
+        let start = UtcMillis::parse_iso("2026-11-05T15:00:00Z").unwrap();
+        t.handle().advance_to(start);
+        let book = |bid: f64, ask: f64| {
+            vec![
+                MarketInput::BookClear,
+                MarketInput::Book {
+                    side: lines_core::Side::Bid,
+                    price: px(bid),
+                    qty: Qty(50),
+                },
+                MarketInput::Book {
+                    side: lines_core::Side::Ask,
+                    price: px(ask),
+                    qty: Qty(50),
+                },
+            ]
+        };
+        t.handle().market(es(), book(5999.75, 6000.00));
+        let es_product = catalog::get(catalog::ES).unwrap();
+        let a = AccountId::new("paper");
+        let open = parse_script("buy 1 mkt; ack", &es_product, es(), &a).unwrap();
+        t.run_script(&open, start, 25);
+        let opened = t.journal.revision();
+        assert_eq!(t.journal.snapshot().unwrap().open, 1);
+        for i in 0..20 {
+            let p = 6000.00 + f64::from(i) * 0.25;
+            let mut batch = book(p - 0.25, p);
+            batch.push(MarketInput::Trade {
+                time: UtcMillis(start.0 + 100 + i64::from(i)),
+                price: px(p),
+                qty: Qty(1),
+            });
+            t.handle().market(es(), batch);
+        }
+        t.settle();
+        assert_eq!(
+            t.journal.revision(),
+            opened,
+            "market batches (and the core's position reports) don't publish"
+        );
+        let close = parse_script("sell 1 mkt; ack", &es_product, es(), &a).unwrap();
+        t.run_script(&close, UtcMillis(start.0 + 1_000), 25);
+        assert!(t.journal.revision() > opened, "a close publishes");
+        let snap = t.journal.snapshot().unwrap();
+        assert_eq!((snap.trades.len(), snap.open), (1, 0));
+        assert!(
+            snap.trades[0].mfe > lines_trading::Money::ZERO,
+            "MAE/MFE still follow"
+        );
     }
 
     #[test]

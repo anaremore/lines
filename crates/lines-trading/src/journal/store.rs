@@ -12,7 +12,7 @@
 //!   trading core's: append, flush, and `sync_data` at most once a second and on close.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -105,32 +105,38 @@ enum Job {
 }
 
 impl JournalWriter {
-    /// Open (or create) `path` for appending: a new file gets its header; a torn tail
-    /// (`loaded.valid_len` short of the file's length) is cut off first.
-    pub fn open(path: PathBuf, source: &str, loaded: Option<&Loaded>) -> Result<JournalWriter> {
+    /// Open (or create) `path` for appending: a new file gets its header; a torn tail is cut
+    /// off first. The file is read again here (not trusted from `_loaded`, which may be older
+    /// than the file), and every write appends, so nothing complete is ever cut or overwritten.
+    pub fn open(path: PathBuf, source: &str, _loaded: Option<&Loaded>) -> Result<JournalWriter> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         }
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let valid = parse(&bytes)?.valid_len;
+        let len = bytes.len() as u64;
+        if valid < len {
+            tracing::warn!(
+                "journal {}: cut a torn tail of {} bytes",
+                path.display(),
+                len - valid
+            );
+            // An append-only handle can't truncate (Windows): cut with a plain write handle.
+            OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|f| f.set_len(valid))
+                .with_context(|| format!("cut the torn tail of {}", path.display()))?;
+        }
         let mut file = OpenOptions::new()
             .create(true)
-            .read(true)
-            .append(false)
-            .write(true)
-            .truncate(false)
+            .append(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        let len = file.metadata()?.len();
-        match loaded {
-            Some(l) if l.valid_len < len => {
-                tracing::warn!(
-                    "journal {}: cut a torn tail of {} bytes",
-                    path.display(),
-                    len - l.valid_len
-                );
-                file.set_len(l.valid_len)?;
-            }
-            _ => {}
-        }
         if file.metadata()?.len() == 0 {
             let h = Header {
                 journal: VERSION,
@@ -141,7 +147,6 @@ impl JournalWriter {
             file.write_all(&line)?;
             file.sync_data()?;
         }
-        file.seek(SeekFrom::End(0))?;
         let (tx, rx) = mpsc::channel();
         thread::Builder::new()
             .name("lines-journal".into())

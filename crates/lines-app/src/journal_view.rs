@@ -140,11 +140,18 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
             excursions,
             t.tags.join(", "),
         ],
-        sign: match pnl::tone(net) {
-            _ if !mode.shown() => 0,
-            pnl::Tone::Up => 1,
-            pnl::Tone::Down => -1,
-            pnl::Tone::Flat => 0,
+        // The color follows the value shown: net money, else the ticks as rounded.
+        sign: if mode.money() {
+            match pnl::tone(net) {
+                pnl::Tone::Up => 1,
+                pnl::Tone::Down => -1,
+                pnl::Tone::Flat => 0,
+            }
+        } else if mode.ticks() {
+            t.ticks(tick)
+                .map_or(0, |v| ((v * 10.0).round() as i64).signum() as i8)
+        } else {
+            0
         },
         note: t.note.clone(),
         tags: t.tags.clone(),
@@ -330,6 +337,8 @@ pub struct JournalView {
     built: Option<(u64, u64, CivilDate)>,
     /// The current trade date as last known (kept while the store is busy).
     today: Option<CivilDate>,
+    /// When `today` was last checked by the poll (about once a second).
+    date_checked: Option<std::time::Instant>,
     /// The P&L display setting (read at render).
     mode: PnlDisplay,
     rows: Vec<Row>,
@@ -377,6 +386,19 @@ impl Pane for JournalView {
         &mut self.seen_revision
     }
 
+    /// A new trade date (checked about once a second) redraws the stats strip.
+    fn changed(&mut self) -> bool {
+        if self
+            .date_checked
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        {
+            return false;
+        }
+        self.date_checked = Some(std::time::Instant::now());
+        let before = self.today;
+        before.is_some() && self.today() != before
+    }
+
     /// The journal's revision (and the P&L display setting's), not the market's: the pane
     /// repaints when a trade or the display changes.
     fn revision(&self) -> u64 {
@@ -409,6 +431,7 @@ impl JournalView {
             seen_revision: u64::MAX,
             built: None,
             today: None,
+            date_checked: None,
             mode: PnlDisplay::default(),
             rows: Vec::new(),
             stats_today: String::new(),
@@ -585,8 +608,11 @@ impl JournalView {
         let k = &ev.keystroke;
         let m = k.modifiers;
         if let Some(ed) = &mut self.editor {
-            if m.control || m.alt || m.platform {
-                return; // workspace commands still work while editing
+            // AltGr (Ctrl+Alt on Windows) types characters such as @ { €; other modified
+            // keys are commands and still work while editing.
+            let alt_gr = m.control && m.alt && k.key_char.is_some();
+            if (m.control || m.alt || m.platform) && !alt_gr {
+                return;
             }
             match ed.key(k.key.as_str(), k.key_char.as_deref()) {
                 EditorKey::Typing => {}
@@ -1000,6 +1026,12 @@ mod tests {
         let ticks = cells(PnlDisplay::Ticks);
         assert_eq!(ticks[JournalCol::Pnl.index()], "+6.3 t");
         assert_eq!(ticks[JournalCol::MaeMfe.index()], "-1.8 t / +8.3 t");
+        // In ticks mode the color follows the ticks shown, not the money after fees.
+        let mut scratch = t.clone();
+        scratch.exit_value = scratch.entry_value; // exit = entry: 0.0 t, a loss after fees
+        scratch.realized = Money::ZERO;
+        assert_eq!(row(&scratch, PnlDisplay::Ticks).sign, 0);
+        assert_eq!(row(&scratch, PnlDisplay::Currency).sign, -1);
         let cur = cells(PnlDisplay::Currency);
         assert_eq!(cur[JournalCol::Pnl.index()], "+$310.02");
         assert_eq!(cur[JournalCol::Ticks.index()], "—");
