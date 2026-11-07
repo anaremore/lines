@@ -626,6 +626,7 @@ pub fn crisp_band(at: f32, width: f32, hair: f32) -> (f32, f32) {
     (w, start)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_line(
     a: (f32, f32),
     b: (f32, f32),
