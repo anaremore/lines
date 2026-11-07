@@ -3,7 +3,10 @@
 //!
 //! - **Table**: time, contract, side, quantity, average entry and exit, net P&L, ticks,
 //!   duration, MAE/MFE, tags; resizable, hideable columns (`lines_core::columns`, saved with
-//!   the pane). P&L is signed text (`+310.02`), coloured up/down: never colour alone.
+//!   the pane). P&L is signed text (`+$310.02`), colored up/down: never color alone.
+//! - **P&L display** (`crate::pnl`, app-wide): off shows no money or tick number at all
+//!   (P&L, ticks, MAE/MFE and the strip's money read `—`; count, win rate and streak stay);
+//!   ticks or currency show only that unit. CSV export is always complete.
 //! - **Stats strip**: count, win rate, net, average win and loss, expectancy, profit factor,
 //!   max drawdown, streak; click it (or the palette) to switch between the current trade date
 //!   and all dates.
@@ -33,6 +36,7 @@ use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
     self, ColumnCmd, ColumnMenu, Columns, HEADER_ROW_H, HeaderHit, JournalCol, Table,
 };
+use crate::pnl::{self, PnlDisplay};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
 use crate::trading::Trading;
@@ -54,8 +58,20 @@ pub struct Row {
     pub tags: Vec<String>,
 }
 
-/// Format a trade for the table.
-pub fn row(t: &Trade) -> Row {
+fn money_text(m: Money) -> String {
+    let mut s = String::new();
+    let _ = pnl::write_money(&mut s, m);
+    s
+}
+
+fn ticks_text(t: f64) -> String {
+    let mut s = String::new();
+    let _ = pnl::write_ticks(&mut s, t);
+    s
+}
+
+/// Format a trade for the table, showing P&L as `mode` allows.
+pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
     let product = lines_feed::catalog::get(t.contract.product);
     let tick = product.as_ref().map_or(1, |p| p.price.tick);
     let price = |v: Option<f64>| match (v, &product) {
@@ -78,9 +94,35 @@ pub fn row(t: &Trade) -> Row {
     if t.incomplete {
         time.push_str(" ≈");
     }
-    let signed_ticks = |v: Option<f64>| v.map_or_else(|| "—".to_owned(), |v| format!("{v:+.2}"));
-    let ticks = |v: Option<f64>| v.map_or_else(|| "—".to_owned(), |v| format!("{v:.1}"));
+    let dash = || "—".to_owned();
+    let tk = |v: Option<f64>| match v {
+        Some(v) if mode.ticks() => ticks_text(v),
+        _ => dash(),
+    };
     let net = t.net();
+    let pnl = if mode.money() {
+        money_text(net)
+    } else if mode.ticks() {
+        tk(t.ticks(tick))
+    } else {
+        dash()
+    };
+    let excursions = match (mode.money(), mode.ticks()) {
+        (true, true) => format!(
+            "{} / {}  ({} / {})",
+            money_text(t.mae),
+            money_text(t.mfe),
+            tk(t.mae_ticks(tick).map(|v| -v)),
+            tk(t.mfe_ticks(tick))
+        ),
+        (true, false) => format!("{} / {}", money_text(t.mae), money_text(t.mfe)),
+        (false, true) => format!(
+            "{} / {}",
+            tk(t.mae_ticks(tick).map(|v| -v)),
+            tk(t.mfe_ticks(tick))
+        ),
+        (false, false) => dash(),
+    };
     Row {
         id: t.id.clone(),
         cells: [
@@ -90,36 +132,20 @@ pub fn row(t: &Trade) -> Row {
             qty,
             price(t.avg_entry()),
             price(t.avg_exit()),
-            signed_money(net),
-            signed_ticks(t.ticks(tick)),
+            pnl,
+            tk(t.ticks(tick)),
             duration_text(t.duration_ms()),
-            format!(
-                "{} / {}  ({}/{} t)",
-                signed_money(t.mae),
-                signed_money(t.mfe),
-                ticks(t.mae_ticks(tick)),
-                ticks(t.mfe_ticks(tick))
-            ),
+            excursions,
             t.tags.join(", "),
         ],
-        sign: if net > Money::ZERO {
-            1
-        } else if net < Money::ZERO {
-            -1
-        } else {
-            0
+        sign: match pnl::tone(net) {
+            _ if !mode.shown() => 0,
+            pnl::Tone::Up => 1,
+            pnl::Tone::Down => -1,
+            pnl::Tone::Flat => 0,
         },
         note: t.note.clone(),
         tags: t.tags.clone(),
-    }
-}
-
-/// `+310.02`, `-150.00`, `0.00`.
-pub fn signed_money(m: Money) -> String {
-    if m > Money::ZERO {
-        format!("+{m}")
-    } else {
-        m.to_string()
     }
 }
 
@@ -164,30 +190,39 @@ pub fn duration_text(ms: i64) -> String {
     }
 }
 
-/// The stats strip: `Today 2026-11-05: 4 trades · win 75% · net +412.50 · …`.
-pub fn stats_text(label: &str, s: &Stats, open: usize) -> String {
+/// The stats strip: `Today 2026-11-05: 4 trades · win 75% · net +$412.50 · …`. Money only
+/// when `mode` shows currency (stats are money: none in tick or off modes).
+pub fn stats_text(label: &str, s: &Stats, open: usize, mode: PnlDisplay) -> String {
     let mut out = format!(
         "{label}: {} trade{}",
         s.count,
         if s.count == 1 { "" } else { "s" }
     );
     if s.count > 0 {
-        let money = |m: Option<Money>| m.map_or_else(|| "—".to_owned(), signed_money);
         out.push_str(&format!(
-            "  ·  win {:.0}%  ·  net {}  ·  avg win {}  ·  avg loss {}  ·  expectancy {}  ·  PF {}  ·  max DD {}  ·  streak {}",
-            s.win_rate().unwrap_or(0.0) * 100.0,
-            signed_money(s.net),
-            money(s.avg_win()),
-            money(s.avg_loss()),
-            money(s.expectancy()),
-            s.profit_factor()
-                .map_or_else(|| "—".to_owned(), |p| format!("{p:.2}")),
-            s.max_drawdown,
+            "  ·  win {:.0}%",
+            s.win_rate().unwrap_or(0.0) * 100.0
+        ));
+        if mode.money() {
+            let money = |m: Option<Money>| m.map_or_else(|| "—".to_owned(), money_text);
+            out.push_str(&format!(
+                "  ·  net {}  ·  avg win {}  ·  avg loss {}  ·  expectancy {}  ·  PF {}  ·  max DD {}",
+                money_text(s.net),
+                money(s.avg_win()),
+                money(s.avg_loss()),
+                money(s.expectancy()),
+                s.profit_factor()
+                    .map_or_else(|| "—".to_owned(), |p| format!("{p:.2}")),
+                money_text(-s.max_drawdown),
+            ));
+        }
+        out.push_str(&format!(
+            "  ·  streak {}",
             match s.streak {
                 0 => "—".to_owned(),
                 n if n > 0 => format!("W{n}"),
                 n => format!("L{}", -n),
-            },
+            }
         ));
     }
     if open > 0 {
@@ -288,8 +323,10 @@ pub struct JournalView {
     frozen: bool,
     journal: Option<Arc<JournalShared>>,
     seen_revision: u64,
-    /// The journal revision `rows` and the stats were built from.
-    built: Option<u64>,
+    /// The journal revision and P&L display epoch `rows` and the stats were built from.
+    built: Option<(u64, u64)>,
+    /// The P&L display setting (read at render).
+    mode: PnlDisplay,
     rows: Vec<Row>,
     stats_today: String,
     stats_all: String,
@@ -337,9 +374,13 @@ impl Pane for JournalView {
         &mut self.seen_revision
     }
 
-    /// The journal's revision, not the market's: the pane repaints when a trade changes.
+    /// The journal's revision (and the P&L display setting's), not the market's: the pane
+    /// repaints when a trade or the display changes.
     fn revision(&self) -> u64 {
-        self.journal.as_ref().map_or(0, |j| j.revision())
+        self.journal
+            .as_ref()
+            .map_or(0, |j| j.revision())
+            .wrapping_add(pnl::display_epoch() << 32)
     }
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
@@ -364,6 +405,7 @@ impl JournalView {
             journal: Trading::try_global(cx).map(|t| t.journal.clone()),
             seen_revision: u64::MAX,
             built: None,
+            mode: PnlDisplay::default(),
             rows: Vec::new(),
             stats_today: String::new(),
             stats_all: String::new(),
@@ -449,22 +491,29 @@ impl JournalView {
         let Some(j) = self.journal.clone() else {
             return true;
         };
-        let rev = j.revision();
+        let rev = (j.revision(), pnl::display_epoch());
         if self.built == Some(rev) {
             return true;
         }
         let Some(journal) = j.try_read() else {
             return false;
         };
-        self.rows = journal.trades().iter().rev().map(row).collect();
+        let mode = self.mode;
+        self.rows = journal
+            .trades()
+            .iter()
+            .rev()
+            .map(|t| row(t, mode))
+            .collect();
         let today = self.today();
         let open = journal.open_trades().count();
         self.stats_today = stats_text(
             &format!("Today {today}"),
             &journal.stats(|t| t.trade_date == today),
             open,
+            mode,
         );
-        self.stats_all = stats_text("All dates", &journal.stats(|_| true), open);
+        self.stats_all = stats_text("All dates", &journal.stats(|_| true), open, mode);
         drop(journal);
         self.built = Some(rev);
         true
@@ -823,6 +872,14 @@ impl JournalView {
 
 impl Render for JournalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mode = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.pnl_display)
+            .unwrap_or_default();
+        if mode != self.mode {
+            self.mode = mode;
+            self.built = None;
+        }
         if !self.rebuild() {
             // The trading thread held the journal this instant: draw again on the next poll.
             self.seen_revision = u64::MAX;
@@ -909,7 +966,7 @@ mod tests {
 
     #[test]
     fn rows_are_signed_and_readable() {
-        let r = row(&trade());
+        let r = row(&trade(), PnlDisplay::Both);
         let c = |col: JournalCol| r.cells[col.index()].as_str();
         assert_eq!(c(JournalCol::Time), "11-05 14:31:07");
         assert_eq!(c(JournalCol::Contract), "ESZ26");
@@ -917,21 +974,40 @@ mod tests {
         assert_eq!(c(JournalCol::Qty), "4");
         assert_eq!(c(JournalCol::Entry), "5999.9375");
         assert_eq!(c(JournalCol::Exit), "6001.50");
-        assert_eq!(c(JournalCol::Pnl), "+310.02");
-        assert_eq!(c(JournalCol::Ticks), "+6.25");
+        assert_eq!(c(JournalCol::Pnl), "+$310.02");
+        assert_eq!(c(JournalCol::Ticks), "+6.3 t");
         assert_eq!(c(JournalCol::Duration), "2m 00s");
-        assert!(
-            c(JournalCol::MaeMfe).starts_with("-87.50 / +412.50  ("),
-            "{}",
-            c(JournalCol::MaeMfe)
+        assert_eq!(
+            c(JournalCol::MaeMfe),
+            "-$87.50 / +$412.50  (-1.8 t / +8.3 t)"
         );
         assert_eq!(c(JournalCol::Tags), "breakout, A+");
         assert_eq!(r.sign, 1);
         assert_eq!(duration_text(45_000), "45s");
         assert_eq!(duration_text(3_780_000), "1h 03m");
-        assert_eq!(signed_money(Money::ZERO), "0.00");
         assert_eq!(decimal(6001.0, 100), "6001.00");
         assert_eq!(decimal(0.5, 1), "0.5");
+    }
+
+    /// P&L display (`crate::pnl`): off shows no money or tick number anywhere; ticks or
+    /// currency only that unit. The sign is always written; with P&L off nothing is colored.
+    #[test]
+    fn pnl_display_decides_what_shows() {
+        let t = trade();
+        let cells = |m| row(&t, m).cells;
+        let off = cells(PnlDisplay::Off);
+        for col in [JournalCol::Pnl, JournalCol::Ticks, JournalCol::MaeMfe] {
+            assert_eq!(off[col.index()], "—", "{col:?}");
+        }
+        assert_eq!(row(&t, PnlDisplay::Off).sign, 0, "nothing colored");
+        assert_eq!(off[JournalCol::Entry.index()], "5999.9375", "prices stay");
+        let ticks = cells(PnlDisplay::Ticks);
+        assert_eq!(ticks[JournalCol::Pnl.index()], "+6.3 t");
+        assert_eq!(ticks[JournalCol::MaeMfe.index()], "-1.8 t / +8.3 t");
+        let cur = cells(PnlDisplay::Currency);
+        assert_eq!(cur[JournalCol::Pnl.index()], "+$310.02");
+        assert_eq!(cur[JournalCol::Ticks.index()], "—");
+        assert_eq!(cur[JournalCol::MaeMfe.index()], "-$87.50 / +$412.50");
     }
 
     #[test]
@@ -939,18 +1015,22 @@ mod tests {
         let j = Journal::from_records([Record::Trade(Box::new(trade()))]);
         let s = j.stats(|_| true);
         assert_eq!(
-            stats_text("Today 2026-11-05", &s, 1),
-            "Today 2026-11-05: 1 trade  ·  win 100%  ·  net +310.02  ·  avg win +310.02  ·  avg loss —  ·  expectancy +310.02  ·  PF —  ·  max DD 0.00  ·  streak W1  ·  1 open"
+            stats_text("Today 2026-11-05", &s, 1, PnlDisplay::Both),
+            "Today 2026-11-05: 1 trade  ·  win 100%  ·  net +$310.02  ·  avg win +$310.02  ·  avg loss —  ·  expectancy +$310.02  ·  PF —  ·  max DD $0.00  ·  streak W1  ·  1 open"
         );
         assert_eq!(
-            stats_text("All dates", &Stats::default(), 0),
+            stats_text("Today 2026-11-05", &s, 0, PnlDisplay::Off),
+            "Today 2026-11-05: 1 trade  ·  win 100%  ·  streak W1"
+        );
+        assert_eq!(
+            stats_text("All dates", &Stats::default(), 0, PnlDisplay::Both),
             "All dates: 0 trades"
         );
     }
 
     #[test]
     fn editor_types_switches_saves_and_cancels() {
-        let r = row(&trade());
+        let r = row(&trade(), PnlDisplay::Both);
         let mut ed = Editor::new(&r);
         assert_eq!(ed.tags, "breakout, A+");
         assert_eq!(ed.key("backspace", None), EditorKey::Typing);
