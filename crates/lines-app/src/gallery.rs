@@ -233,8 +233,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     j.push("--paper".into());
     j.push("buy 2 mkt; ack; print 6011.50; wait 20; sell 2 mkt; ack".into());
     v.push(s("journal", false, end, j));
-    // The strategy panel (decision 0025) on the synthetic instances, beside a DOM; instance 1
-    // holds the paper position.
+    // The strategy panel (decision 0025) on the synthetic instances, beside a DOM.
     let mut st = vec![
         "--workspace".into(),
         ws("strategies.json"),
@@ -243,7 +242,11 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         "--strategies-demo".into(),
     ];
     st.push("--paper".into());
-    st.push("buy 2 mkt; ack; print 6011.50".into());
+    // #3 trades a losing round trip as itself (its stop is hit), and the core halts it at
+    // its daily loss.
+    st.push(
+        "strategy 3; buy 10 mkt; ack; sell 10 stop 6018.00; ack; print 6018.00; ack; manual".into(),
+    );
     v.push(s("strategies", true, end, st));
     if let Some(p) = v.iter_mut().find(|s| s.name == "popout") {
         p.windows = 2;

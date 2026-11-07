@@ -62,7 +62,8 @@ pub struct StrategyView {
     selected: Option<StrategyId>,
     /// Commands sent and not answered yet; a refusal becomes the row's note.
     pending: Vec<(StrategyId, CommandId)>,
-    denied: Vec<(StrategyId, String)>,
+    /// Refusals shown on their rows, with the row's state when shown (cleared when it moves).
+    denied: Vec<(StrategyId, String, Option<Phase>)>,
 }
 
 impl EventEmitter<FeedChanged> for StrategyView {}
@@ -182,6 +183,8 @@ impl StrategyView {
     /// (try again on the next poll).
     fn rebuild(&mut self, cx: &App) -> bool {
         let today = self.today();
+        // Read the revision once, before anything it covers: a change landing while the rows
+        // are built moves it past this value, so the next poll builds again.
         let rev = (self.revision(), today);
         if self.built == Some(rev) {
             return true;
@@ -192,6 +195,8 @@ impl StrategyView {
         let mut accounts: Vec<AccountId> = self.infos.iter().map(|i| i.account.clone()).collect();
         accounts.sort_by(|a, b| a.0.cmp(&b.0));
         accounts.dedup();
+        // New accounts: their revisions weren't in `rev`; build again on the next poll.
+        let same_accounts = accounts == self.accounts;
         self.accounts = accounts;
         let Some(trading) = Trading::try_global(cx) else {
             self.rows.clear();
@@ -204,12 +209,13 @@ impl StrategyView {
         // Answers to commands this pane sent: a refusal is shown on its row.
         self.pending.retain(|(id, cmd)| match state.result(*cmd) {
             Some(Err(r)) => {
-                self.denied.retain(|(d, _)| d != id);
-                self.denied.push((*id, format!("DENIED: {}", r.message)));
+                self.denied.retain(|(d, _, _)| d != id);
+                self.denied
+                    .push((*id, format!("DENIED: {}", r.message), None));
                 false
             }
             Some(Ok(_)) => {
-                self.denied.retain(|(d, _)| d != id);
+                self.denied.retain(|(d, _, _)| d != id);
                 false
             }
             None => true,
@@ -244,13 +250,25 @@ impl StrategyView {
             })
             .collect();
         drop(state);
-        // Recompute the revision now that the accounts are known.
-        self.built = Some((self.revision(), today));
+        // A refusal shows until the row's state changes (then its reason is the news).
+        for (id, _, phase) in &mut self.denied {
+            let now = self.rows.iter().find(|r| r.id == *id).map(|r| r.phase);
+            phase.get_or_insert(now.unwrap_or(Phase::Stopped));
+        }
+        let rows = &self.rows;
+        self.denied
+            .retain(|(id, _, phase)| rows.iter().find(|r| r.id == *id).map(|r| r.phase) == *phase);
+        self.built = same_accounts.then_some(rev);
         true
     }
 
     /// Run a strategy command from this pane (buttons, keys, the palette).
-    pub fn run(&mut self, cmd: StrategyCmd, cx: &mut Context<Self>) -> Result<(), &'static str> {
+    pub fn run(
+        &mut self,
+        cmd: StrategyCmd,
+        source: Source,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         let trading = Trading::try_global(cx).ok_or("trading isn't running")?;
         let issued = Instant::now();
         let (id, c) = match cmd {
@@ -270,7 +288,7 @@ impl StrategyView {
             }
             StrategyCmd::Open => return Ok(()),
         };
-        let sent = trading.submit(Source::Palette, issued, c);
+        let sent = trading.submit(source, issued, c);
         if let Some(id) = id {
             self.pending.push((id, sent));
         }
@@ -281,9 +299,9 @@ impl StrategyView {
 
     fn click(&mut self, id: StrategyId, cmd: StrategyCmd, cx: &mut Context<Self>) {
         self.selected = Some(id);
-        if let Err(e) = self.run(cmd, cx) {
-            self.denied.retain(|(d, _)| *d != id);
-            self.denied.push((id, e.to_owned()));
+        if let Err(e) = self.run(cmd, Source::Palette, cx) {
+            self.denied.retain(|(d, _, _)| *d != id);
+            self.denied.push((id, e.to_owned(), None));
         }
         cx.notify();
     }
@@ -333,7 +351,7 @@ impl StrategyView {
                         cx.stop_propagation();
                         // One press even over a popover, which it closes (as Flatten does).
                         crate::popover::close_any(cx);
-                        let _ = this.run(StrategyCmd::StopAll, cx);
+                        let _ = this.run(StrategyCmd::StopAll, Source::Palette, cx);
                     }),
                 ),
             "Stop all strategies and flatten their positions",
@@ -366,7 +384,12 @@ impl StrategyView {
                             .children(pane::link_chip(self.common.link, &t))
                             .child(div().text_color(t.text_main).child("Strategies"))
                             .child(crate::trade_bar::paper_badge(&t))
-                            .child(div().text_color(t.text_dim).child("paper only")),
+                            // Strategies don't use a DOM's trading switch: say so here.
+                            .child(
+                                div()
+                                    .text_color(t.text_dim)
+                                    .child("paper only · not gated by the DOM's trading switch"),
+                            ),
                     )
                     // Always visible while any instance exists (decision 0025).
                     .when(any, |d| d.child(crate::popover::always_live(stop_all))),
@@ -434,7 +457,10 @@ impl StrategyView {
             .border_1()
             .child(label);
         if !enabled {
-            return b.border_color(t.axis_line).text_color(t.text_dim);
+            // Not available: no outline at all (shape, not only a lighter gray).
+            return b
+                .border_color(gpui::transparent_black())
+                .text_color(t.text_dim);
         }
         let b = if cmd == StrategyCmd::Stop {
             b.border_color(t.warn).font_weight(FontWeight::SEMIBOLD)
@@ -466,8 +492,8 @@ impl StrategyView {
         let denied = self
             .denied
             .iter()
-            .find(|(d, _)| *d == r.id)
-            .map(|(_, m)| m.clone());
+            .find(|(d, _, _)| *d == r.id)
+            .map(|(_, m, _)| m.clone());
         let id = r.id;
         let line1 = div()
             .flex()
@@ -504,7 +530,7 @@ impl StrategyView {
                     .flex()
                     .flex_row()
                     .gap_1()
-                    .child(div().text_color(t.text_dim).child("strategy today"))
+                    .child(div().text_color(t.text_dim).child("P&L today"))
                     .child(
                         div()
                             .text_color(pnl_color)
@@ -516,22 +542,23 @@ impl StrategyView {
         // Every row has the same lines (blank when empty), so rows never change height and
         // nothing below moves.
         const BLANK: &str = "\u{a0}";
-        let notes = div()
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .child(
-                div()
-                    .truncate()
-                    .text_color(t.text_main)
-                    .child(denied.or(r.why.clone()).unwrap_or_else(|| BLANK.into())),
-            )
-            .child(
-                div()
-                    .truncate()
-                    .text_color(t.text_dim)
-                    .child(r.last.clone().unwrap_or_else(|| BLANK.into())),
-            );
+        // The reason and the newest decision, in that order, then blank lines up to two:
+        // every row has the same height (nothing below moves) and its slack at the bottom.
+        let mut lines: Vec<(String, gpui::Hsla)> = Vec::with_capacity(2);
+        if let Some(w) = denied.or(r.why.clone()) {
+            lines.push((w, t.text_main));
+        }
+        if let Some(l) = r.last.clone() {
+            lines.push((l, t.text_dim));
+        }
+        while lines.len() < 2 {
+            lines.push((BLANK.to_owned(), t.text_dim));
+        }
+        let notes = div().flex().flex_col().min_w_0().children(
+            lines
+                .into_iter()
+                .map(|(text, color)| div().truncate().text_color(color).child(text)),
+        );
         let buttons = div()
             .flex()
             .flex_row()
@@ -582,8 +609,8 @@ impl StrategyView {
                     .whitespace_nowrap()
                     .child(line1)
                     .child(line2)
-                    .child(notes)
-                    .child(limits),
+                    .child(limits)
+                    .child(notes),
             )
             .child(buttons)
     }

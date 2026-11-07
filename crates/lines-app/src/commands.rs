@@ -1026,6 +1026,10 @@ mod tests {
         }
         // Stop all strategies has a key (from any pane); starting one never does.
         assert!(!hint(Command::Strategy(StrategyCmd::StopAll)).is_empty());
+        assert_eq!(
+            cmd(&format!("{}-shift-r", ctrl())),
+            Some(Command::Strategy(StrategyCmd::StopAll))
+        );
         assert!(hint(Command::Strategy(StrategyCmd::Start)).is_empty());
         assert!(!repeats(Command::Strategy(StrategyCmd::StopAll)));
         for c in StrategyCmd::ALL {

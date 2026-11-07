@@ -1480,7 +1480,7 @@ impl WindowView {
             (StrategyCmd::Start | StrategyCmd::Stop, _, None) => {
                 Err("focus the strategy panel first (Open strategies)")
             }
-            (_, Some(p), _) => p.update(cx, |v, cx| v.run(c, cx)),
+            (_, Some(p), _) => p.update(cx, |v, cx| v.run(c, lines_trading::Source::Hotkey, cx)),
             (_, None, _) => match crate::trading::Trading::try_global(cx) {
                 Some(t) => {
                     let flatten = c == StrategyCmd::StopAll;

@@ -46,6 +46,10 @@ fn command(cmd: Command) -> Option<Command> {
         Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
         // A chart's drawing style editor (the rest of the drawing keys: main windows).
         Command::Draw(crate::commands::DrawCmd::Style) => Some(cmd),
+        // Stop all strategies works from every window (decision 0025's kill switch).
+        Command::Strategy(
+            crate::commands::StrategyCmd::StopAll | crate::commands::StrategyCmd::StopAllKeep,
+        ) => Some(cmd),
         _ => None,
     }
 }
@@ -98,6 +102,16 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
+            Some(Command::Strategy(c)) => {
+                if let Some(t) = crate::trading::Trading::try_global(cx) {
+                    let flatten = c == crate::commands::StrategyCmd::StopAll;
+                    t.submit(
+                        lines_trading::Source::Hotkey,
+                        std::time::Instant::now(),
+                        crate::strategy_panel::stop_all(flatten),
+                    );
+                }
+            }
             Some(Command::Draw(d)) => {
                 if let PaneHandle::Chart(chart) = &self.handle {
                     chart.update(cx, |c, cx| c.drawing_command(d, cx));
@@ -297,6 +311,17 @@ pub fn all(cx: &App) -> Vec<(WindowHandle<PaneWindow>, (f32, f32))> {
 mod tests {
     use super::*;
     use crate::layout::PaneKind;
+
+    /// Stop all strategies (the kill switch) runs from a popped-out window too.
+    #[test]
+    fn stop_all_strategies_runs_in_pane_windows() {
+        use crate::commands::StrategyCmd;
+        for c in [StrategyCmd::StopAll, StrategyCmd::StopAllKeep] {
+            assert_eq!(command(Command::Strategy(c)), Some(Command::Strategy(c)));
+        }
+        // Starting stays in main windows (the strategy panel).
+        assert_eq!(command(Command::Strategy(StrategyCmd::Start)), None);
+    }
 
     /// Every control a pane window's header shows is a command the window runs.
     #[test]

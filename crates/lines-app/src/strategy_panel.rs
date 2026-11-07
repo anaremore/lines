@@ -316,9 +316,10 @@ impl DemoStrategies {
     }
 
     /// Four instances on `account`, one per interesting state, with decisions up to `now`:
-    /// the first on `contract`, the others on MES, NQ and MNQ of the same delivery (one
-    /// instance per account and contract, as the core requires). Synthetic: a level-touch
-    /// example, no real strategy.
+    /// #3 (halted) on `contract`, the others on MES, NQ and MNQ of the same delivery (one
+    /// instance per account and contract, as the core requires). A screenshot script can make
+    /// #3's trade real (`strategy 3; …; halt 3`). Synthetic: a level-touch example, no real
+    /// strategy.
     pub fn sample(account: &AccountId, contract: ContractKey, now: UtcMillis) -> DemoStrategies {
         use lines_strategy::Decision;
         let limits = StrategyLimits {
@@ -338,11 +339,16 @@ impl DemoStrategies {
             not_sent: None,
         };
         let products = [
-            contract.product,
             lines_feed::catalog::MES,
             lines_feed::catalog::NQ,
+            contract.product,
             lines_feed::catalog::MNQ,
         ];
+        // #3's daily loss matches the screenshot script's (`strategy N`: 100).
+        let limit = |id: u32| StrategyLimits {
+            max_daily_loss: if id == 3 { 100 } else { 500 },
+            ..limits.clone()
+        };
         let info = |id: u32, state, reason: Option<&str>, decisions| StrategyInfo {
             id: StrategyId(id),
             label: format!("level-touch #{id}"),
@@ -353,7 +359,7 @@ impl DemoStrategies {
                 product: products[(id as usize - 1) % products.len()],
                 ..contract
             },
-            limits: limits.clone(),
+            limits: limit(id),
             state,
             reason: reason.map(str::to_owned),
             fault: None,
@@ -374,7 +380,7 @@ impl DemoStrategies {
             info(
                 2,
                 StrategyState::Paused,
-                Some("manual order activity on MESZ26"),
+                Some("manual order activity on NQZ26"),
                 vec![rec(
                     240,
                     "touch-long",
@@ -485,7 +491,7 @@ mod tests {
         assert_eq!(words, ["ARMED", "PAUSED", "HALTED", "STOPPED"]);
         assert_eq!(
             rows[1].why.as_deref(),
-            Some("Manual order activity on MESZ26")
+            Some("Manual order activity on NQZ26")
         );
         assert_eq!(rows[3].why.as_deref(), Some("Not started"));
         // Starting is explicit and only from a stopped or paused instance; a halted one waits
@@ -494,7 +500,7 @@ mod tests {
         assert_eq!(starts, [false, true, false, true]);
         let stops: Vec<bool> = rows.iter().map(|r| r.can_stop).collect();
         assert_eq!(stops, [true, true, true, false]);
-        assert_eq!(rows[0].scope, "Paper 1 · ESZ26");
+        assert_eq!(rows[0].scope, "Paper 1 · MESZ26");
         assert_eq!(
             rows[0].limits,
             "max 2 · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
@@ -539,7 +545,8 @@ mod tests {
 
     #[test]
     fn armed_with_a_position_is_running_and_pnl_counts_only_its_trades() {
-        let i = infos().remove(0);
+        let mut i = infos().remove(0);
+        i.contract = es();
         let pos = PositionView {
             account: i.account.clone(),
             contract: es(),
