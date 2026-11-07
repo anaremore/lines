@@ -327,19 +327,19 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, c: Hsla, hair: f32, dashed: b
         window.paint_quad(fill(r(x + w - lw, y, lw, h), c));
         return;
     }
-    let dash: f32 = 3.0;
+    let d = crate::theme::HELD_DASH;
     let mut dx = 0.0;
     while dx < w {
-        let seg = dash.min(w - dx);
+        let seg = d.on.min(w - dx);
         window.paint_quad(fill(r(x + dx, y, seg, lw), c));
         window.paint_quad(fill(r(x + dx, y + h - lw, seg, lw), c));
-        dx += dash * 2.0;
+        dx += d.on + d.off;
     }
     let mut dy = 0.0;
     while dy < h {
-        let seg = dash.min(h - dy);
+        let seg = d.on.min(h - dy);
         window.paint_quad(fill(r(x, y + dy, lw, seg), c));
         window.paint_quad(fill(r(x + w - lw, y + dy, lw, seg), c));
-        dy += dash * 2.0;
+        dy += d.on + d.off;
     }
 }

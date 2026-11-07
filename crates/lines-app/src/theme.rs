@@ -94,8 +94,9 @@ pub struct Theme {
     /// Study lines (VWAP, …), picked per instance. Never up/down or the accent.
     pub study: [Hsla; 4],
     /// Drawings (roadmap 11: lines, zones, notes, measures), picked per drawing
-    /// (`lines_core::drawings::Style::color`). Never up/down or the accent; each at least
-    /// 3:1 against the chart background (WCAG 1.4.11, graphical objects).
+    /// (`lines_core::drawings::Style::color`). Perceptually clear (CIEDE2000 >= 20) of every
+    /// color with a meaning (up/down in both palettes, accent/last, warn, bracket target and
+    /// stop) and at least 3:1 against the chart background (WCAG 1.4.11): tested.
     pub drawing: [Hsla; 4],
     /// Behind text drawn over the plot (study legends, the volume profile's tag): a slightly
     /// translucent panel box, so lines and profile rows never run through the text. Its text
@@ -125,6 +126,21 @@ pub struct Theme {
     pub order_target: Hsla,
     pub order_stop: Hsla,
 }
+
+/// A dash pattern, logical px: `on` drawn, `off` skipped.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Dash {
+    pub on: f32,
+    pub off: f32,
+}
+
+/// The chart's open-position line at the average price.
+pub const POSITION_DASH: Dash = Dash { on: 6.0, off: 4.0 };
+/// A held order (bracket exit waiting for its entry) in the DOM's orders column.
+pub const HELD_DASH: Dash = Dash { on: 3.0, off: 3.0 };
+/// Dashed drawings: a long dash no trading state uses, so a drawn level never reads as a
+/// position or an order (tested against the two above).
+pub const DRAWING_DASH: Dash = Dash { on: 12.0, off: 4.0 };
 
 fn c(hex: u32) -> Hsla {
     rgb(hex).into()
@@ -167,8 +183,8 @@ impl Theme {
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
             // sand, teal, silver, orchid
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
-            // paper, gold, pink, lime: none near up/down in either palette, nor the accent
-            drawing: [c(brand::PAPER), c(0xe8df4f), c(0xf08bd6), c(0xb8e04a)],
+            // paper, lime, olive, slate
+            drawing: [c(brand::PAPER), c(0xd4ff3a), c(0x78871e), c(0x788787)],
             label_bg: c(0x171b24).opacity(0.9),
             profile_va: c(0x9a9fb2).opacity(0.30),
             profile_poc: c(brand::PAPER).opacity(0.70),
@@ -219,8 +235,8 @@ impl Theme {
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
-            // ink, brown, plum, olive
-            drawing: [c(brand::INK), c(0x5c4a3a), c(0x6b4c8a), c(0x6b6b00)],
+            // ink, warm gray, forest, maroon
+            drawing: [c(brand::INK), c(0x695a5a), c(0x0f2d00), c(0x4b0000)],
             label_bg: c(brand::PAPER).opacity(0.9),
             profile_va: c(0x565b6e).opacity(0.24),
             profile_poc: c(brand::INK).opacity(0.65),
@@ -596,24 +612,135 @@ mod tests {
     /// palette.
     #[test]
     fn drawing_colors_contrast_and_stay_distinct() {
-        let dist = |a: Hsla, b: Hsla| {
-            let (a, b) = (a.to_rgb(), b.to_rgb());
-            ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt()
-        };
         for t in Theme::all() {
+            // Both palettes' up/down: a drawing keeps its color when the palette changes.
+            let other = if t.name.contains("colorblind") {
+                Palette::Standard
+            } else {
+                Palette::Colorblind
+            };
+            let twin = if t.name.starts_with("dark") {
+                Theme::dark(other)
+            } else {
+                Theme::light(other)
+            };
+            let reserved = [
+                ("up", t.up),
+                ("down", t.down),
+                ("other palette's up", twin.up),
+                ("other palette's down", twin.down),
+                ("accent", t.accent),
+                ("last", t.last),
+                ("warn", t.warn),
+                ("order_target", t.order_target),
+                ("order_stop", t.order_stop),
+            ];
             for (i, d) in t.drawing.iter().enumerate() {
                 let r = contrast(*d, t.bg);
                 assert!(r >= 3.0, "{}: drawing color {i}: {r:.2}", t.name);
-                for (what, other) in [("up", t.up), ("down", t.down), ("accent", t.accent)] {
-                    let gap = dist(*d, other);
+                for (what, c) in reserved {
+                    let de = delta_e_2000(*d, c);
                     assert!(
-                        gap >= 0.24,
-                        "{}: drawing color {i} near {what}: {gap:.3}",
+                        de >= 20.0,
+                        "{}: drawing color {i} near {what}: dE {de:.1}",
                         t.name
                     );
                 }
             }
         }
+    }
+
+    /// A dashed drawing never looks like the position line or a held order.
+    #[test]
+    fn drawing_dash_is_its_own() {
+        for (what, d) in [("position", POSITION_DASH), ("held", HELD_DASH)] {
+            let (a, b) = (DRAWING_DASH, d);
+            assert!(
+                a.on >= 1.5 * b.on && a.on + a.off >= b.on + b.off + 4.0,
+                "drawing dash too close to {what}"
+            );
+        }
+        assert_ne!(POSITION_DASH, HELD_DASH);
+    }
+
+    /// CIEDE2000 color difference (sRGB, D65): the perceptual gap the drawing test uses.
+    fn delta_e_2000(a: Hsla, b: Hsla) -> f64 {
+        fn lab(c: Hsla) -> (f64, f64, f64) {
+            let c = c.to_rgb();
+            let lin = |v: f32| {
+                let v = f64::from(v);
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            let (r, g, b) = (lin(c.r), lin(c.g), lin(c.b));
+            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+            let f = |t: f64| {
+                if t > 0.008856 {
+                    t.cbrt()
+                } else {
+                    7.787 * t + 16.0 / 116.0
+                }
+            };
+            let (fx, fy, fz) = (f(x), f(y), f(z));
+            (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+        }
+        let ((l1, a1, b1), (l2, a2, b2)) = (lab(a), lab(b));
+        let (c1, c2) = (a1.hypot(b1), a2.hypot(b2));
+        let cb7 = ((c1 + c2) / 2.0).powi(7);
+        let g = 0.5 * (1.0 - (cb7 / (cb7 + 25f64.powi(7))).sqrt());
+        let (a1p, a2p) = ((1.0 + g) * a1, (1.0 + g) * a2);
+        let (c1p, c2p) = (a1p.hypot(b1), a2p.hypot(b2));
+        let hue = |b: f64, a: f64| b.atan2(a).to_degrees().rem_euclid(360.0);
+        let (h1, h2) = (hue(b1, a1p), hue(b2, a2p));
+        let dl = l2 - l1;
+        let dc = c2p - c1p;
+        let dh = if c1p * c2p == 0.0 {
+            0.0
+        } else if (h2 - h1).abs() <= 180.0 {
+            h2 - h1
+        } else if h2 > h1 {
+            h2 - h1 - 360.0
+        } else {
+            h2 - h1 + 360.0
+        };
+        let dhh = 2.0 * (c1p * c2p).sqrt() * (dh.to_radians() / 2.0).sin();
+        let lb = (l1 + l2) / 2.0;
+        let cbp = (c1p + c2p) / 2.0;
+        let hb = if c1p * c2p == 0.0 {
+            h1 + h2
+        } else if (h1 - h2).abs() <= 180.0 {
+            (h1 + h2) / 2.0
+        } else if h1 + h2 < 360.0 {
+            (h1 + h2 + 360.0) / 2.0
+        } else {
+            (h1 + h2 - 360.0) / 2.0
+        };
+        let cos = |d: f64| d.to_radians().cos();
+        let t = 1.0 - 0.17 * cos(hb - 30.0) + 0.24 * cos(2.0 * hb) + 0.32 * cos(3.0 * hb + 6.0)
+            - 0.20 * cos(4.0 * hb - 63.0);
+        let dth = 30.0 * (-((hb - 275.0) / 25.0).powi(2)).exp();
+        let cbp7 = cbp.powi(7);
+        let rc = 2.0 * (cbp7 / (cbp7 + 25f64.powi(7))).sqrt();
+        let sl = 1.0 + 0.015 * (lb - 50.0).powi(2) / (20.0 + (lb - 50.0).powi(2)).sqrt();
+        let sc = 1.0 + 0.045 * cbp;
+        let sh = 1.0 + 0.015 * cbp * t;
+        let rt = -(2.0 * dth).to_radians().sin() * rc;
+        ((dl / sl).powi(2) + (dc / sc).powi(2) + (dhh / sh).powi(2) + rt * (dc / sc) * (dhh / sh))
+            .sqrt()
+    }
+
+    #[test]
+    fn delta_e_2000_matches_reference_pairs() {
+        // Sharma, Wu & Dalal (2005) test data, pairs 1 and 17 (Lab inputs via sRGB are not
+        // exact, so check the metric on identical and clearly different colors instead).
+        assert!(delta_e_2000(c(0x808080), c(0x808080)) < 1e-9);
+        let black_white = delta_e_2000(c(0x000000), c(0xffffff));
+        assert!((black_white - 100.0).abs() < 0.5, "{black_white}");
     }
 
     /// The DOM price trail (`crate::dom_trail`) is fill only, in its own column, so it never

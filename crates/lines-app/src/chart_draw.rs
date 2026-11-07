@@ -27,8 +27,6 @@ pub const HIT_TOL: f32 = 5.0;
 pub const HANDLE_R: f32 = 5.0;
 /// A press that moves less than this is a click (two-anchor tools: click, click).
 const CLICK_SLOP: f32 = 4.0;
-/// Dash and gap lengths (logical px).
-const DASH: (f32, f32) = (6.0, 4.0);
 
 /// What a press on a drawing started.
 #[derive(Clone, Debug)]
@@ -608,14 +606,24 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, color: Hsla, w: f32) {
 /// nothing is boxed per line per frame.
 fn dash_segments(len: f32, dashed: bool, mut f: impl FnMut(f32, f32)) {
     if dashed {
+        let d = crate::theme::DRAWING_DASH;
         let mut s = 0.0;
         while s < len {
-            f(s, (s + DASH.0).min(len));
-            s += DASH.0 + DASH.1;
+            f(s, (s + d.on).min(len));
+            s += d.on + d.off;
         }
     } else {
         f(0.0, len);
     }
+}
+
+/// A horizontal or vertical line's band across its length: (thickness, start), both on the
+/// device-pixel grid (`hair` = one device pixel), centred on `at` as nearly as the grid allows.
+pub fn crisp_band(at: f32, width: f32, hair: f32) -> (f32, f32) {
+    let hair = if hair > 0.0 { hair } else { 1.0 };
+    let w = (width / hair).round().max(1.0) * hair;
+    let start = ((at - w * 0.5) / hair).round() * hair;
+    (w, start)
 }
 
 fn paint_line(
@@ -625,6 +633,7 @@ fn paint_line(
     dashed: bool,
     color: Hsla,
     origin: (f32, f32),
+    hair: f32,
     window: &mut Window,
 ) {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -634,14 +643,16 @@ fn paint_line(
     }
     let (ux, uy) = (dx / len, dy / len);
     if dy.abs() < 0.01 || dx.abs() < 0.01 {
+        // Crisp at every DPI: a whole number of device pixels wide, on device-pixel edges.
         let horizontal = dy.abs() < 0.01;
+        let (w, cross) = crisp_band(if horizontal { a.1 } else { a.0 }, width, hair);
         dash_segments(len, dashed, |s, e| {
             let (x0, y0) = (a.0 + ux * s, a.1 + uy * s);
             let (x1, y1) = (a.0 + ux * e, a.1 + uy * e);
             let b = if horizontal {
-                rect(origin, x0.min(x1), y0 - width * 0.5, (x1 - x0).abs(), width)
+                rect(origin, x0.min(x1), cross, (x1 - x0).abs(), w)
             } else {
-                rect(origin, x0 - width * 0.5, y0.min(y1), width, (y1 - y0).abs())
+                rect(origin, cross, y0.min(y1), w, (y1 - y0).abs())
             };
             window.paint_quad(fill(b, color));
         });
@@ -667,7 +678,16 @@ fn paint_shape(d: &Projected, color: Hsla, origin: (f32, f32), hair: f32, window
     let width = f32::from(d.style.width).max(hair);
     match d.tool {
         Tool::HLine | Tool::HRay | Tool::VLine | Tool::Trend | Tool::Ray => {
-            paint_line(d.p0, d.p1, width, d.style.dashed, color, origin, window);
+            paint_line(
+                d.p0,
+                d.p1,
+                width,
+                d.style.dashed,
+                color,
+                origin,
+                hair,
+                window,
+            );
         }
         Tool::Rect | Tool::Measure => {
             let (x0, x1) = (d.p0.0.min(d.p1.0), d.p0.0.max(d.p1.0));
@@ -682,7 +702,7 @@ fn paint_shape(d: &Projected, color: Hsla, origin: (f32, f32), hair: f32, window
                 ((x0, y0), (x0, y1)),
                 ((x1, y0), (x1, y1)),
             ] {
-                paint_line(a, b, width, d.style.dashed, color, origin, window);
+                paint_line(a, b, width, d.style.dashed, color, origin, hair, window);
             }
         }
         Tool::Note => {

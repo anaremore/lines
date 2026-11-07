@@ -520,7 +520,8 @@ fn timeframe_updates_do_not_allocate() {
 #[test]
 fn drawings_do_not_allocate() {
     use lines_core::drawings::{
-        Anchor, Drawing, Style, TimeAxis, Tool, measure, pick, project, snap_anchor, write_measure,
+        Anchor, Drawing, MeasureParts, Style, TimeAxis, Tool, measure, pick, project, snap_anchor,
+        write_measure,
     };
     use lines_core::instrument::Ratio;
     use lines_core::{BarsView, Derived, Timeframe};
@@ -580,7 +581,7 @@ fn drawings_do_not_allocate() {
             if let Some(a) = a {
                 let m = measure(drawings[0].a, a, &axis, &fmt, Ratio::new(50, 1));
                 let mut s = FixedStr::<96>::new();
-                let _ = write_measure(&m, &fmt, &mut s);
+                let _ = write_measure(&m, &fmt, MeasureParts::ALL, &mut s);
             }
         }
     });

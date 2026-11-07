@@ -520,50 +520,63 @@ pub fn measure(
     }
 }
 
-/// `MeasureStats` as one line, e.g. `+12 ticks  +3.00 pts  +$150.00  5 bars  25m`, without
-/// allocating.
+/// Which amounts a measure shows (the app maps its P&L display setting onto this: with P&L
+/// display off, no ticks or money; ticks only; money only; both).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MeasureParts {
+    pub ticks: bool,
+    pub money: bool,
+}
+
+impl MeasureParts {
+    pub const ALL: MeasureParts = MeasureParts {
+        ticks: true,
+        money: true,
+    };
+}
+
+/// `MeasureStats` as one line, e.g.
+/// `+12 ticks · +3.00 pts · +$1,500.00/contract · 85 bars · 1h 25m`, without allocating.
+/// Points, bars and duration always show; ticks and money as `parts` says.
 pub fn write_measure<W: std::fmt::Write>(
     s: &MeasureStats,
     fmt: &PriceFormat,
+    parts: MeasureParts,
     out: &mut W,
 ) -> std::fmt::Result {
-    let sign = |v: i64| {
-        if v > 0 {
-            "+"
-        } else if v < 0 {
-            "-"
-        } else {
-            ""
-        }
+    const SEP: &str = " \u{b7} ";
+    let sign = |v: i128| match v.signum() {
+        1 => "+",
+        -1 => "-",
+        _ => "",
     };
-    write!(
-        out,
-        "{}{} ticks  {}",
-        sign(s.ticks),
-        s.ticks.abs(),
-        sign(s.units)
-    )?;
+    if parts.ticks {
+        write!(out, "{}{} ticks{SEP}", sign(s.ticks.into()), s.ticks.abs())?;
+    }
+    out.write_str(sign(s.units.into()))?;
     fmt.write(Price(s.units.abs()), out)?;
-    let c = s.cents.unsigned_abs();
-    let cs = if s.cents < 0 {
-        "-"
-    } else if s.cents > 0 {
-        "+"
-    } else {
-        ""
-    };
-    write!(
-        out,
-        " pts  {cs}${}.{:02}  {} bars  ",
-        c / 100,
-        c % 100,
-        s.bars.abs()
-    )?;
+    out.write_str(" pts")?;
+    if parts.money {
+        write!(out, "{SEP}{}$", sign(s.cents))?;
+        write_thousands(s.cents.unsigned_abs() / 100, out)?;
+        write!(out, ".{:02}/contract", s.cents.unsigned_abs() % 100)?;
+    }
+    write!(out, "{SEP}{} bars{SEP}", s.bars.abs())?;
     let mins = s.duration_ms.abs() / 60_000;
     match (mins / 1_440, (mins / 60) % 24, mins % 60) {
         (0, 0, m) => write!(out, "{m}m"),
         (0, h, m) => write!(out, "{h}h {m:02}m"),
         (d, h, _) => write!(out, "{d}d {h}h"),
+    }
+}
+
+/// `n` with US thousands separators (`1,500`), without allocating.
+fn write_thousands<W: std::fmt::Write>(n: u128, out: &mut W) -> std::fmt::Result {
+    if n >= 1_000 {
+        write_thousands(n / 1_000, out)?;
+        write!(out, ",{:03}", n % 1_000)
+    } else {
+        write!(out, "{n}")
     }
 }
 
