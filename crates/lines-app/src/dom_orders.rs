@@ -219,7 +219,8 @@ impl OrdersLayer {
                         let share = (m.filled.0 as f32 / m.qty.0.max(1) as f32).clamp(0.0, 1.0);
                         window.paint_quad(fill(rect(x, yy, (w - 1.0) * share, h), c));
                         outline(window, rect(x, yy, w - 1.0, h), c, hair, false);
-                        t.text_main
+                        // The label goes on its own opaque pill (below).
+                        t.mark_label().0
                     }
                     MarkStyle::Pending => {
                         outline(window, rect(x, yy, w - 1.0, h), c, hair, false);
@@ -252,6 +253,15 @@ impl OrdersLayer {
                 let _ = mark_text(m, &mut buf);
                 if more && k == 1 {
                     let _ = std::fmt::Write::write_str(&mut buf, "+");
+                }
+                // A partial fill's label on an opaque pill: readable over the fill (AA).
+                if m.style == MarkStyle::Partial {
+                    let tw = glyphs.width(buf.as_str(), text_colour, true, window);
+                    let left = (x + w - 7.0 - tw).max(x + hair);
+                    window.paint_quad(fill(
+                        rect(left, yy + hair, x + w - 3.0 - left, h - 2.0 * hair),
+                        t.mark_label().1,
+                    ));
                 }
                 // Inset past the outline (dashed when held) so the label never sits on it.
                 glyphs.paint_right(

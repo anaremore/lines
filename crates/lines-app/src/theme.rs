@@ -291,6 +291,13 @@ fn c(hex: u32) -> Hsla {
 }
 
 impl Theme {
+    /// A partially filled order mark's label: (text, pill). The text sits on an opaque pill
+    /// over the mark's fill, since `text_main` on the fill colors (`up`, `down`,
+    /// `order_target`, `order_stop`) is below AA.
+    pub fn mark_label(&self) -> (Hsla, Hsla) {
+        (self.text_main, self.bg)
+    }
+
     /// Ink-based dark theme (primary).
     pub fn dark(palette: Palette) -> Self {
         let (up, down) = match palette {
@@ -1022,6 +1029,27 @@ mod tests {
     /// Trade panel v2: the position card (on `panel`) writes S1 / T1 in the stop and target
     /// colors, P&L in up/down, and the warn switch carries `on_warn`; the order buttons put
     /// `bg` text on up/down fills. All AA in every theme and palette.
+    #[test]
+    /// A partial order mark's label meets AA over every fill: its text on its opaque pill,
+    /// and the pill stands out from the fill (3:1, a UI part).
+    fn partial_mark_label_meets_aa_on_each_fill() {
+        for t in Theme::all() {
+            let (text, pill) = t.mark_label();
+            assert_eq!(pill.a, 1.0, "{}: the pill is opaque", t.name);
+            for (what, fill) in [
+                ("up", t.up),
+                ("down", t.down),
+                ("order_target", t.order_target),
+                ("order_stop", t.order_stop),
+            ] {
+                let r = contrast(text, over(pill, fill));
+                assert!(r >= 4.5, "{}: label text on its pill over {what} {r:.2}", t.name);
+                let r = contrast(pill, fill);
+                assert!(r >= 3.0, "{}: the pill against {what} {r:.2}", t.name);
+            }
+        }
+    }
+
     #[test]
     fn trade_panel_text_meets_aa() {
         for t in Theme::all() {
