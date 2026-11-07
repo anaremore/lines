@@ -465,20 +465,21 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
     cx.notify();
 }
 
-/// The commands that move the position's stop(s) to breakeven, from the cache.
-/// Whether an order is live in the market (not held server-side, not pending).
+/// Whether an order is live in the market (not held server-side, not pending, something
+/// left), as the ladder draws it.
 fn live(o: &lines_trading::Order) -> bool {
     matches!(
         o.state,
         lines_trading::OrderState::Working | lines_trading::OrderState::PartiallyFilled
-    )
+    ) && o.remaining().0 > 0
 }
 
-/// Whether a working order protects the open `position` (signed): a live stop on the exit
-/// side that only ever closes it (a bracket's stop loss, a reduce-only stop, or a single
-/// stop no larger than the position). Never a held exit (its entry hasn't filled), an entry
-/// stop (it would flip or add) or a triggered stop-limit (a resting limit now: at BE it could
-/// fill at once). BE moves only these.
+/// Whether a working order could protect the open `position` (signed) on its own: a live
+/// stop on the exit side that only ever closes it (a bracket's stop loss, a reduce-only stop,
+/// or a single stop no larger than the position). Never a held exit (its entry hasn't
+/// filled), an entry stop (it would flip or add) or a triggered stop-limit (a resting limit
+/// now: at BE it could fill at once). Together they must not exceed the position either:
+/// [`protective`].
 pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
     use lines_trading::{OrderKind, Role, Side};
     let stop = match o.kind {
@@ -496,6 +497,43 @@ pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
         || (o.role == Role::Single && o.remaining().0 <= position.abs());
     live(o) && stop && exit && closes
 }
+
+/// The stops BE may move: those that [`protects`] accepts, reduce-only ones always (the
+/// broker shrinks them with the position), then stop losses, then single stops, each only
+/// while their quantities together stay within the position: moved to one price, they all
+/// trigger together and must never flip it.
+pub fn protective<'a>(
+    orders: impl IntoIterator<Item = &'a lines_trading::Order>,
+    position: i64,
+) -> Vec<&'a lines_trading::Order> {
+    use lines_trading::Role;
+    let mut cands: Vec<_> = orders
+        .into_iter()
+        .filter(|o| protects(o, position))
+        .collect();
+    let rank = |o: &lines_trading::Order| match (o.reduce_only, o.role) {
+        (true, _) => 0,
+        (false, Role::StopLoss) => 1,
+        _ => 2,
+    };
+    cands.sort_by_key(|o| (rank(o), o.id.0));
+    let mut total = 0;
+    cands.retain(|o| {
+        if o.reduce_only {
+            return true;
+        }
+        let q = o.remaining().0;
+        if total + q <= position.abs() {
+            total += q;
+            true
+        } else {
+            false
+        }
+    });
+    cands
+}
+
+/// The commands that move the position's stop(s) to breakeven, from the cache.
 
 /// BE only moves an existing protective stop, like dragging it: it needs no switch.
 fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'static str> {
@@ -520,9 +558,8 @@ fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'s
     let s = t.cache.read();
     let pos = s.position(&account, contract);
     let (qty, avg) = pos.map_or((0, None), |p| (p.qty, p.avg_price));
-    let stops: Vec<_> = s
-        .open_orders(&account, contract)
-        .filter(|o| protects(o, qty))
+    let stops: Vec<_> = protective(s.open_orders(&account, contract), qty)
+        .into_iter()
         .filter_map(|o| dom_trade::order_price(o).map(|p| (o.id, o.side, p)))
         .collect();
     // A long's stop is a sell: it must sit below where it would sell (the bid).
@@ -2546,6 +2583,35 @@ mod tests {
         assert!(protects(&t, -1));
         t.triggered = true;
         assert!(!protects(&t, -1), "a triggered stop-limit rests as a limit");
+        let mut done = stop(Side::Sell, 1, Role::StopLoss, OrderState::Working);
+        done.filled = Qty(1);
+        assert!(!protects(&done, 1), "nothing left: drawn as held");
+
+        // Together: long 1 with its stop loss and a breakdown stop of 1: only the stop loss
+        // moves (both at BE would trigger together and flip the position).
+        let mut sl = stop(Side::Sell, 1, Role::StopLoss, OrderState::Working);
+        sl.id = OrderId(5);
+        let mut single = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        single.id = OrderId(2);
+        let picked: Vec<_> = protective([&single, &sl], 1).iter().map(|o| o.id).collect();
+        assert_eq!(picked, vec![OrderId(5)]);
+        // Two single stops of 1 against long 2: both; against long 1: the first only.
+        let mut a = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        a.id = OrderId(3);
+        let mut b = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        b.id = OrderId(4);
+        assert_eq!(protective([&a, &b], 2).len(), 2);
+        assert_eq!(
+            protective([&b, &a], 1)
+                .iter()
+                .map(|o| o.id)
+                .collect::<Vec<_>>(),
+            vec![OrderId(3)]
+        );
+        // Reduce-only never flips: always.
+        let mut r = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        r.reduce_only = true;
+        assert_eq!(protective([&r, &sl], 1).len(), 2);
     }
 
     #[test]

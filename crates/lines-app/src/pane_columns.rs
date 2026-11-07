@@ -401,22 +401,26 @@ impl Columns {
 
     /// Lay out in `total` px, this frame only (saved choices are untouched): while the
     /// columns overflow, leave out the next column of `drop` (least needed first); still too
-    /// wide, every shown column narrows to the least its numbers need; any that still doesn't
-    /// fit whole is left out. A narrow pane never shows half a number. No allocation.
-    pub fn layout_fitting(&mut self, total: f32, drop: &[usize]) {
+    /// wide, every shown column narrows to the least its numbers need; still too wide, leave
+    /// out the columns of `last` in turn; any that still doesn't fit whole is left out. A
+    /// narrow pane never shows half a number. No allocation.
+    pub fn layout_fitting(&mut self, total: f32, drop: &[usize], last: &[usize]) {
         let specs = self.specs();
         let over =
             |cells: &[Cell; MAX_COLS]| cells.iter().any(|c| c.shown && c.right() > total + 0.5);
         let mut set = self.set;
         set.layout(specs, &self.needed, total, &mut self.cells);
-        for &i in drop {
-            if !over(&self.cells) {
-                break;
+        let mut shed = |set: &mut ColumnSet, cells: &mut [Cell; MAX_COLS], cols: &[usize]| {
+            for &i in cols {
+                if !over(cells) {
+                    break;
+                }
+                if set.set_shown(specs, i, false) {
+                    set.layout(specs, &self.needed, total, cells);
+                }
             }
-            if set.set_shown(specs, i, false) {
-                set.layout(specs, &self.needed, total, &mut self.cells);
-            }
-        }
+        };
+        shed(&mut set, &mut self.cells, drop);
         if over(&self.cells) {
             for i in 0..specs.len() {
                 if set.is_shown(i) {
@@ -425,6 +429,7 @@ impl Columns {
             }
             set.layout(specs, &self.needed, total, &mut self.cells);
         }
+        shed(&mut set, &mut self.cells, last);
         self.drop_overflow(total);
     }
 
@@ -866,8 +871,12 @@ mod tests {
             c.need(col.index(), w, 0.0);
         }
         let order = [DomCol::Volume.index(), DomCol::Trail.index()];
+        let last = [DomCol::Orders.index()];
+        c.set
+            .set_width(c.specs(), DomCol::Bid.index(), 120.0, &c.needed);
+        let saved = c.set;
         // The narrowest DOM the trading panel is laid out for (`trade_bar::MIN_DOM_WIDTH`).
-        c.layout_fitting(240.0, &order);
+        c.layout_fitting(240.0, &order, &last);
         for col in [DomCol::Orders, DomCol::Bid, DomCol::Price, DomCol::Ask] {
             let cell = c.cells[col.index()];
             assert!(cell.shown && cell.right() <= 240.5, "{col:?} {:?}", c.cells);
@@ -878,8 +887,23 @@ mod tests {
             "saved choice untouched"
         );
         // Wide: nothing given up.
-        c.layout_fitting(2000.0, &order);
+        assert_eq!(c.set, saved, "saved widths untouched by narrowing");
+        c.layout_fitting(2000.0, &order, &last);
         assert!(c.cells[DomCol::Volume.index()].shown);
+        // Crypto sizes (8 decimals): the book outranks working orders.
+        for (col, w) in [
+            (DomCol::Bid, 82.0),
+            (DomCol::Ask, 82.0),
+            (DomCol::Price, 74.0),
+        ] {
+            c.need(col.index(), w, 0.0);
+        }
+        c.layout_fitting(240.0, &order, &last);
+        for col in [DomCol::Bid, DomCol::Price, DomCol::Ask] {
+            let cell = c.cells[col.index()];
+            assert!(cell.shown && cell.right() <= 240.5, "{col:?} {:?}", c.cells);
+        }
+        assert!(!c.cells[DomCol::Orders.index()].shown);
     }
 
     #[test]
