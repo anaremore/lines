@@ -26,8 +26,9 @@ Format: Status · Context · Decision · Consequences.
 | 0018 | One trading surface: commands, trading core, connectors, accounts |
 | 0019 | Local market-data store |
 | 0020 | Official builds wrap the public app; connectors register through an extension point |
-| 0021 | Settings: in context first, one searchable Settings window, settings as data (Proposed) |
+| 0021 | Settings: in context first, one searchable Settings window, settings as data (Accepted) |
 | 0022 | External level sources: a public levels layer, private adapters |
 | 0023 | Trade execution via Sierra Chart's DTC server |
 | 0024 | Contract alignment for live orders, amends 0023 |
 | 0025 | Strategies: pure state machines behind the trading core, backtested on replays (Accepted) |
+| 0026 | User styles for drawings and studies: one style model and editor, custom colors as user data (Accepted) |
