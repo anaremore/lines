@@ -1690,11 +1690,13 @@ pub fn dom_bar<V: TradePane>(
     };
     // Keys on while the header has no room for the chip: it trails the status line beside
     // whatever it says (a flash, a lockout, a release), never replaced by it.
+    // Narrow, the chip says just "Keys" (its knob filled: on), so a flash's price still fits
+    // beside it (fit test).
     let status = if !keys_in_header(width) && pt.hotkeys {
         status
             .overflow_hidden()
-            .child(div().flex_1())
-            .child(keys_chip(true, false, t, cx))
+            .gap_2()
+            .child(keys_chip(true, narrow, t, cx).ml_auto())
     } else {
         status
     };
@@ -3613,6 +3615,20 @@ mod tests {
         // The switch: text, px_2, border, knob and gap (30 px past the text; `w` has 10).
         .map(|b| w(&switch_text(true, Some(b), false)) + 20.0)
         .fold(w(&switch_text(false, None, false)) + 20.0, f32::max);
+        // Keys on in the narrowest DOM: the chip trails the status line beside a flash whose
+        // label is the longest and whose first item a 10-character price ("104523.50:").
+        let flash = ["DENIED", "REJECTED", "WARNING", "NOT SENT"]
+            .iter()
+            .map(|l| w(l) - 2.0)
+            .fold(0.0, f32::max)
+            + 8.0
+            + 10.0 * CHAR;
+        let chip = w(keys_text(true, true)) + 20.0;
+        assert!(
+            flash + 8.0 + chip <= room,
+            "status line with Keys {} > {room}",
+            flash + 8.0 + chip
+        );
         assert!(keys_in_header(0.0) && keys_in_header(KEYS_IN_HEADER));
         assert!(!keys_in_header(KEYS_IN_HEADER - 1.0) && !keys_in_header(MIN_DOM_WIDTH));
         let header = 60.0 + w("PAPER") + keys + widest + 3.0 * 8.0;
