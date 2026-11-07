@@ -36,7 +36,7 @@ use crate::{Ctx, Decision, Input, LevelView, Strategy, StrategyExtension};
 /// Decisions one input may cause (a strategy answering its own events in a loop pauses).
 const MAX_DECISIONS_PER_INPUT: usize = 64;
 /// Decisions kept per instance for the panel.
-const KEEP_DECISIONS: usize = 200;
+pub const KEEP_DECISIONS: usize = 200;
 /// The host's tick: level polls, staleness checks, the timer input, the heartbeat.
 const TICK: Duration = Duration::from_millis(250);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(1);
@@ -93,8 +93,10 @@ pub struct InstanceView {
     /// The strategy failed (panicked or was refused); it is never called again.
     pub fault: Option<String>,
     pub status: Vec<String>,
-    /// Newest last.
+    /// Newest last (the newest [`KEEP_DECISIONS`] only).
     pub decisions: Vec<DecisionRecord>,
+    /// Decisions made so far, all of them (to tell new ones from the ring's).
+    pub decided: u64,
 }
 
 enum Msg {
@@ -122,6 +124,7 @@ struct Running {
     last_batch: Instant,
     market_time: Option<(UtcMillis, Instant)>,
     decisions: VecDeque<DecisionRecord>,
+    decided: u64,
     /// The pause the host asked for, until its answer (not sent twice).
     pausing: Option<u64>,
     alive: Arc<AtomicBool>,
@@ -189,6 +192,9 @@ impl StrategyHost {
                 inst.product.symbol
             ));
         }
+        if self.snapshot().iter().any(|v| v.id == inst.config.id) {
+            return Err(format!("{} is already running", inst.config.id));
+        }
         let strategy = inst.ext.create(&inst.params)?;
         let alive = Arc::new(AtomicBool::new(true));
         let id = inst.config.id;
@@ -219,6 +225,7 @@ impl StrategyHost {
             last_batch: Instant::now(),
             market_time: None,
             decisions: VecDeque::new(),
+            decided: 0,
             pausing: None,
             alive,
         };
@@ -343,17 +350,20 @@ impl Running {
             fault: self.fault.clone(),
             status: catch_unwind(AssertUnwindSafe(|| self.strategy.status())).unwrap_or_default(),
             decisions: self.decisions.iter().cloned().collect(),
+            decided: self.decided,
         }
     }
 
-    fn now(&self, clock: Clock) -> UtcMillis {
+    /// The instance's `now`: the wall clock live; on a market or manual clock the newest
+    /// trade time seen (`None` before the first one: not yet known).
+    fn now(&self, clock: Clock) -> Option<UtcMillis> {
         match (clock, self.market_time) {
-            (Clock::Wall, _) => lines_feed::now_utc(),
-            (Clock::Market, Some((t, at))) => {
-                UtcMillis(t.0 + at.elapsed().as_millis().min(i64::MAX as u128) as i64)
-            }
-            (Clock::Manual, Some((t, _))) => t,
-            (_, None) => lines_feed::now_utc(),
+            (Clock::Wall, _) => Some(lines_feed::now_utc()),
+            (Clock::Market, Some((t, at))) => Some(UtcMillis(
+                t.0 + at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            )),
+            (Clock::Manual, Some((t, _))) => Some(t),
+            (_, None) => None,
         }
     }
 }
@@ -361,6 +371,9 @@ impl Running {
 impl Host {
     fn add(&mut self, r: Running) {
         let id = r.cfg.id;
+        if let Some(old) = self.instances.get(&id) {
+            old.alive.store(false, Ordering::Release);
+        }
         // The core holds the instance (Disarmed); its answer comes back as an event.
         let cid = self
             .handle
@@ -373,6 +386,9 @@ impl Host {
     fn remove(&mut self, id: StrategyId) {
         if let Some(r) = self.instances.remove(&id) {
             r.alive.store(false, Ordering::Release);
+            self.seq.remove(&id);
+            self.pending.retain(|_, (s, _)| *s != id);
+            self.adds.retain(|_, s| *s != id);
             self.handle
                 .submit(Source::Api, Command::RemoveStrategy { id });
             self.changed = true;
@@ -388,7 +404,8 @@ impl Host {
         if r.fault.is_some() {
             return;
         }
-        let now = r.now(clock);
+        // Before a replay's first trade, the wall clock (nothing is armed on it yet).
+        let now = r.now(clock).unwrap_or_else(lines_feed::now_utc);
         let ctx = Ctx {
             now,
             id,
@@ -446,6 +463,7 @@ impl Host {
                 record.decision.reason
             );
             if let Some(r) = self.instances.get_mut(&id) {
+                r.decided += 1;
                 r.decisions.push_back(record);
                 while r.decisions.len() > KEEP_DECISIONS {
                     r.decisions.pop_front();
@@ -549,6 +567,14 @@ impl Host {
             r.state = *state;
             r.reason = reason.clone();
             self.changed = true;
+            // A strategy that failed is never called again: armed (by a person, or the arm
+            // and the failure crossed), it is paused at once.
+            if *state == StrategyState::Armed
+                && let Some(f) = r.fault.clone()
+            {
+                let sid = *id;
+                self.pause(sid, f);
+            }
         }
         let ids: Vec<StrategyId> = self
             .instances
@@ -570,11 +596,17 @@ impl Host {
             let mut views = Vec::new();
             let mut bad: Option<String> = None;
             if let Some(r) = self.instances.get_mut(&id) {
-                let now = r.now(clock);
+                // Freshness needs the instance's clock: before a replay's first trade it is
+                // unknown, so nothing pauses for it yet.
+                let known = r.now(clock);
+                let now = known.unwrap_or_else(lines_feed::now_utc);
                 for (i, l) in r.levels.iter().enumerate() {
                     let rev = l.revision();
                     let view = l.view(now);
-                    if !matches!(view.status, LevelStatus::Current) && bad.is_none() {
+                    if known.is_some()
+                        && !matches!(view.status, LevelStatus::Current)
+                        && bad.is_none()
+                    {
                         bad = Some(format!(
                             "levels {} are {}",
                             view.source,

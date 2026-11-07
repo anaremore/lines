@@ -181,10 +181,28 @@ fn run_strategy_flag_runs_it_through_the_host_on_a_replay() {
             arg(&config),
             "--headless".into(),
             "4".into(),
+            "--report".into(),
+            arg(&dir.join("run.json")),
         ],
         Extensions::new().with_level_source(Arc::new(DemoLevels)),
     )
     .unwrap();
+    // Through the host it makes the backtest's trade: in at S1 5997.50, out at the target.
+    let run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+    assert_eq!(run["armed"], true, "{run:#}");
+    assert_eq!(run["state"], "armed", "{run:#}");
+    let fills = run["fills"].as_array().unwrap();
+    assert_eq!(fills.len(), 2, "{run:#}");
+    assert_eq!(
+        (fills[0]["side"].as_str(), fills[0]["price"].as_i64()),
+        (Some("Buy"), Some(599_750))
+    );
+    assert_eq!(
+        (fills[1]["side"].as_str(), fills[1]["price"].as_i64()),
+        (Some("Sell"), Some(599_950))
+    );
+    assert_eq!(run["decisions"][0]["rule"], "touch-long");
     // A settings file without --backtest or --run-strategy is a mistake, said plainly.
     let e = lines_app::run_with_args(
         [

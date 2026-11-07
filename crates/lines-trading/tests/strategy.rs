@@ -995,3 +995,39 @@ fn ids(events: &[Event]) -> Vec<u64> {
         })
         .collect()
 }
+
+#[test]
+fn daily_loss_closes_a_trade_the_host_paused_with() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // The host pauses it (levels went stale) with the trade open.
+    r.bot(Command::PauseStrategy {
+        id: ID,
+        reason: "levels demo are stale".into(),
+    })
+    .unwrap();
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        0,
+        "closed at the daily loss"
+    );
+}
+
+#[test]
+fn daily_loss_never_closes_a_trade_a_person_took_over() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // A person's own order pauses it: the trade is theirs now.
+    r.manual(sell(1, limit(6100.0))).unwrap();
+    r.wait(30);
+    assert!(r.reason().contains("manual order activity"));
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2, "left to the person");
+}

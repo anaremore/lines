@@ -505,8 +505,9 @@ struct Cli {
     #[arg(long, requires_all = ["backtest_config", "headless"], conflicts_with = "backtest")]
     run_strategy: Option<String>,
     /// Write the backtest's full report here (JSON: inputs with hashes, trades, every decision
-    /// with its reason and result). Without it only the summary is printed.
-    #[arg(long, requires = "backtest")]
+    /// with its reason and result); with --run-strategy, the run's fills, final state and
+    /// decisions. Without it only the summary is printed.
+    #[arg(long)]
     report: Option<PathBuf>,
     /// Show the synthetic demo level source on ES/MES charts (builds with `demo-levels`).
     #[cfg(feature = "demo-levels")]
@@ -934,6 +935,8 @@ fn run_strategy(
     let bridge = lines_trading::FeedBridge::new(lines_feed::registry::FeedRegistry::new(), config);
     bridge.follow_store(&store, &handle);
     let mut levels: Vec<Box<dyn lines_strategy::host::LevelFeed>> = Vec::new();
+    // The same level tasks, to arm only once every source is current.
+    let mut watch: Vec<lines_feed::levels::runtime::LevelHandle> = Vec::new();
     for id in strategy.level_sources() {
         let source = lines_feed::levels::by_id(id)
             .ok_or_else(|| anyhow!("level source {id:?} is not registered in this build"))?;
@@ -943,9 +946,9 @@ fn run_strategy(
             settings: lines_feed::levels::runtime::settings_for(id),
         };
         let prices = Arc::new(lines_feed::levels::StorePrices(store.clone()));
-        levels.push(Box::new(lines_feed::levels::runtime::acquire(
-            source, ctx, prices,
-        )));
+        let handle = lines_feed::levels::runtime::acquire(source, ctx, prices);
+        watch.push(handle.clone());
+        levels.push(Box::new(handle));
     }
     let host = lines_strategy::host::StrategyHost::start(handle.clone(), clock);
     let id = StrategyId(1);
@@ -967,11 +970,6 @@ fn run_strategy(
     .map_err(|e| anyhow!("{}: {e}", strategy.label()))?;
     handle.sync();
     host.sync();
-    // This command line is the person arming it (decision 0025: nothing else arms).
-    handle.submit(
-        lines_trading::Source::Palette,
-        TradeCommand::ArmStrategy { id },
-    );
     println!(
         "running {} v{} on {} (paper) for {} s",
         strategy.name(),
@@ -980,18 +978,50 @@ fn run_strategy(
         dur.as_secs()
     );
     let start = std::time::Instant::now();
-    let mut printed = 0usize;
+    let mut printed = 0u64;
     let mut state = None;
+    let mut fault: Option<String> = None;
     let mut net = lines_trading::Money::ZERO;
-    let mut fills = 0usize;
+    let mut fills: Vec<serde_json::Value> = Vec::new();
+    let mut armed = false;
     while start.elapsed() < dur {
         std::thread::sleep(Duration::from_millis(100));
+        // This command line is the person arming it (decision 0025: nothing else arms), once
+        // every level source is current on the feed's own clock (a replay's levels arrive
+        // with the replay).
+        if !armed {
+            let now = if replay {
+                store.read().market_time
+            } else {
+                Some(lines_feed::now_utc())
+            };
+            let current = now.is_some_and(|now| {
+                watch.iter().all(|h| {
+                    matches!(
+                        h.cell().read().status(now),
+                        lines_feed::levels::runtime::LevelStatus::Current
+                    )
+                })
+            });
+            if current {
+                armed = true;
+                handle.submit(
+                    lines_trading::Source::Palette,
+                    TradeCommand::ArmStrategy { id },
+                );
+            }
+        }
         for e in events.try_iter() {
             if let Event::Fill(f) = &e
                 && f.contract == contract
             {
-                fills += 1;
                 net += f.realised - f.fee;
+                fills.push(serde_json::json!({
+                    "side": format!("{:?}", f.side),
+                    "qty": f.qty.0,
+                    "price": f.price.0,
+                    "at": f.at.0,
+                }));
                 println!(
                     "fill {:?} {} @ {}",
                     f.side,
@@ -1012,11 +1042,15 @@ fn run_strategy(
                 );
                 state = Some((v.state, v.reason.clone()));
             }
-            if let Some(f) = &v.fault {
-                println!("fault: {f}");
+            if v.fault != fault {
+                if let Some(f) = &v.fault {
+                    println!("fault: {f}");
+                }
+                fault = v.fault.clone();
             }
-            // Print the decisions not printed yet (the ring keeps the newest).
-            for d in v.decisions.iter().skip(printed.min(v.decisions.len())) {
+            // The decisions not printed yet (the ring keeps only the newest).
+            let new = (v.decided - printed).min(v.decisions.len() as u64) as usize;
+            for d in &v.decisions[v.decisions.len() - new..] {
                 let result = match &d.result {
                     Some(Ok(_)) => " [sent]".to_string(),
                     Some(Err(r)) => format!(" [denied: {}]", r.message),
@@ -1028,10 +1062,30 @@ fn run_strategy(
                     d.at, d.decision.rule, d.decision.reason
                 );
             }
-            printed = v.decisions.len();
+            printed = v.decided;
         }
     }
-    println!("{fills} fills, realized net {net}");
+    println!("{} fills, realized net {net}", fills.len());
+    if !armed {
+        println!("never armed: the level sources were not all current");
+    }
+    if let Some(out) = &cli.report {
+        let v = host.snapshot().into_iter().find(|v| v.id == id);
+        let report = serde_json::json!({
+            "strategy": strategy.name(),
+            "version": strategy.version(),
+            "contract": contract.label(&product).as_str(),
+            "armed": armed,
+            "state": v.as_ref().map(|v| v.state.label()),
+            "reason": v.as_ref().and_then(|v| v.reason.clone()),
+            "fault": v.as_ref().and_then(|v| v.fault.clone()),
+            "fills": fills,
+            "net": net.to_string(),
+            "decisions": v.map(|v| v.decisions).unwrap_or_default(),
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&report)?)
+            .with_context(|| format!("--report {}", out.display()))?;
+    }
     drop(host);
     drop(feed);
     Ok(())

@@ -214,6 +214,8 @@ pub(crate) struct Instance {
     pub recent: VecDeque<UtcMillis>,
     /// The command in flight passed the gate as an entry: count it if the core accepts it.
     pub counting: bool,
+    /// The trade date its daily loss closed its trade (once per trade date).
+    pub loss_closed: Option<CivilDate>,
 }
 
 impl Instance {
@@ -228,6 +230,7 @@ impl Instance {
             day: None,
             recent: VecDeque::new(),
             counting: false,
+            loss_closed: None,
         }
     }
 

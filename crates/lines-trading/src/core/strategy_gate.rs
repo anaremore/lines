@@ -354,32 +354,65 @@ impl TradingCore {
     /// Pause armed instances that may no longer trade (after every command, broker tick and
     /// market batch).
     pub(super) fn strategy_watch(&mut self, now: UtcMillis) {
-        let armed: Vec<StrategyId> = self
-            .strategies
-            .values()
-            .filter(|i| i.state == StrategyState::Armed)
-            .map(|i| i.cfg.id)
-            .collect();
-        for id in armed {
-            if let Some(why) = self.strategy_blocker(now, id) {
-                let daily_loss = why == DAILY_LOSS;
+        let ids: Vec<StrategyId> = self.strategies.keys().copied().collect();
+        for id in ids {
+            let Some(i) = self.strategies.get(&id) else {
+                continue;
+            };
+            let state = i.state;
+            if state == StrategyState::Armed
+                && let Some(why) = self.strategy_blocker(now, id)
+                && why != DAILY_LOSS
+            {
                 self.pause_strategy(now, id, StrategyState::Paused, why);
-                // The owner's rule: the daily loss limit closes the instance's trade too (its
-                // position on its contract, and every order there), then entries stay paused
-                // for the rest of the trade date (arming is refused until the next one).
-                if daily_loss && let Some(i) = self.strategies.get(&id) {
-                    let (account, contract) = (i.cfg.account.clone(), i.cfg.contract);
-                    self.submit_internal(
-                        now,
-                        Source::Rule,
-                        Command::Flatten {
-                            account,
-                            contract: Some(contract),
-                        },
-                    );
-                }
             }
+            self.strategy_daily_loss(now, id);
         }
+    }
+
+    /// The owner's rule (decision 0027): reaching the daily loss closes the instance's trade
+    /// (its account and contract flattened, every order there cancelled) and pauses it for the
+    /// rest of the trade date. Once per trade date; also when the host had already paused it
+    /// with a trade open; never when a person's own order paused it (the trade is theirs) or
+    /// after Stop.
+    fn strategy_daily_loss(&mut self, now: UtcMillis, id: StrategyId) {
+        let Some(i) = self.strategies.get(&id) else {
+            return;
+        };
+        let manual = i
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with("manual order activity"));
+        if i.state == StrategyState::Stopped || manual {
+            return;
+        }
+        let (account, contract, limit, state) = (
+            i.cfg.account.clone(),
+            i.cfg.contract,
+            Money::whole(i.cfg.limits.max_daily_loss),
+            i.state,
+        );
+        let day = self.trade_day(&account, now).map(|(d, _)| d);
+        if day.is_some() && self.strategies[&id].loss_closed == day {
+            return;
+        }
+        if self.strategy_day_pnl(now, id) > -limit {
+            return;
+        }
+        if let Some(i) = self.strategies.get_mut(&id) {
+            i.loss_closed = day;
+        }
+        if state == StrategyState::Armed {
+            self.pause_strategy(now, id, StrategyState::Paused, DAILY_LOSS.into());
+        }
+        self.submit_internal(
+            now,
+            Source::Rule,
+            Command::Flatten {
+                account,
+                contract: Some(contract),
+            },
+        );
     }
 
     /// A person's order action on an account (and contract): pause the armed instances that
