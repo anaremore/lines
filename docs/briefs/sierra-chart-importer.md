@@ -1,6 +1,6 @@
 # Brief: Sierra Chart importer (roadmap 3b)
 
-> **Status: done** (roadmap 3b, `a40523c`). Kept for reference; findings that differ from this brief are recorded in CLAUDE.md "Known gaps" and decision 0015.
+> **Status: done** (roadmap 3b, `a40523c`). Kept for reference; findings that differ from this brief are recorded in `docs/known-gaps.md` and decision 0015.
 
 ## Goal
 Convert local Sierra Chart tick (`.scid`) and market depth (`.depth`) files into Lines' replay format, so the DOM, paper broker, and chart trading (roadmap 5–8) can be built and tested on real CME data without any vendor contract.

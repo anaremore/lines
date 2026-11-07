@@ -80,6 +80,20 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  guard:
+    name: agent guard hook tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # .claude/hooks/guard.py blocks force pushes, pushes to main, licensed data and secrets
+      # for agents (CLAUDE.md "Never"). Its tests run here so a broken guard can't merge.
+      - run: python3 .claude/hooks/test_guard.py
+      # Agent context budget: CLAUDE.md is loaded into every agent turn. Growing it past 150
+      # lines needs a deliberate change here.
+      - name: CLAUDE.md stays under 150 lines
+        run: test "$(wc -l < CLAUDE.md)" -le 150
+
   deny:
     name: cargo-deny (licences, advisories, bans, sources)
     runs-on: ubuntu-latest

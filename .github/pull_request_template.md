@@ -1,9 +1,17 @@
 ## What & why
 
-## Testing
+## Risk tier
 
-- [ ] `cargo test --workspace` passes
-- [ ] `cargo clippy --workspace -- -D warnings` clean
+- [ ] A  - [ ] B (add a Risk section: what could go wrong, which tests cover it)  - [ ] C (owner approved: link the message)  (CLAUDE.md "Risk tiers")
+
+## Testing (CLAUDE.md gate, on HEAD `<sha>`)
+
+- [ ] `cargo fmt --all --check`
+- [ ] clippy `-D warnings`, default and `--all-features`
+- [ ] `cargo test --workspace --no-fail-fast`: passed N, failed 0
+- [ ] same with `--features lines-app/vendor-cqg,lines-feed/vendor-cqg`
+- [ ] `screenshot_exit` (UI changes) · `cargo deny --locked check` (dependency changes) · `test_guard.py` (`.claude/` changes)
+- [ ] review-loop: rounds used, final verdict 0 blocking
 
 ## Visual evidence (decision 0009)
 
