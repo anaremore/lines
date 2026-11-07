@@ -756,6 +756,8 @@ impl JournalView {
             names,
             mode,
         );
+        // Fewer lines than before (another date range, a tag gone): keep the first in view.
+        self.group_scroll = self.group_scroll.min(self.groups.len().saturating_sub(1));
         self.built = Some(rev);
         true
     }
