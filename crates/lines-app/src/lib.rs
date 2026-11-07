@@ -155,6 +155,14 @@ impl SourceChoice {
     }
 }
 
+/// `--hover-pane`: which pane kind's header controls a screenshot draws as hovered.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum HoverPaneArg {
+    Chart,
+    Dom,
+    Tape,
+}
+
 /// `--pnl`: the P&L display (`crate::pnl::PnlDisplay`).
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum PnlArg {
@@ -361,6 +369,10 @@ struct Cli {
     /// Screenshot: DOMs start armed for one-click trading (the app always starts disarmed).
     #[arg(long, requires = "screenshot")]
     arm: bool,
+    /// Screenshot: draw that pane kind's header controls as if the pointer were over its
+    /// header (they show only on hover in the app; the slot is always reserved).
+    #[arg(long, requires = "screenshot", value_enum)]
+    hover_pane: Option<HoverPaneArg>,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -833,6 +845,14 @@ where
         let out = cli.screenshot.clone().expect("screenshot mode");
         #[cfg(feature = "screenshot")]
         {
+            if let Some(k) = cli.hover_pane {
+                let kind = match k {
+                    HoverPaneArg::Chart => layout::PaneKind::Chart,
+                    HoverPaneArg::Dom => layout::PaneKind::Dom,
+                    HoverPaneArg::Tape => layout::PaneKind::Tape,
+                };
+                pane::FORCE_CONTROLS.store(kind as u8 + 1, std::sync::atomic::Ordering::Relaxed);
+            }
             let shot = screenshot::Shot {
                 out,
                 size,

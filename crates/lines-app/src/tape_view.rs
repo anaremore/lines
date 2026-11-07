@@ -76,9 +76,12 @@ pub struct TapeView {
     cols: Columns,
     /// The table's bounds in the last frame (for header-row hits).
     bounds: Bounds<Pixels>,
+    /// The pane's width at the last paint (the header lays out to it).
+    header_w: f32,
 }
 
 impl EventEmitter<FeedChanged> for TapeView {}
+impl EventEmitter<pane::PaneControl> for TapeView {}
 impl EventEmitter<ColumnMenu> for TapeView {}
 
 impl Pane for TapeView {
@@ -158,6 +161,7 @@ impl TapeView {
             glyphs: Glyphs::new(TEXT_PX),
             cols: Columns::new(Table::Tape),
             bounds: Bounds::default(),
+            header_w: 0.0,
         }
     }
 
@@ -291,7 +295,13 @@ impl TapeView {
         Ok(())
     }
 
-    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // The header lays out to the pane's width: lay it out again when that changes.
+        let width = f(bounds.size.width);
+        if (width - self.header_w).abs() > 0.5 {
+            self.header_w = width;
+            cx.notify();
+        }
         self.common.paints += 1;
         self.bounds = bounds;
         let rows =
@@ -439,7 +449,11 @@ impl TapeView {
         self.cols.paint_rules(&t, body, window);
     }
 
-    fn header(&self) -> impl IntoElement {
+    /// The tape's header: link chip, contract (elided last), stale, the large-print threshold
+    /// at the right (elided first), then the controls slot.
+    fn header(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        use pane::HeaderPrio::{Status, Symbol};
+        const SIZE: f32 = 12.0;
         let t = self.theme;
         let mut left = String::with_capacity(48);
         if let Some(title) = pane::unavailable_title(&self.feed) {
@@ -454,46 +468,27 @@ impl TapeView {
             let _ = write!(right, "{n}  ·  ");
         }
         let _ = write!(right, "large ≥ {q}");
-        div()
-            .flex()
-            .flex_row()
-            .justify_between()
-            .gap_2()
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .px_2()
-            .pr(px(pane::controls_gutter(crate::layout::PaneKind::Tape)))
+        let mut parts = Vec::new();
+        parts.extend(pane::link_part(self.common.link, &t, window, SIZE));
+        let w = pane::measure(window, &left, SIZE, false);
+        parts.push(pane::text_part(left, t.text_main, w, Symbol, false));
+        parts.extend(pane::stale_part(&self.store, &t, window, SIZE));
+        let w = pane::measure(window, &right, SIZE, false);
+        parts.push(pane::text_part(right, t.text_dim, w, Status, true));
+        let root = div()
             .py_1()
             .bg(t.panel)
             .border_b_1()
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
-            .child(
-                pane::header_content()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .items_center()
-                            .children(pane::link_chip(self.common.link, &t))
-                            .child(div().text_color(t.text_main).child(left))
-                            .children(pane::stale_badge(&self.store, &t)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(t.text_dim)
-                            .child(right),
-                    ),
-            )
+            .text_size(px(SIZE));
+        let slot = pane::controls_slot(crate::layout::PaneKind::Tape, self.common.detached, &t, cx);
+        pane::header_row(root, self.header_w, 8.0, parts, slot)
     }
 }
 
 impl Render for TapeView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let t = self.theme;
         let today = pane::today(self.frozen, &self.store);
@@ -522,7 +517,7 @@ impl Render for TapeView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header())
+            .child(self.header(window, cx))
             .child(
                 div()
                     .relative()

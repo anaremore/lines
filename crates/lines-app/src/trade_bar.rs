@@ -870,7 +870,13 @@ pub fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Opti
 }
 
 /// A chart's header: its account and the PAPER badge (chart trading is roadmap 8).
-pub fn chart_chip<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<AnyElement> {
+/// The chart header's account chip and its natural width (logical px, 14 px text).
+pub fn chart_chip<V: TradePane>(
+    v: &V,
+    t: &Theme,
+    window: &mut gpui::Window,
+    cx: &mut Context<V>,
+) -> Option<(AnyElement, f32)> {
     let trading = Trading::try_global(cx)?;
     let pt = v.trade_ref();
     let info = pt.account.as_ref().and_then(|a| trading.account(a))?;
@@ -886,7 +892,18 @@ pub fn chart_chip<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option
         unresolved: 0,
         working: 0,
     };
-    Some(account_chip(v, Some(&data), t, cx))
+    let name_w = crate::pane::measure(window, &format!("{} ▾", data.account_name), 14.0, true);
+    let paper_w = data
+        .paper
+        .then(|| crate::pane::measure(window, "PAPER", 14.0, true));
+    let w = account_chip_width(name_w, paper_w);
+    Some((account_chip(v, Some(&data), t, cx), w))
+}
+
+/// The account chip's width from its measured text: the name chip (padding 4 + 4, border
+/// 1 + 1), and with PAPER the gap (4) and the badge (padding 4 + 4).
+pub fn account_chip_width(name_w: f32, paper_w: Option<f32>) -> f32 {
+    name_w + 10.0 + paper_w.map_or(0.0, |p| 4.0 + p + 8.0)
 }
 
 /// The quantity the pane trades.

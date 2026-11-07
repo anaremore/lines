@@ -44,6 +44,7 @@ use crate::dom_orders::{DragOrder, OrdersLayer};
 use crate::dom_trade::{self, DomColumn, EntryCtx, Ghost, Refusal};
 use crate::dom_trail::DomTrail;
 use crate::feeds::{Feeds, PaneFeed};
+use crate::layout::PaneKind;
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
     self, ColumnCmd, ColumnMenu, Columns, DomCol, HEADER_ROW_H, HeaderHit, Table,
@@ -95,6 +96,8 @@ pub struct DomView {
     stats: LadderStats,
     inside: Inside,
     bounds: Bounds<Pixels>,
+    /// The pane's width at the last paint (the header lays out to it).
+    header_w: f32,
     /// Unapplied wheel movement, in rows.
     scroll_rows: f32,
     focus: FocusHandle,
@@ -110,6 +113,7 @@ pub struct DomView {
 }
 
 impl EventEmitter<FeedChanged> for DomView {}
+impl EventEmitter<pane::PaneControl> for DomView {}
 impl EventEmitter<ColumnMenu> for DomView {}
 
 impl TradePane for DomView {
@@ -224,6 +228,7 @@ impl DomView {
             stats: LadderStats::default(),
             inside: Inside::Empty,
             bounds: Bounds::default(),
+            header_w: 0.0,
             scroll_rows: 0.0,
             focus: cx.focus_handle(),
             glyphs: Glyphs::new(TEXT_PX),
@@ -617,7 +622,13 @@ impl DomView {
 
     // ---- paint ---------------------------------------------------------------------
 
-    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // The header lays out to the pane's width: lay it out again when that changes.
+        let width = f(bounds.size.width);
+        if (width - self.header_w).abs() > 0.5 {
+            self.header_w = width;
+            cx.notify();
+        }
         self.common.paints += 1;
         self.bounds = bounds;
         let rows = self.visible_rows();
@@ -871,7 +882,11 @@ impl DomView {
         self.cols.paint_rules(&t, body, window);
     }
 
-    fn header(&self) -> impl IntoElement {
+    /// The DOM's header: link chip, contract (elided last), stale and book state (never
+    /// shrunk), grouping status at the right (elided first), then the controls slot.
+    fn header(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        use pane::HeaderPrio::{Fixed, Status, Symbol};
+        const SIZE: f32 = 12.0;
         let t = self.theme;
         let mut left = String::with_capacity(64);
         let mut right = String::with_capacity(64);
@@ -891,52 +906,31 @@ impl DomView {
             Inside::OneSided => Some("one-sided"),
             _ => None,
         };
-        div()
-            .flex()
-            .flex_row()
-            .justify_between()
-            .gap_2()
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .px_2()
-            .pr(px(pane::controls_gutter(crate::layout::PaneKind::Dom)))
+        let mut parts = Vec::new();
+        parts.extend(pane::link_part(self.common.link, &t, window, SIZE));
+        let w = pane::measure(window, &left, SIZE, false);
+        parts.push(pane::text_part(left, t.text_main, w, Symbol, false));
+        parts.extend(pane::stale_part(&self.store, &t, window, SIZE));
+        if let Some(s) = state {
+            // The book's state is text, not only colour.
+            let w = pane::measure(window, s, SIZE, true);
+            let el = div()
+                .text_color(t.text_main)
+                .font_weight(gpui::FontWeight::BOLD)
+                .child(s)
+                .into_any_element();
+            parts.push(pane::el_part(el, w, Fixed, false));
+        }
+        let w = pane::measure(window, &right, SIZE, false);
+        parts.push(pane::text_part(right, t.text_dim, w, Status, true));
+        let root = div()
             .py_1()
             .bg(t.panel)
             .border_b_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
-            .child(
-                pane::header_content()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .items_center()
-                            .children(pane::link_chip(self.common.link, &t))
-                            .child(div().text_color(t.text_main).child(left))
-                            .children(pane::stale_badge(&self.store, &t)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_color(t.text_dim)
-                            .when_some(state, |d, s| {
-                                // The book's state is text, not only colour.
-                                d.child(
-                                    div()
-                                        .text_color(t.text_main)
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child(s),
-                                )
-                            })
-                            .child(right),
-                    ),
-            )
+            .text_size(px(SIZE));
+        let slot = pane::controls_slot(PaneKind::Dom, self.common.detached, &t, cx);
+        pane::header_row(root, self.header_w, 8.0, parts, slot)
     }
 }
 
@@ -1004,7 +998,7 @@ impl Render for DomView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header())
+            .child(self.header(window, cx))
             .children(trade)
             .child(
                 div()

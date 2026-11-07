@@ -203,6 +203,8 @@ pub struct CrosshairTime {
 pub struct ChartView {
     feed: PaneFeed,
     common: PaneCommon,
+    /// The pane's width at the last paint (the header lays out to it).
+    header_w: f32,
     /// The volume profile, painted first (under other studies). Kept typed, not in `layers`,
     /// so its settings can be read and changed.
     profile: VolumeProfileLayer,
@@ -350,6 +352,7 @@ impl ChartView {
             anchoring: None,
             feed,
             common: PaneCommon::default(),
+            header_w: 0.0,
             profile: VolumeProfileLayer::new(fixture.profile),
             layers: Vec::new(),
             studies,
@@ -1195,6 +1198,12 @@ impl ChartView {
     // ---- paint ---------------------------------------------------------------------
 
     fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // The header lays out to the pane's width: lay it out again when that changes.
+        let width = f32::from(bounds.size.width);
+        if (width - self.header_w).abs() > 0.5 {
+            self.header_w = width;
+            cx.notify();
+        }
         let t0 = Instant::now();
         self.common.paints += 1;
         let scale = window.scale_factor();
@@ -1989,43 +1998,34 @@ impl ChartView {
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
     }
 
-    /// The chart's header. `account`: its trading account chip (with the PAPER badge), shown
-    /// with the contract and the timeframe chip on the left; the right end is the hover
-    /// controls' gutter.
-    fn header(&self, account: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> gpui::Div {
+    /// The chart's header: link chip, contract, timeframe chip, account chip + PAPER (never
+    /// shrunk), quotes, stale; description and status text at the right, elided first; then
+    /// the controls slot (`pane::header_row`). `account`: the chip and its natural width.
+    fn header(
+        &self,
+        account: Option<(gpui::AnyElement, f32)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use pane::HeaderPrio::{Chip, Fixed, Quotes, Rest, Status, Symbol};
+        const SIZE: f32 = 14.0;
         let t = self.theme;
-        let bar = || {
-            div()
-                .flex()
-                .flex_row()
-                .justify_between()
-                .gap_2()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .px_3()
-                .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chart)))
-                .py_1()
-                .bg(t.panel)
-                .border_b_1()
-                .border_color(t.axis_line)
-                .text_sm()
-        };
-        let chip = pane::link_chip(self.common.link, &t);
+        let root = div()
+            .py_1()
+            .bg(t.panel)
+            .border_b_1()
+            .border_color(t.axis_line)
+            .text_size(px(SIZE));
+        let slot =
+            pane::controls_slot(crate::layout::PaneKind::Chart, self.common.detached, &t, cx);
+        let mut parts = Vec::new();
+        parts.extend(pane::link_part(self.common.link, &t, window, SIZE));
         if let Some(title) = pane::unavailable_title(&self.feed) {
-            return bar().child(
-                pane::header_content().child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .items_center()
-                        .text_color(t.text_dim)
-                        .children(chip)
-                        .child(title),
-                ),
-            );
+            let w = pane::measure(window, &title, SIZE, false);
+            parts.push(pane::text_part(title, t.text_dim, w, Symbol, false));
+            return pane::header_row(root, self.header_w, 12.0, parts, slot);
         }
-        let mut left = String::with_capacity(96);
+        let mut contract = String::with_capacity(32);
         let mut right = String::with_capacity(160);
         let Some(d) = self.store.try_read() else {
             return div(); // feed busy this instant; header refreshes next frame
@@ -2034,23 +2034,39 @@ impl ChartView {
         let f = i.price;
         // The active contract is always shown (decision 0013); unknown is labelled, not hidden.
         let _ = match d.contract_label() {
-            Some(c) => write!(left, "{c}  {}", i.description),
-            None => write!(left, "{} (contract unknown)  {}", i.symbol, i.description),
+            Some(c) => write!(contract, "{c}"),
+            None => write!(contract, "{} (contract unknown)", i.symbol),
         };
+        let w = pane::measure(window, &contract, SIZE, false);
+        parts.push(pane::text_part(contract, t.text_main, w, Symbol, false));
+        let tf = pane::timeframe_chip_text(self.timeframe);
+        let w = pane::measure(window, &tf, SIZE, false) + 10.0;
+        parts.push(pane::el_part(
+            self.timeframe_chip(&t, cx).into_any_element(),
+            w,
+            Chip,
+            false,
+        ));
+        if let Some((el, w)) = account {
+            parts.push(pane::el_part(el, w, Fixed, false));
+        }
         // Last, bid, ask: a missing value shows as a dimmed dash (docs/design.md §7), never as
         // a bare label that reads like a layout bug.
-        let quote = |label: &str, p: Option<Price>| {
+        let mut quote = |label: &str, p: Option<Price>| {
             let (text, missing) = quote_text(label, p, &f);
-            div()
-                .ml_2()
-                .text_color(if missing { t.text_dim } else { t.text_main })
-                .child(text)
+            let w = pane::measure(window, &text, SIZE, false);
+            let c = if missing { t.text_dim } else { t.text_main };
+            pane::text_part(text, c, w, Quotes, false)
         };
-        let mut quotes = vec![quote("last", d.last_trade)];
+        parts.push(quote("last", d.last_trade));
         if d.capabilities.bbo {
-            quotes.push(quote("bid", d.bid));
-            quotes.push(quote("ask", d.ask));
+            parts.push(quote("bid", d.bid));
+            parts.push(quote("ask", d.ask));
         }
+        parts.extend(pane::stale_part(&self.store, &t, window, SIZE));
+        let desc = i.description.to_string();
+        let w = pane::measure(window, &desc, SIZE, false);
+        parts.push(pane::text_part(desc, t.text_dim, w, Rest, false));
         if let Some(n) = pane::adopted_note(&self.feed) {
             let _ = write!(right, "{n}  ·  ");
         }
@@ -2086,30 +2102,10 @@ impl ChartView {
         if let FeedStatus::Failed(msg) | FeedStatus::Reconnecting { reason: msg, .. } = &d.status {
             let _ = write!(right, "  ·  {msg}");
         }
-        bar().child(
-            pane::header_content()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .items_center()
-                        .flex_shrink_0()
-                        .children(chip)
-                        .child(div().text_color(t.text_main).child(left))
-                        .child(self.timeframe_chip(&t, cx))
-                        .children(account)
-                        .children(quotes)
-                        .children(pane::stale_badge(&self.store, &t)),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(t.text_dim)
-                        .child(right),
-                ),
-        )
+        drop(d);
+        let w = pane::measure(window, &right, SIZE, false);
+        parts.push(pane::text_part(right, t.text_dim, w, Status, true));
+        pane::header_row(root, self.header_w, 12.0, parts, slot)
     }
 }
 
@@ -2244,6 +2240,7 @@ impl ChartView {
 }
 
 impl EventEmitter<FeedChanged> for ChartView {}
+impl EventEmitter<pane::PaneControl> for ChartView {}
 
 impl EventEmitter<CrosshairTime> for ChartView {}
 
@@ -2418,7 +2415,7 @@ impl Render for ChartView {
                 .flex()
                 .flex_col()
                 .bg(t.bg)
-                .child(self.header(None, cx))
+                .child(self.header(None, window, cx))
                 .child(
                     div()
                         .relative()
@@ -2430,15 +2427,14 @@ impl Render for ChartView {
                         .when_some(overlay, |d, o| d.child(o)),
                 );
         }
-        let _ = window;
-        let account = crate::trade_bar::chart_chip(self, &t, cx);
+        let account = crate::trade_bar::chart_chip(self, &t, window, cx);
         let accounts = crate::trade_bar::account_menu(self, &t, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header(account, cx))
+            .child(self.header(account, window, cx))
             .child(
                 div()
                     .relative()

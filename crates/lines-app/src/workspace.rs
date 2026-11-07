@@ -263,6 +263,16 @@ impl PaneHandle {
         }))
     }
 
+    /// Whether the pane is in its own window (its header offers dock and re-attach).
+    pub(crate) fn set_detached(&self, detached: bool, cx: &mut App) {
+        each!(self, e => e.update(cx, |p, cx| {
+            if p.common().detached != detached {
+                p.common().detached = detached;
+                cx.notify();
+            }
+        }))
+    }
+
     pub(crate) fn set_visible(&self, visible: bool, cx: &mut App) {
         each!(self, e => e.update(cx, |p, _| p.common().visible = visible))
     }
@@ -566,6 +576,9 @@ struct PaneDrag {
 }
 
 pub struct WindowView {
+    /// Header controls panes asked for (`pane::PaneControl`), run on the next render (where
+    /// the window is at hand).
+    controls: Vec<(PaneId, Command)>,
     tabs: Vec<Tab>,
     active: usize,
     theme: Theme,
@@ -612,6 +625,7 @@ impl WindowView {
             cx.notify();
         }));
         let mut this = WindowView {
+            controls: Vec::new(),
             tabs: Vec::new(),
             active: 0,
             theme: env.theme,
@@ -725,6 +739,10 @@ impl WindowView {
             };
         match handle {
             PaneHandle::Chart(e) => vec![
+                cx.subscribe(e, move |this, _, ev: &crate::pane::PaneControl, cx| {
+                    this.controls.push((id, ev.0));
+                    cx.notify();
+                }),
                 cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
                     feed_changed(this, ev, cx)
                 }),
@@ -733,6 +751,10 @@ impl WindowView {
                 }),
             ],
             PaneHandle::Dom(e) => vec![
+                cx.subscribe(e, move |this, _, ev: &crate::pane::PaneControl, cx| {
+                    this.controls.push((id, ev.0));
+                    cx.notify();
+                }),
                 cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
                     feed_changed(this, ev, cx)
                 }),
@@ -741,6 +763,10 @@ impl WindowView {
                 }),
             ],
             PaneHandle::Tape(e) => vec![
+                cx.subscribe(e, move |this, _, ev: &crate::pane::PaneControl, cx| {
+                    this.controls.push((id, ev.0));
+                    cx.notify();
+                }),
                 cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
                     feed_changed(this, ev, cx)
                 }),
@@ -778,6 +804,8 @@ impl WindowView {
         for (i, tab) in self.tabs.iter().enumerate() {
             let active = self.window_visible && i == self.active;
             for (id, slot) in &tab.panes {
+                let detached = tab.state(*id) == PaneState::Detached;
+                slot.handle.set_detached(detached, cx);
                 match tab.state(*id) {
                     PaneState::Detached => {}
                     s => slot.handle.set_visible(active && s.is_shown(), cx),
@@ -2400,42 +2428,11 @@ impl WindowView {
         let mut out = Vec::new();
         let leaves = tab.layout.leaves();
         let placed = tab.layout.place_where(area, &shown);
-        let hovered = self.hover_pane;
         let bar = self.bar_h();
         for p in &placed {
             let id = *leaves[p.index];
             let Some(h) = tab.handle(id) else { continue };
             let r = p.rect;
-            let kind = h.kind();
-            let controls = (hovered == Some(id)).then(|| {
-                // Labels from `pane::control_labels` (the gutter headers keep free is sized
-                // for them), commands in the same order.
-                let labels = crate::pane::control_labels(kind, false);
-                let buttons: Vec<(&'static str, Command, bool)> = match kind {
-                    PaneKind::Chart => {
-                        let on = tabstate::is_chart_only(&tab.leaves(cx), id);
-                        vec![
-                            (labels[0], Command::ChartOnly, on),
-                            (labels[1], Command::PopOut, false),
-                        ]
-                    }
-                    _ => vec![
-                        (labels[0], Command::PopOut, false),
-                        (labels[1], Command::HidePane, false),
-                    ],
-                };
-                header_controls(
-                    &t,
-                    kind,
-                    buttons,
-                    |this: &mut Self, cmd, id, window, cx| {
-                        this.focus_pane(id, window, cx);
-                        this.run(cmd, window, cx);
-                    },
-                    id,
-                    cx,
-                )
-            });
             out.push(
                 div()
                     .absolute()
@@ -2469,7 +2466,6 @@ impl WindowView {
                         }),
                     )
                     .child(h.view().cached(StyleRefinement::default().size_full()))
-                    .children(controls)
                     .into_any_element(),
             );
         }
@@ -2809,6 +2805,20 @@ impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         self.screen = screen_rect(window);
+        // Header controls clicked since the last frame: run them (after this render).
+        if !self.controls.is_empty() {
+            let queued = std::mem::take(&mut self.controls);
+            cx.defer_in(window, move |this, window, cx| {
+                for (id, cmd) in queued {
+                    // A detached pane's window handles its own controls.
+                    if this.tabs.iter().any(|t| t.state(id) == PaneState::Detached) {
+                        continue;
+                    }
+                    this.focus_pane(id, window, cx);
+                    this.run(cmd, window, cx);
+                }
+            });
+        }
         if !window.is_window_hovered() {
             // GPUI on Windows sends no exit event: the pointer left, so nothing is hovered.
             self.hover_pane = None;
@@ -2879,57 +2889,6 @@ impl Render for WindowView {
             .children(self.prompt_overlay())
             .children(self.drag_ghost())
     }
-}
-
-/// Small text controls over the right end of a pane's header. Callers build them only for
-/// the hovered pane (docs/design.md: no permanent chrome; and no per-frame cost for the
-/// others). Each is `(label, command, on)`; `on` draws it in the accent colour (e.g. "chart
-/// only" while active). `run` issues the command on pane `id`.
-pub(crate) fn header_controls<V: 'static>(
-    t: &Theme,
-    kind: PaneKind,
-    buttons: Vec<(&'static str, Command, bool)>,
-    run: fn(&mut V, Command, PaneId, &mut Window, &mut Context<V>),
-    id: PaneId,
-    cx: &mut Context<V>,
-) -> AnyElement {
-    // Exactly the gutter every pane header keeps free (`pane::controls_gutter`): the controls
-    // never cover header content.
-    let mut row = div()
-        .absolute()
-        .top_0()
-        .right_0()
-        .h(px(HEADER_H))
-        .w(px(crate::pane::controls_gutter(kind)))
-        .overflow_hidden()
-        .justify_end()
-        .px_1()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .bg(t.panel)
-        .text_size(px(11.0));
-    for (i, (label, cmd, on)) in buttons.into_iter().enumerate() {
-        row = row.child(
-            div()
-                .id(("pane-control", i))
-                .px_1()
-                .rounded_sm()
-                .text_color(if on { t.accent } else { t.text_dim })
-                .hover(|s| s.bg(t.axis_line).text_color(t.text_main))
-                .child(label)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        run(this, cmd, id, window, cx);
-                        cx.notify();
-                    }),
-                ),
-        );
-    }
-    row.into_any_element()
 }
 
 /// The window's screen rectangle (logical px).

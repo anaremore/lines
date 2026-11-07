@@ -75,6 +75,7 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 # Screenshot mode (decision 0009). Replays at full speed to --at, renders off-screen, writes PNG, exits.
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
+# --hover-pane chart|dom|tape draws that pane kind's header controls as hovered.
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair; --magnet snaps it to OHLC.
 # README hero (assets/readme/lines-dark.png): synthetic mock data only (decision 0010):
 #   lines --source mock --headless 5 --record recordings/readme-mock.lfr

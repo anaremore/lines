@@ -20,9 +20,7 @@ use gpui::{
 use crate::commands::{self, Command};
 use crate::menu::{Menu, MenuItem, MenuKey};
 use crate::theme::Theme;
-use crate::workspace::{
-    self, PaneHandle, PaneId, Workspace, dock_beside_chart, header_controls, reattach_pane,
-};
+use crate::workspace::{self, PaneHandle, PaneId, Workspace, dock_beside_chart, reattach_pane};
 use crate::wsdoc::{Placement, WindowState};
 
 pub struct PaneWindow {
@@ -68,7 +66,31 @@ impl PaneWindow {
             cx.notify();
         }));
         handle.set_visible(true, cx);
+        handle.set_detached(true, cx);
         handle.focus(window, cx);
+        // The pane's header controls (dock, re-attach, menu) act on this window.
+        let control =
+            |this: &mut PaneWindow,
+             ev: &crate::pane::PaneControl,
+             window: &mut Window,
+             cx: &mut Context<PaneWindow>| { this.run(ev.0, window, cx) };
+        match &handle {
+            PaneHandle::Chart(e) => {
+                subs.push(cx.subscribe_in(e, window, move |this, _, ev, window, cx| {
+                    control(this, ev, window, cx)
+                }))
+            }
+            PaneHandle::Dom(e) => {
+                subs.push(cx.subscribe_in(e, window, move |this, _, ev, window, cx| {
+                    control(this, ev, window, cx)
+                }))
+            }
+            PaneHandle::Tape(e) => {
+                subs.push(cx.subscribe_in(e, window, move |this, _, ev, window, cx| {
+                    control(this, ev, window, cx)
+                }))
+            }
+        }
         PaneWindow {
             id,
             handle,
@@ -125,22 +147,6 @@ impl PaneWindow {
 impl Render for PaneWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        // Controls only while the pointer is over this window (no permanent chrome).
-        let controls = window.is_window_hovered().then(|| {
-            let kind = self.handle.kind();
-            let labels = crate::pane::control_labels(kind, true);
-            header_controls(
-                &t,
-                kind,
-                vec![
-                    (labels[0], Command::DockBesideChart, false),
-                    (labels[1], Command::Reattach, false),
-                ],
-                |this: &mut Self, cmd, _, window, cx| this.run(cmd, window, cx),
-                self.id,
-                cx,
-            )
-        });
         let menu: Option<AnyElement> = self.menu.as_ref().map(|m| {
             m.render(
                 &t,
@@ -170,8 +176,7 @@ impl Render for PaneWindow {
                         self.handle
                             .view()
                             .cached(StyleRefinement::default().size_full()),
-                    )
-                    .children(controls),
+                    ),
             )
             .children(menu)
     }
