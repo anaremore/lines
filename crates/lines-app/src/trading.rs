@@ -50,6 +50,8 @@ use crate::dom_trade::ArmPrefs;
 pub const FLASH: Duration = Duration::from_secs(4);
 /// Command results kept for drag ghosts (newest last).
 const KEEP_RESULTS: usize = 256;
+/// Fills kept for chart marks.
+const KEEP_FILLS: usize = 1000;
 /// Finished orders kept (a ghost may need to learn its order filled).
 const KEEP_FINISHED: usize = 256;
 
@@ -123,6 +125,8 @@ pub struct TradeState {
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
     guards: HashMap<AccountId, GuardView>,
+    /// Recent fills, newest last (chart fill marks).
+    fills: VecDeque<lines_trading::FillEvent>,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -183,7 +187,14 @@ impl TradeState {
                 }
                 Some(account)
             }
-            Event::Fill(f) => Some(f.account),
+            Event::Fill(f) => {
+                let account = f.account.clone();
+                if self.fills.len() == KEEP_FILLS {
+                    self.fills.pop_front();
+                }
+                self.fills.push_back(f);
+                Some(account)
+            }
             Event::Position(p) => {
                 let account = p.account.clone();
                 self.positions.insert((p.account.clone(), p.contract), p);
@@ -294,6 +305,17 @@ impl TradeState {
         self.positions
             .get(&(account.clone(), contract))
             .filter(|p| p.qty != 0)
+    }
+
+    /// The account's recent fills in a contract, oldest first (chart fill marks).
+    pub fn fills<'a>(
+        &'a self,
+        account: &'a AccountId,
+        contract: ContractKey,
+    ) -> impl Iterator<Item = &'a lines_trading::FillEvent> + 'a {
+        self.fills
+            .iter()
+            .filter(move |f| &f.account == account && f.contract == contract)
     }
 
     /// How many of the account's orders have no known outcome.
@@ -494,6 +516,8 @@ pub struct Trading {
     pub report: Option<String>,
     /// Screenshot fixture (`--arm`): DOMs start armed. Never set in the app.
     pub start_armed: bool,
+    /// Screenshot fixture (`--chart-bar`): charts show their trading bar.
+    pub start_chart_bar: bool,
     /// Screenshot fixture (a `--paper` script's first `account`): the panes' account.
     pub start_account: Option<AccountId>,
     /// The core's clock kind, so the UI reads time the way the core does (`now`).
@@ -612,6 +636,7 @@ impl Trading {
             prefs: ArmPrefs::default(),
             report,
             start_armed: false,
+            start_chart_bar: false,
             start_account: None,
             clock,
             advanced: std::sync::atomic::AtomicI64::new(i64::MIN),

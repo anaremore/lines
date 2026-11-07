@@ -27,7 +27,7 @@ Status: `done` · `current` · `next` · `later`
 | 6b | Latency HUD | later | Exchange→receive, input→order-sent, gateway RTT visible; clock-sync status shown |
 | 6c | Settings window + settings schema | next | Ctrl+, window with search and sections; every setting also a palette command; explicit scope (pane / workspace / defaults); instant apply with undo and reset; risk-loosening changes confirmed; one typed schema drives UI, palette and persistence (decision 0021) |
 | 7 | DOM trading | current | Click/drag/hotkey orders, brackets, pending vs working states, flatten/cancel-all; orders dispatch from the input handler, not the next frame |
-| 8 | Chart trading | later | Draggable order/position lines, bracket P&L, same intents as DOM |
+| 8 | Chart trading | done | Draggable order/position lines, bracket P&L, same intents as DOM |
 | 8b | Discipline guardrails + economic calendar | later | Loss/streak lockouts with cooldown, max trades/day, news blackout (warn/flatten/block) tied to prop-rule presets; overrides deliberately hard. Calendar from official sources only (BLS, BEA, Federal Reserve schedules; FRED API), as a data-source plugin (0007); no scraping |
 | 8c | Automatic trade journal | later | Fills → trades with auto entry/exit screenshots, tags, P&L by time/setup/account, consistency-rule progress |
 | 10 | Indicators (10a engine + VWAP moved to 5c): 10a more built-ins · 10b WASM host · 10c data-source plugins · 10d plugin dev tooling | later | See decisions 0007–0008 |

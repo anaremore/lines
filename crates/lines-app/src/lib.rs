@@ -3,6 +3,7 @@
 //! [`Extensions`]; nothing in this crate names them.
 
 mod bench;
+mod chart_trade;
 mod chart_view;
 mod commands;
 mod diagnostics;
@@ -361,6 +362,9 @@ struct Cli {
     /// Screenshot: DOMs start armed for one-click trading (the app always starts disarmed).
     #[arg(long, requires = "screenshot")]
     arm: bool,
+    /// Screenshot: charts show their compact trading bar (Ctrl+Alt+T in the app).
+    #[arg(long, requires = "screenshot")]
+    chart_bar: bool,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -840,6 +844,7 @@ where
                 doc,
                 paper: cli.paper.clone(),
                 arm: cli.arm,
+                chart_bar: cli.chart_bar,
                 pnl: cli.pnl.map(PnlArg::mode),
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;

@@ -275,7 +275,7 @@ pub struct ChartView {
     rates_changed: bool,
     /// The chart's account (chart trading is roadmap 8; Flatten/Cancel All hotkeys work now).
     trade: crate::trade_bar::PaneTrade,
-    /// The position tag's text (glyphs shaped once).
+    /// The trading tags' text (glyphs shaped once).
     pos_glyphs: crate::text::Glyphs,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
     /// groups: they share the market only.
@@ -291,6 +291,8 @@ pub struct ChartView {
     tf_entry: Option<String>,
     /// The hovered bar was cut short by a session break.
     cross_partial: bool,
+    /// Chart trading (roadmap 8): this frame's orders, tags (for hit-testing), fills, drags.
+    ct: crate::chart_trade::ChartTradeState,
 }
 
 impl crate::trade_bar::TradePane for ChartView {
@@ -316,6 +318,10 @@ impl ChartView {
         cx: &mut Context<Self>,
     ) {
         self.trade = crate::trade_bar::PaneTrade::new(doc, cx);
+        // Screenshot fixture (`--chart-bar`): charts show their trading bar.
+        if crate::trading::Trading::try_global(cx).is_some_and(|t| t.start_chart_bar) {
+            self.trade.chart_bar = true;
+        }
     }
 
     pub fn new(
@@ -411,6 +417,7 @@ impl ChartView {
             tf_menu: false,
             tf_entry: None,
             cross_partial: false,
+            ct: crate::chart_trade::ChartTradeState::default(),
         };
         view.apply_timeframe(timeframe);
         if let Some(set) = fixture_studies {
@@ -694,6 +701,22 @@ impl ChartView {
                 );
             }
             return;
+        }
+        // Chart trading: a tag's × cancels (the position's flattens); its body starts a drag
+        // that moves the order. Tags win over panning.
+        if region == Region::Plot
+            && let Some(hit) = lines_core::order_lines::hit_tag(
+                &self.ct.tags[..self.ct.n_tags],
+                x as f32,
+                y as f32,
+            )
+        {
+            self.tag_pressed(hit, cx);
+            return;
+        }
+        // Ctrl(+Shift)+press: an order if the pointer doesn't move (a drag scales, as before).
+        if region == Region::Plot && ev.modifiers.control && ev.click_count == 1 {
+            self.ct.pending_click = Some(((x, y), std::time::Instant::now(), ev.modifiers.shift));
         }
         if ev.click_count >= 2 {
             match region {
@@ -1049,6 +1072,11 @@ impl ChartView {
     }
 
     /// What this chart draws of its studies.
+    /// The instrument's price format (menus label prices with it).
+    pub fn price_format(&self) -> lines_core::PriceFormat {
+        self.instrument.price
+    }
+
     pub fn visibility(&self) -> StudyVisibility {
         self.visibility
     }
@@ -1096,6 +1124,20 @@ impl ChartView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
+        if let Some(d) = self.ct.drag {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.ct.drag = None;
+            } else {
+                let (_, y) = self.local(ev.position);
+                if let Some(to) =
+                    lines_core::geometry::snap_price(&self.vp, y, self.instrument.price.tick)
+                {
+                    self.ct.drag = Some(crate::dom_orders::DragOrder { to, ..d });
+                }
+            }
+            cx.notify();
+            return;
+        }
         if self.drag.is_none() {
             return;
         }
@@ -1118,11 +1160,183 @@ impl ChartView {
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = self.ct.drag.take() {
+            self.drop_order(d, cx);
+            cx.notify();
+        }
+        if let Some(((x0, y0), issued, stop)) = self.ct.pending_click.take() {
+            let (x, y) = self.local(ev.position);
+            if (x - x0).hypot(y - y0) < 4.0
+                && let Some(price) =
+                    lines_core::geometry::snap_price(&self.vp, y0, self.instrument.price.tick)
+            {
+                self.place_click(price, stop, issued, cx);
+            }
+        }
         if self.drag.is_some() {
             self.end_drag();
             cx.notify();
         }
+    }
+
+    /// Right press: remember the price under the pointer for the menu's order choices.
+    fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        let (_, y) = self.local(ev.position);
+        self.ct.menu_price = (self.region(ev.position) == Some(Region::Plot))
+            .then(|| lines_core::geometry::snap_price(&self.vp, y, self.instrument.price.tick))
+            .flatten();
+    }
+
+    /// A tag was pressed: × cancels the order (the position's flattens); the body starts a
+    /// drag to move the order. Neither needs arming (they never add exposure).
+    fn tag_pressed(&mut self, hit: lines_core::order_lines::TagHit, cx: &mut Context<Self>) {
+        use crate::chart_trade::POSITION_TAG;
+        use lines_core::order_lines::TagHit;
+        let issued = std::time::Instant::now();
+        let (Some(t), Some(account)) = (
+            crate::trading::Trading::try_global(cx),
+            self.trade.account.clone(),
+        ) else {
+            return;
+        };
+        match hit {
+            TagHit::Close(POSITION_TAG) => {
+                if let Some(contract) = crate::trade_bar::contract_of(&self.store) {
+                    t.submit(
+                        lines_trading::Source::Chart,
+                        issued,
+                        lines_trading::Command::Flatten {
+                            account,
+                            contract: Some(contract),
+                        },
+                    );
+                }
+            }
+            TagHit::Close(id) => {
+                t.submit(
+                    lines_trading::Source::Chart,
+                    issued,
+                    lines_trading::Command::CancelOrder {
+                        account,
+                        order: lines_trading::OrderId(id),
+                    },
+                );
+            }
+            TagHit::Body(POSITION_TAG) => {}
+            TagHit::Body(id) => {
+                if let Some(m) = self.ct.mark(id) {
+                    self.ct.drag = Some(crate::dom_orders::DragOrder {
+                        order: m.id,
+                        to: m.price,
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Release after dragging a tag: move that order (a bracket exit moves alone) to the
+    /// snapped price, with a ghost until the broker confirms.
+    fn drop_order(&mut self, d: crate::dom_orders::DragOrder, cx: &mut Context<Self>) {
+        let issued = std::time::Instant::now();
+        let Some(t) = crate::trading::Trading::try_global(cx) else {
+            return;
+        };
+        let order = t.cache.read().order(d.order).cloned();
+        let Some(o) = order else {
+            return;
+        };
+        if let Some(cmd) = crate::dom_trade::drag_command(&o, d.to) {
+            let id = t.submit(lines_trading::Source::Chart, issued, cmd);
+            self.ct.ghosts.push(crate::dom_trade::Ghost {
+                order: o.id,
+                price: d.to,
+                command: id,
+            });
+        }
+    }
+
+    /// Ctrl(+Shift)+click at `price` (armed only): a limit on the far side of the market, or
+    /// with Shift a stop on the near side (`chart_trade`).
+    fn place_click(
+        &mut self,
+        price: Price,
+        stop: bool,
+        issued: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let built = crate::trade_bar::entry_ctx(self, cx)
+            .map_err(crate::dom_trade::Refusal)
+            .and_then(|ctx| {
+                if !self.trade.arming.is_armed() {
+                    return Err(crate::dom_trade::Refusal(crate::dom_trade::ARM_TO_TRADE));
+                }
+                let market = crate::chart_trade::reference(&ctx)
+                    .ok_or(crate::dom_trade::Refusal("no market price yet"))?;
+                let pick = crate::chart_trade::pick_for_click(price, market, stop)?;
+                crate::chart_trade::pick_command(pick, price, self.trade.arming, &ctx)
+            });
+        self.send_built(built, issued, cx);
+    }
+
+    /// A menu choice (`Command::ChartOrder`): `pick` at `price` (armed only).
+    pub fn place_pick(
+        &mut self,
+        pick: crate::chart_trade::OrderPick,
+        price: Price,
+        issued: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let built = crate::trade_bar::entry_ctx(self, cx)
+            .map_err(crate::dom_trade::Refusal)
+            .and_then(|ctx| crate::chart_trade::pick_command(pick, price, self.trade.arming, &ctx));
+        self.send_built(built, issued, cx);
+    }
+
+    fn send_built(
+        &mut self,
+        built: Result<lines_trading::Command, crate::dom_trade::Refusal>,
+        issued: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) {
+        match built {
+            Ok(c) => {
+                if let Some(t) = crate::trading::Trading::try_global(cx) {
+                    t.submit(lines_trading::Source::Chart, issued, c);
+                }
+            }
+            Err(crate::dom_trade::Refusal(why)) => self.trade.flash(why),
+        }
+        cx.notify();
+    }
+
+    /// The menu's order choices at the last right-click's price, if trading can place them.
+    pub fn menu_orders(&self, cx: &App) -> Option<(Price, [crate::chart_trade::OrderPick; 2])> {
+        let price = self.ct.menu_price?;
+        let ctx = crate::trade_bar::entry_ctx(self, cx).ok()?;
+        let market = crate::chart_trade::reference(&ctx)?;
+        Some((price, crate::chart_trade::menu_picks(price, market)))
+    }
+
+    /// Show or hide this chart's compact trading bar (saved with the chart).
+    pub fn toggle_chart_bar(&mut self, cx: &mut Context<Self>) {
+        self.trade.chart_bar = !self.trade.chart_bar;
+        cx.notify();
+    }
+
+    /// Show or hide this chart's fill marks (saved with the chart).
+    pub fn toggle_fills(&mut self, cx: &mut Context<Self>) {
+        self.trade.hide_fills = !self.trade.hide_fills;
+        cx.notify();
+    }
+
+    pub fn chart_bar_shown(&self) -> bool {
+        self.trade.chart_bar
+    }
+
+    pub fn fills_shown(&self) -> bool {
+        !self.trade.hide_fills
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1350,82 +1564,278 @@ impl ChartView {
         Some((p.qty, p.avg_price?, p.unrealised, mode))
     }
 
-    /// The position line's tag at plot-local `y`: `LONG 2 @ 6000.25` and, unless P&L is off,
-    /// the open P&L in the up/down colour with its sign (`+2.5 t  +$125.00`). Allocation-free
-    /// (fixed buffers, cached glyphs).
+    /// This frame's chart trading state (orders, position, fills, refusals) from the
+    /// trading cache; refused drags become header refusals.
+    fn prepare_trade(&mut self, cx: &App) {
+        let Some(t) = crate::trading::Trading::try_global(cx) else {
+            self.ct.n_tags = 0;
+            return;
+        };
+        let contract = crate::trade_bar::contract_of(&self.store);
+        let refused = self
+            .ct
+            .prepare(&t.cache, self.trade.account.as_ref(), contract);
+        for (p, why) in refused {
+            let price = self.instrument.price.format::<32>(p);
+            self.trade.flash(format!("{}: {why}", price.as_str()));
+        }
+    }
+
+    /// The colour an order's line and tag use: its role's (target, stop) or its side's.
+    fn mark_colour(&self, m: &crate::dom_trade::OrderMark) -> Colour {
+        let t = &self.theme;
+        match crate::dom_trade::MarkRole::of(m) {
+            crate::dom_trade::MarkRole::Target => t.order_target,
+            crate::dom_trade::MarkRole::Stop => t.order_stop,
+            crate::dom_trade::MarkRole::Entry if m.side == lines_trading::Side::Buy => t.up,
+            crate::dom_trade::MarkRole::Entry => t.down,
+        }
+    }
+
+    /// Inside the plot: order lines, the dragged order and ghosts, fill marks, refusals on
+    /// their price. Allocation-free (copied state, fixed buffers, cached glyphs).
     #[allow(clippy::too_many_arguments)]
-    fn draw_position_tag(
+    fn draw_trade_lines(
         &mut self,
-        (qty, avg, pnl, mode): (i64, f64, lines_trading::Money, PnlDisplay),
-        y: f32,
         (ox, oy): (f32, f32),
+        (pw, ph): (f32, f32),
         hair: f32,
+        scale: f32,
         window: &mut Window,
         cx: &mut App,
     ) {
         let t = self.theme;
-        let mut head = FixedStr::<64>::new();
-        let _ = write!(
-            head,
-            "{} {} @ ",
-            if qty > 0 { "LONG" } else { "SHORT" },
-            qty.abs()
-        );
-        let _ = crate::trade_bar::write_avg(&mut head, &self.instrument, avg);
-        let mut money = FixedStr::<64>::new();
-        let ticks = self
-            .last_trade
-            .and_then(|m| crate::dom_trade::open_ticks(qty, avg, m, self.instrument.price.tick));
-        let shown = crate::pnl::write_pnl(&mut money, mode, ticks, pnl).unwrap_or(false);
-        let tone = match crate::pnl::tone(pnl) {
-            crate::pnl::Tone::Up => t.up,
-            crate::pnl::Tone::Down => t.down,
-            crate::pnl::Tone::Flat => t.text_main,
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
         };
-        let w_head = self
-            .pos_glyphs
-            .width(head.as_str(), t.text_main, true, window);
-        let w_money = if shown {
-            8.0 + self.pos_glyphs.width(money.as_str(), tone, true, window)
-        } else {
-            0.0
+        let dashed = |window: &mut Window, y: f32, c: gpui::Hsla, dash: f32| {
+            let mut x = 0.0;
+            while x < pw {
+                window.paint_quad(fill(rect(x, y, dash.min(pw - x), hair), c));
+                x += dash * 2.0;
+            }
         };
-        let (x, h) = (ox + 4.0, TAG_H);
-        let top = oy + y - h * 0.5;
-        let w = w_head + w_money + 12.0;
-        window.paint_quad(fill(
-            Bounds::new(point(px(x), px(top)), size(px(w), px(h))),
-            t.label_bg,
-        ));
-        // Outlined, so the tag reads as the position's even over candles.
-        for (bx, by, bw, bh) in [
-            (x, top, w, hair),
-            (x, top + h - hair, w, hair),
-            (x, top, hair, h),
-            (x + w - hair, top, hair, h),
-        ] {
-            window.paint_quad(fill(
-                Bounds::new(point(px(bx), px(by)), size(px(bw), px(bh))),
-                t.text_dim,
-            ));
+        for i in 0..self.ct.marks.len() {
+            let m = self.ct.marks[i];
+            let y = self.vp.price_to_y(m.price.0 as f64) as f32;
+            if !(0.0..=ph).contains(&y) {
+                continue;
+            }
+            let c = self.mark_colour(&m);
+            // Working: a line; pending or held: dashed.
+            match m.style {
+                crate::dom_trade::MarkStyle::Working | crate::dom_trade::MarkStyle::Partial => {
+                    window.paint_quad(fill(rect(0.0, y, pw, hair), c.opacity(0.8)))
+                }
+                _ => dashed(window, y, c.opacity(0.8), 3.0),
+            }
         }
-        self.pos_glyphs.paint(
-            head.as_str(),
-            x + 6.0,
-            top,
-            h,
-            t.text_main,
-            true,
-            window,
-            cx,
-        );
-        if shown {
+        // The order being dragged and moves awaiting the broker: dashed accent.
+        let drag = self.ct.drag.map(|d| d.to);
+        for p in drag
+            .into_iter()
+            .chain(self.ct.ghosts.iter().map(|g| g.price))
+        {
+            let y = self.vp.price_to_y(p.0 as f64) as f32;
+            if (0.0..=ph).contains(&y) {
+                dashed(window, y, t.accent, 5.0);
+            }
+        }
+        // Fills: a small triangle at fill price and time (buys point up from below, sells
+        // down from above), in the side's colour; shape and position, not only colour.
+        if !self.trade.hide_fills
+            && let Some(d) = self.store.try_read()
+        {
+            // The bars the chart shows (its timeframe's), so a mark sits on the right bar.
+            let view = bars_view(&self.derived, &d);
+            for &(at, price, side) in &self.ct.fills {
+                let Some((x, y)) = lines_core::order_lines::fill_mark(
+                    &self.vp,
+                    view.bars,
+                    view.period_ms,
+                    at,
+                    price,
+                    ph,
+                    scale,
+                ) else {
+                    continue;
+                };
+                let buy = side == lines_trading::Side::Buy;
+                let c = if buy { t.up } else { t.down };
+                for row in 0..5 {
+                    let half = row as f32 + 0.5;
+                    let ry = if buy {
+                        y + 2.0 + row as f32
+                    } else {
+                        y - 3.0 - row as f32
+                    };
+                    window.paint_quad(fill(rect(x - half, ry, half * 2.0, 1.0), c));
+                }
+            }
+        }
+        // Refusals on their price: a short warning tag at the plot's left.
+        for i in 0..self.ct.flashes.len() {
+            let (p, text) = self.ct.flashes[i];
+            let y = self.vp.price_to_y(p.0 as f64) as f32;
+            if !(0.0..=ph).contains(&y) {
+                continue;
+            }
+            let w = self
+                .pos_glyphs
+                .width(text.as_str(), t.on_warn, true, window)
+                + 10.0;
+            let top = y - TAG_H * 0.5;
+            window.paint_quad(fill(rect(4.0, top, w, TAG_H), t.warn));
             self.pos_glyphs.paint(
-                money.as_str(),
-                x + 6.0 + w_head + 8.0,
-                top,
-                h,
-                tone,
+                text.as_str(),
+                ox + 9.0,
+                oy + top,
+                TAG_H,
+                t.on_warn,
+                true,
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// The tags at the plot's right edge: the position (side, quantity, average, P&L as the
+    /// P&L display shows it, × flattens) and each working order (side, type, quantity, price,
+    /// × cancels; drag the tag to move it). Laid out by `lines_core::order_lines` (never
+    /// overlapping), kept for hit-testing. Allocation-free.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_trade_tags(
+        &mut self,
+        position: Option<(i64, f64, lines_trading::Money, PnlDisplay)>,
+        (ox, oy): (f32, f32),
+        (pw, ph): (f32, f32),
+        hair: f32,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use crate::chart_trade::{POSITION_TAG, TagText, write_order_tag};
+        use lines_core::order_lines::{CLOSE_W, LineIn, layout_tags};
+        let t = self.theme;
+        let fmt = self.instrument.price;
+        self.ct.texts.clear();
+        self.ct.lines.clear();
+        if let Some((qty, avg, pnl, mode)) = position {
+            let mut head = FixedStr::<64>::new();
+            let _ = write!(
+                head,
+                "{} {} @ ",
+                if qty > 0 { "LONG" } else { "SHORT" },
+                qty.abs()
+            );
+            let _ = crate::trade_bar::write_avg(&mut head, &self.instrument, avg);
+            let mut tail = FixedStr::<48>::new();
+            let ticks = self
+                .last_trade
+                .and_then(|m| crate::dom_trade::open_ticks(qty, avg, m, fmt.tick));
+            let _ = crate::pnl::write_pnl(&mut tail, mode, ticks, pnl);
+            let mut w = self
+                .pos_glyphs
+                .width(head.as_str(), t.text_main, true, window);
+            if !tail.as_str().is_empty() {
+                w += 8.0
+                    + self
+                        .pos_glyphs
+                        .width(tail.as_str(), t.text_main, true, window);
+            }
+            self.ct.texts.push(TagText {
+                id: POSITION_TAG,
+                head,
+                tail,
+                mark: None,
+            });
+            self.ct.lines.push(LineIn {
+                id: POSITION_TAG,
+                price: Price(avg.round() as i64),
+                text_w: w,
+            });
+        }
+        for i in 0..self.ct.marks.len() {
+            let m = self.ct.marks[i];
+            let mut head = FixedStr::<64>::new();
+            let _ = write_order_tag(&mut head, &m, &fmt);
+            let w = self
+                .pos_glyphs
+                .width(head.as_str(), t.text_main, true, window);
+            self.ct.texts.push(TagText {
+                id: m.id.0,
+                head,
+                tail: FixedStr::new(),
+                mark: Some(m),
+            });
+            self.ct.lines.push(LineIn {
+                id: m.id.0,
+                price: m.price,
+                text_w: w,
+            });
+        }
+        self.ct.n_tags = layout_tags(&self.vp, &self.ct.lines, pw, ph, scale, &mut self.ct.tags);
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
+        };
+        for k in 0..self.ct.n_tags {
+            let b = self.ct.tags[k];
+            let Some(text) = self.ct.texts.iter().find(|x| x.id == b.id).copied() else {
+                continue;
+            };
+            let edge = match &text.mark {
+                Some(m) => self.mark_colour(m),
+                None => t.text_main,
+            };
+            window.paint_quad(fill(rect(b.left, b.top, b.w, TAG_H), t.label_bg));
+            for (x, y, w, h) in [
+                (b.left, b.top, b.w, hair),
+                (b.left, b.top + TAG_H - hair, b.w, hair),
+                (b.left, b.top, 2.0, TAG_H),
+                (b.left + b.w - hair, b.top, hair, TAG_H),
+                (b.close_left, b.top, hair, TAG_H),
+            ] {
+                window.paint_quad(fill(rect(x, y, w, h), edge));
+            }
+            let head_w = self
+                .pos_glyphs
+                .width(text.head.as_str(), t.text_main, true, window);
+            self.pos_glyphs.paint(
+                text.head.as_str(),
+                ox + b.left + 6.0,
+                oy + b.top,
+                TAG_H,
+                t.text_main,
+                true,
+                window,
+                cx,
+            );
+            if !text.tail.as_str().is_empty()
+                && let Some((_, _, pnl, _)) = position
+            {
+                let tone = match crate::pnl::tone(pnl) {
+                    crate::pnl::Tone::Up => t.up,
+                    crate::pnl::Tone::Down => t.down,
+                    crate::pnl::Tone::Flat => t.text_main,
+                };
+                self.pos_glyphs.paint(
+                    text.tail.as_str(),
+                    ox + b.left + 6.0 + head_w + 8.0,
+                    oy + b.top,
+                    TAG_H,
+                    tone,
+                    true,
+                    window,
+                    cx,
+                );
+            }
+            // × cancels (or flattens, on the position's tag).
+            self.pos_glyphs.paint(
+                "×",
+                ox + b.close_left + CLOSE_W * 0.5 - 3.5,
+                oy + b.top,
+                TAG_H,
+                t.text_main,
                 true,
                 window,
                 cx,
@@ -1436,6 +1846,7 @@ impl ChartView {
     fn draw(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let t = self.theme;
         let position = self.position_for_draw(cx);
+        self.prepare_trade(cx);
         let scale = window.scale_factor();
         let hair = 1.0 / scale; // one device pixel
         let ox = f32::from(bounds.origin.x);
@@ -1535,6 +1946,7 @@ impl ChartView {
                     x += 10.0;
                 }
             }
+            self.draw_trade_lines((ox, oy), (pw, ph), hair, scale, window, cx);
             if self.cross.is_none()
                 && let Some((x, _)) = self.sync_marker
             {
@@ -1659,12 +2071,7 @@ impl ChartView {
                 },
             );
         }
-        if let Some(pos) = position {
-            let y = self.vp.price_to_y(pos.1) as f32;
-            if (0.0..=ph).contains(&y) {
-                self.draw_position_tag(pos, y, (ox, oy), hair, window, cx);
-            }
-        }
+        self.draw_trade_tags(position, (ox, oy), (pw, ph), hair, scale, window, cx);
         if !self.vp.auto_price {
             self.draw_manual_scale_indicator(bounds, window, cx);
         }
@@ -2389,11 +2796,14 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
     }
 }
 
+/// A theme colour (tokens only; the alias keeps signatures clear of colour literals).
+type Colour = gpui::Hsla;
+
 /// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
 const LEGEND_MAX_W: f32 = 360.0;
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Ctrl+I studies  ·  Alt+V profile";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Ctrl+I studies  ·  Alt+V profile  ·  Ctrl+click: order (armed)";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2430,15 +2840,42 @@ impl Render for ChartView {
                         .when_some(overlay, |d, o| d.child(o)),
                 );
         }
-        let _ = window;
+        // Arming is the link group's; focus leaving the group (or the window) disarms it.
+        self.trade.set_link(self.common.link);
+        let focus = self.focus.clone();
+        crate::trade_bar::PaneTrade::watch_focus(self, &focus, window, cx);
         let account = crate::trade_bar::chart_chip(self, &t, cx);
         let accounts = crate::trade_bar::account_menu(self, &t, cx);
+        // The compact trading bar: per chart, hidden by default; clean chart hides it.
+        let bar_shown = self.trade.chart_bar && self.visibility.draws_labels();
+        let width = f32::from(self.chart.size.width);
+        let bar = bar_shown
+            .then(|| crate::trade_bar::chart_bar(self, &self.instrument, width, &t, cx))
+            .flatten();
+        // Without the bar, a refusal shows in the header (never silent, never a dialog).
+        let flash = (!bar_shown)
+            .then(|| crate::trade_bar::chart_flash(self, &self.instrument, &t, cx))
+            .flatten();
+        let account = match (account, flash) {
+            (a, None) => a,
+            (a, Some(f)) => Some(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .children(a)
+                    .child(f)
+                    .into_any_element(),
+            ),
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(t.bg)
             .child(self.header(account, cx))
+            .children(bar)
             .child(
                 div()
                     .relative()
@@ -2447,6 +2884,7 @@ impl Render for ChartView {
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

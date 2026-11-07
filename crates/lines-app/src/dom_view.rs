@@ -241,11 +241,9 @@ impl DomView {
     /// the screenshot fixture's `--arm`.
     pub fn restore_trade(&mut self, doc: Option<&TradeDoc>, cx: &mut Context<Self>) {
         self.trade = PaneTrade::new(doc, cx);
-        if Trading::try_global(cx).is_some_and(|t| t.start_armed) {
-            let ok = trade_bar::cant_trade(self, cx).is_none();
-            self.trade
-                .arm_event(crate::dom_trade::ArmEvent::Toggle, ok, cx);
-        }
+        // Armed on the first render, once the link group is known (arming is the group's).
+        self.trade.arm_on_link = Trading::try_global(cx).is_some_and(|t| t.start_armed)
+            && trade_bar::cant_trade(self, cx).is_none();
     }
 
     /// Restore saved view state (price grouping, columns).
@@ -948,6 +946,7 @@ impl Render for DomView {
         let entity = cx.entity();
         let t = self.theme;
         let focus = self.focus.clone();
+        self.trade.set_link(self.common.link);
         PaneTrade::watch_focus(self, &focus, window, cx);
         // Armed but no longer able to trade (no contract, feed gone): disarm.
         if self.trade.arming.is_armed() && trade_bar::cant_trade(self, cx).is_some() {

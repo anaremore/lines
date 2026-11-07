@@ -33,6 +33,69 @@ use crate::dom_trade::{
 use crate::theme::Theme;
 use crate::trading::{TradeCache, Trading};
 
+// ---- arming, shared by a link group ---------------------------------------------------------
+
+/// Whose arming a pane uses: its link group's (a linked chart + DOM + T&S arm together), or
+/// its own when unlinked.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ArmKey {
+    Group(u8),
+    Pane(u64),
+}
+
+impl ArmKey {
+    pub fn of(link: crate::layout::LinkGroup, pane: u64) -> ArmKey {
+        match link {
+            Some(g) => ArmKey::Group(g),
+            None => ArmKey::Pane(pane),
+        }
+    }
+}
+
+/// The arming of every group and unlinked pane (pure; the app keeps one on the UI thread).
+#[derive(Default)]
+pub struct ArmBook(std::collections::HashMap<ArmKey, Arming>);
+
+impl ArmBook {
+    pub fn get(&self, k: ArmKey) -> Arming {
+        self.0.get(&k).copied().unwrap_or_default()
+    }
+
+    /// Apply an arming event to a key; whether its state changed.
+    pub fn apply(
+        &mut self,
+        k: ArmKey,
+        ev: ArmEvent,
+        prefs: dom_trade::ArmPrefs,
+        can_trade: bool,
+    ) -> bool {
+        let a = self.0.entry(k).or_default();
+        a.apply(ev, prefs, can_trade)
+    }
+}
+
+/// After a pane's focus left it: did focus leave its arming group (so the group disarms)?
+/// `focused`: the key of the pane that now has focus, if any.
+pub fn focus_left_group(focused: Option<ArmKey>, mine: ArmKey) -> bool {
+    focused != Some(mine)
+}
+
+static ARM_BOOK: std::sync::LazyLock<std::sync::Mutex<ArmBook>> =
+    std::sync::LazyLock::new(Default::default);
+/// Bumped whenever any arming changes: panes sync on their next poll (lock-free check).
+static ARM_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The arming key of the pane with keyboard focus (set by focus-in, cleared by focus-out).
+static FOCUSED: std::sync::Mutex<Option<ArmKey>> = std::sync::Mutex::new(None);
+static NEXT_PANE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn book() -> std::sync::MutexGuard<'static, ArmBook> {
+    ARM_BOOK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn arm_epoch() -> u64 {
+    ARM_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How long a local refusal ("disarmed", "no account") stays.
 const LOCAL_FLASH: Duration = Duration::from_secs(3);
 
@@ -45,6 +108,12 @@ pub struct TradeDoc {
     pub qty: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bracket: Option<BracketPreset>,
+    /// A chart's compact trading bar is shown (hidden by default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chart_bar: bool,
+    /// A chart's fill marks are hidden (shown by default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_fills: bool,
 }
 
 /// One pane's trading state.
@@ -63,7 +132,17 @@ pub struct PaneTrade {
     /// The P&L display setting's epoch last drawn.
     seen_display: u64,
     /// The window the focus/activation subscriptions belong to.
-    watched: Option<(gpui::WindowId, Subscription, Subscription)>,
+    watched: Option<(gpui::WindowId, [Subscription; 3])>,
+    /// This pane's own arming key (used while unlinked) and the key in use.
+    pane_id: u64,
+    arm_key: ArmKey,
+    seen_arm: u64,
+    /// Chart: the compact trading bar is shown; fill marks are hidden.
+    pub chart_bar: bool,
+    pub hide_fills: bool,
+    /// Screenshot fixture (`--arm`): arm once the pane's link group is known.
+    pub arm_on_link: bool,
+    linked: bool,
 }
 
 impl PaneTrade {
@@ -74,11 +153,19 @@ impl PaneTrade {
             .map(|a| AccountId::new(a))
             .filter(|a| trading.is_some_and(|t| t.account(a).is_some()))
             .or_else(|| trading.and_then(Trading::default_account));
+        let pane_id = NEXT_PANE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         PaneTrade {
             account,
             qty: saved.and_then(|s| s.qty).filter(|&q| q > 0).unwrap_or(1),
             bracket: saved.and_then(|s| s.bracket),
             arming: Arming::default(),
+            pane_id,
+            arm_key: ArmKey::Pane(pane_id),
+            seen_arm: arm_epoch(),
+            chart_bar: saved.is_some_and(|s| s.chart_bar),
+            hide_fills: saved.is_some_and(|s| s.hide_fills),
+            arm_on_link: false,
+            linked: false,
             qty_edit: None,
             account_menu: false,
             local_flash: None,
@@ -94,6 +181,8 @@ impl PaneTrade {
             account: self.account.as_ref().map(|a| a.0.clone()),
             qty: (self.qty != 1).then_some(self.qty),
             bracket: self.bracket,
+            chart_bar: self.chart_bar,
+            hide_fills: self.hide_fills,
         };
         (d != TradeDoc::default()).then_some(d)
     }
@@ -101,6 +190,16 @@ impl PaneTrade {
     /// The trading state moved for this pane's account (or a local flash expired).
     pub fn changed(&mut self) -> bool {
         let mut changed = false;
+        // Arming is the group's: another pane of it may have armed or disarmed.
+        let e = arm_epoch();
+        if e != self.seen_arm {
+            self.seen_arm = e;
+            let a = book().get(self.arm_key);
+            if a != self.arming {
+                self.arming = a;
+                changed = true;
+            }
+        }
         let e = crate::pnl::display_epoch();
         if e != self.seen_display {
             self.seen_display = e;
@@ -135,9 +234,31 @@ impl PaneTrade {
             .map(|(m, _)| m.as_str())
     }
 
+    /// Apply an arming event to this pane's group (or the pane, unlinked); every pane of the
+    /// group follows on its next poll.
     pub fn arm_event(&mut self, ev: ArmEvent, can_trade: bool, cx: &App) -> bool {
         let prefs = Trading::try_global(cx).map(|t| t.prefs).unwrap_or_default();
-        self.arming.apply(ev, prefs, can_trade)
+        let changed = book().apply(self.arm_key, ev, prefs, can_trade);
+        self.arming = book().get(self.arm_key);
+        if changed {
+            ARM_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        changed
+    }
+
+    /// The pane's link group (from the workspace): its arming is the group's from now on.
+    /// Joining or leaving a group never arms anything: the pane takes that group's state.
+    pub fn set_link(&mut self, link: crate::layout::LinkGroup) {
+        let k = ArmKey::of(link, self.pane_id);
+        if k != self.arm_key || !self.linked {
+            self.linked = true;
+            self.arm_key = k;
+            if std::mem::take(&mut self.arm_on_link) && !book().get(k).is_armed() {
+                book().apply(k, ArmEvent::Toggle, dom_trade::ArmPrefs::default(), true);
+                ARM_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.arming = book().get(k);
+        }
     }
 
     /// The pane switched feed: disarm, and let paper fills follow the new feed (`follow`:
@@ -162,17 +283,34 @@ impl PaneTrade {
         if view.trade_ref().watched.as_ref().is_some_and(|w| w.0 == id) {
             return;
         }
-        let blur = cx.on_focus_out(focus, window, |v: &mut V, _, _, cx| {
-            if v.trade().arm_event(ArmEvent::FocusLost, true, cx) {
-                cx.notify();
+        let focus_in = cx.on_focus_in(focus, window, |v: &mut V, _, _| {
+            *FOCUSED.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.trade_ref().arm_key);
+        });
+        // Focus left this pane: disarm only if it left the pane's group (moving between a
+        // linked chart and DOM keeps them armed). Checked once focus has settled.
+        let blur = cx.on_focus_out(focus, window, |v: &mut V, _, window, cx| {
+            let mine = v.trade_ref().arm_key;
+            {
+                let mut f = FOCUSED.lock().unwrap_or_else(|e| e.into_inner());
+                if *f == Some(mine) {
+                    *f = None;
+                }
             }
+            cx.defer_in(window, move |v: &mut V, _, cx| {
+                let focused = *FOCUSED.lock().unwrap_or_else(|e| e.into_inner());
+                if focus_left_group(focused, mine)
+                    && v.trade().arm_event(ArmEvent::FocusLost, true, cx)
+                {
+                    cx.notify();
+                }
+            });
         });
         let activation = cx.observe_window_activation(window, |v: &mut V, window, cx| {
             if !window.is_window_active() && v.trade().arm_event(ArmEvent::FocusLost, true, cx) {
                 cx.notify();
             }
         });
-        view.trade().watched = Some((id, blur, activation));
+        view.trade().watched = Some((id, [focus_in, blur, activation]));
     }
 }
 
@@ -593,11 +731,6 @@ pub fn dom_bar<V: TradePane>(
 ) -> Option<AnyElement> {
     let data = gather(v, product, cx);
     Trading::try_global(cx)?;
-    let pt = v.trade_ref();
-    let armed = pt.arming.is_armed();
-    // A guardrail lockout: entry buttons dim (the core still decides; a click is denied
-    // with the reason). Flatten and Cancel all never dim.
-    let guarded = data.as_ref().is_some_and(|d| d.guard.is_some());
     let mut rows = div()
         .flex()
         .flex_col()
@@ -702,7 +835,44 @@ pub fn dom_bar<V: TradePane>(
         .gap_1()
         .px_2()
         .pb_1();
-    r2 = r2.child(div().text_color(t.text_dim).child("Qty"));
+    r2 = r2.children(qty_controls(v, t, cx));
+    r2 = r2.child(div().w(px(6.0))).child(bracket_control(v, t, cx));
+    // Order buttons: market buy/sell (up/down colours, each with its word), join bid/ask,
+    // reverse. Dimmed while disarmed; a click then says "Arm to trade" and sends nothing.
+    let labels = order_button_labels(width);
+    r2 = r2.children(order_buttons(
+        v,
+        t,
+        &[
+            (TradeCmd::BuyMarket, labels[0], Some(t.up)),
+            (TradeCmd::SellMarket, labels[1], Some(t.down)),
+            (TradeCmd::JoinBid, labels[2], None),
+            (TradeCmd::JoinAsk, labels[3], None),
+            (TradeCmd::Reverse, labels[4], None),
+        ],
+        Source::Dom,
+        cx,
+    ));
+    r2 = r2.child(div().flex_1());
+    r2 = r2.child(arm_toggle(v, t, "ARMED · click trades", cx));
+    rows = rows.child(r2);
+    rows = rows.children(guard_row(data.as_ref(), t));
+
+    // Row 3: the prop-rule strip (accounts with a preset).
+    if let Some(d) = &data
+        && (!d.rules.is_empty() || d.blocked.is_some())
+    {
+        rows = rows.child(rule_strip(d, t, mode));
+    }
+    // Refusals and rejections, inline and brief: one line, the newest, with a count.
+    rows = rows.children(flash_row(data.as_ref(), t));
+    Some(rows.into_any_element())
+}
+
+/// The quantity controls: `Qty`, the presets and the custom field.
+fn qty_controls<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Vec<AnyElement> {
+    let pt = v.trade_ref();
+    let mut out = vec![div().text_color(t.text_dim).child("Qty").into_any_element()];
     for q in dom_trade::QTY_PRESETS {
         let on = pt.qty == q && pt.qty_edit.is_none();
         let accent = t.accent;
@@ -717,15 +887,18 @@ pub fn dom_bar<V: TradePane>(
                 .text_color(t.on_last)
                 .font_weight(FontWeight::BOLD);
         }
-        r2 = r2.child(c.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |v: &mut V, _, _, cx| {
-                cx.stop_propagation();
-                v.trade().qty = q;
-                v.trade().qty_edit = None;
-                cx.notify();
-            }),
-        ));
+        out.push(
+            c.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v: &mut V, _, _, cx| {
+                    cx.stop_propagation();
+                    v.trade().qty = q;
+                    v.trade().qty_edit = None;
+                    cx.notify();
+                }),
+            )
+            .into_any_element(),
+        );
     }
     // Custom: the current value if it's not a preset, or the field being typed.
     let custom = match &pt.qty_edit {
@@ -738,60 +911,81 @@ pub fn dom_bar<V: TradePane>(
     if editing {
         cc = cc.border_color(t.accent).font_weight(FontWeight::BOLD);
     }
-    r2 = r2.child(cc.on_mouse_down(
-        MouseButton::Left,
-        cx.listener(|v: &mut V, _, _, cx| {
-            cx.stop_propagation();
-            v.trade().qty_edit = Some(String::new());
-            cx.notify();
-        }),
-    ));
-    let bracket = match pt.bracket {
+    out.push(
+        cc.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|v: &mut V, _, _, cx| {
+                cx.stop_propagation();
+                v.trade().qty_edit = Some(String::new());
+                cx.notify();
+            }),
+        )
+        .into_any_element(),
+    );
+    out
+}
+
+/// The bracket preset button (cycles presets).
+fn bracket_control<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> AnyElement {
+    let bracket = match v.trade_ref().bracket {
         Some(b) => format!("Bracket {}/{} t", b.stop_ticks, b.target_ticks),
         None => "No bracket".into(),
     };
-    r2 = r2
-        .child(div().w(px(6.0)))
-        .child(button("bracket", bracket, t, TradeCmd::NextBracket, cx));
-    // Order buttons: market buy/sell (up/down colours, each with its word), join bid/ask,
-    // reverse. Dimmed while disarmed; a click then says "Arm to trade" and sends nothing.
-    let labels = order_button_labels(width);
-    for (i, (cmd, tone)) in [
-        (TradeCmd::BuyMarket, Some(t.up)),
-        (TradeCmd::SellMarket, Some(t.down)),
-        (TradeCmd::JoinBid, None),
-        (TradeCmd::JoinAsk, None),
-        (TradeCmd::Reverse, None),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut b = div()
-            .id(("order-button", i))
-            .px_1()
-            .rounded_sm()
-            .border_1()
-            .cursor_pointer()
-            .font_weight(FontWeight::BOLD)
-            .child(labels[i]);
-        b = match (tone, armed) {
-            // Armed market buttons: filled in the side's colour.
-            (Some(c), true) => b.bg(c).border_color(c).text_color(t.bg),
-            (Some(c), false) => b.border_color(c).text_color(c),
-            (None, _) => b.border_color(t.axis_line).text_color(t.text_main),
-        };
-        if !armed || guarded {
-            b = b.opacity(0.45);
-        }
-        r2 = r2.child(b.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |v: &mut V, _, _, cx| {
-                cx.stop_propagation();
-                run_from(v, cmd, Instant::now(), Source::Dom, cx);
-            }),
-        ));
-    }
-    r2 = r2.child(div().flex_1());
+    button("bracket", bracket, t, TradeCmd::NextBracket, cx).into_any_element()
+}
+
+/// Order buttons `(command, label, side colour)`: filled in their side's colour when armed,
+/// outlined and dimmed when not (a click then says "Arm to trade" and sends nothing).
+fn order_buttons<V: TradePane>(
+    v: &V,
+    t: &Theme,
+    buttons: &[(TradeCmd, &'static str, Option<gpui::Hsla>)],
+    source: Source,
+    cx: &mut Context<V>,
+) -> Vec<AnyElement> {
+    let armed = v.trade_ref().arming.is_armed();
+    // A guardrail lockout dims them too; the core still decides (a click is denied with the
+    // reason). Flatten and Cancel all are never order buttons and never dim.
+    let guarded = guarded(v, cx);
+    buttons
+        .iter()
+        .enumerate()
+        .map(|(i, &(cmd, label, tone))| {
+            let mut b = div()
+                .id(("order-button", i))
+                .px_1()
+                .rounded_sm()
+                .border_1()
+                .cursor_pointer()
+                .font_weight(FontWeight::BOLD)
+                .child(label);
+            b = match (tone, armed) {
+                (Some(c), true) => b.bg(c).border_color(c).text_color(t.bg),
+                (Some(c), false) => b.border_color(c).text_color(c),
+                (None, _) => b.border_color(t.axis_line).text_color(t.text_main),
+            };
+            if !armed || guarded {
+                b = b.opacity(0.45);
+            }
+            b.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v: &mut V, _, _, cx| {
+                    cx.stop_propagation();
+                    run_from(v, cmd, Instant::now(), source, cx);
+                }),
+            )
+            .into_any_element()
+        })
+        .collect()
+}
+
+/// ARMED / DISARMED: filled and named when armed, outlined when not.
+fn arm_toggle<V: TradePane>(
+    v: &V,
+    t: &Theme,
+    armed_label: &'static str,
+    cx: &mut Context<V>,
+) -> AnyElement {
     let mut arm = div()
         .id("arm")
         .px_2()
@@ -799,81 +993,165 @@ pub fn dom_bar<V: TradePane>(
         .border_1()
         .cursor_pointer()
         .font_weight(FontWeight::BOLD);
-    arm = if armed {
-        // Filled and named: unmistakable.
+    arm = if v.trade_ref().arming.is_armed() {
         arm.bg(t.accent)
             .border_color(t.accent)
             .text_color(t.on_last)
-            .child("ARMED · click trades")
+            .child(armed_label)
     } else {
         arm.border_color(t.axis_line)
             .text_color(t.text_dim)
             .child("DISARMED")
     };
-    r2 = r2.child(arm.on_mouse_down(
+    arm.on_mouse_down(
         MouseButton::Left,
         cx.listener(|v: &mut V, _, _, cx| {
             cx.stop_propagation();
             run(v, TradeCmd::ToggleArm, Instant::now(), cx);
         }),
-    ));
-    rows = rows.child(r2);
+    )
+    .into_any_element()
+}
 
-    // The guardrail lockout, while it lasts: persistent, in words, with what still works.
-    if let Some(g) = data.as_ref().and_then(|d| d.guard.as_ref()) {
-        rows = rows.child(
-            div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .gap_2()
-                .px_2()
-                .pb_1()
-                .child(
-                    div()
-                        .px_1()
-                        .bg(t.warn)
-                        .text_color(t.on_warn)
-                        .font_weight(FontWeight::BOLD)
-                        .child(g.clone()),
-                )
-                .child(
-                    div()
-                        .text_color(t.text_dim)
-                        .child("exits, Flatten and Cancel all still work"),
-                ),
-        );
-    }
+/// The guardrail lockout, while it lasts: persistent, in words, with what still works.
+fn guard_row(data: Option<&BarData>, t: &Theme) -> Option<AnyElement> {
+    let g = data?.guard.clone()?;
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_2()
+            .px_2()
+            .pb_1()
+            .child(
+                div()
+                    .px_1()
+                    .bg(t.warn)
+                    .text_color(t.on_warn)
+                    .font_weight(FontWeight::BOLD)
+                    .child(g),
+            )
+            .child(
+                div()
+                    .text_color(t.text_dim)
+                    .child("exits, Flatten and Cancel all still work"),
+            )
+            .into_any_element(),
+    )
+}
 
-    // Row 3: the prop-rule strip (accounts with a preset).
-    if let Some(d) = &data
-        && (!d.rules.is_empty() || d.blocked.is_some())
-    {
-        rows = rows.child(rule_strip(d, t, mode));
-    }
-    // Refusals and rejections, inline and brief: one line, the newest, with a count.
-    if let Some(d) = &data
-        && let Some((label, f)) = flash_line(&d.flashes)
-    {
-        rows = rows.child(
-            div()
-                .px_2()
-                .pb_1()
-                .flex()
-                .flex_row()
-                .gap_2()
-                .child(
-                    div()
-                        .px_1()
-                        .bg(t.warn)
-                        .text_color(t.on_warn)
-                        .font_weight(FontWeight::BOLD)
-                        .child(label),
-                )
-                .child(div().text_color(t.text_main).overflow_hidden().child(f)),
-        );
-    }
-    Some(rows.into_any_element())
+/// Whether the pane's account is under a guardrail lockout (entry buttons dim).
+fn guarded<V: TradePane>(v: &V, cx: &App) -> bool {
+    let (Some(t), Some(a)) = (Trading::try_global(cx), v.trade_ref().account.as_ref()) else {
+        return false;
+    };
+    t.cache.try_read().is_some_and(|s| s.guard(a).is_some())
+}
+
+/// The newest refusal, one line with its count (`DENIED` / `REJECTED` / `NOT SENT`).
+fn flash_row(data: Option<&BarData>, t: &Theme) -> Option<AnyElement> {
+    let (label, f) = flash_line(&data?.flashes)?;
+    Some(
+        div()
+            .px_2()
+            .pb_1()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(
+                div()
+                    .px_1()
+                    .bg(t.warn)
+                    .text_color(t.on_warn)
+                    .font_weight(FontWeight::BOLD)
+                    .child(label),
+            )
+            .child(div().text_color(t.text_main).overflow_hidden().child(f))
+            .into_any_element(),
+    )
+}
+
+/// A chart's compact trading bar (roadmap 8): account and PAPER, quantity, bracket, Buy / Sell
+/// Mkt, arming, and the newest refusal. Hidden unless the chart shows it.
+pub fn chart_bar<V: TradePane>(
+    v: &V,
+    product: &Product,
+    width: f32,
+    t: &Theme,
+    cx: &mut Context<V>,
+) -> Option<AnyElement> {
+    Trading::try_global(cx)?;
+    let data = gather(v, product, cx);
+    let labels = order_button_labels(width);
+    let row = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .child(account_chip(v, data.as_ref(), t, cx))
+        .child(div().w(px(6.0)))
+        .children(qty_controls(v, t, cx))
+        .child(div().w(px(6.0)))
+        .child(bracket_control(v, t, cx))
+        .children(order_buttons(
+            v,
+            t,
+            &[
+                (TradeCmd::BuyMarket, labels[0], Some(t.up)),
+                (TradeCmd::SellMarket, labels[1], Some(t.down)),
+            ],
+            Source::Chart,
+            cx,
+        ))
+        .child(div().flex_1())
+        .child(arm_toggle(v, t, "ARMED · Ctrl+click trades", cx));
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .bg(t.panel)
+            .border_b_1()
+            .border_color(t.axis_line)
+            .text_size(px(12.0))
+            .child(row)
+            .children(guard_row(data.as_ref(), t))
+            .children(flash_row(data.as_ref(), t))
+            .into_any_element(),
+    )
+}
+
+/// A chart without its bar: the newest refusal as a chip in its header, so a chart order's
+/// rejection is never silent.
+pub fn chart_flash<V: TradePane>(
+    v: &V,
+    product: &Product,
+    t: &Theme,
+    cx: &mut Context<V>,
+) -> Option<AnyElement> {
+    let data = gather(v, product, cx)?;
+    let (label, f) = flash_line(&data.flashes)?;
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .px_1()
+                    .bg(t.warn)
+                    .text_color(t.on_warn)
+                    .font_weight(FontWeight::BOLD)
+                    .child(label),
+            )
+            .child(div().text_color(t.text_main).truncate().child(f))
+            .into_any_element(),
+    )
 }
 
 /// Prop-rule progress. Amounts are currency, so they show only when the P&L display shows
@@ -1256,6 +1534,37 @@ mod tests {
         }
     }
 
+    /// Arming is shared by a link group: a linked chart and DOM arm together; unlinked panes
+    /// keep their own; focus moving inside the group keeps it armed, leaving it disarms.
+    #[test]
+    fn arming_is_shared_by_the_link_group() {
+        let p = dom_trade::ArmPrefs::default();
+        let mut b = ArmBook::default();
+        let (chart, dom, other) = (
+            ArmKey::of(Some(0), 1),
+            ArmKey::of(Some(0), 2),
+            ArmKey::of(None, 3),
+        );
+        assert_eq!(chart, dom, "one key for the group");
+        assert!(b.apply(chart, ArmEvent::Toggle, p, true));
+        assert!(b.get(dom).is_armed(), "arming the chart arms its DOM");
+        assert!(!b.get(other).is_armed(), "an unlinked pane keeps its own");
+        assert!(
+            !b.get(ArmKey::of(Some(1), 1)).is_armed(),
+            "another group too"
+        );
+        // Focus from the chart to its DOM: still in the group.
+        assert!(!focus_left_group(Some(dom), chart));
+        // Focus to an unlinked pane, or nowhere: the group disarms.
+        assert!(focus_left_group(Some(other), chart));
+        assert!(focus_left_group(None, chart));
+        assert!(b.apply(dom, ArmEvent::FocusLost, p, true));
+        assert!(
+            !b.get(chart).is_armed(),
+            "disarming the DOM disarms its chart"
+        );
+    }
+
     #[test]
     fn trade_doc_saves_only_choices() {
         let d = TradeDoc::default();
@@ -1267,6 +1576,8 @@ mod tests {
                 stop_ticks: 8,
                 target_ticks: 16,
             }),
+            chart_bar: true,
+            hide_fills: true,
         };
         let back: TradeDoc = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         assert_eq!(back, d);

@@ -96,6 +96,12 @@ pub enum Command {
     Studies,
     /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
     Trade(TradeCmd),
+    /// Chart trading (roadmap 8): an order at a price from the chart's menu (price units).
+    ChartOrder(crate::chart_trade::OrderPick, i64),
+    /// The focused chart's compact trading bar: show or hide.
+    ToggleChartBar,
+    /// The focused chart's fill marks: show or hide.
+    ToggleFillMarks,
     /// The app-wide P&L display: the next mode (off, ticks, currency, both).
     CyclePnl,
     /// The app-wide P&L display: this mode.
@@ -239,6 +245,8 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Trade(TradeCmd::JoinBid), true, false, true, "j"),
     b(Command::Trade(TradeCmd::JoinAsk), true, false, true, "k"),
     b(Command::Trade(TradeCmd::Reverse), true, false, true, "r"),
+    b(Command::ToggleChartBar, true, false, true, "t"),
+    b(Command::ToggleFillMarks, true, false, true, "f"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
     b(
@@ -394,6 +402,9 @@ pub fn label(c: Command) -> String {
         Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
+        Command::ChartOrder(pick, _) => format!("Chart: {}", pick.label()),
+        Command::ToggleChartBar => "Chart: show/hide trading bar".into(),
+        Command::ToggleFillMarks => "Chart: show/hide fill marks".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
         Command::Timeframe(tf) => format!("Timeframe: {tf}"),
         Command::TimeframeMenu => "Chart: timeframe…".into(),
@@ -472,6 +483,7 @@ pub fn palette() -> Vec<Command> {
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
     v.extend(TradeCmd::ALL.map(Command::Trade));
     v.push(Command::CyclePnl);
+    v.extend([Command::ToggleChartBar, Command::ToggleFillMarks]);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
     v.extend(Timeframe::ALL.map(Command::Timeframe));
@@ -622,6 +634,21 @@ mod tests {
         ] {
             assert!(!matches!(cmd(k), Some(Command::Trade(_))), "{k}");
         }
+    }
+
+    #[test]
+    fn chart_trading_toggles_have_keys_and_palette_entries() {
+        let ca = |k: &str| cmd(&format!("{}-alt-{k}", ctrl()));
+        assert_eq!(ca("t"), Some(Command::ToggleChartBar));
+        assert_eq!(ca("f"), Some(Command::ToggleFillMarks));
+        let p = palette();
+        assert!(p.contains(&Command::ToggleChartBar) && p.contains(&Command::ToggleFillMarks));
+        // Neighbours unchanged: Ctrl+Shift+F flattens, Ctrl+T opens a tab.
+        assert_eq!(
+            cmd(&format!("{}-shift-f", ctrl())),
+            Some(Command::Trade(TradeCmd::Flatten))
+        );
+        assert_eq!(cmd(&format!("{}-t", ctrl())), Some(Command::NewTab));
     }
 
     #[test]

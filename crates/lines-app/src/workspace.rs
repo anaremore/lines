@@ -1185,6 +1185,20 @@ impl WindowView {
                     dom.update(cx, |v, cx| v.toggle_trail(cx));
                 }
             }
+            Command::ChartOrder(..) | Command::ToggleChartBar | Command::ToggleFillMarks => {
+                let issued = std::time::Instant::now();
+                let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+                    self.refuse("chart trading acts on the focused chart", cx);
+                    return;
+                };
+                chart.update(cx, |c, cx| match cmd {
+                    Command::ChartOrder(pick, p) => {
+                        c.place_pick(pick, lines_core::Price(p), issued, cx)
+                    }
+                    Command::ToggleChartBar => c.toggle_chart_bar(cx),
+                    _ => c.toggle_fills(cx),
+                });
+            }
             Command::CyclePnl | Command::SetPnl(_) => {
                 let s = cx.global_mut::<crate::picker_view::AppSettings>();
                 let m = match cmd {
@@ -1743,6 +1757,27 @@ impl WindowView {
                 on,
             ));
             if let PaneHandle::Chart(chart) = &h {
+                // Chart trading: orders at the right-clicked price, the bar and fill marks.
+                let c = chart.read(cx);
+                let fmt = c.price_format();
+                if let Some((price, picks)) = c.menu_orders(cx) {
+                    let p = fmt.format::<32>(price);
+                    for pick in picks {
+                        items.push(MenuItem::named(
+                            &format!("{} @ {}", pick.label(), p.as_str()),
+                            Command::ChartOrder(pick, price.0),
+                            false,
+                        ));
+                    }
+                }
+                let (bar, fills) = (c.chart_bar_shown(), c.fills_shown());
+                items.push(MenuItem::named("Trading bar", Command::ToggleChartBar, bar));
+                items.push(MenuItem::named(
+                    "Fill marks",
+                    Command::ToggleFillMarks,
+                    fills,
+                ));
+                items.push(MenuItem::sep());
                 let v = chart.read(cx).visibility();
                 let hints_hidden = cx.global::<Workspace>().hide_hints;
                 let tf = chart.read(cx).timeframe();

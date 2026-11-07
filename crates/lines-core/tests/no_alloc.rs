@@ -467,3 +467,58 @@ fn timeframe_updates_do_not_allocate() {
     assert!(series.trimmed() > 0, "the test covers a trim");
     assert_eq!(n, 0, "timeframe updates allocated {n} times");
 }
+
+#[test]
+fn chart_order_lines_do_not_allocate() {
+    use lines_core::geometry::snap_price;
+    use lines_core::order_lines::{LineIn, MAX_TAGS, TagBox, fill_mark, hit_tag, layout_tags};
+    let vp = Viewport {
+        width: 800.0,
+        height: 400.0,
+        price_lo: 590_000.0,
+        price_hi: 610_000.0,
+        right_index: 99.0,
+        ..Viewport::default()
+    };
+    let bars: Vec<Bar> = (0..100)
+        .map(|i| Bar {
+            time: UtcMillis(i * 60_000),
+            open: Price(600_000),
+            high: Price(600_100),
+            low: Price(599_900),
+            close: Price(600_025),
+            volume: Qty(1),
+        })
+        .collect();
+    let lines: Vec<LineIn> = (0..40)
+        .map(|i| LineIn {
+            id: i,
+            price: Price(600_000 + (i as i64 % 7) * 25),
+            text_w: 90.0,
+        })
+        .collect();
+    let mut tags = [TagBox::default(); MAX_TAGS];
+    let n = allocs_during(|| {
+        for frame in 0..200 {
+            let k = layout_tags(&vp, &lines, 800.0, 400.0, 1.0, &mut tags);
+            let y = frame as f32 % 400.0;
+            let _ = hit_tag(&tags[..k], 700.0, y);
+            let _ = snap_price(&vp, y as f64, 25);
+            for b in 0..10 {
+                let _ = fill_mark(
+                    &vp,
+                    &bars,
+                    60_000,
+                    UtcMillis(b * 60_000 * 9),
+                    Price(600_000),
+                    400.0,
+                    1.0,
+                );
+            }
+        }
+    });
+    assert_eq!(
+        n, 0,
+        "order-line layout, hit-testing and fill marks allocated {n} times"
+    );
+}
