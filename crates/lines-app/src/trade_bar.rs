@@ -2411,12 +2411,6 @@ pub fn paper_badge(t: &Theme) -> gpui::Div {
     account_badge("PAPER", t)
 }
 
-/// LIVE: an outlined chip with the word, where a narrow chart header drops a live account's
-/// chip (paper vs live is always visible, docs/design.md; never color alone).
-pub fn live_badge(t: &Theme) -> gpui::Div {
-    account_badge("LIVE", t)
-}
-
 /// The chart header's account, for the fit model: its chip text ("Name ▾") and whether it's
 /// paper.
 pub fn chart_account<V: TradePane>(v: &V, cx: &gpui::App) -> Option<(String, bool)> {
