@@ -307,6 +307,17 @@ pub fn handle_is_target(position_qty: i64, above: bool) -> bool {
     (position_qty > 0) == above
 }
 
+/// Dragging the position line itself to `to` (roadmap 8, phase 2): which exit it sets, by
+/// direction from the average price `avg`: toward profit a target, toward loss a stop
+/// (`Some(true)`: target); at the average, nothing yet. The order is checked against the
+/// market when released (`chart_trade::exit_command`).
+pub fn position_drag_exit(position_qty: i64, avg: Price, to: Price) -> Option<bool> {
+    if position_qty == 0 || to == avg {
+        return None;
+    }
+    Some((to.0 > avg.0) == (position_qty > 0))
+}
+
 /// Whether the handle for a target / stop is offered: only while the position has none (a
 /// working order on the exit side of that kind), as the owner asked ("when the bracket has
 /// none"). `[above, below]` for the given position.
@@ -529,6 +540,19 @@ mod tests {
             "short with a target: stop above"
         );
         assert_eq!(wanted_handles(0, false, false), [false, false]);
+    }
+
+    /// Phase 2: dragging the position line up from a long's average sets a target, down a
+    /// stop; a short the other way round; back at the average, nothing.
+    #[test]
+    fn position_line_drag_picks_the_exit_by_direction() {
+        let avg = Price(581_000);
+        assert_eq!(position_drag_exit(2, avg, Price(581_500)), Some(true));
+        assert_eq!(position_drag_exit(2, avg, Price(580_500)), Some(false));
+        assert_eq!(position_drag_exit(-1, avg, Price(580_500)), Some(true));
+        assert_eq!(position_drag_exit(-1, avg, Price(581_500)), Some(false));
+        assert_eq!(position_drag_exit(2, avg, avg), None);
+        assert_eq!(position_drag_exit(0, avg, Price(581_500)), None);
     }
 
     #[test]

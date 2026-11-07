@@ -410,6 +410,10 @@ struct Cli {
     /// top-left corner of the plot area, i.e. below the header).
     #[arg(long, requires = "screenshot", value_parser = parse_point)]
     cursor: Option<(f32, f32)>,
+    /// Screenshot: draw the position line held dragged to plot-local Y: the stop or target it
+    /// would set, with its P&L (a preview; nothing is placed).
+    #[arg(long, requires = "screenshot")]
+    drag_position: Option<f32>,
     /// Screenshot: zoom the auto-fitted price range by this factor around the plot's center
     /// (as Ctrl+wheel would), which switches the price axis to manual scale.
     #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
@@ -1042,6 +1046,7 @@ where
             style_editor: cli.style_editor,
             tick_continuous: cli.tick_continuous,
             cursor: cli.cursor,
+            drag_position: cli.drag_position,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),
             indicators: cli

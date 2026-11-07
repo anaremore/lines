@@ -261,6 +261,10 @@ pub struct ChartTradeState {
     pub grab: i64,
     /// Where a handle drag started: releasing there (a click, no drag) places nothing.
     pub add_from: Option<Price>,
+    /// The position tag as last drawn (plot-local): pressing it starts a position-line drag.
+    pub pos_tag: Option<TagBox>,
+    /// The position line is being dragged (phase 2): `adding` follows the pointer's side.
+    pub pos_drag: bool,
 }
 
 impl Default for ChartTradeState {
@@ -280,6 +284,8 @@ impl Default for ChartTradeState {
             closing: None,
             grab: 0,
             add_from: None,
+            pos_tag: None,
+            pos_drag: false,
         }
     }
 }
