@@ -357,6 +357,8 @@ struct State {
     cells: HashMap<usize, Vec<Arc<OutputCell>>>,
     /// Trade-built bars nodes the engine copies from a store, with the references it holds.
     sources: HashMap<usize, (TradeBarsSource, u32)>,
+    /// Consumers (by cell) whose acquire took a reference on a trade-built bars node.
+    holds: HashMap<usize, usize>,
 }
 
 /// The trade-built bars a spec reads, if any.
@@ -442,9 +444,16 @@ fn run(rx: Receiver<Msg>) {
         feeds: HashMap::new(),
         cells: HashMap::new(),
         sources: HashMap::new(),
+        holds: HashMap::new(),
     };
     loop {
-        let msg = match rx.recv_timeout(BARS_POLL) {
+        // Poll only while some study reads trade-built bars.
+        let next = if st.sources.is_empty() {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        } else {
+            rx.recv_timeout(BARS_POLL)
+        };
+        let msg = match next {
             Ok(m) => m,
             Err(RecvTimeoutError::Timeout) => {
                 st.sync_bars(None);
@@ -485,6 +494,7 @@ fn run(rx: Receiver<Msg>) {
                     match st.acquire(info, Spec::Bars { period_ms, bars }) {
                         Ok(id) => {
                             st.sources.entry(id).or_insert((source, 0)).1 += 1;
+                            st.holds.insert(Arc::as_ptr(&cell) as usize, id);
                             st.sync_bars(Some(info.feed));
                         }
                         Err(e) => tracing::error!("trade bars for feed {}: {e}", info.feed),
@@ -504,14 +514,9 @@ fn run(rx: Receiver<Msg>) {
                 }
             }
             Msg::Release(feed, spec, cell) => {
-                if let Some((period_ms, bars)) = trade_bars(&spec) {
-                    let key = lines_indicators::SeriesKey {
-                        feed,
-                        spec: Spec::Bars { period_ms, bars },
-                    };
-                    if let Some(id) = st.graph.id(&key)
-                        && let Some(e) = st.sources.get_mut(&id)
-                    {
+                // Only a consumer that took a bars reference gives one back.
+                if let Some(id) = st.holds.remove(&(Arc::as_ptr(&cell) as usize)) {
+                    if let Some(e) = st.sources.get_mut(&id) {
                         e.1 -= 1;
                         if e.1 == 0 {
                             st.sources.remove(&id);

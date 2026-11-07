@@ -1328,6 +1328,7 @@ impl ChartView {
         self.derived = (tf.source() == BarSource::OneMinute && !tf.is_one_minute())
             .then(|| Derived::new(tf, capacity));
         self.studies.set_bars(self.chart_bars());
+        self.seen_studies = u64::MAX; // new nodes: draw their values when they come
         // Indices change: re-baseline the trim count on the next paint.
         self.series_trimmed = u64::MAX;
         // Time labels are cached by bar time; their text depends on the timeframe.
@@ -1386,6 +1387,7 @@ impl ChartView {
         self.ticks = None;
         self.ticks = want.map(|k| self.store.acquire_ticks(k));
         self.studies.set_bars(self.chart_bars());
+        self.seen_studies = u64::MAX;
         self.series_trimmed = u64::MAX;
         self.readout = None;
         self.cross = None;

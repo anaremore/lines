@@ -507,5 +507,8 @@ fn averages_are_studies() {
     assert_eq!(back, set);
     // Removed.
     set.apply(&StudyAction::Remove(StudyRef::Average(1)));
-    assert!(matches!(set.indicators[1], IndicatorConfig::Bollinger { .. }));
+    assert!(matches!(
+        set.indicators[1],
+        IndicatorConfig::Bollinger { .. }
+    ));
 }

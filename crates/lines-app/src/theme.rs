@@ -762,6 +762,18 @@ mod tests {
     /// meaning: clearly apart from up, down and the accent (sRGB distance, so near-misses such
     /// as a sky blue beside the colorblind palette's blue up fail too), in every theme and
     /// palette.
+    /// Study lines (VWAP, averages, Bollinger band edges) carry data: each study color is at
+    /// least 3:1 on the chart in every theme and palette.
+    #[test]
+    fn study_colors_are_3_to_1_on_the_chart() {
+        for t in Theme::all() {
+            for (i, c) in t.study.iter().enumerate() {
+                let r = contrast(*c, t.bg);
+                assert!(r >= 3.0, "{} study[{i}]: {r:.2}:1", t.name);
+            }
+        }
+    }
+
     #[test]
     fn drawing_colors_contrast_and_stay_distinct() {
         for t in Theme::all() {

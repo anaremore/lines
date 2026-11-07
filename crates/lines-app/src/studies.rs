@@ -273,8 +273,8 @@ impl Studies {
                     if let Ok(path) = b.build() {
                         window.paint_path(path, base.opacity(0.06));
                     }
-                    // Bollinger Bands: the band edges are lines too (thin, fainter than the
-                    // middle line).
+                    // Bollinger Bands: the band edges are lines too, thin, in the study's full
+                    // color (3:1 on the chart in every theme: `theme` tests).
                     if edges {
                         for upper in [true, false] {
                             let edge = |c: &Column| if upper { c.up[kk] } else { c.down[kk] };
@@ -284,7 +284,7 @@ impl Studies {
                                 b.line_to(at(xs(i, col(i)), edge(col(i))));
                             }
                             if let Ok(path) = b.build() {
-                                window.paint_path(path, base.opacity(0.7));
+                                window.paint_path(path, base);
                             }
                         }
                     }
