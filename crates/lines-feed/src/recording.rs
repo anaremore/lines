@@ -200,7 +200,7 @@ impl Recorder {
             protocol: protocol.into(),
             product: product.into(),
             contract,
-            version: FORMAT_VERSION,
+            version: version_for(contract),
         };
         let mut w = Writer::create(path, &header)?;
         let (tx, rx) = mpsc::channel::<Msg>();
@@ -459,7 +459,12 @@ pub(crate) fn read_contract<R: Read>(r: &mut R, v4_kinds: bool) -> io::Result<Op
                 1 => Right::Put,
                 x => return Err(bad(format!("bad option right {x}"))),
             };
-            Ok(Some(ContractKey::option(product, expiry, strike, right)))
+            let k = ContractKey::option(product, expiry, strike, right);
+            // A catalog product must list options (an extension's products aren't known here).
+            if crate::catalog::get(product).is_some_and(|p| !p.lists(&k)) {
+                return Err(bad("an option on a product that lists none"));
+            }
+            Ok(Some(k))
         }
         k => Err(bad(format!("bad contract kind {k}"))),
     }
@@ -535,6 +540,18 @@ mod tests {
             .unwrap();
         bad[8..10].copy_from_slice(&3u16.to_le_bytes());
         assert!(Reader::new(&bad[..]).is_err());
+        // An option on a catalog product that lists none (ES) is damage too.
+        let es_opt = ContractKey::option(
+            ProductId(1),
+            CivilDate::new(2026, 12, 18).unwrap(),
+            Price(600_000),
+            Right::Call,
+        );
+        let b = Writer::new(Vec::new(), &hdr(Some(es_opt)))
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(Reader::new(&b[..]).is_err());
         // A zero strike or a bad right is damage.
         let mut zero = Writer::new(Vec::new(), &hdr(Some(opt)))
             .unwrap()

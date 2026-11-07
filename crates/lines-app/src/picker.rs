@@ -313,7 +313,7 @@ pub fn contract_choices(product: &Product, today: CivilDate) -> Vec<ContractKey>
         return Vec::new();
     };
     let mut out = vec![front.contract];
-    if !product.is_spot() {
+    if !product.is_spot() && !product.is_equity() {
         let mut k = front.contract;
         for _ in 0..LATER_MONTHS {
             match lines_core::roll::next_contract(product, k) {

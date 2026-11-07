@@ -62,7 +62,8 @@ fn expiry(
 /// expired.
 pub fn calendar_front(product: &Product, today: CivilDate) -> Option<ContractKey> {
     let mut contracts = product.contracts_from(today);
-    if product.is_spot() {
+    // Spot and equities: one contract that never rolls (an equity's options aren't "front").
+    if product.is_spot() || product.is_equity() {
         return contracts.next();
     }
     contracts
@@ -101,7 +102,7 @@ pub fn resolve_front(
     prior_session: Option<&[(ContractKey, Qty)]>,
     provider_expiries: &[(ContractKey, CivilDate)],
 ) -> Option<FrontMonth> {
-    if product.is_spot() {
+    if product.is_spot() || product.is_equity() {
         return Some(FrontMonth {
             contract: product.contracts_from(today).next()?,
             rule: FrontRule::Spot,
@@ -143,6 +144,22 @@ mod tests {
     }
     fn k(y: u16, m: u8) -> ContractKey {
         ContractKey::monthly(es().id, y, Month::new(m).unwrap())
+    }
+
+    /// Decision 0028: an equity's one contract is its "front", like spot (never rolls).
+    #[test]
+    fn equities_resolve_to_their_shares() {
+        let spy = spy();
+        let today = d(2026, 11, 9);
+        assert_eq!(
+            calendar_front(&spy, today),
+            Some(ContractKey::equity(spy.id))
+        );
+        let f = resolve_front(&spy, today, None, None, &[]).unwrap();
+        assert_eq!(
+            (f.contract, f.rule),
+            (ContractKey::equity(spy.id), FrontRule::Spot)
+        );
     }
 
     #[test]

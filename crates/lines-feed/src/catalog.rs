@@ -566,6 +566,12 @@ mod tests {
                 p.contracts_from(d(2026, 11, 9)).next(),
                 Some(ContractKey::equity(id))
             );
+            // A product target resolves to the shares (`--instrument SPY`, a workspace pane).
+            assert_eq!(
+                lines_core::roll::resolve_front(&p, d(2026, 11, 9), None, None, &[])
+                    .map(|f| f.contract),
+                Some(ContractKey::equity(id))
+            );
         }
         assert_eq!(session_spec(SPY), session_spec(QQQ));
         let spy = sessions(SPY).unwrap();
