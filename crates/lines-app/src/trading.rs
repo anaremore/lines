@@ -53,6 +53,7 @@ use lines_trading::order::Order;
 use lines_trading::persist;
 use lines_trading::rules;
 use lines_trading::service::{Clock, Observer};
+use lines_trading::strategy::{StrategyId, StrategyState};
 use lines_trading::{
     AccountConfig, AccountId, AccountView, Command as TradeCommand, CommandId, Event, FeedBridge,
     MarketInput, OrderId, OrderKind, PaperBroker, PaperConfig, PositionView, Reject, RulePreset,
@@ -166,6 +167,9 @@ pub struct TradeState {
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
     guards: HashMap<AccountId, GuardView>,
+    /// Each strategy instance's state and reason, from `Event::Strategy` (decision 0025):
+    /// the core enforces it, so the strategy panel shows this over the host's view.
+    strategies: HashMap<StrategyId, (StrategyState, Option<String>)>,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -238,8 +242,19 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
-            // Strategies (decision 0025) have no pane yet: the strategy panel comes later.
-            Event::Strategy { .. } => None,
+            Event::Strategy {
+                id,
+                state,
+                reason,
+                removed,
+            } => {
+                if removed {
+                    self.strategies.remove(&id);
+                } else {
+                    self.strategies.insert(id, (state, reason));
+                }
+                None
+            }
             Event::Guardrail {
                 account,
                 state,
@@ -369,6 +384,11 @@ impl TradeState {
 
     pub fn account(&self, account: &AccountId) -> Option<&AccountView> {
         self.accounts.get(account)
+    }
+
+    /// A strategy instance's state and reason as the core last reported them.
+    pub fn strategy(&self, id: StrategyId) -> Option<(StrategyState, Option<&str>)> {
+        self.strategies.get(&id).map(|(s, r)| (*s, r.as_deref()))
     }
 
     /// The account's guardrail lockout, if one is in force (`None`: active).

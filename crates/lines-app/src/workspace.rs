@@ -38,7 +38,7 @@ use lines_feed::FeedConfig;
 use lines_feed::availability::Availability;
 
 use crate::chart_view::{self, ChartView, CrosshairTime, Fixture};
-use crate::commands::{self, Command, DrawCmd};
+use crate::commands::{self, Command, DrawCmd, StrategyCmd};
 use crate::dom_view::{DomOptions, DomView};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::journal_view::JournalView;
@@ -52,6 +52,7 @@ use crate::pane::{FeedChanged, Pane};
 use crate::pane_columns::{ColumnCmd, ColumnMenu, Columns};
 use crate::pane_window::{self, PaneWindow};
 use crate::persist::{self, Writer};
+use crate::strategy_view::StrategyView;
 use crate::tabstate::{self, Leaf, PaneState};
 use crate::tape_view::{TapeOptions, TapeView};
 use crate::theme::Theme;
@@ -218,6 +219,7 @@ pub enum PaneHandle {
     Dom(Entity<DomView>),
     Tape(Entity<TapeView>),
     Journal(Entity<JournalView>),
+    Strategies(Entity<StrategyView>),
 }
 
 macro_rules! each {
@@ -227,6 +229,7 @@ macro_rules! each {
             PaneHandle::Dom($e) => $body,
             PaneHandle::Tape($e) => $body,
             PaneHandle::Journal($e) => $body,
+            PaneHandle::Strategies($e) => $body,
         }
     };
 }
@@ -250,6 +253,7 @@ impl PaneHandle {
             PaneHandle::Dom(_) => PaneKind::Dom,
             PaneHandle::Tape(_) => PaneKind::Tape,
             PaneHandle::Journal(_) => PaneKind::Journal,
+            PaneHandle::Strategies(_) => PaneKind::Strategies,
         }
     }
 
@@ -334,7 +338,9 @@ impl PaneHandle {
             PaneHandle::Dom(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Tape(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Journal(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
-            PaneHandle::Chart(_) => Err("columns belong to a DOM, time & sales or the journal"),
+            PaneHandle::Chart(_) | PaneHandle::Strategies(_) => {
+                Err("columns belong to a DOM, time & sales or the journal")
+            }
         }
     }
 
@@ -344,7 +350,7 @@ impl PaneHandle {
             PaneHandle::Dom(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Tape(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Journal(e) => Some(e.read(cx).columns().clone()),
-            PaneHandle::Chart(_) => None,
+            PaneHandle::Chart(_) | PaneHandle::Strategies(_) => None,
         }
     }
 
@@ -570,6 +576,10 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
                 }
                 v
             }))
+        }
+        PaneKind::Strategies => {
+            let frozen = env.frozen;
+            PaneHandle::Strategies(cx.new(|cx| StrategyView::new(feed, theme, frozen, cx)))
         }
     };
     handle.set_link(doc.link, cx);
@@ -884,6 +894,11 @@ impl WindowView {
                     this.open_column_menu(id, ev.0, cx)
                 }),
             ],
+            PaneHandle::Strategies(e) => {
+                vec![cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
+                    feed_changed(this, ev, cx)
+                })]
+            }
         }
     }
 
@@ -1105,7 +1120,11 @@ impl WindowView {
                 let i = self.tabs.len() - 1;
                 self.activate_tab(i, window, cx);
             }
-            Command::OpenJournal => self.open_journal(window, cx),
+            Command::OpenJournal => self.open_panel(PaneKind::Journal, window, cx),
+            Command::Strategy(StrategyCmd::Open) => {
+                self.open_panel(PaneKind::Strategies, window, cx)
+            }
+            Command::Strategy(c) => self.strategy_command(c, window, cx),
             Command::ExportJournal => export_journal(cx),
             Command::JournalEdit | Command::JournalAllDates => {
                 let Some(PaneHandle::Journal(j)) = self.tab().focused_handle().cloned() else {
@@ -1441,18 +1460,65 @@ impl WindowView {
         cx.notify();
     }
 
-    /// Show the journal: a journal pane of this window (shown again if it was hidden; a
-    /// popped-out one is said to be in its own window), else a new tab with one.
-    fn open_journal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Strategy controls. Stop all runs from any pane (through a strategy panel if one
+    /// exists, so a refusal shows there; else straight to the core). Start and Stop act on
+    /// the focused panel's selected strategy.
+    fn strategy_command(&mut self, c: StrategyCmd, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = match self.tab().focused_handle() {
+            Some(PaneHandle::Strategies(p)) => Some(p.clone()),
+            _ => None,
+        };
+        let panel = focused.clone().or_else(|| {
+            self.tabs.iter().find_map(|t| {
+                t.panes.values().find_map(|s| match &s.handle {
+                    PaneHandle::Strategies(p) => Some(p.clone()),
+                    _ => None,
+                })
+            })
+        });
+        let r = match (c, panel, focused) {
+            (StrategyCmd::Start | StrategyCmd::Stop, _, None) => {
+                Err("focus the strategy panel first (Open strategies)")
+            }
+            (_, Some(p), _) => p.update(cx, |v, cx| v.run(c, cx)),
+            (_, None, _) => match crate::trading::Trading::try_global(cx) {
+                Some(t) => {
+                    let flatten = c == StrategyCmd::StopAll;
+                    t.submit(
+                        lines_trading::Source::Hotkey,
+                        std::time::Instant::now(),
+                        crate::strategy_panel::stop_all(flatten),
+                    );
+                    Ok(())
+                }
+                None => Err("trading isn't running"),
+            },
+        };
+        if let Err(e) = r {
+            self.refuse(e, cx);
+        }
+        let _ = window;
+    }
+
+    /// Show the journal or the strategy panel: such a pane of this window (shown again if it
+    /// was hidden; a popped-out one is said to be in its own window), else a new tab with one.
+    fn open_panel(&mut self, kind: PaneKind, window: &mut Window, cx: &mut Context<Self>) {
         let found = self.tabs.iter().enumerate().find_map(|(i, t)| {
             t.panes
                 .iter()
-                .find(|(_, s)| s.handle.kind() == PaneKind::Journal)
+                .find(|(_, s)| s.handle.kind() == kind)
                 .map(|(id, _)| (i, *id, t.state(*id)))
         });
         if let Some((i, id, state)) = found {
             if state == PaneState::Detached {
-                self.refuse("the journal is popped out: it is in its own window", cx);
+                self.refuse(
+                    if kind == PaneKind::Journal {
+                        "the journal is popped out: it is in its own window"
+                    } else {
+                        "the strategy panel is popped out: it is in its own window"
+                    },
+                    cx,
+                );
                 return;
             }
             self.activate_tab(i, window, cx);
@@ -1465,7 +1531,7 @@ impl WindowView {
         let tab = Self::build_tab(
             &TabDoc {
                 focused: 0,
-                layout: Layout::Pane(PaneDoc::new(PaneKind::Journal, None, None)),
+                layout: Layout::Pane(PaneDoc::new(kind, None, None)),
             },
             cx,
         );
@@ -2591,6 +2657,7 @@ impl WindowView {
                                 PaneKind::Dom => "DOM",
                                 PaneKind::Tape => "T&S",
                                 PaneKind::Journal => "journal",
+                                PaneKind::Strategies => "strategy panel",
                             };
                             if !v.contains(&l) {
                                 v.push(l);

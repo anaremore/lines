@@ -44,6 +44,8 @@ mod redact;
 mod screenshot;
 mod settings_schema;
 mod settings_view;
+mod strategy_panel;
+mod strategy_view;
 mod studies;
 mod study_menu;
 mod study_menu_view;
@@ -457,6 +459,11 @@ struct Cli {
     /// the panes trade its SIM account, long 2 with a working order on the recording's contract.
     #[arg(long, requires = "screenshot")]
     demo_broker: bool,
+    /// Screenshot: a fixed set of synthetic strategy instances (armed, paused, halted at the
+    /// daily loss limit, not started) on the paper account and the recording's contract, for
+    /// the strategy panel until the strategy host runs in the app.
+    #[arg(long, requires = "screenshot")]
+    strategies_demo: bool,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -1376,6 +1383,7 @@ where
                 paper: cli.paper.clone(),
                 arm: cli.arm,
                 demo_broker: cli.demo_broker,
+                strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
                 pnl: cli.pnl.map(PnlArg::mode),
                 drawings,
