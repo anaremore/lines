@@ -16,6 +16,7 @@ mod dropdown;
 mod feeds;
 mod footprint;
 mod journal_view;
+mod latency_hud;
 mod layout;
 mod levels_layer;
 mod logs;

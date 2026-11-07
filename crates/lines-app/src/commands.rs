@@ -88,6 +88,10 @@ pub enum Command {
     /// Show or hide the chart headers' performance stats (feed msgs/s, updates/s, paints/s,
     /// paint time): a workspace preference, off by default. No key: palette and menu only.
     TogglePerfStats,
+    /// Show or hide the latency HUD in chart headers (roadmap 6b: feed, paint, order and ack
+    /// latency, the clock offset): a workspace preference, off by default; nothing is
+    /// recorded while it is hidden. No key: palette and menu only.
+    ToggleLatencyHud,
     /// The focused DOM's price trail on/off (its column comes with it). No key: pane keys
     /// are reserved; palette and the DOM's pane menu.
     DomTrail,
@@ -478,6 +482,7 @@ pub fn label(c: Command) -> String {
             format!("Chart: hide/show level kind {} of source {}", k + 1, i + 1)
         }
         Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
+        Command::ToggleLatencyHud => "Latency HUD on/off (chart headers)".into(),
         Command::DomTrail => "DOM: price trail on/off".into(),
         Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
         Command::OpenJournal => "Open journal".into(),
@@ -557,6 +562,7 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleLevels,
         Command::ToggleLevelLabels,
         Command::TogglePerfStats,
+        Command::ToggleLatencyHud,
         Command::DomTrail,
         Command::DomTrailHalfLife,
         Command::OpenJournal,
@@ -895,6 +901,8 @@ mod tests {
         );
         // A palette/menu command: no key of its own.
         assert!(BINDINGS.iter().all(|b| b.cmd != Command::TogglePerfStats));
+        assert_eq!(filter("latency", &p), vec![Command::ToggleLatencyHud]);
+        assert!(BINDINGS.iter().all(|b| b.cmd != Command::ToggleLatencyHud));
         // The DOM trail: palette and pane menu only, never a key (pane keys are reserved).
         assert_eq!(
             filter("price trail", &p),

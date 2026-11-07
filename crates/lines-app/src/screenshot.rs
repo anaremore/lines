@@ -65,7 +65,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     };
 
     // 1. Replay to the cut-off before any UI exists: the frame depends only on the data. The
-    // feeds started here are the ones the panes join (the registry shares them).
+    // feeds started here are the ones the panes join (the registry shares them). The latency
+    // HUD records while the data arrives, so it is switched on first.
+    lines_core::latency::set_enabled(shot.doc.show_latency_hud);
     let mut feeds = Vec::new();
     for pane in window.tabs.iter().flat_map(|t| t.layout.leaves()) {
         let f = PaneFeed::open(

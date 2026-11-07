@@ -102,6 +102,9 @@ pub struct WorkspaceDoc {
     /// by default; written only when on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub show_perf_stats: bool,
+    /// Chart headers show the latency HUD (roadmap 6b). Off by default; written only when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_latency_hud: bool,
     pub windows: Vec<WindowDoc>,
 }
 
@@ -463,6 +466,7 @@ impl WorkspaceDoc {
             crosshair_sync_price: false,
             hide_hints: false,
             show_perf_stats: false,
+            show_latency_hud: false,
             windows: vec![WindowDoc {
                 placement: None,
                 active_tab: 0,
@@ -1002,6 +1006,20 @@ mod tests {
             panic!("round trip")
         };
         assert!(value.show_perf_stats);
+        // The latency HUD: the same (off unless saved on, written only when on).
+        assert!(!value.show_latency_hud);
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains("show_latency_hud")
+        );
+        let mut w = value;
+        w.show_latency_hud = true;
+        let bytes = encode(&FORMAT, &w).unwrap();
+        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, &bytes) else {
+            panic!("round trip")
+        };
+        assert!(value.show_latency_hud);
     }
 
     #[test]

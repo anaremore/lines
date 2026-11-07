@@ -195,6 +195,13 @@ pub trait ProviderSession: Send {
     fn keepalive(&mut self, _now: UtcMillis) -> Option<Outgoing> {
         None
     }
+
+    /// The last [`ProviderSession::on_frame`] delivered back-fill (a snapshot of past
+    /// trades), not live trades: the latency HUD leaves its trades out (roadmap 6b). HTTP
+    /// frames always count as back-fill; this is for streamed snapshots.
+    fn backfill_frame(&self) -> bool {
+        false
+    }
 }
 
 /// Stable provider identifiers (stored in recordings).

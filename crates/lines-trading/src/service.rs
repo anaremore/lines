@@ -77,6 +77,7 @@ enum Msg {
 pub struct TradingHandle {
     tx: Sender<Msg>,
     next_id: Arc<AtomicU64>,
+    order_latency: Arc<std::sync::Mutex<crate::core::OrderLatency>>,
 }
 
 impl TradingHandle {
@@ -143,6 +144,11 @@ impl TradingHandle {
         let _ = rx.recv_timeout(Duration::from_secs(10));
     }
 
+    /// The latency HUD's order windows (roadmap 6b). The UI reads them with `try_lock` only.
+    pub fn order_latency(&self) -> &Arc<std::sync::Mutex<crate::core::OrderLatency>> {
+        &self.order_latency
+    }
+
     /// Click → order-sent latency: (p50 µs, p99 µs, samples). Blocks briefly (tests, stats).
     pub fn latency(&self) -> (Option<u64>, Option<u64>, usize) {
         let (tx, rx) = mpsc::channel();
@@ -186,6 +192,7 @@ impl TradingService {
         let handle = TradingHandle {
             tx,
             next_id: Arc::new(AtomicU64::new(1)),
+            order_latency: core.order_latency(),
         };
         let thread = thread::Builder::new()
             .name("lines-trading".into())
@@ -362,6 +369,7 @@ fn run(
             break;
         }
         core.tick(clock.now());
+        core.note_time(clock.now());
         let rest = core.drain();
         for o in &mut observers {
             o.events(&rest);

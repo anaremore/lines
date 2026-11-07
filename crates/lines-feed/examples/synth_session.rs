@@ -9,6 +9,10 @@
 //! heavier volume and recovers half of it, so the ETH and RTH profiles of a day differ
 //! visibly, and the two days differ for composite profiles. A fixed-seed generator makes the
 //! file identical on every run.
+//!
+//! `-- <out> --transit`: each frame is received 2-40 ms after its trade's exchange time (now
+//! and then 150-400 ms), from a second fixed-seed generator, for latency HUD screenshots
+//! (roadmap 6b). The trades are the same as without it.
 
 use std::time::Duration;
 
@@ -63,6 +67,8 @@ fn main() -> anyhow::Result<()> {
     let out = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "recordings/synth-es-2026-11-05.lfr".into());
+    let transit = std::env::args().any(|a| a == "--transit");
+    let mut jitter = Rng(0x7a17_5eed_0000_0042);
     let es = catalog::get(catalog::ES).expect("ES");
     let contract = ContractKey::monthly(es.id, 2026, Month::new(12).expect("month"));
     let ms = |s: &str| UtcMillis::parse_iso(s).expect("time").0;
@@ -134,9 +140,18 @@ fn main() -> anyhow::Result<()> {
                 },
                 &mut buf,
             );
+            // Receive time: the exchange time plus the link's transit (`--transit`). Trades are
+            // at least 500 ms apart, so frames stay in order.
+            let late = if !transit {
+                0
+            } else if jitter.below(50) == 0 {
+                150 + jitter.below(250) as i64
+            } else {
+                2 + jitter.below(39) as i64
+            };
             w.write(
                 Direction::FromServer,
-                Duration::from_millis((t - start) as u64),
+                Duration::from_millis((t + late - start) as u64),
                 &Frame::binary(buf.clone()),
             )?;
             trades += 1;

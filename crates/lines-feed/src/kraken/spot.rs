@@ -85,6 +85,8 @@ pub struct SpotSession {
     rest_done: bool,
     rest_max: Option<(u64, UtcMillis)>,
     ws_first: Option<(u64, UtcMillis)>,
+    /// The frame being handled is the trade channel's snapshot (past trades).
+    backfill: bool,
     ws_last_id: Option<u64>,
     fill_attempts: u32,
     complete: bool,
@@ -205,6 +207,7 @@ impl SpotSession {
             rest_done: false,
             rest_max: None,
             ws_first: None,
+            backfill: false,
             ws_last_id: None,
             fill_attempts: 0,
             complete: false,
@@ -599,6 +602,7 @@ impl SpotSession {
                 }
             }
             "trade" => {
+                self.backfill = env.kind.as_deref() == Some("snapshot");
                 let msgs: Vec<TradeMsg> =
                     serde_json::from_str(data.get()).map_err(|e| bad_json("trade", e))?;
                 for m in msgs.iter().filter(|m| m.symbol == ws) {
@@ -712,6 +716,10 @@ impl SpotSession {
 }
 
 impl ProviderSession for SpotSession {
+    fn backfill_frame(&self) -> bool {
+        self.backfill
+    }
+
     fn start(&mut self, ctx: StartContext, out: &mut Vec<Outgoing>) {
         self.ctx = Some(ctx);
         out.push(Outgoing::HttpGet(format!(
@@ -727,6 +735,7 @@ impl ProviderSession for SpotSession {
         events: &mut Vec<MarketEvent>,
         out: &mut Vec<Outgoing>,
     ) -> Result<(), SessionError> {
+        self.backfill = false;
         match frame.kind {
             FrameKind::Http => self.on_http(&frame.data, events, out),
             FrameKind::Text => {
@@ -1029,6 +1038,21 @@ mod tests {
         format!(
             r#"{{"channel":"trade","type":"update","data":[{{"symbol":"BTC/USD","side":"{side}","price":{price},"qty":{qty},"ord_type":"market","trade_id":{id},"timestamp":"{ts}"}}]}}"#
         )
+    }
+
+    /// The trade channel's snapshot is back-fill for the latency HUD; its updates are live.
+    #[test]
+    fn the_trade_snapshot_is_back_fill() {
+        let (mut s, _) = ready(None);
+        let snap = trade(7, "100.1", "0.5", "buy", "2026-11-06T18:01:13.437282Z")
+            .replace(r#""type":"update""#, r#""type":"snapshot""#);
+        text(&mut s, &snap);
+        assert!(s.backfill_frame());
+        text(
+            &mut s,
+            &trade(8, "100.2", "0.5", "sell", "2026-11-06T18:01:14.000000Z"),
+        );
+        assert!(!s.backfill_frame());
     }
 
     #[test]
