@@ -697,6 +697,7 @@ fn latency_windows_do_not_allocate() {
     });
     assert_eq!(n, 0, "latency windows allocated {n} times");
     assert!(seen > 0);
+}
 
 #[test]
 fn chart_order_tags_do_not_allocate() {

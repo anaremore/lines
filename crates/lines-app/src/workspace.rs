@@ -763,6 +763,56 @@ impl WindowView {
         }
     }
 
+    /// A chart's exit from a position handle: sent only when a DOM linked to that chart, on the
+    /// same account and contract, has trading enabled (a chart shows no switch of its own).
+    fn chart_exit(
+        &mut self,
+        id: PaneId,
+        chart: gpui::Entity<crate::chart_view::ChartView>,
+        ev: &crate::chart_view::ChartExit,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::trade_bar::TradePane;
+        let Some(link) = self.tab().handle(id).cloned().map(|h| h.link(cx)) else {
+            return;
+        };
+        let doms: Vec<_> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.handles())
+            .filter_map(|h| match h {
+                PaneHandle::Dom(d) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut seen = Vec::with_capacity(doms.len());
+        for d in doms {
+            let l = PaneHandle::Dom(d.clone()).link(cx);
+            let v = d.read(cx);
+            let p = v.trade_ref();
+            seen.push((
+                l,
+                p.account.clone(),
+                crate::trade_bar::contract_of(v.trade_store()),
+                p.arming.is_armed(),
+            ));
+        }
+        let ok = crate::chart_trade::linked_dom_enabled(
+            link,
+            &ev.account,
+            ev.contract,
+            seen.iter().map(|(l, a, k, on)| (*l, a.as_ref(), *k, *on)),
+        );
+        match crate::trading::Trading::try_global(cx) {
+            Some(t) if ok => {
+                t.submit(lines_trading::Source::Chart, ev.issued, ev.command.clone());
+            }
+            _ => chart.update(cx, |c, cx| {
+                c.exit_refused(crate::chart_trade::ENABLE_TO_ADD, cx)
+            }),
+        }
+    }
+
     fn subscribe(
         &self,
         id: PaneId,
@@ -781,6 +831,12 @@ impl WindowView {
                 cx.subscribe(e, move |_, _, ev: &CrosshairTime, cx| {
                     forward_crosshair(id, *ev, cx)
                 }),
+                cx.subscribe(
+                    e,
+                    move |this, chart, ev: &crate::chart_view::ChartExit, cx| {
+                        this.chart_exit(id, chart, ev, cx)
+                    },
+                ),
             ],
             PaneHandle::Dom(e) => vec![
                 cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {

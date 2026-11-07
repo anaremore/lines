@@ -629,6 +629,40 @@ pub fn hidden_placement(ow: f32, title_w: f32, count_w: f32) -> HiddenPlacement 
     }
 }
 
+/// Orders off the ladder's visible rows: `[above, below]`, each the nearest such order and how
+/// many orders are beyond that edge (rows as `price / units` floored). Pure and
+/// allocation-free.
+pub fn offscreen_orders(
+    marks: &[OrderMark],
+    top_row: i64,
+    bottom_row: i64,
+    units: i64,
+) -> [Option<(OrderMark, usize)>; 2] {
+    let mut out: [Option<(OrderMark, usize)>; 2] = [None, None];
+    for m in marks {
+        let row = m.price.0.div_euclid(units.max(1));
+        let k = if row > top_row {
+            0
+        } else if row < bottom_row {
+            1
+        } else {
+            continue;
+        };
+        out[k] = Some(match out[k] {
+            None => (*m, 1),
+            Some((near, n)) => {
+                let closer = if k == 0 {
+                    m.price.0 < near.price.0
+                } else {
+                    m.price.0 > near.price.0
+                };
+                (if closer { *m } else { near }, n + 1)
+            }
+        });
+    }
+    out
+}
+
 /// Refused prices above the top row and below the bottom row (rows as `price / units`
 /// floored), each with its word: `[above, below]`. Warnings are not refusals. Pure and
 /// allocation-free.
@@ -747,6 +781,39 @@ mod tests {
         );
         assert_eq!(hidden_placement(110.0, 20.0, 56.0), HiddenPlacement::Beside);
         assert_eq!(hidden_placement(50.0, 20.0, 56.0), HiddenPlacement::None);
+    }
+
+    /// The owner's case: a target off the DOM's visible rows was invisible everywhere. The
+    /// nearest order beyond each edge is found (and how many there are).
+    #[test]
+    fn offscreen_orders_name_the_nearest_at_each_edge() {
+        let mk = |row: i64, role| OrderMark {
+            id: OrderId(row as u64),
+            side: Side::Sell,
+            price: Price(row * 25),
+            style: MarkStyle::Working,
+            qty: Qty(1),
+            filled: Qty(0),
+            stop: false,
+            role,
+            exit: false,
+        };
+        let marks = [
+            mk(14, Role::TakeProfit),
+            mk(12, Role::TakeProfit),
+            mk(8, Role::Single),
+            mk(3, Role::StopLoss),
+        ];
+        let e = offscreen_orders(&marks, 10, 6, 25);
+        let (top, n) = e[0].unwrap();
+        assert_eq!(
+            (top.price, n),
+            (Price(12 * 25), 2),
+            "the nearer of two above"
+        );
+        let (bottom, n) = e[1].unwrap();
+        assert_eq!((bottom.price, n), (Price(3 * 25), 1));
+        assert_eq!(offscreen_orders(&marks[2..3], 10, 6, 25), [None, None]);
     }
 
     /// The ladder accounts for every refusal the header counts: ones off the visible rows are

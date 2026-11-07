@@ -19,8 +19,29 @@ use lines_trading::{AccountId, Command as TradeCommand, Money, OrderKind, OrderS
 use crate::dom_trade::{MarkRole, MarkStyle, OrderMark, Refusal};
 use crate::pnl::PnlDisplay;
 
-/// Shown when a handle is dragged with trading off.
-pub const ENABLE_TO_ADD: &str = "Enable trading to add a stop or target";
+/// Shown when a handle is dragged with no linked DOM enabled (a chart shows no switch).
+pub const ENABLE_TO_ADD: &str = "Enable trading on the linked DOM to add a stop or target";
+
+/// Whether a chart exit may go out: a DOM in the chart's link group (not unlinked), on the
+/// same account and contract, has trading enabled. `doms`: (link, account, contract, enabled).
+pub fn linked_dom_enabled<'a>(
+    link: crate::layout::LinkGroup,
+    account: &AccountId,
+    contract: ContractKey,
+    doms: impl IntoIterator<
+        Item = (
+            crate::layout::LinkGroup,
+            Option<&'a AccountId>,
+            Option<ContractKey>,
+            bool,
+        ),
+    >,
+) -> bool {
+    link.is_some()
+        && doms
+            .into_iter()
+            .any(|(l, a, k, on)| l == link && a == Some(account) && k == Some(contract) && on)
+}
 
 /// Money per (price unit × quantity unit), exact (1e-10 currency units), as the trading core
 /// computes it; `None` if it isn't whole (no catalog product). Allocation-free.
@@ -131,6 +152,17 @@ pub fn write_edge(
         write!(out, " +{}", n - 1)?;
     }
     Ok(())
+}
+
+/// An edge marker in short (`↑T1`, `↓S2`, `↑BUY`), for a narrow cell or both edges at once.
+pub fn write_edge_short(out: &mut impl Write, m: &OrderMark, above: bool) -> fmt::Result {
+    out.write_str(if above { "↑" } else { "↓" })?;
+    let left = m.qty.0 - m.filled.0;
+    match MarkRole::of(m) {
+        MarkRole::Target => write!(out, "T{left}"),
+        MarkRole::Stop => write!(out, "S{left}"),
+        MarkRole::Entry => out.write_str(if m.side == Side::Buy { "BUY" } else { "SELL" }),
+    }
 }
 
 /// The exit a position handle places at `price`: a target (limit) or a stop for the whole
@@ -373,6 +405,43 @@ mod tests {
         // A chart-added exit (reduce-only, plain role) reads by its kind: stop S, limit T.
         let added = mark(Side::Sell, 5805.00, true, Role::Single, true);
         assert_eq!(tag(&added, PnlDisplay::Off), "S1 · 5805.00");
+    }
+
+    /// A chart shows no switch: its exits go out only through a linked DOM's switch, on the
+    /// same account and contract; unlinked panes never share it.
+    #[test]
+    fn chart_exits_need_a_linked_enabled_dom() {
+        let a = AccountId::new("paper");
+        let b = AccountId::new("other");
+        let k = lines_trading::types::ContractDoc {
+            product: 1,
+            year: Some(2026),
+            month: Some(12),
+        }
+        .to_key()
+        .unwrap();
+        assert!(linked_dom_enabled(
+            Some(0),
+            &a,
+            k,
+            [(Some(0), Some(&a), Some(k), true)]
+        ));
+        assert!(
+            !linked_dom_enabled(Some(0), &a, k, [(Some(0), Some(&a), Some(k), false)]),
+            "off"
+        );
+        assert!(
+            !linked_dom_enabled(Some(0), &a, k, [(Some(1), Some(&a), Some(k), true)]),
+            "other group"
+        );
+        assert!(
+            !linked_dom_enabled(Some(0), &a, k, [(Some(0), Some(&b), Some(k), true)]),
+            "other account"
+        );
+        assert!(
+            !linked_dom_enabled(None, &a, k, [(None, Some(&a), Some(k), true)]),
+            "unlinked"
+        );
     }
 
     #[test]

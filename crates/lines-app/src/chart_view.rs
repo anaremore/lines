@@ -450,14 +450,6 @@ impl ChartView {
         cx: &mut Context<Self>,
     ) {
         self.trade = crate::trade_bar::PaneTrade::new(doc, cx);
-        // The screenshot fixture `--enable-trading` enables charts too (their add handles); the
-        // switch is sticky, so only when it is off.
-        if crate::trading::Trading::try_global(cx).is_some_and(|t| t.start_armed)
-            && !self.trade.arming.is_armed()
-        {
-            self.trade
-                .arm_event(crate::dom_trade::ArmEvent::Toggle, cx);
-        }
     }
 
     pub fn new(
@@ -1777,9 +1769,7 @@ impl ChartView {
             // too, with the price).
             TagHit::Handle(above) => {
                 let qty = self.ct.position.map_or(0, |p| p.0);
-                if !self.trade.arming.is_armed() {
-                    self.trade.flash(crate::chart_trade::ENABLE_TO_ADD);
-                } else if let Some(to) =
+                if let Some(to) =
                     lines_core::geometry::snap_price(&self.vp, y, self.instrument.price.tick)
                 {
                     self.ct.adding = Some(crate::chart_trade::AddExit {
@@ -1824,8 +1814,7 @@ impl ChartView {
     /// why not.
     fn place_exit(&mut self, a: crate::chart_trade::AddExit, cx: &mut Context<Self>) {
         let issued = std::time::Instant::now();
-        let (Some(t), Some(account), Some(contract), Some((qty, _))) = (
-            crate::trading::Trading::try_global(cx),
+        let (Some(account), Some(contract), Some((qty, _))) = (
             self.trade.account.clone(),
             crate::trade_bar::contract_of(&self.store),
             self.ct.position,
@@ -1838,18 +1827,18 @@ impl ChartView {
                 _ => None,
             })
         });
+        // A chart shows no trading switch (trade panel v2): the order goes to the window, which
+        // sends it only when a DOM linked to this chart, on the same account and contract, has
+        // trading enabled (the same switch as any new order).
         match crate::chart_trade::exit_command(
-            self.trade.arming.is_armed(),
-            &account,
-            contract,
-            qty,
-            a.target,
-            a.to,
-            market,
+            true, &account, contract, qty, a.target, a.to, market,
         ) {
-            Ok(cmd) => {
-                t.submit(lines_trading::Source::Chart, issued, cmd);
-            }
+            Ok(command) => cx.emit(ChartExit {
+                command,
+                account,
+                contract,
+                issued,
+            }),
             Err(crate::dom_trade::Refusal(why)) => self.trade.flash(why),
         }
     }
@@ -2546,14 +2535,9 @@ impl ChartView {
         if let (Some(tag), Some((qty, _))) = (pos_tag, self.ct.position) {
             let (has_t, has_s) = self.ct.exits();
             self.ct.handles = handles(&tag, wanted_handles(qty, has_t, has_s));
-            let enabled = self.trade.arming.is_armed();
             for h in self.ct.handles.iter().flatten() {
                 let target = lines_core::geometry::order_tags::handle_is_target(qty, h.above);
-                let c = match (enabled, target) {
-                    (false, _) => t.text_dim,
-                    (true, true) => t.order_target,
-                    (true, false) => t.order_stop,
-                };
+                let c = if target { t.order_target } else { t.order_stop };
                 let r = rect(h.left, h.top, HANDLE_W, HANDLE_H);
                 window.paint_quad(fill(r, t.label_bg));
                 self.outline(r, c, hair, window);
@@ -4526,6 +4510,26 @@ impl ChartView {
 }
 
 impl EventEmitter<FeedChanged> for ChartView {}
+
+/// A chart asks its window to send an exit it built from a position handle; the window sends it
+/// only when a linked DOM (same account and contract) has trading enabled.
+pub struct ChartExit {
+    pub command: lines_trading::Command,
+    pub account: lines_trading::AccountId,
+    pub contract: lines_core::ContractKey,
+    pub issued: std::time::Instant,
+}
+
+impl EventEmitter<ChartExit> for ChartView {}
+
+impl ChartView {
+    /// The window refused a chart exit (no linked DOM with trading enabled): say so on the
+    /// chart.
+    pub fn exit_refused(&mut self, why: &'static str, cx: &mut Context<Self>) {
+        self.trade.flash(why);
+        cx.notify();
+    }
+}
 
 impl EventEmitter<CrosshairTime> for ChartView {}
 

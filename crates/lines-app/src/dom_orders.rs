@@ -163,12 +163,18 @@ impl OrdersLayer {
         oy: f32,
         row_h: f32,
         hair: f32,
+        price_fmt: &lines_core::PriceFormat,
         window: &mut Window,
         cx: &mut App,
     ) {
         let rect =
             |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
         let side_colour = |s: Side| if s == Side::Buy { t.up } else { t.down };
+        let mark_colour = |t: &Theme, m: &OrderMark| match MarkRole::of(m) {
+            MarkRole::Entry => side_colour(m.side),
+            MarkRole::Target => t.order_target,
+            MarkRole::Stop => t.order_stop,
+        };
         let pos_row = self.position.map(|(_, avg)| position_row(avg, tick, units));
         let mut buf = lines_core::FixedStr::<24>::new();
         for (i, r) in rows.iter().enumerate() {
@@ -312,6 +318,47 @@ impl OrdersLayer {
                 units,
             );
             let n = edges[0].n + edges[1].n;
+            // Orders off the visible rows (the owner's case: a target nobody could see): the
+            // title cell names the nearest one ("↑ T1 5820.00"), or both edges in short
+            // ("↑T1 ↓S1"); refusals, brief and urgent, take the cell first.
+            if n == 0 && ow > 0.0 {
+                let orders = crate::dom_trade::offscreen_orders(
+                    &self.marks,
+                    row_of(top.price.0, units),
+                    row_of(bottom.price.0, units),
+                    units,
+                );
+                let mut s = lines_core::FixedStr::<48>::new();
+                let mut colour = None;
+                match orders {
+                    [Some((m, n)), None] | [None, Some((m, n))] => {
+                        let above = orders[0].is_some();
+                        let _ = crate::chart_trade::write_edge(&mut s, &m, above, n, price_fmt);
+                        if glyphs.width(s.as_str(), t.text_main, true, window) + 8.0 > ow {
+                            s.clear();
+                            let _ = crate::chart_trade::write_edge_short(&mut s, &m, above);
+                        }
+                        colour = Some(mark_colour(t, &m));
+                    }
+                    [Some((a, _)), Some((b, _))] => {
+                        let _ = crate::chart_trade::write_edge_short(&mut s, &a, true);
+                        let _ = s.write_char(' ');
+                        let _ = crate::chart_trade::write_edge_short(&mut s, &b, false);
+                        colour = Some(t.text_main);
+                    }
+                    [None, None] => {}
+                }
+                if let Some(c) = colour {
+                    let hh = crate::pane_columns::HEADER_ROW_H;
+                    let ty = oy - hh;
+                    let cell = rect(ox + 1.0, ty + 1.0, ow - 2.0, hh - 2.0);
+                    window.with_content_mask(Some(gpui::ContentMask { bounds: cell }), |window| {
+                        window.paint_quad(fill(cell, t.panel));
+                        outline(window, cell, c, hair, false);
+                        glyphs.paint(s.as_str(), ox + 4.0, ty, hh, t.text_main, true, window, cx);
+                    });
+                }
+            }
             if n > 0 && ow > 0.0 {
                 let mut s = lines_core::FixedStr::<32>::new();
                 let _ = write!(s, "{n} hidden");
