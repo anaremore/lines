@@ -318,7 +318,11 @@ impl TickBars {
             BarKind::Ticks(n) => i64::from(n) - i64::from(self.count(i)),
             BarKind::Volume(n) => {
                 let u = self.scale.qty_unit;
-                (i64::from(n).saturating_mul(u) - b.volume.0 + u - 1).div_euclid(u)
+                i64::from(n)
+                    .saturating_mul(u)
+                    .saturating_sub(b.volume.0)
+                    .saturating_add(u - 1)
+                    .div_euclid(u)
             }
             BarKind::Range(r) => i64::from(r) - (b.high.0 - b.low.0).div_euclid(self.scale.tick),
             BarKind::Seconds(_) => return None,

@@ -597,8 +597,8 @@ fn tick_bar_updates_do_not_allocate() {
         bars.iter().all(|b| b.trimmed() > 0),
         "the test covers trims"
     );
-    // Session resets close bars short, per kind (a tick and a volume builder; range bars
-    // this narrow complete before a reset can catch one: the unit tests cover theirs).
+    // Session resets close bars short, per kind (a tick and a volume builder; range bars are
+    // covered by the unit tests).
     for kind in [
         lines_core::BarKind::Ticks(TICK_PRESETS[0]),
         lines_core::BarKind::Volume(500),

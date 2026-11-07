@@ -351,7 +351,7 @@ impl Studies {
                     continue;
                 }
                 // Direction by shape too (docs/design.md): one direction's bodies are hollow,
-                // as the price candles (bodies are at least 4 px, so hollow always reads when
+                // as the price candles (bodies are at least 6 px, so hollow always reads when
                 // the bar is 3 device pixels wide).
                 let hollow = theme.hollow.is_hollow(up) && bw >= 3.0 * hair && bh >= 3.0 * hair;
                 let wx = x - hair * 0.5;
