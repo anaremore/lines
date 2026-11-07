@@ -150,6 +150,22 @@ impl Level {
     }
 }
 
+/// A source's named number that isn't a price (an indicator reading, a statistic), published
+/// with its map for strategies (decision 0025). Never drawn, and never turned into a `Price`
+/// (order prices come only from levels, explicitly rounded: decision 0002). Unbounded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedValue {
+    /// Stable name: 1-32 lowercase letters, digits, `-`, `_` or `.`, unique in the map.
+    pub name: String,
+    pub value: f64,
+    /// When the source computed it, if it says ([`LevelMap::value_as_of`] falls back to the
+    /// map's as-of).
+    pub as_of: Option<UtcMillis>,
+}
+
+/// Named values a map may carry.
+pub const MAX_VALUES: usize = 64;
+
 /// One source's levels for one product (and contract, if the source is contract specific).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LevelMap {
@@ -163,6 +179,8 @@ pub struct LevelMap {
     pub kinds: Vec<String>,
     pub levels: Vec<Level>,
     pub meta: LevelMeta,
+    /// Named values (not prices): see [`NamedValue`].
+    pub values: Vec<NamedValue>,
 }
 
 impl LevelMap {
@@ -176,9 +194,20 @@ impl LevelMap {
                 kinds: Vec::new(),
                 levels: Vec::new(),
                 meta: LevelMeta::default(),
+                values: Vec::new(),
             },
             error: None,
         }
+    }
+
+    /// A named value by name.
+    pub fn value(&self, name: &str) -> Option<&NamedValue> {
+        self.values.iter().find(|v| v.name == name)
+    }
+
+    /// When a named value was computed: its own as-of, else the map's.
+    pub fn value_as_of(&self, name: &str) -> Option<UtcMillis> {
+        self.value(name).map(|v| v.as_of.unwrap_or(self.as_of))
     }
 
     /// Index of a kind slug.
@@ -201,6 +230,12 @@ pub enum LevelError {
     /// A zone with one bound relative to the VWAP and the other absolute.
     MixedAnchors,
     BadWeight(u8),
+    /// A named value's name isn't 1-32 of `a-z`, `0-9`, `-`, `_` and `.`.
+    BadValueName(String),
+    /// Two named values share a name.
+    DuplicateValue(String),
+    /// A named value isn't a finite number.
+    ValueNotFinite(String),
 }
 
 impl fmt::Display for LevelError {
@@ -218,6 +253,14 @@ impl fmt::Display for LevelError {
                 write!(f, "a zone mixes a VWAP-relative bound with an absolute one")
             }
             LevelError::BadWeight(w) => write!(f, "line weight {w} (use 1-4)"),
+            LevelError::BadValueName(s) => {
+                write!(
+                    f,
+                    "bad value name {s:?} (use 1-32 of a-z, 0-9, '-', '_' and '.')"
+                )
+            }
+            LevelError::DuplicateValue(s) => write!(f, "two values are named {s:?}"),
+            LevelError::ValueNotFinite(s) => write!(f, "value {s:?} is not a finite number"),
         }
     }
 }
@@ -225,10 +268,19 @@ impl fmt::Display for LevelError {
 impl std::error::Error for LevelError {}
 
 fn slug_ok(s: &str) -> bool {
+    name_ok(s, b"-_")
+}
+
+/// Value names also allow `.` (e.g. `rsi.14`).
+fn value_name_ok(s: &str) -> bool {
+    name_ok(s, b"-_.")
+}
+
+fn name_ok(s: &str, extra: &[u8]) -> bool {
     !s.is_empty()
         && s.len() <= MAX_SLUG
         && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || extra.contains(&b))
 }
 
 /// Builds and validates a [`LevelMap`]. The first error is kept and returned by `build`.
@@ -315,6 +367,16 @@ impl LevelMapBuilder {
         )
     }
 
+    /// Add a named value (not a price): see [`NamedValue`].
+    pub fn value(mut self, name: &str, value: f64, as_of: Option<UtcMillis>) -> Self {
+        self.map.values.push(NamedValue {
+            name: name.to_owned(),
+            value,
+            as_of,
+        });
+        self
+    }
+
     /// Validate against the instrument's `tick` (catalog units) and return the map.
     pub fn build(mut self, tick: i64) -> Result<LevelMap, LevelError> {
         if !slug_ok(&self.map.source) {
@@ -340,6 +402,29 @@ impl LevelMapBuilder {
         };
         if !meta_ok(&self.map.meta) {
             self.fail(LevelError::TooLong("metadata"));
+        }
+        if self.map.values.len() > MAX_VALUES {
+            self.fail(LevelError::TooMany("values"));
+        }
+        // Too many is already the error: don't spend time (quadratic name checks) on a map
+        // that is refused anyway.
+        let bad = (self.map.values.len() <= MAX_VALUES)
+            .then(|| {
+                self.map.values.iter().enumerate().find_map(|(i, v)| {
+                    if !value_name_ok(&v.name) {
+                        Some(LevelError::BadValueName(v.name.clone()))
+                    } else if self.map.values[..i].iter().any(|o| o.name == v.name) {
+                        Some(LevelError::DuplicateValue(v.name.clone()))
+                    } else if !v.value.is_finite() {
+                        Some(LevelError::ValueNotFinite(v.name.clone()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten();
+        if let Some(e) = bad {
+            self.fail(e);
         }
         for i in 0..self.map.levels.len() {
             let l = &self.map.levels[i];

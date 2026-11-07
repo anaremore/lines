@@ -287,3 +287,87 @@ fn vwap_relative_levels_follow_the_vwap_and_wait_for_it() {
         LevelError::NotFinite
     );
 }
+
+#[test]
+fn named_values_ride_with_the_map() {
+    let at = Some(t("2026-11-05T14:31:00"));
+    let m = b()
+        .value("dd-ratio", 0.62, at)
+        .value("res", -3.5, None)
+        .build(TICK)
+        .unwrap();
+    assert_eq!(
+        m.value("dd-ratio").map(|v| (v.value, v.as_of)),
+        Some((0.62, at))
+    );
+    assert_eq!(m.value("res").map(|v| v.value), Some(-3.5));
+    assert!(m.value("missing").is_none());
+    assert!(m.levels.is_empty(), "values are not levels");
+}
+
+#[test]
+fn named_values_are_checked() {
+    for bad in ["", "Caps", "has space", "a/b", &"x".repeat(33)] {
+        assert_eq!(
+            b().value(bad, 1.0, None).build(TICK).unwrap_err(),
+            LevelError::BadValueName(bad.to_string()),
+            "{bad:?}"
+        );
+    }
+    for good in ["rsi.14", "dd-ratio", "a_b", &"x".repeat(32)] {
+        assert!(b().value(good, 1.0, None).build(TICK).is_ok(), "{good:?}");
+    }
+    assert_eq!(
+        b().value("a", 1.0, None)
+            .value("a", 2.0, None)
+            .build(TICK)
+            .unwrap_err(),
+        LevelError::DuplicateValue("a".into())
+    );
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            b().value("a", x, None).build(TICK).unwrap_err(),
+            LevelError::ValueNotFinite("a".into())
+        );
+    }
+    // One bad value refuses the whole map, levels and all.
+    assert!(
+        b().line("p", LevelValue::Tick(Price(600_000)), None, style())
+            .value("a", f64::NAN, None)
+            .build(TICK)
+            .is_err()
+    );
+    let mut exactly = b();
+    for i in 0..MAX_VALUES {
+        exactly = exactly.value(&format!("v{i}"), 0.0, None);
+    }
+    assert!(exactly.build(TICK).is_ok());
+    let mut many = b();
+    for i in 0..=MAX_VALUES {
+        many = many.value(&format!("v{i}"), 0.0, None);
+    }
+    assert_eq!(many.build(TICK).unwrap_err(), LevelError::TooMany("values"));
+    // Too many duplicates: refused as too many, without checking every pair.
+    let mut dup = b();
+    for _ in 0..=MAX_VALUES {
+        dup = dup.value("same", 0.0, None);
+    }
+    assert_eq!(dup.build(TICK).unwrap_err(), LevelError::TooMany("values"));
+}
+
+#[test]
+fn a_values_as_of_falls_back_to_the_maps() {
+    let own = t("2026-11-05T14:31:00");
+    let m = b()
+        .value("a", 1.0, Some(own))
+        .value("b", 2.0, None)
+        .build(TICK)
+        .unwrap();
+    assert_eq!(m.value_as_of("a"), Some(own));
+    assert_eq!(m.value_as_of("b"), Some(t("2026-11-05T14:00:00")));
+    assert_eq!(m.value_as_of("c"), None);
+}
+
+fn b() -> LevelMapBuilder {
+    LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+}
