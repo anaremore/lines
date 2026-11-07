@@ -67,6 +67,7 @@ pub fn render(
             } => {
                 let sw = match swatch {
                     Swatch::Study(c) => Some(t.study[*c as usize % t.study.len()]),
+                    Swatch::Custom(rgb) => Some(crate::theme::user_color(*rgb, 100)),
                     Swatch::None => None,
                 };
                 let link = |id: (&'static str, usize), text: &'static str, part| {
@@ -168,6 +169,12 @@ pub fn render(
                                 .w(px(14.0))
                                 .h(px(10.0))
                                 .bg(t.study[*c as usize % t.study.len()]),
+                        ),
+                        Swatch::Custom(rgb) => chip.child(
+                            div()
+                                .w(px(14.0))
+                                .h(px(10.0))
+                                .bg(crate::theme::user_color(*rgb, 100)),
                         ),
                         Swatch::None => chip.child(label.clone()),
                     };

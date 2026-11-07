@@ -1,6 +1,8 @@
 //! The chart's external levels (decision 0022): every registered level source that serves the
 //! chart's product draws its map here. Lines and zones use the **source's colours** (the one
-//! exception to "theme tokens only"); labels use theme text on the legend box.
+//! exception to "theme tokens only") unless the chart restyled the source (decision 0026,
+//! `study_style::LEVELS`: one color and opacity for its lines, one for its zones; zone edges
+//! take the Zones color at the Lines opacity); labels use theme text on the legend box.
 //!
 //! - Paint order (see `chart_view`): zone fills behind the candles ([`LevelsLayer::paint_back`]),
 //!   lines and zone edges above them ([`LevelsLayer::paint_front`]), labels last
@@ -16,7 +18,8 @@
 //!   and labels. The chart's study visibility applies on top: "hide studies" hides levels,
 //!   "hide study labels" and Clean chart hide their labels and legend rows.
 
-use std::collections::HashMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use gpui::{
@@ -32,9 +35,10 @@ use lines_feed::levels::runtime::{self, LevelHandle, LevelStatus};
 use lines_feed::levels::{LevelContext, StorePrices};
 use lines_feed::store::ChartStore;
 use lines_indicators::render::{Column, build_columns};
-use lines_indicators::{Bands, Reset, Spec, VwapSpec};
+use lines_indicators::{Bands, PartStyles, Reset, Spec, VwapSpec};
 use serde::{Deserialize, Serialize};
 
+use crate::study_style::{self, Look};
 use crate::theme::Theme;
 
 const LABEL_PX: f32 = 11.0;
@@ -116,6 +120,52 @@ struct Slot {
     /// Kind visibility bit per kind index (maps have at most 64 kinds).
     kinds: u64,
     placed: Vec<Placed>,
+    /// The chart's style override for this source (decision 0026; default: the source's).
+    looks: [Look; 2],
+    /// What its zone fills are scaled by under the candles (`zone_scale`) for (theme, map,
+    /// looks): computed when one of them changes, not every frame.
+    zone_scale: Cell<Option<ZoneScale>>,
+}
+
+/// (theme name, map pointer, looks) and the zone scale computed for them.
+type ZoneScale = (&'static str, usize, [Look; 2], f32);
+
+impl Slot {
+    /// The scale (0..=1) on this source's zone fills so the candles over each keep 3:1
+    /// (`Theme::under_candles`; one scale for all its zones: the most held back).
+    fn zone_scale(&self, map: &Arc<LevelMap>, theme: &Theme) -> f32 {
+        let key = Arc::as_ptr(map) as usize;
+        if let Some((name, k, looks, out)) = self.zone_scale.get()
+            && name == theme.name
+            && k == key
+            && looks == self.looks
+        {
+            return out;
+        }
+        let out = zone_scale(
+            theme,
+            &self.looks,
+            map.levels
+                .iter()
+                .filter_map(|l| matches!(l.shape, LevelShape::Zone { .. }).then_some(l.style.rgba)),
+        );
+        self.zone_scale
+            .set(Some((theme.name, key, self.looks, out)));
+        out
+    }
+}
+
+/// The scale (0..=1) on zone fills of colors `rgbas` (a source's, as `looks` style them) so
+/// the candles over each keep 3:1 in `theme` (`Theme::under_candles`): the most held back.
+pub fn zone_scale(theme: &Theme, looks: &[Look; 2], rgbas: impl Iterator<Item = u32>) -> f32 {
+    let mut k = 1.0f32;
+    for rgba in rgbas {
+        let z = theme.level_zone(looks, rgba, 1.0);
+        if z.a > 0.0 {
+            k = k.min(theme.under_candles(z, 1).0.a / z.a);
+        }
+    }
+    k
 }
 
 /// One legend row: source label, freshness text, and whether it is a warning.
@@ -127,6 +177,8 @@ pub struct LegendRow {
 
 pub struct LevelsLayer {
     pub config: LevelsConfig,
+    /// Style overrides by source id, as saved (`StudyStyles::levels`).
+    styles: BTreeMap<String, PartStyles>,
     slots: Vec<Slot>,
     shaped: HashMap<String, ShapedLine>,
     /// The chart's feed, for the ETH VWAP node.
@@ -150,6 +202,7 @@ impl LevelsLayer {
     pub fn new(config: LevelsConfig) -> LevelsLayer {
         LevelsLayer {
             config,
+            styles: BTreeMap::new(),
             slots: Vec::new(),
             shaped: HashMap::new(),
             feed: None,
@@ -182,8 +235,11 @@ impl LevelsLayer {
                     settings: runtime::settings_for(source.id()),
                 };
                 let label = source.label();
+                let looks = looks_for(&self.styles, source.id());
                 let handle = runtime::acquire(source, ctx, Arc::new(StorePrices(store.clone())));
                 Slot {
+                    zone_scale: Cell::new(None),
+                    looks,
                     handle,
                     label,
                     map: None,
@@ -194,6 +250,29 @@ impl LevelsLayer {
                 }
             })
             .collect();
+    }
+
+    /// The style overrides by source id, as saved.
+    pub fn styles(&self) -> &BTreeMap<String, PartStyles> {
+        &self.styles
+    }
+
+    /// Restyle sources (the chart's `StudyStyles::levels`).
+    pub fn set_styles(&mut self, styles: &BTreeMap<String, PartStyles>) {
+        if *styles == self.styles {
+            return;
+        }
+        self.styles = styles.clone();
+        for s in &mut self.slots {
+            s.looks = looks_for(&self.styles, s.handle.source());
+        }
+    }
+
+    /// The first color source `id`'s current map gives (its "Source colors" swatch).
+    pub fn source_color(&self, id: &str) -> Option<lines_core::style::Rgb> {
+        let s = self.slots.iter().find(|s| s.handle.source() == id)?;
+        let rgba = s.map.as_ref()?.levels.first()?.style.rgba;
+        Some(lines_core::style::Rgb::hex(rgba >> 8))
     }
 
     /// Sources on this chart: `(id, label, kinds)` for menus (render time).
@@ -313,7 +392,7 @@ impl LevelsLayer {
         }
     }
 
-    fn each(&self, mut f: impl FnMut(&LevelMap, &Placed, f32)) {
+    fn each(&self, mut f: impl FnMut(&Arc<LevelMap>, &Placed, f32, &Slot)) {
         for s in &self.slots {
             let Some(map) = &s.map else { continue };
             // Stale maps are dimmed (shown as stale, never as current).
@@ -323,20 +402,23 @@ impl LevelsLayer {
                 1.0
             };
             for p in &s.placed {
-                f(map, p, dim);
+                f(map, p, dim, s);
             }
         }
     }
 
     /// Zone fills (behind the candles).
-    pub fn paint_back(&self, plot: Bounds<Pixels>, window: &mut Window) {
+    pub fn paint_back(&self, plot: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
         let scale = window.scale_factor();
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let pw = f32::from(plot.size.width);
         let ppu = self.px_per_unit;
         let cols = &self.vwap_cols;
-        self.each(|map, p, dim| {
+        self.each(|map, p, dim, s| {
             let l = &map.levels[p.index as usize];
+            // Held back so the candles over it keep 3:1.
+            let mut zone = theme.level_zone(&s.looks, l.style.rgba, dim);
+            zone.a *= s.zone_scale(map, theme);
             if let (true, Some((lo, hi))) = (p.vwap_relative, l.vwap_offsets()) {
                 // Along the VWAP, bar by bar.
                 if let LevelShape::Zone { .. } = l.shape {
@@ -347,7 +429,7 @@ impl LevelsLayer {
                                 point(px(ox + c.left), px(oy + top)),
                                 size(px(c.right - c.left), px((bottom - top).max(1.0 / scale))),
                             ),
-                            colour(l.style.rgba, 0.10 * dim),
+                            zone,
                         ));
                     }
                 }
@@ -358,14 +440,14 @@ impl LevelsLayer {
                 let h = (bottom - top).max(1.0 / scale);
                 window.paint_quad(fill(
                     Bounds::new(point(px(ox), px(oy + top)), size(px(pw), px(h))),
-                    colour(l.style.rgba, 0.10 * dim),
+                    zone,
                 ));
             }
         });
     }
 
     /// Lines and zone edges (above the candles).
-    pub fn paint_front(&self, plot: Bounds<Pixels>, window: &mut Window) {
+    pub fn paint_front(&self, plot: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
@@ -423,14 +505,15 @@ impl LevelsLayer {
                 prev = Some(y);
             }
         };
-        self.each(|map, p, dim| {
+        self.each(|map, p, dim, s| {
+            let looks = &s.looks;
             let l = &map.levels[p.index as usize];
-            let c = colour(l.style.rgba, dim);
+            let c = theme.level_line(looks, l.style.rgba, dim);
             if let (true, Some((lo, hi))) = (p.vwap_relative, l.vwap_offsets()) {
                 match l.shape {
                     LevelShape::Line(_) => along(window, lo, l.style.weight, l.style.dashed, c),
                     LevelShape::Zone { .. } => {
-                        let c = colour(l.style.rgba, 0.6 * dim);
+                        let c = theme.level_zone_edge(looks, l.style.rgba, 0.6 * dim);
                         along(window, hi, 1, l.style.dashed, c);
                         along(window, lo, 1, l.style.dashed, c);
                     }
@@ -440,7 +523,7 @@ impl LevelsLayer {
             match l.shape {
                 LevelShape::Line(_) => line(window, p.top, l.style.weight, l.style.dashed, c),
                 LevelShape::Zone { .. } => {
-                    let c = colour(l.style.rgba, 0.6 * dim);
+                    let c = theme.level_zone_edge(looks, l.style.rgba, 0.6 * dim);
                     line(window, p.top, 1, l.style.dashed, c);
                     line(window, p.bottom, 1, l.style.dashed, c);
                 }
@@ -513,7 +596,7 @@ impl LevelsLayer {
                         point(px(ox + x + 6.0), px(oy + top + box_h * 0.5 - 1.5)),
                         size(px(8.0), px(3.0)),
                     ),
-                    colour(rgba, if dim { 0.4 } else { 1.0 }),
+                    theme.level_line(&self.slots[si].looks, rgba, if dim { 0.4 } else { 1.0 }),
                 ));
                 let _ = line.paint(
                     point(
@@ -606,7 +689,13 @@ fn age(ms: i64) -> String {
     }
 }
 
-use crate::theme::source_colour as colour;
+/// A source's override from the saved styles (none: the source's own style).
+fn looks_for(styles: &BTreeMap<String, PartStyles>, id: &str) -> [Look; 2] {
+    styles.get(id).map_or_else(
+        || Look::defaults(&study_style::LEVELS),
+        |m| study_style::read(m, &study_style::LEVELS),
+    )
+}
 
 /// The same map (by pointer), or both absent.
 fn same(a: &Option<Arc<LevelMap>>, b: &Option<Arc<LevelMap>>) -> bool {

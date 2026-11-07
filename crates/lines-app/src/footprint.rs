@@ -33,16 +33,27 @@
 //!   legend counts it (`? N without aggressor side`). Mixed cells still show only their sell and buy numbers: the legend count covers their side-less share.
 //! - **POC** per bar: the cell is outlined.
 //! - **Rows** use the DOM grid and grouping, coarsened until a row is at least 15 px tall.
+//! - **Styles** (decision 0026, `crate::study_style::FOOTPRINT`): cell shading, imbalance marks
+//!   and the POC outline take a user color and opacity; each mark keeps its side's place and
+//!   the strip its shape, so direction never depends on those colors. An imbalanced number
+//!   keeps its side's color only with the marks' own color, else it is the main text color.
+//!   Every number stays AA (4.5:1) on its cell whatever the cells' color and opacity: a tint
+//!   that would go past that is held back at its strongest shade, its weaker shades scaled
+//!   with it ([`CellShades`], tested over study colors, sampled custom colors, opacities,
+//!   themes, palettes and modes); the style editor says when it is.
 
-use gpui::{App, Bounds, Pixels, Window, fill, point, px, size};
+use gpui::{App, Bounds, Hsla, Pixels, Window, fill, point, px, size};
 use lines_core::footprint::{BarCells, Cell, FootprintFrame, ImbalanceRule, fit_grouping};
+use lines_core::style::{Color, Rgb};
 use lines_core::{BarsView, FixedStr, Qty, Viewport};
 use lines_feed::ChartData;
 use serde::{Deserialize, Serialize};
 
 use crate::chart_view::ChartLayer;
+use crate::study_style::{self, FOOTPRINT, Look};
 use crate::text::Glyphs;
-use crate::theme::Theme;
+use crate::theme::{Theme, with_alpha};
+use lines_indicators::PartStyles;
 
 /// What each cell shows.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -321,6 +332,207 @@ pub struct FootprintLayer {
     open_close: Vec<(lines_core::Price, lines_core::Price)>,
     /// The cells drawn this frame (x0, x1, y0, y1; plot-local): horizontal lines break there.
     drawn: Vec<[f32; 4]>,
+    /// User styles (decision 0026), as saved, and resolved for paint.
+    style: PartStyles,
+    looks: [Look; 3],
+    /// The cell shading for (theme, mode, looks), computed when one of them changes.
+    shades: Option<(ShadesKey, CellShades)>,
+}
+
+type ShadesKey = (&'static str, FootprintMode, [Look; 3]);
+
+/// A cell's fill color, from theme tokens (`CellShades::color`).
+pub type CellFill = Hsla;
+
+/// Which tint a cell takes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Tint {
+    Neutral = 0,
+    /// Delta mode, more buying.
+    Up = 1,
+    /// Delta mode, more selling.
+    Down = 2,
+}
+
+/// The cells' shading in a theme (decision 0026): each tint's color and its alpha at shade 0
+/// and at full shade, held back so every number a cell can carry (the main text color; in
+/// sell × buy with the marks' own color, the up and down colors too) stays AA on the tint's
+/// strongest shade composited over the chart.
+///
+/// Unstyled, delta and volume cells are never held back; sell × buy cells are, because an
+/// imbalanced number in its side's color was below AA on the strongest neutral cells before
+/// styles: their strongest alpha goes from 0.28 to 0.22 (dark), 0.27 (dark colorblind), 0.11
+/// (light) and 0.14 (light colorblind), never to 0 (`unstyled_sell_buy_caps`). Light sell × buy
+/// cells are so about half as shaded as before styles.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct CellShades {
+    /// (opaque color, alpha at shade 0, alpha at full shade) per [`Tint`].
+    tints: [(Hsla, f32, f32); 3],
+    /// Each [`Tint`] was held back.
+    pub held: [bool; 3],
+}
+
+/// The cells' own shading: alpha at shade 0, and what full shade adds.
+const NEUTRAL_SHADE: (f32, f32) = (0.06, 0.22);
+const DELTA_SHADE: (f32, f32) = (0.12, 0.4);
+/// The contrast every cell number keeps, with a margin for the GPU's blend rounding.
+const CELL_TEXT_CONTRAST: f64 = lines_core::style::TEXT_CONTRAST + 0.05;
+
+impl CellShades {
+    /// The shading for `looks` (the footprint's parts) in `mode`, in theme `t`.
+    pub fn of(t: &Theme, looks: &[Look; 3], mode: FootprintMode) -> CellShades {
+        let cells = looks[study_style::FP_CELLS];
+        let side =
+            mode == FootprintMode::BidAsk && looks[study_style::FP_IMBALANCE].color() == Color::Own;
+        let all = [t.text_main, t.up, t.down];
+        let texts = &all[..if side { 3 } else { 1 }];
+        let bg = crate::theme::rgb_of(t.bg);
+        let mut held = [false; 3];
+        let mut tint = |i: Tint, base: Hsla, (lo, span): (f32, f32)| {
+            // The part's color (its own: `base`) at the part's opacity.
+            let c = t.part_color(cells.color(), with_alpha(base, 1.0), cells.opacity());
+            let (lo, top) = (lo * c.a, (lo + span) * c.a);
+            let cap = readable_alpha(bg, crate::theme::rgb_of(c), top, texts);
+            let k = if top > 0.0 { (cap / top).min(1.0) } else { 1.0 };
+            held[i as usize] = k < 1.0;
+            (with_alpha(c, 1.0), lo * k, top * k)
+        };
+        let tints = [
+            tint(Tint::Neutral, t.text_dim, NEUTRAL_SHADE),
+            tint(Tint::Up, t.up, DELTA_SHADE),
+            tint(Tint::Down, t.down, DELTA_SHADE),
+        ];
+        CellShades { tints, held }
+    }
+
+    /// The tints `mode` draws (delta: all three; sell × buy and volume: neutral).
+    pub fn tints(mode: FootprintMode) -> &'static [Tint] {
+        if mode == FootprintMode::Delta {
+            &[Tint::Neutral, Tint::Up, Tint::Down]
+        } else {
+            &[Tint::Neutral]
+        }
+    }
+
+    /// A tint `mode` draws was held back.
+    #[cfg(test)]
+    pub fn held_in(&self, mode: FootprintMode) -> bool {
+        CellShades::tints(mode)
+            .iter()
+            .any(|t| self.held[*t as usize])
+    }
+
+    /// A tint's alpha at full shade (0: held back to no shading at all).
+    pub fn strongest(&self, tint: Tint) -> f32 {
+        self.tints[tint as usize].2
+    }
+
+    /// A cell's fill at `shade` (0..=1: its volume against the largest cell's).
+    pub fn color(&self, tint: Tint, shade: f32) -> CellFill {
+        let (c, lo, hi) = self.tints[tint as usize];
+        with_alpha(c, lo + (hi - lo) * shade.clamp(0.0, 1.0))
+    }
+}
+
+/// The strongest alpha, at most `top`, at which `tint` over `bg` keeps each of `texts` at
+/// [`CELL_TEXT_CONTRAST`], and so does every weaker alpha (steps of 1/64; no allocation).
+fn readable_alpha(bg: Rgb, tint: Rgb, top: f32, texts: &[Hsla]) -> f32 {
+    const STEPS: u16 = 64;
+    let reads = |a: f32| {
+        let seen = blend(tint, a, bg);
+        texts.iter().all(|x| {
+            lines_core::style::contrast(crate::theme::rgb_of(*x), seen) >= CELL_TEXT_CONTRAST
+        })
+    };
+    let mut ok = 0.0;
+    for i in 1..=STEPS {
+        let a = top * f32::from(i) / f32::from(STEPS);
+        if !reads(a) {
+            break;
+        }
+        ok = a;
+    }
+    ok
+}
+
+/// `top` at alpha `a` over opaque `bottom`, as drawn.
+pub fn blend(top: Rgb, a: f32, bottom: Rgb) -> Rgb {
+    let a = f64::from(a.clamp(0.0, 1.0));
+    let mix = |x: u8, y: u8| (f64::from(x) * a + f64::from(y) * (1.0 - a)).round() as u8;
+    Rgb {
+        r: mix(top.r, bottom.r),
+        g: mix(top.g, bottom.g),
+        b: mix(top.b, bottom.b),
+    }
+}
+
+/// The style editor's warning on the footprint's Cells tab when the color and opacity picked
+/// are held back in the chart's `mode` (off: in any mode, each named) in some theme or palette.
+/// Holds unstyled cells already have (sell × buy, the cells' own color) aren't warned about;
+/// a tint held back to no shading at all says so. `themes` in the order of `ctxs`.
+pub fn cells_warning(
+    looks: &[Look; 3],
+    mode: FootprintMode,
+    themes: &[Theme],
+    ctxs: &[crate::style_editor::ThemeCtx],
+) -> Option<crate::style_editor::Warning> {
+    let cells = study_style::FP_CELLS;
+    if looks[cells].style == FOOTPRINT[cells].style {
+        return None;
+    }
+    let own = looks[cells].color() == Color::Own;
+    let plain = Look::defaults(&FOOTPRINT);
+    let all = [
+        FootprintMode::BidAsk,
+        FootprintMode::Delta,
+        FootprintMode::Volume,
+    ];
+    let modes: &[FootprintMode] = if mode == FootprintMode::Off {
+        &all
+    } else {
+        std::slice::from_ref(&mode)
+    };
+    let mut gone = false;
+    let mut named: Vec<&str> = Vec::new();
+    let mut hit = vec![false; themes.len()];
+    for m in modes {
+        for (t, h) in themes.iter().zip(hit.iter_mut()) {
+            let s = CellShades::of(t, looks, *m);
+            let before = CellShades::of(t, &plain, *m);
+            let new_hold = CellShades::tints(*m)
+                .iter()
+                .any(|i| s.held[*i as usize] && !(own && before.held[*i as usize]));
+            if new_hold {
+                *h = true;
+                gone |= CellShades::tints(*m).iter().any(|i| s.strongest(*i) <= 0.0);
+                if !named.contains(&m.label()) {
+                    named.push(m.label());
+                }
+            }
+        }
+    }
+    if !hit.iter().any(|h| *h) {
+        return None;
+    }
+    let what = if gone { "Not shaded" } else { "Shown fainter" };
+    let in_mode = format!(" in {},", named.join(" and "));
+    Some(crate::style_editor::Warning {
+        text: format!(
+            "{what}{in_mode}{}, so the counts on the cells stay readable (4.5:1).",
+            crate::style_editor::where_phrase(ctxs, &hit)
+        ),
+        swatch: None,
+    })
+}
+
+/// The style editor's warning on the footprint's Imbalances tab when a color is picked: both
+/// sides' marks then share it in every theme and palette, and only their place (each under its
+/// side's number) tells a buy imbalance from a sell one.
+pub fn imbalance_warning(looks: &[Look; 3]) -> Option<crate::style_editor::Warning> {
+    (looks[study_style::FP_IMBALANCE].color() != Color::Own).then(|| crate::style_editor::Warning {
+        text: "Buy and sell imbalance marks share this color in every theme and palette; only their place tells them apart (each under its side's number), and the numbers take the main text color.".to_owned(),
+        swatch: None,
+    })
 }
 
 impl FootprintLayer {
@@ -339,6 +551,9 @@ impl FootprintLayer {
             first_bar: 0,
             legend_block: (0.0, 0.0),
             fallbacks: Fallbacks::default(),
+            style: PartStyles::new(),
+            looks: Look::defaults(&FOOTPRINT),
+            shades: None,
             open_close: Vec::new(),
             drawn: Vec::new(),
         }
@@ -356,6 +571,18 @@ impl FootprintLayer {
 
     pub fn set_config(&mut self, c: FootprintConfig) {
         self.config = c;
+    }
+
+    /// Its user styles, as saved.
+    pub fn style(&self) -> &PartStyles {
+        &self.style
+    }
+
+    pub fn set_style(&mut self, style: &PartStyles) {
+        if *style != self.style {
+            self.style = style.clone();
+            self.looks = study_style::read(style, &FOOTPRINT);
+        }
     }
 
     /// Why bars are candles this frame (the chart repaints its legend when this changes).
@@ -695,6 +922,24 @@ impl ChartLayer for FootprintLayer {
         let row_h = row_height(vp, u, scale);
         let max = self.frame.max_cell.0.max(1) as f32;
         let mode = self.config.mode;
+        let key = (t.name, mode, self.looks);
+        let shades = match self.shades {
+            Some((k, s)) if k == key => s,
+            _ => {
+                let s = CellShades::of(t, &self.looks, mode);
+                self.shades = Some((key, s));
+                s
+            }
+        };
+        let imb = self.looks[study_style::FP_IMBALANCE];
+        let (imb_sell, imb_buy) = (
+            t.part_color(imb.color(), t.down, imb.opacity()),
+            t.part_color(imb.color(), t.up, imb.opacity()),
+        );
+        // Imbalanced numbers keep their side's color only with the marks' own color.
+        let own_marks = imb.color() == lines_core::style::Color::Own;
+        let poc = self.looks[study_style::FP_POC];
+        let poc_color = t.part_color(poc.color(), t.text_main, poc.opacity());
         let mut s = FixedStr::<32>::new();
         for bi in 0..self.frame.bars.len() {
             let b: BarCells = self.frame.bars[bi];
@@ -747,11 +992,12 @@ impl ChartLayer for FootprintLayer {
                     self.drawn.push([left, left + w, top, top + row_h]);
                 }
                 let shade = (c.total.0 as f32 / max).clamp(0.08, 1.0);
-                let bg = match mode {
-                    FootprintMode::Delta if c.delta() > 0 => t.up.opacity(0.12 + 0.4 * shade),
-                    FootprintMode::Delta if c.delta() < 0 => t.down.opacity(0.12 + 0.4 * shade),
-                    _ => t.text_dim.opacity(0.06 + 0.22 * shade),
+                let tint = match mode {
+                    FootprintMode::Delta if c.delta() > 0 => Tint::Up,
+                    FootprintMode::Delta if c.delta() < 0 => Tint::Down,
+                    _ => Tint::Neutral,
                 };
+                let bg = shades.color(tint, shade);
                 // Opaque: what was drawn under the cell (profile, VWAP) never shows through it.
                 let cell = rect(left, top, w, (row_h - hair).max(hair));
                 window.paint_quad(fill(cell, t.bg));
@@ -763,8 +1009,8 @@ impl ChartLayer for FootprintLayer {
                 let uy = snap(f64::from(top + row_h - uh - 2.0));
                 if mode != FootprintMode::BidAsk {
                     for (on, buy, color) in [
-                        (c.imbalance.sell, false, t.down),
-                        (c.imbalance.buy, true, t.up),
+                        (c.imbalance.sell, false, imb_sell),
+                        (c.imbalance.buy, true, imb_buy),
                     ] {
                         if on {
                             let (x, uw) = imbalance_underline(w, buy);
@@ -781,7 +1027,7 @@ impl ChartLayer for FootprintLayer {
                         rect(left, top, hair, row_h),
                         rect(r, top, hair, row_h),
                     ] {
-                        window.paint_quad(fill(q, t.text_main));
+                        window.paint_quad(fill(q, poc_color));
                     }
                 }
                 // Every drawn cell carries its numbers: `prepare` kept only bars whose
@@ -818,17 +1064,21 @@ impl ChartLayer for FootprintLayer {
                             rect(mid_x, top + 2.0, hair, (row_h - 4.0).max(hair)),
                             t.text_dim.opacity(0.35),
                         ));
-                        let sell = if c.imbalance.sell {
+                        let sell = if c.imbalance.sell && own_marks {
                             t.down
                         } else {
                             t.text_main
                         };
-                        let buy = if c.imbalance.buy { t.up } else { t.text_main };
+                        let buy = if c.imbalance.buy && own_marks {
+                            t.up
+                        } else {
+                            t.text_main
+                        };
                         num(&mut s, c.sell.0);
                         if c.imbalance.sell {
                             let tw = self.glyphs.width(s.as_str(), sell, true, window);
                             let x = mid_x - GUTTER - tw - 1.0;
-                            window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), t.down));
+                            window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), imb_sell));
                         }
                         self.glyphs.paint_right(
                             s.as_str(),
@@ -844,7 +1094,7 @@ impl ChartLayer for FootprintLayer {
                         if c.imbalance.buy {
                             let tw = self.glyphs.width(s.as_str(), buy, true, window);
                             let x = mid_x + GUTTER - 1.0;
-                            window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), t.up));
+                            window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), imb_buy));
                         }
                         self.glyphs.paint(
                             s.as_str(),
@@ -1316,5 +1566,194 @@ mod tests {
         let back: FootprintConfig = serde_json::from_str(r#"{"mode":"delta"}"#).unwrap();
         assert_eq!(back.mode, FootprintMode::Delta);
         assert_eq!(back.imbalance_pct, 300, "missing fields take the defaults");
+    }
+
+    /// A cells' color and opacity as styled (`looks` otherwise unstyled).
+    fn styled(color: Color, opacity: u8, own_marks: bool) -> [Look; 3] {
+        use crate::style_editor::PartStyle;
+        let mut looks = Look::defaults(&FOOTPRINT);
+        if let PartStyle::Fill(f) = &mut looks[study_style::FP_CELLS].style {
+            f.color = color;
+            f.opacity = opacity;
+        }
+        if !own_marks && let PartStyle::Line(l) = &mut looks[study_style::FP_IMBALANCE].style {
+            l.color = Color::Palette(1);
+        }
+        looks
+    }
+
+    /// B1 (decision 0026): every number a cell carries (the main text color; in sell × buy
+    /// with the marks' own color, the up and down colors) stays AA on every shade of its
+    /// cell, whatever the cells' color and opacity, in every theme, palette and mode; a tint
+    /// that isn't held back is exactly the control's.
+    #[test]
+    fn cell_numbers_stay_readable_on_any_cell_color() {
+        let mut colors = vec![Color::Own];
+        colors.extend((0..4).map(Color::Palette));
+        for hex in [
+            0xffffff, 0x000000, 0xc4c8d6, 0x808080, 0xf719cb, 0x3fcf9a, 0xff6b7f, 0x4a4f63,
+            0xe2c46a, 0x1a1a1a, 0xfff7c0,
+        ] {
+            colors.push(Color::Custom(Rgb::hex(hex)));
+        }
+        let modes = [
+            FootprintMode::BidAsk,
+            FootprintMode::Delta,
+            FootprintMode::Volume,
+        ];
+        for t in Theme::all() {
+            let bg = crate::theme::rgb_of(t.bg);
+            for mode in modes {
+                // Unstyled, only sell × buy holds back (an imbalanced number in its side's
+                // color on the strongest neutral cells was below AA before styles).
+                let plain = CellShades::of(&t, &Look::defaults(&FOOTPRINT), mode);
+                if mode != FootprintMode::BidAsk {
+                    assert!(
+                        !plain.held_in(mode),
+                        "{} {mode:?}: unstyled cells held back",
+                        t.name
+                    );
+                }
+                for &color in &colors {
+                    for opacity in [10, 25, 50, 75, 100] {
+                        for own_marks in [true, false] {
+                            let looks = styled(color, opacity, own_marks);
+                            let s = CellShades::of(&t, &looks, mode);
+                            let mut texts = vec![t.text_main];
+                            if mode == FootprintMode::BidAsk && own_marks {
+                                texts.extend([t.up, t.down]);
+                            }
+                            let tints: &[Tint] = if mode == FootprintMode::Delta {
+                                &[Tint::Neutral, Tint::Up, Tint::Down]
+                            } else {
+                                &[Tint::Neutral]
+                            };
+                            for &tint in tints {
+                                for shade in [0.0, 0.08, 0.5, 1.0] {
+                                    let c = s.color(tint, shade);
+                                    let seen = blend(crate::theme::rgb_of(c), c.a, bg);
+                                    for x in &texts {
+                                        let r = lines_core::style::contrast(
+                                            crate::theme::rgb_of(*x),
+                                            seen,
+                                        );
+                                        assert!(
+                                            r >= 4.5,
+                                            "{} {mode:?} {color:?} {opacity}% {tint:?} \
+                                             shade {shade}: {r:.2}:1",
+                                            t.name
+                                        );
+                                    }
+                                }
+                            }
+                            if !s.held[Tint::Neutral as usize] {
+                                // Not held back: the control's opacity exactly.
+                                let (lo, span) = NEUTRAL_SHADE;
+                                let want = (lo + span) * f32::from(opacity) / 100.0;
+                                let got = s.color(Tint::Neutral, 1.0).a;
+                                assert!((got - want).abs() < 1e-4, "{got} vs {want}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A light custom cell color on dark is held back and the editor says where, naming the
+    /// theme and palette.
+    #[test]
+    fn a_held_cell_color_is_warned_about() {
+        let themes = Theme::all();
+        let ctxs: Vec<_> = themes.iter().map(Theme::study_ctx).collect();
+        for mode in [
+            FootprintMode::Off,
+            FootprintMode::BidAsk,
+            FootprintMode::Delta,
+        ] {
+            assert_eq!(
+                cells_warning(&Look::defaults(&FOOTPRINT), mode, &themes, &ctxs),
+                None
+            );
+        }
+        let white = styled(Color::Custom(Rgb::hex(0xffffff)), 100, true);
+        let w = cells_warning(&white, FootprintMode::Delta, &themes, &ctxs)
+            .expect("white cells on dark are held");
+        assert!(w.text.contains("in delta,"), "{}", w.text);
+        assert!(w.text.contains("dark theme, both palettes"), "{}", w.text);
+        assert!(w.text.contains("4.5:1"), "{}", w.text);
+        assert!(w.text.starts_with("Shown fainter"), "{}", w.text);
+        let dark = themes.iter().find(|t| t.is_dark()).unwrap();
+        assert!(CellShades::of(dark, &white, FootprintMode::Delta).held_in(FootprintMode::Delta));
+    }
+
+    /// N4: the warning is for the chart's mode (off: each mode held, named), and holds the
+    /// unstyled cells already have (sell × buy, own color) aren't warned about.
+    #[test]
+    fn cells_warning_follows_the_charts_mode() {
+        let themes = Theme::all();
+        let ctxs: Vec<_> = themes.iter().map(Theme::study_ctx).collect();
+        use crate::style_editor::PartStyle;
+        // Own color, only fainter: sell × buy's unstyled hold isn't the user's doing.
+        for op in [50, 75] {
+            let mut looks = Look::defaults(&FOOTPRINT);
+            if let PartStyle::Fill(f) = &mut looks[study_style::FP_CELLS].style {
+                f.opacity = op;
+            }
+            for mode in [
+                FootprintMode::BidAsk,
+                FootprintMode::Volume,
+                FootprintMode::Off,
+            ] {
+                let w = cells_warning(&looks, mode, &themes, &ctxs);
+                assert_eq!(w, None, "own {op}% {mode:?}");
+            }
+        }
+        // White on dark: held in sell × buy and delta, not in volume (main-color numbers keep
+        // AA on it); off names each mode held, a mode only itself.
+        let white = styled(Color::Custom(Rgb::hex(0xffffff)), 100, true);
+        let off = cells_warning(&white, FootprintMode::Off, &themes, &ctxs).unwrap();
+        assert!(
+            off.text.contains("in sell × buy and delta,"),
+            "{}",
+            off.text
+        );
+        assert_eq!(
+            cells_warning(&white, FootprintMode::Volume, &themes, &ctxs),
+            None
+        );
+        let bid = cells_warning(&white, FootprintMode::BidAsk, &themes, &ctxs).unwrap();
+        assert!(bid.text.contains("in sell × buy,"), "{}", bid.text);
+        assert!(!bid.text.contains("delta"), "{}", bid.text);
+    }
+
+    /// N2/N5: unstyled sell × buy cells are held back (the side-colored numbers on the
+    /// strongest neutral cells), by exactly what `CellShades`' doc says; every unstyled tint
+    /// in every mode keeps some shading (never collapsed to 0).
+    #[test]
+    fn unstyled_sell_buy_caps() {
+        let plain = Look::defaults(&FOOTPRINT);
+        let want = [
+            ("dark", 0.223),
+            ("dark-colorblind", 0.267),
+            ("light", 0.109),
+            ("light-colorblind", 0.140),
+        ];
+        for t in Theme::all() {
+            for mode in [
+                FootprintMode::BidAsk,
+                FootprintMode::Delta,
+                FootprintMode::Volume,
+            ] {
+                let s = CellShades::of(&t, &plain, mode);
+                for tint in CellShades::tints(mode) {
+                    assert!(s.strongest(*tint) > 0.0, "{} {mode:?} {tint:?}", t.name);
+                }
+            }
+            let got = CellShades::of(&t, &plain, FootprintMode::BidAsk).strongest(Tint::Neutral);
+            println!("{}: {got:.3}", t.name);
+            let w = want.iter().find(|(n, _)| *n == t.name).unwrap().1;
+            assert!((got - w).abs() < 0.006, "{}: {got:.3} vs doc {w}", t.name);
+        }
     }
 }

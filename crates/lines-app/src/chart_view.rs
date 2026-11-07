@@ -83,6 +83,7 @@ use crate::study_menu::{
     Item, MenuCmd, MenuInput, SourceInfo, StudyAction, StudyMenu, StudyRef, StudySet, anchor_at,
     save_template,
 };
+use crate::study_style::StudyStyles;
 use crate::theme::Theme;
 use crate::wsdoc::{ChartState, PaneDoc, StudyVisibility};
 
@@ -281,6 +282,12 @@ pub struct ChartView {
     study_draft: Option<StudyMenu>,
     /// Waiting for a click on a bar to anchor a VWAP: `Some(None)` adds a new one.
     anchoring: Option<Option<usize>>,
+    /// The style editor open on a study's parts (the studies menu's "Style…"): Esc steps
+    /// back to the menu.
+    study_style: Option<(StudyRef, crate::style_editor::StyleEditor)>,
+    /// Study styles a newer build saved for studies this one doesn't have (kept, written
+    /// back).
+    styles_extra: serde_json::Map<String, serde_json::Value>,
     /// External levels (decision 0022), saved with the pane.
     levels: LevelsLayer,
     /// `levels.revision()` last drawn.
@@ -492,6 +499,8 @@ impl ChartView {
 
         let mut view = ChartView {
             study_menu: None,
+            study_style: None,
+            styles_extra: serde_json::Map::new(),
             study_draft: None,
             anchoring: None,
             feed,
@@ -624,14 +633,34 @@ impl ChartView {
             profile: self.profile.config(),
             levels: self.levels.config.clone(),
             footprint: self.footprint.config(),
+            styles: self.study_styles(),
         }
+    }
+
+    /// The chart-wide studies' styles (profile, footprint, level sources).
+    fn study_styles(&self) -> StudyStyles {
+        StudyStyles {
+            profile: self.profile.style().clone(),
+            footprint: self.footprint.style().clone(),
+            levels: self.levels.styles().clone(),
+            extra: self.styles_extra.clone(),
+        }
+    }
+
+    fn set_study_styles(&mut self, s: &StudyStyles) {
+        self.profile.set_style(&s.profile);
+        self.footprint.set_style(&s.footprint);
+        self.levels.set_styles(&s.levels);
+        self.styles_extra = s.extra.clone();
     }
 
     /// Replace this chart's studies (a template, the defaults, a menu change).
     pub fn set_study_set(&mut self, s: StudySet) {
-        if s.indicators != self.studies.configs() {
+        // A restyle keeps the studies' engine nodes; anything else builds them anew.
+        if s.indicators != self.studies.configs() && !self.studies.restyle(&s.indicators) {
             self.set_indicator_configs(s.indicators);
         }
+        self.set_study_styles(&s.styles);
         self.profile.set_config(s.profile);
         self.levels.config = s.levels;
         self.footprint.set_config(s.footprint);
@@ -720,7 +749,9 @@ impl ChartView {
             }
             Kind::Account => return crate::trade_bar::close_account_menu(self, cx),
             Kind::StyleEditor => {
-                if !self.drawings.close_editor() {
+                let drawing = self.drawings.close_editor();
+                let study = self.study_style.take().is_some();
+                if !drawing && !study {
                     return;
                 }
             }
@@ -732,11 +763,29 @@ impl ChartView {
 
     /// Screenshot fixture: the menu open, optionally on a study's editor.
     fn open_menu_at(&mut self, spec: &str, cx: &mut Context<Self>) {
-        let editing = match spec.split(':').collect::<Vec<_>>().as_slice() {
-            ["edit", "vwap", i] => i.parse().ok().map(StudyRef::Vwap),
-            ["edit", "profile"] => Some(StudyRef::Profile),
-            ["edit", "levels", id] => Some(StudyRef::Levels((*id).to_owned())),
-            _ => None,
+        let parts: Vec<&str> = spec.split(':').collect();
+        let study = |p: &[&str]| -> Option<(StudyRef, usize)> {
+            let n = |s: Option<&&str>| s.and_then(|s| s.parse().ok()).unwrap_or(0);
+            match p {
+                ["vwap", i, rest @ ..] => Some((StudyRef::Vwap(i.parse().ok()?), n(rest.first()))),
+                ["delta", i, rest @ ..] => {
+                    Some((StudyRef::Delta(i.parse().ok()?), n(rest.first())))
+                }
+                ["profile", rest @ ..] => Some((StudyRef::Profile, n(rest.first()))),
+                ["footprint", rest @ ..] => Some((StudyRef::Footprint, n(rest.first()))),
+                ["levels", id, rest @ ..] => {
+                    Some((StudyRef::Levels((*id).to_owned()), n(rest.first())))
+                }
+                _ => None,
+            }
+        };
+        let (editing, style) = match parts.as_slice() {
+            ["edit", rest @ ..] => (study(rest).map(|(r, _)| r), None),
+            ["style", rest @ ..] => {
+                let s = study(rest);
+                (s.as_ref().map(|(r, _)| r.clone()), s)
+            }
+            _ => (None, None),
         };
         let mut m = StudyMenu {
             editing,
@@ -744,7 +793,115 @@ impl ChartView {
         };
         let items = self.menu_items(&m, cx);
         m.clamp(&items);
+        // On "Style…" (the draft the style editor steps back to).
+        if let Some(i) = items
+            .iter()
+            .position(|it| {
+                matches!(
+                    it,
+                    Item::Control {
+                        cmd: MenuCmd::Style(_),
+                        ..
+                    }
+                )
+            })
+            .filter(|_| style.is_some())
+        {
+            m.cursor = i;
+        }
         self.study_menu = Some(m);
+        if let Some((r, tab)) = style {
+            self.open_study_style(r, cx);
+            if let Some((_, e)) = self.study_style.as_mut() {
+                e.select_tab(tab);
+            }
+        }
+    }
+
+    /// The style editor's title and parts for study `r` of `set` (`None`: not on the chart).
+    fn study_style_editor(
+        &self,
+        set: &StudySet,
+        r: &StudyRef,
+    ) -> Option<crate::style_editor::StyleEditor> {
+        use crate::study_style as ss;
+        let (title, defs, looks, source): (String, &[ss::PartDef], Vec<ss::Look>, _) = match r {
+            StudyRef::Vwap(i) => {
+                let c = set.indicators.get(*i)?;
+                let lines_indicators::IndicatorConfig::Vwap { spec, .. } = c else {
+                    return None;
+                };
+                (
+                    crate::study_menu::vwap_label(spec),
+                    &ss::VWAP,
+                    ss::vwap_looks(c).to_vec(),
+                    None,
+                )
+            }
+            StudyRef::Delta(i) => {
+                let c = set.indicators.get(*i)?;
+                let lines_indicators::IndicatorConfig::CumDelta { .. } = c else {
+                    return None;
+                };
+                (
+                    "Cumulative delta".to_owned(),
+                    &ss::DELTA,
+                    ss::read(c.style(), &ss::DELTA).to_vec(),
+                    None,
+                )
+            }
+            StudyRef::Profile => (
+                "Volume profile".to_owned(),
+                &ss::PROFILE,
+                ss::read(&set.styles.profile, &ss::PROFILE).to_vec(),
+                None,
+            ),
+            StudyRef::Footprint => (
+                "Footprint".to_owned(),
+                &ss::FOOTPRINT,
+                ss::read(&set.styles.footprint, &ss::FOOTPRINT).to_vec(),
+                None,
+            ),
+            StudyRef::Levels(id) => {
+                let (_, label, _) = self.levels.sources().into_iter().find(|s| s.0 == *id)?;
+                let looks = set.styles.levels.get(id).map_or_else(
+                    || ss::Look::defaults(&ss::LEVELS),
+                    |m| ss::read(m, &ss::LEVELS),
+                );
+                (
+                    format!("Levels · {label}"),
+                    &ss::LEVELS,
+                    looks.to_vec(),
+                    self.levels.source_color(id),
+                )
+            }
+        };
+        Some(ss::editor(format!("{title} style"), defs, &looks, source))
+    }
+
+    /// Open the style editor on study `r`'s parts ("Style…" in its editor): the studies menu
+    /// closes, kept as the draft Esc steps back to; any other popover closes (one at a time).
+    fn open_study_style(&mut self, r: StudyRef, cx: &mut Context<Self>) {
+        let Some(e) = self.study_style_editor(&self.study_set(), &r) else {
+            return;
+        };
+        self.close_popover(Kind::StyleEditor, cx);
+        self.close_popover(Kind::Studies, cx);
+        self.close_popover(Kind::Timeframe, cx);
+        self.close_popover(Kind::Account, cx);
+        self.picker.close();
+        self.anchoring = None;
+        self.editor_scroll = Default::default();
+        self.study_style = Some((r, e));
+        popover::opened(cx, Kind::StyleEditor, |v: &mut Self, cx| {
+            v.close_popover(Kind::StyleEditor, cx)
+        });
+        cx.notify();
+    }
+
+    /// A style editor is open (a drawing's or a study's).
+    fn styling(&self) -> bool {
+        self.drawings.editing() || self.study_style.is_some()
     }
 
     /// A click on menu item `i`.
@@ -811,7 +968,7 @@ impl ChartView {
                     .map(|t| t.set.clone());
                 if let Some(set) = t {
                     let mut s = self.study_set();
-                    s.apply(&StudyAction::Replace(set));
+                    s.apply(&StudyAction::Replace(Box::new(set)));
                     self.set_study_set(s);
                 }
             }
@@ -831,6 +988,7 @@ impl ChartView {
                 crate::picker_view::update_settings(cx, |s| s.chart_defaults = Some(set));
             }
             Some(MenuCmd::Close) => self.close_popover(Kind::Studies, cx),
+            Some(MenuCmd::Style(r)) => self.open_study_style(r, cx),
             Some(MenuCmd::Edit(_) | MenuCmd::StartSaveTemplate) | None => {}
         }
         if let Some(mut m) = self.study_menu.take() {
@@ -1022,11 +1180,7 @@ impl ChartView {
         // An open list or menu normally takes this press on its backdrop (`crate::popover`);
         // this is the fallback (a list whose chip is clipped away draws none). A press that
         // closes something does only that: no focus change, no pan.
-        if self.tf_menu
-            || self.trade.account_menu
-            || self.study_menu.is_some()
-            || self.drawings.editing()
-        {
+        if self.tf_menu || self.trade.account_menu || self.study_menu.is_some() || self.styling() {
             popover::mark_dismissing();
             self.close_popover(Kind::Timeframe, cx);
             self.close_popover(Kind::Account, cx);
@@ -1144,14 +1298,19 @@ impl ChartView {
             cx.stop_propagation();
             return;
         }
-        if self.drawings.editing() {
-            // The style editor takes its keys; Undo and Redo still work (the workspace leaves
-            // them to a pane taking text, so they run here).
+        if self.styling() {
+            // The style editor takes its keys; Undo and Redo still work on a drawing (the
+            // workspace leaves them to a pane taking text, so they run here).
             match editor_key(k) {
                 EditorKey::Editor => {
                     let text = k.key_char.as_deref().filter(|_| !m.alt);
                     let (key, shift) = (k.key.clone(), m.shift);
                     self.style_edit(|e| e.key(&key, shift, text), cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // A study's styles aren't drawings: nothing of theirs to undo.
+                EditorKey::Draw(_) if self.study_style.is_some() => {
                     cx.stop_propagation();
                     return;
                 }
@@ -1491,16 +1650,15 @@ impl ChartView {
         if !state.footprint.is_default() {
             self.footprint.set_config(state.footprint);
         }
+        // Saved styles win; a pane without them keeps its initial (`--study-set`) ones.
+        if !state.styles.is_empty() {
+            self.set_study_styles(&state.styles);
+        }
         if let Some(r) = state.subpane {
             self.subpane_ratio = crate::subpane::clamp_ratio(r);
         }
         // Saved indicators, then any given on the command line (`--vwap`) not among them.
-        let mut configs = state.indicators.clone();
-        for c in self.studies.configs() {
-            if !configs.contains(&c) {
-                configs.push(c);
-            }
-        }
+        let configs = merge_indicators(state.indicators.clone(), self.studies.configs());
         self.set_indicator_configs(configs);
     }
 
@@ -2042,7 +2200,7 @@ impl ChartView {
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
         self.footprint.ensure_capacity(plot_w);
         self.chart = bounds;
-        if self.drawings.editing() && self.editor_pane != (w, above_axis) {
+        if self.styling() && self.editor_pane != (w, above_axis) {
             // The style editor is placed from the pane's size: place it again.
             cx.notify();
         }
@@ -2836,17 +2994,19 @@ impl ChartView {
             for l in &self.scene.time_lines {
                 window.paint_quad(fill(rect(l.x, 0.0, hair, ph), t.grid));
             }
-            // Paint order inside the plot: grid, volume profile and the levels' back zones
-            // (behind the candles), candles, `layers`, indicator studies (VWAP lines), opaque
-            // footprint cells over them, the levels' front lines, the profile's label,
-            // last-price line, crosshair.
+            // Paint order inside the plot: grid, volume profile, the levels' zones and VWAP
+            // band fills (behind the candles: a heavy fill never covers a bar), candles,
+            // `layers`, indicator studies (VWAP lines and band edges), opaque footprint cells
+            // over them, the levels' front lines, the profile's label, drawings, then the
+            // last-price line (above every study fill and line), crosshair.
             let (studies, labels) = (
                 self.visibility.draws_studies(),
                 self.visibility.draws_labels(),
             );
             if studies {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
-                self.levels.paint_back(plot, window);
+                self.levels.paint_back(plot, &t, window);
+                self.studies.paint_back((ox, oy), &t, window);
             }
             // Tick charts: a faint dashed line where each session's bars begin, behind the
             // bars (dashed: never mistaken for the crosshair's solid line).
@@ -2943,7 +3103,7 @@ impl ChartView {
                 }
                 self.studies.paint((ox, oy), &t, window);
                 self.footprint.paint(plot, &self.vp, &t, window, cx);
-                self.levels.paint_front(plot, window);
+                self.levels.paint_front(plot, &t, window);
             }
             // Drawings: the trader's own marks, above the studies (shown unless hidden on
             // this chart; hiding studies or a clean chart leaves them).
@@ -2967,7 +3127,13 @@ impl ChartView {
             };
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
-                hline(window, y, 0.0, pw, t.last.opacity(0.6));
+                hline(
+                    window,
+                    y,
+                    0.0,
+                    pw,
+                    t.last.opacity(crate::theme::LAST_LINE_ALPHA),
+                );
             }
             // The open position: a dashed line at its average price (never the last price's
             // solid violet).
@@ -3741,7 +3907,7 @@ impl ChartView {
             || self.tf_entry.is_some()
             || self.drawings.typing()
             || self.study_menu.is_some()
-            || self.drawings.editing()
+            || self.styling()
     }
 
     // ---- the drawing style editor (crate::style_editor) ------------------------------------
@@ -3752,6 +3918,26 @@ impl ChartView {
         f: impl FnOnce(&mut crate::style_editor::StyleEditor) -> crate::style_editor::Outcome,
         cx: &mut Context<Self>,
     ) {
+        if let Some((r, mut e)) = self.study_style.take() {
+            // A study's editor: each change restyles the study (a `StudyAction`); Esc steps
+            // back to the studies menu, as it was left.
+            match f(&mut e) {
+                crate::style_editor::Outcome::Close => {
+                    popover::closed(cx, Kind::StyleEditor);
+                    self.toggle_studies_menu(cx);
+                }
+                crate::style_editor::Outcome::Changed => {
+                    let looks = crate::study_style::looks_of(&e);
+                    let mut s = self.study_set();
+                    s.apply(&StudyAction::SetStyle(r.clone(), looks));
+                    self.set_study_set(s);
+                    self.study_style = Some((r, e));
+                }
+                _ => self.study_style = Some((r, e)),
+            }
+            cx.notify();
+            return;
+        }
         let (out, saved) = self.drawings.edit_style(f);
         if out == crate::style_editor::Outcome::Close {
             popover::closed(cx, Kind::StyleEditor);
@@ -3806,6 +3992,8 @@ impl ChartView {
         if !self.drawings.open_editor(id) {
             return false;
         }
+        // One popover: a study's style editor gives way to the drawing's.
+        self.study_style = None;
         self.picker.close();
         self.anchoring = None;
         self.editor_scroll = Default::default();
@@ -3820,18 +4008,49 @@ impl ChartView {
     }
 
     /// The open style editor over the window, with a backdrop under it (`crate::popover`):
-    /// placed beside its drawing, inside the pane; its warnings checked in every theme.
+    /// placed beside its drawing (a study's under the study legend), inside the pane; its
+    /// warnings checked in every theme and palette.
     fn style_editor_layer(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let e = self.drawings.editor()?.clone();
-        let id = self.drawings.editor_target()?;
-        let ctxs: Vec<_> = Theme::all().iter().map(Theme::style_ctx).collect();
-        let warnings = e.warnings(&ctxs);
+        // A study's editor sits at the plot's left under the study legend, away from the
+        // newest bars; a drawing's beside its drawing. Warnings name theme and palette.
+        let (e, target, warnings) = match &self.study_style {
+            Some((r, e)) => {
+                let themes = Theme::all();
+                let chart = crate::study_style::ChartCtx::of(&self.study_set(), r, &themes);
+                let warnings = crate::study_style::warnings(r, e, &themes, &chart);
+                (e.clone(), None, warnings)
+            }
+            None => {
+                let e = self.drawings.editor()?.clone();
+                let id = self.drawings.editor_target()?;
+                let ctxs: Vec<_> = Theme::all().iter().map(Theme::style_ctx).collect();
+                let warnings = e.warnings(&ctxs);
+                (e, Some(self.drawings.extent(id)), warnings)
+            }
+        };
         // Inside the plot area: never over the time axis, the status bar or a pane below.
         let area = (f32::from(self.chart.size.width), self.above_axis);
         self.editor_pane = area;
         let w = crate::style_editor_view::width(area.0);
-        let h = crate::style_editor_view::content_height(&e, &warnings, w, &t.drawing_names);
-        let at = crate::style_editor_view::place(area, self.drawings.extent(id), h);
+        let names = crate::style_editor_view::names(&e, t);
+        let h = crate::style_editor_view::content_height(&e, &warnings, w, names);
+        let at = match target {
+            Some(extent) => crate::style_editor_view::place(area, extent, h),
+            None => {
+                // The volume profile's editor stays clear of the profile (anchored at the
+                // plot's left), its POC included.
+                let pc = self.profile.config();
+                let left_clear = match &self.study_style {
+                    Some((StudyRef::Profile, _))
+                        if pc.mode != crate::profile::ProfileMode::Off && !pc.hidden =>
+                    {
+                        (area.0 - AXIS_W).max(0.0) * pc.width()
+                    }
+                    _ => 0.0,
+                };
+                crate::style_editor_view::place_study(area, self.legend_band.get().1, left_clear, h)
+            }
+        };
         // A key that moved the focus scrolls it into view. Until the layout it needs exists
         // (the body's first, the focused row's controls) the follow stays pending (a few
         // frames at most); each follow renders the pane once more (a cached view), so the
@@ -4780,6 +4999,7 @@ impl Pane for ChartView {
                 .then_some(self.tick_continuous()),
             timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
             footprint: self.footprint.config(),
+            styles: self.study_styles(),
             subpane: (self.subpane_ratio != crate::subpane::DEFAULT_RATIO)
                 .then_some(self.subpane_ratio),
         });
@@ -4934,6 +5154,22 @@ enum EditorKey {
     Draw(DrawCmd),
     /// Another Ctrl/Cmd shortcut: on to the chart's other handling.
     Pass,
+}
+
+/// A restored chart's studies: the saved ones, then each initial one (`--vwap`) the saved
+/// ones don't already have, ignoring styles (a saved styled VWAP ETH and `--vwap eth` are one
+/// study, kept with its saved styles).
+fn merge_indicators(
+    saved: Vec<lines_indicators::IndicatorConfig>,
+    initial: Vec<lines_indicators::IndicatorConfig>,
+) -> Vec<lines_indicators::IndicatorConfig> {
+    let mut out = saved;
+    for c in initial {
+        if !out.iter().any(|s| s.same_but_style(&c)) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn editor_key(k: &gpui::Keystroke) -> EditorKey {
@@ -5468,6 +5704,42 @@ const PICKER_CLOSES: [Kind; 4] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N4: a restored chart keeps a saved styled study and doesn't add the same study from
+    /// the command line again (styles aside); a different one is added.
+    #[test]
+    fn restore_merges_initial_studies_ignoring_styles() {
+        use lines_indicators::{IndicatorConfig, Reset, VwapSpec};
+        let vwap = |reset: Reset| IndicatorConfig::Vwap {
+            spec: VwapSpec {
+                reset,
+                ..VwapSpec::default()
+            },
+            color: 0,
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let mut styled = vwap(Reset::Eth);
+        styled
+            .style_mut()
+            .insert("line".into(), serde_json::json!({"color": "#f719cb"}));
+        let out = merge_indicators(vec![styled.clone()], vec![vwap(Reset::Eth)]);
+        assert_eq!(
+            out,
+            vec![styled.clone()],
+            "one VWAP ETH, with its saved styles"
+        );
+        // Restyled through the config's own fields (line color index, width): still the same.
+        let mut recolored = vwap(Reset::Eth);
+        if let IndicatorConfig::Vwap { color, display, .. } = &mut recolored {
+            *color = 3;
+            display.width = 4;
+        }
+        let out = merge_indicators(vec![recolored.clone()], vec![vwap(Reset::Eth)]);
+        assert_eq!(out, vec![recolored], "color and width are styles");
+        let out = merge_indicators(vec![styled.clone()], vec![vwap(Reset::Rth)]);
+        assert_eq!(out, vec![styled, vwap(Reset::Rth)]);
+    }
     use lines_core::{Aggressor, Capabilities, Month, Qty};
     use lines_feed::catalog;
     use lines_feed::provider::MarketEvent;
@@ -5678,6 +5950,7 @@ mod tests {
                 spec: lines_indicators::VwapSpec::default(),
                 color: 0,
                 display: Default::default(),
+                style: Default::default(),
             }]);
         let hidden = StudyVisibility {
             hide_studies: true,

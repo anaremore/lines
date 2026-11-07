@@ -342,6 +342,13 @@ pub struct ChartState {
         skip_serializing_if = "crate::footprint::FootprintConfig::is_default"
     )]
     pub footprint: crate::footprint::FootprintConfig,
+    /// User styles of the profile, the footprint and level sources (decision 0026; VWAPs and
+    /// cumulative delta keep theirs in `indicators`). Optional: absent means today's look.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::study_style::StudyStyles::is_empty"
+    )]
+    pub styles: crate::study_style::StudyStyles,
     /// The sub-pane's share of the chart's height (`crate::subpane`), when it was moved from
     /// the default. Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -908,10 +915,12 @@ mod tests {
                 },
                 color: 1,
                 display: Default::default(),
+                style: Default::default(),
             }],
             profile: ProfileConfig::default(),
             magnet: false,
             footprint: Default::default(),
+            styles: Default::default(),
             subpane: None,
         };
         let json = serde_json::to_string(&state).unwrap();
@@ -929,6 +938,7 @@ mod tests {
             profile: ProfileConfig::default(),
             magnet: false,
             footprint: Default::default(),
+            styles: Default::default(),
             subpane: None,
         })
         .unwrap();
@@ -1013,6 +1023,7 @@ mod tests {
                             profile: ProfileConfig::default(),
                             magnet: false,
                             footprint: Default::default(),
+                            styles: Default::default(),
                             subpane: None,
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
@@ -1090,6 +1101,7 @@ mod tests {
                 spec: lines_indicators::VwapSpec::default(),
                 color: 1,
                 display: Default::default(),
+                style: Default::default(),
             }],
             profile: ProfileConfig {
                 mode: crate::profile::ProfileMode::Session,
@@ -1102,6 +1114,7 @@ mod tests {
             },
             magnet: false,
             footprint: Default::default(),
+            styles: Default::default(),
             subpane: None,
         };
         let json = serde_json::to_string(&hidden).unwrap();
@@ -1209,6 +1222,7 @@ mod tests {
                 profile,
                 magnet: false,
                 footprint: Default::default(),
+                styles: Default::default(),
                 subpane: None,
             }),
             ..PaneDoc::new(PaneKind::Chart, None, None)
@@ -1241,10 +1255,12 @@ mod tests {
                 spec: lines_indicators::VwapSpec::default(),
                 color: 0,
                 display: Default::default(),
+                style: Default::default(),
             }],
             profile: set,
             magnet: false,
             footprint: Default::default(),
+            styles: Default::default(),
             subpane: None,
         };
         let json = serde_json::to_string(&both).unwrap();
@@ -1319,6 +1335,7 @@ mod tests {
                 profile: ProfileConfig::default(),
                 magnet: false,
                 footprint: Default::default(),
+                styles: Default::default(),
                 subpane: None,
             })
         );

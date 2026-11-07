@@ -50,6 +50,7 @@ mod strategy_view;
 mod studies;
 mod study_menu;
 mod study_menu_view;
+mod study_style;
 mod style_doc;
 mod style_editor;
 mod style_editor_view;
@@ -482,8 +483,9 @@ struct Cli {
     /// or the defaults for new charts hold them).
     #[arg(long, requires = "screenshot")]
     study_set: Option<PathBuf>,
-    /// Screenshot: render with the studies menu open: `open`, or `edit:vwap:N`,
-    /// `edit:profile`, `edit:levels:ID` for that study's editor.
+    /// Screenshot: render with the studies menu open: `open`, or `edit:STUDY` for that
+    /// study's editor, or `style:STUDY[:TAB]` for the style editor on its parts (tab 0 =
+    /// first). STUDY: `vwap:N`, `delta:N`, `profile`, `footprint`, `levels:ID`.
     #[arg(long, requires = "screenshot")]
     studies_menu: Option<String>,
     /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
@@ -1327,6 +1329,7 @@ where
                     spec: *spec,
                     color: (i % 4) as u8,
                     display: Default::default(),
+                    style: Default::default(),
                 })
                 .collect(),
             profile: ProfileConfig {

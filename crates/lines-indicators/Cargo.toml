@@ -9,6 +9,4 @@ description = "Indicator engine (series graph) and built-in indicators. Pure: no
 [dependencies]
 lines-core.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

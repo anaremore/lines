@@ -182,7 +182,7 @@ fn editor_controls_are_commands_and_keys_navigate() {
     let items = m.items(&input(&set, &src, &[]));
     let l = labels(&items);
     assert_eq!(
-        &l[1..20],
+        &l[1..22],
         [
             "VWAP ETH",
             "  Reset: ETH *",
@@ -200,7 +200,9 @@ fn editor_controls_are_commands_and_keys_navigate() {
             "  Width: Thin",
             "  Width: Normal *",
             "  Width: Thick",
+            "  Width: Heavy",
             "  Label: Show in legend *",
+            "  Style: Style…",
             "Levels · Demo levels",
             "# Add",
         ]
@@ -269,6 +271,7 @@ fn actions_change_the_set_and_hidden_studies_keep_their_settings() {
         spec,
         color,
         display,
+        ..
     } = set.indicators[0]
     else {
         panic!("a VWAP")
@@ -391,7 +394,7 @@ fn templates_save_apply_and_round_trip() {
     assert!(json.contains(r#"{"name":"plain","set":{}}"#), "{json}");
     // Applying a template to a new chart gives exactly its studies.
     let mut fresh = StudySet::default();
-    fresh.apply(&StudyAction::Replace(back[0].set.clone()));
+    fresh.apply(&StudyAction::Replace(Box::new(back[0].set.clone())));
     assert_eq!(fresh, set);
     // Naming flow: StartSaveTemplate, type, Enter.
     let mut m = StudyMenu::default();
@@ -437,4 +440,49 @@ fn a_closed_menu_reopens_with_its_draft() {
     assert_eq!(l[2], "  Reset: ETH *", "the editor is open again");
     // Once reopened the draft is used up: closing a finished menu starts fresh next time.
     assert_eq!(draft, None);
+}
+
+/// Every study's editor ends with "Style…", which asks for the style editor on that study
+/// (one entry and one key path: arrow to it, Enter).
+#[test]
+fn every_study_editor_offers_its_styles() {
+    let src = sources();
+    let mut set = StudySet::default();
+    set.apply(&StudyAction::AddVwap(Reset::Eth));
+    set.apply(&StudyAction::AddDelta(lines_indicators::DeltaReset::Eth));
+    set.apply(&StudyAction::AddProfile(ProfileMode::Session));
+    set.apply(&StudyAction::AddFootprint(FootprintMode::BidAsk));
+    for r in [
+        StudyRef::Vwap(0),
+        StudyRef::Delta(1),
+        StudyRef::Profile,
+        StudyRef::Footprint,
+        StudyRef::Levels(src[0].id.clone()),
+    ] {
+        let mut m = StudyMenu {
+            editing: Some(r.clone()),
+            ..StudyMenu::default()
+        };
+        let items = m.items(&input(&set, &src, &[]));
+        let at = items
+            .iter()
+            .position(|i| {
+                matches!(
+                    i,
+                    Item::Control {
+                        cmd: MenuCmd::Style(_),
+                        ..
+                    }
+                )
+            })
+            .unwrap_or_else(|| panic!("{r:?}: no Style…"));
+        // The last control of the study's editor.
+        assert!(!matches!(items[at + 1], Item::Control { .. }), "{r:?}");
+        m.clamp(&items);
+        while m.cursor != at {
+            m.key(&items, "down", None);
+        }
+        let cmd = m.key(&items, "enter", None).unwrap();
+        assert_eq!(m.local(cmd), Some(MenuCmd::Style(r.clone())));
+    }
 }

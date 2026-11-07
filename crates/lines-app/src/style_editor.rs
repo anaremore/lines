@@ -4,11 +4,14 @@
 //! back; every change comes back as an [`Outcome`] the owner applies (a drawing: one undo step
 //! per change).
 //!
-//! Drawings use it today ([`StyleEditor::for_drawing`], [`StyleEditor::drawing_style`]): a
-//! line tab (a note's is its edge marker), a zone's fill, a note's text, and the drawing
-//! options (extend left/right, the axis price tag) on the first tab. A study's editor (PR 2)
-//! builds its own [`Part`]s (a VWAP's line, each band's line and fill, …) and reads them back
-//! the same way; nothing here knows about drawings except those two functions.
+//! Drawings ([`StyleEditor::for_drawing`], [`StyleEditor::drawing_style`]): a line tab (a
+//! note's is its edge marker), a zone's fill, a note's text, and the drawing options (extend
+//! left/right, the axis price tag) on the first tab. Studies ([`StyleEditor::for_study`],
+//! built by `crate::study_style`): one tab per part (a VWAP's line, bands and band fill, ...);
+//! a part may have its own color ([`Own`], offered first as [`Color::Own`]: a theme token, the
+//! study's line, a level source's colors) and be optional (a "Show" checkbox: VWAP band
+//! edges). Study colors are the theme's study colors, and a study part's opacity scales the
+//! part's own translucency (`Theme::part_color`), so every part offers the line opacities.
 //!
 //! Keys: ↑↓ row, ←→ control, Enter or Space picks, Tab / Shift+Tab switch tabs, Esc closes (or
 //! leaves the custom color entry first). A custom color is typed as six hex digits.
@@ -51,6 +54,35 @@ impl PartStyle {
     }
 }
 
+/// What a study part's own color is (`Theme::own_color` shows it).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OwnToken {
+    Up,
+    Down,
+    /// Up for buyers, down for sellers (footprint imbalances: each side keeps its place too).
+    UpDown,
+    /// The theme's neutral (dim text) shade: footprint cells.
+    Neutral,
+    Text,
+    ProfileBuy,
+    ProfileSell,
+    ProfilePoc,
+    ProfileVa,
+    /// The study's line color (a VWAP's bands and band fill).
+    Line,
+    /// The colors a level source gives its levels (decision 0022); the first one, for the
+    /// swatch.
+    Source(Option<Rgb>),
+}
+
+/// A study part's own color: what [`Color::Own`] is called and shows.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Own {
+    /// "Theme", "Line color", "Source colors".
+    pub name: &'static str,
+    pub token: OwnToken,
+}
+
 /// A tab: what it styles and how.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Part {
@@ -58,6 +90,26 @@ pub struct Part {
     pub style: PartStyle,
     /// Lines: whether line type and width are offered (a note's edge marker has neither).
     pub stroke: bool,
+    /// Studies: the part's own color, offered first (`None`: drawings, a VWAP's line).
+    pub own: Option<Own>,
+    /// An optional part (drawn only when shown): whether it is (`None`: always drawn).
+    pub shown: Option<bool>,
+    /// Studies: one line under the part's colors saying how they apply (`None`: nothing).
+    pub note: Option<&'static str>,
+}
+
+impl Part {
+    /// A part always drawn, without an own color (drawings).
+    pub fn new(title: &'static str, style: PartStyle, stroke: bool) -> Part {
+        Part {
+            title,
+            style,
+            stroke,
+            own: None,
+            shown: None,
+            note: None,
+        }
+    }
 }
 
 /// Drawing options shown on the first tab (`None`: not offered).
@@ -83,6 +135,8 @@ pub enum Control {
     ExtendLeft,
     ExtendRight,
     AxisTag,
+    /// An optional part drawn (a checkbox).
+    Shown,
     SaveDefault,
 }
 
@@ -125,6 +179,9 @@ pub struct StyleEditor {
     pub hex: Option<String>,
     /// The current tab's style was just saved as the default (until the next change).
     pub saved: bool,
+    /// A study's editor: theme colors are the study colors, every part offers the line
+    /// opacities (a study part's opacity scales its own translucency).
+    pub study: bool,
 }
 
 /// A tool's name in the editor: its title ("Zone style") and the plural of "Save as default
@@ -146,7 +203,11 @@ pub fn tool_names(tool: Tool) -> (&'static str, &'static str) {
 pub fn is_toggle(c: Control) -> bool {
     matches!(
         c,
-        Control::TextBox | Control::ExtendLeft | Control::ExtendRight | Control::AxisTag
+        Control::TextBox
+            | Control::ExtendLeft
+            | Control::ExtendRight
+            | Control::AxisTag
+            | Control::Shown
     )
 }
 
@@ -173,6 +234,8 @@ impl ThemeCtx {
             Color::Palette(i) => self.palette[usize::from(i) % self.palette.len()],
             Color::Text => self.text,
             Color::Custom(rgb) => rgb,
+            // Never checked (a part's own color is the theme's or its source's).
+            Color::Own => self.palette[0],
         }
     }
 
@@ -208,27 +271,27 @@ fn misread(name: &str) -> &'static str {
     }
 }
 
-/// Where a finding holds, from the contexts it holds in (`hit[i]` for `ctxs[i]`): nothing when
-/// it holds in all of them, else " in the light theme (both palettes)", " in the colorblind
-/// palette (both themes)", or the combinations named, each with its palette.
-fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
+/// Where a finding holds, from the contexts it holds in (`hit[i]` for `ctxs[i]`), always
+/// naming themes and palettes: " in every theme and palette", " in the light theme, both
+/// palettes", " in the colorblind palette, both themes", or the combinations named.
+pub(crate) fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
     if hit.iter().all(|h| *h) {
-        return String::new();
+        return " in every theme and palette".into();
     }
     let exactly = |f: fn(&ThemeCtx) -> bool| {
         ctxs.iter().filter(|c| f(c)).count() >= 2 && ctxs.iter().zip(hit).all(|(c, h)| *h == f(c))
     };
     if exactly(|c| c.dark) {
-        return " in the dark theme (both palettes)".into();
+        return " in the dark theme, both palettes".into();
     }
     if exactly(|c| !c.dark) {
-        return " in the light theme (both palettes)".into();
+        return " in the light theme, both palettes".into();
     }
     if exactly(|c| c.colorblind) {
-        return " in the colorblind palette (both themes)".into();
+        return " in the colorblind palette, both themes".into();
     }
     if exactly(|c| !c.colorblind) {
-        return " in the standard palette (both themes)".into();
+        return " in the standard palette, both themes".into();
     }
     let names: Vec<&str> = ctxs
         .iter()
@@ -256,33 +319,45 @@ impl StyleEditor {
             col: 0,
             hex: None,
             saved: false,
+            study: false,
         }
+    }
+
+    // ---- studies ------------------------------------------------------------------------
+
+    /// A study's editor titled `title` with `parts` (from `crate::study_style`): study
+    /// colors, no "save as default" (the studies menu saves whole study sets).
+    pub fn for_study(title: String, parts: Vec<Part>) -> StyleEditor {
+        let mut e = StyleEditor::new(title, parts, 4);
+        e.study = true;
+        e.focus_current();
+        e
+    }
+
+    /// The current tab's own color's name ("Theme"), for the color row's name line.
+    pub fn own_name(&self) -> &'static str {
+        self.parts
+            .get(self.tab)
+            .and_then(|p| p.own)
+            .map_or("Default", |o| o.name)
     }
 
     // ---- drawings -----------------------------------------------------------------------
 
     /// The editor for a drawing of `tool` styled `s`: tabs for the parts the tool has.
     pub fn for_drawing(tool: Tool, s: &Style) -> StyleEditor {
-        let line = Part {
-            title: if tool.has_stroke() { "Line" } else { "Marker" },
-            style: PartStyle::Line(s.line),
-            stroke: tool.has_stroke(),
-        };
+        let line = Part::new(
+            if tool.has_stroke() { "Line" } else { "Marker" },
+            PartStyle::Line(s.line),
+            tool.has_stroke(),
+        );
         let mut parts = Vec::with_capacity(2);
         if tool.has_text() {
-            parts.push(Part {
-                title: "Text",
-                style: PartStyle::Text(s.text),
-                stroke: false,
-            });
+            parts.push(Part::new("Text", PartStyle::Text(s.text), false));
         }
         parts.push(line);
         if tool.has_fill() {
-            parts.push(Part {
-                title: "Fill",
-                style: PartStyle::Fill(s.fill),
-                stroke: false,
-            });
+            parts.push(Part::new("Fill", PartStyle::Fill(s.fill), false));
         }
         let (l, r) = tool.extends();
         let (name, plural) = tool_names(tool);
@@ -347,8 +422,11 @@ impl StyleEditor {
         &self.parts[self.tab.min(self.parts.len().saturating_sub(1))]
     }
 
-    fn color_row(&self, current: Color, text: bool) -> Row {
+    fn color_row(&self, current: Color, text: bool, own: bool) -> Row {
         let mut controls = Vec::with_capacity(12);
+        if own {
+            controls.push((Control::Color(Color::Own), current == Color::Own));
+        }
         if text {
             controls.push((Control::Color(Color::Text), current == Color::Text));
         }
@@ -383,9 +461,16 @@ impl StyleEditor {
             return rows;
         }
         let part = self.part();
+        let own = part.own.is_some();
+        if let Some(on) = part.shown {
+            rows.push(Row {
+                label: "Show",
+                controls: vec![(Control::Shown, on)],
+            });
+        }
         match part.style {
             PartStyle::Line(l) => {
-                rows.push(self.color_row(l.color, false));
+                rows.push(self.color_row(l.color, false, own));
                 if part.stroke {
                     rows.push(Row {
                         label: "Line",
@@ -410,10 +495,16 @@ impl StyleEditor {
                 });
             }
             PartStyle::Fill(f) => {
-                rows.push(self.color_row(f.color, false));
+                rows.push(self.color_row(f.color, false, own));
+                // A study part's opacity scales its own translucency: the line choices.
+                let choices: &[u8] = if self.study {
+                    &LINE_OPACITIES
+                } else {
+                    &FILL_OPACITIES
+                };
                 rows.push(Row {
                     label: "Opacity",
-                    controls: FILL_OPACITIES
+                    controls: choices
                         .iter()
                         .map(|&o| (Control::Opacity(o), o == f.opacity))
                         .collect(),
@@ -427,7 +518,7 @@ impl StyleEditor {
                         .map(|&s| (Control::TextSize(s), s == t.size))
                         .collect(),
                 });
-                rows.push(self.color_row(t.color, true));
+                rows.push(self.color_row(t.color, true, own));
                 rows.push(Row {
                     label: "Box",
                     controls: vec![(Control::TextBox, t.background)],
@@ -583,6 +674,10 @@ impl StyleEditor {
             Control::ExtendLeft => flip(&mut self.options.extend_left),
             Control::ExtendRight => flip(&mut self.options.extend_right),
             Control::AxisTag => flip(&mut self.options.axis_tag),
+            Control::Shown => match self.parts.get_mut(tab) {
+                Some(p) => flip(&mut p.shown),
+                None => false,
+            },
             other => {
                 let Some(p) = self.parts.get_mut(tab) else {
                     return Outcome::Nothing;
@@ -597,7 +692,11 @@ impl StyleEditor {
                     (PartStyle::Text(t), Control::TextBox) => t.background = !t.background,
                     _ => {}
                 }
-                p.style != before
+                let changed = p.style != before;
+                if changed {
+                    show(p);
+                }
+                changed
             }
         };
         if changed {
@@ -608,8 +707,8 @@ impl StyleEditor {
         }
     }
 
-    /// Set the current tab's color. A line's new color carries to a fill that matched its old
-    /// one (a zone recolored keeps its fill in step).
+    /// Set the current tab's color. A drawing's line's new color carries to a fill that
+    /// matched its old one (a zone recolored keeps its fill in step).
     fn set_color(&mut self, c: Color) -> Outcome {
         let tab = self.tab.min(self.parts.len().saturating_sub(1));
         let Some(p) = self.parts.get_mut(tab) else {
@@ -621,7 +720,9 @@ impl StyleEditor {
         }
         let was_line = matches!(p.style, PartStyle::Line(_));
         p.style.set_color(c);
-        if was_line {
+        show(p);
+        // Drawings only: a study's parts follow their line through their own color instead.
+        if was_line && !self.study {
             for q in &mut self.parts {
                 if let PartStyle::Fill(f) = &mut q.style
                     && f.color == old
@@ -644,6 +745,11 @@ impl StyleEditor {
         let Some(part) = self.parts.get(self.tab) else {
             return out;
         };
+        if part.style.color() == Color::Own {
+            // The theme's own color for the part (tested with the theme), or the colors a
+            // level source chose (decision 0022): nothing the user picked to check.
+            return out;
+        }
         let (color, opacity, text, contrast, boxed) = match part.style {
             PartStyle::Line(l) => (l.color, l.opacity, false, true, false),
             // A fill is translucent area behind data: only its hue can mislead.
@@ -684,18 +790,32 @@ impl StyleEditor {
             });
         }
         if contrast {
-            // Contrast depends on the theme's background only: one figure per theme.
-            let mut low: Vec<(&'static str, f64)> = Vec::with_capacity(2);
+            // One figure per theme (the worst), naming the palettes it holds in (a theme
+            // color differs between palettes).
+            let mut low: Vec<(String, f64)> = Vec::with_capacity(2);
             for dark in [true, false] {
-                let worst = ctxs
+                let hits: Vec<(bool, f64)> = ctxs
                     .iter()
                     .zip(&found)
                     .filter(|(c, _)| c.dark == dark)
-                    .filter_map(|(_, r)| r.low_contrast)
-                    .min_by(f64::total_cmp);
-                if let Some(w) = worst {
-                    low.push((if dark { "dark" } else { "light" }, w));
-                }
+                    .filter_map(|(c, r)| r.low_contrast.map(|k| (c.colorblind, k)))
+                    .collect();
+                let Some(worst) = hits.iter().map(|h| h.1).min_by(f64::total_cmp) else {
+                    continue;
+                };
+                let palettes = ctxs.iter().filter(|c| c.dark == dark).count();
+                let palette = match hits.as_slice() {
+                    [(cb, _)] if palettes > 1 => {
+                        if *cb {
+                            "colorblind palette"
+                        } else {
+                            "standard palette"
+                        }
+                    }
+                    _ => "both palettes",
+                };
+                let theme = if dark { "dark" } else { "light" };
+                low.push((format!("{theme} theme, {palette}"), worst));
             }
             if !low.is_empty() {
                 let against = if boxed { " against its box" } else { "" };
@@ -706,7 +826,7 @@ impl StyleEditor {
                 };
                 let themes: Vec<String> = low
                     .iter()
-                    .map(|(n, r)| format!("the {n} theme ({r:.1}:1)"))
+                    .map(|(n, r)| format!("the {n} ({r:.1}:1)"))
                     .collect();
                 let mut words =
                     format!("Low contrast{against} in {}; {what}.", themes.join(" and "));
@@ -720,6 +840,13 @@ impl StyleEditor {
             }
         }
         out
+    }
+}
+
+/// Styling an optional part that isn't shown shows it (the change is seen at once).
+fn show(p: &mut Part) {
+    if p.shown == Some(false) {
+        p.shown = Some(true);
     }
 }
 
@@ -738,6 +865,7 @@ fn flip(o: &mut Option<bool>) -> bool {
 pub fn color_name(c: Color, names: &[&'static str]) -> String {
     match c {
         Color::Text => "Text".to_owned(),
+        Color::Own => "Default".to_owned(),
         Color::Palette(i) => names
             .get(usize::from(i) % names.len().max(1))
             .map_or_else(|| format!("Theme {}", i + 1), |n| (*n).to_owned()),
@@ -766,6 +894,7 @@ pub fn control_label(c: Control, names: &[&'static str]) -> String {
         Control::ExtendLeft => "Left".to_owned(),
         Control::ExtendRight => "Right".to_owned(),
         Control::AxisTag => "On the price axis".to_owned(),
+        Control::Shown => "Drawn on the chart".to_owned(),
         Control::SaveDefault => "Save as default".to_owned(),
     }
 }
