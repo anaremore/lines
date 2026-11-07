@@ -269,6 +269,9 @@ pub struct ChartTradeState {
     /// the pointer has moved from it (px): under [`DRAG_PX`] it was a click.
     pub press_y: f32,
     pub moved: f32,
+    /// The order strip's limit price: the crosshair's price the last time the pointer was on
+    /// the plot (off the strip), kept while the pointer goes to the strip.
+    pub strip_price: Option<Price>,
 }
 
 /// An add drag shorter than this (px) is a click and places nothing.
@@ -308,6 +311,100 @@ pub fn release_action(
     }
 }
 
+// ---- order strip (phase 2b) ----------------------------------------------------------------
+
+/// A button on the chart's order strip.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StripOrder {
+    BuyMarket,
+    SellMarket,
+    /// A buy limit at the strip's price (the crosshair's).
+    BuyLimit,
+    /// A sell limit at the strip's price.
+    SellLimit,
+}
+
+/// A strip limit with no crosshair price yet.
+pub const PICK_A_PRICE: &str = "Point at a price on the chart first: limits go at the crosshair";
+/// A strip order from a chart in no link group (no DOM's switch can send it).
+pub const LINK_TO_TRADE: &str = "Link this chart to a DOM to place orders from it";
+/// A strip order with no linked DOM enabled.
+pub const ENABLE_TO_ORDER: &str = "Enable trading on the linked DOM to place orders from the chart";
+
+/// The command for a strip button: the DOM's own intents (market as its BUY/SELL MKT, a limit
+/// as a click in its bid/ask column at that price), with the chart's quantity and bracket. A
+/// chart shows no switch: the window sends this only when a linked DOM has trading enabled,
+/// so it is built here as if enabled and the switch is checked there (`linked_dom_enabled`).
+pub fn strip_command(
+    o: StripOrder,
+    at: Option<Price>,
+    ctx: &crate::dom_trade::EntryCtx,
+) -> Result<TradeCommand, Refusal> {
+    use crate::dom_trade::{Arming, DomColumn, QuickOrder, click, quick};
+    let on = Arming::new(true);
+    match o {
+        StripOrder::BuyMarket => quick(QuickOrder::BuyMarket, on, ctx),
+        StripOrder::SellMarket => quick(QuickOrder::SellMarket, on, ctx),
+        StripOrder::BuyLimit | StripOrder::SellLimit => {
+            let p = at.ok_or(Refusal(PICK_A_PRICE))?;
+            let col = if o == StripOrder::BuyLimit {
+                DomColumn::Bid
+            } else {
+                DomColumn::Ask
+            };
+            click(col, p, false, on, ctx)
+        }
+    }
+}
+
+/// Strip height, margin from the plot's bottom-left corner, and its pieces' widths (fixed, so
+/// the pointer test needs no layout): quantity, two market buttons, two limit buttons.
+pub const STRIP_H: f32 = 26.0;
+pub const STRIP_MARGIN: f32 = 8.0;
+pub const STRIP_PAD: f32 = 3.0;
+pub const STRIP_GAP: f32 = 4.0;
+pub const STRIP_QTY_W: f32 = 56.0;
+pub const STRIP_MKT_W: f32 = 76.0;
+pub const STRIP_LMT_W: f32 = 136.0;
+
+/// Where the strip sits in the plot (plot-local).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct StripBox {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    /// Narrow plots drop the limit buttons (market only).
+    pub limits: bool,
+}
+
+impl StripBox {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + STRIP_H
+    }
+}
+
+/// The strip's box in a `plot_w` x `plot_h` plot: bottom-left, inside the margin; `None` when
+/// the plot is too small for it.
+pub fn strip_box(plot_w: f32, plot_h: f32) -> Option<StripBox> {
+    let market = STRIP_PAD * 2.0 + STRIP_QTY_W + 2.0 * (STRIP_GAP + STRIP_MKT_W);
+    let full = market + 2.0 * (STRIP_GAP + STRIP_LMT_W);
+    let room = plot_w - 2.0 * STRIP_MARGIN;
+    let w = if room >= full {
+        full
+    } else if room >= market {
+        market
+    } else {
+        return None;
+    };
+    let y = plot_h - STRIP_MARGIN - STRIP_H;
+    (y >= STRIP_MARGIN).then_some(StripBox {
+        x: STRIP_MARGIN,
+        y,
+        w,
+        limits: w == full,
+    })
+}
+
 impl Default for ChartTradeState {
     fn default() -> Self {
         ChartTradeState {
@@ -329,6 +426,7 @@ impl Default for ChartTradeState {
             pos_drag: false,
             press_y: 0.0,
             moved: 0.0,
+            strip_price: None,
         }
     }
 }
@@ -620,5 +718,95 @@ mod tests {
             !linked_dom_enabled(None, &a, k, [(None, Some(&a), Some(k), true)]),
             "unlinked"
         );
+    }
+
+    fn ctx() -> crate::dom_trade::EntryCtx {
+        crate::dom_trade::EntryCtx {
+            account: AccountId::new("paper"),
+            contract: lines_core::ContractKey::monthly(
+                lines_feed::catalog::ES,
+                2026,
+                lines_core::Month::new(12).unwrap(),
+            ),
+            qty: Qty(2),
+            position: 0,
+            working: 0,
+            bracket: None,
+            tick: 25,
+            best_bid: Some(Price(580_000)),
+            best_ask: Some(Price(580_025)),
+            last: Some(Price(580_000)),
+        }
+    }
+
+    /// The strip builds exactly the DOM's commands: market as BUY/SELL MKT, a limit as a
+    /// bid/ask column click at the crosshair price, with the chart's quantity and bracket.
+    #[test]
+    fn strip_orders_are_the_doms_intents() {
+        use crate::dom_trade::{Arming, BracketPreset, DomColumn, QuickOrder, click, quick};
+        let on = Arming::new(true);
+        let mut c = ctx();
+        let at = Some(Price(579_500));
+        assert_eq!(
+            strip_command(StripOrder::BuyMarket, at, &c),
+            quick(QuickOrder::BuyMarket, on, &c)
+        );
+        assert_eq!(
+            strip_command(StripOrder::SellMarket, None, &c),
+            quick(QuickOrder::SellMarket, on, &c),
+            "market needs no crosshair"
+        );
+        assert_eq!(
+            strip_command(StripOrder::BuyLimit, at, &c),
+            click(DomColumn::Bid, Price(579_500), false, on, &c)
+        );
+        let Ok(TradeCommand::PlaceOrder(o)) = strip_command(StripOrder::SellLimit, at, &c) else {
+            panic!("a plain limit");
+        };
+        assert_eq!(
+            (o.side, o.qty, o.kind),
+            (
+                Side::Sell,
+                Qty(2),
+                OrderKind::Limit {
+                    price: Price(579_500)
+                }
+            )
+        );
+        assert_eq!(
+            strip_command(StripOrder::BuyLimit, None, &c),
+            Err(Refusal(PICK_A_PRICE))
+        );
+        // A bracket preset attaches as on the DOM.
+        c.bracket = Some(BracketPreset {
+            stop_ticks: 8,
+            target_ticks: 16,
+        });
+        assert!(matches!(
+            strip_command(StripOrder::BuyLimit, at, &c),
+            Ok(TradeCommand::PlaceBracket(_))
+        ));
+        c.qty = Qty(0);
+        assert!(
+            strip_command(StripOrder::BuyMarket, at, &c).is_err(),
+            "no quantity"
+        );
+    }
+
+    #[test]
+    fn the_strip_fits_the_plot_or_drops_its_limits_or_hides() {
+        let full = strip_box(1000.0, 600.0).unwrap();
+        assert!(full.limits);
+        assert_eq!(
+            (full.x, full.y),
+            (STRIP_MARGIN, 600.0 - STRIP_MARGIN - STRIP_H)
+        );
+        assert!(full.contains(full.x + 1.0, full.y + 1.0));
+        assert!(!full.contains(full.x + full.w, full.y + 1.0));
+        assert!(!full.contains(full.x + 1.0, full.y - 1.0));
+        let narrow = strip_box(full.w, 600.0).unwrap();
+        assert!(!narrow.limits && narrow.w < full.w, "market only");
+        assert_eq!(strip_box(narrow.w, 600.0), None, "too narrow: hidden");
+        assert_eq!(strip_box(1000.0, 30.0), None, "too short: hidden");
     }
 }

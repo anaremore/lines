@@ -332,6 +332,10 @@ pub struct ChartState {
     /// written only when on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub magnet: bool,
+    /// The order strip (chart trading phase 2b) shown on this chart. Optional: written only
+    /// when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub order_strip: bool,
     /// The chart's timeframe (roadmap 9), e.g. `"5m"`, `"1h"`, `"1D"`. Optional: absent means
     /// 1 minute; a value this version doesn't offer also loads as 1 minute.
     #[serde(default, skip_serializing_if = "TimeframeDoc::is_default")]
@@ -776,11 +780,19 @@ mod tests {
         assert!(!serde_json::to_string(&old).unwrap().contains("magnet"));
         let on = ChartState {
             magnet: true,
-            ..old
+            ..old.clone()
         };
         let json = serde_json::to_string(&on).unwrap();
         assert!(json.contains(r#""magnet":true"#), "{json}");
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), on);
+        assert!(!old.order_strip && !json.contains("order_strip"), "{json}");
+        let strip = ChartState {
+            order_strip: true,
+            ..old.clone()
+        };
+        let json = serde_json::to_string(&strip).unwrap();
+        assert!(json.contains(r#""order_strip":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), strip);
 
         let mut w = builtin("pair").unwrap();
         assert!(!w.crosshair_sync_price);
@@ -919,6 +931,7 @@ mod tests {
             }],
             profile: ProfileConfig::default(),
             magnet: false,
+            order_strip: false,
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
@@ -937,6 +950,7 @@ mod tests {
             indicators: vec![],
             profile: ProfileConfig::default(),
             magnet: false,
+            order_strip: false,
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
@@ -1022,6 +1036,7 @@ mod tests {
                             indicators: vec![],
                             profile: ProfileConfig::default(),
                             magnet: false,
+                            order_strip: false,
                             footprint: Default::default(),
                             styles: Default::default(),
                             subpane: None,
@@ -1113,6 +1128,7 @@ mod tests {
                 ..Default::default()
             },
             magnet: false,
+            order_strip: false,
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
@@ -1221,6 +1237,7 @@ mod tests {
                 indicators: vec![],
                 profile,
                 magnet: false,
+                order_strip: false,
                 footprint: Default::default(),
                 styles: Default::default(),
                 subpane: None,
@@ -1259,6 +1276,7 @@ mod tests {
             }],
             profile: set,
             magnet: false,
+            order_strip: false,
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
@@ -1334,6 +1352,7 @@ mod tests {
                 indicators: vec![],
                 profile: ProfileConfig::default(),
                 magnet: false,
+                order_strip: false,
                 footprint: Default::default(),
                 styles: Default::default(),
                 subpane: None,

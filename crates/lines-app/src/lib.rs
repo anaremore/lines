@@ -485,6 +485,9 @@ struct Cli {
     /// open/high/low/close (Ctrl+Shift+G in the app).
     #[arg(long)]
     magnet: bool,
+    /// Screenshot: show the order strip on the first chart (the pane menu's "Order strip").
+    #[arg(long, requires = "screenshot")]
+    order_strip: bool,
     /// Screenshot: start the chart with these studies (a `StudySet` JSON file, as a template
     /// or the defaults for new charts hold them).
     #[arg(long, requires = "screenshot")]
@@ -1322,6 +1325,7 @@ where
             },
             studies_menu: cli.studies_menu.clone(),
             magnet: cli.magnet,
+            order_strip: cli.order_strip,
             timeframe: cli.timeframe.unwrap_or_default(),
             timeframe_menu: cli.timeframe_menu,
             style_editor: cli.style_editor,
