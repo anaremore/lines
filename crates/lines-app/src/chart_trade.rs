@@ -357,6 +357,12 @@ pub fn strip_command(
     }
 }
 
+/// Whether a press released `dx`, `dy` px from where it started was a click (a pick sends) or a
+/// drag (a pan: the pick stays armed), by the chart's click rule ([`DRAG_PX`]).
+pub fn is_click(dx: f32, dy: f32) -> bool {
+    dx.hypot(dy) < DRAG_PX
+}
+
 /// Strip height, margin from the plot's bottom-left corner, and its pieces' widths (fixed, so
 /// the pointer test needs no layout): quantity, two market buttons, two limit buttons.
 pub const STRIP_H: f32 = 26.0;
@@ -816,6 +822,14 @@ mod tests {
         s.arm_pick(StripOrder::BuyLimit);
         s.feed_changed();
         assert_eq!(s.strip_pick, None, "another symbol drops it");
+    }
+
+    #[test]
+    fn a_pick_sends_on_a_click_and_a_drag_pans() {
+        assert!(is_click(0.0, 0.0));
+        assert!(is_click(2.0, 3.0), "jitter under 4 px");
+        assert!(!is_click(0.0, DRAG_PX), "4 px is a drag");
+        assert!(!is_click(3.0, 3.0), "diagonal past 4 px");
     }
 
     #[test]
