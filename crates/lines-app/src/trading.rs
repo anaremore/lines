@@ -1493,6 +1493,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
             (account.clone(), None, None)
         }
+        TradeCommand::SetBracketMode {
+            account, contract, ..
+        } => (account.clone(), Some(*contract), None),
         TradeCommand::AddStrategy(_)
         | TradeCommand::RemoveStrategy { .. }
         | TradeCommand::ArmStrategy { .. }

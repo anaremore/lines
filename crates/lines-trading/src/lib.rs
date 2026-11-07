@@ -45,7 +45,7 @@ pub use broker::{
     Broker, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot, ContractSelection, Origin,
     PaneContext, RequestContext,
 };
-pub use command::{BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
+pub use command::{BracketMode, BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
 pub use core::{AccountConfig, INTERNAL_COMMAND_IDS, OrderLatency, TradingCore};
 pub use event::{AccountView, Event, FillEvent, PositionView};
 pub use guardrails::{GuardState, GuardrailTracker, Guardrails, LosingStreak, RoundTrip};

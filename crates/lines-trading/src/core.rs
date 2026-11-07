@@ -41,6 +41,7 @@ use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind
 
 /// The order id a fill made outside Lines carries ([`BrokerEvent::ExternalFill`]): no order.
 pub const EXTERNAL_ORDER: OrderId = OrderId(0);
+mod position_bracket;
 mod strategy_gate;
 
 /// An account as configured (saved with the trading state).
@@ -209,6 +210,8 @@ pub struct TradingCore {
     /// Strategy instances (decision 0025), and which instance placed each order.
     strategies: BTreeMap<StrategyId, Instance>,
     strategy_orders: HashMap<OrderId, StrategyId>,
+    /// Accounts and contracts whose manual trades have one bracket for the position.
+    position_brackets: BTreeMap<(AccountId, ContractKey), position_bracket::PositionBracket>,
     /// The economic calendar for news blackouts (`None`: none loaded, never assumed clear).
     econ: Option<Arc<EconSchedule>>,
     /// Positions a news blackout already flattened: (account, contract, release time). Each
@@ -272,6 +275,7 @@ impl TradingCore {
             held: VecDeque::new(),
             strategies: BTreeMap::new(),
             strategy_orders: HashMap::new(),
+            position_brackets: BTreeMap::new(),
             econ: Some(lines_feed::econ::bundled()),
             news_flattened: HashSet::new(),
             seen_now: UtcMillis(i64::MIN),
@@ -662,7 +666,19 @@ impl TradingCore {
         if env.id.0 < INTERNAL_COMMAND_IDS {
             self.next_command = self.next_command.max(env.id.0 + 1);
         }
-        let result = self.run(now, &env);
+        // Position brackets: a person's bracket order loses its exits, a second exit is refused.
+        let (env, result) = match self.bracket_rewrite(&env) {
+            Err(r) => (env, Err(r)),
+            Ok(Some(command)) => {
+                let env = Envelope { command, ..env };
+                let result = self.run(now, &env);
+                (env, result)
+            }
+            Ok(None) => {
+                let result = self.run(now, &env);
+                (env, result)
+            }
+        };
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
             if let Ok(ids) = &result {
@@ -678,6 +694,7 @@ impl TradingCore {
         // Requests may complete at once (zero latency): apply what the broker has.
         self.poll(now);
         self.strategy_watch(now);
+        self.position_brackets_sync(now);
     }
 
     fn run(&mut self, now: UtcMillis, env: &Envelope) -> Result<Vec<OrderId>, Reject> {
@@ -992,6 +1009,12 @@ impl TradingCore {
                 );
                 Ok(vec![order])
             }
+            Command::SetBracketMode {
+                contract,
+                mode,
+                replace,
+                ..
+            } => self.set_bracket_mode(env, now, &account, contract, mode, replace),
             Command::CancelOrder { order, .. } => {
                 self.open_order(&account, order)?;
                 if self.cancelling.insert(order) {
@@ -1647,6 +1670,7 @@ impl TradingCore {
         self.poll(now);
         self.news_flatten(now);
         self.strategy_watch(now);
+        self.position_brackets_sync(now);
     }
 
     /// When the broker next needs a tick.
@@ -1962,6 +1986,7 @@ impl TradingCore {
             self.account_changed(now, &a);
         }
         self.strategy_watch(now);
+        self.position_brackets_sync(now);
     }
 
     fn mark(&self, contract: ContractKey) -> Option<Price> {
