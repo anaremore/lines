@@ -31,6 +31,7 @@ use lines_core::{CivilDate, UtcMillis};
 use lines_feed::store::ChartStore;
 use lines_trading::journal::stats::Stats;
 use lines_trading::journal::{Edit, Trade, price_value};
+use lines_trading::types::ContractSpec;
 use lines_trading::{JournalShared, Money, Side};
 
 use crate::feeds::PaneFeed;
@@ -109,20 +110,26 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
     } else {
         dash()
     };
+    // MAE/MFE are the whole position's worst/best P&L while open (realized + open), so the
+    // ticks shown are that money in ticks of one contract: dollars and ticks always describe
+    // the same number (not the per-contract price excursion, which can differ after a
+    // scale-out).
+    let tick_money = product
+        .as_ref()
+        .and_then(|p| ContractSpec::new(p.clone(), t.contract, Money::ZERO))
+        .map(|s| s.money(i128::from(tick), 1))
+        .filter(|m| m.0 > 0);
+    let as_ticks = |m: Money| tick_money.map(|tm| m.0 as f64 / tm.0 as f64);
     let excursions = match (mode.money(), mode.ticks()) {
         (true, true) => format!(
             "{} / {}  ({} / {})",
             money_text(t.mae),
             money_text(t.mfe),
-            tk(t.mae_ticks(tick).map(|v| -v)),
-            tk(t.mfe_ticks(tick))
+            tk(as_ticks(t.mae)),
+            tk(as_ticks(t.mfe))
         ),
         (true, false) => format!("{} / {}", money_text(t.mae), money_text(t.mfe)),
-        (false, true) => format!(
-            "{} / {}",
-            tk(t.mae_ticks(tick).map(|v| -v)),
-            tk(t.mfe_ticks(tick))
-        ),
+        (false, true) => format!("{} / {}", tk(as_ticks(t.mae)), tk(as_ticks(t.mfe))),
         (false, false) => dash(),
     };
     Row {
@@ -582,6 +589,12 @@ impl JournalView {
             return false;
         };
         let mode = self.mode;
+        // New trades go on top: while scrolled, keep the same rows in view (nothing the
+        // trader aims at shifts under the pointer, docs/design.md §7).
+        let added = snap.trades.len().saturating_sub(self.rows.len());
+        if self.scroll > 0 && self.built.is_some() {
+            self.scroll += added;
+        }
         let names = &self.names;
         self.rows = snap
             .trades
@@ -1091,9 +1104,10 @@ mod tests {
         assert_eq!(c(JournalCol::Pnl), "+$310.02");
         assert_eq!(c(JournalCol::Ticks), "+6.3 t");
         assert_eq!(c(JournalCol::Duration), "2m 00s");
+        // Position P&L in dollars and the same amount in ticks of one contract ($12.50).
         assert_eq!(
             c(JournalCol::MaeMfe),
-            "-$87.50 / +$412.50  (-1.8 t / +8.3 t)"
+            "-$87.50 / +$412.50  (-7.0 t / +33.0 t)"
         );
         assert_eq!(c(JournalCol::Tags), "breakout, A+");
         assert_eq!(r.sign, 1);
@@ -1117,7 +1131,7 @@ mod tests {
         assert_eq!(off[JournalCol::Entry.index()], "5999.9375", "prices stay");
         let ticks = cells(PnlDisplay::Ticks);
         assert_eq!(ticks[JournalCol::Pnl.index()], "+6.3 t");
-        assert_eq!(ticks[JournalCol::MaeMfe.index()], "-1.8 t / +8.3 t");
+        assert_eq!(ticks[JournalCol::MaeMfe.index()], "-7.0 t / +33.0 t");
         // In ticks mode the color follows the ticks shown, not the money after fees.
         let mut scratch = t.clone();
         scratch.exit_value = scratch.entry_value; // exit = entry: 0.0 t, a loss after fees
