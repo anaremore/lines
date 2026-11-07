@@ -10,6 +10,7 @@ mod dom_orders;
 mod dom_trade;
 mod dom_trail;
 mod dom_view;
+mod dropdown;
 mod feeds;
 mod footprint;
 mod journal_view;
@@ -410,6 +411,12 @@ struct Cli {
     /// wins. In the app: type it on a chart (`5`, `1h`, `1d` + Enter) or use the header chip.
     #[arg(long, value_parser = parse_timeframe)]
     timeframe: Option<lines_core::Timeframe>,
+    /// Screenshot: the first chart with its timeframe list open (the header's "5m ▾" chip).
+    #[arg(long, requires = "screenshot")]
+    timeframe_menu: bool,
+    /// Screenshot: charts and DOMs with their account list open (the header's account chip).
+    #[arg(long, requires = "screenshot")]
+    account_menu: bool,
 }
 
 /// The CLI with every registered source as a `--source` value, with its help.
@@ -768,6 +775,7 @@ where
             studies_menu: cli.studies_menu.clone(),
             magnet: cli.magnet,
             timeframe: cli.timeframe.unwrap_or_default(),
+            timeframe_menu: cli.timeframe_menu,
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),
@@ -843,6 +851,7 @@ where
                 doc,
                 paper: cli.paper.clone(),
                 arm: cli.arm,
+                account_menu: cli.account_menu,
                 pnl: cli.pnl.map(PnlArg::mode),
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;

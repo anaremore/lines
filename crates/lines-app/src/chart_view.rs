@@ -172,6 +172,8 @@ pub struct Fixture {
     pub magnet: bool,
     /// Initial timeframe (`--timeframe`). One saved with the pane takes precedence.
     pub timeframe: Timeframe,
+    /// Start with the timeframe list open (screenshots: `--timeframe-menu`).
+    pub timeframe_menu: bool,
 }
 
 /// Which part of a studies-menu row a click hit.
@@ -453,7 +455,7 @@ impl ChartView {
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
             tf_anchor: None,
-            tf_menu: false,
+            tf_menu: fixture.timeframe_menu,
             tf_entry: None,
             cross_partial: false,
         };
@@ -729,8 +731,10 @@ impl ChartView {
             return;
         };
         self.focus.focus(window, cx);
-        if std::mem::take(&mut self.tf_menu) {
-            // Clicking the chart dismisses the timeframe list (its rows handle their clicks).
+        let tf = std::mem::take(&mut self.tf_menu);
+        if std::mem::take(&mut self.trade.account_menu) || tf {
+            // Clicking the chart dismisses the timeframe or account list (their rows handle
+            // their clicks).
             cx.notify();
             return;
         }
@@ -2456,6 +2460,8 @@ impl ChartView {
         if let FeedStatus::Failed(msg) | FeedStatus::Reconnecting { reason: msg, .. } = &d.status {
             let _ = write!(right, "  ·  {msg}");
         }
+        let list = self.timeframe_list(&t, cx);
+        let timeframe = crate::dropdown::dropdown(self.timeframe_chip(&t, cx), list);
         bar().child(
             pane::header_content()
                 .child(
@@ -2467,7 +2473,7 @@ impl ChartView {
                         .flex_shrink_0()
                         .children(chip)
                         .child(div().text_color(t.text_main).child(left))
-                        .child(self.timeframe_chip(&t, cx))
+                        .child(timeframe)
                         .children(account)
                         .children(quotes)
                         .children(pane::stale_badge(&self.store, &t)),
@@ -2508,16 +2514,15 @@ impl ChartView {
             )
     }
 
-    /// The timeframe list under the header, while open.
+    /// The timeframe list, while open: under the chip (`dropdown`).
     fn timeframe_list(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.tf_menu {
             return None;
         }
         let accent = t.accent;
         let mut list = div()
-            .absolute()
-            .top(px(2.0))
-            .left(px(8.0))
+            .id("timeframe-list")
+            .occlude()
             .min_w(px(150.0))
             .flex()
             .flex_col()
@@ -2811,7 +2816,6 @@ impl Render for ChartView {
         }
         let _ = window;
         let account = crate::trade_bar::chart_chip(self, &t, cx);
-        let accounts = crate::trade_bar::account_menu(self, &t, cx);
         div()
             .size_full()
             .flex()
@@ -2852,8 +2856,6 @@ impl Render for ChartView {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
                     .when_some(overlay, |d, overlay| d.child(overlay))
-                    .when_some(accounts, |d, o| d.child(o))
-                    .when_some(self.timeframe_list(&t, cx), |d, l| d.child(l))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e)),
             )
     }

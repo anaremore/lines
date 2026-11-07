@@ -198,22 +198,26 @@ impl Menu {
                     ),
             );
         }
-        div()
-            .absolute()
-            .size_full()
-            .child(
-                // Clicking anywhere else closes the menu.
-                div()
-                    .id("menu-backdrop")
-                    .absolute()
-                    .size_full()
-                    .on_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        *slot(this) = None;
-                        cx.notify();
-                    })),
-            )
-            .child(list)
-            .into_any_element()
+        // Deferred above any open header dropdown (`dropdown::OVERLAY_PRIORITY`).
+        gpui::deferred(
+            div()
+                .absolute()
+                .size_full()
+                .child(
+                    // Clicking anywhere else closes the menu.
+                    div()
+                        .id("menu-backdrop")
+                        .absolute()
+                        .size_full()
+                        .on_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            *slot(this) = None;
+                            cx.notify();
+                        })),
+                )
+                .child(list),
+        )
+        .with_priority(crate::dropdown::OVERLAY_PRIORITY)
+        .into_any_element()
     }
 }
 

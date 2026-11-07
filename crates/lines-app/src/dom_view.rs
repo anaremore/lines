@@ -977,7 +977,6 @@ impl Render for DomView {
                 .arm_event(dom_trade::ArmEvent::Unavailable, false, cx);
         }
         let trade = trade_bar::dom_bar(self, &self.product, &t, cx);
-        let accounts = trade_bar::account_menu(self, &t, cx);
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
@@ -1020,8 +1019,7 @@ impl Render for DomView {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(body)
-                    .when_some(overlay, |d, o| d.child(o))
-                    .when_some(accounts, |d, o| d.child(o)),
+                    .when_some(overlay, |d, o| d.child(o)),
             )
     }
 }
