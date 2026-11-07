@@ -387,6 +387,16 @@ impl Columns {
         self.set.layout(specs, &self.needed, total, &mut self.cells);
     }
 
+    /// This frame only: leave out columns that don't fit entirely in `total` px (header and
+    /// rows alike), so a narrow pane never shows half a number. Saved choices are untouched.
+    pub fn drop_overflow(&mut self, total: f32) {
+        for c in self.cells.iter_mut() {
+            if c.shown && c.right() > total + 0.5 {
+                c.shown = false;
+            }
+        }
+    }
+
     /// Run a column command. `Err` says why not (inline).
     pub fn apply(&mut self, cmd: ColumnCmd) -> Result<(), &'static str> {
         let specs = self.specs();
@@ -791,6 +801,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn columns_that_dont_fit_are_left_out_not_cut() {
+        let mut c = Columns::new(Table::Journal);
+        c.layout(400.0);
+        c.drop_overflow(400.0);
+        let shown: Vec<_> = c.cells.iter().filter(|c| c.shown).collect();
+        assert!(!shown.is_empty() && shown.len() < JournalCol::ALL.len());
+        assert!(
+            shown.iter().all(|c| c.right() <= 400.5),
+            "nothing cut at the edge"
+        );
+        assert!(
+            c.set.is_shown(JournalCol::MaeMfe.index()),
+            "saved choice untouched"
+        );
     }
 
     #[test]
