@@ -35,11 +35,11 @@ pub struct BrokerCaps {
     /// then never reconciles fills for orders it adopted from a snapshot: those executions
     /// already reached the fill stream once.
     ///
-    /// The contract: every execution from the moment the broker is opened is reported once,
-    /// including those made while it was disconnected (reported after the reconnect, before
-    /// or with the snapshot that holds them), and none from before it was opened. The app's
-    /// journal follows such a broker's accounts from these fills alone (after seeding what was
-    /// open when each account joined), so a missed execution would be missing there.
+    /// The contract: an account is listed (`AccountSource`) only once its positions are known,
+    /// and from then on every execution on it is reported once, including those made while
+    /// disconnected (after the reconnect); none from before it was listed. The app's journal
+    /// follows such a broker's accounts from these fills alone (after seeding what was open
+    /// when each account joined), so a missed execution would be missing there.
     #[serde(default)]
     pub external_fills: bool,
 }

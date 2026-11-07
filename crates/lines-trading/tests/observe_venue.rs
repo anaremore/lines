@@ -327,3 +327,41 @@ fn fills_before_their_account_joins_are_kept() {
         .count();
     assert_eq!(fills, 1);
 }
+
+/// Trades of unmarked accounts (a venue whose market the app's prices aren't: a replay or the
+/// mock) take no MAE/MFE from market batches; other accounts' trades do.
+#[test]
+fn unmarked_accounts_take_no_mae_from_market_batches() {
+    let fill = |account: &str, side, price, id: &str| {
+        Event::Fill(lines_trading::FillEvent {
+            account: AccountId::new(account),
+            order: EXTERNAL_ORDER,
+            contract: es(),
+            side,
+            price: Price(price),
+            qty: Qty(1),
+            fee: Money::ZERO,
+            realised: Money::ZERO,
+            at: t(),
+            trade_id: id.into(),
+            reconciled: false,
+        })
+    };
+    let mut j = Journal::new();
+    j.add_unmarked([AccountId::new("venue-sim")]);
+    j.on_event(&fill("venue-sim", Side::Buy, 600_000, "V1"));
+    j.on_event(&fill("paper", Side::Buy, 600_000, "P1"));
+    // A replay prints 10 points under the entries.
+    j.on_market(es(), &[MarketInput::Last(Price(599_000))]);
+    j.on_event(&fill("venue-sim", Side::Sell, 600_100, "V2"));
+    j.on_event(&fill("paper", Side::Sell, 600_100, "P2"));
+    let mae = |a: &str| {
+        j.trades()
+            .iter()
+            .find(|tr| tr.account == AccountId::new(a))
+            .and_then(|tr| tr.mae_ticks(25))
+            .unwrap()
+    };
+    assert_eq!(mae("venue-sim"), 0.0, "not from the replay's prices");
+    assert!(mae("paper") >= 40.0);
+}

@@ -789,6 +789,9 @@ fn venue_accounts(index: usize, source: &dyn AccountSource) -> Vec<AccountInfo> 
 
 /// Watch a venue: new accounts join its core, changes rebuild it from the broker, and the
 /// shared account list follows. Runs until `stop`.
+/// `unmarked`: the journal, when the app's prices aren't the venue's market (a replay or the
+/// mock): the venue's accounts are added to its unmarked set (no MAE/MFE from those prices).
+#[allow(clippy::too_many_arguments)]
 fn spawn_watcher(
     index: usize,
     source: Arc<dyn AccountSource>,
@@ -796,6 +799,7 @@ fn spawn_watcher(
     handle: TradingHandle,
     accounts: Arc<RwLock<Vec<AccountInfo>>>,
     cache: Arc<TradeCache>,
+    unmarked: Option<Arc<JournalShared>>,
     stop: Arc<AtomicBool>,
 ) {
     let spawned = std::thread::Builder::new()
@@ -841,6 +845,9 @@ fn spawn_watcher(
                         known = infos.iter().map(|a| a.id.clone()).collect();
                         all.retain(|a| a.venue != Some(index));
                         all.extend(infos);
+                    }
+                    if let Some(j) = &unmarked {
+                        j.add_unmarked(known.clone());
                     }
                     if !new.is_empty() {
                         handle.add_accounts(new);
@@ -1037,6 +1044,7 @@ impl Trading {
                 vh.clone(),
                 accounts.clone(),
                 cache.clone(),
+                (!venue_marks).then(|| journal.clone()),
                 stop.clone(),
             );
             venues.push(Venue {

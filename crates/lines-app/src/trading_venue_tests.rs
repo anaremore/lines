@@ -629,7 +629,6 @@ fn replay_prices_never_mark_venue_positions() {
         .position(&sim, es())
         .is_some_and(|p| p.qty == 2)));
     t.follow(&store_at(595_000));
-    std::thread::sleep(Duration::from_millis(300));
     t.settle();
     assert_eq!(
         t.cache.read().position(&sim, es()).unwrap().unrealised,
@@ -765,4 +764,59 @@ fn executions_missed_while_disconnected_reach_the_journal_after_reconnect() {
         "a long round trip, no phantom short"
     );
     assert_eq!(snap.open, 0);
+}
+
+/// In a replay, a venue account's journal trades take no MAE/MFE from the replay's prices.
+#[test]
+fn replay_prices_never_reach_venue_trades_in_the_journal() {
+    let shared = Arc::new(Shared {
+        v: Mutex::new(Venue {
+            accounts: vec![sim_account()],
+            rev: 1,
+            ..Default::default()
+        }),
+        requests: AtomicUsize::new(0),
+    });
+    let t = start_with(&shared, false);
+    let sim = AccountId::new("venue-sim");
+    assert!(until(&t, |t| t.account(&sim).is_some()));
+    let now = lines_feed::now_utc();
+    let fill = |side, px, id: &str, dt| BrokerEvent::ExternalFill {
+        account: sim.clone(),
+        contract: es(),
+        side,
+        price: Price(px),
+        qty: Qty(1),
+        fee: Money::ZERO,
+        at: UtcMillis(now.0 + dt),
+        trade_id: id.into(),
+    };
+    shared
+        .v
+        .lock()
+        .unwrap()
+        .pending
+        .push_back(fill(Side::Buy, 600_000, "R1", 0));
+    assert!(until(&t, |t| {
+        t.journal.sync();
+        t.journal.snapshot().is_some_and(|s| s.open == 1)
+    }));
+    // The replay prints 10 points under the entry (the paper core follows it).
+    t.follow(&store_at(599_000));
+    t.settle();
+    shared
+        .v
+        .lock()
+        .unwrap()
+        .pending
+        .push_back(fill(Side::Sell, 600_100, "R2", 60_000));
+    assert!(until(&t, |t| {
+        t.journal.sync();
+        t.journal
+            .snapshot()
+            .is_some_and(|s| s.trades.iter().any(|tr| tr.account == sim))
+    }));
+    let snap = t.journal.snapshot().unwrap();
+    let tr = snap.trades.iter().find(|tr| tr.account == sim).unwrap();
+    assert_eq!(tr.mae_ticks(25), Some(0.0));
 }
