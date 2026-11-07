@@ -54,6 +54,8 @@ pub enum Command {
     ToggleCrosshairSyncPrice,
     /// The focused chart's magnet crosshair (snap to the bar's open/high/low/close).
     ToggleMagnet,
+    /// The focused chart's order strip (chart trading phase 2b): market and crosshair limits.
+    ToggleOrderStrip,
     /// The focused pane's context menu, from the keyboard.
     Menu,
     /// Every command, searchable.
@@ -543,6 +545,9 @@ pub fn label(c: Command) -> String {
             "Crosshair sync: price too, same product (on/off)".into()
         }
         Command::ToggleMagnet => "Chart: magnet crosshair, snap to OHLC (on/off)".into(),
+        Command::ToggleOrderStrip => {
+            "Chart: order strip, market and limit at the crosshair (show/hide)".into()
+        }
         Command::Menu => "Pane menu".into(),
         Command::Palette => "Command palette".into(),
         Command::SaveAs => "Save workspace as…".into(),
@@ -660,6 +665,7 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleCrosshairSync,
         Command::ToggleCrosshairSyncPrice,
         Command::ToggleMagnet,
+        Command::ToggleOrderStrip,
         Command::ToggleStudyLabels,
         Command::ToggleStudies,
         Command::CleanChart,

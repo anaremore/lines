@@ -772,7 +772,7 @@ impl WindowView {
         &mut self,
         _id: PaneId,
         chart: gpui::Entity<crate::chart_view::ChartView>,
-        ev: &crate::chart_view::ChartExit,
+        ev: &crate::chart_view::ChartOrder,
         cx: &mut Context<Self>,
     ) {
         use crate::trade_bar::TradePane;
@@ -829,9 +829,7 @@ impl WindowView {
             Some(t) if ok => {
                 t.submit(lines_trading::Source::Chart, ev.issued, ev.command.clone());
             }
-            _ => chart.update(cx, |c, cx| {
-                c.exit_refused(crate::chart_trade::ENABLE_TO_ADD, cx)
-            }),
+            _ => chart.update(cx, |c, cx| c.exit_refused(ev.refused, cx)),
         }
     }
 
@@ -855,7 +853,7 @@ impl WindowView {
                 }),
                 cx.subscribe(
                     e,
-                    move |this, chart, ev: &crate::chart_view::ChartExit, cx| {
+                    move |this, chart, ev: &crate::chart_view::ChartOrder, cx| {
                         this.chart_exit(id, chart, ev, cx)
                     },
                 ),
@@ -1236,6 +1234,11 @@ impl WindowView {
             Command::ToggleMagnet => {
                 if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
                     chart.update(cx, |c, cx| c.toggle_magnet(cx));
+                }
+            }
+            Command::ToggleOrderStrip => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.toggle_order_strip(cx));
                 }
             }
             Command::ToggleStudyLabels | Command::ToggleStudies | Command::CleanChart => {
@@ -2016,6 +2019,11 @@ impl WindowView {
                     "Magnet crosshair (snap to OHLC)",
                     Command::ToggleMagnet,
                     chart.read(cx).magnet(),
+                ));
+                items.push(MenuItem::named(
+                    "Order strip (market, limit at the crosshair)",
+                    Command::ToggleOrderStrip,
+                    chart.read(cx).order_strip(),
                 ));
                 items.push(MenuItem::named(
                     "Hide study labels",
