@@ -758,10 +758,6 @@ mod tests {
         }
     }
 
-    /// Drawing colors read against the chart (3:1, graphical objects) and never borrow a
-    /// meaning: clearly apart from up, down and the accent (sRGB distance, so near-misses such
-    /// as a sky blue beside the colorblind palette's blue up fail too), in every theme and
-    /// palette.
     /// Study lines (VWAP, averages, Bollinger band edges) carry data: each study color is at
     /// least 3:1 on the chart in every theme and palette.
     #[test]
@@ -774,6 +770,10 @@ mod tests {
         }
     }
 
+    /// Drawing colors read against the chart (3:1, graphical objects) and never borrow a
+    /// meaning: clearly apart from up, down and the accent (sRGB distance, so near-misses such
+    /// as a sky blue beside the colorblind palette's blue up fail too), in every theme and
+    /// palette.
     #[test]
     fn drawing_colors_contrast_and_stay_distinct() {
         for t in Theme::all() {

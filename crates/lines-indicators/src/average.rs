@@ -15,6 +15,10 @@
 //!
 //! **No resets**: averages run across session breaks (the bars themselves break there).
 //!
+//! **Bounded memory**: when the oldest bars are dropped, the points already computed with them
+//! are kept; a later full recompute (a contract change, a back-fill from the start) has no
+//! value for the first `length − 1` bars left, as on a chart that starts there.
+//!
 //! **Incremental**: an update recomputes from the bar holding the first change (the forming
 //! bar on a live tick), continuing the window sums and the EMA from the bars before it.
 

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lines_core::{ProductId, UtcMillis};
 use lines_indicators::graph::{SeriesKey, Spec, make_builtin};
@@ -438,6 +438,13 @@ impl State {
     }
 }
 
+/// How long the engine may wait for its next message: `None` blocks (no study reads
+/// trade-built bars); otherwise until `BARS_POLL` after the last full copy, which runs whatever
+/// other feeds send meanwhile (a busy feed never starves a quiet one's rebuilt bars).
+fn bars_wait(copying: bool, since_full: Duration) -> Option<Duration> {
+    copying.then(|| BARS_POLL.saturating_sub(since_full))
+}
+
 fn run(rx: Receiver<Msg>) {
     let mut st = State {
         graph: Graph::new(),
@@ -446,19 +453,20 @@ fn run(rx: Receiver<Msg>) {
         sources: HashMap::new(),
         holds: HashMap::new(),
     };
+    let mut last_full = Instant::now();
     loop {
-        // Poll only while some study reads trade-built bars.
-        let next = if st.sources.is_empty() {
-            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
-        } else {
-            rx.recv_timeout(BARS_POLL)
+        // Every `BARS_POLL`, all trade-built bars are copied, however busy any feed is.
+        if !st.sources.is_empty() && last_full.elapsed() >= BARS_POLL {
+            st.sync_bars(None);
+            last_full = Instant::now();
+        }
+        let next = match bars_wait(!st.sources.is_empty(), last_full.elapsed()) {
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(wait) => rx.recv_timeout(wait),
         };
         let msg = match next {
             Ok(m) => m,
-            Err(RecvTimeoutError::Timeout) => {
-                st.sync_bars(None);
-                continue;
-            }
+            Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
         match msg {
@@ -539,5 +547,25 @@ fn run(rx: Receiver<Msg>) {
                 let _ = reply.send(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The full copy of trade-built bars is due `BARS_POLL` after the last one, counted from
+    /// that copy, not from the last message: a feed sending every few ms can't postpone it.
+    #[test]
+    fn the_bar_copy_is_due_whatever_other_feeds_send() {
+        assert_eq!(
+            bars_wait(false, Duration::ZERO),
+            None,
+            "nothing to copy: block"
+        );
+        assert_eq!(bars_wait(true, Duration::ZERO), Some(BARS_POLL));
+        let ms = Duration::from_millis;
+        assert_eq!(bars_wait(true, ms(200)), Some(BARS_POLL - ms(200)));
+        assert_eq!(bars_wait(true, BARS_POLL + ms(5)), Some(Duration::ZERO));
     }
 }
