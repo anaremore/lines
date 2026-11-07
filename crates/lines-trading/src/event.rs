@@ -134,6 +134,9 @@ pub struct AccountView {
 /// take over with the next trade date.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccountLimits {
+    /// The account's size (its starting balance, whole dollars): prop rules are for it.
+    #[serde(default)]
+    pub account_size: i64,
     /// The prop rules in force now (`None`: none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_in_force: Option<crate::rules::RulePreset>,

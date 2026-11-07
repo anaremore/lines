@@ -270,3 +270,85 @@ fn waiting_rules_survive_a_restart() {
     core.restore_rules(&id, rules_now, a.pending_rules);
     assert!(core.pending_rules(&id).is_some());
 }
+
+/// A tighter rule the account is already past is refused with the reason: it would breach
+/// (and liquidate) now, mid-order, or block the account's own exits.
+#[test]
+fn a_tightening_the_account_is_already_past_is_refused() {
+    let mut r = Rig::new(eod());
+    // Long 3 (30 micros), then down a few points on it.
+    r.order(Side::Buy, 3, OrderKind::Market).expect("accepted");
+    r.wait(LAT);
+    r.book_at(5997.75, 5998.25);
+    let e = r
+        .set(Some(RulePreset {
+            max_micro_contracts: Some(20),
+            ..eod()
+        }))
+        .expect_err("30 micros are open");
+    assert_eq!(e.code, RejectCode::Invalid);
+    assert!(e.message.contains("30 micro"), "{}", e.message);
+    let e = r
+        .set(Some(RulePreset {
+            daily_loss_limit: Some(100),
+            ..eod()
+        }))
+        .expect_err("today's loss is past $100");
+    assert!(e.message.contains("daily loss"), "{}", e.message);
+    // Within what the account holds: fine.
+    r.set(Some(RulePreset {
+        max_micro_contracts: Some(30),
+        ..eod()
+    }))
+    .expect("30 of 30");
+    // Nothing was liquidated.
+    assert!(
+        !r.events.iter().any(|e| matches!(e, Event::Breach { .. })),
+        "no breach from a setting"
+    );
+}
+
+/// Settings commands never breach by themselves: an account whose saved high-water mark
+/// locked its drawdown at the start balance, before its real balance is known, isn't failed.
+#[test]
+fn a_settings_change_never_breaches() {
+    let mut cfg = AccountConfig::paper("paper-1", 50_000);
+    let mut p = eod();
+    p.liquidate_on_breach = true;
+    cfg.rules = Some(p.clone());
+    let mut tracker = rules::RuleTracker::new(Money::whole(50_000));
+    tracker.high_water = Money::whole(52_100);
+    tracker.locked = true;
+    let mut b = PaperBroker::new(paper());
+    b.open_account(cfg.id.clone(), Money::whole(50_000));
+    let mut core = TradingCore::new(Box::new(b));
+    core.add_account(cfg, Some(tracker));
+    let t = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap();
+    core.submit(
+        t,
+        Source::Test,
+        Instant::now(),
+        Command::SetRules {
+            account: acct(),
+            rules: Some(p),
+        },
+    );
+    core.submit(
+        t,
+        Source::Test,
+        Instant::now(),
+        Command::SetGuardrails {
+            account: acct(),
+            guardrails: Default::default(),
+        },
+    );
+    let events = core.drain();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Breach { .. })),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Account(v) if v.blocked.is_none() && v.limits.account_size == 50_000
+    )));
+}

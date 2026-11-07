@@ -941,6 +941,9 @@ impl Trading {
                 (core, setup.paper)
             }
         };
+        // Orders the broker still holds (brackets survive restarts) come back through rebuild,
+        // with the account's real balance: only then are settings applied.
+        core.rebuild(lines_feed::now_utc());
         // The trader's guardrails from settings, through the command path (tighter now, looser
         // with the next trade date; a saved lockout is never cleared).
         let wanted: Vec<(AccountId, Guardrails)> = core
@@ -983,8 +986,6 @@ impl Trading {
                 TradeCommand::SetRules { account, rules },
             );
         }
-        // Orders the broker still holds (brackets survive restarts) come back through rebuild.
-        core.rebuild(lines_feed::now_utc());
         let _ = core.drain();
         let accounts: Vec<AccountInfo> = core
             .accounts()

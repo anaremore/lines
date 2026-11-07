@@ -153,6 +153,8 @@ pub struct AccountFact {
     pub lock: Option<String>,
     /// A prop-rule breach restricting the account: what ("drawdown reached").
     pub breach: Option<String>,
+    /// The account's size (its starting balance, whole dollars): prop presets are for it.
+    pub account_size: Option<i64>,
 }
 
 /// Everything settings read and write: the app's `settings.json` and this workspace's own.
@@ -1548,30 +1550,42 @@ fn prop_field(key: &str, r: Option<&lines_trading::rules::RulePreset>) -> Option
     })
 }
 
-/// The row's line about what is in force: "In force $1,000 now · $1,500 from the next
-/// session" when the core holds a looser value back, else nothing.
-pub fn status(st: &Setting, t: &Target, f: &Facts) -> Option<String> {
+/// The row's line about what the trading core has in force, when it differs from the value
+/// shown: "In force $1,000 now · $1,500 from the next session" (a looser value waiting), or
+/// "In force 1 now" (set elsewhere, e.g. a script, or not sent yet). Nothing when they agree.
+pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> {
     let a = fact(f, t)?;
     let (now, next) = if st.key.starts_with("guard.") {
         (
             guard_field(st.key, &a.guard_in_force)?,
-            guard_field(st.key, a.guard_pending.as_ref()?)?,
+            a.guard_pending
+                .as_ref()
+                .and_then(|g| guard_field(st.key, g)),
         )
     } else if st.key.starts_with("prop.") {
         (
             prop_field(st.key, a.rules_in_force.as_ref())?,
-            prop_field(st.key, a.rules_pending.as_ref()?.rules.as_ref())?,
+            a.rules_pending
+                .as_ref()
+                .and_then(|r| prop_field(st.key, r.rules.as_ref())),
         )
     } else {
         return None;
     };
-    (now != next).then(|| {
-        format!(
+    let shown = match (st.get)(p, t, f) {
+        Value::Number(n) => n,
+        _ => return None,
+    };
+    let text = |n: Option<i64>| st.value_text(&Value::Number(n));
+    match next {
+        Some(next) if next != now => Some(format!(
             "In force {} now · {} from the next session",
-            st.value_text(&Value::Number(now)),
-            st.value_text(&Value::Number(next))
-        )
-    })
+            text(now),
+            text(next)
+        )),
+        _ if now != shown => Some(format!("In force {} now", text(now))),
+        _ => None,
+    }
 }
 
 /// Thousands separators: 1500 → "1,500".
@@ -2182,21 +2196,41 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            status(by_key("guard.max_daily_loss").unwrap(), &t, &f).as_deref(),
+            status(
+                by_key("guard.max_daily_loss").unwrap(),
+                &Prefs::default(),
+                &t,
+                &f
+            )
+            .as_deref(),
             Some("In force $1,000 now · $1,500 from the next session")
         );
-        assert_eq!(status(by_key("guard.max_position").unwrap(), &t, &f), None);
+        assert_eq!(
+            status(
+                by_key("guard.max_position").unwrap(),
+                &Prefs::default(),
+                &t,
+                &f
+            ),
+            None
+        );
         let lock = by_key("guard.status").unwrap();
         assert_eq!(
             (lock.get)(&Prefs::default(), &t, &f),
             Value::Text("🔒 Locked out: 6 of 6 trades today".into())
         );
-        // Nothing waiting: no line.
+        // Nothing waiting, but settings say none while the core has $1,000 (set elsewhere):
+        // the row says what is in force.
         f.accounts[0].guard_pending = None;
+        let daily = by_key("guard.max_daily_loss").unwrap();
         assert_eq!(
-            status(by_key("guard.max_daily_loss").unwrap(), &t, &f),
-            None
+            status(daily, &Prefs::default(), &t, &f).as_deref(),
+            Some("In force $1,000 now")
         );
+        // And nothing when they agree.
+        let mut p = Prefs::default();
+        daily.apply(&mut p, &t, Value::Number(Some(1_000))).unwrap();
+        assert_eq!(status(daily, &p, &t, &f), None);
     }
 
     #[test]

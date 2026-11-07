@@ -82,6 +82,17 @@ fn restore_look(
     });
 }
 
+/// A risk change sent to the trading core, until it answers: a refusal puts the account's
+/// saved entry back and says why on the row.
+struct Awaiting {
+    index: usize,
+    id: lines_trading::CommandId,
+    /// The account's settings key and its entries before the change.
+    key: String,
+    prop: Option<schema::PropRulesDoc>,
+    guard: Option<lines_trading::Guardrails>,
+}
+
 /// A setting change waiting for the trader's yes (a guardrail loosened).
 struct Pending {
     index: usize,
@@ -115,6 +126,8 @@ pub struct SettingsWindow {
     editor_msg: Option<String>,
     /// The settings list's scroll (keeps the selected row in view).
     scroll: gpui::ScrollHandle,
+    /// A risk change the trading core hasn't answered yet.
+    awaiting: Option<Awaiting>,
     /// The row last scrolled into view (only a new selection or search scrolls).
     scrolled: Option<(Section, usize, String)>,
 }
@@ -296,7 +309,7 @@ pub fn run(c: schema::SettingCmd, cx: &mut App) -> Result<Option<String>, &'stat
                 }
                 return Ok(None);
             }
-            commit(&before, &after, &target, cx);
+            let _ = commit(&before, &after, &target, cx);
             Ok(Some(format!("{}: {}", st.name, st.value_text(&v))))
         }
         None => {
@@ -325,7 +338,13 @@ fn current_prefs(cx: &App) -> Prefs {
 
 /// Write `after` where it lives and apply its effects (the look, the trading core's
 /// guardrails, P&L text, the workspace's preferences).
-fn commit(before: &Prefs, after: &Prefs, target: &Target, cx: &mut App) {
+fn commit(
+    before: &Prefs,
+    after: &Prefs,
+    target: &Target,
+    cx: &mut App,
+) -> Option<lines_trading::CommandId> {
+    let mut sent = None;
     // The look as saved and this run's flags: only the fields changed now are saved, and a
     // field the trader set drops its flag (flags are never saved).
     let flags = cx
@@ -378,28 +397,29 @@ fn commit(before: &Prefs, after: &Prefs, target: &Target, cx: &mut App) {
             .find_map(|k| after.app.prop_rules.get(k))
         && let Ok(rules) = doc.resolve()
     {
-        t.submit(
+        sent = Some(t.submit(
             lines_trading::Source::Api,
             Instant::now(),
             lines_trading::Command::SetRules {
                 account: lines_trading::AccountId::new(id),
                 rules,
             },
-        );
+        ));
     }
     if after.app.guardrails != before.app.guardrails
         && let (Some(id), Some(t)) = (&target.account, crate::trading::Trading::try_global(cx))
     {
         // Saved under the name or the id (as startup reads them): the entry just edited.
-        t.submit(
+        sent = Some(t.submit(
             lines_trading::Source::Api,
             Instant::now(),
             lines_trading::Command::SetGuardrails {
                 account: lines_trading::AccountId::new(id),
                 guardrails: target.guardrails(after),
             },
-        );
+        ));
     }
+    sent
 }
 
 fn gather_facts(cx: &App) -> Facts {
@@ -432,7 +452,10 @@ fn gather_facts(cx: &App) -> Facts {
             })
             .collect();
         // What the core reports now: rules and guardrails in force, what waits, lockouts.
-        let cache = t.cache.read();
+        // Never wait on the trading thread: a busy cache shows last frame's facts next time.
+        let Some(cache) = t.cache.try_read() else {
+            return f;
+        };
         for fa in &mut f.accounts {
             let id = lines_trading::AccountId::new(&fa.id);
             if let Some(v) = cache.account(&id) {
@@ -440,16 +463,24 @@ fn gather_facts(cx: &App) -> Facts {
                 fa.rules_pending = v.limits.rules_pending.clone();
                 fa.guard_in_force = v.limits.guardrails_in_force.clone();
                 fa.guard_pending = v.limits.guardrails_pending.clone();
+                fa.account_size = Some(v.limits.account_size).filter(|s| *s > 0);
                 fa.breach = v.blocked.map(|b| {
-                    match b {
+                    let what = match b {
                         lines_trading::rules::Breach::TrailingDrawdown => {
-                            "the trailing drawdown was reached; the account may only close positions"
+                            "the trailing drawdown was reached (final)"
                         }
                         lines_trading::rules::Breach::DailyLoss => {
-                            "the daily loss limit was reached"
+                            "the daily loss limit was reached (until the next session)"
                         }
-                    }
-                    .to_owned()
+                    };
+                    let can = match v.trading {
+                        lines_trading::rules::TradingState::Halted => "no new orders",
+                        lines_trading::rules::TradingState::ReducingOnly => {
+                            "orders may only close positions"
+                        }
+                        lines_trading::rules::TradingState::Active => "orders are allowed",
+                    };
+                    format!("{what}; {can}")
                 });
             }
             fa.lock = cache.guard(&id).map(|g| {
@@ -493,6 +524,7 @@ impl SettingsWindow {
             editor_msg: None,
             scroll: gpui::ScrollHandle::new(),
             scrolled: None,
+            awaiting: None,
         }
     }
 
@@ -571,7 +603,7 @@ impl SettingsWindow {
                 target: self.target.clone(),
                 text: if guard || prop {
                     format!(
-                        "Loosening {} for {} ({from} → {to}) takes effect tomorrow, at the next trade date.",
+                        "Loosening {} for {} ({from} → {to}) takes effect at the next session.",
                         st.name.to_lowercase(),
                         self.target
                             .account_name
@@ -588,8 +620,53 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
+        // A preset for another account size is refused here, with the reason (the core
+        // refuses it too).
+        if st.key == "prop.preset"
+            && let Value::Choice(k) = v
+            && k > 0
+            && let Some(size) = self
+                .facts
+                .accounts
+                .iter()
+                .find(|a| Some(&a.id) == self.target.account.as_ref())
+                .and_then(|a| a.account_size)
+            && lines_trading::rules::presets()
+                .get(k - 1)
+                .is_some_and(|p| p.account_size != size)
+        {
+            self.note = Some((
+                i,
+                format!(
+                    "This account is ${}: choose a preset for that size",
+                    schema::grouped(size)
+                ),
+                Tone::Problem,
+            ));
+            cx.notify();
+            return;
+        }
         let look = schema::LookField::of(st.key).map(|_| look_now(cx));
-        commit(&before, &after, &self.target, cx);
+        let key = self
+            .target
+            .account_name
+            .clone()
+            .or(self.target.account.clone())
+            .unwrap_or_default();
+        let saved = settings(cx);
+        let (prop_was, guard_was) = (
+            saved.prop_rules.get(&key).cloned(),
+            saved.guardrails.get(&key).cloned(),
+        );
+        if let Some(id) = commit(&before, &after, &self.target, cx) {
+            self.awaiting = Some(Awaiting {
+                index: i,
+                id,
+                key,
+                prop: prop_was,
+                guard: guard_was,
+            });
+        }
         self.undo.push(UndoEntry {
             index: i,
             target: self.target.clone(),
@@ -599,7 +676,7 @@ impl SettingsWindow {
         let text = if guard {
             if loosens {
                 format!(
-                    "Loosened {} → {}: takes effect at the next trade date.",
+                    "Loosened {} → {}: takes effect at the next session.",
                     st.value_text(&old),
                     st.value_text(&v)
                 )
@@ -1139,7 +1216,7 @@ impl SettingsWindow {
             );
         }
         // What is in force now, when the core holds a looser value back.
-        if let Some(line) = schema::status(st, &self.target, &self.facts) {
+        if let Some(line) = schema::status(st, prefs, &self.target, &self.facts) {
             left = left.child(div().text_size(px(11.5)).text_color(t.warn).child(line));
         }
         if let (Kind::Editor, Value::Text(s)) = (st.kind, &value) {
@@ -1275,7 +1352,7 @@ impl SettingsWindow {
                                 .font_weight(FontWeight::BOLD)
                                 .cursor_pointer()
                                 .child(if p.tomorrow {
-                                    "Loosen from tomorrow · Y"
+                                    "Loosen from the next session · Y"
                                 } else {
                                     "Loosen now · Y"
                                 })
@@ -1412,6 +1489,33 @@ impl Render for SettingsWindow {
         let t = self.theme;
         // What the trading core reports (in force, waiting, lockouts) as of this frame.
         self.facts = gather_facts(cx);
+        // A risk change the core refused: the saved entry goes back, the row says why.
+        let answer = self.awaiting.as_ref().and_then(|w| {
+            crate::trading::Trading::try_global(cx)
+                .and_then(|t| t.cache.try_read().and_then(|c| c.result(w.id).cloned()))
+        });
+        if let Some(result) = answer {
+            let w = self.awaiting.take().expect("checked");
+            if let Err(r) = result {
+                let (key, prop, guard) = (w.key.clone(), w.prop.clone(), w.guard.clone());
+                update_settings(cx, move |s| {
+                    match prop {
+                        Some(d) => s.prop_rules.insert(key.clone(), d),
+                        None => s.prop_rules.remove(&key),
+                    };
+                    match guard {
+                        Some(g) => s.guardrails.insert(key, g),
+                        None => s.guardrails.remove(&key),
+                    };
+                });
+                self.undo.pop();
+                self.note = Some((
+                    w.index,
+                    format!("Not changed: {}", r.message),
+                    Tone::Problem,
+                ));
+            }
+        }
         let prefs = current_prefs(cx);
         let rows = self.rows();
         if self.row >= rows.len() {
@@ -1521,7 +1625,12 @@ impl Render for SettingsWindow {
         if let Some(c) = selected_child
             && self.scrolled.as_ref() != Some(&at)
         {
-            self.scroll.scroll_to_item(c);
+            // The first row: the top (its section's title and account line too).
+            if self.row == 0 {
+                self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            } else {
+                self.scroll.scroll_to_item(c);
+            }
             self.scrolled = Some(at);
         }
         let search = div()
@@ -1581,7 +1690,11 @@ impl Render for SettingsWindow {
                     .text_size(px(11.5))
                     .text_color(t.text_dim)
                     .child("↑↓ settings · ←→ change · Enter edit · Tab sections · Ctrl+Z undo · Ctrl+R reset")
-                    .child("Changes apply at once · every setting is also a palette command"),
+                    .child(if self.section == Section::Risk && self.query.trim().is_empty() {
+                        "Tighter applies at once · looser waits for the next session"
+                    } else {
+                        "Changes apply at once · every setting is also a palette command"
+                    }),
             )
     }
 }
