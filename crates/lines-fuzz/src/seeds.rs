@@ -133,7 +133,7 @@ pub fn all() -> Vec<Seed> {
     ));
     v.push(seed("recording", "lines-v2", lfr_v2("NQ", &nat)));
     // Audit finding 5: files from older builds hold outbound frames, a CQG logon among them;
-    // replay skips them (new recordings no longer write any).
+    // replay skips them (new recordings write their time only, no bytes).
     v.push(seed(
         "recording",
         "cqg-old-outbound-logon",

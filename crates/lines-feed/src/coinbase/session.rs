@@ -1356,6 +1356,26 @@ mod tests {
         let (ev, _) = feed(&mut s, f);
         assert!(ev.contains(&MarketEvent::Rejected { count: 2 }), "{ev:?}");
         assert_eq!(s.rest_newest_seen, Some(101));
+        // A full page of nothing but malformed ids ends the back-fill (a gap), never pages
+        // again from the newest.
+        let mut s = session();
+        let f = reply(&s, "[]");
+        feed(&mut s, f);
+        let row = r#"{"trade_id":0,"size":"1","price":"1","time":"2026-11-06T14:05:20Z"}"#;
+        let page = format!("[{}]", vec![row; TRADES_PER_PAGE].join(","));
+        let f = reply(&s, &page);
+        let (ev, out) = feed(&mut s, f);
+        assert!(ev.contains(&MarketEvent::Rejected {
+            count: TRADES_PER_PAGE as u64
+        }));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, MarketEvent::HistoryGap { .. }))
+        );
+        assert!(
+            s.backfill_done && s.queue.is_empty() && out.is_empty(),
+            "{out:?}"
+        );
     }
 
     #[test]

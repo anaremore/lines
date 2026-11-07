@@ -357,10 +357,38 @@ mod recording_tests {
         assert_eq!(second.direction, Direction::FromServer);
         assert_eq!(&second.frame.data[..], b"market data");
         assert!(r.next_record().unwrap().is_none());
-        // Replay's clock before any delivery is the logon's time (when start() ran live).
-        let header = r.header.clone();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Replay's clock before any delivery is the first outbound marker's time (when start()
+    /// ran live), not the first reply's: a session's time windows (Coinbase's bar cutoff)
+    /// match the live run.
+    #[test]
+    fn replay_starts_at_the_outbound_marker() {
+        use crate::recording::{Header, Writer};
+        let dir = std::env::temp_dir().join(format!("lines-rec-clock-{}", std::process::id()));
+        let path = dir.join("c.lfr");
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = Header {
+            start_wall_ms: 1_000_000,
+            provider: "coinbase".into(),
+            protocol: "x".into(),
+            product: "BTC/USD".into(),
+            contract: None,
+            version: crate::recording::FORMAT_VERSION,
+        };
+        let mut w = Writer::create(&path, &header).unwrap();
+        w.write(Direction::ToServer, Duration::ZERO, &Frame::text(""))
+            .unwrap();
+        w.write(
+            Direction::FromServer,
+            Duration::from_millis(5_000),
+            &Frame::text("{}"),
+        )
+        .unwrap();
+        w.finish().unwrap();
         let replay = ReplayTransport::open(&path, 1.0, None).unwrap();
-        assert_eq!(replay.clock(), Some(UtcMillis(first.wall_ms(&header))));
+        assert_eq!(replay.clock(), Some(UtcMillis(1_000_000)));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
