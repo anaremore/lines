@@ -130,6 +130,10 @@ impl Pane for TapeView {
 }
 
 impl TapeView {
+    /// A new look (the Settings window's appearance).
+    pub(crate) fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
     pub fn new(
         feed: PaneFeed,
         theme: Theme,

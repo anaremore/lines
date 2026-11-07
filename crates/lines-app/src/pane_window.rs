@@ -49,6 +49,13 @@ fn command(cmd: Command) -> Option<Command> {
 }
 
 impl PaneWindow {
+    /// A new look (the Settings window's appearance): this window and its pane.
+    pub(crate) fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        self.handle.set_theme(theme, cx);
+        cx.notify();
+    }
+
     fn new(
         id: PaneId,
         handle: PaneHandle,
@@ -72,7 +79,7 @@ impl PaneWindow {
         PaneWindow {
             id,
             handle,
-            theme: env.theme,
+            theme: env.theme.get(),
             focus: cx.focus_handle(),
             placement: workspace::placement(window, cx),
             opened,

@@ -104,6 +104,23 @@ pub struct Settings {
         skip_serializing_if = "crate::dom_trade::ArmPrefs::is_default"
     )]
     pub trading_prefs: crate::dom_trade::ArmPrefs,
+    /// Theme, palette and hollow candles (the Settings window; decision 0021). Optional:
+    /// absent means the built-in defaults; a CLI flag wins for its run.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::settings_schema::Appearance::is_default"
+    )]
+    pub appearance: crate::settings_schema::Appearance,
+    /// Defaults for panes created from now on (the Settings window). Optional.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::settings_schema::NewPanes::is_default"
+    )]
+    pub new_panes: crate::settings_schema::NewPanes,
+    /// Keys this version doesn't know (a newer version's), kept as they were so saving
+    /// never drops them (decision 0021).
+    #[serde(flatten)]
+    pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Files written before versioning (no `version` field) have exactly version 1's fields.
@@ -140,6 +157,8 @@ impl Settings {
     }
 
     fn normalise(&mut self) {
+        // The format's own key is written by `versioned`, not kept as an unknown one.
+        self.unknown.remove("version");
         dedup_keep_first(&mut self.recents);
         self.recents.truncate(MAX_RECENTS);
         dedup_keep_first(&mut self.favourites);
