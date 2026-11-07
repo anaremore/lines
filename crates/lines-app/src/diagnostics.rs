@@ -570,6 +570,8 @@ mod tests {
         "FAKE-ACCT-0006",
         // The OS user name in paths (logs and about.json's log_dir).
         "FAKEUSERNAME",
+        "FAKEGIVEN",
+        "FAKESURNAME",
         // An Authorization header's credentials and URL signing parameters.
         "FAKE-bearer-credential",
         "FAKEQUERYKEY",
@@ -621,6 +623,7 @@ mod tests {
              2026-11-06 INFO logs in C:\\Users\\FAKEUSERNAME\\AppData\\Local\\lines\\logs\n\
              2026-11-06 INFO saved \"C:\\\\Users\\\\FAKEUSERNAME\\\\AppData\\\\x.json\"\n\
              2026-11-06 DEBUG Authorization: Bearer FAKE-bearer-credential\n\
+             2026-11-06 INFO saved C:\\Users\\FAKEGIVEN FAKESURNAME\\Documents\\w.json\n\
              2026-11-06 DEBUG GET https://example.invalid/v1?key=FAKEQUERYKEY&sig=FAKEQUERYSIG\n",
         )
         .unwrap();
