@@ -3019,6 +3019,7 @@ impl ChartView {
             self.tf_menu,
             &measure,
         );
+        let desc_w = measure(i.description).ceil() + 1.0;
         let account = crate::trade_bar::chart_chip(self, &t, fit.account, cx);
         let timeframe = fit
             .timeframe
@@ -3067,7 +3068,11 @@ impl ChartView {
                                 .flex_row()
                                 .flex_wrap()
                                 .min_w_0()
+                                // Its whole text's width, shrinking from there (a wrapping
+                                // row's own width otherwise comes from the 48 px basis).
+                                .flex_basis(px(desc_w))
                                 .h(px(QUOTE_ROW_H))
+                                .line_height(px(QUOTE_ROW_H))
                                 .items_center()
                                 .overflow_hidden()
                                 .child(div().w(px(0.0)).h(px(QUOTE_ROW_H)))
