@@ -465,40 +465,39 @@ impl EconSchedule {
         &self.releases[e.release]
     }
 
-    /// Whether the schedule can answer for `symbol` from `now` to `now + ahead_ms` (the dates
-    /// of both ends must be covered by every release that affects it). Missing wins over stale.
-    pub fn coverage(&self, symbol: &str, now: UtcMillis, ahead_ms: i64) -> Coverage {
+    /// Whether the schedule can answer for `symbol` about releases at least `min` important
+    /// whose windows could hold `now`: the local dates from `now − back_ms` to `now + ahead_ms`
+    /// must be covered by every such release that affects it (a release below `min` never
+    /// matters). Missing wins over stale.
+    pub fn coverage(
+        &self,
+        symbol: &str,
+        now: UtcMillis,
+        back_ms: i64,
+        ahead_ms: i64,
+        min: Importance,
+    ) -> Coverage {
         let dates = [
+            self.local_date(UtcMillis(now.0 - back_ms.max(0))),
             self.local_date(now),
             self.local_date(UtcMillis(now.0 + ahead_ms.max(0))),
         ];
+        let counts = |r: &Release| r.importance >= min && r.affects(symbol);
         for (i, r) in self.releases.iter().enumerate() {
-            if !r.affects(symbol) {
+            if !counts(r) {
                 continue;
             }
             if let Some(&date) = dates.iter().find(|d| !r.covers(**d)) {
                 return Coverage::Missing { release: i, date };
             }
         }
-        let affected = self.releases.iter().any(|r| r.affects(symbol));
-        if affected && dates[0].days() - self.version.days() > STALE_AFTER_DAYS {
+        let affected = self.releases.iter().any(counts);
+        if affected && dates[1].days() - self.version.days() > STALE_AFTER_DAYS {
             return Coverage::Stale {
                 checked: self.version,
             };
         }
         Coverage::Current
-    }
-
-    /// Events at least `min` important that affect `symbol` (all products with `None`).
-    fn relevant<'a>(
-        &'a self,
-        symbol: Option<&'a str>,
-        min: Importance,
-    ) -> impl Iterator<Item = &'a EconEvent> + 'a {
-        self.events.iter().filter(move |e| {
-            let r = self.release(e);
-            r.importance >= min && symbol.is_none_or(|s| r.affects(s))
-        })
     }
 
     /// The event whose window `[at − before, at + after)` holds `now`, if any (the earliest
@@ -550,9 +549,15 @@ impl EconSchedule {
         before_ms: i64,
         min: Importance,
     ) -> Option<UtcMillis> {
-        self.relevant(symbol, min)
+        // Window starts are sorted like the events: skip those not after `now`.
+        let first = self.events.partition_point(|e| e.at.0 - before_ms <= now.0);
+        self.events[first..]
+            .iter()
+            .find(|e| {
+                let r = self.release(e);
+                r.importance >= min && symbol.is_none_or(|s| r.affects(s))
+            })
             .map(|e| UtcMillis(e.at.0 - before_ms))
-            .find(|t| *t > now)
     }
 
     /// `HH:MM` of an event in the schedule's zone.

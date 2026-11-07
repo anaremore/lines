@@ -178,25 +178,25 @@ fn next_window_start_and_next_event() {
 fn coverage_is_missing_outside_and_stale_when_old() {
     let s = sample();
     assert_eq!(
-        s.coverage("ES", t("2026-06-01T12:00:00Z"), 0),
+        s.coverage("ES", t("2026-06-01T12:00:00Z"), 0, 0, Importance::Low),
         Coverage::Current
     );
     // PPI (ES only) ends in November; CPI covers December.
     assert_eq!(
-        s.coverage("ES", t("2026-12-02T12:00:00Z"), 0),
+        s.coverage("ES", t("2026-12-02T12:00:00Z"), 0, 0, Importance::Low),
         Coverage::Missing {
             release: 1,
             date: d(2026, 12, 2)
         }
     );
     assert_eq!(
-        s.coverage("NQ", t("2026-12-02T12:00:00Z"), 0),
+        s.coverage("NQ", t("2026-12-02T12:00:00Z"), 0, 0, Importance::Low),
         Coverage::Current
     );
     // The local date decides: 2026-03-01T04:30Z is 23:30 on February 28 in New York, before
     // coverage.
     assert_eq!(
-        s.coverage("NQ", t("2026-03-01T04:30:00Z"), 0),
+        s.coverage("NQ", t("2026-03-01T04:30:00Z"), 0, 0, Importance::Low),
         Coverage::Missing {
             release: 0,
             date: d(2026, 2, 28)
@@ -204,32 +204,43 @@ fn coverage_is_missing_outside_and_stale_when_old() {
     );
     // Looking ahead past the end of coverage.
     assert_eq!(
-        s.coverage("NQ", t("2026-12-31T23:00:00Z"), 0),
+        s.coverage("NQ", t("2026-12-31T23:00:00Z"), 0, 0, Importance::Low),
         Coverage::Current
     );
     assert_eq!(
-        s.coverage("NQ", t("2027-01-01T04:58:00Z"), 0),
+        s.coverage("NQ", t("2027-01-01T04:58:00Z"), 0, 0, Importance::Low),
         Coverage::Current,
         "still 23:58 on Dec 31 in New York"
     );
     assert!(matches!(
-        s.coverage("NQ", t("2027-01-01T04:58:00Z"), 2 * MIN),
+        s.coverage("NQ", t("2027-01-01T04:58:00Z"), 0, 2 * MIN, Importance::Low),
         Coverage::Missing { .. }
     ));
+    // Looking back: just after midnight, a window from the evening before could still hold.
+    assert!(matches!(
+        s.coverage("NQ", t("2026-03-01T05:01:00Z"), 2 * MIN, 0, Importance::Low),
+        Coverage::Missing { .. }
+    ));
+    // A release below the rule's importance never matters: PPI (medium) is missing in
+    // December, but a high-only question about ES is answered.
+    assert_eq!(
+        s.coverage("ES", t("2026-12-02T12:00:00Z"), 0, 0, Importance::High),
+        Coverage::Current
+    );
     // Products no release moves have nothing to miss.
     assert_eq!(
-        s.coverage("BTC/USD", t("2030-01-01T00:00:00Z"), 0),
+        s.coverage("BTC/USD", t("2030-01-01T00:00:00Z"), 0, 0, Importance::Low),
         Coverage::Current
     );
     // Stale after STALE_AFTER_DAYS from the version (2026-11-01), if not already missing.
     let old =
         EconSchedule::parse(&SAMPLE.replace("version 2026-11-01", "version 2026-04-01")).unwrap();
     assert_eq!(
-        old.coverage("NQ", t("2026-05-31T12:00:00Z"), 0),
+        old.coverage("NQ", t("2026-05-31T12:00:00Z"), 0, 0, Importance::Low),
         Coverage::Current
     );
     assert_eq!(
-        old.coverage("NQ", t("2026-06-01T12:00:00Z"), 0),
+        old.coverage("NQ", t("2026-06-01T12:00:00Z"), 0, 0, Importance::Low),
         Coverage::Stale {
             checked: d(2026, 4, 1)
         }

@@ -73,11 +73,16 @@ mod tests {
         assert_eq!(fomc.at, at("2027-06-09T18:00:00Z"));
         // BEA has no 2027 list yet: missing, never assumed clear.
         assert!(matches!(
-            s.coverage("ES", at("2027-01-04T15:00:00Z"), 0),
+            s.coverage("ES", at("2027-01-04T15:00:00Z"), 0, 0, Importance::Medium),
             Coverage::Missing { .. }
         ));
+        // ...which a high-only rule doesn't need: CPI, jobs and FOMC are covered.
         assert_eq!(
-            s.coverage("ES", at("2026-11-09T15:00:00Z"), 0),
+            s.coverage("ES", at("2027-01-04T15:00:00Z"), 0, 0, Importance::High),
+            Coverage::Current
+        );
+        assert_eq!(
+            s.coverage("ES", at("2026-11-09T15:00:00Z"), 0, 0, Importance::Low),
             Coverage::Current
         );
     }

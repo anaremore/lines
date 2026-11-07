@@ -294,10 +294,77 @@ fn warn_refuses_nothing_and_never_flattens() {
 fn products_the_release_does_not_move_trade_on() {
     let mut r = Rig::new(NewsAction::Block);
     r.t = cpi();
-    // BTC/USD isn't in CPI's list: the blackout doesn't apply (whatever else refuses it).
-    if let Err(e) = r.order_on(btc(), Side::Buy, OrderKind::Limit { price: Price(100) }) {
-        assert_ne!(e.code, RejectCode::Guardrail, "{e:?}");
-    }
+    // BTC/USD isn't in CPI's list: the blackout doesn't apply.
+    r.order_on(btc(), Side::Buy, OrderKind::Limit { price: Price(100) })
+        .expect("not a product CPI moves");
+}
+
+#[test]
+fn medium_releases_count_only_when_asked_for() {
+    // PPI's list ends in November: a high-only rule still answers for December (CPI covers it),
+    // a rule that includes medium releases can't.
+    let short_ppi = SCHEDULE.replace(
+        "coverage 2026-03-01 2026-12-31 verified
+source https://www.bls.gov/schedule/news_release/ppi.htm",
+        "coverage 2026-03-01 2026-11-30 verified
+source https://www.bls.gov/schedule/news_release/ppi.htm",
+    );
+    assert_ne!(short_ppi, SCHEDULE);
+    let rig = |include_medium| {
+        Rig::with(
+            Guardrails {
+                news: Some(NewsBlackout {
+                    include_medium,
+                    ..NewsBlackout::new(NewsAction::Block)
+                }),
+                ..Default::default()
+            },
+            None,
+            Some(&short_ppi),
+        )
+    };
+    let ppi = at("2026-11-12T13:30:00Z");
+    let december = at("2026-12-02T15:00:00Z");
+    let mut r = rig(false);
+    r.t = ppi;
+    r.buy_limit().expect("PPI is medium");
+    r.t = december;
+    r.book();
+    r.buy_limit().expect("high releases are covered");
+    let mut r = rig(true);
+    r.t = ppi;
+    assert_eq!(r.denied(), "News blackout: PPI, October 2026, 2 min left");
+    r.t = december;
+    r.book();
+    assert!(r.denied().contains("missing PPI for 2026-12-02"));
+}
+
+#[test]
+fn adding_quantity_inside_the_window_is_an_entry() {
+    let mut r = Rig::new(NewsAction::Block);
+    r.buy_limit().expect("before the window");
+    let id = r
+        .core
+        .open_orders(&acct())
+        .next()
+        .map(|o| o.id)
+        .expect("working");
+    r.wait(LAT);
+    r.t = cpi();
+    let e = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order: id,
+            qty: Some(Qty(2)),
+            price: None,
+        })
+        .expect_err("more quantity is an entry");
+    assert_eq!(e.code, RejectCode::Guardrail, "{e:?}");
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: id,
+    })
+    .expect("a cancel always passes");
 }
 
 #[test]

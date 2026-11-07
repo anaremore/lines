@@ -1254,7 +1254,7 @@ impl TradingCore {
             return;
         };
         self.news_flattened
-            .retain(|(_, _, at)| at.0 + 86_400_000 > now.0);
+            .retain(|(_, _, at)| at.0 + 7 * 86_400_000 > now.0);
         let mut todo = Vec::new();
         for (id, a) in &self.accounts {
             let Some(rule) = self

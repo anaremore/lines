@@ -128,17 +128,23 @@ pub fn title(s: &EconSchedule, e: &lines_core::econ::EconEvent) -> String {
     format!("{}, {}", s.release(e).name, e.label)
 }
 
-/// Why the schedule can't answer, if it can't (short, US English).
+/// Why the schedule can't answer for `symbol` under `rule`, if it can't (short, US English).
 pub fn unknown_reason(
     schedule: Option<&EconSchedule>,
+    rule: &NewsBlackout,
     symbol: &str,
     now: UtcMillis,
-    ahead_ms: i64,
 ) -> Option<String> {
     let Some(s) = schedule else {
         return Some("no economic calendar loaded".to_owned());
     };
-    match s.coverage(symbol, now, ahead_ms) {
+    match s.coverage(
+        symbol,
+        now,
+        rule.after_ms(),
+        rule.before_ms(),
+        rule.min_importance(),
+    ) {
         Coverage::Current => None,
         Coverage::Missing { release, date } => Some(format!(
             "economic calendar missing {} for {date}",
@@ -171,7 +177,7 @@ pub fn status(
             until: UtcMillis(e.at.0 + rule.after_ms()),
         };
     }
-    match unknown_reason(schedule, symbol, now, rule.before_ms()) {
+    match unknown_reason(schedule, rule, symbol, now) {
         Some(reason) => NewsStatus::Unknown { reason },
         None => NewsStatus::Clear,
     }
