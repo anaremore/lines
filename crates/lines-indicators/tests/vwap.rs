@@ -42,6 +42,7 @@ fn trade(iso: &str, price: f64, qty: i64) -> Input {
         time: at(iso),
         price: Price((price * 100.0).round() as i64),
         qty: Qty(qty),
+        aggressor: None,
     }
 }
 
@@ -461,6 +462,7 @@ fn deterministic_for_the_same_inputs() {
                     time: UtcMillis(t),
                     price: Price(600_000 + (x % 400) as i64 * 25),
                     qty: Qty(1 + (x % 9) as i64),
+                    aggressor: None,
                 });
             }
             r.push(&batch);

@@ -96,6 +96,7 @@ fn indicator_cpu_per_tick_6_charts_2_vwaps() {
             time: UtcMillis(t),
             price: Price(600_000 + ((x >> 33) % 80) as i64 * 25),
             qty: Qty(1 + ((x >> 40) % 9) as i64),
+            aggressor: None,
         }];
         let t0 = Instant::now();
         g.push(feed, &input);

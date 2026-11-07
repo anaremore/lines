@@ -92,8 +92,9 @@ pub struct Point {
     pub forming: bool,
 }
 
-/// Where a bucket's reset period starts (its key), or `None` if it has no VWAP value.
-struct Periods {
+/// Where a bucket's reset period starts (its key), or `None` if it has no value (shared with
+/// cumulative delta).
+pub(crate) struct Periods {
     reset: Reset,
     cal: Option<&'static SessionCalendar>,
     /// The last session looked up, `[open, close)` → key (most lookups hit it).
@@ -101,7 +102,15 @@ struct Periods {
 }
 
 impl Periods {
-    fn key(&mut self, t: UtcMillis) -> Option<i64> {
+    pub(crate) fn new(reset: Reset, cal: Option<&'static SessionCalendar>) -> Periods {
+        Periods {
+            reset,
+            cal,
+            cache: None,
+        }
+    }
+
+    pub(crate) fn key(&mut self, t: UtcMillis) -> Option<i64> {
         let trade_date = |p: &mut Periods, kind| -> Option<(i64, i64, i64)> {
             if let Some((open, close, key)) = p.cache
                 && open <= t.0
