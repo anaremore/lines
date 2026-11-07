@@ -85,9 +85,15 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
 # --drag-position Y previews the position line dragged to plot-local Y (the stop or target it would set, with its P&L; nothing is placed).
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair; --magnet snaps it to OHLC.
-# README hero (assets/readme/lines-dark.png): synthetic mock data only (decision 0010):
-#   lines --source mock --headless 5 --record recordings/readme-mock.lfr
-#   lines --replay recordings/readme-mock.lfr --screenshot assets/readme/lines-dark.png --size 1600x900 --theme dark --cursor 700,420 --large-print 8
+# README images (docs/img/): synthetic data only (decision 0010); workspaces in docs/img/*.json:
+#   cargo run -p lines-feed --example synth_session -- recordings/synth.lfr --depth
+#   P="buy 2 @ 6021.00 bracket 8/16; ack; buy 1 @ 6017.00; ack"
+#   (`lines` here is a `--features screenshot` build; release binaries can't take screenshots)
+#   lines --replay recordings/synth.lfr --workspace docs/img/footprint-trading.json --size 1600x900 --theme dark --paper "$P" --enable-trading --screenshot hero.png
+#   lines --replay recordings/synth.lfr --workspace docs/img/trading-5m.json --size 1600x900 --theme light --paper "$P" --enable-trading --screenshot light.png
+#   lines --replay recordings/synth.lfr --layout chart --timeframe 500t --vwap "eth/1,2" --size 1200x700 --theme dark --screenshot tick.png
+#   then quantize each (hero → chart-orders-footprint.png, light → light.png, tick → tick-chart.png):
+#   magick hero.png -strip +dither -colors 256 PNG8:docs/img/chart-orders-footprint.png
 # Colours: --theme dark|light, --palette standard|cb (colourblind: blue up, orange down),
 # --hollow up|down (which direction's candle bodies are hollow; default up). Also for the live app, where
 # they win over Settings › Appearance for that run.
