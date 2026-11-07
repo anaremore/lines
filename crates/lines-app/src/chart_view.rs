@@ -53,6 +53,7 @@ use gpui::{
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
     Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
+use lines_core::drawings::{Anchor, TimeAxis, Tool, snap_anchor, write_measure};
 use lines_core::geometry::{
     Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
     snap, write_ohlcv,
@@ -67,6 +68,8 @@ use lines_feed::ChartData;
 use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
 
+use crate::chart_draw::{self, ChartDrawings};
+use crate::commands::DrawCmd;
 use crate::feeds::{Feeds, PaneFeed};
 use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
@@ -110,6 +113,9 @@ enum LabelKind {
     CrossTime,
     Indicator,
 }
+
+/// Behind a drawing's note text: the box's padding (logical px).
+const NOTE_PAD: f32 = 6.0;
 
 /// Where a pointer event landed.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -331,6 +337,13 @@ pub struct ChartView {
     tf_entry: Option<String>,
     /// The hovered bar was cut short by a session break.
     cross_partial: bool,
+    /// The product's drawings on this chart (roadmap 11).
+    drawings: ChartDrawings,
+    /// Note texts shaped (by drawing id; re-shaped only when the text changes).
+    note_lines: HashMap<u64, (String, ShapedLine)>,
+    /// Measure readouts (`None`: the temporary one; else a pinned measure's id), shaped once
+    /// per distinct reading.
+    measure_lines: HashMap<Option<u64>, (lines_core::drawings::MeasureStats, ShapedLine)>,
 }
 
 impl crate::trade_bar::TradePane for ChartView {
@@ -384,6 +397,7 @@ impl ChartView {
         }
         let trade = crate::trade_bar::PaneTrade::new(None, cx);
         let timeframe = fixture.timeframe;
+        let drawings = ChartDrawings::new(crate::drawings_store::for_product(&instrument, cx));
 
         let mut view = ChartView {
             study_menu: None,
@@ -458,6 +472,9 @@ impl ChartView {
             tf_menu: fixture.timeframe_menu,
             tf_entry: None,
             cross_partial: false,
+            drawings,
+            note_lines: HashMap::new(),
+            measure_lines: HashMap::new(),
         };
         view.apply_timeframe(timeframe);
         if let Some(set) = fixture_studies {
@@ -761,6 +778,16 @@ impl ChartView {
             }
             return;
         }
+        // Drawings take a press only in drawing mode or on a drawing, never with Ctrl (chart
+        // trading's); otherwise the chart pans and scales as usual.
+        if region == Region::Plot {
+            let anchor = self.drawing_anchor(x, y);
+            let ctrl = ev.modifiers.control || ev.modifiers.platform;
+            if self.drawings.on_down(x as f32, y as f32, ctrl, anchor) {
+                cx.notify();
+                return;
+            }
+        }
         if ev.click_count >= 2 {
             match region {
                 Region::Plot => self.vp.reset(self.series_len),
@@ -815,6 +842,23 @@ impl ChartView {
         }
         if self.anchoring.is_some() && k.key == "escape" {
             self.anchoring = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
+        // go to them when they have a use for it (a tool, a measure, a selection).
+        let typed = k
+            .key_char
+            .as_deref()
+            .filter(|_| !m.control && !m.alt && !m.platform);
+        if !m.control
+            && !m.platform
+            && (self.drawings.typing()
+                || (self.tf_entry.is_none()
+                    && matches!(k.key.as_str(), "escape" | "enter" | "delete" | "backspace")))
+            && self.drawings.key(&k.key, typed) == chart_draw::Key::Handled
+        {
             cx.stop_propagation();
             cx.notify();
             return;
@@ -1020,6 +1064,7 @@ impl ChartView {
 
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
+        self.drawings.hidden = state.hide_drawings;
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -1245,7 +1290,12 @@ impl ChartView {
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (x, y) = self.local(ev.position);
+        let anchor = self.drawing_anchor(x, y);
+        if self.drawings.on_up(x as f32, y as f32, anchor) {
+            cx.notify();
+        }
         if self.drag.is_some() {
             self.end_drag();
             cx.notify();
@@ -1466,6 +1516,17 @@ impl ChartView {
                 self.fp_seen = fb;
                 cx.notify();
             }
+            // Drawings: projected for this timeframe; previews and drags follow the pointer.
+            let magnet = self.magnet();
+            self.drawings.set_pointer(self.hover);
+            self.drawings.prepare(
+                &TimeAxis::new(view),
+                &self.vp,
+                fmt.tick,
+                magnet,
+                &fmt,
+                self.instrument.point_value,
+            );
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -1693,6 +1754,12 @@ impl ChartView {
                 }
                 self.studies.paint((ox, oy), &t, window);
                 self.levels.paint_front(plot, window);
+            }
+            // Drawings: the trader's own marks, above the studies (shown unless hidden on
+            // this chart; hiding studies or a clean chart leaves them).
+            if !self.drawings.hidden {
+                self.drawings.paint((ox, oy), hair, &t, window);
+                self.paint_drawing_text((ox, oy), window, cx);
             }
             if labels {
                 self.levels.paint_labels(plot, &t, window, cx);
@@ -2176,6 +2243,248 @@ impl ChartView {
         self.space_measured = true;
     }
 
+    /// The pointer at plot-local (`x`, `y`) as a drawing anchor: the bar's start and a price
+    /// on the tick grid (or its O/H/L/C with the magnet).
+    fn drawing_anchor(&self, x: f64, y: f64) -> Option<Anchor> {
+        let d = self.store.try_read()?;
+        let axis = TimeAxis::new(bars_view(&self.derived, &d));
+        snap_anchor(
+            &axis,
+            &self.vp,
+            self.instrument.price.tick,
+            self.magnet(),
+            x,
+            y,
+        )
+    }
+
+    /// Notes' text and the measure's readout, on `label_bg` boxes (inside the plot mask).
+    /// Shaped text is cached: a note re-shapes only when its text changes.
+    fn paint_drawing_text(&mut self, origin: (f32, f32), window: &mut Window, cx: &mut App) {
+        let t = self.theme;
+        let (ox, oy) = origin;
+        let line_h = px(LABEL_PX * 1.3);
+        let box_h = LABEL_PX * 1.3 + NOTE_PAD;
+        for i in 0..self.drawings.drawn().len() {
+            let d = self.drawings.drawn()[i];
+            if d.tool != Tool::Note {
+                continue;
+            }
+            let Some(text) = self.drawings.note_text(d.id) else {
+                continue;
+            };
+            if self.note_lines.get(&d.id).is_none_or(|(s, _)| s != text) {
+                let text = text.to_owned();
+                let line = self.shape(&text, t.text_main, window);
+                self.note_lines.insert(d.id, (text, line));
+            }
+            let Some((_, line)) = self.note_lines.get(&d.id) else {
+                continue;
+            };
+            let w = f32::from(line.width) + 2.0 * NOTE_PAD;
+            let (x, y) = d.p0;
+            window.paint_quad(fill(
+                Bounds::new(point(px(ox + x + 2.0), px(oy + y)), size(px(w), px(box_h))),
+                t.label_bg,
+            ));
+            let _ = line.paint(
+                point(px(ox + x + 2.0 + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5)),
+                line_h,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+            self.drawings.set_note_box(i, (w + 2.0, box_h));
+        }
+        if let Some((d, text)) = self.drawings.note_entry() {
+            // The note being typed (re-shaped per key while typing).
+            let shown = format!("{text}▏");
+            let line = self.shape(&shown, t.text_main, window);
+            let w = f32::from(line.width) + 2.0 * NOTE_PAD;
+            let b = Bounds::new(
+                point(px(ox + d.p0.0 + 2.0), px(oy + d.p0.1)),
+                size(px(w), px(box_h)),
+            );
+            window.paint_quad(fill(b, t.label_bg));
+            window.paint_quad(gpui::outline(b, t.accent, gpui::BorderStyle::Solid));
+            let _ = line.paint(
+                point(
+                    px(ox + d.p0.0 + 2.0 + NOTE_PAD),
+                    px(oy + d.p0.1 + NOTE_PAD * 0.5),
+                ),
+                line_h,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+        for i in 0..self.drawings.pinned_measures().len() {
+            let (k, stats) = self.drawings.pinned_measures()[i];
+            let m = self.drawings.drawn()[k];
+            self.paint_measure_label(Some(m.id), m, stats, origin, window, cx);
+        }
+        if let Some((m, stats)) = self.drawings.measure_shown() {
+            self.paint_measure_label(None, m, stats, origin, window, cx);
+        }
+    }
+
+    /// A measure's readout beside its end anchor, kept inside the plot.
+    fn paint_measure_label(
+        &mut self,
+        key: Option<u64>,
+        m: lines_core::drawings::Projected,
+        stats: lines_core::drawings::MeasureStats,
+        (ox, oy): (f32, f32),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        if self
+            .measure_lines
+            .get(&key)
+            .is_none_or(|(s, _)| *s != stats)
+        {
+            let mut s = FixedStr::<96>::new();
+            let _ = write_measure(&stats, &self.instrument.price, &mut s);
+            let line = self.shape(s.as_str(), t.text_main, window);
+            if self.measure_lines.len() > 64 {
+                self.measure_lines.clear();
+            }
+            self.measure_lines.insert(key, (stats, line));
+        }
+        let Some((_, line)) = self.measure_lines.get(&key) else {
+            return;
+        };
+        let box_h = LABEL_PX * 1.3 + NOTE_PAD;
+        let w = f32::from(line.width) + 2.0 * NOTE_PAD;
+        let pw = f32::from(self.plot.size.width);
+        let x = (m.p1.0 + 8.0).min(pw - w).max(0.0);
+        let y = (m.p1.1 - box_h - 4.0).max(0.0);
+        window.paint_quad(fill(
+            Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(box_h))),
+            t.label_bg,
+        ));
+        let _ = line.paint(
+            point(px(ox + x + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5)),
+            px(LABEL_PX * 1.3),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Takes typed text now (symbol search, a timeframe, a note, a menu's filter): the
+    /// workspace leaves plain and Alt keys to it (`commands::runs_while_typing`).
+    pub fn takes_text(&self) -> bool {
+        self.picker.is_open()
+            || self.tf_entry.is_some()
+            || self.drawings.typing()
+            || self.study_menu.is_some()
+    }
+
+    /// A drawing command (`Command::Draw`) on this chart.
+    pub fn drawing_command(&mut self, cmd: DrawCmd, cx: &mut Context<Self>) {
+        use lines_core::drawings::Style;
+        let d = &mut self.drawings;
+        match cmd {
+            DrawCmd::Tool(tool) => {
+                self.picker.close();
+                self.tf_menu = false;
+                self.tf_entry = None;
+                self.drawings.set_tool(tool);
+            }
+            DrawCmd::Undo => {
+                d.undo();
+            }
+            DrawCmd::Redo => {
+                d.redo();
+            }
+            DrawCmd::DeleteSelected => {
+                d.delete_selected();
+            }
+            DrawCmd::ToggleVisible => {
+                d.cancel();
+                d.hidden = !d.hidden;
+            }
+            DrawCmd::DeleteAll => d.confirm_clear = d.count() > 0,
+            DrawCmd::NextColor => d.restyle(|s| Style {
+                color: (s.color + 1) % Style::COLORS,
+                ..s
+            }),
+            DrawCmd::ToggleWidth => d.restyle(|s| Style {
+                width: 3 - s.width,
+                ..s
+            }),
+            DrawCmd::ToggleDashed => d.restyle(|s| Style {
+                dashed: !s.dashed,
+                ..s
+            }),
+            DrawCmd::PinMeasure => {
+                d.pin_measure();
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn drawings_hidden(&self) -> bool {
+        self.drawings.hidden
+    }
+
+    pub fn product_symbol(&self) -> &'static str {
+        self.instrument.symbol
+    }
+
+    /// The banner for drawing mode, a temporary measure or the delete-all confirmation.
+    fn drawing_banner(&self, t: &Theme) -> Option<AnyElement> {
+        let d = &self.drawings;
+        let text = if d.confirm_clear {
+            let n = d.count();
+            let plural = if n == 1 { "" } else { "s" };
+            format!(
+                "Delete all {n} drawing{plural} for {}?  Enter: delete  ·  Esc: keep  (Ctrl+Z undoes)",
+                self.instrument.symbol
+            )
+        } else if let Some(tool) = d.tool() {
+            let how = if tool.anchors() == 2 {
+                "click two points (or drag)"
+            } else {
+                "click to place"
+            };
+            format!("Drawing: {}  ·  {how}  ·  Esc cancels", tool.label())
+        } else if d.typing() {
+            "Note: type, Enter to keep, Esc to cancel".to_owned()
+        } else if d.measure_shown().is_some() {
+            "Measure: Enter pins it  ·  Esc or a click clears it".to_owned()
+        } else {
+            return None;
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(6.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(t.panel)
+                        .border_1()
+                        .border_color(if d.confirm_clear { t.warn } else { t.accent })
+                        .text_color(t.text_main)
+                        .text_size(px(12.0))
+                        .child(text),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The crosshair time tag's text: date and time, or on daily and weekly charts the trade
     /// date ("Mon 2026-11-09", "Week of 2026-11-09").
     fn time_tag_text(&self, time: UtcMillis) -> impl FnOnce(&mut FixedStr<32>) + use<> {
@@ -2654,6 +2963,7 @@ impl Pane for ChartView {
             visibility: self.visibility,
             levels: self.levels.config.clone(),
             magnet: self.magnet(),
+            hide_drawings: self.drawings.hidden,
             timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
             footprint: self.footprint.config(),
             subpane: (self.subpane_ratio != crate::subpane::DEFAULT_RATIO)
@@ -2670,6 +2980,9 @@ impl Pane for ChartView {
         self.picker.close();
         let follow = feed.sub.is_some();
         self.apply_feed(feed);
+        self.drawings
+            .set_data(crate::drawings_store::for_product(&self.instrument, cx));
+        self.note_lines.clear();
         self.trade.feed_changed(&self.store, follow, cx);
         cx.notify();
     }
@@ -2688,7 +3001,10 @@ impl Pane for ChartView {
     /// New indicator values (they arrive from the indicator thread after the store's), or new
     /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
-        let rates = std::mem::take(&mut self.rates_changed) | self.trade.changed();
+        // Drawings changed on any chart of this product (shown here).
+        let rates = std::mem::take(&mut self.rates_changed)
+            | self.trade.changed()
+            | (self.drawings.changed() && !self.drawings.hidden);
         if !self.visibility.draws_studies() {
             return rates;
         }
@@ -2777,7 +3093,7 @@ const READOUT_BOTTOM: f32 = 6.0 + LABEL_PX * 1.6 + 4.0;
 const LEGEND_MAX_W: f32 = 360.0;
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Ctrl+I studies  ·  Alt+V profile";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2835,6 +3151,11 @@ impl Render for ChartView {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_exit(cx.listener(Self::on_mouse_exit))
                     .on_scroll(cx.listener(Self::on_scroll))
+                    .when(self.drawings.active(), |d| d.cursor_crosshair())
+                    .when(
+                        !self.drawings.active() && self.drawings.hover_hit().is_some(),
+                        |d| d.cursor_pointer(),
+                    )
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -2856,7 +3177,8 @@ impl Render for ChartView {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
                     .when_some(overlay, |d, overlay| d.child(overlay))
-                    .when_some(self.timeframe_entry(&t), |d, e| d.child(e)),
+                    .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
+                    .when_some(self.drawing_banner(&t), |d, b| d.child(b)),
             )
     }
 }

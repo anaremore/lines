@@ -965,6 +965,14 @@ pub fn next_grouping(g: u32, back: bool) -> u32 {
     }
 }
 
+impl DomView {
+    /// Taking typed text now (the symbol picker): the workspace leaves plain and Alt keys
+    /// to it (`commands::runs_while_typing`).
+    pub fn takes_text(&self) -> bool {
+        self.picker.is_open()
+    }
+}
+
 impl Render for DomView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();

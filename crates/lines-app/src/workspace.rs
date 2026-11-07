@@ -38,7 +38,7 @@ use lines_feed::FeedConfig;
 use lines_feed::availability::Availability;
 
 use crate::chart_view::{self, ChartView, CrosshairTime, Fixture};
-use crate::commands::{self, Command};
+use crate::commands::{self, Command, DrawCmd};
 use crate::dom_view::{DomOptions, DomView};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::journal_view::JournalView;
@@ -238,6 +238,11 @@ impl PaneHandle {
 
     fn set_feed(&self, feed: PaneFeed, cx: &mut App) {
         each!(self, e => e.update(cx, |p, cx| p.set_feed(feed, cx)))
+    }
+
+    /// Taking typed text now (symbol search, a note, a timeframe being typed).
+    fn takes_text(&self, cx: &App) -> bool {
+        each!(self, e => e.read(cx).takes_text())
     }
 
     /// Whether it is shown, frames painted, and (charts) smoothed paint time in µs.
@@ -1172,6 +1177,13 @@ impl WindowView {
                     chart.update(cx, |c, cx| c.toggle_timeframe_menu(cx));
                 }
             }
+            // Drawings are on charts; they belong to the chart's product.
+            Command::Draw(d) => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chart(chart)) => {
+                    chart.update(cx, |c, cx| c.drawing_command(d, cx))
+                }
+                _ => self.refuse("Drawings are on charts: focus a chart first", cx),
+            },
             Command::ToggleLevels
             | Command::ToggleLevelLabels
             | Command::ToggleLevelSource(_)
@@ -1822,6 +1834,20 @@ impl WindowView {
                     false,
                 ));
                 items.push(MenuItem::named("Studies…", Command::Studies, false));
+                let (hidden, symbol) = {
+                    let c = chart.read(cx);
+                    (c.drawings_hidden(), c.product_symbol())
+                };
+                items.push(MenuItem::named(
+                    "Hide drawings on this chart",
+                    Command::Draw(DrawCmd::ToggleVisible),
+                    hidden,
+                ));
+                items.push(MenuItem::named(
+                    &format!("Delete all drawings for {symbol}…"),
+                    Command::Draw(DrawCmd::DeleteAll),
+                    false,
+                ));
                 items.push(MenuItem::named(
                     "Magnet crosshair (snap to OHLC)",
                     Command::ToggleMagnet,
@@ -2144,6 +2170,15 @@ impl WindowView {
             self.prompt_key(ev, window, cx);
             cx.stop_propagation();
         } else if let Some(cmd) = commands::command_for(&ev.keystroke) {
+            // A pane taking typed text (symbol search, a note) keeps its plain and Alt keys.
+            let typing = self
+                .tabs
+                .get(self.active)
+                .and_then(|t| t.focused_handle())
+                .is_some_and(|h| h.takes_text(cx));
+            if typing && !commands::runs_while_typing(&ev.keystroke, cmd) {
+                return;
+            }
             self.run(cmd, window, cx);
             cx.stop_propagation();
         }
