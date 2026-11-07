@@ -622,6 +622,7 @@ struct Venue {
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
     barrier: Sender<Sender<()>>,
     /// Its watcher looks now and rebuilds if anything changed, then answers (`settle`).
+    /// Only `settle` sends, but every build needs it kept: the watcher stops once it's dropped.
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
     look: Sender<Sender<()>>,
     stop: Arc<AtomicBool>,
@@ -766,14 +767,14 @@ impl Observer for TaggedObserver {
     }
 }
 
-/// What the account chip shows of a venue's status: connected, detail, and how stale (in
-/// 5 s steps, 0 while fresh). The watcher repaints when it changes.
 /// Whether a venue's watcher rebuilds its core now: after a change (`pending`), at most every
 /// `VENUE_REBUILD` (a change inside it waits, never dropped), or at once when `asked`.
 fn rebuild_due(pending: bool, asked: bool, last: Option<Instant>, now: Instant) -> bool {
     pending && (asked || last.is_none_or(|t| now.duration_since(t) >= VENUE_REBUILD))
 }
 
+/// What the account chip shows of a venue's status: connected, detail, and how stale (in
+/// 5 s steps, 0 while fresh). The watcher repaints when it changes.
 fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
     let s = s.as_ref()?;
     let silent = s
@@ -1239,15 +1240,18 @@ impl Trading {
         }
     }
 
-    /// Wait until everything sent so far is handled by the core and in the cache. Blocks:
-    /// screenshots and tests only, never the UI's trading path.
+    /// Wait until everything sent so far is handled by the core and in the cache. Each venue's
+    /// watcher first looks at its accounts and rebuilds at once if they changed (not waiting
+    /// for `VENUE_REBUILD`). Blocks: screenshots and tests only, never the UI's trading path.
     #[cfg(any(test, feature = "screenshot"))]
     pub fn settle(&self) {
         // Each venue's watcher looks at its accounts now: the list and the rebuild it sends
         // match the venue's state as of this call (synced below).
         for v in &self.venues {
             let (tx, rx) = mpsc::channel();
-            if v.look.send(tx).is_ok() && rx.recv_timeout(Duration::from_secs(10)).is_err() {
+            if v.look.send(tx).is_ok()
+                && let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(Duration::from_secs(10))
+            {
                 tracing::warn!("{}: its account watcher didn't answer within 10 s", v.label);
             }
         }
