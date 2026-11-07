@@ -466,6 +466,37 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
 }
 
 /// The commands that move the position's stop(s) to breakeven, from the cache.
+/// Whether an order is live in the market (not held server-side, not pending).
+fn live(o: &lines_trading::Order) -> bool {
+    matches!(
+        o.state,
+        lines_trading::OrderState::Working | lines_trading::OrderState::PartiallyFilled
+    )
+}
+
+/// Whether a working order protects the open `position` (signed): a live stop on the exit
+/// side that only ever closes it (a bracket's stop loss, a reduce-only stop, or a single
+/// stop no larger than the position). Never a held exit (its entry hasn't filled), an entry
+/// stop (it would flip or add) or a triggered stop-limit (a resting limit now: at BE it could
+/// fill at once). BE moves only these.
+pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
+    use lines_trading::{OrderKind, Role, Side};
+    let stop = match o.kind {
+        OrderKind::Stop { .. } => true,
+        OrderKind::StopLimit { .. } => !o.triggered,
+        _ => false,
+    };
+    let exit = match position.signum() {
+        1 => o.side == Side::Sell,
+        -1 => o.side == Side::Buy,
+        _ => false,
+    };
+    let closes = o.role == Role::StopLoss
+        || o.reduce_only
+        || (o.role == Role::Single && o.remaining().0 <= position.abs());
+    live(o) && stop && exit && closes
+}
+
 /// BE only moves an existing protective stop, like dragging it: it needs no switch.
 fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'static str> {
     if let Some(why) = cant_trade(v, cx) {
@@ -491,12 +522,7 @@ fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'s
     let (qty, avg) = pos.map_or((0, None), |p| (p.qty, p.avg_price));
     let stops: Vec<_> = s
         .open_orders(&account, contract)
-        // A triggered stop-limit is a resting limit now: moving it to BE could fill at once.
-        .filter(|o| match o.kind {
-            lines_trading::OrderKind::Stop { .. } => true,
-            lines_trading::OrderKind::StopLimit { .. } => !o.triggered,
-            _ => false,
-        })
+        .filter(|o| protects(o, qty))
         .filter_map(|o| dom_trade::order_price(o).map(|p| (o.id, o.side, p)))
         .collect();
     // A long's stop is a sell: it must sit below where it would sell (the bid).
@@ -659,9 +685,10 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
                 };
                 data.position = Some((p.qty, p.avg_price, ticks, p.unrealised));
                 // The position's bracket exits: the nearest of each role.
+                // Live ones only: a held exit (its entry not filled) protects nothing yet.
                 let near = |role: lines_trading::Role| {
                     s.open_orders(account, k)
-                        .filter(|o| o.role == role)
+                        .filter(|o| o.role == role && live(o))
                         .filter_map(dom_trade::order_price)
                         .min_by_key(|pr| (pr.0 - last.map_or(pr.0, |l| l.0)).abs())
                 };
@@ -2447,6 +2474,78 @@ mod tests {
             Err("the stop is already at or past breakeven"),
             "a short's stop below BE stays"
         );
+    }
+
+    /// BE's candidates: live protective stops only.
+    #[test]
+    fn only_live_closing_stops_protect() {
+        use lines_core::UtcMillis;
+        use lines_trading::{Order, OrderKind, OrderState, Role};
+        let es = lines_trading::types::ContractDoc {
+            product: 1,
+            year: Some(2026),
+            month: Some(12),
+        }
+        .to_key()
+        .unwrap();
+        let stop = |side, qty: i64, role, state| Order {
+            id: OrderId(1),
+            account: AccountId::new("paper"),
+            contract: es,
+            side,
+            qty: Qty(qty),
+            kind: OrderKind::Stop {
+                trigger: Price(599_000),
+            },
+            state,
+            filled: Qty(0),
+            fill_value: 0,
+            role,
+            parent: None,
+            oco: None,
+            triggered: false,
+            created: UtcMillis(0),
+            updated: UtcMillis(0),
+            reduce_only: false,
+            overfill: Qty(0),
+        };
+        // Long 1.
+        assert!(protects(
+            &stop(Side::Sell, 1, Role::StopLoss, OrderState::Working),
+            1
+        ));
+        assert!(protects(
+            &stop(Side::Sell, 1, Role::Single, OrderState::Working),
+            1
+        ));
+        assert!(
+            !protects(&stop(Side::Sell, 1, Role::StopLoss, OrderState::Acked), 1),
+            "held: its entry hasn't filled"
+        );
+        assert!(
+            !protects(&stop(Side::Sell, 3, Role::Single, OrderState::Working), 1),
+            "an entry stop that would flip the position"
+        );
+        assert!(!protects(
+            &stop(Side::Sell, 1, Role::Entry, OrderState::Working),
+            1
+        ));
+        assert!(
+            !protects(&stop(Side::Buy, 1, Role::StopLoss, OrderState::Working), 1),
+            "wrong side"
+        );
+        assert!(
+            !protects(&stop(Side::Sell, 1, Role::StopLoss, OrderState::Working), 0),
+            "flat"
+        );
+        let mut t = stop(Side::Buy, 1, Role::StopLoss, OrderState::Working);
+        t.kind = OrderKind::StopLimit {
+            trigger: Price(601_000),
+            limit: Price(601_000),
+        };
+        assert!(protects(&t, -1));
+        t.triggered = true;
+        assert!(!protects(&t, -1), "a triggered stop-limit rests as a limit");
     }
 
     #[test]

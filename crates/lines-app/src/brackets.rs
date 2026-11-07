@@ -324,7 +324,6 @@ impl Editor {
         }
     }
 
-    /// Show the rows in the other unit (valid cells convert exactly; invalid ones stay).
     /// Why the units can't switch now: a stop or target cell that doesn't read in the
     /// current units would be reinterpreted in the new ones (never silently).
     pub fn units_blocked(&self) -> Option<String> {

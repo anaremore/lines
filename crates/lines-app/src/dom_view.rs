@@ -680,16 +680,10 @@ impl DomView {
         let ow = self.glyphs.width("S88+", t.text_main, true, window);
         self.cols
             .need(DomCol::Orders.index(), 2.0 * (ow + 6.0), PAD);
-        // Narrow: volume, then the trail, then working orders give way; bid, price and ask
-        // stay whole.
-        self.cols.layout_fitting(
-            w,
-            &[
-                DomCol::Volume.index(),
-                DomCol::Trail.index(),
-                DomCol::Orders.index(),
-            ],
-        );
+        // Narrow: volume, then the trail give way, then the rest narrow to their numbers;
+        // working orders, bid, price and ask stay whole (drag-modify lives in orders).
+        self.cols
+            .layout_fitting(w, &[DomCol::Volume.index(), DomCol::Trail.index()]);
         self.cols
             .paint_header(&mut self.glyphs, &t, bounds, PAD, &[false; 5], window, cx);
         let cell = |c: DomCol| self.cols.cell(c.index(), ox);

@@ -399,24 +399,31 @@ impl Columns {
         self.set.layout(specs, &self.needed, total, &mut self.cells);
     }
 
-    /// Lay out in `total` px; while the columns overflow, leave out (this frame only) the
-    /// next column of `order`, least needed first, then any that still don't fit whole. A
-    /// narrow pane drops whole columns, never half a number. Saved choices are untouched.
-    pub fn layout_fitting(&mut self, total: f32, order: &[usize]) {
+    /// Lay out in `total` px, this frame only (saved choices are untouched): while the
+    /// columns overflow, leave out the next column of `drop` (least needed first); still too
+    /// wide, every shown column narrows to the least its numbers need; any that still doesn't
+    /// fit whole is left out. A narrow pane never shows half a number. No allocation.
+    pub fn layout_fitting(&mut self, total: f32, drop: &[usize]) {
         let specs = self.specs();
+        let over =
+            |cells: &[Cell; MAX_COLS]| cells.iter().any(|c| c.shown && c.right() > total + 0.5);
         let mut set = self.set;
         set.layout(specs, &self.needed, total, &mut self.cells);
-        for &i in order {
-            if !self
-                .cells
-                .iter()
-                .any(|c| c.shown && c.right() > total + 0.5)
-            {
+        for &i in drop {
+            if !over(&self.cells) {
                 break;
             }
             if set.set_shown(specs, i, false) {
                 set.layout(specs, &self.needed, total, &mut self.cells);
             }
+        }
+        if over(&self.cells) {
+            for i in 0..specs.len() {
+                if set.is_shown(i) {
+                    set.set_width(specs, i, 0.0, &self.needed);
+                }
+            }
+            set.layout(specs, &self.needed, total, &mut self.cells);
         }
         self.drop_overflow(total);
     }
@@ -843,21 +850,25 @@ mod tests {
         }
     }
 
-    /// A narrow DOM gives up volume, the trail, then orders; bid, price and ask stay whole.
+    /// A narrow DOM gives up volume and the trail, then narrows the rest to what their
+    /// numbers need: working orders, bid, price and ask all stay whole.
     #[test]
     fn a_narrow_dom_keeps_the_book_whole() {
         let mut c = Columns::new(Table::Dom);
-        for col in DomCol::ALL {
-            c.need(col.index(), 60.0, 0.0);
+        // About what the panel's DOM font needs: two order marks, sizes, a price.
+        for (col, w) in [
+            (DomCol::Orders, 84.0),
+            (DomCol::Bid, 30.0),
+            (DomCol::Price, 60.0),
+            (DomCol::Ask, 30.0),
+            (DomCol::Volume, 40.0),
+        ] {
+            c.need(col.index(), w, 0.0);
         }
-        let order = [
-            DomCol::Volume.index(),
-            DomCol::Trail.index(),
-            DomCol::Orders.index(),
-        ];
+        let order = [DomCol::Volume.index(), DomCol::Trail.index()];
         // The narrowest DOM the trading panel is laid out for (`trade_bar::MIN_DOM_WIDTH`).
         c.layout_fitting(240.0, &order);
-        for col in [DomCol::Bid, DomCol::Price, DomCol::Ask] {
+        for col in [DomCol::Orders, DomCol::Bid, DomCol::Price, DomCol::Ask] {
             let cell = c.cells[col.index()];
             assert!(cell.shown && cell.right() <= 240.5, "{col:?} {:?}", c.cells);
         }
