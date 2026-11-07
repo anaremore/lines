@@ -498,10 +498,11 @@ pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
     live(o) && stop && exit && closes
 }
 
-/// The stops BE may move: those that [`protects`] accepts, reduce-only ones first, then stop
-/// losses, then single stops, each only while their quantities together stay within the
+/// The stops BE may move: those that [`protects`] accepts, stop losses first, then single
+/// stops, then reduce-only stops, each only while their quantities together stay within the
 /// position: moved to one price they all trigger together, in any order, and must never flip
-/// it (a reduce-only stop that fills first can't shrink the others).
+/// it. Reduce-only stops come last because one left behind cancels itself when the position
+/// goes flat; a bracket's stop loss left behind would not.
 pub fn protective<'a>(
     orders: impl IntoIterator<Item = &'a lines_trading::Order>,
     position: i64,
@@ -512,9 +513,9 @@ pub fn protective<'a>(
         .filter(|o| protects(o, position))
         .collect();
     let rank = |o: &lines_trading::Order| match (o.reduce_only, o.role) {
-        (true, _) => 0,
-        (false, Role::StopLoss) => 1,
-        _ => 2,
+        (false, Role::StopLoss) => 0,
+        (false, _) => 1,
+        (true, _) => 2,
     };
     cands.sort_by_key(|o| (rank(o), o.id.0));
     let mut total = 0;
@@ -2608,16 +2609,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![OrderId(3)]
         );
-        // A reduce-only stop counts too (filling first, it can't shrink the others).
+        // A reduce-only stop counts too, and comes after the stop loss: left behind, it
+        // cancels itself when the position goes flat (a stop loss left behind would flip it).
         let mut r = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        r.id = OrderId(1);
         r.reduce_only = true;
         assert_eq!(
-            protective([&sl, &r], 1)
+            protective([&r, &sl], 1)
                 .iter()
                 .map(|o| o.id)
                 .collect::<Vec<_>>(),
-            vec![r.id]
+            vec![sl.id]
         );
+        assert_eq!(protective([&r, &sl], 2).len(), 2);
         // Short 2: a partly filled buy stop for 3 with 2 left fits (the remainder counts).
         let mut p = stop(Side::Buy, 3, Role::StopLoss, OrderState::PartiallyFilled);
         p.filled = Qty(1);
