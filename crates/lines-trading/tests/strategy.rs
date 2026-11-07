@@ -881,3 +881,60 @@ fn working_bracket_exits_count_as_closing() {
     // A further sell is not an exit: the bracket already closes the position.
     assert!(denied(r.bot(sell(1, limit(6010.0)))).contains("is paused"));
 }
+
+#[test]
+fn repricing_counts_other_closing_orders() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 1, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // One closing sell, then a second one: that one reverses (an entry, allowed while armed).
+    r.bot(sell(1, limit(6010.0))).expect("closing");
+    let second = r.bot(sell(1, limit(6020.0))).expect("armed: a reversal")[0];
+    r.wait(30);
+    r.bot(Command::PauseStrategy {
+        id: ID,
+        reason: "test".into(),
+    })
+    .unwrap();
+    // Making the reversal marketable while paused is an entry: refused.
+    assert!(
+        denied(r.bot(Command::ModifyOrder {
+            account: acct(),
+            order: second,
+            qty: None,
+            price: Some(px(5999.75)),
+        }))
+        .contains("is paused")
+    );
+}
+
+#[test]
+fn its_flatten_with_a_position_leaves_nothing_to_reopen_it() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // The trader protects the position (pausing the instance); the strategy then flattens.
+    let stop = r
+        .manual(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: OrderKind::Stop {
+                trigger: px(5990.0),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(30);
+    r.bot(Command::Flatten {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert!(
+        !r.core.order(stop).unwrap().is_open(),
+        "no stop left to open a short"
+    );
+}
