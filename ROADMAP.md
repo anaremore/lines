@@ -40,6 +40,7 @@ Status: `done` · `current` · `next` · `later`
 | 12 | First live connection (likely Rithmic; CQG WebAPI is enterprise-priced) | later | Vendor conformance passed; live routing gated behind a Cargo feature until then |
 | 13 | Second live connection (whichever of CQG/Rithmic wasn't first) | later | |
 | 14 | Trade copier across account groups | later | Rule-aware per account/firm |
+| 15 | Strategies (decision 0025, proposed) | current | (a) the core's strategy gate, `lines-strategy` and deterministic backtests (`--backtest`); (b) private strategies backtested on recorded market data and levels; (c) the strategy panel, Stop all, chart markers and the in-app host; (d) Live, owner-gated |
 | — | Not planned: Tradovate, equities, crypto trading, international | later | Kept possible by decisions 0002–0003; nothing built |
 
 ## Before the first outside users

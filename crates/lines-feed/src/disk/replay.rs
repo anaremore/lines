@@ -83,7 +83,7 @@ impl SegmentReplay {
             clock: None,
         };
         // Like a recording: before any frame, the clock reads the first stored time.
-        r.pending = r.next()?;
+        r.pending = r.next_frame()?;
         r.clock = r
             .pending
             .as_ref()
@@ -92,7 +92,8 @@ impl SegmentReplay {
         Ok(r)
     }
 
-    fn next(&mut self) -> Result<Option<(i64, Frame)>> {
+    /// The next stored block as a frame, with its time in microseconds (no pacing).
+    pub(crate) fn next_frame(&mut self) -> Result<Option<(i64, Frame)>> {
         loop {
             if self.reader.is_none() {
                 let Some(p) = self.files.pop_front() else {
@@ -134,7 +135,7 @@ impl Transport for SegmentReplay {
 
     async fn recv(&mut self) -> Result<Option<Frame>> {
         if self.pending.is_none() {
-            self.pending = self.next()?;
+            self.pending = self.next_frame()?;
         }
         let Some((t, _)) = self.pending.as_ref() else {
             return Ok(None);

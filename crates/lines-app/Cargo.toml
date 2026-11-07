@@ -29,6 +29,7 @@ lines-core.workspace = true
 lines-feed.workspace = true
 lines-indicators.workspace = true
 lines-trading.workspace = true
+lines-strategy.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
