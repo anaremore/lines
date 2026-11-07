@@ -161,5 +161,10 @@ mod tests {
         );
         let back: Vec<IndicatorConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, cfgs);
+        // The reset is optional (ETH).
+        let bare: IndicatorConfig = serde_json::from_str(r#"{"kind":"cum_delta"}"#).unwrap();
+        assert!(
+            matches!(bare, IndicatorConfig::CumDelta { spec, .. } if spec.reset == DeltaReset::Eth)
+        );
     }
 }

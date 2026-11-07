@@ -346,7 +346,7 @@ impl Studies {
                     .child(
                         div()
                             .text_color(theme.text_main)
-                            .child(format!("Cumulative delta {}", spec.reset.label())),
+                            .child(format!("Cumulative delta · {}", spec.reset.label())),
                     );
                 if s.approx {
                     row = row.child(div().text_color(theme.text_dim).child("≈ from bars"));
