@@ -935,7 +935,13 @@ impl TradingCore {
                         OrderKind::StopLimit { .. } => !o.triggered,
                         _ => false,
                     };
-                    if stop && let Some(m) = self.marks.get(&o.contract) {
+                    // A bracket exit held for its entry isn't in the market: it can't trigger.
+                    let held = matches!(o.role, Role::TakeProfit | Role::StopLoss)
+                        && matches!(o.state, OrderState::Submitted | OrderState::Acked);
+                    if stop
+                        && !held
+                        && let Some(m) = self.marks.get(&o.contract)
+                    {
                         let market = match o.side {
                             Side::Buy => m.ask.or(m.last),
                             Side::Sell => m.bid.or(m.last),

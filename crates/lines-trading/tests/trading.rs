@@ -2158,3 +2158,39 @@ fn a_halted_account_cant_grow_an_order() {
     r.wait(LAT);
     assert_eq!(r.core.position(&acct(), es()), 2, "never triggered");
 }
+
+/// Review round 1: a breakout bracket's stop, held until its buy-stop entry fills, sits above
+/// the market and moves there freely (it isn't in the market, it can't trigger).
+#[test]
+fn a_held_bracket_stop_moves_before_its_entry_fills() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.market(
+        es(),
+        &[MarketInput::Bid(px(5999.75)), MarketInput::Ask(px(6000.25))],
+    );
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(1),
+                kind: OrderKind::Stop {
+                    trigger: px(6010.00),
+                },
+            },
+            take_profit: Some(px(6014.00)),
+            stop_loss: Some(px(6008.00)),
+        }))
+        .unwrap();
+    r.wait(LAT);
+    assert_eq!(r.state(ids[2]), OrderState::Acked, "held");
+    r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order: ids[2],
+        qty: None,
+        price: Some(px(6007.00)),
+    })
+    .expect("a held stop isn't in the market");
+}
