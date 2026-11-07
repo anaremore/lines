@@ -53,7 +53,7 @@ const PAD: f32 = 6.0;
 pub struct Row {
     pub id: String,
     /// Indexed by [`JournalCol`].
-    pub cells: [String; 11],
+    pub cells: [String; 12],
     /// Net P&L sign: colours the P&L cell (its text is signed too).
     pub sign: i8,
     pub note: String,
@@ -129,6 +129,7 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
         id: t.id.clone(),
         cells: [
             time,
+            t.account.0.clone(),
             contract,
             if t.side == Side::Buy { "Long" } else { "Short" }.to_owned(),
             qty,
@@ -199,45 +200,83 @@ pub fn duration_text(ms: i64) -> String {
     }
 }
 
-/// The stats strip: `Today 2026-11-05: 4 trades · win 75% · net +$412.50 · …`. Money only
-/// when `mode` shows currency (stats are money: none in tick or off modes).
-pub fn stats_text(label: &str, s: &Stats, open: usize, mode: PnlDisplay) -> String {
-    let mut out = format!(
+/// One item of the stats strip. Items are whole: a narrow pane leaves out the last ones
+/// (they wrap out of sight), never part of a number.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatItem {
+    pub text: String,
+    /// The value's sign, for its color (its text is signed too); 0: plain.
+    pub tone: i8,
+    /// The loudest item (net P&L).
+    pub strong: bool,
+}
+
+fn item(text: String) -> StatItem {
+    StatItem {
+        text,
+        tone: 0,
+        strong: false,
+    }
+}
+
+/// The stats strip in priority order: the count, then net P&L (loudest) and max drawdown,
+/// then win rate, averages, expectancy, profit factor, streak, open trades. Money only when
+/// `mode` shows currency (stats are money: none in tick or off modes).
+pub fn stats_items(label: &str, s: &Stats, open: usize, mode: PnlDisplay) -> Vec<StatItem> {
+    let mut out = vec![item(format!(
         "{label}: {} trade{}",
         s.count,
         if s.count == 1 { "" } else { "s" }
-    );
+    ))];
     if s.count > 0 {
-        out.push_str(&format!(
-            "  ·  win {:.0}%",
-            s.win_rate().unwrap_or(0.0) * 100.0
-        ));
+        let money = |m: Option<Money>| m.map_or_else(|| "—".to_owned(), money_text);
         if mode.money() {
-            let money = |m: Option<Money>| m.map_or_else(|| "—".to_owned(), money_text);
-            out.push_str(&format!(
-                "  ·  net {}  ·  avg win {}  ·  avg loss {}  ·  expectancy {}  ·  PF {}  ·  max DD {}",
-                money_text(s.net),
-                money(s.avg_win()),
-                money(s.avg_loss()),
-                money(s.expectancy()),
-                s.profit_factor()
-                    .map_or_else(|| "—".to_owned(), |p| format!("{p:.2}")),
-                money_text(-s.max_drawdown),
-            ));
+            out.push(StatItem {
+                text: format!("net {}", money_text(s.net)),
+                tone: s.net.0.signum() as i8,
+                strong: true,
+            });
+            out.push(item(format!(
+                "max drawdown {}",
+                money_text(-s.max_drawdown)
+            )));
         }
-        out.push_str(&format!(
-            "  ·  streak {}",
-            match s.streak {
-                0 => "—".to_owned(),
-                n if n > 0 => format!("W{n}"),
-                n => format!("L{}", -n),
-            }
-        ));
+        out.push(item(format!(
+            "win {:.0}%",
+            s.win_rate().unwrap_or(0.0) * 100.0
+        )));
+        if mode.money() {
+            out.push(item(format!("avg win {}", money(s.avg_win()))));
+            out.push(item(format!("avg loss {}", money(s.avg_loss()))));
+            out.push(item(format!("expectancy {}", money(s.expectancy()))));
+            out.push(item(format!(
+                "profit factor {}",
+                s.profit_factor()
+                    .map_or_else(|| "—".to_owned(), |p| format!("{p:.2}"))
+            )));
+        }
+        out.push(item(match s.streak {
+            0 => "no streak".to_owned(),
+            1 => "1 win in a row".to_owned(),
+            -1 => "1 loss in a row".to_owned(),
+            n if n > 0 => format!("{n} wins in a row"),
+            n => format!("{} losses in a row", -n),
+        }));
     }
     if open > 0 {
-        out.push_str(&format!("  ·  {open} open"));
+        out.push(item(format!("{open} open")));
     }
     out
+}
+
+/// The strip as one line of text (tests).
+#[cfg(test)]
+pub fn stats_text(label: &str, s: &Stats, open: usize, mode: PnlDisplay) -> String {
+    stats_items(label, s, open, mode)
+        .into_iter()
+        .map(|i| i.text)
+        .collect::<Vec<_>>()
+        .join("  ·  ")
 }
 
 /// Which field of the inline editor has the cursor.
@@ -342,8 +381,12 @@ pub struct JournalView {
     /// The P&L display setting (read at render).
     mode: PnlDisplay,
     rows: Vec<Row>,
-    stats_today: String,
-    stats_all: String,
+    stats_today: Vec<StatItem>,
+    stats_all: Vec<StatItem>,
+    /// Account names by id (the trading core's accounts).
+    names: std::collections::HashMap<String, String>,
+    /// Every account is a paper account (the header's PAPER badge).
+    paper: bool,
     all_dates: bool,
     selected: Option<String>,
     /// First row shown.
@@ -434,8 +477,17 @@ impl JournalView {
             date_checked: None,
             mode: PnlDisplay::default(),
             rows: Vec::new(),
-            stats_today: String::new(),
-            stats_all: String::new(),
+            stats_today: Vec::new(),
+            stats_all: Vec::new(),
+            names: Trading::try_global(cx)
+                .map(|t| {
+                    t.accounts
+                        .iter()
+                        .map(|a| (a.id.0.clone(), a.name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            paper: Trading::try_global(cx).is_some_and(|t| t.accounts.iter().all(|a| a.paper)),
             all_dates: false,
             selected: None,
             scroll: 0,
@@ -530,14 +582,26 @@ impl JournalView {
             return false;
         };
         let mode = self.mode;
-        self.rows = snap.trades.iter().rev().map(|t| row(t, mode)).collect();
-        self.stats_today = stats_text(
+        let names = &self.names;
+        self.rows = snap
+            .trades
+            .iter()
+            .rev()
+            .map(|t| {
+                let mut r = row(t, mode);
+                if let Some(n) = names.get(&t.account.0) {
+                    r.cells[JournalCol::Account.index()] = n.clone();
+                }
+                r
+            })
+            .collect();
+        self.stats_today = stats_items(
             &format!("Today {today}"),
             &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
             snap.open,
             mode,
         );
-        self.stats_all = stats_text("All dates", &Stats::of(&snap.trades), snap.open, mode);
+        self.stats_all = stats_items("All dates", &Stats::of(&snap.trades), snap.open, mode);
         self.built = Some(rev);
         true
     }
@@ -697,15 +761,15 @@ impl JournalView {
         self.cols.layout(w);
         // A narrow pane leaves out columns it can't hold whole (never half a number).
         self.cols.drop_overflow(w);
-        let left: [bool; 11] = JournalCol::ALL.map(JournalCol::left_aligned);
+        let left: [bool; 12] = JournalCol::ALL.map(JournalCol::left_aligned);
         self.cols
             .paint_header(&mut self.glyphs, &t, bounds, PAD, &left, window, cx);
         let oy = top + HEADER_ROW_H;
         if self.rows.is_empty() {
             let msg = if self.journal.is_some() {
-                "no closed trades yet: trades appear here when a position goes back to flat"
+                "No closed trades yet. Trades appear here when a position goes back to flat."
             } else {
-                "trading isn't running"
+                "Trading isn't running."
             };
             self.glyphs.paint(
                 msg,
@@ -783,9 +847,10 @@ impl JournalView {
         let t = self.theme;
         let right = match &self.journal {
             Some(j) if j.persistent() => "saved",
-            Some(_) => "this session only",
+            Some(_) => "not saved: this run only",
             None => "",
         };
+        let paper = self.paper && self.journal.is_some();
         div()
             .flex()
             .flex_row()
@@ -810,7 +875,9 @@ impl JournalView {
                             .gap_2()
                             .items_center()
                             .children(pane::link_chip(self.common.link, &t))
-                            .child(div().text_color(t.text_main).child("Journal")),
+                            .child(div().text_color(t.text_main).child("Journal"))
+                            // Paper trades say so, as everywhere else (docs/design.md §3).
+                            .when(paper, |d| d.child(crate::trade_bar::paper_badge(&t))),
                     )
                     .child(div().text_color(t.text_dim).child(right)),
             )
@@ -818,11 +885,36 @@ impl JournalView {
 
     fn strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let text = if self.all_dates {
-            self.stats_all.clone()
+        let items = if self.all_dates {
+            &self.stats_all
         } else {
-            self.stats_today.clone()
+            &self.stats_today
         };
+        // Whole items on one line: those that don't fit wrap onto a second line, which the
+        // fixed height hides. Never part of a number.
+        let line = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .h(px(16.0))
+            .overflow_hidden()
+            .children(items.iter().enumerate().map(|(i, it)| {
+                let color = match it.tone {
+                    1 => t.up,
+                    -1 => t.down,
+                    _ => t.text_main,
+                };
+                div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_color(color)
+                    .when(it.strong, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(if i == 0 {
+                        it.text.clone()
+                    } else {
+                        format!("  ·  {}", it.text)
+                    })
+            }));
         div()
             .id("journal-stats")
             .px_2()
@@ -833,8 +925,7 @@ impl JournalView {
             .text_size(px(12.0))
             .text_color(t.text_main)
             .cursor_pointer()
-            // Cut with "…" when the pane is narrower than the line.
-            .child(div().min_w_0().truncate().child(text))
+            .child(line)
             // A click switches between the current trade date and all dates.
             .on_mouse_down(
                 MouseButton::Left,
@@ -1045,11 +1136,14 @@ mod tests {
         let s = j.stats(|_| true);
         assert_eq!(
             stats_text("Today 2026-11-05", &s, 1, PnlDisplay::Both),
-            "Today 2026-11-05: 1 trade  ·  win 100%  ·  net +$310.02  ·  avg win +$310.02  ·  avg loss —  ·  expectancy +$310.02  ·  PF —  ·  max DD $0.00  ·  streak W1  ·  1 open"
+            "Today 2026-11-05: 1 trade  ·  net +$310.02  ·  max drawdown $0.00  ·  win 100%  ·  avg win +$310.02  ·  avg loss —  ·  expectancy +$310.02  ·  profit factor —  ·  1 win in a row  ·  1 open"
         );
+        // Net P&L is the loudest item, colored by its sign (and signed).
+        let items = stats_items("Today", &s, 0, PnlDisplay::Both);
+        assert!(items[1].strong && items[1].tone == 1);
         assert_eq!(
             stats_text("Today 2026-11-05", &s, 0, PnlDisplay::Off),
-            "Today 2026-11-05: 1 trade  ·  win 100%  ·  streak W1"
+            "Today 2026-11-05: 1 trade  ·  win 100%  ·  1 win in a row"
         );
         assert_eq!(
             stats_text("All dates", &Stats::default(), 0, PnlDisplay::Both),
