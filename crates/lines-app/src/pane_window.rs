@@ -113,6 +113,7 @@ impl PaneWindow {
             vec![
                 MenuItem::named("Re-attach to its previous spot", Command::Reattach, false),
                 MenuItem::of(Command::DockBesideChart, false),
+                MenuItem::named("Settings…", Command::Settings, false),
             ],
         ));
         cx.notify();

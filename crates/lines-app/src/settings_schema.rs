@@ -124,7 +124,8 @@ pub enum Kind {
 #[derive(Clone, Debug, Default)]
 pub struct Facts {
     pub store_path: String,
-    pub store_budget_gb: f64,
+    /// `None`: this source keeps no store.
+    pub store_budget_gb: Option<f64>,
     pub depth_products: Vec<String>,
     pub accounts: Vec<AccountFact>,
     pub config_dir: String,
@@ -164,6 +165,13 @@ pub struct Target {
 }
 
 impl Target {
+    /// This account's saved guardrails (none: the default), wherever they are saved.
+    pub fn guardrails(&self, p: &Prefs) -> lines_trading::Guardrails {
+        self.guard_key(&p.app.guardrails)
+            .and_then(|k| p.app.guardrails.get(&k).cloned())
+            .unwrap_or_default()
+    }
+
     /// Where this account's guardrails are saved: under its name, else its id (as startup
     /// reads them), else the name for a new entry.
     fn guard_key(
@@ -202,7 +210,7 @@ pub struct Setting {
 
 /// Appearance in `settings.json` (optional fields; absent = the built-in default). A CLI
 /// flag, when given, wins for that run.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Appearance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemeName>,
@@ -215,6 +223,41 @@ pub struct Appearance {
 impl Appearance {
     pub fn is_default(&self) -> bool {
         *self == Appearance::default()
+    }
+
+    /// `self` (what is saved) with this run's look flags over it.
+    pub fn with_flags(self, flags: Appearance) -> Appearance {
+        Appearance {
+            theme: flags.theme.or(self.theme),
+            palette: flags.palette.or(self.palette),
+            hollow: flags.hollow.or(self.hollow),
+        }
+    }
+
+    /// After a change from `before` to `after` (both as shown, flags included): what to save
+    /// (only the fields that changed, over what was `saved`) and the flags that still hold
+    /// (a field the trader set drops its flag).
+    pub fn changed(
+        saved: Appearance,
+        flags: Appearance,
+        before: Appearance,
+        after: Appearance,
+    ) -> (Appearance, Appearance) {
+        let mut s = saved;
+        let mut f = flags;
+        if after.theme != before.theme {
+            s.theme = after.theme;
+            f.theme = None;
+        }
+        if after.palette != before.palette {
+            s.palette = after.palette;
+            f.palette = None;
+        }
+        if after.hollow != before.hollow {
+            s.hollow = after.hollow;
+            f.hollow = None;
+        }
+        (s, f)
     }
 }
 
@@ -802,7 +845,7 @@ fn table() -> Vec<Setting> {
             "Bracket presets",
             "Stop and target pairs per account and product. The DOM panel's Edit… edits the same list in place.",
             Scope::AccountProduct,
-            Normal,
+            Trading,
             Editor,
             |p, t, _| {
                 let (Some(a), Some(prod)) = (&t.account, &t.product) else {
@@ -816,7 +859,7 @@ fn table() -> Vec<Setting> {
                         .map(|b| format!("{}/{}", b.stop_ticks, b.target_ticks))
                         .collect::<Vec<_>>()
                         .join(", ")
-                        + " t"
+                        + " ticks"
                 })
             },
             None,
@@ -841,7 +884,7 @@ fn table() -> Vec<Setting> {
             "guard.max_position",
             Sec::Trading,
             "Max position",
-            "Contracts per contract, worst case (position plus open orders on one side). Empty: none.",
+            "Contracts per product, worst case (position plus open orders on one side). Empty: none.",
             Scope::Account,
             Trading,
             Number {
@@ -969,7 +1012,12 @@ fn table() -> Vec<Setting> {
             Scope::ReadOnly,
             Normal,
             Info,
-            |_, _, f| Value::Text(format!("{} GiB", f.store_budget_gb)),
+            |_, _, f| {
+                Value::Text(
+                    f.store_budget_gb
+                        .map_or_else(|| "None (no store)".to_owned(), |g| format!("{g} GiB")),
+                )
+            },
             None,
         ),
         s(
@@ -1078,7 +1126,7 @@ impl Setting {
                     u => format!("{n} {u}"),
                 }
             }
-            (_, Value::Number(None)) => "none".to_owned(),
+            (_, Value::Number(None)) => "None".to_owned(),
             (_, Value::Text(t)) => t.clone(),
             _ => String::new(),
         }
@@ -1353,6 +1401,34 @@ mod tests {
         assert!(loosens(&old, &removed), "removing a limit loosens");
     }
 
+    /// Look flags hold for the run; a field the trader sets is saved and drops its flag, the
+    /// others stay as saved (a flag is never saved).
+    #[test]
+    fn look_flags_are_this_runs_only() {
+        let saved = Appearance::default();
+        let flags = Appearance {
+            theme: Some(ThemeName::Light),
+            ..Default::default()
+        };
+        let shown = saved.with_flags(flags);
+        assert_eq!(shown.theme, Some(ThemeName::Light));
+        let after = Appearance {
+            hollow: Some(HollowName::Down),
+            ..shown
+        };
+        let (s, f) = Appearance::changed(saved, flags, shown, after);
+        assert_eq!(s.theme, None, "the flag isn't saved");
+        assert_eq!(s.hollow, Some(HollowName::Down));
+        assert_eq!(f.theme, Some(ThemeName::Light), "and still holds");
+        assert_eq!(s.with_flags(f).theme, Some(ThemeName::Light));
+        let after = Appearance {
+            theme: Some(ThemeName::Dark),
+            ..shown
+        };
+        let (s, f) = Appearance::changed(saved, flags, shown, after);
+        assert_eq!((s.theme, f.theme), (Some(ThemeName::Dark), None));
+    }
+
     #[test]
     fn trading_loosenings_need_a_yes() {
         let g = lines_trading::Guardrails::default();
@@ -1418,6 +1494,8 @@ mod tests {
         loss.apply(&mut p, &t, Value::Number(Some(800))).unwrap();
         assert_eq!(p.app.guardrails.len(), 1, "no second entry under the name");
         assert_eq!(p.app.guardrails["paper-eval"].max_daily_loss, Some(800));
+        // What the core is sent for this account: the edited entry, never an empty one.
+        assert_eq!(t.guardrails(&p).max_daily_loss, Some(800));
     }
 
     /// Every existing field still round-trips through the versioned format with the flattened

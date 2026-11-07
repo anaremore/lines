@@ -8,7 +8,7 @@
 //! Keys: type to search (Esc clears it, then closes), ↑↓ settings, ←→ change a choice,
 //! Space or Enter toggles, Enter edits a number (Enter keeps it, Esc drops it), Tab and
 //! Shift+Tab move between sections, Alt+A and Alt+P step the account and the product,
-//! Ctrl+R resets, Ctrl+Z undoes.
+//! Ctrl+R resets, Ctrl+Z undoes; a loosening is confirmed with Y (Esc cancels).
 
 use std::time::Instant;
 
@@ -45,6 +45,10 @@ struct Pending {
     /// The account (and product) it was asked for: confirmed for that one only.
     target: Target,
     text: String,
+    /// It is an undo's: a cancel puts the undo back; a yes adds no new undo entry.
+    undo: Option<(usize, Target, Value)>,
+    /// A guardrail: takes effect at the next trade date (else at once).
+    tomorrow: bool,
 }
 
 pub struct SettingsWindow {
@@ -67,8 +71,8 @@ pub struct SettingsWindow {
     editor_msg: Option<String>,
     /// The settings list's scroll (keeps the selected row in view).
     scroll: gpui::ScrollHandle,
-    /// The row last scrolled into view (only a new selection scrolls).
-    scrolled: Option<(Section, usize, bool)>,
+    /// The row last scrolled into view (only a new selection or search scrolls).
+    scrolled: Option<(Section, usize, String)>,
 }
 
 /// The window's size (logical px).
@@ -244,8 +248,13 @@ pub fn run(c: schema::SettingCmd, cx: &mut App) -> Result<Option<String>, &'stat
 /// The window's view of every value, from the live app and workspace.
 fn current_prefs(cx: &App) -> Prefs {
     let ws = cx.try_global::<Workspace>();
+    let mut app = settings(cx).clone();
+    // As shown: this run's look flags over what is saved.
+    if let Some(w) = ws {
+        app.appearance = app.appearance.with_flags(w.env.look_flags.get());
+    }
     Prefs {
-        app: settings(cx).clone(),
+        app,
         ws: WorkspacePrefs {
             hide_hints: ws.is_some_and(|w| w.hide_hints),
             latency_hud: ws.is_some_and(|w| w.show_latency_hud),
@@ -256,14 +265,30 @@ fn current_prefs(cx: &App) -> Prefs {
 /// Write `after` where it lives and apply its effects (the look, the trading core's
 /// guardrails, P&L text, the workspace's preferences).
 fn commit(before: &Prefs, after: &Prefs, target: &Target, cx: &mut App) {
+    // The look as saved and this run's flags: only the fields changed now are saved, and a
+    // field the trader set drops its flag (flags are never saved).
+    let flags = cx
+        .try_global::<Workspace>()
+        .map(|w| w.env.look_flags.get())
+        .unwrap_or_default();
+    let (saved_look, flags) = schema::Appearance::changed(
+        settings(cx).appearance,
+        flags,
+        before.app.appearance,
+        after.app.appearance,
+    );
     if after.app != before.app {
-        let app = after.app.clone();
+        let mut app = after.app.clone();
+        app.appearance = saved_look;
         update_settings(cx, move |s| *s = app);
+    }
+    if let Some(w) = cx.try_global::<Workspace>() {
+        w.env.look_flags.set(flags);
     }
     if after.app.appearance != before.app.appearance {
         // After the current update: the window that asked (the Settings window, or a main
         // window running a palette command) can't be updated while it is being updated.
-        let t = schema::theme_for(&after.app.appearance);
+        let t = schema::theme_for(&saved_look.with_flags(flags));
         cx.defer(move |cx| {
             crate::workspace::set_theme(t, cx);
             if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
@@ -287,13 +312,13 @@ fn commit(before: &Prefs, after: &Prefs, target: &Target, cx: &mut App) {
     if after.app.guardrails != before.app.guardrails
         && let (Some(id), Some(t)) = (&target.account, crate::trading::Trading::try_global(cx))
     {
-        let key = target.account_name.as_ref().unwrap_or(id);
+        // Saved under the name or the id (as startup reads them): the entry just edited.
         t.submit(
             lines_trading::Source::Api,
             Instant::now(),
             lines_trading::Command::SetGuardrails {
                 account: lines_trading::AccountId::new(id),
-                guardrails: after.app.guardrails.get(key).cloned().unwrap_or_default(),
+                guardrails: target.guardrails(after),
             },
         );
     }
@@ -305,7 +330,8 @@ fn gather_facts(cx: &App) -> Facts {
         && let Some(st) = &ws.env.base.store
     {
         f.store_path = st.root.display().to_string();
-        f.store_budget_gb = (st.budget_bytes as f64 / (1u64 << 30) as f64 * 10.0).round() / 10.0;
+        f.store_budget_gb =
+            Some((st.budget_bytes as f64 / (1u64 << 30) as f64 * 10.0).round() / 10.0);
         f.depth_products = st.depth_products.clone();
     } else {
         f.store_path = "Not recording (this source has no store)".to_owned();
@@ -367,7 +393,7 @@ impl SettingsWindow {
     /// editor): the account, product or section changed under it.
     fn drop_unfinished(&mut self) {
         self.edit = None;
-        self.pending = None;
+        self.cancel_pending();
         self.editor = None;
         self.editor_msg = None;
     }
@@ -375,10 +401,10 @@ impl SettingsWindow {
     /// Show setting `i`: its section, selected, the search cleared.
     fn show(&mut self, i: usize) {
         if let Some(st) = schema::all().get(i) {
+            self.drop_unfinished();
             self.query.clear();
             self.section = st.section;
             self.row = self.rows().iter().position(|&r| r == i).unwrap_or(0);
-            self.edit = None;
         }
     }
 
@@ -412,14 +438,10 @@ impl SettingsWindow {
             return;
         }
         let guard = st.key.starts_with("guard.");
-        let account = |p: &Prefs| {
-            [&self.target.account_name, &self.target.account]
-                .into_iter()
-                .flatten()
-                .find_map(|k| p.app.guardrails.get(k).cloned())
-                .unwrap_or_default()
-        };
-        let (g0, g1) = (account(&before), account(&after));
+        let (g0, g1) = (
+            self.target.guardrails(&before),
+            self.target.guardrails(&after),
+        );
         let loosens = schema::loosening(st, &old, &v, &g0, &g1);
         if loosens && !sure {
             let (from, to) = (st.value_text(&old), st.value_text(&v));
@@ -429,11 +451,18 @@ impl SettingsWindow {
                 target: self.target.clone(),
                 text: if guard {
                     format!(
-                        "Loosening ({from} → {to}) takes effect tomorrow, at the next trade date."
+                        "Loosening {} for {} ({from} → {to}) takes effect tomorrow, at the next trade date.",
+                        st.name.to_lowercase(),
+                        self.target
+                            .account_name
+                            .as_deref()
+                            .unwrap_or("this account")
                     )
                 } else {
-                    format!("This loosens a trading safeguard ({from} → {to}).")
+                    format!("This loosens a trading safeguard ({from} → {to}): it applies now.")
                 },
+                undo: None,
+                tomorrow: guard,
             });
             self.note = None;
             cx.notify();
@@ -471,8 +500,23 @@ impl SettingsWindow {
     fn confirm(&mut self, cx: &mut Context<Self>) {
         let Some(p) = self.pending.take() else { return };
         let keep = std::mem::replace(&mut self.target, p.target);
+        let n = self.undo.len();
         self.set(p.index, p.value, true, cx);
+        if p.undo.is_some() {
+            // An undo's yes: it was undone, not a new change to undo.
+            self.undo.truncate(n);
+        }
         self.target = keep;
+    }
+
+    /// No to the pending loosening (an undo's goes back on the undo list).
+    fn cancel_pending(&mut self) {
+        if let Some(p) = self.pending.take()
+            && let Some(u) = p.undo
+        {
+            self.undo.push(u);
+        }
+        self.note = None;
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
@@ -480,13 +524,16 @@ impl SettingsWindow {
             self.note = None;
             return;
         };
-        let keep = std::mem::replace(&mut self.target, target);
+        // The setting it undoes, for its account: what is undone (or asked) is in view.
+        self.show(i);
+        self.target = target.clone();
         let n = self.undo.len();
         // An undo that loosens asks like any other change.
-        self.set(i, v, false, cx);
+        self.set(i, v.clone(), false, cx);
         self.undo.truncate(n);
-        self.target = keep;
-        if let Some(n) = &mut self.note {
+        if let Some(p) = &mut self.pending {
+            p.undo = Some((i, target, v));
+        } else if let Some(n) = &mut self.note {
             n.1 = format!("Undone · {}", n.1);
         }
     }
@@ -614,11 +661,9 @@ impl SettingsWindow {
         }
         if self.pending.is_some() {
             match key {
-                "enter" => self.confirm(cx),
-                "escape" => {
-                    self.pending = None;
-                    self.note = None;
-                }
+                // Y, not Enter: an Enter typed out of habit after a number never says yes.
+                "y" => self.confirm(cx),
+                "escape" => self.cancel_pending(),
                 _ => {}
             }
             cx.notify();
@@ -815,35 +860,41 @@ impl SettingsWindow {
                 seg.into_any_element()
             }
             (Kind::Toggle, Value::Bool(b)) => {
-                let b = *b;
-                div()
-                    .id(("toggle", i))
+                // Off | On, the current one filled: a state, never a lone button.
+                let mut seg = div()
+                    .flex()
+                    .flex_row()
                     .flex_none()
-                    .px_2()
-                    .rounded_sm()
                     .border_1()
-                    .cursor_pointer()
-                    // On and off by text as well as fill.
-                    .when(b, |d| {
-                        d.bg(t.accent).border_color(t.accent).text_color(t.bg)
-                    })
-                    .when(!b, |d| d.border_color(t.axis_line).text_color(t.text_dim))
-                    .child(if b { "On" } else { "Off" })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |v, _, _, cx| {
-                            v.select(i);
-                            v.set(i, Value::Bool(!b), false, cx);
-                        }),
-                    )
-                    .into_any_element()
+                    .border_color(t.axis_line)
+                    .rounded_sm();
+                for (j, (name, val)) in [("Off", false), ("On", true)].into_iter().enumerate() {
+                    let on = val == *b;
+                    seg = seg.child(
+                        div()
+                            .id(("toggle", i * 2 + j))
+                            .px_2()
+                            .cursor_pointer()
+                            .when(on, |d| d.bg(t.accent).text_color(t.bg))
+                            .child(name)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |v, _, _, cx| {
+                                    v.select(i);
+                                    v.set(i, Value::Bool(val), false, cx);
+                                }),
+                            ),
+                    );
+                }
+                seg.into_any_element()
             }
             (Kind::Number { unit, .. }, Value::Number(n)) => {
                 let editing = selected && self.edit.is_some();
                 let text = match (&self.edit, editing) {
                     (Some(e), true) => format!("{e}▏"),
-                    _ => n.map_or_else(|| "none".to_owned(), schema::grouped),
+                    _ => n.map_or_else(|| "None".to_owned(), schema::grouped),
                 };
+                let unit = if n.is_some() || editing { unit } else { "" };
                 let mut d = div()
                     .id(("number", i))
                     .flex_none()
@@ -992,7 +1043,9 @@ impl SettingsWindow {
             .py_1()
             .border_b_1()
             .border_color(t.axis_line)
-            .when(selected, |d| d.bg(t.panel))
+            .when(selected, |d| {
+                d.bg(t.panel).border_l_2().border_color(t.accent)
+            })
             .when(st.safety == Safety::Trading, |d| {
                 d.border_l_2().border_color(t.warn)
             })
@@ -1065,7 +1118,11 @@ impl SettingsWindow {
                                 .rounded_sm()
                                 .font_weight(FontWeight::BOLD)
                                 .cursor_pointer()
-                                .child("Loosen from tomorrow · Enter")
+                                .child(if p.tomorrow {
+                                    "Loosen from tomorrow · Y"
+                                } else {
+                                    "Loosen now · Y"
+                                })
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|v, _, _, cx| v.confirm(cx)),
@@ -1083,7 +1140,7 @@ impl SettingsWindow {
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|v, _, _, cx| {
-                                        v.pending = None;
+                                        v.cancel_pending();
                                         cx.notify();
                                     }),
                                 ),
@@ -1302,9 +1359,9 @@ impl Render for SettingsWindow {
                 child += 1;
             }
         }
-        let at = (self.section, self.row, searching);
+        let at = (self.section, self.row, self.query.clone());
         if let Some(c) = selected_child
-            && self.scrolled != Some(at)
+            && self.scrolled.as_ref() != Some(&at)
         {
             self.scroll.scroll_to_item(c);
             self.scrolled = Some(at);

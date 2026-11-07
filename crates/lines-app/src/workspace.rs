@@ -86,6 +86,9 @@ pub struct PaneEnv {
     /// The look every pane is created with; the Settings window changes it live
     /// ([`set_theme`]).
     pub theme: std::cell::Cell<Theme>,
+    /// This run's look flags (`--theme`, `--palette`, `--hollow`): over Settings ›
+    /// Appearance until the trader sets that field; never saved.
+    pub look_flags: std::cell::Cell<crate::settings_schema::Appearance>,
     /// Screenshot mode: frozen clock, no pointer, no user files.
     pub frozen: bool,
     /// Follow window visibility (off for screenshots and the benchmark, whose windows are

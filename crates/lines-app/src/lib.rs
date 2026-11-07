@@ -896,31 +896,26 @@ where
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));
     }
-    // The look from the flags; the app overlays Settings › Appearance where none was given.
-    let look = |saved: &settings_schema::Appearance| {
+    // This run's look flags: over Settings › Appearance (the app reads it below), never saved.
+    let look_flags = {
         use settings_schema::{HollowName, PaletteName, ThemeName};
-        let mut a = saved.clone();
-        if let Some(t) = cli.theme {
-            a.theme = Some(match t {
+        settings_schema::Appearance {
+            theme: cli.theme.map(|t| match t {
                 ThemeKind::Dark => ThemeName::Dark,
                 ThemeKind::Light => ThemeName::Light,
-            });
-        }
-        if let Some(p) = cli.palette {
-            a.palette = Some(match p {
+            }),
+            palette: cli.palette.map(|p| match p {
                 PaletteKind::Standard => PaletteName::Standard,
                 PaletteKind::Colorblind => PaletteName::Colorblind,
-            });
-        }
-        if let Some(h) = cli.hollow {
-            a.hollow = Some(match h {
+            }),
+            hollow: cli.hollow.map(|h| match h {
                 HollowKind::Up => HollowName::Up,
                 HollowKind::Down => HollowName::Down,
-            });
+            }),
         }
-        settings_schema::theme_for(&a)
     };
-    let theme = look(&settings_schema::Appearance::default());
+    let theme =
+        settings_schema::theme_for(&settings_schema::Appearance::default().with_flags(look_flags));
 
     // The source's (or `--instrument`'s) product sizes `--large-print`.
     let large_print = match &cli.large_print {
@@ -946,6 +941,7 @@ where
         availability: lines_feed::availability::availability(&base.source)?,
         base,
         theme: std::cell::Cell::new(theme),
+        look_flags: std::cell::Cell::new(look_flags),
         frozen,
         track_visibility: !frozen && !bench,
         dom: DomOptions {
@@ -1125,7 +1121,9 @@ where
     }
     let mut ws = Workspace::new(env);
     // Settings › Appearance, under any look flag given.
-    ws.env.theme.set(look(&settings.settings.appearance));
+    ws.env.theme.set(settings_schema::theme_for(
+        &settings.settings.appearance.with_flags(look_flags),
+    ));
     // The paper trading core (roadmap 7): its own thread, state per data source.
     let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.
