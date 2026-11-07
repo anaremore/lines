@@ -32,6 +32,10 @@
 //! `snapshot`, then `l2update` batches every 50 ms with new totals per price (0 removes).
 //! Coinbase reports the *maker's* side of a match, so the aggressor is the opposite side.
 //!
+//! **Hostile ids.** Trade ids 0 and `u64::MAX` are malformed (rejected), so id arithmetic
+//! never wraps. A hole wider than fills could ever close ([`MAX_HOLE`]) is reported as a gap
+//! at once, never requested, and holes shrink by the ids received, never by walking id space.
+//!
 //! Requests are issued one at a time. Each HTTP frame carries its request URL, so a response
 //! is interpreted from the URL, not from this session's own request plan: a replay decodes it
 //! the same way whatever history window the replaying build is configured with (0011). Anything that can't be back-filled is
@@ -59,6 +63,24 @@ const MAX_TRADE_PAGES: u32 = 10;
 /// Attempts to fill one id hole before reporting it as a gap (one per keepalive tick while
 /// REST lags; the next attempt is immediate when one made progress).
 const MAX_FILL_ATTEMPTS: u32 = 6;
+/// The widest hole fills could close (every attempt a full page); wider ones are gaps at once.
+const MAX_HOLE: u64 = MAX_FILL_ATTEMPTS as u64 * TRADES_PER_PAGE as u64;
+
+/// A trade id we can do arithmetic on: 0 and `u64::MAX` are malformed.
+fn valid_id(id: u64) -> bool {
+    id != 0 && id != u64::MAX
+}
+
+/// REST trades with usable ids, and how many were dropped.
+fn valid_trades(trades: Vec<RestTrade>) -> (Vec<RestTrade>, u64) {
+    let n = trades.len();
+    let ok: Vec<RestTrade> = trades
+        .into_iter()
+        .filter(|t| valid_id(t.trade_id))
+        .collect();
+    let bad = (n - ok.len()) as u64;
+    (ok, bad)
+}
 
 /// Trade ids `lo..=hi` that neither REST nor the websocket delivered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,12 +307,13 @@ impl CoinbaseSession {
         }
         match self.last_trade_id {
             Some(last) if trade_id <= last => return false,
+            // Ids are valid (`valid_id`), so `last + 1` and `trade_id - 1` never wrap.
             Some(last) if trade_id > last + 1 => {
                 // Dropped by the matches channel: count it, and fetch it from REST.
                 events.push(MarketEvent::Gap {
                     missed: trade_id - last - 1,
                 });
-                self.add_hole(last + 1, trade_id - 1, false, self.last_ws_time);
+                self.add_hole(last + 1, trade_id - 1, false, self.last_ws_time, events);
             }
             _ => {}
         }
@@ -302,16 +325,33 @@ impl CoinbaseSession {
         true
     }
 
-    fn add_hole(&mut self, lo: u64, hi: u64, boundary: bool, when: UtcMillis) {
-        if lo <= hi {
-            self.holes.push(Hole {
-                lo,
-                hi,
-                boundary,
-                attempts: 0,
-                when,
-            });
+    /// Fetch ids `lo..=hi` from REST, unless no number of fills could: then it is a gap now.
+    fn add_hole(
+        &mut self,
+        lo: u64,
+        hi: u64,
+        boundary: bool,
+        when: UtcMillis,
+        events: &mut Vec<MarketEvent>,
+    ) {
+        if lo > hi {
+            return;
         }
+        if hi - lo >= MAX_HOLE {
+            tracing::warn!("trades {lo}..={hi}: too many to fetch; reporting a gap");
+            events.push(MarketEvent::HistoryGap {
+                from: when,
+                to: when,
+            });
+            return;
+        }
+        self.holes.push(Hole {
+            lo,
+            hi,
+            boundary,
+            attempts: 0,
+            when,
+        });
     }
 
     /// Request the first open hole. Fills start only after back-paging has finished, so
@@ -320,7 +360,7 @@ impl CoinbaseSession {
         if !self.backfill_done || self.fill_in_flight {
             return;
         }
-        let Some(after) = self.holes.first().map(|h| h.hi + 1) else {
+        let Some(after) = self.holes.first().and_then(|h| h.hi.checked_add(1)) else {
             return;
         };
         self.fill_in_flight = true;
@@ -337,7 +377,7 @@ impl CoinbaseSession {
         let Some(b) = self.boundary else { return };
         self.boundary_checked = true;
         if let Some(r) = self.rest_newest_seen {
-            self.add_hole(r + 1, b, true, self.cutoff);
+            self.add_hole(r.saturating_add(1), b, true, self.cutoff, events);
             self.maybe_fill(out);
         }
         self.maybe_complete(events);
@@ -360,6 +400,15 @@ impl CoinbaseSession {
             .map_err(|e| SessionError::Protocol(format!("bad Coinbase message: {e}")))?;
         match msg {
             WsMsg::Subscriptions {} => events.push(MarketEvent::Ready),
+            WsMsg::Match(m) if !valid_id(m.trade_id) => {
+                events.push(MarketEvent::Rejected { count: 1 })
+            }
+            WsMsg::LastMatch(m) if !valid_id(m.trade_id) => {
+                events.push(MarketEvent::Rejected { count: 1 })
+            }
+            WsMsg::Heartbeat(h) if !valid_id(h.last_trade_id) => {
+                events.push(MarketEvent::Rejected { count: 1 })
+            }
             WsMsg::Match(m) => {
                 if !self.sequence(m.trade_id, events) {
                     return Ok(());
@@ -461,7 +510,7 @@ impl CoinbaseSession {
                     events.push(MarketEvent::Gap {
                         missed: h.last_trade_id - last,
                     });
-                    self.add_hole(last + 1, h.last_trade_id, false, self.last_ws_time);
+                    self.add_hole(last + 1, h.last_trade_id, false, self.last_ws_time, events);
                     self.last_trade_id = Some(h.last_trade_id);
                     self.maybe_fill(out);
                 }
@@ -543,11 +592,12 @@ impl CoinbaseSession {
         let page = self.trade_pages - 1;
         let trades: Vec<RestTrade> =
             serde_json::from_slice(body).map_err(|e| Self::bad_json("trades", body, e))?;
+        let full = trades.len() >= TRADES_PER_PAGE;
+        let (trades, mut rejected) = valid_trades(trades);
         if let Some(newest) = trades.first() {
             self.rest_newest_seen.get_or_insert(newest.trade_id);
         }
         let mut reached_cutoff = false;
-        let mut rejected = 0;
         for t in &trades {
             match (
                 UtcMillis::parse_iso(&t.time),
@@ -568,11 +618,15 @@ impl CoinbaseSession {
         if rejected > 0 {
             events.push(MarketEvent::Rejected { count: rejected });
         }
-        let full = trades.len() >= TRADES_PER_PAGE;
         let oldest = trades.last();
-        if !reached_cutoff && full && page + 1 < MAX_TRADE_PAGES {
-            let after = oldest.map(|t| t.trade_id);
-            self.queue.push_back(Request::Trades { after });
+        if !reached_cutoff
+            && full
+            && page + 1 < MAX_TRADE_PAGES
+            && let Some(o) = oldest
+        {
+            self.queue.push_back(Request::Trades {
+                after: Some(o.trade_id),
+            });
             return Ok(());
         }
         if !reached_cutoff && full {
@@ -596,7 +650,7 @@ impl CoinbaseSession {
         // REST delivered every id up to its newest: mid-stream holes below it are closed.
         if let Some(r) = self.rest_newest_seen {
             self.holes.retain_mut(|h| {
-                h.lo = h.lo.max(r + 1);
+                h.lo = h.lo.max(r.saturating_add(1));
                 h.lo <= h.hi
             });
         }
@@ -664,9 +718,9 @@ impl CoinbaseSession {
         self.fill_in_flight = false;
         let trades: Vec<RestTrade> =
             serde_json::from_slice(body).map_err(|e| Self::bad_json("trades", body, e))?;
+        let (trades, mut rejected) = valid_trades(trades);
         let mut got = BTreeSet::new();
         let mut fresh = Vec::new();
-        let mut rejected = 0;
         for t in &trades {
             let in_hole = self
                 .holes
@@ -699,28 +753,29 @@ impl CoinbaseSession {
         if rejected > 0 {
             events.push(MarketEvent::Rejected { count: rejected });
         }
-        // Shrink the holes by what arrived (a hole may split).
+        // Shrink the holes by what arrived (a hole may split): walk the ids received inside
+        // each hole, never the hole's id space.
         let mut next = Vec::with_capacity(self.holes.len());
         for (i, h) in std::mem::take(&mut self.holes).into_iter().enumerate() {
             // The hole just requested (the first) counts an attempt.
             let attempts = h.attempts + u32::from(i == 0);
-            let mut lo = None;
-            for id in h.lo..=h.hi + 1 {
-                let present = id > h.hi || got.contains(&id);
-                match (present, lo) {
-                    (false, None) => lo = Some(id),
-                    (true, Some(l)) => {
-                        next.push(Hole {
-                            lo: l,
-                            hi: id - 1,
-                            attempts,
-                            ..h.clone()
-                        });
-                        lo = None;
-                    }
-                    _ => {}
+            let mut lo = h.lo;
+            let mut push = |l: u64, hi: u64| {
+                if l <= hi {
+                    next.push(Hole {
+                        lo: l,
+                        hi,
+                        attempts,
+                        ..h.clone()
+                    });
                 }
+            };
+            for &id in got.range(h.lo..=h.hi) {
+                // `id >= lo >= 1`: `id - 1` never wraps; `id < u64::MAX`: `id + 1` neither.
+                push(lo, id - 1);
+                lo = id + 1;
             }
+            push(lo, h.hi);
         }
         let (dead, alive): (Vec<_>, Vec<_>) = next
             .into_iter()
@@ -753,7 +808,7 @@ impl ProviderSession for CoinbaseSession {
         if !self.backfill_done || self.fill_in_flight || !self.queue.is_empty() {
             return None;
         }
-        let after = self.holes.first()?.hi + 1;
+        let after = self.holes.first()?.hi.checked_add(1)?;
         self.fill_in_flight = true;
         let r = Request::Fill { after };
         let get = Outgoing::HttpGet(self.url(&r));
@@ -1162,6 +1217,165 @@ mod tests {
         assert_eq!(gaps, 2);
         // A late websocket duplicate of a filled id is still dropped.
         assert!(text(&mut s, r#"{"type":"match","trade_id":102,"size":"1","price":"1","time":"2026-11-06T14:05:31Z"}"#).is_empty());
+    }
+
+    /// A session past its back-fill: REST up to 99, the websocket from 100.
+    fn live() -> CoinbaseSession {
+        let mut s = session();
+        let f = reply(&s, "[]");
+        feed(&mut s, f);
+        text(
+            &mut s,
+            r#"{"type":"last_match","trade_id":99,"size":"1","price":"1","time":"2026-11-06T14:05:20Z"}"#,
+        );
+        let f = reply(&s, &trade_rows(&[99]));
+        feed(&mut s, f);
+        text(
+            &mut s,
+            r#"{"type":"match","trade_id":100,"size":"1","price":"1","time":"2026-11-06T14:05:31Z"}"#,
+        );
+        s
+    }
+
+    fn rejected(ev: &[MarketEvent]) -> bool {
+        ev == [MarketEvent::Rejected { count: 1 }]
+    }
+
+    /// Audit finding 2: a heartbeat jumping far ahead is a gap at once, never a hole to fill
+    /// (filling it used to walk the whole id range and freeze the feed).
+    #[test]
+    fn a_huge_id_jump_is_a_gap_not_a_hole() {
+        let mut s = live();
+        let big: u64 = 1 << 40;
+        let (ev, out) = feed(
+            &mut s,
+            Frame::text(format!(r#"{{"type":"heartbeat","last_trade_id":{big}}}"#)),
+        );
+        assert_eq!(ev[0], MarketEvent::Gap { missed: big - 100 });
+        assert!(matches!(ev[1], MarketEvent::HistoryGap { .. }), "{ev:?}");
+        assert!(out.is_empty() && s.holes.is_empty(), "nothing requested");
+        assert_eq!(s.keepalive(UtcMillis(0)), None);
+        // The stream carries on after it.
+        let m = format!(
+            r#"{{"type":"match","trade_id":{},"size":"1","price":"1","time":"2026-11-06T14:05:33Z"}}"#,
+            big + 1
+        );
+        assert_eq!(text(&mut s, &m).len(), 1);
+        // The REST-to-websocket hole too: a gap at once, and history completes.
+        let mut s = session();
+        let f = reply(&s, "[]");
+        feed(&mut s, f);
+        text(
+            &mut s,
+            &format!(
+                r#"{{"type":"last_match","trade_id":{big},"size":"1","price":"1","time":"2026-11-06T14:05:20Z"}}"#
+            ),
+        );
+        let f = reply(&s, &trade_rows(&[99]));
+        let (ev, out) = feed(&mut s, f);
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, MarketEvent::HistoryGap { .. }))
+        );
+        assert_eq!(ev.last(), Some(&MarketEvent::HistoryComplete));
+        assert!(out.is_empty() && s.holes.is_empty());
+    }
+
+    /// A wide hole that fills can close shrinks by the ids received (split around them),
+    /// never by walking its range.
+    #[test]
+    fn a_fill_splits_a_hole_around_the_ids_received() {
+        let mut s = live();
+        // The widest fillable hole: ids 101..=100 + MAX_HOLE (MAX_HOLE of them).
+        let hi = 101 + MAX_HOLE;
+        let (_, out) = feed(
+            &mut s,
+            Frame::text(format!(
+                r#"{{"type":"match","trade_id":{hi},"size":"1","price":"1","time":"2026-11-06T14:05:33Z"}}"#
+            )),
+        );
+        assert_eq!(out.len(), 1, "fillable: requested");
+        let f = reply(&s, &trade_rows(&[3000, 2000]));
+        let (ev, _) = feed(&mut s, f);
+        assert_eq!(ev.len(), 2);
+        let spans: Vec<(u64, u64)> = s.holes.iter().map(|h| (h.lo, h.hi)).collect();
+        assert_eq!(spans, [(101, 1999), (2001, 2999), (3001, hi - 1)]);
+        // One id more than fills could close is a gap.
+        let mut s = live();
+        let (ev, out) = feed(
+            &mut s,
+            Frame::text(format!(
+                r#"{{"type":"match","trade_id":{},"size":"1","price":"1","time":"2026-11-06T14:05:33Z"}}"#,
+                hi + 1
+            )),
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, MarketEvent::HistoryGap { .. }))
+        );
+        assert!(out.is_empty() && s.holes.is_empty());
+    }
+
+    /// Audit finding 6: ids 0 and `u64::MAX` are malformed everywhere (match, last match,
+    /// heartbeat, REST pages), so no id arithmetic can wrap.
+    #[test]
+    fn ids_zero_and_max_are_rejected() {
+        for id in [0, u64::MAX] {
+            // Before anything else (a first match used to compute `id - 1`).
+            let mut s = session();
+            for msg in [
+                format!(
+                    r#"{{"type":"match","trade_id":{id},"size":"1","price":"1","time":"2026-11-06T14:05:31Z"}}"#
+                ),
+                format!(
+                    r#"{{"type":"last_match","trade_id":{id},"size":"1","price":"1","time":"2026-11-06T14:05:31Z"}}"#
+                ),
+            ] {
+                assert!(rejected(&text(&mut s, &msg)), "{msg}");
+            }
+            assert_eq!(s.boundary, None);
+            let mut s = live();
+            let hb = format!(r#"{{"type":"heartbeat","last_trade_id":{id}}}"#);
+            assert!(rejected(&text(&mut s, &hb)));
+            assert_eq!(s.last_trade_id, Some(100));
+            assert!(s.holes.is_empty());
+        }
+        // REST rows with those ids are rejected, the rest used.
+        let mut s = session();
+        let f = reply(&s, "[]");
+        feed(&mut s, f);
+        let rows = format!(
+            "[{}]",
+            [u64::MAX, 101, 0]
+                .map(|id| format!(
+                    r#"{{"trade_id":{id},"size":"1","price":"1","time":"2026-11-06T14:05:20Z"}}"#
+                ))
+                .join(",")
+        );
+        let f = reply(&s, &rows);
+        let (ev, _) = feed(&mut s, f);
+        assert!(ev.contains(&MarketEvent::Rejected { count: 2 }), "{ev:?}");
+        assert_eq!(s.rest_newest_seen, Some(101));
+        // A full page of nothing but malformed ids ends the back-fill (a gap), never pages
+        // again from the newest.
+        let mut s = session();
+        let f = reply(&s, "[]");
+        feed(&mut s, f);
+        let row = r#"{"trade_id":0,"size":"1","price":"1","time":"2026-11-06T14:05:20Z"}"#;
+        let page = format!("[{}]", vec![row; TRADES_PER_PAGE].join(","));
+        let f = reply(&s, &page);
+        let (ev, out) = feed(&mut s, f);
+        assert!(ev.contains(&MarketEvent::Rejected {
+            count: TRADES_PER_PAGE as u64
+        }));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, MarketEvent::HistoryGap { .. }))
+        );
+        assert!(
+            s.backfill_done && s.queue.is_empty() && out.is_empty(),
+            "{out:?}"
+        );
     }
 
     #[test]

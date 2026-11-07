@@ -61,6 +61,32 @@ pub fn all() -> Vec<Seed> {
     let cb = coinbase_script();
     v.push(seed("coinbase_session", "script", encode_ops(0, &cb)));
     v.push(seed("coinbase_session", "script-eth", encode_ops(1, &cb)));
+    // Audit findings 2 and 6: ids 0 and u64::MAX, and a heartbeat jumping 2^40 ids ahead
+    // (filling it used to walk the id range), then a fill answer and keepalive ticks.
+    let mut hostile = cb.clone();
+    for j in [
+        r#"{"type":"match","trade_id":0,"side":"buy","size":"1","price":"75416","time":"2026-11-06T14:00:07Z"}"#,
+        r#"{"type":"match","trade_id":18446744073709551615,"side":"buy","size":"1","price":"75416","time":"2026-11-06T14:00:07Z"}"#,
+        r#"{"type":"heartbeat","last_trade_id":18446744073709551615}"#,
+        r#"{"type":"heartbeat","last_trade_id":1099511627776}"#,
+        r#"{"type":"match","trade_id":1099511628000,"side":"buy","size":"1","price":"75416","time":"2026-11-06T14:00:08Z"}"#,
+    ] {
+        hostile.push((Some(FrameKind::Text), 1, Some(Frame::text(j.to_owned()))));
+    }
+    hostile.push((None, 5, None));
+    hostile.push((
+        Some(FrameKind::Http),
+        0,
+        Some(Frame::http(
+            "https://api.exchange.coinbase.com/products/BTC-USD/trades?after=1099511628000&limit=1000
+             [{\"time\":\"2026-11-06T14:00:07Z\",\"trade_id\":0,\"price\":\"1\",\"size\":\"1\"}]",
+        )),
+    ));
+    v.push(seed(
+        "coinbase_session",
+        "hostile-ids",
+        encode_ops(0, &hostile),
+    ));
     v.push(seed(
         "coinbase_session",
         "pre-url-candles",
@@ -106,6 +132,13 @@ pub fn all() -> Vec<Seed> {
         lfr(native::PROVIDER, native::PROTOCOL, "NQ", None, &nat),
     ));
     v.push(seed("recording", "lines-v2", lfr_v2("NQ", &nat)));
+    // Audit finding 5: files from older builds hold outbound frames, a CQG logon among them;
+    // replay skips them (new recordings write their time only, no bytes).
+    v.push(seed(
+        "recording",
+        "cqg-old-outbound-logon",
+        cqg_logon_lfr(&cqg[..20]),
+    ));
 
     v.push(seed("sierra_import", "ticks-depth", sierra_input(true)));
     v.push(seed("sierra_import", "ticks-only", sierra_input(false)));
@@ -572,6 +605,44 @@ fn lfr(
     // One client frame too: replay skips them.
     w.write(Direction::ToServer, Duration::ZERO, &Frame::text("{}"))
         .expect("in memory");
+    w.finish().expect("in memory")
+}
+
+/// A CQG recording as builds before the fix wrote it: the session's outbound logon (with a
+/// synthetic password) first, then inbound frames.
+fn cqg_logon_lfr(inbound: &[Frame]) -> Vec<u8> {
+    let es = catalog::get(catalog::ES).expect("ES");
+    let provider = CqgProvider::new(LogonParams {
+        user_name: Some("fuzz-user".into()),
+        password: Some("fuzz-password".into()),
+        ..Default::default()
+    });
+    let mut session = provider.new_session(&es, Some(esz26())).expect("session");
+    let mut out = Vec::new();
+    session.start(ctx(), &mut out);
+    let header = Header {
+        start_wall_ms: BASE_MS,
+        provider: "cqg".into(),
+        protocol: provider.protocol(),
+        product: "ES".into(),
+        contract: Some(esz26()),
+        version: lines_feed::recording::FORMAT_VERSION,
+    };
+    let mut w = Writer::new(Vec::new(), &header).expect("in memory");
+    for o in &out {
+        if let Outgoing::Frame(f) = o {
+            w.write(Direction::ToServer, Duration::ZERO, f)
+                .expect("in memory");
+        }
+    }
+    for (i, f) in inbound.iter().enumerate() {
+        w.write(
+            Direction::FromServer,
+            Duration::from_millis(i as u64 * 10),
+            f,
+        )
+        .expect("in memory");
+    }
     w.finish().expect("in memory")
 }
 

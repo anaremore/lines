@@ -157,7 +157,10 @@ impl Transport for WsTransport {
 }
 
 // ---------------------------------------------------------------------------------------
-// Recording wrapper: tees every frame (both directions, incl. HTTP bodies) to a `.lfr` file.
+// Recording wrapper: tees every inbound frame (incl. HTTP bodies) to a `.lfr` file. An
+// outbound frame is recorded as its time only (empty data): its bytes can carry credentials
+// (a CQG logon's user name and password; decision 0020: no credentials in recordings), and
+// replay needs only when it was sent (the clock `start()` sees, below).
 
 pub struct Recording<'r, T> {
     inner: T,
@@ -172,7 +175,13 @@ impl<'r, T: Transport> Recording<'r, T> {
 
 impl<T: Transport> Transport for Recording<'_, T> {
     async fn send(&mut self, frame: Frame) -> Result<()> {
-        self.recorder.record(Direction::ToServer, &frame);
+        self.recorder.record(
+            Direction::ToServer,
+            &Frame {
+                kind: frame.kind,
+                data: Default::default(),
+            },
+        );
         self.inner.send(frame).await
     }
 
@@ -214,7 +223,8 @@ impl ReplayTransport {
             Reader::open(path).with_context(|| format!("open recording {}", path.display()))?;
         let mut reader = reader;
         // Before any frame is delivered, the clock reads the time of the first recorded frame
-        // (normally the session's own logon/subscribe, i.e. when start() ran live), so
+        // (normally the session's own logon/subscribe, recorded as its time only: when
+        // start() ran live), so
         // sessions computing time windows in start() behave exactly as they did live.
         let mut clock = Some(UtcMillis(reader.header.start_wall_ms));
         let mut pending = None;
@@ -290,5 +300,95 @@ impl Transport for ReplayTransport {
 
     fn clock(&self) -> Option<UtcMillis> {
         self.clock
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+    use crate::recording::Reader;
+
+    /// Sends nothing anywhere; yields one inbound frame.
+    struct Echo(Option<Frame>);
+
+    impl Transport for Echo {
+        async fn send(&mut self, _frame: Frame) -> Result<()> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> Result<Option<Frame>> {
+            Ok(self.0.take())
+        }
+    }
+
+    /// Audit finding 5: a logon sent through a recording connection never reaches the file
+    /// (outbound frames are recorded as their time only); inbound frames still are.
+    #[test]
+    fn outbound_frames_such_as_a_logon_are_never_recorded() {
+        let dir = std::env::temp_dir().join(format!("lines-rec-out-{}", std::process::id()));
+        let path = dir.join("logon.lfr");
+        let rec = Recorder::create(&path, "cqg", "cqg-webapi-2", "ES", None).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut t = Recording::new(Echo(Some(Frame::binary(b"market data".to_vec()))), &rec);
+            t.send(Frame::binary(
+                b"logon user_name=jsmith password=hunter2".to_vec(),
+            ))
+            .await
+            .unwrap();
+            assert!(t.recv().await.unwrap().is_some());
+        });
+        rec.finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            !has(b"hunter2") && !has(b"jsmith"),
+            "no credentials in the file"
+        );
+        let mut r = Reader::new(&bytes[..]).unwrap();
+        let first = r.next_record().unwrap().unwrap();
+        assert_eq!(first.direction, Direction::ToServer);
+        assert!(
+            first.frame.data.is_empty(),
+            "the logon's time only, so replay's start clock is the live one"
+        );
+        let second = r.next_record().unwrap().unwrap();
+        assert_eq!(second.direction, Direction::FromServer);
+        assert_eq!(&second.frame.data[..], b"market data");
+        assert!(r.next_record().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Replay's clock before any delivery is the first outbound marker's time (when start()
+    /// ran live), not the first reply's: a session's time windows (Coinbase's bar cutoff)
+    /// match the live run.
+    #[test]
+    fn replay_starts_at_the_outbound_marker() {
+        use crate::recording::{Header, Writer};
+        let dir = std::env::temp_dir().join(format!("lines-rec-clock-{}", std::process::id()));
+        let path = dir.join("c.lfr");
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = Header {
+            start_wall_ms: 1_000_000,
+            provider: "coinbase".into(),
+            protocol: "x".into(),
+            product: "BTC/USD".into(),
+            contract: None,
+            version: crate::recording::FORMAT_VERSION,
+        };
+        let mut w = Writer::create(&path, &header).unwrap();
+        w.write(Direction::ToServer, Duration::ZERO, &Frame::text(""))
+            .unwrap();
+        w.write(
+            Direction::FromServer,
+            Duration::from_millis(5_000),
+            &Frame::text("{}"),
+        )
+        .unwrap();
+        w.finish().unwrap();
+        let replay = ReplayTransport::open(&path, 1.0, None).unwrap();
+        assert_eq!(replay.clock(), Some(UtcMillis(1_000_000)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
