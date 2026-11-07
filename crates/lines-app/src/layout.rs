@@ -18,6 +18,8 @@ pub enum PaneKind {
     Chart,
     Dom,
     Tape,
+    /// The trade journal (roadmap 8c; workspace format 3).
+    Journal,
 }
 
 impl PaneKind {
@@ -26,6 +28,7 @@ impl PaneKind {
             PaneKind::Chart => "Chart",
             PaneKind::Dom => "DOM",
             PaneKind::Tape => "Time & sales",
+            PaneKind::Journal => "Journal",
         }
     }
 }

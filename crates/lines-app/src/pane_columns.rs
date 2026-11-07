@@ -146,11 +146,115 @@ pub const TAPE_SPECS: [ColumnSpec; 4] = [
 /// The time column takes the tape's leftover width (prices and sizes stay together).
 pub const TAPE_FILL: usize = 0;
 
-/// A column of either table, for commands.
+/// Journal columns, left to right (roadmap 8c).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalCol {
+    /// Entry time.
+    Time,
+    /// The account's name (every journal pane shows every account's trades).
+    Account,
+    Contract,
+    Side,
+    /// Largest size.
+    Qty,
+    /// Average entry and exit prices.
+    Entry,
+    Exit,
+    /// Net P&L (after fees).
+    Pnl,
+    /// Ticks per contract.
+    Ticks,
+    Duration,
+    /// Maximum adverse / favorable excursion.
+    MaeMfe,
+    Tags,
+}
+
+impl JournalCol {
+    pub const ALL: [JournalCol; 12] = [
+        JournalCol::Time,
+        JournalCol::Account,
+        JournalCol::Contract,
+        JournalCol::Side,
+        JournalCol::Qty,
+        JournalCol::Entry,
+        JournalCol::Exit,
+        JournalCol::Pnl,
+        JournalCol::Ticks,
+        JournalCol::Duration,
+        JournalCol::MaeMfe,
+        JournalCol::Tags,
+    ];
+
+    pub fn header(self) -> &'static str {
+        match self {
+            JournalCol::MaeMfe => "MAE / MFE",
+            JournalCol::Duration => "Held",
+            // Averages over every fill on that side (they can sit between ticks).
+            JournalCol::Entry => "Avg entry",
+            JournalCol::Exit => "Avg exit",
+            c => c.label(),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            JournalCol::Time => "Time",
+            JournalCol::Account => "Account",
+            JournalCol::Contract => "Contract",
+            JournalCol::Side => "Side",
+            JournalCol::Qty => "Qty",
+            JournalCol::Entry => "Entry",
+            JournalCol::Exit => "Exit",
+            JournalCol::Pnl => "P&L",
+            JournalCol::Ticks => "Ticks",
+            JournalCol::Duration => "Duration",
+            JournalCol::MaeMfe => "MAE/MFE",
+            JournalCol::Tags => "Tags",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Text columns read left-aligned; numbers right-aligned.
+    pub fn left_aligned(self) -> bool {
+        matches!(
+            self,
+            JournalCol::Time
+                | JournalCol::Account
+                | JournalCol::Contract
+                | JournalCol::Side
+                | JournalCol::Tags
+        )
+    }
+}
+
+pub const JOURNAL_SPECS: [ColumnSpec; 12] = [
+    spec(48.0, 96.0, false, true),
+    spec(40.0, 72.0, true, true),
+    spec(40.0, 64.0, true, true),
+    spec(32.0, 44.0, true, true),
+    spec(24.0, 36.0, true, true),
+    spec(48.0, 76.0, true, true),
+    spec(48.0, 76.0, true, true),
+    spec(48.0, 80.0, true, true),
+    spec(32.0, 52.0, true, true),
+    spec(40.0, 60.0, true, true),
+    spec(64.0, 130.0, true, true),
+    spec(40.0, 96.0, true, true),
+];
+/// The tags column takes the journal's leftover width.
+pub const JOURNAL_FILL: usize = 11;
+
+/// A column of any table, for commands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Column {
     Dom(DomCol),
     Tape(TapeCol),
+    Journal(JournalCol),
 }
 
 impl Column {
@@ -158,6 +262,7 @@ impl Column {
         match self {
             Column::Dom(c) => format!("DOM column: {}", c.label()),
             Column::Tape(c) => format!("Time & sales column: {}", c.label()),
+            Column::Journal(c) => format!("Journal column: {}", c.label()),
         }
     }
 }
@@ -196,6 +301,7 @@ pub struct ColumnDoc {
 pub enum Table {
     Dom,
     Tape,
+    Journal,
 }
 
 /// A pane's columns: the trader's choices, this frame's layout, and what the content needs.
@@ -243,6 +349,7 @@ impl Columns {
             set: match table {
                 Table::Dom => ColumnSet::new(&DOM_SPECS, DOM_FILL),
                 Table::Tape => ColumnSet::new(&TAPE_SPECS, TAPE_FILL),
+                Table::Journal => ColumnSet::new(&JOURNAL_SPECS, JOURNAL_FILL),
             },
             cells: [Cell::default(); MAX_COLS],
             needed: [0.0; MAX_COLS],
@@ -254,6 +361,7 @@ impl Columns {
         match self.table {
             Table::Dom => &DOM_SPECS,
             Table::Tape => &TAPE_SPECS,
+            Table::Journal => &JOURNAL_SPECS,
         }
     }
 
@@ -262,6 +370,7 @@ impl Columns {
         match (self.table, c) {
             (Table::Dom, Column::Dom(d)) => Some(d.index()),
             (Table::Tape, Column::Tape(t)) => Some(t.index()),
+            (Table::Journal, Column::Journal(j)) => Some(j.index()),
             _ => None,
         }
     }
@@ -271,6 +380,7 @@ impl Columns {
         match self.table {
             Table::Dom => DomCol::ALL.get(i).map(|c| Column::Dom(*c)),
             Table::Tape => TapeCol::ALL.get(i).map(|c| Column::Tape(*c)),
+            Table::Journal => JournalCol::ALL.get(i).map(|c| Column::Journal(*c)),
         }
     }
 
@@ -278,6 +388,7 @@ impl Columns {
         match self.column(i) {
             Some(Column::Dom(c)) => c.label(),
             Some(Column::Tape(c)) => c.label(),
+            Some(Column::Journal(c)) => c.label(),
             None => "",
         }
     }
@@ -288,13 +399,24 @@ impl Columns {
         self.set.layout(specs, &self.needed, total, &mut self.cells);
     }
 
+    /// This frame only: leave out columns that don't fit entirely in `total` px (header and
+    /// rows alike), so a narrow pane never shows half a number. Saved choices are untouched.
+    pub fn drop_overflow(&mut self, total: f32) {
+        for c in self.cells.iter_mut() {
+            if c.shown && c.right() > total + 0.5 {
+                c.shown = false;
+            }
+        }
+    }
+
     /// Run a column command. `Err` says why not (inline).
     pub fn apply(&mut self, cmd: ColumnCmd) -> Result<(), &'static str> {
         let specs = self.specs();
         let col = |c: Column| {
             self.index(c).ok_or(match self.table {
-                Table::Dom => "that column belongs to time & sales",
-                Table::Tape => "that column belongs to the DOM",
+                Table::Dom => "that column isn't the DOM's",
+                Table::Tape => "that column isn't time & sales'",
+                Table::Journal => "that column isn't the journal's",
             })
         };
         match cmd {
@@ -304,6 +426,8 @@ impl Columns {
                 if !self.set.set_shown(specs, i, shown) {
                     return Err(if specs[i].hideable {
                         "the last column stays"
+                    } else if self.table == Table::Journal {
+                        "the time column is always shown"
                     } else {
                         "the price column is always shown"
                     });
@@ -404,6 +528,7 @@ impl Columns {
         match self.column(i) {
             Some(Column::Dom(c)) => c.header(),
             Some(Column::Tape(c)) => c.header(),
+            Some(Column::Journal(c)) => c.header(),
             None => "",
         }
     }
@@ -636,13 +761,19 @@ mod tests {
     }
 
     /// The owner's bug: dragging time & sales dividers moved them against the pointer. Every
-    /// divider of both real tables, both ways, through the same path the panes use (hit,
+    /// divider of every real table (DOM, time & sales, journal), both ways, through the same path the panes use (hit,
     /// start_drag, drag_to, apply, layout): it ends under the pointer, or at a limit, and
     /// never on the wrong side of where it started.
     #[test]
     fn real_tables_dividers_follow_the_pointer() {
-        for table in [Table::Dom, Table::Tape] {
-            for width in [420.0, 700.0] {
+        for table in [Table::Dom, Table::Tape, Table::Journal] {
+            // Widths that hold the table's defaults (a narrower journal leaves columns out
+            // per frame: `drop_overflow`, tested on its own).
+            let widths: [f32; 2] = match table {
+                Table::Journal => [1000.0, 1400.0],
+                _ => [420.0, 700.0],
+            };
+            for width in widths {
                 let mut fresh = Columns::new(table);
                 fresh.layout(width);
                 let last = (0..fresh.set.len())
@@ -691,9 +822,28 @@ mod tests {
     }
 
     #[test]
+    fn columns_that_dont_fit_are_left_out_not_cut() {
+        let mut c = Columns::new(Table::Journal);
+        c.layout(400.0);
+        c.drop_overflow(400.0);
+        let shown: Vec<_> = c.cells.iter().filter(|c| c.shown).collect();
+        assert!(!shown.is_empty() && shown.len() < JournalCol::ALL.len());
+        assert!(
+            shown.iter().all(|c| c.right() <= 400.5),
+            "nothing cut at the edge"
+        );
+        assert!(
+            c.set.is_shown(JournalCol::MaeMfe.index()),
+            "saved choice untouched"
+        );
+    }
+
+    #[test]
     fn auto_fit_all_fits_every_column_but_the_filler() {
         let mut c = Columns::new(Table::Tape);
-        c.needed = [70.0, 58.5, 30.0, 18.0, 0.0, 0.0, 0.0, 0.0];
+        c.needed = [
+            70.0, 58.5, 30.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
         c.apply(ColumnCmd::AutoFitAll).unwrap();
         assert_eq!(c.set.width(0), None, "time fills: not fitted");
         assert_eq!(

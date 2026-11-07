@@ -141,6 +141,35 @@ impl Lockout {
     }
 }
 
+/// What a fill did to a round trip (flat → position → flat), from the signed position
+/// before and after it. The one definition of a trade, shared by the guardrails' counts and
+/// the journal (`crate::journal`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RoundTrip {
+    /// Flat before and after (nothing to count).
+    None,
+    /// From flat: a trade starts.
+    Opens,
+    /// Same side before and after (an add or a partial exit).
+    Continues,
+    /// Back to flat: the trade ends.
+    Closes,
+    /// Through flat to the other side in one fill: one trade ends, the next starts.
+    Reverses,
+}
+
+impl RoundTrip {
+    pub fn of(before: i64, after: i64) -> RoundTrip {
+        match (before, after) {
+            (0, 0) => RoundTrip::None,
+            (0, _) => RoundTrip::Opens,
+            (_, 0) => RoundTrip::Closes,
+            (b, a) if a.signum() != b.signum() => RoundTrip::Reverses,
+            _ => RoundTrip::Continues,
+        }
+    }
+}
+
 /// A round trip in progress.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenTrade {
@@ -323,8 +352,9 @@ impl GuardrailTracker {
         day_end: UtcMillis,
     ) {
         let i = self.open.iter().position(|t| t.contract == contract);
+        let step = RoundTrip::of(before, after);
         if before == 0 {
-            if after != 0 {
+            if step == RoundTrip::Opens {
                 self.open.push(OpenTrade { contract, pnl });
             }
             return;
@@ -339,8 +369,8 @@ impl GuardrailTracker {
             },
         };
         trade.pnl += pnl;
-        let reversed = after != 0 && after.signum() != before.signum();
-        if after != 0 && !reversed {
+        let reversed = step == RoundTrip::Reverses;
+        if step == RoundTrip::Continues {
             self.open.push(trade);
             return;
         }
