@@ -92,7 +92,13 @@ pub fn kraken_session(data: &[u8]) {
 /// `lines-events-1` frames through the native (replay-only) session.
 pub fn native_session(data: &[u8]) {
     let (cfg, ops) = frames::split(data);
-    let id = [catalog::NQ, catalog::ES, catalog::MNQ, catalog::BTC_USD][cfg as usize % 4];
+    let id = [
+        catalog::NQ,
+        catalog::ES,
+        catalog::MNQ,
+        catalog::BTC_USD,
+        catalog::SPY,
+    ][cfg as usize % 5];
     let product = catalog::get(id).expect("product");
     drive(&NativeProvider, product, None, frames::Ops::new(ops));
     // The bare decoder too, on the whole input.

@@ -182,6 +182,9 @@ pub struct ChartData {
     pub book: OrderBook,
     /// Time & sales: the newest live prints (bounded ring).
     pub tape: Tape,
+    /// The underlying's option chains (decision 0028), from `MarketEvent::OptionQuote`.
+    /// Their own revision tells panes what changed; they never move `chart_epoch`.
+    pub chains: lines_core::OptionChains,
     /// Traded volume per price since data start for this contract (trading sessions are not
     /// modelled yet). Only trades the stitch counts as new, so a re-delivered trade is never
     /// counted twice.
@@ -253,6 +256,7 @@ impl ChartData {
             ask: None,
             book: OrderBook::default(),
             tape: Tape::new(TAPE_PRINTS),
+            chains: lines_core::OptionChains::default(),
             vap: VolumeAtPrice::default(),
             profiles: SessionProfiles::new(calendar, period_ms, max_bars),
             // Journal cap: ~ one busy hour of trades while history is outstanding.
@@ -321,6 +325,8 @@ impl ChartData {
                     | MarketEvent::Bid(_)
                     | MarketEvent::Ask(_)
                     | MarketEvent::LastPrice(_)
+                    // The chains have their own revision: charts don't repaint for them.
+                    | MarketEvent::OptionQuote { .. }
             );
             match *e {
                 MarketEvent::Ready => self.status = FeedStatus::Live,
@@ -407,6 +413,13 @@ impl ChartData {
                 MarketEvent::Rejected { count } => self.stats.rejected += count,
                 MarketEvent::CorrectionsIgnored { count } => {
                     self.stats.corrections_ignored += count
+                }
+                MarketEvent::OptionQuote { key, quote } => {
+                    // Not counted as feed updates (the underlying's stats); a quote past the
+                    // chains' bounds is counted as rejected.
+                    if !self.chains.apply(key, quote) {
+                        self.stats.rejected += 1;
+                    }
                 }
                 MarketEvent::BookClear => {
                     self.book.clear();
@@ -937,6 +950,46 @@ mod tests {
             qty: Qty(q),
             aggressor: Some(Aggressor::Buy),
         }
+    }
+
+    /// Decision 0028: a frame of option quotes lands in the chains (their revision moves) but
+    /// never repaints charts: `chart_epoch` and the chart revision stay put.
+    #[test]
+    fn option_quotes_fill_the_chains_without_repainting_charts() {
+        let spy = catalog::get(catalog::SPY).unwrap();
+        let store = ChartStore::new(spy, None, Capabilities::default(), "test", 60_000, 1000);
+        let key = lines_core::OptionKey {
+            expiry: lines_core::CivilDate::new(2026, 11, 9).unwrap(),
+            strike: Price(68_400),
+            right: lines_core::Right::Call,
+        };
+        let quote = lines_core::OptionQuote {
+            bid: Some(Price(80)),
+            ..Default::default()
+        };
+        let (rev, chart_rev) = (store.revision(), store.chart_revision());
+        let epoch = store.read().chart_epoch;
+        store.update_frame(|d| d.apply(&[MarketEvent::OptionQuote { key, quote }]));
+        let d = store.read();
+        assert_eq!(d.chains.revision(), 1);
+        assert_eq!(d.chart_epoch, epoch);
+        assert_eq!(d.stats.updates_in, 0, "not the underlying's updates");
+        drop(d);
+        assert!(store.revision() > rev, "the chain pane sees it");
+        assert_eq!(store.chart_revision(), chart_rev, "charts don't repaint");
+        // Past the chains' bounds: counted as rejected.
+        let far = |i: i64| MarketEvent::OptionQuote {
+            key: lines_core::OptionKey {
+                expiry: lines_core::CivilDate::new(2027, 1, 1).unwrap().add_days(i),
+                ..key
+            },
+            quote,
+        };
+        let events: Vec<_> = (0..lines_core::chain::MAX_EXPIRIES as i64)
+            .map(far)
+            .collect();
+        store.update_frame(|d| d.apply(&events));
+        assert_eq!(store.read().stats.rejected, 1, "the 401st expiry");
     }
 
     /// The stored → live boundary: a history snapshot older than the newest stored trade

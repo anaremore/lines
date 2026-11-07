@@ -6,6 +6,7 @@
 pub mod bars;
 pub mod book;
 pub mod calendar;
+pub mod chain;
 pub mod columns;
 pub mod continuous;
 pub mod drawings;
@@ -36,6 +37,7 @@ pub mod viewport;
 pub use bars::{Bar, BarSeries, Changed, TradeOutcome};
 pub use book::{Level, OrderBook, Side};
 pub use calendar::CivilDate;
+pub use chain::{ChainRow, OptionChain, OptionChains, OptionQuote};
 pub use fixed_str::FixedStr;
 pub use geometry::{Candle, PriceGridLine, Scene, TimeGridLine};
 pub use instrument::{
