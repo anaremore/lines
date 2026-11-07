@@ -1464,8 +1464,14 @@ impl TradingCore {
             .orders
             .values()
             .filter(|o| {
-                let exit = (o.reduce_only || matches!(o.role, Role::TakeProfit | Role::StopLoss))
-                    && !self.exit_held(o);
+                let bracket = matches!(o.role, Role::TakeProfit | Role::StopLoss);
+                // A bracket exit whose entry still works is the broker's to hold (it protects
+                // what the entry fills next), never the core's to cancel.
+                let entry_working = bracket
+                    && o.parent
+                        .and_then(|p| self.orders.get(&p))
+                        .is_some_and(Order::is_open);
+                let exit = (o.reduce_only || bracket) && !entry_working;
                 let position = self.position(account, o.contract);
                 &o.account == account
                     && o.is_open()
@@ -1588,7 +1594,7 @@ impl TradingCore {
                 o.qty = order.qty;
                 o.kind = order.kind;
                 o.updated = order.updated;
-                // A bracket's exits become reduce-only when the entry is done; never undone.
+                // A bracket's exits become reduce-only from the entry's first fill; never undone.
                 o.reduce_only |= order.reduce_only;
                 let o = o.clone();
                 let a = o.account.clone();

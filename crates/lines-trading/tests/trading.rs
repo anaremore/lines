@@ -1992,6 +1992,47 @@ fn exits_of_a_partly_filled_cancelled_entry_follow_the_position() {
     assert_eq!(r.core.position(&acct(), es()), 0, "closed, never short");
 }
 
+/// Review round 2: a manual close while the bracket's entry still works holds its exits (never
+/// cancels them): the entry's next fill is protected again, and the old stop closes exactly it.
+#[test]
+fn a_manual_close_while_the_entry_works_keeps_the_rest_protected() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(3),
+                kind: limit(6000.00),
+            },
+            take_profit: Some(px(6005.00)),
+            stop_loss: Some(px(5995.00)),
+        }))
+        .unwrap();
+    let (tp, sl) = (ids[1], ids[2]);
+    r.wait(LAT);
+    r.trade(5999.75, 2); // 2 of 3
+    r.place(Side::Sell, 2, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert!(r.core.order(sl).unwrap().is_open(), "held, not cancelled");
+    assert_eq!(r.core.order(sl).unwrap().remaining(), Qty(0));
+    r.trade(5999.75, 5); // the last 1 fills
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(
+        r.core.order(sl).unwrap().remaining(),
+        Qty(1),
+        "protected again"
+    );
+    assert_eq!(r.core.order(tp).unwrap().remaining(), Qty(1));
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0, "closed, never short");
+}
+
 // ---- critical review 1, finding 3: a quantity increase is checked as a new order -------------
 
 fn grow(r: &mut Rig, order: OrderId, qty: i64) -> Result<Vec<OrderId>, lines_trading::Reject> {

@@ -500,6 +500,12 @@ impl PaperBroker {
                 });
             // The pair's share: what its first order was allowed (closable before it).
             let paired = sibling.and_then(|s| budgeted.iter().find(|(b, _)| *b == s).map(|b| b.1));
+            // A bracket exit whose entry still works protects what the entry fills next.
+            let entry_working = po
+                .order
+                .parent
+                .and_then(|e| self.orders.get(&e))
+                .is_some_and(|e| e.order.is_open());
             let Some(po) = self.orders.get_mut(&id) else {
                 continue;
             };
@@ -507,6 +513,15 @@ impl PaperBroker {
             let pool = paired.unwrap_or(closable);
             let allowed = if opposes { pool } else { 0 };
             let left = po.order.remaining().0;
+            if allowed == 0 && entry_working {
+                // Nothing to close now (a manual close), but the entry still works: hold the
+                // exit, as after its sibling's fill; the entry's next fill grows it again.
+                po.order.qty = Qty(po.order.filled.0);
+                po.held = true;
+                let order = po.order.clone();
+                self.out.push(BrokerEvent::Modified { order });
+                continue;
+            }
             if allowed == 0 {
                 self.cancel(now, id, "reduce-only: nothing left to close");
                 continue;
