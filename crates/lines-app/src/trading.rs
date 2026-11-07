@@ -768,6 +768,12 @@ impl Observer for TaggedObserver {
 
 /// What the account chip shows of a venue's status: connected, detail, and how stale (in
 /// 5 s steps, 0 while fresh). The watcher repaints when it changes.
+/// Whether a venue's watcher rebuilds its core now: after a change (`pending`), at most every
+/// `VENUE_REBUILD` (a change inside it waits, never dropped), or at once when `asked`.
+fn rebuild_due(pending: bool, asked: bool, last: Option<Instant>, now: Instant) -> bool {
+    pending && (asked || last.is_none_or(|t| now.duration_since(t) >= VENUE_REBUILD))
+}
+
 fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
     let s = s.as_ref()?;
     let silent = s
@@ -871,12 +877,10 @@ fn spawn_watcher(
                     pending = true;
                     cache.bump(None);
                 }
-                if pending
-                    && (!asked.is_empty()
-                        || last_rebuild.is_none_or(|t| t.elapsed() >= VENUE_REBUILD))
-                {
+                let now = Instant::now();
+                if rebuild_due(pending, !asked.is_empty(), last_rebuild, now) {
                     handle.rebuild();
-                    last_rebuild = Some(Instant::now());
+                    last_rebuild = Some(now);
                     pending = false;
                 }
                 for tx in asked.drain(..) {
@@ -1243,8 +1247,8 @@ impl Trading {
         // match the venue's state as of this call (synced below).
         for v in &self.venues {
             let (tx, rx) = mpsc::channel();
-            if v.look.send(tx).is_ok() {
-                let _ = rx.recv_timeout(Duration::from_secs(10));
+            if v.look.send(tx).is_ok() && rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                tracing::warn!("{}: its account watcher didn't answer within 10 s", v.label);
             }
         }
         self.handle.sync();
@@ -1277,8 +1281,7 @@ impl Trading {
                     .all(|a| listed.iter().any(|l| l.id == a.id))
             });
             if all {
-                // The join's rebuild, then its events in the cache.
-                std::thread::sleep(VENUE_POLL);
+                // The join's rebuild (the watcher looks now), then its events in the cache.
                 self.settle();
                 return;
             }

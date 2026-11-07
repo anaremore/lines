@@ -434,6 +434,21 @@ fn a_reconnect_rebuilds_from_the_new_snapshot() {
     );
 }
 
+/// The watcher's rebuild decision: the first change rebuilds at once, a change within
+/// `VENUE_REBUILD` of the last rebuild waits for it (a quick reconnect is never dropped), and
+/// `settle` asking skips the wait; with nothing changed nothing rebuilds.
+#[test]
+fn the_watcher_rebuilds_at_most_every_venue_rebuild_unless_asked() {
+    use super::{VENUE_REBUILD, rebuild_due};
+    let t0 = Instant::now();
+    assert!(rebuild_due(true, false, None, t0));
+    assert!(!rebuild_due(true, false, Some(t0), t0 + VENUE_REBUILD / 2));
+    assert!(rebuild_due(true, false, Some(t0), t0 + VENUE_REBUILD));
+    assert!(rebuild_due(true, true, Some(t0), t0 + VENUE_REBUILD / 2));
+    assert!(!rebuild_due(false, false, None, t0));
+    assert!(!rebuild_due(false, true, Some(t0), t0 + VENUE_REBUILD));
+}
+
 /// With a broker configured, a pane restored on a broker account not listed yet keeps it
 /// (shown waiting, read-only); every command on it is denied and nothing is sent.
 #[test]
