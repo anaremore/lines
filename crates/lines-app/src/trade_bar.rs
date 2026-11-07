@@ -80,7 +80,7 @@ impl PaneTrade {
             bracket: saved.and_then(|s| s.bracket),
             arming: Arming::default(),
             qty_edit: None,
-            account_menu: false,
+            account_menu: trading.is_some_and(|t| t.start_account_menu),
             local_flash: None,
             cache: trading.map(|t| t.cache.clone()),
             seen: u64::MAX,
@@ -756,12 +756,13 @@ fn account_chip<V: TradePane>(
     });
     let accent = t.accent;
     let open = v.trade_ref().account_menu;
+    let menu = account_menu(v, t, cx);
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
-        .child(
+        .child(crate::dropdown::dropdown(
             chip(format!("{name} ▾"), t)
                 .id("account")
                 .cursor_pointer()
@@ -777,7 +778,8 @@ fn account_chip<V: TradePane>(
                         cx.notify();
                     }),
                 ),
-        )
+            menu,
+        ))
         .when(paper, |d| d.child(paper_badge(t)))
         .into_any_element()
 }
@@ -793,8 +795,8 @@ pub fn paper_badge(t: &Theme) -> gpui::Div {
         .child("PAPER")
 }
 
-/// The account list, under the header while the selector is open.
-pub fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<AnyElement> {
+/// The account list, while the selector is open: under the account chip (`dropdown`).
+fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<AnyElement> {
     if !v.trade_ref().account_menu {
         return None;
     }
@@ -802,9 +804,8 @@ pub fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Opti
     let current = v.trade_ref().account.clone();
     let accent = t.accent;
     let mut list = div()
-        .absolute()
-        .top(px(2.0))
-        .left(px(8.0))
+        .id("account-list")
+        .occlude()
         .min_w(px(220.0))
         .flex()
         .flex_col()
