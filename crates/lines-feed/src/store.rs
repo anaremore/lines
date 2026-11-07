@@ -325,6 +325,8 @@ impl ChartData {
                     | MarketEvent::Bid(_)
                     | MarketEvent::Ask(_)
                     | MarketEvent::LastPrice(_)
+                    // The chains have their own revision: charts don't repaint for them.
+                    | MarketEvent::OptionQuote { .. }
             );
             match *e {
                 MarketEvent::Ready => self.status = FeedStatus::Live,
@@ -413,8 +415,11 @@ impl ChartData {
                     self.stats.corrections_ignored += count
                 }
                 MarketEvent::OptionQuote { key, quote } => {
-                    self.chains.apply(key, quote);
-                    self.stats.updates_in += 1;
+                    // Not counted as feed updates (the underlying's stats); a quote past the
+                    // chains' bounds is counted as rejected.
+                    if !self.chains.apply(key, quote) {
+                        self.stats.rejected += 1;
+                    }
                 }
                 MarketEvent::BookClear => {
                     self.book.clear();
@@ -945,6 +950,33 @@ mod tests {
             qty: Qty(q),
             aggressor: Some(Aggressor::Buy),
         }
+    }
+
+    /// Decision 0028: a frame of option quotes lands in the chains (their revision moves) but
+    /// never repaints charts: `chart_epoch` and the chart revision stay put.
+    #[test]
+    fn option_quotes_fill_the_chains_without_repainting_charts() {
+        let spy = catalog::get(catalog::SPY).unwrap();
+        let store = ChartStore::new(spy, None, Capabilities::default(), "test", 60_000, 1000);
+        let key = lines_core::OptionKey {
+            expiry: lines_core::CivilDate::new(2026, 11, 9).unwrap(),
+            strike: Price(68_400),
+            right: lines_core::Right::Call,
+        };
+        let quote = lines_core::OptionQuote {
+            bid: Some(Price(80)),
+            ..Default::default()
+        };
+        let (rev, chart_rev) = (store.revision(), store.chart_revision());
+        let epoch = store.read().chart_epoch;
+        store.update_frame(|d| d.apply(&[MarketEvent::OptionQuote { key, quote }]));
+        let d = store.read();
+        assert_eq!(d.chains.revision(), 1);
+        assert_eq!(d.chart_epoch, epoch);
+        assert_eq!(d.stats.updates_in, 0, "not the underlying's updates");
+        drop(d);
+        assert!(store.revision() > rev, "the chain pane sees it");
+        assert_eq!(store.chart_revision(), chart_rev, "charts don't repaint");
     }
 
     /// The stored → live boundary: a history snapshot older than the newest stored trade

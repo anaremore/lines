@@ -11,7 +11,9 @@
 //! Option prices are Black-Scholes values (r = 4%) on a volatility smile, rounded to the
 //! penny: bid and ask a few cents around the value, a series worth under a cent quoted 0.00 /
 //! 0.01 with no bid. These numbers are plausible, not market data, and only the generator
-//! uses floating point: what it writes is exact (prices in cents).
+//! uses floating point: what it writes is exact (prices in cents). The file is identical on
+//! every run on one platform; `exp`/`ln` may differ in the last bit between platforms, so a
+//! value on a rounding boundary could differ across them.
 
 use std::io;
 use std::path::Path;
@@ -22,7 +24,7 @@ use lines_core::{CivilDate, ContractKey, OptionKey, OptionQuote, Price, Qty, Rig
 use crate::catalog;
 use crate::native::{self, Aggressor, NativeEvent};
 use crate::provider::Frame;
-use crate::recording::{Direction, FORMAT_VERSION, Header, Writer};
+use crate::recording::{Direction, Header, Writer};
 
 /// The session's trade date and regular hours (UTC).
 pub const DATE: &str = "2026-11-09";
@@ -111,16 +113,12 @@ fn quote(key: OptionKey, spot: i64, now: i64, close_ms: i64) -> OptionQuote {
     let (value, delta) = black_scholes(s, k, t, iv, key.right);
     let cents = (value * 100.0).round() as i64;
     let half_spread = 1 + cents / 150;
-    let (bid, ask) = if cents < 1 {
-        (None, Some(Price(1)))
-    } else {
-        (
-            Some(Price((cents - half_spread).max(0))),
-            Some(Price(cents + half_spread)),
-        )
-    };
-    // Volume grows through the day, most near the money; open interest is fixed per series.
-    let dist = ((k - s).abs() as i64).max(1);
+    // No bid when the bid would be zero: one form for "no bid".
+    let bid = (cents - half_spread >= 1).then(|| Price(cents - half_spread));
+    let ask = Some(Price((cents + half_spread).max(1)));
+    // Volume grows through the day, most near the open's money (so it never falls); open
+    // interest is fixed per series.
+    let dist = ((k - 684.0).abs() as i64).max(1);
     let elapsed = ((now - (close_ms - 390 * 60_000)) / 60_000).max(1);
     let volume = elapsed * 200 / dist;
     let open_interest = 40_000 / dist + (key.strike.0 / 100 % 7) * 900;
@@ -147,7 +145,7 @@ pub fn write_spy_chain(out: &Path) -> io::Result<(u64, u64)> {
         protocol: native::PROTOCOL.into(),
         product: spy.symbol.into(),
         contract: Some(ContractKey::equity(spy.id)),
-        version: FORMAT_VERSION,
+        version: crate::recording::version_for(Some(ContractKey::equity(spy.id))),
     };
     let mut w = Writer::create(out, &header)?;
     let mut rng = Rng(0x5e7d_0028_c4a1_0001);
@@ -228,7 +226,7 @@ mod tests {
         };
         let atm_call = quote(key(9, 684, Right::Call), spot, now, close);
         let atm_put = quote(key(9, 684, Right::Put), spot, now, close);
-        // Near the money a 0DTE is worth a few dollars; delta near ±0.5.
+        // Near the money a 0DTE is worth well under a dollar here (low IV); delta near ±0.5.
         for q in [atm_call, atm_put] {
             let (b, a) = (q.bid.unwrap().0, q.ask.unwrap().0);
             assert!(b < a && (50..800).contains(&b), "{q:?}");

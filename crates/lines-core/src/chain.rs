@@ -88,6 +88,11 @@ impl OptionChain {
     }
 }
 
+/// Expiries kept per underlying (more are refused: hostile or corrupt input can't grow it).
+pub const MAX_EXPIRIES: usize = 400;
+/// Strikes kept per expiry.
+pub const MAX_STRIKES: usize = 2_000;
+
 /// Every expiry's chain for one underlying.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OptionChains {
@@ -97,11 +102,16 @@ pub struct OptionChains {
 }
 
 impl OptionChains {
-    /// Set one series' quote (replacing what was there).
-    pub fn apply(&mut self, key: OptionKey, quote: OptionQuote) {
+    /// Set one series' quote (replacing what was there). `false`: refused, a new expiry or
+    /// strike past [`MAX_EXPIRIES`] / [`MAX_STRIKES`].
+    pub fn apply(&mut self, key: OptionKey, quote: OptionQuote) -> bool {
+        if !self.by_expiry.contains_key(&key.expiry) && self.by_expiry.len() >= MAX_EXPIRIES {
+            return false;
+        }
         let chain = self.by_expiry.entry(key.expiry).or_default();
         let i = match chain.find(key.strike) {
             Ok(i) => i,
+            Err(_) if chain.rows.len() >= MAX_STRIKES => return false,
             Err(i) => {
                 chain.rows.insert(
                     i,
@@ -120,6 +130,7 @@ impl OptionChains {
             Right::Put => row.put = Some(quote),
         }
         self.revision += 1;
+        true
     }
 
     pub fn revision(&self) -> u64 {
@@ -189,6 +200,33 @@ mod tests {
         assert!(ch.rows[0].call.is_none());
         c.drop_expired(CivilDate::new(2026, 11, 10).unwrap());
         assert_eq!(c.expiries().count(), 1);
+    }
+
+    #[test]
+    fn chains_are_bounded() {
+        let mut c = OptionChains::default();
+        for s in 0..MAX_STRIKES as i64 {
+            assert!(c.apply(key(9, 1 + s, Right::Call), q(1)));
+        }
+        assert!(!c.apply(key(9, 1 + MAX_STRIKES as i64, Right::Call), q(1)));
+        assert!(
+            c.apply(key(9, 1, Right::Put), q(1)),
+            "an existing strike still updates"
+        );
+        let rev = c.revision();
+        for d in 0..MAX_EXPIRIES as i64 - 1 {
+            let mut k = key(9, 1, Right::Call);
+            k.expiry = CivilDate::new(2027, 1, 1).unwrap().add_days(d);
+            assert!(c.apply(k, q(1)));
+        }
+        let mut k = key(9, 1, Right::Call);
+        k.expiry = CivilDate::new(2030, 1, 1).unwrap();
+        assert!(!c.apply(k, q(1)));
+        assert_eq!(
+            c.revision(),
+            rev + MAX_EXPIRIES as u64 - 1,
+            "refusals don't count"
+        );
     }
 
     #[test]

@@ -63,7 +63,8 @@ pub enum NativeEvent {
         bid: Option<Price>,
         ask: Option<Price>,
     },
-    /// An option on the recording's product (its quote's own `time` is `time_us`).
+    /// An option on the recording's product. Its quote's `time` isn't encoded: decoding sets
+    /// it to `time_us` (in ms), so encode a quote stamped that way to round-trip it.
     OptionQuote {
         time_us: i64,
         key: OptionKey,
@@ -243,9 +244,15 @@ pub fn decode(data: &[u8], out: &mut Vec<NativeEvent>) -> Result<(), SessionErro
                     r => return Err(bad(&format!("bad option right {r}"))),
                 };
                 let mask = c.u8()?;
+                if mask >= 32 {
+                    return Err(bad(&format!("bad option quote mask {mask}")));
+                }
                 let (bid, ask, last) = (c.i64()?, c.i64()?, c.i64()?);
                 let (volume, open_interest) = (c.i64()?, c.i64()?);
                 let (iv, delta) = (c.i32()?, c.i32()?);
+                if bid < 0 || ask < 0 || last < 0 || volume < 0 || open_interest < 0 {
+                    return Err(bad("negative option quote value"));
+                }
                 let on = |bit: u8| mask & bit != 0;
                 NativeEvent::OptionQuote {
                     time_us,
@@ -437,6 +444,22 @@ mod tests {
                 },
             },
         ];
+        // Malformed option quotes: unknown mask bits, a negative price.
+        let opt = |mut f: Box<dyn FnMut(&mut Vec<u8>)>| {
+            let mut b = Vec::new();
+            encode(&evs[5], &mut b);
+            f(&mut b);
+            decode(&b, &mut Vec::new()).is_err()
+        };
+        // tag(1) time(8) date(4) strike(8) right(1) = 22: the mask byte.
+        assert!(opt(Box::new(|b| b[22] = 32)));
+        assert!(opt(Box::new(
+            |b| b[23..31].copy_from_slice(&(-1i64).to_le_bytes())
+        )));
+        assert!(
+            opt(Box::new(|b| b[13..21].copy_from_slice(&0i64.to_le_bytes()))),
+            "zero strike"
+        );
         let mut buf = Vec::new();
         for e in &evs {
             encode(e, &mut buf);

@@ -377,6 +377,9 @@ impl EventSink for ContractWriter {
                     self.run.head = None;
                     None
                 }
+                // Option chains are a live snapshot, not stored (decision 0019 stores trades and
+                // the best bid/ask): after a restart the chain comes from the provider again.
+                MarketEvent::OptionQuote { .. } => None,
                 _ => None,
             };
             if let Some(ne) = ne {

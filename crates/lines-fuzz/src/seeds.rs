@@ -562,7 +562,6 @@ fn coinbase_script() -> Vec<ScriptOp> {
     script
 }
 
-/// `lines-events-1` frames: book snapshot, updates, BBO and trades.
 /// A few SPY trades and option quotes (`lines-events-1` tag 5).
 fn chain_frames() -> Vec<Frame> {
     let t0 = BASE_MS * 1000;
@@ -614,6 +613,7 @@ fn chain_frames() -> Vec<Frame> {
     vec![Frame::binary(b)]
 }
 
+/// `lines-events-1` frames: book snapshot, updates, BBO and trades.
 fn native_frames() -> Vec<Frame> {
     let t0 = BASE_MS * 1000;
     let enc = |evs: &[NativeEvent]| {
