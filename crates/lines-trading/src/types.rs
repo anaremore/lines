@@ -182,9 +182,12 @@ impl ContractSpec {
         contract: ContractKey,
         fee_per_qty: Money,
     ) -> Option<ContractSpec> {
-        // money/unit = scale × point_value / 10^qty_decimals, in units of 10⁻¹⁰.
+        // money/unit = scale × point_value × multiplier / 10^qty_decimals, in units of 10⁻¹⁰
+        // (the multiplier: an option's shares per contract, else 1).
+        let multiplier = contract.multiplier(&product)?;
         let num = product.price.scale.num() as i128
             * product.point_value.num as i128
+            * multiplier as i128
             * Money::UNITS_PER_WHOLE;
         let den = product.price.scale.den() as i128
             * product.point_value.den as i128
@@ -216,37 +219,103 @@ impl ContractSpec {
 }
 
 /// A contract key as it is saved and sent (lines-core types carry no serde).
+///
+/// A future has `year` and `month`; spot has nothing else; an equity has `equity: true`; an
+/// option has `option` (decision 0028). Files that can hold the last two moved their version
+/// (trading file v3, journal v2), so an older build refuses them instead of reading an option
+/// as spot.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContractDoc {
     pub product: u32,
-    /// `None` for spot.
+    /// `None` for spot, equities and options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub month: Option<u8>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub equity: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option: Option<OptionDoc>,
+}
+
+/// An option series as saved: expiry as `YYYYMMDD`, the strike in the underlying's price
+/// units (exact), and the right.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OptionDoc {
+    pub expiry: u32,
+    pub strike: i64,
+    pub right: RightDoc,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RightDoc {
+    Call,
+    Put,
 }
 
 impl ContractDoc {
     pub fn from_key(k: ContractKey) -> ContractDoc {
+        let base = ContractDoc {
+            product: k.product.0,
+            year: None,
+            month: None,
+            equity: false,
+            option: None,
+        };
         match k.delivery {
             Delivery::Monthly { year, month } => ContractDoc {
-                product: k.product.0,
                 year: Some(year),
                 month: Some(month.number()),
+                ..base
             },
-            Delivery::Spot => ContractDoc {
-                product: k.product.0,
-                year: None,
-                month: None,
+            Delivery::Spot => base,
+            Delivery::Equity => ContractDoc {
+                equity: true,
+                ..base
+            },
+            Delivery::Option(o) => ContractDoc {
+                option: Some(OptionDoc {
+                    expiry: u32::from(o.expiry.year) * 10_000
+                        + u32::from(o.expiry.month) * 100
+                        + u32::from(o.expiry.day),
+                    strike: o.strike.0,
+                    right: match o.right {
+                        lines_core::Right::Call => RightDoc::Call,
+                        lines_core::Right::Put => RightDoc::Put,
+                    },
+                }),
+                ..base
             },
         }
     }
 
     pub fn to_key(self) -> Option<ContractKey> {
         let p = ProductId(self.product);
-        match (self.year, self.month) {
-            (Some(y), Some(m)) => Some(ContractKey::monthly(p, y, Month::new(m)?)),
-            (None, None) => Some(ContractKey::spot(p)),
+        match (self.year, self.month, self.equity, self.option) {
+            (Some(y), Some(m), false, None) => Some(ContractKey::monthly(p, y, Month::new(m)?)),
+            (None, None, false, None) => Some(ContractKey::spot(p)),
+            (None, None, true, None) => Some(ContractKey::equity(p)),
+            (None, None, false, Some(o)) => {
+                let expiry = lines_core::CivilDate::new(
+                    u16::try_from(o.expiry / 10_000).ok()?,
+                    (o.expiry / 100 % 100) as u8,
+                    (o.expiry % 100) as u8,
+                )?;
+                if o.strike <= 0 {
+                    return None;
+                }
+                let right = match o.right {
+                    RightDoc::Call => lines_core::Right::Call,
+                    RightDoc::Put => lines_core::Right::Put,
+                };
+                Some(ContractKey::option(
+                    p,
+                    expiry,
+                    lines_core::Price(o.strike),
+                    right,
+                ))
+            }
             _ => None,
         }
     }
@@ -334,6 +403,81 @@ pub mod opt_time_serde {
 mod tests {
     use super::*;
     use lines_feed::catalog;
+
+    /// Decision 0028: the saved contract shape. Futures and spot are written exactly as before
+    /// (pinned); equities and options round-trip; mixed or broken shapes are refused.
+    #[test]
+    fn contract_docs_keep_futures_and_add_equities_and_options() {
+        let z = Month::new(12).unwrap();
+        let es = ContractKey::monthly(catalog::ES, 2026, z);
+        let doc = |k: ContractKey| serde_json::to_string(&ContractDoc::from_key(k)).unwrap();
+        assert_eq!(doc(es), r#"{"product":1,"year":2026,"month":12}"#);
+        assert_eq!(
+            doc(ContractKey::spot(catalog::BTC_USD)),
+            r#"{"product":1001}"#
+        );
+        let opt = ContractKey::option(
+            catalog::SPY,
+            lines_core::CivilDate::new(2026, 12, 18).unwrap(),
+            lines_core::Price(45_050),
+            lines_core::Right::Call,
+        );
+        assert_eq!(
+            doc(opt),
+            r#"{"product":2001,"option":{"expiry":20261218,"strike":45050,"right":"call"}}"#
+        );
+        assert_eq!(
+            doc(ContractKey::equity(catalog::SPY)),
+            r#"{"product":2001,"equity":true}"#
+        );
+        for k in [
+            es,
+            ContractKey::spot(catalog::BTC_USD),
+            ContractKey::equity(catalog::SPY),
+            opt,
+        ] {
+            let back: ContractDoc = serde_json::from_str(&doc(k)).unwrap();
+            assert_eq!(back.to_key(), Some(k));
+        }
+        for bad in [
+            r#"{"product":2001,"equity":true,"year":2026,"month":12}"#,
+            r#"{"product":2001,"equity":true,"option":{"expiry":20261218,"strike":1,"right":"put"}}"#,
+            r#"{"product":2001,"option":{"expiry":20261318,"strike":1,"right":"put"}}"#,
+            r#"{"product":2001,"option":{"expiry":20261218,"strike":0,"right":"put"}}"#,
+        ] {
+            let d: ContractDoc = serde_json::from_str(bad).unwrap();
+            assert_eq!(d.to_key(), None, "{bad}");
+        }
+    }
+
+    /// An option's money: premium units × 100 shares (SPY: $0.01 × 100 = $1 per unit).
+    #[test]
+    fn option_money_uses_the_multiplier() {
+        let spy = catalog::get(catalog::SPY).unwrap();
+        let opt = ContractKey::option(
+            catalog::SPY,
+            lines_core::CivilDate::new(2026, 12, 18).unwrap(),
+            lines_core::Price(45_000),
+            lines_core::Right::Put,
+        );
+        let o = ContractSpec::new(spy.clone(), opt, Money::ZERO).unwrap();
+        // 2 contracts, premium up 1.25 (125 units): $250.
+        assert_eq!(o.money(125, 2), Money::whole(250));
+        let shares =
+            ContractSpec::new(spy, ContractKey::equity(catalog::SPY), Money::ZERO).unwrap();
+        assert_eq!(shares.money(125, 2), Money(Money::whole(5).0 / 2), "$2.50");
+        let es = catalog::get(catalog::ES).unwrap();
+        let es_opt = ContractKey::option(
+            catalog::ES,
+            lines_core::CivilDate::new(2026, 12, 18).unwrap(),
+            lines_core::Price(600_000),
+            lines_core::Right::Call,
+        );
+        assert!(
+            ContractSpec::new(es, es_opt, Money::ZERO).is_none(),
+            "no listed options"
+        );
+    }
 
     #[test]
     fn money_factors_are_exact_for_every_catalog_product() {

@@ -10,17 +10,22 @@
 //!
 //! Format v3 (little-endian):
 //! ```text
-//! header:  b"LINESFR\0" | u16 format_version=3 | i64 start_wall_ms
+//! header:  b"LINESFR\0" | u16 format_version=3|4 | i64 start_wall_ms
 //!          | str provider | str protocol | str product_symbol         (str = u16 len + UTF-8)
-//!          | contract                                                  (v3 only)
-//! contract: u8 kind (0 = unknown, 1 = monthly, 2 = spot)
+//!          | contract                                                  (v3 and v4)
+//! contract: u8 kind (0 = unknown, 1 = monthly, 2 = spot; v4 also 3 = equity, 4 = option)
 //!          | if kind != 0: u32 product_id | if kind == 1: u16 year | u8 month
+//!          | if kind == 4: u16 year | u8 month | u8 day (expiry) | i64 strike | u8 right
+//!                          (strike in the underlying's price units; right 0 = call, 1 = put)
 //! record:  u8 tag | u64 nanos_since_start | u32 len | len bytes
 //!          tag bit 0: direction (0 = server->client, 1 = client->server)
 //!          tag bits 1-2: kind (0 = binary, 1 = text, 2 = http response)
 //! ```
-//! v3 adds the contract key (decision 0013). v2 files (same layout without `contract`) are
-//! still read, with the contract reported as unknown. v1 files are rejected.
+//! v3 adds the contract key (decision 0013). v4 (decision 0028) adds the equity and option
+//! contract kinds and nothing else, so a writer writes v4 **only** for those and v3 for
+//! everything else: a futures or spot recording is byte-for-byte what earlier builds wrote, and
+//! they still read it. v2 files (same layout without `contract`) are still read, with the
+//! contract reported as unknown. v1 files are rejected.
 //!
 //! Recordings can contain licensed exchange data: keep them out of git (decision 0010).
 
@@ -33,12 +38,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 
-use lines_core::{ContractKey, Delivery, Month, ProductId};
+use lines_core::{CivilDate, ContractKey, Delivery, Month, Price, ProductId, Right};
 
 use crate::provider::{Frame, FrameKind};
 
 pub const MAGIC: &[u8; 8] = b"LINESFR\0";
-pub const FORMAT_VERSION: u16 = 3;
+/// The newest version this build writes (only for contracts that need it: [`version_for`]).
+pub const FORMAT_VERSION: u16 = 4;
 /// Oldest version this build still reads (as "contract unknown").
 pub const OLDEST_READABLE: u16 = 2;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
@@ -129,7 +135,7 @@ impl Writer<BufWriter<File>> {
 impl<W: Write> Writer<W> {
     pub fn new(mut w: W, header: &Header) -> io::Result<Self> {
         w.write_all(MAGIC)?;
-        w.write_all(&FORMAT_VERSION.to_le_bytes())?;
+        w.write_all(&version_for(header.contract).to_le_bytes())?;
         w.write_all(&header.start_wall_ms.to_le_bytes())?;
         write_str(&mut w, &header.provider)?;
         write_str(&mut w, &header.protocol)?;
@@ -194,7 +200,7 @@ impl Recorder {
             protocol: protocol.into(),
             product: product.into(),
             contract,
-            version: FORMAT_VERSION,
+            version: version_for(contract),
         };
         let mut w = Writer::create(path, &header)?;
         let (tx, rx) = mpsc::channel::<Msg>();
@@ -298,7 +304,7 @@ impl<R: Read> Reader<R> {
         let protocol = read_str(&mut r)?;
         let product = read_str(&mut r)?;
         let contract = if version >= 3 {
-            read_contract(&mut r)?
+            read_contract(&mut r, version >= 4)?
         } else {
             None
         };
@@ -374,6 +380,23 @@ pub(crate) fn read_n<const N: usize, R: Read>(r: &mut R) -> io::Result<[u8; N]> 
     Ok(b)
 }
 
+/// The version a recording of `contract` is written as: v4 only for the kinds v4 added.
+pub fn version_for(contract: Option<ContractKey>) -> u16 {
+    if needs_v4(contract) {
+        FORMAT_VERSION
+    } else {
+        3
+    }
+}
+
+/// Equity and option contracts exist only from `.lfr` v4 / segment v2 on.
+pub(crate) fn needs_v4(contract: Option<ContractKey>) -> bool {
+    matches!(
+        contract.map(|k| k.delivery),
+        Some(Delivery::Equity | Delivery::Option(_))
+    )
+}
+
 pub(crate) fn write_contract(w: &mut impl Write, c: Option<ContractKey>) -> io::Result<()> {
     let Some(k) = c else {
         return w.write_all(&[0]);
@@ -381,17 +404,33 @@ pub(crate) fn write_contract(w: &mut impl Write, c: Option<ContractKey>) -> io::
     let kind = match k.delivery {
         Delivery::Monthly { .. } => 1u8,
         Delivery::Spot => 2,
+        Delivery::Equity => 3,
+        Delivery::Option(_) => 4,
     };
     w.write_all(&[kind])?;
     w.write_all(&k.product.0.to_le_bytes())?;
-    if let Delivery::Monthly { year, month } = k.delivery {
-        w.write_all(&year.to_le_bytes())?;
-        w.write_all(&[month.number()])?;
+    match k.delivery {
+        Delivery::Monthly { year, month } => {
+            w.write_all(&year.to_le_bytes())?;
+            w.write_all(&[month.number()])?;
+        }
+        Delivery::Option(o) => {
+            w.write_all(&o.expiry.year.to_le_bytes())?;
+            w.write_all(&[o.expiry.month, o.expiry.day])?;
+            w.write_all(&o.strike.0.to_le_bytes())?;
+            w.write_all(&[match o.right {
+                Right::Call => 0,
+                Right::Put => 1,
+            }])?;
+        }
+        Delivery::Spot | Delivery::Equity => {}
     }
     Ok(())
 }
 
-pub(crate) fn read_contract<R: Read>(r: &mut R) -> io::Result<Option<ContractKey>> {
+/// A contract as [`write_contract`] wrote it. `v4_kinds`: the file's version allows equity
+/// and option contracts (a v3 file claiming one is damaged).
+pub(crate) fn read_contract<R: Read>(r: &mut R, v4_kinds: bool) -> io::Result<Option<ContractKey>> {
     let kind = read_n::<1, _>(r)?[0];
     if kind == 0 {
         return Ok(None);
@@ -405,6 +444,28 @@ pub(crate) fn read_contract<R: Read>(r: &mut R) -> io::Result<Option<ContractKey
             Ok(Some(ContractKey::monthly(product, year, month)))
         }
         2 => Ok(Some(ContractKey::spot(product))),
+        3 if v4_kinds => Ok(Some(ContractKey::equity(product))),
+        4 if v4_kinds => {
+            let year = u16::from_le_bytes(read_n(r)?);
+            let [month, day] = read_n::<2, _>(r)?;
+            let expiry =
+                CivilDate::new(year, month, day).ok_or_else(|| bad("bad option expiry"))?;
+            let strike = Price(i64::from_le_bytes(read_n(r)?));
+            if strike.0 <= 0 {
+                return Err(bad("bad option strike"));
+            }
+            let right = match read_n::<1, _>(r)?[0] {
+                0 => Right::Call,
+                1 => Right::Put,
+                x => return Err(bad(format!("bad option right {x}"))),
+            };
+            let k = ContractKey::option(product, expiry, strike, right);
+            // A catalog product must list options (an extension's products aren't known here).
+            if crate::catalog::get(product).is_some_and(|p| !p.lists(&k)) {
+                return Err(bad("an option on a product that lists none"));
+            }
+            Ok(Some(k))
+        }
         k => Err(bad(format!("bad contract kind {k}"))),
     }
 }
@@ -419,6 +480,93 @@ pub(crate) fn read_str<R: Read>(r: &mut R) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision 0028: a futures or spot recording is written as v3, byte for byte as before
+    /// (pinned), so older builds still read it; equity and option contracts make it v4 and
+    /// round-trip exactly; a v3 file claiming one of those kinds is damaged.
+    #[test]
+    fn v4_only_for_equities_and_options() {
+        let hdr = |c| Header {
+            start_wall_ms: 7,
+            product: "SPY".into(),
+            ..header(c)
+        };
+        let es = ContractKey::monthly(ProductId(1), 2026, Month::new(12).unwrap());
+        let bytes = Writer::new(Vec::new(), &hdr(Some(es)))
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut pinned = Vec::new();
+        pinned.extend_from_slice(MAGIC);
+        pinned.extend_from_slice(&3u16.to_le_bytes());
+        pinned.extend_from_slice(&7i64.to_le_bytes());
+        for s in ["lines", "lines-events-1", "SPY"] {
+            pinned.extend_from_slice(&(s.len() as u16).to_le_bytes());
+            pinned.extend_from_slice(s.as_bytes());
+        }
+        pinned.extend_from_slice(&[1, 1, 0, 0, 0]);
+        pinned.extend_from_slice(&2026u16.to_le_bytes());
+        pinned.push(12);
+        assert_eq!(bytes, pinned, "a futures recording is unchanged (v3)");
+        let r = Reader::new(&bytes[..]).unwrap();
+        assert_eq!((r.header.version, r.header.contract), (3, Some(es)));
+        let spy = ProductId(2001);
+        let opt = ContractKey::option(
+            spy,
+            CivilDate::new(2026, 12, 18).unwrap(),
+            Price(45_050),
+            Right::Put,
+        );
+        for k in [
+            ContractKey::equity(spy),
+            opt,
+            ContractKey::spot(ProductId(1001)),
+        ] {
+            let bytes = Writer::new(Vec::new(), &hdr(Some(k)))
+                .unwrap()
+                .finish()
+                .unwrap();
+            let r = Reader::new(&bytes[..]).unwrap();
+            assert_eq!(r.header.contract, Some(k));
+            assert_eq!(r.header.version, version_for(Some(k)));
+        }
+        assert_eq!(version_for(Some(opt)), 4);
+        assert_eq!(version_for(Some(es)), 3);
+        assert_eq!(version_for(None), 3);
+        // An option header relabelled v3: refused, never read as something else.
+        let mut bad = Writer::new(Vec::new(), &hdr(Some(opt)))
+            .unwrap()
+            .finish()
+            .unwrap();
+        bad[8..10].copy_from_slice(&3u16.to_le_bytes());
+        assert!(Reader::new(&bad[..]).is_err());
+        // An option on a catalog product that lists none (ES) is damage too.
+        let es_opt = ContractKey::option(
+            ProductId(1),
+            CivilDate::new(2026, 12, 18).unwrap(),
+            Price(600_000),
+            Right::Call,
+        );
+        let b = Writer::new(Vec::new(), &hdr(Some(es_opt)))
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(Reader::new(&b[..]).is_err());
+        // A zero strike or a bad right is damage.
+        let mut zero = Writer::new(Vec::new(), &hdr(Some(opt)))
+            .unwrap()
+            .finish()
+            .unwrap();
+        let n = zero.len();
+        zero[n - 9..n - 1].copy_from_slice(&0i64.to_le_bytes());
+        assert!(Reader::new(&zero[..]).is_err());
+        let mut right = Writer::new(Vec::new(), &hdr(Some(opt)))
+            .unwrap()
+            .finish()
+            .unwrap();
+        *right.last_mut().unwrap() = 7;
+        assert!(Reader::new(&right[..]).is_err());
+    }
 
     #[test]
     fn a_huge_length_on_a_short_file_is_a_truncated_record() {
@@ -537,7 +685,7 @@ mod tests {
             protocol: "lines-events-1".into(),
             product: "NQ".into(),
             contract,
-            version: FORMAT_VERSION,
+            version: version_for(contract),
         }
     }
 

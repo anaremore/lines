@@ -132,6 +132,34 @@ pub fn all() -> Vec<Seed> {
         lfr(native::PROVIDER, native::PROTOCOL, "NQ", None, &nat),
     ));
     v.push(seed("recording", "lines-v2", lfr_v2("NQ", &nat)));
+    // Decision 0028: a v4 file (an option contract in the header) and an equity's.
+    v.push(seed(
+        "recording",
+        "lines-v4-option",
+        lfr(
+            native::PROVIDER,
+            native::PROTOCOL,
+            "SPY",
+            Some(ContractKey::option(
+                catalog::SPY,
+                lines_core::CivilDate::new(2026, 12, 18).unwrap(),
+                Price(45_050),
+                lines_core::Right::Put,
+            )),
+            &nat,
+        ),
+    ));
+    v.push(seed(
+        "recording",
+        "lines-v4-equity",
+        lfr(
+            native::PROVIDER,
+            native::PROTOCOL,
+            "SPY",
+            Some(ContractKey::equity(catalog::SPY)),
+            &nat,
+        ),
+    ));
     // Audit finding 5: files from older builds hold outbound frames, a CQG logon among them;
     // replay skips them (new recordings write their time only, no bytes).
     v.push(seed(

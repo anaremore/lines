@@ -28,6 +28,10 @@
 //! RTH is the day session of trade date `D`, on `D` itself, clipped by an early close (none if
 //! the early close is at or before the RTH open).
 //!
+//! **Same-day hours** (equities, decision 0028: NYSE 04:00–20:00 ET, RTH 09:30–16:00): when
+//! `eth_open` is before `eth_close`, the session of `D` opens and closes on `D` itself. Halt
+//! days don't exist for these (refused); an early close ends the whole session.
+//!
 //! Continuous products (crypto spot) trade 24/7; the "session" is a day starting at a
 //! configurable local time (UTC for Coinbase). Its trade date is the date of its last instant,
 //! the same convention as exchange sessions (a 00:00 UTC day is that UTC date).
@@ -102,12 +106,20 @@ pub enum SessionKind {
 /// Exchange hours for products with trade dates Monday–Friday.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExchangeHours {
-    /// ETH open, on the calendar day *before* the trade date.
+    /// ETH open: on the calendar day *before* the trade date when it is after `eth_close`
+    /// (overnight futures hours), else on the trade date itself (same-day hours).
     pub eth_open: LocalTime,
-    /// ETH close, on the trade date. Must be before `eth_open` (the daily halt between).
+    /// ETH close, on the trade date.
     pub eth_close: LocalTime,
     /// RTH `(open, close)` on the trade date, within the ETH session.
     pub rth: Option<(LocalTime, LocalTime)>,
+}
+
+impl ExchangeHours {
+    /// The session opens and closes on its trade date (no overnight part).
+    pub fn same_day(&self) -> bool {
+        self.eth_open < self.eth_close
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -261,14 +273,19 @@ impl SessionCalendar {
             }
             Hours::Exchange(h) => h,
         };
-        if h.eth_close >= h.eth_open {
+        if h.eth_close == h.eth_open {
             return bad(format!(
-                "ETH close {} must be before the evening open {}",
+                "ETH close {} must differ from the open {}",
                 h.eth_close, h.eth_open
             ));
         }
+        let floor = if h.same_day() {
+            h.eth_open
+        } else {
+            LocalTime::MIDNIGHT
+        };
         if let Some((o, c)) = h.rth
-            && !(o < c && c <= h.eth_close)
+            && !(floor <= o && o < c && c <= h.eth_close)
         {
             return bad(format!("RTH {o}-{c} must be within the trade date's ETH"));
         }
@@ -284,6 +301,9 @@ impl SessionCalendar {
             };
             match day.rule {
                 DayRule::Closed => {}
+                DayRule::Halt(_) if h.same_day() => {
+                    return fail("same-day hours have no halt days (use closed or early)".into());
+                }
                 DayRule::Halt(t) => {
                     if t == LocalTime::MIDNIGHT || t >= h.eth_open {
                         return fail(format!(
@@ -302,7 +322,6 @@ impl SessionCalendar {
                 }
                 DayRule::EarlyClose(t) => {
                     // An early close at or before the RTH open leaves the day without RTH.
-                    let floor = LocalTime::MIDNIGHT;
                     if t <= floor || t >= h.eth_close {
                         return fail(format!(
                             "early close {t} must be after {floor} and before {}",
@@ -450,6 +469,17 @@ impl SessionCalendar {
                     });
                 }
                 let close = self.instant(trade_date, early.unwrap_or(h.eth_close));
+                if h.same_day() {
+                    return Some(Session {
+                        trade_date,
+                        kind,
+                        open: self.instant(trade_date, h.eth_open),
+                        close,
+                        halt: None,
+                        early_close: early.is_some(),
+                        holidays,
+                    });
+                }
                 let evening = trade_date.add_days(-1);
                 let mut open = self.instant(evening, h.eth_open);
                 let mut halt = None;
@@ -509,7 +539,7 @@ impl SessionCalendar {
                 }
             }
             Hours::Exchange(h) => match kind {
-                SessionKind::Eth if time >= h.eth_open => date.add_days(1),
+                SessionKind::Eth if !h.same_day() && time >= h.eth_open => date.add_days(1),
                 _ => date,
             },
         };

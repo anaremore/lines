@@ -254,7 +254,7 @@ impl PickerUi {
                 (Some(reason), _) => right = right.child(reason.clone()),
                 (None, Some(r)) => {
                     right = right.child(div().text_color(fg).child(r.label.as_str().to_owned()));
-                    if r.is_front && !e.product.is_spot() {
+                    if r.is_front && !e.product.is_spot() && !e.product.is_equity() {
                         right = right.child("front");
                     }
                     if let Some(x) = r.expiry {

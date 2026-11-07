@@ -1,8 +1,15 @@
 //! The journal file: `<config dir>/journal/<source>.jsonl`.
 //!
 //! JSON Lines, append-only. The first line is a versioned header
-//! (`{"journal":1,"source":"mock"}`); every later line is one [`Record`]: a closed trade, or
-//! an edit of one (tags, note; the last one wins). Nothing is ever rewritten in place.
+//! (`{"journal":2,"source":"mock"}`); every later line is one [`Record`]: a closed trade, or
+//! an edit of one (tags, note; the last one wins). Nothing is ever rewritten in place, with one
+//! exception: the version migration below.
+//!
+//! - **v1 → v2** (decision 0028): v2 trades may name equity and option contracts, so an older
+//!   build must refuse the file instead of reading an option as spot. Every v1 record is a
+//!   valid v2 record. Opening a v1 file for writing first copies it aside
+//!   (`<stem>.v1.jsonl`, never overwritten), then replaces it atomically with the same bytes
+//!   under a v2 header; reading a v1 file needs nothing.
 //!
 //! - **Torn tail**: a crash can leave a last line without its newline, or cut mid-record.
 //!   [`parse`] drops it (and reports it); opening the file for writing cuts it off first, so
@@ -23,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Record;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Header {
@@ -41,6 +48,8 @@ pub struct Loaded {
     pub torn: bool,
     /// Bytes up to the end of the last complete line (where appending resumes).
     pub valid_len: u64,
+    /// The header's version (0: no header yet).
+    pub version: u32,
 }
 
 /// Parse a journal file's bytes. `Err` for a missing/garbled header or a newer version.
@@ -64,6 +73,7 @@ pub fn parse(bytes: &[u8]) -> Result<Loaded> {
                     h.journal
                 );
             }
+            out.version = h.journal;
             first = false;
         } else if !line.iter().all(u8::is_ascii_whitespace) {
             match serde_json::from_slice::<Record>(line) {
@@ -117,7 +127,8 @@ impl JournalWriter {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
-        let valid = parse(&bytes)?.valid_len;
+        let parsed = parse(&bytes)?;
+        let valid = parsed.valid_len;
         let len = bytes.len() as u64;
         if valid < len {
             tracing::warn!(
@@ -131,6 +142,9 @@ impl JournalWriter {
                 .open(&path)
                 .and_then(|f| f.set_len(valid))
                 .with_context(|| format!("cut the torn tail of {}", path.display()))?;
+        }
+        if parsed.version != 0 && parsed.version < VERSION {
+            migrate(&path, parsed.version, &bytes[..valid as usize])?;
         }
         let mut file = OpenOptions::new()
             .create(true)
@@ -164,6 +178,49 @@ impl JournalWriter {
         let (tx, rx) = mpsc::channel();
         self.tx.send(Job::Flush(tx)).is_ok() && rx.recv_timeout(timeout).is_ok()
     }
+}
+
+/// Bring an older journal to [`VERSION`]: keep a copy as it was, then swap in the same records
+/// under the current header (written whole beside it, then renamed: a crash leaves either
+/// file, never half of one).
+fn migrate(path: &Path, from: u32, valid: &[u8]) -> Result<()> {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let aside = path.with_file_name(format!("{stem}.v{from}.jsonl"));
+    if !aside.exists() {
+        write_whole(&aside, valid)?;
+    }
+    let nl = valid
+        .iter()
+        .position(|&b| b == b'\n')
+        .context("journal header")?;
+    // The file's own header, version moved (its source is kept as written).
+    let mut header: Header = serde_json::from_slice(&valid[..nl]).context("journal header")?;
+    header.journal = VERSION;
+    let mut out = serde_json::to_vec(&header)?;
+    out.push(b'\n');
+    out.extend_from_slice(&valid[nl + 1..]);
+    write_whole(path, &out)?;
+    tracing::info!(
+        "journal {}: migrated v{from} → v{VERSION} (the original is kept as {})",
+        path.display(),
+        aside.display()
+    );
+    Ok(())
+}
+
+/// Write `bytes` to a temporary file beside `path`, sync it, then rename it over `path`: a
+/// crash leaves the old file or the new one, never part of one.
+fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+        f.write_all(bytes)?;
+        f.sync_data()?;
+    }
+    fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))
 }
 
 fn write_loop(mut file: File, path: PathBuf, rx: Receiver<Job>) {

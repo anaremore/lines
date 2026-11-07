@@ -510,7 +510,15 @@ fn validation() {
         Err(SessionError::UnknownHolidayCalendar(_))
     ));
     assert!(matches!(
-        err(spec(ex(h(16, 0), h(17, 0), None), None), &tbl),
+        err(spec(ex(h(16, 0), h(16, 0), None), None), &tbl),
+        SessionError::BadHours(_)
+    ));
+    // Same-day hours: RTH must sit inside them.
+    assert!(matches!(
+        err(
+            spec(ex(h(9, 0), h(17, 0), Some((h(8, 30), h(16, 0)))), None),
+            &tbl
+        ),
         SessionError::BadHours(_)
     ));
     assert!(matches!(
@@ -712,4 +720,91 @@ fn property_point_queries_agree() {
             }
         }
     }
+}
+
+/// Same-day hours (equities, decision 0028): NYSE-like 04:00–20:00 ET with RTH 09:30–16:00;
+/// a closed holiday, an early close, and no halt days.
+#[test]
+fn same_day_hours_open_and_close_on_the_trade_date() {
+    let h = LocalTime::hm;
+    let tbl = HolidayTable::parse(
+        "format 1
+version 2026-11-06
+calendar nyse
+coverage 2026 2026 verified
+source s
+         2026-11-26 closed verified Thanksgiving
+2026-11-27 early 13:00 verified Day after
+",
+    )
+    .unwrap();
+    let spec = SessionSpec {
+        time_zone: "America/New_York",
+        hours: Hours::Exchange(ExchangeHours {
+            eth_open: h(4, 0),
+            eth_close: h(20, 0),
+            rth: Some((h(9, 30), h(16, 0))),
+        }),
+        holidays: Some("nyse"),
+    };
+    let cal = SessionCalendar::new(spec, Some(&tbl)).unwrap();
+    // Monday 2026-11-09, EST (UTC-5).
+    let s = cal.session(d(2026, 11, 9), SessionKind::Eth).unwrap();
+    assert_eq!(
+        (s.open, s.close),
+        (t("2026-11-09T09:00:00Z"), t("2026-11-10T01:00:00Z"))
+    );
+    let r = cal.session(d(2026, 11, 9), SessionKind::Rth).unwrap();
+    assert_eq!(
+        (r.open, r.close),
+        (t("2026-11-09T14:30:00Z"), t("2026-11-09T21:00:00Z"))
+    );
+    assert_eq!(
+        cal.session_at(t("2026-11-09T12:00:00Z"), SessionKind::Eth)
+            .unwrap()
+            .trade_date,
+        d(2026, 11, 9)
+    );
+    // Overnight it's closed; the next open is the same morning, 04:00 ET.
+    assert!(!cal.is_open(t("2026-11-10T02:00:00Z")));
+    assert!(
+        cal.session_at(t("2026-11-10T02:00:00Z"), SessionKind::Eth)
+            .is_none()
+    );
+    assert_eq!(
+        cal.next_open(t("2026-11-10T02:00:00Z")),
+        Some(t("2026-11-10T09:00:00Z"))
+    );
+    // Friday's close → Monday's open.
+    assert_eq!(
+        cal.next_open(t("2026-11-14T02:00:00Z")),
+        Some(t("2026-11-16T09:00:00Z"))
+    );
+    // Thanksgiving closed; Friday closes early at 13:00 ET, RTH too.
+    assert!(!cal.is_trade_date(d(2026, 11, 26)));
+    let f = cal.session(d(2026, 11, 27), SessionKind::Eth).unwrap();
+    assert_eq!(f.close, t("2026-11-27T18:00:00Z"));
+    let fr = cal.session(d(2026, 11, 27), SessionKind::Rth).unwrap();
+    assert!(fr.early_close && fr.close == t("2026-11-27T18:00:00Z"));
+    assert_eq!(
+        cal.next_session(t("2026-11-26T03:00:00Z"), SessionKind::Eth)
+            .unwrap()
+            .trade_date,
+        d(2026, 11, 27)
+    );
+    // No halt days for same-day hours.
+    let halt = HolidayTable::parse(
+        "format 1
+version 2026-11-06
+calendar nyse
+coverage 2026 2026 verified
+source s
+         2026-11-26 halt 12:00 verified Thanksgiving
+",
+    )
+    .unwrap();
+    assert!(matches!(
+        SessionCalendar::new(spec, Some(&halt)),
+        Err(SessionError::BadHoliday { .. })
+    ));
 }
