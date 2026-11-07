@@ -18,11 +18,13 @@
 //!   (`StoredReplay`: the same segments, the same covered ranges, at or before
 //!   `stored_through`, so exactly the same trades in the same order; their total must match,
 //!   else the store changed, an evicted day), then the live ones from the [`TickSource`]: a
-//!   replay's own file through the same stitch and floor, cut after the right count, or the
-//!   local store's segments, which hold exactly the trades live counted, each once (the writer
-//!   stores a frame's counted trades, `frame_counted`): those after `stored_through`, cut
-//!   where the tape's first prints (up to [`MATCH_PRINTS`]) appear in order, and only if
-//!   exactly the right number came before. Then every tape print follows, then the trades
+//!   replay's own file through the same stitch and floor, or the local store's segments, which
+//!   hold exactly the trades live counted, each once (the writer stores a frame's counted
+//!   trades, `frame_counted`): those after `stored_through`. Either way the source is cut
+//!   where the tape's first prints (up to [`MATCH_PRINTS`]) appear in order, and accepted only
+//!   if exactly the right number came before (a replayed provider session whose start depends
+//!   on the replay's clock, such as a minute cutoff on REST trades, can count a different
+//!   set). Then every tape print follows, then the trades
 //!   counted while the rebuild ran (held), so a trade is never counted twice. The split is by
 //!   position, never by time (feeds deliver trades out of time order);
 //! - when the counted trades can't be read again (no source, a count that doesn't match,
@@ -149,9 +151,10 @@ impl Slot {
 /// Where a rebuild's source stops and the tape takes over.
 #[derive(Clone, Debug)]
 enum Cut {
-    /// After this many counted trades (a replay: the same trades in the same order).
+    /// After this many counted trades (an empty tape: nothing to match).
     Count(u64),
-    /// Just before these prints, in this order (the tape's first ones; a stored segment).
+    /// Just before these prints, in this order (the tape's first ones); the caller then checks
+    /// how many came before.
     Match(Vec<Print>),
 }
 
@@ -161,7 +164,7 @@ struct Scratch {
     bars: TickBars,
     cut: Cut,
     taken: u64,
-    /// `Cut::Match`: the newest source prints not yet in `bars`.
+    /// The newest source prints not yet in `bars`.
     ring: VecDeque<Print>,
     done: bool,
 }
@@ -885,7 +888,15 @@ fn from_source(job: &Job, mut cancelled: impl FnMut() -> bool) -> anyhow::Result
                 job.max_bars,
             );
             d.stored_through = through;
-            d.ticks.scratch = Some(Box::new(Scratch::new(bars, Cut::Count(rest))));
+            // Cut where the tape's first prints appear, and only if exactly `rest` trades came
+            // before them: a provider session whose start depends on the replay's clock (a
+            // minute cutoff on REST trades) can count a different set, which is then refused.
+            let cut = if job.tape.is_empty() {
+                Cut::Count(rest)
+            } else {
+                Cut::Match(job.tape[..job.tape.len().min(MATCH_PRINTS)].to_vec())
+            };
+            d.ticks.scratch = Some(Box::new(Scratch::new(bars, cut)));
             while !d.ticks.scratch.as_ref().is_some_and(|s| s.done) {
                 if cancelled() {
                     return Ok(Read::Cancelled);
@@ -896,8 +907,9 @@ fn from_source(job: &Job, mut cancelled: impl FnMut() -> bool) -> anyhow::Result
                 d.apply(&batch);
             }
             match d.ticks.scratch.take() {
-                // The source must reach the tape: else trades between them would be missing.
-                Some(s) if s.done => Ok(Read::Done(Box::new(s.bars))),
+                // The source must reach the tape with exactly the trades live counted before
+                // it: else some would be missing or counted twice.
+                Some(s) if s.done && s.taken == rest => Ok(Read::Done(Box::new(s.bars))),
                 _ => Ok(Read::Uncovered),
             }
         }

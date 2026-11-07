@@ -634,6 +634,48 @@ fn released_builders_and_rebuilds_stop() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A replay read again that counts a different set before the tape (a provider session whose
+/// start depends on the replay's clock), with the same total: refused, never counted twice.
+/// The rebuild must find the tape's first prints right after exactly the trades live counted.
+#[test]
+fn a_replay_that_counts_a_different_set_is_refused() {
+    let dir = scratch("replay-shift");
+    let frames = frames();
+    let path = recording(&dir, &frames);
+    let s = store();
+    for (_, e) in &frames[..6_000] {
+        s.update(|d| d.apply(&events(e)));
+    }
+    let d = s.read();
+    let tape = tape_prints(&d);
+    let before = d.counted_n - tape.len() as u64;
+    let (product, k) = es();
+    let job = |before_tape| Job {
+        key: KEY,
+        generation: 1,
+        stored: None,
+        live: Some(TickSource::Replay(path.clone())),
+        product: product.clone(),
+        contract: Some(k),
+        capabilities: Capabilities::default(),
+        provider: "lines",
+        period_ms: 60_000,
+        max_bars: 50_000,
+        tape: tape.clone(),
+        before_tape,
+    };
+    // The right count: read again, every counted trade once.
+    let ok = rebuild(&job(before), || false).unwrap();
+    assert_eq!(ok.trades(), d.counted_n);
+    // One trade more or fewer than the replay gives before the tape: only the tape, labelled.
+    for wrong in [before - 1, before + 1] {
+        let b = rebuild(&job(wrong), || false).unwrap();
+        assert_eq!(b.trades(), tape.len() as u64, "refused at {wrong}");
+    }
+    drop(d);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// History shows trading before the first counted trade: the chart says from when it has
 /// tick bars ("tick bars from 10:15"); once the bars reach back to the session's start, nothing.
 #[test]
