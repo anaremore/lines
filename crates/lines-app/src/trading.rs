@@ -944,6 +944,16 @@ impl Trading {
         // Orders the broker still holds (brackets survive restarts) come back through rebuild,
         // with the account's real balance: only then are settings applied.
         core.rebuild(lines_feed::now_utc());
+        // Settings are stamped with the wall time live; a replay (market or manual clock) has
+        // no time until its first data, so its trade date isn't rolled for them.
+        let at = if setup.clock == Clock::Wall {
+            lines_feed::now_utc()
+        } else {
+            TradingCore::BEFORE_DATA
+        };
+        // What settings asked for and the core refused (wrong size, already past a limit):
+        // reported at start, like a setting that doesn't resolve.
+        let mut sent: Vec<(lines_trading::CommandId, String)> = Vec::new();
         // The trader's guardrails from settings, through the command path (tighter now, looser
         // with the next trade date; a saved lockout is never cleared).
         let wanted: Vec<(AccountId, Guardrails)> = core
@@ -957,8 +967,9 @@ impl Trading {
             })
             .collect();
         for (account, guardrails) in wanted {
-            core.submit(
-                lines_feed::now_utc(),
+            let name = format!("guardrails for {account}");
+            let id = core.submit(
+                at,
                 Source::Api,
                 Instant::now(),
                 TradeCommand::SetGuardrails {
@@ -966,6 +977,7 @@ impl Trading {
                     guardrails,
                 },
             );
+            sent.push((id, name));
         }
         // The trader's prop rules from settings, the same way.
         let wanted: Vec<(AccountId, Option<lines_trading::rules::RulePreset>)> = core
@@ -979,14 +991,29 @@ impl Trading {
             })
             .collect();
         for (account, rules) in wanted {
-            core.submit(
-                lines_feed::now_utc(),
+            let name = format!("prop rules for {account}");
+            let id = core.submit(
+                at,
                 Source::Api,
                 Instant::now(),
                 TradeCommand::SetRules { account, rules },
             );
+            sent.push((id, name));
         }
-        let _ = core.drain();
+        for e in core.drain() {
+            if let lines_trading::Event::Command {
+                id, result: Err(r), ..
+            } = e
+                && let Some((_, name)) = sent.iter().find(|(s, _)| *s == id)
+            {
+                let msg = format!("Settings: {name} not applied ({})", r.message);
+                tracing::warn!("{msg}");
+                report = Some(match report {
+                    Some(p) => format!("{p}  ·  {msg}"),
+                    None => msg,
+                });
+            }
+        }
         let accounts: Vec<AccountInfo> = core
             .accounts()
             .map(|(c, _)| AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone()))

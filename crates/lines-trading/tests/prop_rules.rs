@@ -11,8 +11,9 @@ use lines_trading::persist;
 use lines_trading::rules::{self, RulePreset};
 use lines_trading::service::trading_file;
 use lines_trading::{
-    AccountConfig, AccountId, Command, Event, FillModel, MarketInput, Money, OrderId, OrderKind,
-    OrderSpec, OrderState, PaperBroker, PaperConfig, Reject, RejectCode, Side, Source, TradingCore,
+    AccountConfig, AccountId, Command, Event, FillModel, Guardrails, MarketInput, Money, OrderId,
+    OrderKind, OrderSpec, OrderState, PaperBroker, PaperConfig, Reject, RejectCode, Side, Source,
+    TradingCore,
 };
 
 const LAT: i64 = 20;
@@ -235,7 +236,7 @@ fn the_account_size_is_fixed() {
         }))
         .expect_err("another size");
     assert_eq!(e.code, RejectCode::Invalid);
-    assert!(e.message.contains("50000"), "{}", e.message);
+    assert!(e.message.contains("$50,000"), "{}", e.message);
 }
 
 /// Looser rules still waiting are saved with the account and come back after a restart.
@@ -308,8 +309,9 @@ fn a_tightening_the_account_is_already_past_is_refused() {
     );
 }
 
-/// Settings commands never breach by themselves: an account whose saved high-water mark
-/// locked its drawdown at the start balance, before its real balance is known, isn't failed.
+/// Settings commands never breach by themselves (the next equity update checks, with the
+/// real balance, which startup restores before sending settings): an account at its locked
+/// threshold isn't failed by a settings command.
 #[test]
 fn a_settings_change_never_breaches() {
     let mut cfg = AccountConfig::paper("paper-1", 50_000);
@@ -351,4 +353,131 @@ fn a_settings_change_never_breaches() {
         e,
         Event::Account(v) if v.blocked.is_none() && v.limits.account_size == 50_000
     )));
+}
+
+/// A rig whose account's drawdown locked at its tracker's start, $49,900 (high-water $52,000,
+/// end-of-day preset, lock at start + $0); the balance is $50,000.
+fn locked_rig() -> Rig {
+    let mut r = Rig::new(eod());
+    let mut cfg = AccountConfig::paper("paper-1", 50_000);
+    cfg.rules = Some(eod());
+    let mut tracker = rules::RuleTracker::new(Money::whole(49_900));
+    tracker.high_water = Money::whole(52_000);
+    tracker.locked = true;
+    let mut b = PaperBroker::new(paper());
+    b.open_account(cfg.id.clone(), Money::whole(50_000));
+    r.core = TradingCore::new(Box::new(b));
+    r.core.add_account(cfg, Some(tracker));
+    r.book_at(5999.75, 6000.25);
+    r
+}
+
+/// A higher lock moves a locked threshold up without changing the amount: refused when the
+/// account is already below where it would move (it would fail the account now).
+#[test]
+fn a_lock_the_account_is_past_is_refused() {
+    let mut r = locked_rig();
+    let lock_200 = |p: RulePreset| RulePreset {
+        trailing_drawdown: p.trailing_drawdown.map(|d| rules::TrailingDrawdown {
+            lock_at_start_plus: Some(200),
+            ..d
+        }),
+        ..p
+    };
+    let e = r
+        .set(Some(lock_200(eod())))
+        .expect_err("the threshold would move to $50,100, above the $50,000 equity");
+    assert!(e.message.contains("drawdown"), "{}", e.message);
+    assert!(
+        !r.events.iter().any(|e| matches!(e, Event::Breach { .. })),
+        "no breach from a setting"
+    );
+    // A lock the account is above: fine.
+    let lock_50 = RulePreset {
+        trailing_drawdown: eod().trailing_drawdown.map(|d| rules::TrailingDrawdown {
+            lock_at_start_plus: Some(50),
+            ..d
+        }),
+        ..eod()
+    };
+    r.set(Some(lock_50))
+        .expect("the threshold moves to $49,950");
+}
+
+/// A guardrail daily loss tightened below today's loss locks at once: the next entry is
+/// denied, on a flat account too (no fill or price needed to notice).
+#[test]
+fn a_tighter_guardrail_daily_loss_denies_the_next_order() {
+    let mut r = Rig::new(eod());
+    // Lose about $300: buy 1, the market drops 6 points, sell.
+    r.order(Side::Buy, 1, OrderKind::Market).expect("accepted");
+    r.wait(LAT);
+    r.book_at(5993.75, 5994.25);
+    r.order(Side::Sell, 1, OrderKind::Market).expect("accepted");
+    r.wait(LAT);
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: Guardrails {
+            max_daily_loss: Some(200),
+            ..Default::default()
+        },
+    })
+    .expect("tightening is allowed");
+    let e = r.resting(1).expect_err("today's loss is past $200");
+    assert_eq!(e.code, RejectCode::Guardrail, "{e:?}");
+}
+
+/// Settings sent before the core has a time (a replay's start) don't roll the trade date:
+/// looser rules waiting still wait through the first data's date.
+#[test]
+fn settings_before_data_leave_the_trade_date_alone() {
+    let mut r = Rig::new(RulePreset {
+        max_micro_contracts: Some(20),
+        ..eod()
+    });
+    // The account traded on 2026-11-10 (its tracker's day).
+    r.resting(1).expect("10 of 20");
+    let id = r.core.submit(
+        TradingCore::BEFORE_DATA,
+        Source::Test,
+        Instant::now(),
+        Command::SetRules {
+            account: acct(),
+            rules: Some(eod()),
+        },
+    );
+    r.events.extend(r.core.drain());
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::Command { id: i, result: Ok(_), .. } if *i == id))
+    );
+    assert!(r.core.pending_rules(&acct()).is_some(), "50 micros waits");
+    // The same trade date's data: still 20.
+    r.book_at(5999.75, 6000.25);
+    let e = r.resting(2).expect_err("10 + 20 of 20");
+    assert_eq!(e.code, RejectCode::PropRule, "{e:?}");
+    assert!(r.core.pending_rules(&acct()).is_some(), "still waiting");
+}
+
+/// Strategies can't change prop rules.
+#[test]
+fn a_strategy_cannot_set_rules() {
+    let mut r = Rig::new(eod());
+    let id = r.core.submit(
+        r.now(),
+        Source::Strategy(lines_trading::StrategyId(1)),
+        Instant::now(),
+        Command::SetRules {
+            account: acct(),
+            rules: None,
+        },
+    );
+    r.events.extend(r.core.drain());
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::Command { id: i, result: Err(_), .. } if *i == id))
+    );
+    assert!(r.core.pending_rules(&acct()).is_none());
 }

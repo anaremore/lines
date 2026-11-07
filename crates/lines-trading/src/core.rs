@@ -475,6 +475,12 @@ impl TradingCore {
 
     // ---- commands -------------------------------------------------------------------
 
+    /// The time for settings sent before the core has seen any (a replay's start, whose
+    /// market time comes with its first data): the trade date isn't rolled for them, so
+    /// the first data's date is never taken for a new one (which would bring in looser
+    /// rules early).
+    pub const BEFORE_DATA: UtcMillis = UtcMillis(i64::MIN);
+
     /// The single entry point (decision 0018). Returns the command's id; its result is an
     /// [`Event::Command`] in the stream.
     pub fn submit(
@@ -574,7 +580,9 @@ impl TradingCore {
                 format!("no account {account}"),
             ));
         }
-        self.roll_day(now, &account);
+        if now != Self::BEFORE_DATA {
+            self.roll_day(now, &account);
+        }
         // Strategies (decision 0025): their commands pass the strategy gate first; a person's
         // order action pauses the strategies trading the same account and contract.
         if let Source::Strategy(s) = env.source {
@@ -824,8 +832,18 @@ impl TradingCore {
                 Ok(self.cancel_all(env, now, &account, contract))
             }
             Command::SetGuardrails { guardrails, .. } => {
+                let unrealised = self.unrealised(&account);
+                let day = (now != Self::BEFORE_DATA)
+                    .then(|| self.trade_day(&account, now))
+                    .flatten();
                 let a = self.accounts.get_mut(&account).expect("checked");
                 a.guard.request(guardrails);
+                // A tighter daily loss applies to the next order: today's loss is checked
+                // now (a guardrail lock never liquidates, nor blocks exits).
+                if let Some((_, end)) = day {
+                    let day_pnl = a.balance + unrealised - a.tracker.day_open_balance;
+                    a.guard.on_day_pnl(day_pnl, end);
+                }
                 self.guard_report(&account);
                 // The account's view says what is in force now and what waits.
                 self.publish_view(&account);
@@ -842,7 +860,7 @@ impl TradingCore {
                         RejectCode::Invalid,
                         format!(
                             "this account is ${}: choose rules for that size",
-                            a.cfg.starting_balance
+                            grouped(a.cfg.starting_balance)
                         ),
                     ));
                 }
@@ -866,7 +884,8 @@ impl TradingCore {
                             "today's loss is already past that daily loss limit: it would end the day now",
                         ));
                     }
-                    if changed(|r| r.trailing_drawdown.as_ref().map(|d| d.amount))
+                    // Amount, mode or lock: a higher lock moves a locked threshold up too.
+                    if was.map(|r| &r.trailing_drawdown) != Some(&p.trailing_drawdown)
                         && !a.tracker.drawdown_breached
                         && st.to_drawdown.is_some_and(|l| l <= Money::ZERO)
                     {
@@ -1949,4 +1968,17 @@ fn no_rules() -> RulePreset {
         liquidate_on_breach: false,
         on_breach: crate::rules::BreachStates::default(),
     }
+}
+
+/// Whole dollars with thousands separators ("50,000").
+fn grouped(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
 }

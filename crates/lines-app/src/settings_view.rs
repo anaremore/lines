@@ -87,10 +87,51 @@ fn restore_look(
 struct Awaiting {
     index: usize,
     id: lines_trading::CommandId,
-    /// The account's settings key and its entries before the change.
-    key: String,
-    prop: Option<schema::PropRulesDoc>,
-    guard: Option<lines_trading::Guardrails>,
+    /// The entries this change wrote: (key, before, after). A refusal puts `before` back
+    /// unless a later change has rewritten the entry since (its own answer decides then).
+    prop: Vec<(
+        String,
+        Option<schema::PropRulesDoc>,
+        Option<schema::PropRulesDoc>,
+    )>,
+    guard: Vec<(
+        String,
+        Option<lines_trading::Guardrails>,
+        Option<lines_trading::Guardrails>,
+    )>,
+    /// Where its undo entry went (the undo list's length before it), if it made one.
+    undo_at: Option<usize>,
+}
+
+/// A refused change's entries back as they were, each unless rewritten since (a later
+/// change's own answer decides then).
+fn put_back<V: PartialEq>(
+    map: &mut std::collections::BTreeMap<String, V>,
+    entries: Vec<(String, Option<V>, Option<V>)>,
+) {
+    for (k, was, wrote) in entries {
+        if map.get(&k) == wrote.as_ref() {
+            match was {
+                Some(v) => map.insert(k, v),
+                None => map.remove(&k),
+            };
+        }
+    }
+}
+
+/// The entries of `map` that differ between `before` and `after`: (key, before, after).
+fn changed_entries<V: Clone + PartialEq>(
+    before: &std::collections::BTreeMap<String, V>,
+    after: &std::collections::BTreeMap<String, V>,
+) -> Vec<(String, Option<V>, Option<V>)> {
+    before
+        .keys()
+        .chain(after.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|k| before.get(*k) != after.get(*k))
+        .map(|k| ((*k).clone(), before.get(k).cloned(), after.get(k).cloned()))
+        .collect()
 }
 
 /// A setting change waiting for the trader's yes (a guardrail loosened).
@@ -126,8 +167,10 @@ pub struct SettingsWindow {
     editor_msg: Option<String>,
     /// The settings list's scroll (keeps the selected row in view).
     scroll: gpui::ScrollHandle,
-    /// A risk change the trading core hasn't answered yet.
-    awaiting: Option<Awaiting>,
+    /// Risk changes the trading core hasn't answered yet, oldest first.
+    awaiting: Vec<Awaiting>,
+    /// The trading accounts' revisions last shown (the watcher repaints when they move).
+    seen_revision: u64,
     /// The row last scrolled into view (only a new selection or search scrolls).
     scrolled: Option<(Section, usize, String)>,
 }
@@ -266,9 +309,15 @@ pub fn open(at: Option<usize>, cx: &mut App) {
         crate::workspace::hidden_window("Lines (settings)", SIZE)
     };
     let facts = gather_facts(cx);
+    // A shown window follows the core while idle (hidden ones, screenshots and tests, repaint
+    // when asked).
+    let watch = ws.env.track_visibility;
     let Ok(h) = cx.open_window(options, move |window, cx| {
         cx.new(|cx| {
             let mut v = SettingsWindow::new(theme, facts, cx);
+            if watch {
+                SettingsWindow::watch(cx);
+            }
             if let Some(i) = at {
                 v.show(i);
             }
@@ -422,7 +471,13 @@ fn commit(
     sent
 }
 
+/// The facts for the window, waiting for the trading cache (off the paint path).
 fn gather_facts(cx: &App) -> Facts {
+    facts_now(cx, true).unwrap_or_default()
+}
+
+/// The facts as of now; with `wait` false (paint), `None` when the trading cache is busy.
+fn facts_now(cx: &App, wait: bool) -> Option<Facts> {
     let mut f = Facts::default();
     if let Some(ws) = cx.try_global::<Workspace>()
         && let Some(st) = &ws.env.base.store
@@ -452,9 +507,11 @@ fn gather_facts(cx: &App) -> Facts {
             })
             .collect();
         // What the core reports now: rules and guardrails in force, what waits, lockouts.
-        // Never wait on the trading thread: a busy cache shows last frame's facts next time.
-        let Some(cache) = t.cache.try_read() else {
-            return f;
+        // Paint never waits on the trading thread: a busy cache keeps last frame's facts.
+        let cache = if wait {
+            t.cache.read()
+        } else {
+            t.cache.try_read()?
         };
         for fa in &mut f.accounts {
             let id = lines_trading::AccountId::new(&fa.id);
@@ -490,7 +547,7 @@ fn gather_facts(cx: &App) -> Facts {
             });
         }
     }
-    f
+    Some(f)
 }
 
 fn default_target(f: &Facts) -> Target {
@@ -524,7 +581,91 @@ impl SettingsWindow {
             editor_msg: None,
             scroll: gpui::ScrollHandle::new(),
             scrolled: None,
-            awaiting: None,
+            awaiting: Vec::new(),
+            seen_revision: 0,
+        }
+    }
+
+    /// The trading accounts' revisions, summed (lock-free).
+    fn trading_revision(cx: &App) -> u64 {
+        crate::trading::Trading::try_global(cx).map_or(0, |t| {
+            t.accounts()
+                .iter()
+                .map(|a| t.cache.revision(&a.id))
+                .fold(0u64, u64::wrapping_add)
+        })
+    }
+
+    /// Repaint while open when the core answers a change or an account moves (a lockout, a
+    /// breach, rules coming into force), so the rows never show a stale state while idle.
+    fn watch(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let alive = this.update(cx, |v, cx| {
+                    v.check_answers(cx);
+                    let r = Self::trading_revision(cx);
+                    if r != v.seen_revision {
+                        v.seen_revision = r;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The core's answers to risk changes sent from here: a refusal puts the saved entry
+    /// back (unless rewritten since), drops its undo entry and says why on the row.
+    fn check_answers(&mut self, cx: &mut Context<Self>) {
+        if self.awaiting.is_empty() {
+            return;
+        }
+        let answers: Vec<Option<Result<Vec<lines_trading::OrderId>, lines_trading::Reject>>> =
+            match crate::trading::Trading::try_global(cx).and_then(|t| t.cache.try_read()) {
+                Some(c) => self
+                    .awaiting
+                    .iter()
+                    .map(|w| c.result(w.id).cloned())
+                    .collect(),
+                None => return,
+            };
+        let mut waiting = Vec::new();
+        let mut refused = false;
+        for (w, answer) in std::mem::take(&mut self.awaiting).into_iter().zip(answers) {
+            let Some(result) = answer else {
+                waiting.push(w);
+                continue;
+            };
+            let Err(r) = result else { continue };
+            refused = true;
+            let (prop, guard) = (w.prop.clone(), w.guard.clone());
+            update_settings(cx, move |s| {
+                put_back(&mut s.prop_rules, prop);
+                put_back(&mut s.guardrails, guard);
+            });
+            if let Some(at) = w.undo_at
+                && self
+                    .undo
+                    .get(at)
+                    .is_some_and(|u| u.index == w.index && u.target == self.target)
+            {
+                self.undo.remove(at);
+            }
+            self.note = Some((
+                w.index,
+                format!("Not changed: {}", r.message),
+                Tone::Problem,
+            ));
+        }
+        self.awaiting = waiting;
+        if refused {
+            cx.notify();
         }
     }
 
@@ -595,31 +736,6 @@ impl SettingsWindow {
         let prop = st.key.starts_with("prop.");
         let loosens = schema::loosening(st, &old, &v, &g0, &g1)
             || (prop && schema::prop_loosens(&before, &after, &self.target, &self.facts));
-        if loosens && !sure {
-            let (from, to) = (st.value_text(&old), st.value_text(&v));
-            self.pending = Some(Pending {
-                index: i,
-                value: v.clone(),
-                target: self.target.clone(),
-                text: if guard || prop {
-                    format!(
-                        "Loosening {} for {} ({from} → {to}) takes effect at the next session.",
-                        st.name.to_lowercase(),
-                        self.target
-                            .account_name
-                            .as_deref()
-                            .unwrap_or("this account")
-                    )
-                } else {
-                    format!("This loosens a trading safeguard ({from} → {to}): it applies now.")
-                },
-                undo: None,
-                tomorrow: guard || prop,
-            });
-            self.note = None;
-            cx.notify();
-            return;
-        }
         // A preset for another account size is refused here, with the reason (the core
         // refuses it too).
         if st.key == "prop.preset"
@@ -646,25 +762,44 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
+        if loosens && !sure {
+            let (from, to) = (st.value_text(&old), st.value_text(&v));
+            self.pending = Some(Pending {
+                index: i,
+                value: v.clone(),
+                target: self.target.clone(),
+                text: if guard || prop {
+                    format!(
+                        "Loosening {} for {} ({from} → {to}) takes effect at the next session.",
+                        st.name.to_lowercase(),
+                        self.target
+                            .account_name
+                            .as_deref()
+                            .unwrap_or("this account")
+                    )
+                } else {
+                    format!("This loosens a trading safeguard ({from} → {to}): it applies now.")
+                },
+                undo: None,
+                tomorrow: guard || prop,
+            });
+            self.note = None;
+            cx.notify();
+            return;
+        }
         let look = schema::LookField::of(st.key).map(|_| look_now(cx));
-        let key = self
-            .target
-            .account_name
-            .clone()
-            .or(self.target.account.clone())
-            .unwrap_or_default();
         let saved = settings(cx);
-        let (prop_was, guard_was) = (
-            saved.prop_rules.get(&key).cloned(),
-            saved.guardrails.get(&key).cloned(),
+        let (prop_wrote, guard_wrote) = (
+            changed_entries(&saved.prop_rules, &after.app.prop_rules),
+            changed_entries(&saved.guardrails, &after.app.guardrails),
         );
         if let Some(id) = commit(&before, &after, &self.target, cx) {
-            self.awaiting = Some(Awaiting {
+            self.awaiting.push(Awaiting {
                 index: i,
                 id,
-                key,
-                prop: prop_was,
-                guard: guard_was,
+                prop: prop_wrote,
+                guard: guard_wrote,
+                undo_at: Some(self.undo.len()),
             });
         }
         self.undo.push(UndoEntry {
@@ -1487,35 +1622,13 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        // What the trading core reports (in force, waiting, lockouts) as of this frame.
-        self.facts = gather_facts(cx);
-        // A risk change the core refused: the saved entry goes back, the row says why.
-        let answer = self.awaiting.as_ref().and_then(|w| {
-            crate::trading::Trading::try_global(cx)
-                .and_then(|t| t.cache.try_read().and_then(|c| c.result(w.id).cloned()))
-        });
-        if let Some(result) = answer {
-            let w = self.awaiting.take().expect("checked");
-            if let Err(r) = result {
-                let (key, prop, guard) = (w.key.clone(), w.prop.clone(), w.guard.clone());
-                update_settings(cx, move |s| {
-                    match prop {
-                        Some(d) => s.prop_rules.insert(key.clone(), d),
-                        None => s.prop_rules.remove(&key),
-                    };
-                    match guard {
-                        Some(g) => s.guardrails.insert(key, g),
-                        None => s.guardrails.remove(&key),
-                    };
-                });
-                self.undo.pop();
-                self.note = Some((
-                    w.index,
-                    format!("Not changed: {}", r.message),
-                    Tone::Problem,
-                ));
-            }
+        // What the trading core reports (in force, waiting, lockouts) as of this frame; a
+        // busy cache keeps the last frame's.
+        if let Some(f) = facts_now(cx, false) {
+            self.facts = f;
         }
+        self.seen_revision = Self::trading_revision(cx);
+        self.check_answers(cx);
         let prefs = current_prefs(cx);
         let rows = self.rows();
         if self.row >= rows.len() {
@@ -1696,5 +1809,39 @@ impl Render for SettingsWindow {
                         "Changes apply at once · every setting is also a palette command"
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A refused change goes back by the entry it wrote (name or id key), and not over a
+    /// change made since.
+    #[test]
+    fn a_refusal_puts_back_only_what_it_wrote() {
+        let saved: BTreeMap<String, i64> = [("paper-eval".to_owned(), 1_000)].into();
+        let mut after = saved.clone();
+        after.insert("paper-eval".into(), 100);
+        after.insert("Other".into(), 5);
+        let wrote = changed_entries(&saved, &after);
+        assert_eq!(
+            wrote,
+            vec![
+                ("Other".to_owned(), None, Some(5)),
+                ("paper-eval".to_owned(), Some(1_000), Some(100)),
+            ],
+            "the entries changed, by their own keys"
+        );
+        let mut now = after.clone();
+        put_back(&mut now, wrote.clone());
+        assert_eq!(now, saved, "both entries back as they were");
+        // Rewritten since: left to that change.
+        let mut now = after.clone();
+        now.insert("paper-eval".into(), 700);
+        put_back(&mut now, wrote);
+        assert_eq!(now.get("paper-eval"), Some(&700));
+        assert_eq!(now.get("Other"), None);
     }
 }
