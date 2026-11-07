@@ -408,6 +408,15 @@ fn stats_math() {
     );
     assert_eq!(by_date["2026-11-06"].net, dollars(-220.0));
     assert_eq!(grouped(&trades, GroupBy::Product)["ES"].count, 7);
+    // By account: each trade once, under its account id.
+    let mut other = closed(40.0, 1080, &["fade"]);
+    other.account = AccountId::new("eval");
+    let with_other: Vec<Trade> = trades.iter().cloned().chain([other]).collect();
+    let by_account = grouped(&with_other, GroupBy::Account);
+    assert_eq!(by_account.keys().collect::<Vec<_>>(), ["eval", "paper"]);
+    assert_eq!(by_account["paper"], s);
+    assert_eq!(by_account["eval"].net, dollars(40.0));
+    assert_eq!(grouped(&with_other, GroupBy::Tag)["fade"].count, 2);
     assert_eq!(
         grouped(&trades, GroupBy::Hour)["09"].count,
         7,
@@ -553,6 +562,114 @@ fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
 /// The journal on its own thread: the trading thread only sends messages, the UI reads
 /// snapshots. Market data moves MAE/MFE without publishing (open trades aren't shown); a
 /// close publishes; an edit is applied there and published.
+/// Screenshots (phase 2): with a folder set, the entry one is asked for as a trade opens and
+/// the exit one as it closes, both named in the trade (and so saved with it); a reversal's two
+/// trades and a seeded trade (no entry seen) too. Without a folder, nothing.
+#[test]
+fn screenshots_are_named_and_asked_for_at_entry_and_exit() {
+    let dir = std::path::PathBuf::from("shots");
+    let mut j = Journal::new();
+    j.set_shots_dir(dir.clone());
+    feed(&mut j, &[fill("a/1:x", 1, Side::Buy, 6000.00, 2, 0.0, 0)]);
+    let r = j.take_shot_requests();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].kind, ShotKind::Entry);
+    assert_eq!(r[0].trade.fills.len(), 1, "the trade as it opened");
+    let id = format!("a/1:x@{}", at(0).0);
+    assert_eq!(r[0].path, shot_path(&dir, &id, ShotKind::Entry));
+    assert!(j.take_shot_requests().is_empty(), "taken once");
+    // An add asks for nothing; the reversal closes the long and opens a short.
+    feed(
+        &mut j,
+        &[
+            fill("b", 2, Side::Buy, 6000.25, 1, 0.0, 5),
+            fill("c", 3, Side::Sell, 6001.00, 4, 0.0, 10),
+        ],
+    );
+    let r = j.take_shot_requests();
+    assert_eq!(
+        r.iter().map(|r| r.kind).collect::<Vec<_>>(),
+        [ShotKind::Entry, ShotKind::Exit],
+        "the short's entry, then the long's exit (the same fill)"
+    );
+    let long = &j.trades()[0].clone();
+    assert_eq!(long.id, id);
+    assert_eq!(
+        long.screenshots,
+        [
+            shot_path(&dir, &id, ShotKind::Entry),
+            shot_path(&dir, &id, ShotKind::Exit)
+        ],
+        "both named in the saved trade"
+    );
+    assert_eq!(r[1].trade.fills.len(), 3, "the exit sees every fill");
+    assert_eq!(r[1].trade.screenshots, long.screenshots);
+    feed(&mut j, &[fill("d", 4, Side::Buy, 6002.00, 1, 0.0, 20)]);
+    let short = &j.trades()[1];
+    assert_eq!(short.id, format!("c/r@{}", at(10).0));
+    assert_eq!(short.screenshots.len(), 2);
+    assert_ne!(short.screenshots[0], long.screenshots[0]);
+    // File names are safe and distinct for ids that differ only in unsafe characters.
+    let name = |id: &str| {
+        shot_path(&dir, id, ShotKind::Exit)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(name("a/1:x@5").starts_with("a_1_x_5-"));
+    assert!(name("a/1:x@5").ends_with("-exit.svg"));
+    assert_ne!(name("a/1:x@5"), name("a:1/x@5"));
+    assert!(name(&"z".repeat(500)).len() < 80);
+    // Saved and read back: the names come along (an optional field, no format change).
+    let line = serde_json::to_string(&Record::Trade(Box::new(long.clone()))).unwrap();
+    let back: Record = serde_json::from_str(&line).unwrap();
+    assert_eq!(back, Record::Trade(Box::new(long.clone())));
+    // A position from before the journal: no entry seen, so the exit only.
+    let mut j2 = Journal::new();
+    j2.set_shots_dir(dir.clone());
+    j2.on_event(&Event::Position(PositionView {
+        account: acct(),
+        contract: es(),
+        qty: 1,
+        avg_price: Some(600_000.0),
+        unrealised: Money::ZERO,
+    }));
+    feed(&mut j2, &[fill("s", 1, Side::Sell, 6001.0, 1, 0.0, 30)]);
+    let r = j2.take_shot_requests();
+    assert_eq!(r.iter().map(|r| r.kind).collect::<Vec<_>>(), [ShotKind::Exit]);
+    assert_eq!(j2.trades()[0].screenshots.len(), 1);
+    // No folder: no names, no requests.
+    let mut j3 = Journal::new();
+    feed(
+        &mut j3,
+        &[
+            fill("n1", 1, Side::Buy, 6000.0, 1, 0.0, 0),
+            fill("n2", 2, Side::Sell, 6001.0, 1, 0.0, 5),
+        ],
+    );
+    assert!(j3.take_shot_requests().is_empty());
+    assert!(j3.trades()[0].screenshots.is_empty());
+}
+
+/// The journal thread hands the requests on as the fills come.
+#[test]
+fn shared_journal_sends_screenshot_requests() {
+    let (tx, rx) = mpsc::channel();
+    let mut j = Journal::new();
+    j.set_shots_dir("shots".into());
+    let shared = JournalShared::start_with_shots(j, None, Some(tx));
+    let mut obs = shared.observer();
+    obs.events(&[fill("o1", 1, Side::Buy, 6000.0, 1, 0.0, 0)]);
+    shared.sync();
+    assert_eq!(rx.try_recv().unwrap().kind, ShotKind::Entry);
+    obs.events(&[fill("o2", 2, Side::Sell, 6001.0, 1, 0.0, 2)]);
+    shared.sync();
+    assert_eq!(rx.try_recv().unwrap().kind, ShotKind::Exit);
+    assert!(rx.try_recv().is_err());
+}
+
 #[test]
 fn shared_journal_runs_on_its_own_thread() {
     let shared = JournalShared::start(Journal::new(), None);

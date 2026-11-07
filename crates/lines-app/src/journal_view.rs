@@ -168,7 +168,7 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
 
 /// A price with the decimals its scale implies (`den` 100 → at least 2), more if the value
 /// has them (averages), at most 6, without trailing zeros past the minimum.
-fn decimal(v: f64, den: i64) -> String {
+pub(crate) fn decimal(v: f64, den: i64) -> String {
     let min = (den.max(1) as f64).log10().ceil() as usize;
     let s = format!("{v:.6}");
     let (int, frac) = s.split_once('.').unwrap_or((&s, ""));

@@ -22,6 +22,7 @@ mod footprint;
 #[cfg(feature = "screenshot")]
 mod gallery;
 mod icons;
+mod journal_shots;
 mod journal_view;
 mod latency_hud;
 mod layout;
@@ -1202,6 +1203,9 @@ where
     ws.env.theme.set(settings_schema::theme_for(
         &settings.settings.appearance.with_flags(look_flags),
     ));
+    // The journal's chart screenshots take the same look.
+    journal_shots::set_theme(ws.env.theme.get());
+    journal_shots::set_pnl(settings.settings.pnl_display);
     // The paper trading core (roadmap 7): its own thread, state per data source.
     let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.

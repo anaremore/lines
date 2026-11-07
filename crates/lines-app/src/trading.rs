@@ -33,7 +33,9 @@
 //! trips from fills, MAE/MFE from the same market batches), saved append-only to
 //! `<config dir>/journal/<source>.jsonl` beside the paper file, under the same rule: replays
 //! and screenshots keep it in memory. A journal this build can't read (newer, damaged
-//! header) is left as it is and nothing is written to it this run.
+//! header) is left as it is and nothing is written to it this run. A saved journal also gets
+//! chart screenshots per trade in `<config dir>/journal/shots/<source>/`
+//! (`crate::journal_shots`, drawn from the feeds the panes follow).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -597,6 +599,8 @@ pub struct Trading {
     pub start_account: Option<AccountId>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
     pub journal: Arc<JournalShared>,
+    /// The feeds panes trade from, for the journal's chart screenshots.
+    shot_stores: crate::journal_shots::Stores,
     /// The core's clock kind, so the UI reads time the way the core does (`now`).
     clock: Clock,
     /// Manual clock: the newest time a script advanced the core to (ms; `i64::MIN`: none).
@@ -876,7 +880,20 @@ impl Trading {
         let check_sessions = setup.check_sessions;
         let mut report = None;
         let journal_file = setup.journal.take();
-        let (journal, journal_report) = open_journal(journal_file.as_ref());
+        // Screenshots use the panes' feeds (`follow`) and the accounts' names (set below).
+        let shot_stores = crate::journal_shots::Stores::default();
+        let shot_names: Arc<std::sync::OnceLock<Arc<RwLock<Vec<AccountInfo>>>>> = Arc::default();
+        let names = shot_names.clone();
+        let shots = journal_file.as_ref().and_then(|_| {
+            crate::journal_shots::spawn(
+                shot_stores.clone(),
+                Arc::new(move |id: &str| {
+                    let a = names.get()?.read().unwrap_or_else(|e| e.into_inner());
+                    a.iter().find(|a| a.id.0 == id).map(|a| a.name.clone())
+                }),
+            )
+        });
+        let (journal, journal_report) = open_journal(journal_file.as_ref(), shots);
         let loaded = match &setup.file {
             Some(path) => match persist::load(path) {
                 Ok(f) => f,
@@ -986,6 +1003,7 @@ impl Trading {
         // The full state as the first events.
         handle.rebuild();
         let accounts = Arc::new(RwLock::new(accounts));
+        let _ = shot_names.set(accounts.clone());
         let mut venues = Vec::new();
         for ext in brokers {
             let broker = match ext.open() {
@@ -1078,6 +1096,7 @@ impl Trading {
             check_sessions,
             start_account: None,
             journal,
+            shot_stores,
             clock: setup.clock,
             advanced: std::sync::atomic::AtomicI64::new(i64::MIN),
         }
@@ -1197,6 +1216,13 @@ impl Trading {
     /// sees it too, to mark its positions (its broker gets the data but needs none); a replay's
     /// or the mock's prices never mark a real venue's positions.
     pub fn follow(&self, store: &Arc<ChartStore>) {
+        {
+            let mut s = self.shot_stores.lock().unwrap_or_else(|e| e.into_inner());
+            s.retain(|w| w.strong_count() > 0);
+            if !s.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(store))) {
+                s.push(Arc::downgrade(store));
+            }
+        }
         self.bridge.follow_store(store, &self.handle);
         if self.venue_marks {
             for v in &self.venues {
@@ -1322,8 +1348,12 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 }
 
 /// The journal from its file (if any): its trades and edits, and a writer appending to it.
-/// A file this build can't read is left alone and not written this run (reported).
-fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option<String>) {
+/// A file this build can't read is left alone and not written this run (reported). A saved
+/// journal's trades get chart screenshots, sent to `shots`, in `shots/<source>/` beside it.
+fn open_journal(
+    file: Option<&(PathBuf, String)>,
+    shots: Option<Sender<lines_trading::ShotRequest>>,
+) -> (Arc<JournalShared>, Option<String>) {
     use lines_trading::journal::store::{self, JournalWriter};
     let Some((path, source)) = file else {
         return (JournalShared::start(Journal::new(), None), None);
@@ -1344,8 +1374,15 @@ fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option
                     None
                 }
             };
-            let journal = Journal::from_records(loaded.map(|l| l.records).unwrap_or_default());
-            (JournalShared::start(journal, writer), report)
+            let mut journal =
+                Journal::from_records(loaded.map(|l| l.records).unwrap_or_default());
+            let shots = shots.filter(|_| writer.is_some());
+            if shots.is_some()
+                && let (Some(dir), Some(stem)) = (path.parent(), path.file_stem())
+            {
+                journal.set_shots_dir(dir.join("shots").join(stem));
+            }
+            (JournalShared::start_with_shots(journal, writer, shots), report)
         }
         Err(e) => (
             JournalShared::start(Journal::new(), None),

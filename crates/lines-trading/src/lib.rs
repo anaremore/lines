@@ -47,7 +47,7 @@ pub use command::{BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
 pub use core::{AccountConfig, OrderLatency, TradingCore};
 pub use event::{AccountView, Event, FillEvent, PositionView};
 pub use guardrails::{GuardState, GuardrailTracker, Guardrails, LosingStreak, RoundTrip};
-pub use journal::{Journal, JournalObserver, JournalShared, Trade};
+pub use journal::{Journal, JournalObserver, JournalShared, ShotKind, ShotRequest, Trade};
 pub use market::MarketInput;
 pub use order::{Order, OrderState, Role};
 pub use paper::{FillModel, PaperBroker, PaperConfig};

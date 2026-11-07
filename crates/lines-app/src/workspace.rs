@@ -3513,6 +3513,7 @@ pub fn set_show_latency_hud(show: bool, cx: &mut App) {
 /// Change the look of every window and pane now (the Settings window's appearance), and of
 /// panes created from now on.
 pub fn set_theme(theme: Theme, cx: &mut App) {
+    crate::journal_shots::set_theme(theme);
     let Some(ws) = cx.try_global::<Workspace>() else {
         return;
     };

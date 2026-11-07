@@ -25,6 +25,12 @@
 //! - **Open trades** live only in memory. After a restart a position the journal didn't see
 //!   open is seeded from the core's position report and its trade is marked `incomplete`.
 //!
+//! **Chart screenshots** (phase 2): with a screenshot folder set, a trade gets two file names
+//! as it opens and closes ([`ShotRequest`]: the entry one when it opens, the exit one when it
+//! closes; a seeded trade has no entry). The names go into [`Trade::screenshots`], so they are
+//! saved with the trade (an optional field: no format change). The journal only names the
+//! files and asks for them; the app renders them on its own thread from its chart data.
+//!
 //! [`Journal`] is pure: no I/O, no clock. It runs on its own thread ([`JournalShared`]): the
 //! trading thread only sends it messages ([`JournalObserver`]), and the UI reads a published
 //! snapshot (an `Arc` swapped in; no lock is held while formatting), so the journal never
@@ -118,7 +124,9 @@ pub struct Trade {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
-    /// Entry/exit chart screenshots (roadmap 8c phase 2).
+    /// Chart screenshots (roadmap 8c phase 2): the entry one (if the journal saw the trade
+    /// open), then the exit one. Named when asked for: a file can be missing if its rendering
+    /// failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub screenshots: Vec<PathBuf>,
     /// Opened before the journal saw it (seeded from a position after a restart): the entry
@@ -198,6 +206,53 @@ pub enum Record {
     Edit(Edit),
 }
 
+/// Which chart screenshot of a trade.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ShotKind {
+    /// As the trade opened: the chart up to its first fill.
+    Entry,
+    /// As it closed: the whole trade, every fill marked.
+    Exit,
+}
+
+impl ShotKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ShotKind::Entry => "entry",
+            ShotKind::Exit => "exit",
+        }
+    }
+}
+
+/// A chart screenshot to render now: the trade as it stands and the file to write.
+#[derive(Clone, Debug)]
+pub struct ShotRequest {
+    pub kind: ShotKind,
+    pub trade: Trade,
+    pub path: PathBuf,
+}
+
+/// A screenshot's file in `dir`: the trade id made safe for a file name (other characters
+/// become `_`, at most 60 kept) plus a hash of the whole id, so two ids never share a file.
+pub fn shot_path(dir: &std::path::Path, id: &str, kind: ShotKind) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(60)
+        .collect();
+    // FNV-1a: stable across builds and platforms (the name is saved).
+    let hash = id.bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
+    dir.join(format!("{safe}-{hash:08x}-{}.svg", kind.name()))
+}
+
 /// A trade in progress.
 #[derive(Clone, Debug)]
 struct Open {
@@ -243,6 +298,10 @@ pub struct Journal {
     /// Accounts whose trades take no MAE/MFE from market batches (a broker venue's accounts
     /// while the app's prices aren't that venue's market: a replay or the mock).
     unmarked: HashSet<AccountId>,
+    /// Where chart screenshots go (`None`: none are taken).
+    shots: Option<PathBuf>,
+    /// Screenshots asked for and not yet taken by [`Journal::take_shot_requests`].
+    shot_requests: Vec<ShotRequest>,
 }
 
 impl Journal {
@@ -267,6 +326,29 @@ impl Journal {
                 let _ = self.edit(e);
             }
         }
+    }
+
+    /// Name a screenshot of each trade from now on, in `dir` (see [`ShotRequest`]).
+    pub fn set_shots_dir(&mut self, dir: PathBuf) {
+        self.shots = Some(dir);
+    }
+
+    /// The screenshots asked for since the last call, oldest first.
+    pub fn take_shot_requests(&mut self) -> Vec<ShotRequest> {
+        std::mem::take(&mut self.shot_requests)
+    }
+
+    /// A free trade id: `base`, else `base#2`, `base#3`… (as [`Journal::push_closed`] names
+    /// a collision).
+    fn free_id(&self, base: &str) -> String {
+        if !self.by_id.contains_key(base) {
+            return base.to_owned();
+        }
+        let mut n = 2;
+        while self.by_id.contains_key(&format!("{base}#{n}")) {
+            n += 1;
+        }
+        format!("{base}#{n}")
     }
 
     /// Closed trades, in the order they closed.
@@ -303,14 +385,7 @@ impl Journal {
     /// Keep a closed trade. Ids are unique: a colliding one (two trades saved with one id)
     /// gets `#2`, `#3`… in file order, so edits keep applying to the first.
     fn push_closed(&mut self, mut t: Trade) {
-        if self.by_id.contains_key(&t.id) {
-            let base = t.id.clone();
-            let mut n = 2;
-            while self.by_id.contains_key(&format!("{base}#{n}")) {
-                n += 1;
-            }
-            t.id = format!("{base}#{n}");
-        }
+        t.id = self.free_id(&t.id);
         self.by_id.insert(t.id.clone(), self.closed.len());
         self.closed.push(t);
     }
@@ -319,6 +394,16 @@ impl Journal {
     fn close(&mut self, mut t: Trade) -> Trade {
         t.id = format!("{}@{}", t.id, t.entry_time.0);
         self.push_closed(t);
+        if let Some(dir) = &self.shots {
+            let t = self.closed.last_mut().expect("just pushed");
+            let path = shot_path(dir, &t.id, ShotKind::Exit);
+            t.screenshots.push(path.clone());
+            self.shot_requests.push(ShotRequest {
+                kind: ShotKind::Exit,
+                trade: t.clone(),
+                path,
+            });
+        }
         self.closed.last().cloned().expect("just pushed")
     }
 
@@ -507,6 +592,17 @@ impl Journal {
             spec: spec.clone(),
         };
         add_fill(&mut o, fill);
+        if let Some(dir) = &self.shots {
+            // Named by the id the trade will close with (`@` entry time; `#n` if taken now).
+            let id = self.free_id(&format!("{}@{}", o.trade.id, o.trade.entry_time.0));
+            let path = shot_path(dir, &id, ShotKind::Entry);
+            o.trade.screenshots.push(path.clone());
+            self.shot_requests.push(ShotRequest {
+                kind: ShotKind::Entry,
+                trade: o.trade.clone(),
+                path,
+            });
+        }
         self.open.insert(key, o);
     }
 
@@ -686,6 +782,16 @@ impl JournalShared {
     /// Start the journal thread with `journal` (loaded from its file) and its writer (`None`:
     /// in memory only).
     pub fn start(journal: Journal, writer: Option<store::JournalWriter>) -> Arc<JournalShared> {
+        JournalShared::start_with_shots(journal, writer, None)
+    }
+
+    /// [`JournalShared::start`], sending the screenshots the journal asks for (its folder set
+    /// with [`Journal::set_shots_dir`]) to `shots` as they come.
+    pub fn start_with_shots(
+        journal: Journal,
+        writer: Option<store::JournalWriter>,
+        shots: Option<Sender<ShotRequest>>,
+    ) -> Arc<JournalShared> {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(JournalShared {
             tx,
@@ -699,7 +805,7 @@ impl JournalShared {
         let s = Arc::downgrade(&shared);
         let spawned = thread::Builder::new()
             .name("lines-journal".into())
-            .spawn(move || run(journal, writer, rx, s));
+            .spawn(move || run(journal, writer, shots, rx, s));
         if let Err(e) = spawned {
             tracing::error!("journal thread failed to start: {e}");
         }
@@ -772,6 +878,7 @@ impl JournalShared {
 fn run(
     mut j: Journal,
     writer: Option<store::JournalWriter>,
+    shots: Option<Sender<ShotRequest>>,
     rx: Receiver<Msg>,
     shared: std::sync::Weak<JournalShared>,
 ) {
@@ -800,6 +907,11 @@ fn run(
                 }
                 if closed || j.open_trades().count() != open {
                     publish(&j);
+                }
+                for r in j.take_shot_requests() {
+                    if let Some(tx) = &shots {
+                        let _ = tx.send(r);
+                    }
                 }
             }
             Msg::Edit(e) => {
