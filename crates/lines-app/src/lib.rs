@@ -471,7 +471,8 @@ struct Cli {
     #[arg(long, requires = "screenshot")]
     study_set: Option<PathBuf>,
     /// Screenshot: render with the studies menu open: `open`, or `edit:vwap:N`,
-    /// `edit:profile`, `edit:levels:ID` for that study's editor.
+    /// `edit:average:N`, `edit:profile`, `edit:levels:ID` for that study's editor (N: the
+    /// index in the chart's indicator list).
     #[arg(long, requires = "screenshot")]
     studies_menu: Option<String>,
     /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
@@ -511,6 +512,12 @@ struct Cli {
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
     #[arg(long, value_parser = parse_vwap)]
     vwap: Vec<lines_indicators::VwapSpec>,
+    /// Add a moving average or Bollinger Bands to the first chart (repeatable, after any
+    /// --vwap): ema, sma or bollinger, then optional `:LENGTH`, `:SOURCE` (close open high low
+    /// hl2 hlc3 ohlc4) and, for bollinger, `:SIGMA`: ema:9, sma:50:hl2, bollinger:20:close:2.5.
+    /// Computed on the chart's bars (its timeframe). In the app, Ctrl+I.
+    #[arg(long, value_parser = parse_average)]
+    average: Vec<lines_indicators::IndicatorConfig>,
     /// The first chart's timeframe: 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w (a bare number is
     /// minutes; bars align to the product's session open), or bars built from counted trades
     /// (reset at each session open): tick `500t` (100t 233t 500t 1000t 2000t, any 1t to
@@ -601,6 +608,54 @@ where
 {
     let mut matches = command(ext).try_get_matches_from(args)?;
     Cli::from_arg_matches_mut(&mut matches)
+}
+
+fn parse_average(s: &str) -> Result<lines_indicators::IndicatorConfig, String> {
+    use lines_indicators::{AverageKind, IndicatorConfig, Sigma, Source};
+    let mut parts = s.split(':');
+    let kind = match parts.next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "ema" => AverageKind::Ema,
+        "sma" => AverageKind::Sma,
+        "bollinger" | "bb" => AverageKind::Bollinger,
+        k => return Err(format!("unknown average {k:?} (ema, sma, bollinger)")),
+    };
+    let mut c = IndicatorConfig::new_average(kind, 0);
+    if let Some(n) = parts.next() {
+        let n: u16 = n
+            .parse()
+            .ok()
+            .filter(|n| (1..=lines_indicators::average::MAX_LENGTH).contains(n))
+            .ok_or_else(|| format!("length is 1 to 1000 bars, not {n:?}"))?;
+        if let Some(p) = c.average_params_mut() {
+            p.length = n;
+        }
+    }
+    if let Some(src) = parts.next() {
+        let src = Source::ALL
+            .into_iter()
+            .find(|x| x.label().eq_ignore_ascii_case(src))
+            .ok_or_else(|| {
+                format!("unknown source {src:?} (close open high low hl2 hlc3 ohlc4)")
+            })?;
+        if let Some(p) = c.average_params_mut() {
+            p.source = src;
+        }
+    }
+    if let Some(sg) = parts.next() {
+        let v: f64 = sg
+            .parse()
+            .ok()
+            .filter(|v: &f64| (0.1..=5.0).contains(v))
+            .ok_or_else(|| format!("sigma is 0.1 to 5, not {sg:?}"))?;
+        match &mut c {
+            IndicatorConfig::Bollinger { sigma, .. } => *sigma = Sigma((v * 10.0).round() as u8),
+            _ => return Err("only bollinger takes a sigma".into()),
+        }
+    }
+    if parts.next().is_some() {
+        return Err(format!("too many parts in {s:?}"));
+    }
+    Ok(c)
 }
 
 fn parse_vwap(s: &str) -> Result<lines_indicators::VwapSpec, String> {
@@ -1056,6 +1111,14 @@ where
                     color: (i % 4) as u8,
                     display: Default::default(),
                 })
+                .chain(cli.average.iter().cloned())
+                .enumerate()
+                .map(|(i, mut c)| {
+                    if let Some(color) = c.color_mut() {
+                        *color = (i % 4) as u8;
+                    }
+                    c
+                })
                 .collect(),
             profile: ProfileConfig {
                 mode: match cli.profile {
@@ -1394,6 +1457,33 @@ mod tests {
     fn window_icon_decodes() {
         let icon = window_icon().expect("embedded PNG decodes");
         assert_eq!(icon.dimensions(), (256, 256));
+    }
+
+    #[test]
+    fn average_flags_parse() {
+        use lines_indicators::{AverageKind, Sigma, Source};
+        let a = parse_average("ema").unwrap().average().unwrap();
+        assert_eq!(
+            (a.kind, a.length, a.source),
+            (AverageKind::Ema, 20, Source::Close)
+        );
+        let a = parse_average("sma:50:hl2").unwrap().average().unwrap();
+        assert_eq!(
+            (a.kind, a.length, a.source),
+            (AverageKind::Sma, 50, Source::Hl2)
+        );
+        let a = parse_average("bollinger:20:close:2.5")
+            .unwrap()
+            .average()
+            .unwrap();
+        assert_eq!((a.kind, a.sigma), (AverageKind::Bollinger, Sigma(25)));
+        assert!(parse_average("wma").is_err());
+        assert!(parse_average("ema:0").is_err());
+        assert!(parse_average("ema:9:median").is_err());
+        assert!(
+            parse_average("ema:9:close:2").is_err(),
+            "sigma is for bollinger"
+        );
     }
 
     #[test]

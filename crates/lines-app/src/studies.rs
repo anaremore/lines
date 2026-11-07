@@ -1,5 +1,6 @@
-//! A chart pane's indicators (roadmap 5c): VWAPs from the shared indicator engine, drawn in the
-//! plot, and cumulative delta (roadmap 10e) drawn as candles in a sub-pane below it
+//! A chart pane's indicators (roadmap 5c): VWAPs and averages (SMA, EMA, Bollinger Bands,
+//! roadmap 10a: computed by the engine on this chart's bars) from the shared indicator engine,
+//! drawn in the plot, and cumulative delta (roadmap 10e) drawn as candles in a sub-pane below it
 //! (`crate::subpane`), with a legend.
 //!
 //! The pane owns a [`Studies`]: one [`IndicatorConfig`] per indicator (what the workspace
@@ -14,10 +15,16 @@
 use gpui::{
     AnyElement, IntoElement, ParentElement, PathBuilder, Pixels, Styled, Window, div, point, px,
 };
+use std::sync::{Arc, Weak};
+
 use lines_core::{BarsView, Product, Viewport};
-use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
-use lines_indicators::render::{Column, DeltaCandle, build_columns, build_delta_candles};
-use lines_indicators::{Bands, IndicatorConfig, Reset};
+use lines_feed::indicators::{FeedInfo, IndicatorHandle, TradeBarsSource, engine};
+use lines_feed::store::ChartStore;
+use lines_feed::ticks::TickKey;
+use lines_indicators::render::{
+    Column, DeltaCandle, build_bar_columns, build_columns, build_delta_candles,
+};
+use lines_indicators::{Bands, ChartBars, IndicatorConfig, Reset};
 
 use crate::subpane::Scale;
 use crate::theme::Theme;
@@ -39,6 +46,25 @@ struct Study {
 pub struct Studies {
     list: Vec<Study>,
     feed: Option<FeedInfo>,
+    /// The chart's bars (bar studies are computed on them) and the store that builds them.
+    bars: ChartBars,
+    store: Weak<ChartStore>,
+}
+
+/// How a line study is drawn: its bands, color index and display.
+fn line_style(c: &IndicatorConfig) -> Option<(Bands, u8, &lines_indicators::Display)> {
+    match c {
+        IndicatorConfig::Vwap {
+            spec,
+            color,
+            display,
+        } => Some((spec.bands, *color, display)),
+        IndicatorConfig::Sma { color, display, .. }
+        | IndicatorConfig::Ema { color, display, .. } => Some((Bands::NONE, *color, display)),
+        // The bands' own width (sigma) is in each point's `sd`: draw ±1 of it.
+        IndicatorConfig::Bollinger { color, display, .. } => Some((Bands(0b001), *color, display)),
+        IndicatorConfig::CumDelta { .. } => None,
+    }
 }
 
 fn bands_label(b: Bands) -> &'static str {
@@ -68,6 +94,8 @@ impl Studies {
                 })
                 .collect(),
             feed: None,
+            bars: ChartBars::default(),
+            store: Weak::new(),
         }
     }
 
@@ -76,14 +104,50 @@ impl Studies {
         self.list.iter().map(|s| s.config.clone()).collect()
     }
 
-    /// (Re)subscribe every shown study on `feed` (a new chart, or the chart switched symbol).
-    /// A hidden study holds no engine node: it is neither computed nor drawn until shown.
-    pub fn attach(&mut self, feed: FeedInfo) {
+    /// (Re)subscribe every shown study on `feed`, whose bars `store` holds (a new chart, or
+    /// the chart switched symbol). A hidden study holds no engine node: it is neither computed
+    /// nor drawn until shown.
+    pub fn attach(&mut self, feed: FeedInfo, store: &Arc<ChartStore>) {
         self.feed = Some(feed);
-        for s in &mut self.list {
-            let hidden = s.config.display().hidden;
-            s.handle = (!hidden).then(|| engine().acquire(feed, s.config.spec(feed.period_ms)));
+        self.store = Arc::downgrade(store);
+        for i in 0..self.list.len() {
+            self.acquire(i);
         }
+    }
+
+    /// The chart now shows `bars` (a timeframe or tick-reset change): studies computed on the
+    /// chart's bars follow; VWAP and cumulative delta keep their nodes.
+    pub fn set_bars(&mut self, bars: ChartBars) {
+        if bars == self.bars {
+            return;
+        }
+        self.bars = bars;
+        for i in 0..self.list.len() {
+            if self.list[i].config.on_chart_bars() {
+                self.acquire(i);
+            }
+        }
+    }
+
+    fn acquire(&mut self, i: usize) {
+        let (Some(feed), bars) = (self.feed, self.bars) else {
+            return;
+        };
+        let source = self.store.upgrade().and_then(|store| {
+            let kind = bars.tf.bar_kind()?;
+            Some(TradeBarsSource::new(
+                &store,
+                TickKey {
+                    kind,
+                    reset: bars.reset,
+                },
+            ))
+        });
+        let s = &mut self.list[i];
+        s.handle = None; // let go of the old node first
+        s.columns.clear();
+        s.handle = (!s.config.display().hidden)
+            .then(|| engine().acquire_on(feed, s.config.spec(feed.period_ms, bars), source));
     }
 
     /// Sum of the studies' output revisions: changes when any study has new values.
@@ -123,6 +187,13 @@ impl Studies {
                     build_columns(&out.points, bars, vp, spec.bands, &mut s.columns);
                     s.approx = out.points.last().is_some_and(|p| p.approx);
                 }
+                IndicatorConfig::Sma { .. }
+                | IndicatorConfig::Ema { .. }
+                | IndicatorConfig::Bollinger { .. } => {
+                    let bands = line_style(&s.config).map_or(Bands::NONE, |l| l.0);
+                    build_bar_columns(&out.points, bars, vp, bands, &mut s.columns);
+                    s.approx = false;
+                }
                 IndicatorConfig::CumDelta { .. } => {
                     let range = vp.visible_range(bars.len());
                     s.extent = build_delta_candles(&out.candles, bars, range, &mut s.candles);
@@ -148,14 +219,10 @@ impl Studies {
         let (ox, oy) = (origin.0, origin.1);
         let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
         for s in &self.list {
-            let IndicatorConfig::Vwap {
-                spec,
-                color,
-                display,
-            } = &s.config
-            else {
+            let Some((bands, color, display)) = line_style(&s.config) else {
                 continue; // sub-pane studies paint in `paint_subpane`
             };
+            let edges = matches!(s.config, IndicatorConfig::Bollinger { .. });
             if display.hidden {
                 continue;
             }
@@ -164,7 +231,7 @@ impl Studies {
                 3 => 2.5,
                 _ => 1.75,
             });
-            let base = theme.study[*color as usize % theme.study.len()];
+            let base = theme.study[color as usize % theme.study.len()];
             let cols = &s.columns;
             // Runs of columns that continue one another (same period, adjacent bars, same
             // exactness): each run is one path.
@@ -190,7 +257,7 @@ impl Studies {
                 let col = |i: usize| &pts[i.min(pts.len() - 1)];
                 // Bands: widest first, translucent, nested.
                 for k in (1..=3u8).rev() {
-                    if !spec.bands.has(k) {
+                    if !bands.has(k) {
                         continue;
                     }
                     let kk = k as usize - 1;
@@ -205,6 +272,21 @@ impl Studies {
                     b.close();
                     if let Ok(path) = b.build() {
                         window.paint_path(path, base.opacity(0.06));
+                    }
+                    // Bollinger Bands: the band edges are lines too (thin, fainter than the
+                    // middle line).
+                    if edges {
+                        for upper in [true, false] {
+                            let edge = |c: &Column| if upper { c.up[kk] } else { c.down[kk] };
+                            let mut b = PathBuilder::stroke(px(1.0));
+                            b.move_to(at(xs(0, col(0)), edge(col(0))));
+                            for i in 1..n {
+                                b.line_to(at(xs(i, col(i)), edge(col(i))));
+                            }
+                            if let Ok(path) = b.build() {
+                                window.paint_path(path, base.opacity(0.7));
+                            }
+                        }
                     }
                 }
                 // The line. Approximate values (from bars) are fainter; the legend says so.
@@ -399,6 +481,21 @@ impl Studies {
             .bg(theme.label_bg)
             .text_size(px(12.0));
         for s in self.list.iter().filter(shown) {
+            if let (Some(avg), Some(color)) = (s.config.average(), s.config.color()) {
+                let c = theme.study[color as usize % theme.study.len()];
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(12.0)).h(px(3.0)).bg(c))
+                    .child(div().text_color(c).child(avg.label()));
+                if let Some(e) = &s.error {
+                    row = row.child(div().text_color(theme.text_main).child(e.clone()));
+                }
+                col = col.child(row);
+                continue;
+            }
             let IndicatorConfig::Vwap { spec, color, .. } = &s.config else {
                 continue;
             };

@@ -127,6 +127,9 @@ fn menu_lists_studies_catalog_and_templates() {
             "+ VWAP · weekly",
             "+ VWAP · monthly",
             "+ Anchored VWAP (click a bar)",
+            "+ Moving average · EMA 20",
+            "+ Moving average · SMA 20",
+            "+ Bollinger Bands · 20, 2σ",
             "+ Cumulative delta · ETH session",
             "+ Cumulative delta · RTH session",
             "+ Cumulative delta · no reset",
@@ -437,4 +440,72 @@ fn a_closed_menu_reopens_with_its_draft() {
     assert_eq!(l[2], "  Reset: ETH *", "the editor is open again");
     // Once reopened the draft is used up: closing a finished menu starts fresh next time.
     assert_eq!(draft, None);
+}
+
+/// Roadmap 10a: EMA, SMA and Bollinger Bands are in the Add list, listed with their
+/// parameters, edited (length, source, σ, color, line, label), hidden and removed through
+/// `StudyAction`s, and saved in the set as optional fields.
+#[test]
+fn averages_are_studies() {
+    use lines_indicators::{AverageKind, IndicatorConfig, Sigma, Source};
+    let src = sources();
+    let mut set = StudySet::default();
+    let items = StudyMenu::default().items(&input(&set, &src, &[]));
+    let l = labels(&items);
+    for want in [
+        "+ Moving average · EMA 20",
+        "+ Moving average · SMA 20",
+        "+ Bollinger Bands · 20, 2σ",
+    ] {
+        assert!(l.contains(&want.to_owned()), "{l:?}");
+    }
+    set.apply(&StudyAction::AddVwap(Reset::Eth));
+    set.apply(&StudyAction::AddAverage(AverageKind::Ema));
+    set.apply(&StudyAction::AddAverage(AverageKind::Bollinger));
+    // Colors continue after the VWAP's.
+    assert_eq!(set.indicators[1].color(), Some(1));
+    assert_eq!(set.indicators[2].color(), Some(2));
+    set.apply(&StudyAction::SetLength(1, 9));
+    set.apply(&StudyAction::SetSource(2, Source::Hlc3));
+    set.apply(&StudyAction::SetSigma(2, Sigma(25)));
+    set.apply(&StudyAction::SetSigma(1, Sigma(25))); // not Bollinger: ignored
+    set.apply(&StudyAction::SetColor(1, 3));
+    set.apply(&StudyAction::SetWidth(1, 3));
+    set.apply(&StudyAction::SetLength(1, 0)); // clamped, never a 0-bar window
+    assert_eq!(set.indicators[1].average().unwrap().length, 1);
+    set.apply(&StudyAction::SetLength(1, 9));
+    let menu = StudyMenu {
+        editing: Some(StudyRef::Average(2)),
+        ..StudyMenu::default()
+    };
+    let l = labels(&menu.items(&input(&set, &src, &[])));
+    assert!(l.contains(&"EMA 9".to_owned()), "{l:?}");
+    assert!(l.contains(&"Bollinger 20 HLC3 2.5σ".to_owned()), "{l:?}");
+    for want in [
+        "  Length: 20 *",
+        "  Source: HLC3 *",
+        "  Width (σ): 2.5σ *",
+        "  Color: 3 *",
+        "  Line: Normal *",
+        "  Label: Show in legend *",
+    ] {
+        assert!(l.contains(&want.to_owned()), "{want}: {l:?}");
+    }
+    let ema = &set.indicators[1];
+    assert_eq!(ema.color(), Some(3));
+    assert_eq!(ema.display().width, 3);
+    // Hide and show; the configuration stays.
+    set.apply(&StudyAction::ToggleHidden(StudyRef::Average(1)));
+    assert!(set.indicators[1].display().hidden);
+    let l = labels(&StudyMenu::default().items(&input(&set, &src, &[])));
+    assert!(l.contains(&"EMA 9 [hidden]".to_owned()), "{l:?}");
+    set.apply(&StudyAction::ToggleHidden(StudyRef::Average(1)));
+    // Saved and restored with the set.
+    let json = serde_json::to_string(&set).unwrap();
+    assert!(json.contains(r#""kind":"ema","length":9"#), "{json}");
+    let back: StudySet = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, set);
+    // Removed.
+    set.apply(&StudyAction::Remove(StudyRef::Average(1)));
+    assert!(matches!(set.indicators[1], IndicatorConfig::Bollinger { .. }));
 }

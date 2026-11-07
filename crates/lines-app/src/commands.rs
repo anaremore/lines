@@ -107,6 +107,9 @@ pub enum Command {
     JournalAllDates,
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
     Studies,
+    /// Add a moving average or Bollinger Bands to the focused chart (palette only; the
+    /// studies menu's Add list has the same).
+    AddAverage(lines_indicators::AverageKind),
     /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
     Trade(TradeCmd),
     /// The app-wide P&L display: the next mode (off, ticks, currency, both).
@@ -583,6 +586,13 @@ pub fn label(c: Command) -> String {
         }
         Command::Timeframe(tf) => format!("Timeframe: {tf}"),
         Command::TimeframeMenu => "Chart: timeframe…".into(),
+        Command::AddAverage(k) => {
+            let label = crate::study_menu::AVERAGES
+                .iter()
+                .find(|(_, x)| *x == k)
+                .map_or("", |(l, _)| l);
+            format!("Chart: add study: {label}")
+        }
         Command::TickBarsContinuous => {
             "Chart: tick, volume, range and seconds bars run continuously, no session reset \
              (on/off)"
@@ -675,6 +685,9 @@ pub fn palette() -> Vec<Command> {
         Command::JournalEdit,
         Command::JournalAllDates,
         Command::Studies,
+        Command::AddAverage(lines_indicators::AverageKind::Ema),
+        Command::AddAverage(lines_indicators::AverageKind::Sma),
+        Command::AddAverage(lines_indicators::AverageKind::Bollinger),
         Command::TimeframeMenu,
         Command::TickBarsContinuous,
         Command::SaveAs,

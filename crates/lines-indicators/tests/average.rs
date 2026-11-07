@@ -9,8 +9,8 @@ use lines_core::{
 };
 use lines_indicators::graph::make_builtin;
 use lines_indicators::{
-    Average, AverageKind, AverageSpec, BarsOut, ChartBars, Graph, Input, Output, Point,
-    SeriesKey, Sigma, Source, Spec,
+    Average, AverageKind, AverageSpec, BarsOut, ChartBars, Graph, Input, Output, Point, SeriesKey,
+    Sigma, Source, Spec,
 };
 
 const MIN: i64 = 60_000;
@@ -167,7 +167,10 @@ fn a_higher_timeframe_is_derived_and_breaks_at_the_session_close() {
         series.upsert(b);
     }
     chart.update(&series, Some(r.cal));
-    assert_eq!(r.points(ema), direct(avg(AverageKind::Ema, 3), chart.bars()));
+    assert_eq!(
+        r.points(ema),
+        direct(avg(AverageKind::Ema, 3), chart.bars())
+    );
 }
 
 /// A contract change starts the bars and the averages over.
@@ -235,9 +238,16 @@ fn trade_built_bars_from_outside() {
         }
         assert_eq!(syncs, trades.len(), "{kind:?}: every trade changes a bar");
         assert!(tb.len() > 4, "{kind:?}");
-        assert!((0..tb.len()).any(|i| i > 0 && tb.starts_session(i)), "{kind:?}");
+        assert!(
+            (0..tb.len()).any(|i| i > 0 && tb.starts_session(i)),
+            "{kind:?}"
+        );
         for (k, id) in KINDS.iter().zip(&ids) {
-            assert_eq!(r.points(*id), direct(avg(*k, 4), tb.bars()), "{kind:?} {k:?}");
+            assert_eq!(
+                r.points(*id),
+                direct(avg(*k, 4), tb.bars()),
+                "{kind:?} {k:?}"
+            );
         }
         // Nothing new: nothing to do.
         assert_eq!(r.g.sync_bars(bars_id, tb.bars(), tb.trimmed()), None);

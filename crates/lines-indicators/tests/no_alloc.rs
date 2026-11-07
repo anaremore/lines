@@ -201,7 +201,11 @@ fn bar_study_columns_do_not_allocate() {
         build_bar_columns(&points, view, &vp, Bands(0b001), &mut out);
         drawn += out.len();
     }
-    assert_eq!(ALLOCS.with(|c| c.get()) - before, 0, "bar study geometry allocated");
+    assert_eq!(
+        ALLOCS.with(|c| c.get()) - before,
+        0,
+        "bar study geometry allocated"
+    );
     assert!(drawn > 0);
     // Each column is its own bar's point (bars i and i + 1 share a time, values differ).
     vp.right_index = 40.0;

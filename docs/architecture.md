@@ -42,6 +42,7 @@ cargo test --release -p lines-app --lib -- --ignored dom_click_latency_budget --
 #   Enter on a chart, or the header chip.
 #   --tick-continuous: tick, volume, range and seconds bars run across sessions (no reset at the session open; a saved mode wins).
 # VWAP: --vwap eth|rth|week|month|anchor@TIME, optional bands after a slash ("eth/1,2,3", quoted in PowerShell); repeatable; first chart; also in screenshots. Ctrl+I in the app.
+# Averages: --average ema|sma|bollinger[:LENGTH[:SOURCE[:SIGMA]]] (ema:9, sma:50:hl2, bollinger:20:close:2.5); repeatable; first chart, on its bars; also in screenshots. Ctrl+I in the app.
 LINES_SIERRA_DATA="C:\SierraChart\SierraChart - Apex\Data" cargo test -p lines-sierra -- --ignored   # real Sierra data, ~1 min
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # includes screenshot + vendor-cqg
@@ -127,7 +128,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 #   the lint's findings beside the PNG as <stem>.lint.txt.
 # Header dropdowns open (screenshots): --timeframe-menu (the first chart's timeframe list), --account-menu (every
 #   chart's and DOM's account list; needs an account chip, i.e. trading running, as in screenshot mode).
-# Studies menu (screenshots): --studies-menu open | edit:vwap:N | edit:profile | edit:levels:ID; --study-set FILE (a StudySet JSON).
+# Studies menu (screenshots): --studies-menu open | edit:vwap:N | edit:average:N | edit:profile | edit:levels:ID; --study-set FILE (a StudySet JSON).
 # Paper trading evidence (in-memory core, manual clock): --paper "account paper-eval; buy 2 mkt; ack; buy 1 @ 5807.00;
 #   buy 1 @ 5808.00 bracket 4/8; ack; buy 1 @ 5806.50" (orders after the last `ack` stay pending), --enable-trading (DOMs start with trading enabled; `--arm` is the old name). --pnl off|ticks|currency|both.
 #   --bracket-units ticks|points (every account), --bracket-editor (DOMs open their bracket-preset editor), --hover-header (the focused pane's header controls show as if hovered).

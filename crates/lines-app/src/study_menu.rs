@@ -1,6 +1,6 @@
 //! The studies menu (Ctrl+I, the chart's "Studies…", the palette): one place for everything
-//! drawn on a chart: VWAPs, cumulative delta, the footprint, the volume profile and external
-//! level sources. Pure (no GPUI):
+//! drawn on a chart: VWAPs, moving averages (SMA, EMA) and Bollinger Bands, cumulative delta,
+//! the footprint, the volume profile and external level sources. Pure (no GPUI):
 //! the chart renders [`StudyMenu::items`] and feeds keys and clicks back as [`MenuCmd`]s.
 //!
 //! - **On this chart:** each study with a hide toggle (eye) and an editor (gear). The editor
@@ -14,7 +14,9 @@
 //! [`StudySet::apply`] (pure), so menus, keys and tests share one path.
 
 use lines_core::{Bar, Viewport};
-use lines_indicators::{Bands, DeltaReset, DeltaSpec, IndicatorConfig, Reset, VwapSpec};
+use lines_indicators::{
+    AverageKind, Bands, DeltaReset, DeltaSpec, IndicatorConfig, Reset, Sigma, Source, VwapSpec,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::footprint::{FootprintConfig, FootprintMode};
@@ -49,6 +51,8 @@ pub enum StudyRef {
     Vwap(usize),
     /// Cumulative delta at this index of the indicators.
     Delta(usize),
+    /// An SMA, EMA or Bollinger Bands at this index of the indicators.
+    Average(usize),
     Footprint,
     Profile,
     Levels(String),
@@ -58,6 +62,11 @@ pub enum StudyRef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StudyAction {
     AddVwap(Reset),
+    /// A new SMA, EMA or Bollinger Bands (20 bars of closes; 2σ).
+    AddAverage(AverageKind),
+    SetLength(usize, u16),
+    SetSource(usize, Source),
+    SetSigma(usize, Sigma),
     /// Anchor VWAP `index` (or a new one) at a bar's start time (ms).
     AnchorAt {
         index: Option<usize>,
@@ -92,10 +101,7 @@ fn next_color(set: &StudySet) -> u8 {
     let used: Vec<u8> = set
         .indicators
         .iter()
-        .filter_map(|c| match c {
-            IndicatorConfig::Vwap { color, .. } => Some(*color),
-            IndicatorConfig::CumDelta { .. } => None,
-        })
+        .filter_map(IndicatorConfig::color)
         .collect();
     (0..4u8).find(|c| !used.contains(c)).unwrap_or(0)
 }
@@ -111,14 +117,14 @@ impl StudySet {
                 color,
                 display,
             } => Some((spec, color, display)),
-            IndicatorConfig::CumDelta { .. } => None,
+            _ => None,
         }
     }
 
     fn delta(&mut self, i: usize) -> Option<&mut DeltaSpec> {
         match self.indicators.get_mut(i)? {
             IndicatorConfig::CumDelta { spec, .. } => Some(spec),
-            IndicatorConfig::Vwap { .. } => None,
+            _ => None,
         }
     }
 
@@ -135,6 +141,35 @@ impl StudySet {
                     color,
                     display: Default::default(),
                 });
+            }
+            StudyAction::AddAverage(kind) => {
+                let color = next_color(self);
+                self.indicators
+                    .push(IndicatorConfig::new_average(*kind, color));
+            }
+            StudyAction::SetLength(i, n) => {
+                if let Some(p) = self
+                    .indicators
+                    .get_mut(*i)
+                    .and_then(|c| c.average_params_mut())
+                {
+                    p.length = (*n).clamp(1, lines_indicators::average::MAX_LENGTH);
+                }
+            }
+            StudyAction::SetSource(i, src) => {
+                if let Some(p) = self
+                    .indicators
+                    .get_mut(*i)
+                    .and_then(|c| c.average_params_mut())
+                {
+                    p.source = *src;
+                }
+            }
+            StudyAction::SetSigma(i, sg) => {
+                if let Some(IndicatorConfig::Bollinger { sigma, .. }) = self.indicators.get_mut(*i)
+                {
+                    *sigma = Sigma(sg.0.clamp(1, 50));
+                }
             }
             StudyAction::AnchorAt { index, from } => {
                 let reset = Reset::Anchored { from: *from };
@@ -172,7 +207,7 @@ impl StudySet {
             StudyAction::SetImbalanceMin(m) => self.footprint.imbalance_min = (*m).max(1),
             StudyAction::SetFootprintGrouping(g) => self.footprint.grouping = *g,
             StudyAction::ToggleHidden(r) => match r {
-                StudyRef::Vwap(i) | StudyRef::Delta(i) => {
+                StudyRef::Vwap(i) | StudyRef::Delta(i) | StudyRef::Average(i) => {
                     if let Some(c) = self.indicators.get_mut(*i) {
                         let d = c.display_mut();
                         d.hidden = !d.hidden;
@@ -183,7 +218,7 @@ impl StudySet {
                 StudyRef::Levels(id) => self.levels.toggle_source(id),
             },
             StudyAction::Remove(r) => match r {
-                StudyRef::Vwap(i) | StudyRef::Delta(i) => {
+                StudyRef::Vwap(i) | StudyRef::Delta(i) | StudyRef::Average(i) => {
                     if *i < self.indicators.len() {
                         self.indicators.remove(*i);
                     }
@@ -216,13 +251,15 @@ impl StudySet {
                 }
             }
             StudyAction::SetColor(i, c) => {
-                if let Some((_, color, _)) = self.vwap(*i) {
+                if let Some(color) = self.indicators.get_mut(*i).and_then(|x| x.color_mut()) {
                     *color = *c % 4;
                 }
             }
             StudyAction::SetWidth(i, w) => {
-                if let Some((.., d)) = self.vwap(*i) {
-                    d.width = (*w).clamp(1, 3);
+                if let Some(x) = self.indicators.get_mut(*i)
+                    && x.color().is_some()
+                {
+                    x.display_mut().width = (*w).clamp(1, 3);
                 }
             }
             StudyAction::ToggleLabel(i) => {
@@ -376,6 +413,9 @@ fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
         "Anchored VWAP (click a bar)".into(),
         MenuCmd::BeginAnchor(None),
     ));
+    for (label, kind) in AVERAGES {
+        v.push((label.into(), set(StudyAction::AddAverage(kind))));
+    }
     if !input.set.indicators.iter().any(|c| c.in_subpane()) {
         v.push((
             "Cumulative delta · ETH session".into(),
@@ -427,6 +467,18 @@ fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
     v
 }
 
+/// The averages in the Add catalog (the palette offers the same).
+pub const AVERAGES: [(&str, AverageKind); 3] = [
+    ("Moving average · EMA 20", AverageKind::Ema),
+    ("Moving average · SMA 20", AverageKind::Sma),
+    ("Bollinger Bands · 20, 2σ", AverageKind::Bollinger),
+];
+
+/// Lengths offered in an average's editor.
+const LENGTHS: [u16; 8] = [5, 9, 10, 20, 21, 50, 100, 200];
+/// Band widths offered for Bollinger Bands (tenths of σ).
+const SIGMAS: [u8; 4] = [15, 20, 25, 30];
+
 /// Every word of `query` appears in `label` (case-insensitive), as the picker filters.
 fn matches(query: &str, label: &str) -> bool {
     let l = label.to_lowercase();
@@ -470,6 +522,69 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             c(
                 "Label",
                 "Show title".into(),
+                display.label,
+                Swatch::None,
+                set(StudyAction::ToggleLabel(i)),
+            );
+        }
+        StudyRef::Average(i) => {
+            let Some(cfg) = input.set.indicators.get(*i) else {
+                return;
+            };
+            let (Some(avg), Some(color)) = (cfg.average(), cfg.color()) else {
+                return;
+            };
+            let (i, display) = (*i, cfg.display());
+            for n in LENGTHS {
+                c(
+                    "Length",
+                    format!("{n}"),
+                    avg.length == n,
+                    Swatch::None,
+                    set(StudyAction::SetLength(i, n)),
+                );
+            }
+            for src in Source::ALL {
+                c(
+                    "Source",
+                    src.label().into(),
+                    avg.source == src,
+                    Swatch::None,
+                    set(StudyAction::SetSource(i, src)),
+                );
+            }
+            if avg.kind == AverageKind::Bollinger {
+                for sg in SIGMAS {
+                    c(
+                        "Width (σ)",
+                        Sigma(sg).to_string(),
+                        avg.sigma == Sigma(sg),
+                        Swatch::None,
+                        set(StudyAction::SetSigma(i, Sigma(sg))),
+                    );
+                }
+            }
+            for k in 0..4u8 {
+                c(
+                    "Color",
+                    format!("{}", k + 1),
+                    color == k,
+                    Swatch::Study(k),
+                    set(StudyAction::SetColor(i, k)),
+                );
+            }
+            for (w, name) in [(1u8, "Thin"), (2, "Normal"), (3, "Thick")] {
+                c(
+                    "Line",
+                    name.into(),
+                    display.width == w,
+                    Swatch::None,
+                    set(StudyAction::SetWidth(i, w)),
+                );
+            }
+            c(
+                "Label",
+                "Show in legend".into(),
                 display.label,
                 Swatch::None,
                 set(StudyAction::ToggleLabel(i)),
@@ -689,6 +804,14 @@ impl StudyMenu {
                     format!("Cumulative delta · {}", spec.reset.label()),
                     Swatch::None,
                     display.hidden,
+                )),
+                IndicatorConfig::Sma { .. }
+                | IndicatorConfig::Ema { .. }
+                | IndicatorConfig::Bollinger { .. } => studies.push((
+                    StudyRef::Average(i),
+                    c.average().map_or_else(String::new, |a| a.label()),
+                    Swatch::Study(c.color().unwrap_or(0)),
+                    c.display().hidden,
                 )),
             }
         }

@@ -1273,6 +1273,13 @@ impl WindowView {
                     chart.update(cx, |c, cx| c.toggle_studies_menu(cx));
                 }
             }
+            Command::AddAverage(kind) => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| {
+                        c.apply_study(&crate::study_menu::StudyAction::AddAverage(kind), cx)
+                    });
+                }
+            }
             // Per chart: linked charts keep their own timeframes (links share the market).
             Command::Timeframe(tf) => {
                 if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {

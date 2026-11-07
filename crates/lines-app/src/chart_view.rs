@@ -468,7 +468,7 @@ impl ChartView {
         // view's current store, which changes when the picker switches symbols.
         pane::watch_store(cx);
         let mut studies = crate::studies::Studies::new(fixture.indicators.clone());
-        studies.attach(feed_info(&store));
+        studies.attach(feed_info(&store), &store);
         let mut levels = LevelsLayer::new(LevelsConfig::default());
         levels.attach(&store);
         let (fixture_studies, fixture_menu) =
@@ -633,6 +633,14 @@ impl ChartView {
         self.seen_studies = u64::MAX;
     }
 
+    /// One change to this chart's studies from outside the menu (the palette).
+    pub fn apply_study(&mut self, a: &StudyAction, cx: &mut Context<Self>) {
+        let mut s = self.study_set();
+        s.apply(a);
+        self.set_study_set(s);
+        cx.notify();
+    }
+
     /// A new chart (not restored from a workspace file): the saved defaults, if any.
     pub fn apply_new_chart_defaults(&mut self, cx: &mut Context<Self>) {
         let s = crate::picker_view::settings(cx);
@@ -728,6 +736,7 @@ impl ChartView {
     fn open_menu_at(&mut self, spec: &str, cx: &mut Context<Self>) {
         let editing = match spec.split(':').collect::<Vec<_>>().as_slice() {
             ["edit", "vwap", i] => i.parse().ok().map(StudyRef::Vwap),
+            ["edit", "average", i] => i.parse().ok().map(StudyRef::Average),
             ["edit", "profile"] => Some(StudyRef::Profile),
             ["edit", "levels", id] => Some(StudyRef::Levels((*id).to_owned())),
             _ => None,
@@ -1261,7 +1270,7 @@ impl ChartView {
     fn apply_feed(&mut self, feed: PaneFeed) {
         self.store = feed.store().clone();
         // The same indicators on the new feed (new shared nodes).
-        self.studies.attach(feed_info(&self.store));
+        self.studies.attach(feed_info(&self.store), &self.store);
         self.levels.attach(&self.store);
         self.seen_levels = u64::MAX;
         self.feed = feed;
@@ -1318,6 +1327,7 @@ impl ChartView {
         let capacity = self.store.read().series.capacity();
         self.derived = (tf.source() == BarSource::OneMinute && !tf.is_one_minute())
             .then(|| Derived::new(tf, capacity));
+        self.studies.set_bars(self.chart_bars());
         // Indices change: re-baseline the trim count on the next paint.
         self.series_trimmed = u64::MAX;
         // Time labels are cached by bar time; their text depends on the timeframe.
@@ -1325,6 +1335,11 @@ impl ChartView {
         self.readout = None;
         self.cross = None;
         self.cross_bar = None;
+    }
+
+    /// The bars this chart shows, as bar studies (averages) are computed on them.
+    fn chart_bars(&self) -> lines_indicators::ChartBars {
+        lines_indicators::ChartBars::new(self.timeframe, self.tick_reset)
     }
 
     /// The store's tick-bar series this chart shows, if it is on a tick timeframe.
@@ -1370,6 +1385,7 @@ impl ChartView {
         }
         self.ticks = None;
         self.ticks = want.map(|k| self.store.acquire_ticks(k));
+        self.studies.set_bars(self.chart_bars());
         self.series_trimmed = u64::MAX;
         self.readout = None;
         self.cross = None;
@@ -1623,7 +1639,8 @@ impl ChartView {
     /// Replace this chart's indicators.
     pub fn set_indicator_configs(&mut self, configs: Vec<lines_indicators::IndicatorConfig>) {
         self.studies = crate::studies::Studies::new(configs);
-        self.studies.attach(feed_info(&self.store));
+        self.studies.set_bars(self.chart_bars());
+        self.studies.attach(feed_info(&self.store), &self.store);
         self.seen_studies = u64::MAX;
     }
 

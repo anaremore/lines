@@ -83,7 +83,11 @@ impl TimeBars {
         cal: Option<&'static SessionCalendar>,
         capacity: usize,
     ) -> TimeBars {
-        debug_assert_eq!(tf.source(), BarSource::OneMinute, "{tf} is built from trades");
+        debug_assert_eq!(
+            tf.source(),
+            BarSource::OneMinute,
+            "{tf} is built from trades"
+        );
         TimeBars {
             period_ms,
             tf,
@@ -173,8 +177,8 @@ impl ExternalBars {
         self.bars.drain(..k);
         self.trimmed = trimmed;
         let from = self.bars.len().saturating_sub(1);
-        let first = (from..self.bars.len().max(src.len()))
-            .find(|&i| self.bars.get(i) != src.get(i))?;
+        let first =
+            (from..self.bars.len().max(src.len())).find(|&i| self.bars.get(i) != src.get(i))?;
         self.bars.truncate(first);
         self.bars.extend_from_slice(&src[first.min(src.len())..]);
         self.syncs += 1;

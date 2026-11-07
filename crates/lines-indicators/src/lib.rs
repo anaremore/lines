@@ -344,7 +344,10 @@ mod tests {
         let bad: IndicatorConfig = serde_json::from_str(r#"{"kind":"ema","length":0}"#).unwrap();
         assert_eq!(bad.average().unwrap().length, 1);
         // Bar studies follow the chart's bars.
-        let tf = ChartBars::new(lines_core::Timeframe::Ticks(500), lines_core::TickReset::Session);
+        let tf = ChartBars::new(
+            lines_core::Timeframe::Ticks(500),
+            lines_core::TickReset::Session,
+        );
         assert!(matches!(ema.spec(60_000, tf), Spec::Average { bars, .. } if bars == tf));
         assert!(ema.on_chart_bars());
     }

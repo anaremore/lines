@@ -12,19 +12,48 @@
 //!   handle releases it. A feed's base series lives as long as its chart store (a finished
 //!   replay stays on screen and can still get indicators).
 //! - **Deterministic**: the engine processes each feed's batches in feed order.
+//! - **Trade-built bars** (tick, volume, range, seconds): bar studies on them read the bars the
+//!   chart's store builds (the engine keeps sums, not trades, so it can't rebuild them). A
+//!   consumer passes a [`TradeBarsSource`]; the engine copies what changed into the shared bars
+//!   node after each batch of that feed, every [`BARS_POLL`] while idle (a rebuild lands
+//!   without new trades), and before answering [`Engine::sync`]. Only the copy holds the
+//!   store's lock; the studies compute after it is released.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, OnceLock};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
 
 use lines_core::{ProductId, UtcMillis};
 use lines_indicators::graph::{SeriesKey, Spec, make_builtin};
-use lines_indicators::{FeedId, Graph, Input, Output, Point};
+use lines_indicators::{ChartBars, FeedId, Graph, Input, Output, Point};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::connection::EventSink;
 use crate::provider::MarketEvent;
+use crate::store::ChartStore;
+use crate::ticks::TickKey;
+
+/// How often the engine copies trade-built bars while no batch arrives.
+pub const BARS_POLL: Duration = Duration::from_millis(250);
+
+/// Where a bar study on trade-built bars reads them: a chart store's tick builder. Weak: the
+/// engine never keeps a store alive.
+#[derive(Clone, Debug)]
+pub struct TradeBarsSource {
+    store: Weak<ChartStore>,
+    key: TickKey,
+}
+
+impl TradeBarsSource {
+    pub fn new(store: &Arc<ChartStore>, key: TickKey) -> TradeBarsSource {
+        TradeBarsSource {
+            store: Arc::downgrade(store),
+            key,
+        }
+    }
+}
 
 /// What a consumer reads.
 #[derive(Debug, Default)]
@@ -70,7 +99,7 @@ impl OutputCell {
             match out {
                 Output::Line(points) => sync(&mut d.points, points, first),
                 Output::Candles(c) => sync(&mut d.candles, c, first),
-                Output::Market(_) => return,
+                Output::Market(_) | Output::Bars(_) => return,
             }
         }
         self.revision.fetch_add(1, Ordering::Release);
@@ -90,7 +119,7 @@ enum Msg {
     FeedStart(FeedInfo),
     FeedEnd(FeedId),
     Events(FeedId, Vec<Input>),
-    Acquire(FeedInfo, Spec, Arc<OutputCell>),
+    Acquire(FeedInfo, Spec, Arc<OutputCell>, Option<TradeBarsSource>),
     Release(FeedId, Spec, Arc<OutputCell>),
     Sync(Sender<()>),
 }
@@ -133,8 +162,19 @@ impl Engine {
     /// Ask for a series on a feed. Returns at once; the handle's cell fills (or reports an
     /// error) shortly after, from the engine thread.
     pub fn acquire(&self, info: FeedInfo, spec: Spec) -> IndicatorHandle {
+        self.acquire_on(info, spec, None)
+    }
+
+    /// As [`Engine::acquire`], for a bar study on trade-built bars: `bars` is where they are
+    /// built (ignored for other specs).
+    pub fn acquire_on(
+        &self,
+        info: FeedInfo,
+        spec: Spec,
+        bars: Option<TradeBarsSource>,
+    ) -> IndicatorHandle {
         let cell = Arc::new(OutputCell::default());
-        self.send(Msg::Acquire(info, spec.clone(), cell.clone()));
+        self.send(Msg::Acquire(info, spec.clone(), cell.clone(), bars));
         IndicatorHandle {
             feed: info.feed,
             spec,
@@ -315,6 +355,18 @@ struct State {
     feeds: HashMap<FeedId, (FeedInfo, usize)>,
     /// Consumers' cells per node.
     cells: HashMap<usize, Vec<Arc<OutputCell>>>,
+    /// Trade-built bars nodes the engine copies from a store, with the references it holds.
+    sources: HashMap<usize, (TradeBarsSource, u32)>,
+}
+
+/// The trade-built bars a spec reads, if any.
+fn trade_bars(spec: &Spec) -> Option<(i64, ChartBars)> {
+    match spec {
+        Spec::Average {
+            period_ms, bars, ..
+        } if bars.from_trades() => Some((*period_ms, *bars)),
+        _ => None,
+    }
 }
 
 impl State {
@@ -333,6 +385,48 @@ impl State {
             .map_err(|e| e.to_string())
     }
 
+    /// Hand changed outputs to their consumers.
+    fn publish(&self, changed: &[lines_indicators::graph::Changed]) {
+        for c in changed {
+            let (Some(cells), Some(out)) = (self.cells.get(&c.node), self.graph.output(c.node))
+            else {
+                continue;
+            };
+            for cell in cells {
+                cell.sync_from(out, c.first);
+            }
+        }
+    }
+
+    /// Copy what changed of trade-built bars (all sources, or one feed's) and update what
+    /// depends on them.
+    fn sync_bars(&mut self, feed: Option<FeedId>) {
+        let ids: Vec<usize> = self.sources.keys().copied().collect();
+        for id in ids {
+            if feed.is_some_and(|f| self.graph.key(id).is_none_or(|k| k.feed != f)) {
+                continue;
+            }
+            let Some((src, _)) = self.sources.get(&id) else {
+                continue;
+            };
+            let Some(store) = src.store.upgrade() else {
+                continue;
+            };
+            let key = src.key;
+            let from = {
+                let d = store.read();
+                match d.ticks.bars(key) {
+                    Some(tb) => self.graph.sync_bars(id, tb.bars(), tb.trimmed()),
+                    None => None,
+                }
+            };
+            if let Some(from) = from {
+                let changed = self.graph.bars_changed(id, from);
+                self.publish(&changed);
+            }
+        }
+    }
+
     fn find(&self, feed: FeedId, spec: &Spec) -> Option<usize> {
         self.cells.keys().copied().find(|&id| {
             self.graph
@@ -347,8 +441,17 @@ fn run(rx: Receiver<Msg>) {
         graph: Graph::new(),
         feeds: HashMap::new(),
         cells: HashMap::new(),
+        sources: HashMap::new(),
     };
-    while let Ok(msg) = rx.recv() {
+    loop {
+        let msg = match rx.recv_timeout(BARS_POLL) {
+            Ok(m) => m,
+            Err(RecvTimeoutError::Timeout) => {
+                st.sync_bars(None);
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         match msg {
             Msg::FeedStart(info) => {
                 // Held from the feed's start until its store is dropped.
@@ -371,29 +474,51 @@ fn run(rx: Receiver<Msg>) {
                 }
             }
             Msg::Events(feed, inputs) => {
-                for c in st.graph.push(feed, &inputs) {
-                    let (Some(cells), Some(out)) = (st.cells.get(&c.node), st.graph.output(c.node))
-                    else {
-                        continue;
-                    };
-                    for cell in cells {
-                        cell.sync_from(out, c.first);
+                let changed = st.graph.push(feed, &inputs);
+                st.publish(&changed);
+                st.sync_bars(Some(feed));
+            }
+            Msg::Acquire(info, spec, cell, source) => {
+                // Trade-built bars: hold the bars node and fill it before the study is made,
+                // so it starts from every bar the chart has.
+                if let (Some((period_ms, bars)), Some(source)) = (trade_bars(&spec), source) {
+                    match st.acquire(info, Spec::Bars { period_ms, bars }) {
+                        Ok(id) => {
+                            st.sources.entry(id).or_insert((source, 0)).1 += 1;
+                            st.sync_bars(Some(info.feed));
+                        }
+                        Err(e) => tracing::error!("trade bars for feed {}: {e}", info.feed),
+                    }
+                }
+                match st.acquire(info, spec) {
+                    Ok(id) => {
+                        if let Some(out) = st.graph.output(id) {
+                            cell.sync_from(out, 0);
+                        }
+                        st.cells.entry(id).or_default().push(cell);
+                    }
+                    Err(e) => {
+                        cell.data.lock().error = Some(e);
+                        cell.revision.fetch_add(1, Ordering::Release);
                     }
                 }
             }
-            Msg::Acquire(info, spec, cell) => match st.acquire(info, spec) {
-                Ok(id) => {
-                    if let Some(out) = st.graph.output(id) {
-                        cell.sync_from(out, 0);
-                    }
-                    st.cells.entry(id).or_default().push(cell);
-                }
-                Err(e) => {
-                    cell.data.lock().error = Some(e);
-                    cell.revision.fetch_add(1, Ordering::Release);
-                }
-            },
             Msg::Release(feed, spec, cell) => {
+                if let Some((period_ms, bars)) = trade_bars(&spec) {
+                    let key = lines_indicators::SeriesKey {
+                        feed,
+                        spec: Spec::Bars { period_ms, bars },
+                    };
+                    if let Some(id) = st.graph.id(&key)
+                        && let Some(e) = st.sources.get_mut(&id)
+                    {
+                        e.1 -= 1;
+                        if e.1 == 0 {
+                            st.sources.remove(&id);
+                        }
+                        st.graph.release(id);
+                    }
+                }
                 if let Some(id) = st.find(feed, &spec) {
                     if let Some(v) = st.cells.get_mut(&id) {
                         v.retain(|c| !Arc::ptr_eq(c, &cell));
@@ -405,6 +530,7 @@ fn run(rx: Receiver<Msg>) {
                 }
             }
             Msg::Sync(reply) => {
+                st.sync_bars(None);
                 let _ = reply.send(());
             }
         }
