@@ -1007,17 +1007,25 @@ pub fn flash_line(flashes: &[(&'static str, String)]) -> Option<(&'static str, S
     Some((*label, out))
 }
 
-/// A status text split into the items it is laid out as, each shown whole or not at all (no
-/// number is ever cut): at " · " and before "+N more".
-pub fn status_parts(text: &str) -> impl Iterator<Item = &str> {
-    text.split(" · ")
-        .flat_map(|p| p.split("  "))
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
+/// A status text split into the items it is laid out as, each shown whole or not at all, so
+/// no number is ever cut: at " · " and before "+N more" (the items' separators), and after
+/// ": " and ", " (which stay with the item before). `(text, separated)`: whether a " · "
+/// separator leads the item.
+pub fn status_parts(text: &str) -> impl Iterator<Item = (&str, bool)> {
+    text.split("  ")
+        .flat_map(|p| p.split(" · ").enumerate())
+        .flat_map(|(k, p)| {
+            p.split_inclusive(": ")
+                .flat_map(|q| q.split_inclusive(", "))
+                .enumerate()
+                .map(move |(m, q)| (q.trim(), k > 0 && m == 0))
+        })
+        .filter(|(p, _)| !p.is_empty())
 }
 
-/// `text` as whole items in a row of fixed height: an item that doesn't fit wraps into the
-/// hidden overflow instead of being cut (a limit, minutes left, a price).
+/// `text` as whole items on one line of text (centred in its slot by the caller): an item
+/// that doesn't fit wraps into the hidden overflow instead of being cut (a limit, minutes
+/// left, a price), taking its leading " · " with it.
 fn whole_items(text: &str, color: gpui::Hsla, bold: bool) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -1025,19 +1033,17 @@ fn whole_items(text: &str, color: gpui::Hsla, bold: bool) -> gpui::Div {
         .flex_wrap()
         .gap_x_1()
         .min_w_0()
-        .h(px(STATUS_H))
+        .h(px(ITEMS_LINE_H))
         .items_center()
         .overflow_hidden()
         .whitespace_nowrap();
-    let n = status_parts(text).count();
-    for (i, part) in status_parts(text).enumerate() {
+    for (part, separated) in status_parts(text) {
         let mut item = div().flex_shrink_0().text_color(color);
         if bold {
             item = item.font_weight(FontWeight::BOLD);
         }
-        // The separator stays with the item before it, so a dropped item takes its own.
-        let s = if i + 1 < n && !part.starts_with('+') {
-            format!("{part} ·")
+        let s = if separated {
+            format!("· {part}")
         } else {
             part.to_owned()
         };
@@ -1045,6 +1051,9 @@ fn whole_items(text: &str, color: gpui::Hsla, bold: bool) -> gpui::Div {
     }
     row
 }
+
+/// One line of 12 px text: the height `whole_items` keep, so a wrapped item never shows.
+const ITEMS_LINE_H: f32 = 18.0;
 
 /// An average price: exact on the tick grid, else one more decimal than the product shows.
 pub fn avg_text(product: &Product, avg: f64) -> String {
@@ -3240,10 +3249,40 @@ mod tests {
     /// "· 1" for 12 min left). Status text is laid out as whole items instead.
     #[test]
     fn status_text_splits_into_whole_items() {
-        let parts: Vec<&str> = status_parts("Cooldown · 3 losses in a row · 12 min left").collect();
-        assert_eq!(parts, ["Cooldown", "3 losses in a row", "12 min left"]);
-        let parts: Vec<&str> = status_parts("5830.00: ES market is closed  +2 more").collect();
-        assert_eq!(parts, ["5830.00: ES market is closed", "+2 more"]);
+        let parts = |t| status_parts(t).collect::<Vec<_>>();
+        assert_eq!(
+            parts("Cooldown · 3 losses in a row · 12 min left"),
+            [
+                ("Cooldown", false),
+                ("3 losses in a row", true),
+                ("12 min left", true)
+            ]
+        );
+        assert_eq!(
+            parts("5830.00: ES market is closed  +2 more"),
+            [
+                ("5830.00:", false),
+                ("ES market is closed", false),
+                ("+2 more", false)
+            ]
+        );
+        // Focused review: a single long refusal with numbers is several short items, so the
+        // minutes left and the limit are never cut.
+        assert_eq!(
+            parts("6000.00: Cooldown: 3 losses in a row, 12 min left"),
+            [
+                ("6000.00:", false),
+                ("Cooldown:", false),
+                ("3 losses in a row,", false),
+                ("12 min left", false)
+            ]
+        );
+        for (p, _) in parts("6000.00: day loss · daily loss limit of 1000 reached") {
+            assert!(
+                p.chars().count() <= 32,
+                "{p:?} is short enough for the narrowest panel"
+            );
+        }
     }
 
     /// The switch reads Enabled / Disabled in words; when orders would be denied anyway it
