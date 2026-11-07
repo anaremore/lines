@@ -496,8 +496,14 @@ struct Cli {
     /// "max_daily_loss": 500, "max_orders_per_min": 10, "hours": {"tz": "America/New_York",
     /// "windows": [{"start": "09:30", "end": "16:00"}]}}}, optionally "starting_balance",
     /// "paper" (fill model, latency, fees) and "timer_ms".
-    #[arg(long, requires = "backtest")]
+    #[arg(long)]
     backtest_config: Option<PathBuf>,
+    /// Run a strategy (decision 0025) through the strategy host on this run's feed (a live
+    /// source or a replay) with the paper broker, headless, for --headless seconds; this
+    /// command line arms it. Its settings come from --backtest-config (the same file). Paper
+    /// only: nothing reaches a live broker.
+    #[arg(long, requires_all = ["backtest_config", "headless"], conflicts_with = "backtest")]
+    run_strategy: Option<String>,
     /// Write the backtest's full report here (JSON: inputs with hashes, trades, every decision
     /// with its reason and result). Without it only the summary is printed.
     #[arg(long, requires = "backtest")]
@@ -838,17 +844,18 @@ fn store_config(cli: &Cli, choice: &SourceChoice) -> Option<lines_feed::disk::St
 /// builds with `demo-levels` register).
 const EXAMPLE_LEVELS: &str = "demo";
 
-/// `--backtest`: one strategy over a replay, headless (decision 0025). Prints the summary;
-/// writes the report with `--report`.
-fn run_backtest(cli: &Cli, ext: &Extensions, name: &str) -> Result<()> {
+/// A registered strategy by name (the public build adds the example).
+fn find_strategy(
+    ext: &Extensions,
+    name: &str,
+) -> Result<Arc<dyn lines_strategy::StrategyExtension>> {
     let example: Arc<dyn lines_strategy::StrategyExtension> =
         Arc::new(lines_strategy::example::LevelTouchExt::new(EXAMPLE_LEVELS));
     let mut all: Vec<Arc<dyn lines_strategy::StrategyExtension>> = ext.strategies.clone();
     if !all.iter().any(|s| s.name() == example.name()) {
         all.push(example);
     }
-    let strategy = all
-        .iter()
+    all.iter()
         .find(|s| s.name() == name)
         .cloned()
         .ok_or_else(|| {
@@ -857,12 +864,184 @@ fn run_backtest(cli: &Cli, ext: &Extensions, name: &str) -> Result<()> {
                 "no strategy {name:?} in this build (available: {})",
                 names.join(", ")
             )
-        })?;
-    let path = cli.backtest_config.as_ref().expect("clap requires it");
-    let settings: lines_strategy::backtest::Settings = serde_json::from_slice(
+        })
+}
+
+/// The strategy settings file (`--backtest-config`).
+fn strategy_settings(cli: &Cli) -> Result<lines_strategy::backtest::Settings> {
+    let path = cli
+        .backtest_config
+        .as_ref()
+        .ok_or_else(|| anyhow!("--backtest-config is required"))?;
+    serde_json::from_slice(
         &std::fs::read(path).with_context(|| format!("--backtest-config {}", path.display()))?,
     )
-    .with_context(|| format!("--backtest-config {}", path.display()))?;
+    .with_context(|| format!("--backtest-config {}", path.display()))
+}
+
+/// How long a strategy's feed may be silent before the host pauses it.
+const STRATEGY_FEED_STALE: Duration = Duration::from_secs(60);
+
+/// `--run-strategy`: one strategy through the strategy host on this run's feed, paper only,
+/// headless (decision 0025). Prints its state, decisions and fills as they happen.
+fn run_strategy(
+    cli: &Cli,
+    ext: &Extensions,
+    name: &str,
+    config: FeedConfig,
+    replay: bool,
+    dur: Duration,
+) -> Result<()> {
+    use lines_trading::{
+        AccountConfig, AccountId, Clock, Command as TradeCommand, Event, PaperBroker,
+        StrategyConfig, StrategyId, TradingCore, TradingService,
+    };
+    let strategy = find_strategy(ext, name)?;
+    let settings = strategy_settings(cli)?;
+    let feed = lines_feed::spawn(config.clone())?;
+    let store = feed.store.clone();
+    // Listen before anything else: a fast replay can deliver everything in moments.
+    let market = lines_feed::listen::listen(store.feed_id());
+    // The contract comes from the feed (a recording's header, a source's front month).
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let (product, contract) = loop {
+        {
+            let d = store.read();
+            if let Some(k) = d.contract {
+                break (d.product.clone(), k);
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("the feed never said which contract it carries");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let clock = if replay { Clock::Market } else { Clock::Wall };
+    let account = AccountId::new("paper-strategy");
+    let mut broker = PaperBroker::new(settings.paper.clone());
+    broker.open_account(
+        account.clone(),
+        lines_trading::Money::whole(settings.starting_balance),
+    );
+    let mut core = TradingCore::new(Box::new(broker));
+    core.add_account(
+        AccountConfig::paper("paper-strategy", settings.starting_balance),
+        None,
+    );
+    let service = TradingService::start_with(core, None, clock)?;
+    let handle = service.handle();
+    let events = handle.subscribe();
+    let bridge = lines_trading::FeedBridge::new(lines_feed::registry::FeedRegistry::new(), config);
+    bridge.follow_store(&store, &handle);
+    let mut levels: Vec<Box<dyn lines_strategy::host::LevelFeed>> = Vec::new();
+    for id in strategy.level_sources() {
+        let source = lines_feed::levels::by_id(id)
+            .ok_or_else(|| anyhow!("level source {id:?} is not registered in this build"))?;
+        let ctx = lines_feed::levels::LevelContext {
+            product: product.clone(),
+            contract: Some(contract),
+            settings: lines_feed::levels::runtime::settings_for(id),
+        };
+        let prices = Arc::new(lines_feed::levels::StorePrices(store.clone()));
+        levels.push(Box::new(lines_feed::levels::runtime::acquire(
+            source, ctx, prices,
+        )));
+    }
+    let host = lines_strategy::host::StrategyHost::start(handle.clone(), clock);
+    let id = StrategyId(1);
+    host.add(lines_strategy::host::Instance {
+        ext: strategy.clone(),
+        params: settings.params.clone(),
+        config: StrategyConfig {
+            id,
+            label: format!("{} #1", strategy.label()),
+            account,
+            contract,
+            limits: settings.limits.clone(),
+        },
+        product: product.clone(),
+        market,
+        levels,
+        stale_after: STRATEGY_FEED_STALE,
+    })
+    .map_err(|e| anyhow!("{}: {e}", strategy.label()))?;
+    handle.sync();
+    host.sync();
+    // This command line is the person arming it (decision 0025: nothing else arms).
+    handle.submit(
+        lines_trading::Source::Palette,
+        TradeCommand::ArmStrategy { id },
+    );
+    println!(
+        "running {} v{} on {} (paper) for {} s",
+        strategy.name(),
+        strategy.version(),
+        contract.label(&product).as_str(),
+        dur.as_secs()
+    );
+    let start = std::time::Instant::now();
+    let mut printed = 0usize;
+    let mut state = None;
+    let mut net = lines_trading::Money::ZERO;
+    let mut fills = 0usize;
+    while start.elapsed() < dur {
+        std::thread::sleep(Duration::from_millis(100));
+        for e in events.try_iter() {
+            if let Event::Fill(f) = &e
+                && f.contract == contract
+            {
+                fills += 1;
+                net += f.realised - f.fee;
+                println!(
+                    "fill {:?} {} @ {}",
+                    f.side,
+                    f.qty.0,
+                    product.price.format::<32>(f.price)
+                );
+            }
+        }
+        if let Some(v) = host.snapshot().into_iter().find(|v| v.id == id) {
+            if state != Some((v.state, v.reason.clone())) {
+                println!(
+                    "state: {}{}",
+                    v.state.label(),
+                    v.reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                );
+                state = Some((v.state, v.reason.clone()));
+            }
+            if let Some(f) = &v.fault {
+                println!("fault: {f}");
+            }
+            // Print the decisions not printed yet (the ring keeps the newest).
+            for d in v.decisions.iter().skip(printed.min(v.decisions.len())) {
+                let result = match &d.result {
+                    Some(Ok(_)) => " [sent]".to_string(),
+                    Some(Err(r)) => format!(" [denied: {}]", r.message),
+                    None if d.decision.command.is_some() => " [pending]".into(),
+                    None => String::new(),
+                };
+                println!(
+                    "{} {}: {}{result}",
+                    d.at, d.decision.rule, d.decision.reason
+                );
+            }
+            printed = v.decisions.len();
+        }
+    }
+    println!("{fills} fills, realized net {net}");
+    drop(host);
+    drop(feed);
+    Ok(())
+}
+
+/// `--backtest`: one strategy over a replay, headless (decision 0025). Prints the summary;
+/// writes the report with `--report`.
+fn run_backtest(cli: &Cli, ext: &Extensions, name: &str) -> Result<()> {
+    let strategy = find_strategy(ext, name)?;
+    let settings = strategy_settings(cli)?;
     let market = cli.replay.clone().expect("clap requires it");
     let bt = lines_strategy::backtest::Backtest::from_settings(
         strategy,
@@ -965,8 +1144,15 @@ where
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
     }
 
+    if cli.backtest_config.is_some() && cli.backtest.is_none() && cli.run_strategy.is_none() {
+        bail!("--backtest-config goes with --backtest or --run-strategy");
+    }
     if let Some(name) = &cli.backtest {
         return run_backtest(&cli, &ext, name);
+    }
+    if let (Some(name), Some(secs)) = (&cli.run_strategy, cli.headless) {
+        let replay = matches!(config.source, lines_feed::Source::Replay { .. });
+        return run_strategy(&cli, &ext, name, config, replay, Duration::from_secs(secs));
     }
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));

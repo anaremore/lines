@@ -118,8 +118,10 @@ impl StrategyState {
     }
 }
 
-/// Core time without a heartbeat from the strategy host before armed instances pause.
-pub const HEARTBEAT_TIMEOUT_MS: i64 = 5_000;
+/// Wall-clock time without a heartbeat from the strategy host before the trading service
+/// pauses every armed instance (host liveness is a wall-clock matter: a fast replay moves the
+/// market clock minutes in a moment).
+pub const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// The order-rate window.
 const RATE_WINDOW_MS: i64 = 60_000;
 
@@ -210,14 +212,12 @@ pub(crate) struct Instance {
     pub day: Option<CivilDate>,
     /// When its recent new orders and modifies passed the gate.
     pub recent: VecDeque<UtcMillis>,
-    /// The host's last heartbeat (or the arm time).
-    pub beat: UtcMillis,
     /// The command in flight passed the gate as an entry: count it if the core accepts it.
     pub counting: bool,
 }
 
 impl Instance {
-    pub fn new(cfg: StrategyConfig, now: UtcMillis) -> Instance {
+    pub fn new(cfg: StrategyConfig) -> Instance {
         Instance {
             cfg,
             state: StrategyState::Disarmed,
@@ -227,7 +227,6 @@ impl Instance {
             day_realised: Money::ZERO,
             day: None,
             recent: VecDeque::new(),
-            beat: now,
             counting: false,
         }
     }

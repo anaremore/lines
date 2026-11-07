@@ -2,8 +2,6 @@
 //! passes before prop rules, risk and guardrails, and the pauses the core makes itself.
 //! See [`crate::strategy`].
 
-use std::time::Instant;
-
 use lines_core::{ContractKey, Price, Qty, UtcMillis};
 
 use super::TradingCore;
@@ -13,8 +11,11 @@ use crate::event::Event;
 use crate::guardrails::GuardState;
 use crate::order::{Order, Role};
 use crate::rules::TradingState;
-use crate::strategy::{HEARTBEAT_TIMEOUT_MS, Instance, StrategyId, StrategyState};
+use crate::strategy::{Instance, StrategyId, StrategyState};
 use crate::types::{AccountId, Money, OrderId, Side};
+
+/// Why an instance paused when it reached its daily loss (it is also flattened).
+const DAILY_LOSS: &str = "its daily loss limit was reached: its trade was closed";
 
 fn deny(message: impl Into<String>) -> Reject {
     Reject::new(RejectCode::Strategy, message)
@@ -28,11 +29,22 @@ impl TradingCore {
             .map(|i| (i.state, i.reason.as_deref()))
     }
 
-    /// The strategy host is alive (decision 0025): armed instances pause after
-    /// [`HEARTBEAT_TIMEOUT_MS`] of core time without one.
-    pub fn strategy_heartbeat(&mut self, now: UtcMillis) {
-        for i in self.strategies.values_mut() {
-            i.beat = UtcMillis(i.beat.0.max(now.0));
+    /// The strategy host stopped sending heartbeats (the trading service watches it on the
+    /// wall clock, `strategy::HEARTBEAT_TIMEOUT`): every armed instance pauses.
+    pub fn strategy_host_silent(&mut self, now: UtcMillis) {
+        let armed: Vec<StrategyId> = self
+            .strategies
+            .values()
+            .filter(|i| i.state == StrategyState::Armed)
+            .map(|i| i.cfg.id)
+            .collect();
+        for id in armed {
+            self.pause_strategy(
+                now,
+                id,
+                StrategyState::Paused,
+                "the strategy host stopped responding".into(),
+            );
         }
     }
 
@@ -51,7 +63,7 @@ impl TradingCore {
                 if from.is_some() {
                     return Some(Err(deny("a strategy can't add strategies")));
                 }
-                self.add_strategy(now, cfg.clone())
+                self.add_strategy(cfg.clone())
             }
             Command::RemoveStrategy { id } => {
                 if from.is_some() {
@@ -91,7 +103,6 @@ impl TradingCore {
 
     fn add_strategy(
         &mut self,
-        now: UtcMillis,
         cfg: crate::strategy::StrategyConfig,
     ) -> Result<Vec<OrderId>, Reject> {
         if !self.accounts.contains_key(&cfg.account) {
@@ -132,7 +143,7 @@ impl TradingCore {
                         i.cfg.label
                     )));
                 }
-                *i = Instance::new(cfg, now);
+                *i = Instance::new(cfg);
             }
             Some(i) => {
                 i.cfg = cfg;
@@ -140,7 +151,7 @@ impl TradingCore {
                 i.reason = None;
             }
             None => {
-                self.strategies.insert(id, Instance::new(cfg, now));
+                self.strategies.insert(id, Instance::new(cfg));
             }
         }
         self.strategy_event(id, false);
@@ -180,14 +191,13 @@ impl TradingCore {
             }
             self.strategies.get_mut(&id).expect("checked").position = Default::default();
         }
-        if let Some(why) = self.strategy_blocker(now, id, false) {
+        if let Some(why) = self.strategy_blocker(now, id) {
             return Err(deny(format!("can't arm: {why}")));
         }
         let i = self.strategies.get_mut(&id).expect("checked");
         if i.state != StrategyState::Armed {
             i.state = StrategyState::Armed;
             i.reason = None;
-            i.beat = now;
             self.strategy_event(id, false);
         }
         Ok(Vec::new())
@@ -222,10 +232,9 @@ impl TradingCore {
             targets.sort();
             targets.dedup();
             for (account, contract) in targets {
-                self.submit(
+                self.submit_internal(
                     now,
                     source,
-                    Instant::now(),
                     Command::Flatten {
                         account,
                         contract: Some(contract),
@@ -283,10 +292,9 @@ impl TradingCore {
             .map(|o| o.id)
             .collect();
         for order in entries {
-            self.submit(
+            self.submit_internal(
                 now,
                 Source::Rule,
-                Instant::now(),
                 Command::CancelOrder {
                     account: account.clone(),
                     order,
@@ -306,14 +314,12 @@ impl TradingCore {
         }
     }
 
-    /// Why an instance may not be armed (or must pause) now, if anything. `watch`: also the
-    /// host's heartbeat.
-    fn strategy_blocker(&mut self, now: UtcMillis, id: StrategyId, watch: bool) -> Option<String> {
-        let (account, beat, limit) = {
+    /// Why an instance may not be armed (or must pause) now, if anything.
+    fn strategy_blocker(&mut self, now: UtcMillis, id: StrategyId) -> Option<String> {
+        let (account, limit) = {
             let i = self.strategies.get(&id)?;
             (
                 i.cfg.account.clone(),
-                i.beat,
                 Money::whole(i.cfg.limits.max_daily_loss),
             )
         };
@@ -340,10 +346,7 @@ impl TradingCore {
             return Some(why.map_or_else(|| "a guardrail lockout".into(), |r| r.to_string()));
         }
         if self.strategy_day_pnl(now, id) <= -limit {
-            return Some("its daily loss limit was reached".into());
-        }
-        if watch && now.0 - beat.0 > HEARTBEAT_TIMEOUT_MS {
-            return Some("the strategy host stopped responding".into());
+            return Some(DAILY_LOSS.into());
         }
         None
     }
@@ -358,8 +361,23 @@ impl TradingCore {
             .map(|i| i.cfg.id)
             .collect();
         for id in armed {
-            if let Some(why) = self.strategy_blocker(now, id, true) {
+            if let Some(why) = self.strategy_blocker(now, id) {
+                let daily_loss = why == DAILY_LOSS;
                 self.pause_strategy(now, id, StrategyState::Paused, why);
+                // The owner's rule: the daily loss limit closes the instance's trade too (its
+                // position on its contract, and every order there), then entries stay paused
+                // for the rest of the trade date (arming is refused until the next one).
+                if daily_loss && let Some(i) = self.strategies.get(&id) {
+                    let (account, contract) = (i.cfg.account.clone(), i.cfg.contract);
+                    self.submit_internal(
+                        now,
+                        Source::Rule,
+                        Command::Flatten {
+                            account,
+                            contract: Some(contract),
+                        },
+                    );
+                }
             }
         }
     }

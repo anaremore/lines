@@ -44,7 +44,7 @@ pub use broker::{
     PaneContext, RequestContext,
 };
 pub use command::{BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
-pub use core::{AccountConfig, OrderLatency, TradingCore};
+pub use core::{AccountConfig, INTERNAL_COMMAND_IDS, OrderLatency, TradingCore};
 pub use event::{AccountView, Event, FillEvent, PositionView};
 pub use guardrails::{GuardState, GuardrailTracker, Guardrails, LosingStreak, RoundTrip};
 pub use journal::{Journal, JournalObserver, JournalShared, Trade};

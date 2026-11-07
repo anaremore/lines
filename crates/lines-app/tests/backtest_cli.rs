@@ -144,3 +144,64 @@ fn backtest_flag_writes_a_report() {
     assert!(e.contains("available: level-touch"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn run_strategy_flag_runs_it_through_the_host_on_a_replay() {
+    let dir = std::env::temp_dir().join(format!("lines-run-strategy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let market = write_inputs(&dir);
+    let config = dir.join("strategy.json");
+    std::fs::write(
+        &config,
+        r#"{
+          "params": {"kind": "support", "qty": 1, "stop_ticks": 8, "target_ticks": 8,
+                     "max_distance_ticks": 8},
+          "limits": {"max_position": 1, "max_daily_loss": 500, "max_orders_per_min": 10,
+                     "hours": {"tz": "America/New_York",
+                               "windows": [{"start": "09:30", "end": "16:00"}]}}
+        }"#,
+    )
+    .unwrap();
+    let arg = |p: &Path| p.to_string_lossy().into_owned();
+    lines_app::run_with_args(
+        [
+            "lines".to_owned(),
+            "--source".into(),
+            "replay".into(),
+            "--replay".into(),
+            arg(&market),
+            "--speed".into(),
+            "20".into(),
+            "--replay-levels".into(),
+            arg(&dir),
+            "--run-strategy".into(),
+            "level-touch".into(),
+            "--backtest-config".into(),
+            arg(&config),
+            "--headless".into(),
+            "4".into(),
+        ],
+        Extensions::new().with_level_source(Arc::new(DemoLevels)),
+    )
+    .unwrap();
+    // A settings file without --backtest or --run-strategy is a mistake, said plainly.
+    let e = lines_app::run_with_args(
+        [
+            "lines",
+            "--source",
+            "replay",
+            "--replay",
+            &arg(&market),
+            "--backtest-config",
+            &arg(&config),
+            "--headless",
+            "1",
+        ],
+        Extensions::new(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("goes with --backtest or --run-strategy"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
