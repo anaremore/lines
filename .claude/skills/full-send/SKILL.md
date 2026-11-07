@@ -49,7 +49,7 @@ description: Take one change from task to merged PR unattended. Only when the ow
 - A test would need deleting, ignoring or weakening, or the passed count drops.
 - A new dependency, a saved-format version bump, or a decision record is needed.
 - The gate fails for a reason outside your diff on two runs.
-- `review-loop` ends round 3 with blocking issues.
+- `review-loop` ends round 3 with blocking issues: open the PR as `review-loop` says, don't merge it.
 - CI fails 3 times, or fails on an OS you can't reproduce.
 - A merge conflict appears in a file you didn't change.
 - main's CI goes red after the merge: report it, then fix it with a new full-send (tier A/B) or ask.
