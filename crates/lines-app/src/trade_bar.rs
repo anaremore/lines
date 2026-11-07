@@ -498,11 +498,13 @@ pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
     live(o) && stop && exit && closes
 }
 
-/// The stops BE may move: those that [`protects`] accepts, stop losses first, then single
-/// stops, then reduce-only stops, each only while their quantities together stay within the
-/// position: moved to one price they all trigger together, in any order, and must never flip
-/// it. Reduce-only stops come last because one left behind cancels itself when the position
-/// goes flat; a bracket's stop loss left behind would not.
+/// The stops that protect the position, as far as it goes: those that [`protects`] accepts,
+/// in the order the market reaches them (a long's highest sell stop first; at one price, a
+/// reduce-only stop after the others, since it shrinks itself), each while their quantities
+/// together stay within the position. BE moves only these (those not already at or past
+/// breakeven), and only towards the market, so it keeps that order: every stop it leaves
+/// behind is reached only after these have closed the position, exactly as without BE. It
+/// never makes a stop that wasn't going to flip the position flip it.
 pub fn protective<'a>(
     orders: impl IntoIterator<Item = &'a lines_trading::Order>,
     position: i64,
@@ -512,12 +514,17 @@ pub fn protective<'a>(
         .into_iter()
         .filter(|o| protects(o, position))
         .collect();
-    let rank = |o: &lines_trading::Order| match (o.reduce_only, o.role) {
+    // Reached first: a long's sell stops from the top, a short's buy stops from the bottom.
+    let reached = |o: &lines_trading::Order| {
+        let p = crate::dom_trade::order_price(o).map_or(0, |p| p.0);
+        if position > 0 { -p } else { p }
+    };
+    let role = |o: &lines_trading::Order| match (o.reduce_only, o.role) {
         (false, Role::StopLoss) => 0,
         (false, _) => 1,
         (true, _) => 2,
     };
-    cands.sort_by_key(|o| (rank(o), o.id.0));
+    cands.sort_by_key(|o| (reached(o), role(o), o.id.0));
     let mut total = 0;
     cands.retain(|o| {
         let q = o.remaining().0;
@@ -2161,7 +2168,7 @@ fn account_chip<V: TradePane>(
         .child(format!("{name} ▾"))
         .when(open, |d| d.border_color(accent))
         .hover(move |s| s.border_color(accent));
-    let c = tip(c, "Choose the account", Some(TradeCmd::NextAccount), t);
+    let c = tip(c, "Choose the account", None, t);
     div()
         .flex()
         .flex_row()
@@ -2622,6 +2629,50 @@ mod tests {
             vec![sl.id]
         );
         assert_eq!(protective([&r, &sl], 2).len(), 2);
+        // Taken in the order the market reaches them: a reduce-only stop already past BE
+        // (higher, for a long) fills first and uses the budget, so the stop loss below it is
+        // not moved (moved to BE, it would fill after the reduce-only one and flip).
+        let mut high = r.clone();
+        high.kind = OrderKind::Stop {
+            trigger: Price(600_200),
+        };
+        assert_eq!(
+            protective([&sl, &high], 1)
+                .iter()
+                .map(|o| o.id)
+                .collect::<Vec<_>>(),
+            vec![high.id]
+        );
+        // And BE then refuses: nothing left to move.
+        assert_eq!(
+            breakeven(
+                &AccountId::new("paper"),
+                1,
+                Some(600_000.0),
+                &[(high.id, Side::Sell, Price(600_200))],
+                Some(Price(600_300)),
+                25
+            ),
+            Err("the stop is already at or past breakeven")
+        );
+        // A short: the lowest buy stop is reached first.
+        let mut lo = stop(Side::Buy, 1, Role::StopLoss, OrderState::Working);
+        lo.id = OrderId(8);
+        lo.kind = OrderKind::Stop {
+            trigger: Price(600_100),
+        };
+        let mut hi = stop(Side::Buy, 1, Role::StopLoss, OrderState::Working);
+        hi.id = OrderId(9);
+        hi.kind = OrderKind::Stop {
+            trigger: Price(600_500),
+        };
+        assert_eq!(
+            protective([&hi, &lo], -1)
+                .iter()
+                .map(|o| o.id)
+                .collect::<Vec<_>>(),
+            vec![lo.id]
+        );
         // Short 2: a partly filled buy stop for 3 with 2 left fits (the remainder counts).
         let mut p = stop(Side::Buy, 3, Role::StopLoss, OrderState::PartiallyFilled);
         p.filled = Qty(1);

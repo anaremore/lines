@@ -350,8 +350,12 @@ impl DomView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        // A click that closes a list (the picker, the account list) does only that: never
+        // also an order on the ladder under it.
         if self.picker.close() || std::mem::take(&mut self.trade.account_menu) {
+            cx.stop_propagation();
             cx.notify();
+            return;
         }
         let (x, y) = self.table_xy(ev.position);
         match self.cols.hit(x, y, ev.click_count) {
