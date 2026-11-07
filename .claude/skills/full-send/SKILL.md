@@ -1,7 +1,6 @@
 ---
 name: full-send
 description: Take one change from task to merged PR unattended. Only when the owner's own current message says "full send" or is /full-send, or when the planning thread runs it under the owner's standing merge instruction. Never self-invoke otherwise.
-disable-model-invocation: true
 ---
 
 # Full send
@@ -20,7 +19,8 @@ disable-model-invocation: true
    (string sweeps, test scaffolding, doc updates). Review its diff yourself.
 3. Run the CLAUDE.md gate (every step that applies).
 4. Run `review-loop`.
-5. `git fetch origin && git rebase origin/main`. If main moved, rerun gate steps 1-5.
+5. `git fetch origin && git rebase origin/main`, then run the full gate (every applicable step)
+   on this exact HEAD. Review fixes count as changes: the pushed HEAD must have passed it.
 6. `git push -u origin <branch>`. If the branch was already pushed before the rebase:
    `git push --force-with-lease origin <branch>` (this branch only).
 7. `gh pr create --base main --title "<summary>" --body-file <scratch>/pr.md`, with the
@@ -52,4 +52,4 @@ disable-model-invocation: true
 - `review-loop` ends round 3 with blocking issues.
 - CI fails 3 times, or fails on an OS you can't reproduce.
 - A merge conflict appears in a file you didn't change.
-- main's CI goes red after the merge: report it; fix only through `full-stop`.
+- main's CI goes red after the merge: report it, then fix it with a new full-send (tier A/B) or ask.
