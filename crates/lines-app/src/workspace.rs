@@ -2334,11 +2334,12 @@ impl WindowView {
             let title = tab.title(cx);
             // Close: on the active tab, and on any tab while hovered.
             let close = (active || hovered == Some(i)).then(|| {
+                // Named per tab for assistive technology; the key closes the active tab only.
                 crate::icons::button(
                     ("tab-close", i),
                     crate::icons::Icon::Close,
-                    "Close tab",
-                    Some(Command::CloseTab),
+                    &format!("Close {title}"),
+                    active.then_some(Command::CloseTab),
                     false,
                     &t,
                 )

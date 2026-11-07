@@ -159,9 +159,10 @@ const fn control(
 pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
     use crate::commands::Command as C;
     use crate::icons::Icon as I;
-    const DETACHED: [Control; 2] = [
+    const DETACHED: [Control; 3] = [
         control(I::Dock, "Dock beside chart", C::DockBesideChart),
         control(I::Reattach, "Re-attach", C::Reattach),
+        control(I::Menu, "Pane menu", C::Menu),
     ];
     const CHART: [Control; 3] = [
         control(I::ChartOnly, "Chart only", C::ChartOnly),

@@ -2959,16 +2959,38 @@ impl ChartView {
                         .child(div().text_color(t.text_main).child(left))
                         .child(timeframe)
                         .children(account)
-                        .children(quotes)
                         .children(pane::stale_badge(&self.store, &t))
                         .children(self.clock_warning(&t)),
                 )
+                // Last, bid, ask: whole or not at all. One wrapping line, clipped to its
+                // height: a quote that doesn't fit moves to the hidden second line, so a
+                // narrow chart never shows half a price.
                 .child(
                     div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
                         .min_w_0()
-                        .truncate()
-                        .text_color(t.text_dim)
-                        .child(right),
+                        .h(px(QUOTE_ROW_H))
+                        .overflow_hidden()
+                        .children(quotes),
+                )
+                // Status text takes only what the quotes leave (it gives way first), at the
+                // right end, cut with "…".
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(t.text_dim)
+                                .child(right),
+                        ),
                 ),
         )
     }
@@ -3240,6 +3262,9 @@ fn cross_tag_y(y: f32, plot_h: f32) -> f32 {
 }
 
 /// A header quote: `bid 6005.25`, or `bid —` (and `true`: show it dimmed) without a value.
+/// The header's quote row: one line of `text_sm`.
+const QUOTE_ROW_H: f32 = 20.0;
+
 fn quote_text(label: &str, p: Option<Price>, f: &lines_core::PriceFormat) -> (String, bool) {
     match p {
         Some(p) => (format!("{label} {}", f.format::<32>(p)), false),

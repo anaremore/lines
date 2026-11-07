@@ -111,26 +111,54 @@ impl Icon {
             ],
             Icon::Menu => &[
                 // Three dots: small squares stroked closed (solid at 1.5 px).
-                &[(2.5, 7.0), (4.0, 7.0), (4.0, 8.5), (2.5, 8.5), (2.5, 7.0)],
-                &[(7.25, 7.0), (8.75, 7.0), (8.75, 8.5), (7.25, 8.5), (7.25, 7.0)],
-                &[(12.0, 7.0), (13.5, 7.0), (13.5, 8.5), (12.0, 8.5), (12.0, 7.0)],
+                &[
+                    (2.5, 7.25),
+                    (4.0, 7.25),
+                    (4.0, 8.75),
+                    (2.5, 8.75),
+                    (2.5, 7.25),
+                ],
+                &[
+                    (7.25, 7.25),
+                    (8.75, 7.25),
+                    (8.75, 8.75),
+                    (7.25, 8.75),
+                    (7.25, 7.25),
+                ],
+                &[
+                    (12.0, 7.25),
+                    (13.5, 7.25),
+                    (13.5, 8.75),
+                    (12.0, 8.75),
+                    (12.0, 7.25),
+                ],
             ],
             Icon::Close => &[&[(4.0, 4.0), (12.0, 12.0)], &[(12.0, 4.0), (4.0, 12.0)]],
         }
     }
 }
 
-/// Snap a logical coordinate to the nearest device-pixel center for a stroke of `STROKE`.
+/// The stroke as drawn at `scale`: `STROKE` rounded to whole device pixels (at least one), in
+/// logical px. [`snap`] places points for exactly this width, so every straight edge covers
+/// whole pixels (1.0: 2 device px on pixel edges; 2.0: 3 device px on pixel centers).
+pub fn stroke_width(scale: f32) -> f32 {
+    let s = scale.max(1.0);
+    (STROKE * s).round().max(1.0) / s
+}
+
+/// Snap a logical coordinate for a stroke of [`stroke_width`]: odd device widths on pixel
+/// centers, even ones on pixel edges.
 pub fn snap(v: f32, scale: f32) -> f32 {
     let s = scale.max(1.0);
-    let w = (STROKE * s).round();
+    let w = (stroke_width(s) * s).round();
     // Odd device widths sit on pixel centers, even ones on pixel edges.
     let offset = if w as i32 % 2 == 1 { 0.5 } else { 0.0 };
     ((v * s - offset).round() + offset) / s
 }
 
 /// Paint `icon` centered in `bounds` (logical px) in `color`. Builds a few short GPUI paths
-/// (GPUI tessellates them per frame); called only for the hovered pane's header.
+/// (GPUI tessellates them per frame, like the chart's study lines): for the hovered pane's
+/// header controls and the tab bar's close buttons, never for ladder or chart rows.
 pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
     let scale = window.scale_factor();
     let side = f32::from(bounds.size.width).min(f32::from(bounds.size.height));
@@ -138,7 +166,7 @@ pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Windo
     let x0 = f32::from(bounds.origin.x) + (f32::from(bounds.size.width) - GRID * unit) * 0.5;
     let y0 = f32::from(bounds.origin.y) + (f32::from(bounds.size.height) - GRID * unit) * 0.5;
     for line in icon.lines() {
-        let mut b = PathBuilder::stroke(px(STROKE));
+        let mut b = PathBuilder::stroke(px(stroke_width(scale)));
         for (i, &(x, y)) in line.iter().enumerate() {
             let p = point(
                 px(snap(x0 + x * unit, scale)),
@@ -182,7 +210,9 @@ pub fn button(
             canvas(
                 |_, _, _| (),
                 move |b, (), window, _| {
-                    let hot = b.contains(&window.mouse_position());
+                    // The pointer's last position stays after it leaves the window (no exit
+                    // event on Windows): only a hovered window lights an icon.
+                    let hot = window.is_window_hovered() && b.contains(&window.mouse_position());
                     let c = if on {
                         accent
                     } else if hot {
@@ -231,10 +261,24 @@ mod tests {
     /// Points land on device-pixel centers (odd stroke widths) at DPI 1.0 and 2.0.
     #[test]
     fn strokes_snap_to_device_pixels() {
-        // 1.5 px at 1.0 rounds to 2 device px (even): edges.
+        // 1.5 px at 1.0 is drawn 2 device px wide (even): on pixel edges.
+        assert_eq!(stroke_width(1.0), 2.0);
         assert_eq!(snap(10.3, 1.0), 10.0);
-        // 1.5 px at 2.0 is 3 device px (odd): centers (half device pixels).
+        // 1.5 px at 2.0 is 3 device px (odd): on pixel centers (half device pixels).
+        assert_eq!(stroke_width(2.0), 1.5);
         assert_eq!(snap(10.3, 2.0), 10.25);
         assert_eq!(snap(10.0, 2.0), 10.25);
+        // At every common scale a snapped straight edge covers whole device pixels: both
+        // sides of the drawn stroke land on pixel boundaries.
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 3.0] {
+            let w = stroke_width(scale) * scale;
+            assert!((w - w.round()).abs() < 1e-4 && w >= 1.0, "{scale}");
+            for v in [3.0_f32, 7.6, 10.3, 13.9] {
+                let c = snap(v, scale) * scale;
+                for edge in [c - w / 2.0, c + w / 2.0] {
+                    assert!((edge - edge.round()).abs() < 1e-3, "{scale} {v}: {edge}");
+                }
+            }
+        }
     }
 }

@@ -252,3 +252,24 @@ pub fn all(cx: &App) -> Vec<(WindowHandle<PaneWindow>, (f32, f32))> {
         .filter_map(|w| w.read(cx).ok().map(|pw| (*w, pw.opened)))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::PaneKind;
+
+    /// Every control a pane window's header shows is a command the window runs.
+    #[test]
+    fn detached_controls_all_run_here() {
+        for kind in [
+            PaneKind::Chart,
+            PaneKind::Dom,
+            PaneKind::Tape,
+            PaneKind::Journal,
+        ] {
+            for c in crate::pane::controls(kind, true) {
+                assert_eq!(command(c.cmd), Some(c.cmd), "{kind:?} {}", c.name);
+            }
+        }
+    }
+}
