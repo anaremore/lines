@@ -151,7 +151,10 @@ impl Render for PaneWindow {
                 kind,
                 true,
                 false,
-                |this: &mut Self, cmd, _, window, cx| this.run(cmd, window, cx),
+                |this: &mut Self, cmd, _, at, window, cx| match (cmd, at) {
+                    (Command::Menu, Some(at)) => this.open_menu(at, cx),
+                    _ => this.run(cmd, window, cx),
+                },
                 self.id,
                 cx,
             )

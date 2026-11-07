@@ -2604,9 +2604,12 @@ impl WindowView {
                     kind,
                     false,
                     chart_only,
-                    |this: &mut Self, cmd, id, window, cx| {
+                    |this: &mut Self, cmd, id, at, window, cx| {
                         this.focus_pane(id, window, cx);
-                        this.run(cmd, window, cx);
+                        match (cmd, at) {
+                            (Command::Menu, Some(at)) => this.open_menu(at, cx),
+                            _ => this.run(cmd, window, cx),
+                        }
                     },
                     id,
                     cx,
@@ -3075,12 +3078,17 @@ impl Render for WindowView {
 /// them only for the hovered pane (docs/design.md: no permanent chrome; and no per-frame cost
 /// for the others). `chart_only` draws the chart-only icon in the accent color while active.
 /// `run` issues the command on pane `id`.
+/// Runs a header control's command on pane `id`; `at`: where it was clicked (the menu opens
+/// there).
+pub(crate) type ControlRun<V> =
+    fn(&mut V, Command, PaneId, Option<Point<Pixels>>, &mut Window, &mut Context<V>);
+
 pub(crate) fn header_controls<V: 'static>(
     t: &Theme,
     kind: PaneKind,
     detached: bool,
     chart_only: bool,
-    run: fn(&mut V, Command, PaneId, &mut Window, &mut Context<V>),
+    run: ControlRun<V>,
     id: PaneId,
     cx: &mut Context<V>,
 ) -> AnyElement {
@@ -3090,7 +3098,8 @@ pub(crate) fn header_controls<V: 'static>(
         .absolute()
         .top_0()
         .right_0()
-        .h(px(HEADER_H))
+        // The header's own height, so the icons sit on its text's center line.
+        .h(px(crate::pane::header_height(kind) - 1.0))
         .w(px(crate::pane::controls_gutter(kind)))
         .overflow_hidden()
         .justify_end()
@@ -3114,9 +3123,10 @@ pub(crate) fn header_controls<V: 'static>(
                 ))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
-                        run(this, cmd, id, window, cx);
+                        // The menu opens where it was asked for (under the ⋯).
+                        run(this, cmd, id, Some(ev.position), window, cx);
                         cx.notify();
                     }),
                 ),

@@ -98,9 +98,7 @@ impl Icon {
                     (11.0, 11.0),
                     (14.0, 8.0),
                 ],
-                // The pupil, a small diamond.
-                &[(8.0, 6.0), (10.0, 8.0), (8.0, 10.0), (6.0, 8.0), (8.0, 6.0)],
-                // The stroke through it.
+                // The stroke through it (no pupil: at 16 px it merged with the stroke).
                 &[(3.0, 13.0), (13.0, 3.0)],
             ],
             Icon::ChartOnly => &[
