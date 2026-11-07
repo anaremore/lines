@@ -165,7 +165,8 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
             Section::ALL.map(|s| s.name().to_lowercase()).join(", ")
         );
     }
-    for s in set {
+    // `account=NAME` picks the window's account (by name or id); the rest are settings.
+    for s in set.iter().filter(|s| !s.starts_with("account=")) {
         parse_set(s).map_err(anyhow::Error::msg)?;
     }
     Ok(())
@@ -182,13 +183,27 @@ pub fn open_for_screenshot(
     open(None, cx);
     let h = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0)?;
     let section = section_named(section)?;
-    let changes: Vec<(usize, Value, bool)> = set.iter().filter_map(|s| parse_set(s).ok()).collect();
     let search = search.map(str::to_owned);
+    let set = set.to_vec();
     let _ = h.update(cx, |v, _, cx| {
         v.section = section;
-        for (i, value, sure) in changes {
-            v.select(i);
-            v.set(i, value, sure, cx);
+        for s in &set {
+            if let Some(name) = s.strip_prefix("account=") {
+                if let Some(a) = v
+                    .facts
+                    .accounts
+                    .iter()
+                    .find(|a| a.id == name || a.name == name)
+                {
+                    v.target.account = Some(a.id.clone());
+                    v.target.account_name = Some(a.name.clone());
+                }
+                continue;
+            }
+            if let Ok((i, value, sure)) = parse_set(s) {
+                v.select(i);
+                v.set(i, value, sure, cx);
+            }
         }
         if let Some(q) = search {
             v.query = q;
@@ -521,7 +536,12 @@ impl SettingsWindow {
     /// Set setting `i` to `v` (validated; a loosened guardrail asks first unless `sure`).
     fn set(&mut self, i: usize, v: Value, sure: bool, cx: &mut Context<Self>) {
         let st = &schema::all()[i];
-        let before = current_prefs(cx);
+        let mut before = current_prefs(cx);
+        // A prop-rule change on an account without a settings entry builds on its rules in
+        // force (not saved unless the change is).
+        if st.key.starts_with("prop.") {
+            schema::seed_prop_doc(&mut before, &self.target, &self.facts);
+        }
         let old = (st.get)(&before, &self.target, &self.facts);
         if old == v && !st.key.starts_with("guard.") {
             // The value shown already: nothing to change (nor to save over).
@@ -1244,7 +1264,7 @@ impl SettingsWindow {
                         .rounded_sm()
                         .border_1()
                         .border_color(t.warn)
-                        .child(div().child(format!("⚠ {}", p.text)))
+                        .child(div().w_full().min_w_0().child(format!("⚠ {}", p.text)))
                         .child(
                             div()
                                 .id("loosen-yes")

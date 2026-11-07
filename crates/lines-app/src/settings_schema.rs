@@ -1476,6 +1476,45 @@ pub fn prop_rules_shown(
     }
 }
 
+/// Before a prop-rule change for an account that has no settings entry yet: start one from
+/// the rules in force (their preset, and any value that differs from it as an override), so
+/// an override builds on what the trader sees.
+pub fn seed_prop_doc(p: &mut Prefs, t: &Target, f: &Facts) {
+    if prop_doc(p, t).is_some() {
+        return;
+    }
+    let (Some(key), Some(r)) = (
+        t.account_name.clone().or(t.account.clone()),
+        fact(f, t).and_then(|a| a.rules_in_force.clone()),
+    ) else {
+        return;
+    };
+    let Some(base) = lines_trading::rules::presets()
+        .into_iter()
+        .find(|b| b.name == r.name)
+    else {
+        return;
+    };
+    let differs = |a: Option<i64>, b: Option<i64>| (a != b).then_some(a).flatten();
+    p.app.prop_rules.insert(
+        key,
+        PropRulesDoc {
+            preset: Some(r.name.clone()),
+            daily_loss_limit: differs(r.daily_loss_limit, base.daily_loss_limit),
+            trailing_drawdown: differs(
+                r.trailing_drawdown.as_ref().map(|d| d.amount),
+                base.trailing_drawdown.as_ref().map(|d| d.amount),
+            ),
+            max_micro_contracts: differs(
+                r.max_micro_contracts.map(i64::from),
+                base.max_micro_contracts.map(i64::from),
+            )
+            .map(|n| n as u32),
+            profit_target: differs(r.profit_target, base.profit_target),
+        },
+    );
+}
+
 /// Whether the prop rules asked for in `after` loosen those in `before` for this account (a
 /// loosening asks first and waits for the next trade date).
 pub fn prop_loosens(before: &Prefs, after: &Prefs, t: &Target, f: &Facts) -> bool {
@@ -2058,6 +2097,40 @@ mod tests {
             ..Default::default()
         };
         assert!(odd.resolve().is_err());
+    }
+
+    /// An account whose rules came from its starting preset (no settings entry): an override
+    /// starts from those rules.
+    #[test]
+    fn an_override_starts_from_the_rules_in_force() {
+        let t = risk_target();
+        let mut f = Facts::default();
+        let eod = lines_trading::rules::presets()[1].clone();
+        f.accounts.push(AccountFact {
+            id: "paper-eval".into(),
+            name: "Paper 50K eval".into(),
+            rules_in_force: Some(lines_trading::rules::RulePreset {
+                max_micro_contracts: Some(20),
+                ..eod.clone()
+            }),
+            ..Default::default()
+        });
+        let mut p = Prefs::default();
+        let loss = by_key("prop.daily_loss").unwrap();
+        assert_eq!((loss.get)(&p, &t, &f), Value::Number(Some(1_000)));
+        seed_prop_doc(&mut p, &t, &f);
+        loss.apply(&mut p, &t, Value::Number(Some(800))).unwrap();
+        let r = p.app.prop_rules["Paper 50K eval"]
+            .resolve()
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.name, eod.name);
+        assert_eq!(r.daily_loss_limit, Some(800));
+        assert_eq!(
+            r.max_micro_contracts,
+            Some(20),
+            "the in-force override is kept"
+        );
     }
 
     /// Raising a prop limit or removing the rules loosens (asks, waits); lowering doesn't.
