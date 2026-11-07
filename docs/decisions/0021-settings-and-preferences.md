@@ -1,6 +1,6 @@
 # 0021: Settings: in context first, one searchable Settings window, settings as data
 
-**Status:** Proposed
+**Status:** Accepted (owner, 2026-11-07)
 
 **Context:** Options are accumulating: themes and palettes, hint bar, column widths, study visibility, grouping, VWAP resets, profile modes, hotkeys, and soon order defaults, risk rules and connections. Incumbent platforms bury hundreds of options in modal dialogs, which traders dislike. Lines needs a settings model that stays clear (`docs/design.md`), safe for trading, and consistent as features grow.
 

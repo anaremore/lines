@@ -28,6 +28,7 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 
 ## 5. Consistent system
 - All colours come from `crates/lines-app/src/theme.rs` tokens; no literal colours in views. Dark is the primary theme; light must be equally complete.
+- User-chosen colors for drawings and studies are user data, not code (decision 0026): the style editor warns when one is close to a color with a meaning or too low in contrast, but never blocks.
 - **Spacing scale:** 2, 4, 8, 12, 16, 24 px. **Type scale:** 11, 12, 13, 15 px, one UI family and one monospace family for numbers.
 - Edges snap to device pixels (as the crosshair work established), so lines are crisp at every DPI.
 - Brand palette (from the icon): ink `#11141B`, signal violet `#8C7BFF`, paper `#ECEAF4`. Violet is the UI accent (focus, selection, active state). It is never used for up/down, which keeps market colours meaning only market direction.
