@@ -128,6 +128,7 @@ pub fn toggle_kind<Id: Copy + Eq + Hash>(
             PaneKind::Dom => "no DOM goes with this pane",
             PaneKind::Tape => "no time & sales goes with this pane",
             PaneKind::Chart => "no chart goes with this pane",
+            PaneKind::Journal => "no journal goes with this pane",
         });
     }
     let any_shown = candidates.iter().any(|id| leaves[id].state.is_shown());

@@ -20,6 +20,12 @@
 //! fills on one source's prices never mark against another's); replays and screenshots keep
 //! theirs in memory only (market time runs in the past). A damaged file is moved aside, never
 //! overwritten, and reported.
+//!
+//! **Journal** (roadmap 8c): the trading thread also feeds `lines_trading::journal` (round
+//! trips from fills, MAE/MFE from the same market batches), saved append-only to
+//! `<config dir>/journal/<source>.jsonl` beside the paper file, under the same rule: replays
+//! and screenshots keep it in memory. A journal this build can't read (newer, damaged
+//! header) is left as it is and nothing is written to it this run.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -42,7 +48,7 @@ use lines_trading::{
     OrderId, OrderKind, PaperBroker, PaperConfig, PositionView, Reject, RulePreset, Source,
     TradingCore, TradingHandle, TradingService,
 };
-use lines_trading::{GuardState, Guardrails};
+use lines_trading::{GuardState, Guardrails, Journal, JournalObserver, JournalShared};
 
 use crate::dom_trade::ArmPrefs;
 
@@ -404,6 +410,8 @@ pub struct TradingSetup {
     /// `settings.json` (roadmap 8b). Asked for at every start: tighter ones apply at once,
     /// looser ones with the next trade date; a saved lockout stays.
     pub guardrails: BTreeMap<String, Guardrails>,
+    /// The trade journal's file and the source label in its header (`None`: in memory).
+    pub journal: Option<(PathBuf, String)>,
 }
 
 impl TradingSetup {
@@ -419,6 +427,16 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            journal: (!replay)
+                .then(|| {
+                    config_dir.map(|d| {
+                        (
+                            d.join("journal").join(format!("{source}.jsonl")),
+                            source.to_owned(),
+                        )
+                    })
+                })
+                .flatten(),
         }
     }
 
@@ -463,6 +481,7 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            journal: None,
         }
     }
 }
@@ -496,6 +515,8 @@ pub struct Trading {
     pub start_armed: bool,
     /// Screenshot fixture (a `--paper` script's first `account`): the panes' account.
     pub start_account: Option<AccountId>,
+    /// The trade journal (roadmap 8c), fed on the trading thread.
+    pub journal: Arc<JournalShared>,
 }
 
 impl Global for Trading {}
@@ -503,8 +524,10 @@ impl Global for Trading {}
 impl Trading {
     /// Build the paper core (from the setup's file, else the default accounts), start it and
     /// the event pump.
-    pub fn start(setup: TradingSetup, registry: FeedRegistry, base: FeedConfig) -> Trading {
+    pub fn start(mut setup: TradingSetup, registry: FeedRegistry, base: FeedConfig) -> Trading {
         let mut report = None;
+        let journal_file = setup.journal.take();
+        let (journal, journal_report) = open_journal(journal_file.as_ref());
         let loaded = match &setup.file {
             Some(path) => match persist::load(path) {
                 Ok(f) => f,
@@ -587,8 +610,17 @@ impl Trading {
                 rules: c.rules.clone(),
             })
             .collect();
-        let service = TradingService::start_with(core, setup.file.map(|p| (p, paper)), setup.clock)
-            .expect("spawn the trading thread");
+        let service = TradingService::start_observed(
+            core,
+            setup.file.map(|p| (p, paper)),
+            setup.clock,
+            vec![Box::new(JournalObserver(journal.clone()))],
+        )
+        .expect("spawn the trading thread");
+        let report = match (report, journal_report) {
+            (Some(a), Some(b)) => Some(format!("{a}  ·  {b}")),
+            (a, b) => a.or(b),
+        };
         let handle = service.handle();
         let cache = Arc::new(TradeCache::new(&accounts));
         let (notes, notes_rx) = mpsc::channel();
@@ -608,6 +640,7 @@ impl Trading {
             report,
             start_armed: false,
             start_account: None,
+            journal,
         }
     }
 
@@ -692,6 +725,42 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 }
 
 /// Move a damaged paper file aside (never overwrite it) and say so.
+/// The journal from its file (if any): its trades and edits, and a writer appending to it.
+/// A file this build can't read is left alone and not written this run (reported).
+fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option<String>) {
+    use lines_trading::journal::store::{self, JournalWriter};
+    let Some((path, source)) = file else {
+        return (JournalShared::new(Journal::new(), None), None);
+    };
+    match store::read(path) {
+        Ok(loaded) => {
+            let mut report = loaded
+                .as_ref()
+                .filter(|l| l.skipped > 0)
+                .map(|l| format!("journal: skipped {} unreadable lines", l.skipped));
+            let writer = match JournalWriter::open(path.clone(), source, loaded.as_ref()) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    report = Some(format!(
+                        "journal {} can't be written ({e:#}); not saved this run",
+                        path.display()
+                    ));
+                    None
+                }
+            };
+            let journal = Journal::from_records(loaded.map(|l| l.records).unwrap_or_default());
+            (JournalShared::new(journal, writer), report)
+        }
+        Err(e) => (
+            JournalShared::new(Journal::new(), None),
+            Some(format!(
+                "journal {} not read ({e:#}); left as it is, not saved this run",
+                path.display()
+            )),
+        ),
+    }
+}
+
 fn set_aside(path: &Path, e: &anyhow::Error) -> String {
     let ms = lines_feed::now_utc().0;
     let aside = path.with_extension(format!("unreadable-{ms}.json"));
@@ -793,6 +862,11 @@ pub enum Step {
     Ack,
     /// Use this account from here on.
     Account(AccountId),
+    /// Market time moves on (ms).
+    Wait(i64),
+    /// A synthetic market trade the trading core sees (paper fills, the journal's MAE/MFE);
+    /// the panes don't (screenshots and tests only).
+    Print(ContractKey, Price, lines_core::Qty),
 }
 
 #[cfg(any(test, feature = "screenshot"))]
@@ -803,7 +877,10 @@ pub enum Step {
 /// - `ack` (acks arrive; orders sent after the last `ack` stay pending);
 /// - `flatten`, `cancelall` (the contract), `account ID`;
 /// - `guard trades N | streak LOSSES/MINUTES | loss MONEY | position N | close MINUTES`: one
-///   guardrail for the account (roadmap 8b; the others unchanged).
+///   guardrail for the account (roadmap 8b; the others unchanged);
+/// - `wait SECONDS` (market time moves on), `print PRICE [QTY]`: a synthetic market trade
+///   only the trading core sees (resting orders fill, the journal's MAE/MFE move), for
+///   round trips in a screenshot of a finished replay.
 pub fn parse_script(
     s: &str,
     product: &lines_core::Product,
@@ -831,6 +908,19 @@ pub fn parse_script(
         match w.as_slice() {
             [] => {}
             ["ack"] => out.push(Step::Ack),
+            ["wait", s] => out.push(Step::Wait(
+                (s.parse::<f64>()
+                    .map_err(|_| anyhow!("wait {s:?}: seconds"))?
+                    * 1000.0) as i64,
+            )),
+            ["print", p, rest @ ..] => {
+                let q = match rest {
+                    [] => 1,
+                    [q] => q.parse().map_err(|_| anyhow!("print quantity {q:?}"))?,
+                    _ => bail!("{raw:?}: print PRICE [QTY]"),
+                };
+                out.push(Step::Print(contract, price(p)?, lines_core::Qty(q)));
+            }
             ["account", id] => {
                 account = AccountId::new(id);
                 out.push(Step::Account(account.clone()));
@@ -921,7 +1011,7 @@ pub fn parse_script(
     Ok(out)
 }
 
-#[cfg(feature = "screenshot")]
+#[cfg(any(test, feature = "screenshot"))]
 impl Trading {
     /// Run a script on a manual-clock core starting at market time `start`, then wait until
     /// the cache shows the result.
@@ -936,6 +1026,20 @@ impl Trading {
                 Step::Ack => {
                     t = lines_core::UtcMillis(t.0 + latency_ms + 1);
                     self.handle.advance_to(t);
+                }
+                Step::Wait(ms) => {
+                    t = lines_core::UtcMillis(t.0 + ms);
+                    self.handle.advance_to(t);
+                }
+                Step::Print(k, price, qty) => {
+                    self.handle.market(
+                        *k,
+                        vec![lines_trading::MarketInput::Trade {
+                            time: t,
+                            price: *price,
+                            qty: *qty,
+                        }],
+                    );
                 }
                 Step::Account(_) => {}
             }
@@ -1080,6 +1184,7 @@ mod tests {
             accounts: Some(accounts),
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            journal: None,
         }
     }
 
@@ -1478,6 +1583,60 @@ mod tests {
         let (p50, p99, n) = dom_click_latency(1000);
         println!("DOM click -> order sent: p50 {p50:?} us, p99 {p99:?} us over {n} commands");
         assert!(p99.unwrap() < 1_000, "p99 {p99:?} us");
+    }
+
+    /// The journal through the real service: a scripted paper session (two round trips, one
+    /// a scale-out with a resting limit filled by a print) arrives as closed trades with
+    /// exact P&L and fees, MAE/MFE from the prints, and the fills' source.
+    #[test]
+    fn paper_round_trips_reach_the_journal() {
+        let t = trading(vec![AccountConfig::paper("paper", 50_000)]);
+        let start = UtcMillis::parse_iso("2026-11-05T15:00:00Z").unwrap();
+        t.handle().advance_to(start);
+        t.handle().market(
+            es(),
+            vec![
+                MarketInput::BookClear,
+                MarketInput::Book {
+                    side: lines_core::Side::Bid,
+                    price: px(5999.75),
+                    qty: Qty(50),
+                },
+                MarketInput::Book {
+                    side: lines_core::Side::Ask,
+                    price: px(6000.00),
+                    qty: Qty(50),
+                },
+            ],
+        );
+        let es_product = catalog::get(catalog::ES).unwrap();
+        let a = AccountId::new("paper");
+        let steps = parse_script(
+            "buy 2 mkt; ack; print 5998.00; wait 30; sell 1 @ 6002.00; ack; print 6002.25; wait 30; sell 1 mkt; ack; \
+             wait 60; sell 1 mkt; ack; buy 1 mkt; ack",
+            &es_product,
+            es(),
+            &a,
+        )
+        .unwrap();
+        t.run_script(&steps, start, 25);
+        let j = t.journal.read();
+        let trades = j.trades();
+        assert_eq!(trades.len(), 2, "{trades:#?}");
+        let first = &trades[0];
+        // Bought 2 at 6000.00 (the ask); sold 1 at 6002.00 (resting, filled by the 6002.25
+        // print) and 1 at 5999.75 (the bid): +2.00 − 0.25 points = $87.50; $1 fees per side.
+        assert_eq!(first.realized, lines_trading::Money::cents(8750));
+        assert_eq!(first.fees, lines_trading::Money::cents(400));
+        assert_eq!((first.max_qty, first.fills.len()), (2, 3));
+        // Worst: 2 × −2.00 at the 5998.00 print; best: 2 × +2.25 at 6002.25.
+        assert_eq!(first.mae, lines_trading::Money::cents(-20_000));
+        assert_eq!(first.mfe, lines_trading::Money::cents(22_500));
+        assert!(first.fills.iter().all(|f| f.source == Some(Source::Test)));
+        // Short 1 at the bid, back at the ask: −0.25 points.
+        assert_eq!(trades[1].side, lines_trading::Side::Sell);
+        assert_eq!(trades[1].realized, lines_trading::Money::cents(-1250));
+        assert!(j.open_trades().next().is_none());
     }
 
     #[test]

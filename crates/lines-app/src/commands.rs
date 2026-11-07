@@ -9,7 +9,7 @@ use gpui::Keystroke;
 use lines_core::Timeframe;
 
 use crate::layout::{Axis, Direction, LinkGroup, PaneKind, Preset, link_letter};
-use crate::pane_columns::{Column, ColumnCmd, DomCol, TapeCol};
+use crate::pane_columns::{Column, ColumnCmd, DomCol, JournalCol, TapeCol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -92,6 +92,14 @@ pub enum Command {
     DomTrail,
     /// The focused DOM's trail half-life: the next preset (0.5, 1, 1.5, 3, 5 s).
     DomTrailHalfLife,
+    /// Show the trade journal: focus its pane, else open one in a new tab (roadmap 8c).
+    OpenJournal,
+    /// Write the journal's trades as CSV to the config folder.
+    ExportJournal,
+    /// The focused journal: edit the selected trade's tags and note.
+    JournalEdit,
+    /// The focused journal: stats for all dates or the current trade date.
+    JournalAllDates,
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
     Studies,
     /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
@@ -319,6 +327,7 @@ pub fn label(c: Command) -> String {
         Command::Toggle(PaneKind::Dom) => "Hide/show DOM".into(),
         Command::Toggle(PaneKind::Tape) => "Hide/show time & sales".into(),
         Command::Toggle(PaneKind::Chart) => "Hide/show chart".into(),
+        Command::Toggle(PaneKind::Journal) => "Hide/show journal".into(),
         Command::ChartOnly => "Chart only (hide/restore linked DOM and T&S)".into(),
         Command::ShowHidden => "Show hidden panes".into(),
         Command::PopOut => "Pop out pane into its own window".into(),
@@ -361,6 +370,10 @@ pub fn label(c: Command) -> String {
         Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
         Command::DomTrail => "DOM: price trail on/off".into(),
         Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
+        Command::OpenJournal => "Open journal".into(),
+        Command::ExportJournal => "Export journal (CSV)".into(),
+        Command::JournalEdit => "Journal: edit tags and note".into(),
+        Command::JournalAllDates => "Journal: stats for all dates / today".into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
@@ -401,7 +414,15 @@ pub fn palette() -> Vec<Command> {
         Command::CycleLink,
     ];
     v.extend([None, Some(0), Some(1), Some(2), Some(3)].map(Command::SetLink));
-    v.extend([PaneKind::Chart, PaneKind::Dom, PaneKind::Tape].map(Command::SetKind));
+    v.extend(
+        [
+            PaneKind::Chart,
+            PaneKind::Dom,
+            PaneKind::Tape,
+            PaneKind::Journal,
+        ]
+        .map(Command::SetKind),
+    );
     v.extend(Preset::ALL.map(Command::Preset));
     v.extend([
         Command::ToggleCrosshairSync,
@@ -416,6 +437,10 @@ pub fn palette() -> Vec<Command> {
         Command::TogglePerfStats,
         Command::DomTrail,
         Command::DomTrailHalfLife,
+        Command::OpenJournal,
+        Command::ExportJournal,
+        Command::JournalEdit,
+        Command::JournalAllDates,
         Command::Studies,
         Command::TimeframeMenu,
         Command::SaveAs,
@@ -428,6 +453,7 @@ pub fn palette() -> Vec<Command> {
             .map(|c| Command::Columns(ColumnCmd::Toggle(Column::Dom(c))))
             .into_iter()
             .chain(TapeCol::ALL.map(|c| Command::Columns(ColumnCmd::Toggle(Column::Tape(c)))))
+            .chain(JournalCol::ALL.map(|c| Command::Columns(ColumnCmd::Toggle(Column::Journal(c)))))
             .chain([
                 Command::Columns(ColumnCmd::AutoFitAll),
                 Command::Columns(ColumnCmd::Reset),

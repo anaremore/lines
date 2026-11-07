@@ -12,6 +12,8 @@
 //!   book walking, stops, partial fills, fees, sessions, server-side brackets/OCO).
 //! - [`position`]: exact FIFO P&L; [`types::Money`]: exact money.
 //! - [`persist`]: the versioned paper trading file.
+//! - [`journal`]: the automatic trade journal (roadmap 8c): round trips from fills, exact P&L,
+//!   MAE/MFE, tags and notes, statistics, an append-only file.
 //! - [`extension`]: the broker extension point (decision 0020): brokers registered from outside
 //!   the public crates, with capabilities and an account source.
 //!
@@ -23,6 +25,7 @@ pub mod core;
 pub mod event;
 pub mod extension;
 pub mod guardrails;
+pub mod journal;
 pub mod market;
 pub mod order;
 pub mod paper;
@@ -40,11 +43,12 @@ pub use broker::{
 pub use command::{BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
 pub use core::{AccountConfig, TradingCore};
 pub use event::{AccountView, Event, FillEvent, PositionView};
-pub use guardrails::{GuardState, GuardrailTracker, Guardrails, LosingStreak};
+pub use guardrails::{GuardState, GuardrailTracker, Guardrails, LosingStreak, RoundTrip};
+pub use journal::{Journal, JournalObserver, JournalShared, Trade};
 pub use market::MarketInput;
 pub use order::{Order, OrderState, Role};
 pub use paper::{FillModel, PaperBroker, PaperConfig};
 pub use risk::RiskLimits;
 pub use rules::{RulePreset, RuleStatus, RuleTracker};
-pub use service::{Clock, FeedBridge, TradingHandle, TradingService};
+pub use service::{Clock, FeedBridge, Observer, TradingHandle, TradingService};
 pub use types::{AccountId, CommandId, Money, OrderId, OrderKind, Side};

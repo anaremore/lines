@@ -146,11 +146,103 @@ pub const TAPE_SPECS: [ColumnSpec; 4] = [
 /// The time column takes the tape's leftover width (prices and sizes stay together).
 pub const TAPE_FILL: usize = 0;
 
-/// A column of either table, for commands.
+/// Journal columns, left to right (roadmap 8c).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalCol {
+    /// Entry time.
+    Time,
+    Contract,
+    Side,
+    /// Largest size.
+    Qty,
+    /// Average entry and exit prices.
+    Entry,
+    Exit,
+    /// Net P&L (after fees).
+    Pnl,
+    /// Ticks per contract.
+    Ticks,
+    Duration,
+    /// Maximum adverse / favorable excursion.
+    MaeMfe,
+    Tags,
+}
+
+impl JournalCol {
+    pub const ALL: [JournalCol; 11] = [
+        JournalCol::Time,
+        JournalCol::Contract,
+        JournalCol::Side,
+        JournalCol::Qty,
+        JournalCol::Entry,
+        JournalCol::Exit,
+        JournalCol::Pnl,
+        JournalCol::Ticks,
+        JournalCol::Duration,
+        JournalCol::MaeMfe,
+        JournalCol::Tags,
+    ];
+
+    pub fn header(self) -> &'static str {
+        match self {
+            JournalCol::MaeMfe => "MAE / MFE",
+            JournalCol::Duration => "Held",
+            c => c.label(),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            JournalCol::Time => "Time",
+            JournalCol::Contract => "Contract",
+            JournalCol::Side => "Side",
+            JournalCol::Qty => "Qty",
+            JournalCol::Entry => "Entry",
+            JournalCol::Exit => "Exit",
+            JournalCol::Pnl => "P&L",
+            JournalCol::Ticks => "Ticks",
+            JournalCol::Duration => "Duration",
+            JournalCol::MaeMfe => "MAE/MFE",
+            JournalCol::Tags => "Tags",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Text columns read left-aligned; numbers right-aligned.
+    pub fn left_aligned(self) -> bool {
+        matches!(
+            self,
+            JournalCol::Time | JournalCol::Contract | JournalCol::Side | JournalCol::Tags
+        )
+    }
+}
+
+pub const JOURNAL_SPECS: [ColumnSpec; 11] = [
+    spec(48.0, 96.0, false, true),
+    spec(40.0, 64.0, true, true),
+    spec(32.0, 44.0, true, true),
+    spec(24.0, 36.0, true, true),
+    spec(48.0, 76.0, true, true),
+    spec(48.0, 76.0, true, true),
+    spec(48.0, 80.0, true, true),
+    spec(32.0, 52.0, true, true),
+    spec(40.0, 60.0, true, true),
+    spec(64.0, 130.0, true, true),
+    spec(40.0, 96.0, true, true),
+];
+/// The tags column takes the journal's leftover width.
+pub const JOURNAL_FILL: usize = 10;
+
+/// A column of any table, for commands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Column {
     Dom(DomCol),
     Tape(TapeCol),
+    Journal(JournalCol),
 }
 
 impl Column {
@@ -158,6 +250,7 @@ impl Column {
         match self {
             Column::Dom(c) => format!("DOM column: {}", c.label()),
             Column::Tape(c) => format!("Time & sales column: {}", c.label()),
+            Column::Journal(c) => format!("Journal column: {}", c.label()),
         }
     }
 }
@@ -196,6 +289,7 @@ pub struct ColumnDoc {
 pub enum Table {
     Dom,
     Tape,
+    Journal,
 }
 
 /// A pane's columns: the trader's choices, this frame's layout, and what the content needs.
@@ -243,6 +337,7 @@ impl Columns {
             set: match table {
                 Table::Dom => ColumnSet::new(&DOM_SPECS, DOM_FILL),
                 Table::Tape => ColumnSet::new(&TAPE_SPECS, TAPE_FILL),
+                Table::Journal => ColumnSet::new(&JOURNAL_SPECS, JOURNAL_FILL),
             },
             cells: [Cell::default(); MAX_COLS],
             needed: [0.0; MAX_COLS],
@@ -254,6 +349,7 @@ impl Columns {
         match self.table {
             Table::Dom => &DOM_SPECS,
             Table::Tape => &TAPE_SPECS,
+            Table::Journal => &JOURNAL_SPECS,
         }
     }
 
@@ -262,6 +358,7 @@ impl Columns {
         match (self.table, c) {
             (Table::Dom, Column::Dom(d)) => Some(d.index()),
             (Table::Tape, Column::Tape(t)) => Some(t.index()),
+            (Table::Journal, Column::Journal(j)) => Some(j.index()),
             _ => None,
         }
     }
@@ -271,6 +368,7 @@ impl Columns {
         match self.table {
             Table::Dom => DomCol::ALL.get(i).map(|c| Column::Dom(*c)),
             Table::Tape => TapeCol::ALL.get(i).map(|c| Column::Tape(*c)),
+            Table::Journal => JournalCol::ALL.get(i).map(|c| Column::Journal(*c)),
         }
     }
 
@@ -278,6 +376,7 @@ impl Columns {
         match self.column(i) {
             Some(Column::Dom(c)) => c.label(),
             Some(Column::Tape(c)) => c.label(),
+            Some(Column::Journal(c)) => c.label(),
             None => "",
         }
     }
@@ -293,8 +392,9 @@ impl Columns {
         let specs = self.specs();
         let col = |c: Column| {
             self.index(c).ok_or(match self.table {
-                Table::Dom => "that column belongs to time & sales",
-                Table::Tape => "that column belongs to the DOM",
+                Table::Dom => "that column isn't the DOM's",
+                Table::Tape => "that column isn't time & sales'",
+                Table::Journal => "that column isn't the journal's",
             })
         };
         match cmd {
@@ -304,6 +404,8 @@ impl Columns {
                 if !self.set.set_shown(specs, i, shown) {
                     return Err(if specs[i].hideable {
                         "the last column stays"
+                    } else if self.table == Table::Journal {
+                        "the time column is always shown"
                     } else {
                         "the price column is always shown"
                     });
@@ -404,6 +506,7 @@ impl Columns {
         match self.column(i) {
             Some(Column::Dom(c)) => c.header(),
             Some(Column::Tape(c)) => c.header(),
+            Some(Column::Journal(c)) => c.header(),
             None => "",
         }
     }
@@ -693,7 +796,9 @@ mod tests {
     #[test]
     fn auto_fit_all_fits_every_column_but_the_filler() {
         let mut c = Columns::new(Table::Tape);
-        c.needed = [70.0, 58.5, 30.0, 18.0, 0.0, 0.0, 0.0, 0.0];
+        c.needed = [
+            70.0, 58.5, 30.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
         c.apply(ColumnCmd::AutoFitAll).unwrap();
         assert_eq!(c.set.width(0), None, "time fills: not fitted");
         assert_eq!(
