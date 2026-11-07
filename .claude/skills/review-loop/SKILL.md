@@ -12,6 +12,13 @@ Each round (at most 3):
    earlier reviewer, and never pass your reasoning, summaries or earlier findings. Prompt it
    with only: "Task: <scratch>/task.md. Diff: <scratch>/review-<round>.diff. Read CLAUDE.md and
    the docs/invariants.md sections for every crate in the diff, then review."
+   **UI changes** (anything that changes what a pane, window, menu or header draws): also spawn
+   three NEW `ui-reviewer` agents in parallel, one per persona (`scalper`, `prop-evaluator`,
+   `accessibility`). Prompt each with only: "Persona: <p>. Change: <one line from task.md>.
+   Images: <paths>." The images are the before/after screenshots from gate step 6, covering every
+   state the change touches (themes, palettes, narrow widths; see CLAUDE.md "Hit every surface").
+   A visual finding is blocking only when at least two personas report it, or one reports it as
+   blocking with a clear region and rubric item. No screenshots for a UI change is itself blocking.
 3. Blocking: a correctness bug with a concrete failure; a broken CLAUDE.md, `docs/invariants.md`,
    `docs/design.md` or accepted-decision rule; changed behavior with no test; data or secret rules.
    Everything else is non-blocking (fix it if it is cheap).
@@ -21,6 +28,7 @@ Each round (at most 3):
 ## Proof: report per round
 - The number of findings by severity, and each blocker's outcome: "fixed in <sha>", or
   "disputed: <reason>". The last round must show 0 blocking.
+- UI changes: each persona's verdict line, and after-screenshots of every visual fix.
 
 ## Stop and ask instead of continuing
 - Round 3 ends with open blockers: report them and stop.
