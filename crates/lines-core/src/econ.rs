@@ -535,7 +535,7 @@ impl EconSchedule {
         })
     }
 
-    /// Up to `n` events from `from` on, any importance (the palette list).
+    /// Events from `from` on, any importance (the palette list).
     pub fn upcoming(&self, from: UtcMillis) -> impl Iterator<Item = &EconEvent> {
         let first = self.events.partition_point(|e| e.at < from);
         self.events[first..].iter()

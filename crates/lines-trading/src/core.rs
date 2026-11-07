@@ -1247,7 +1247,9 @@ impl TradingCore {
     }
 
     /// Flatten-action blackouts: every position whose product is inside a window is flattened
-    /// once per window (a rule command, so it passes no checks and cancels that contract's
+    /// once per window (a position that opens later in the window, from an entry resting since
+    /// before it, is flattened too). A calendar that can't answer flattens nothing: entries are
+    /// refused, positions are the trader's (a rule command, so it passes no checks and cancels that contract's
     /// orders too).
     fn news_flatten(&mut self, now: UtcMillis) {
         let Some(sched) = self.econ.clone() else {
@@ -1283,16 +1285,25 @@ impl TradingCore {
             }
         }
         for (account, contract, at) in todo {
-            self.news_flattened.insert((account.clone(), contract, at));
-            self.submit(
+            let id = self.submit(
                 now,
                 Source::Rule,
                 Instant::now(),
                 Command::Flatten {
-                    account,
+                    account: account.clone(),
                     contract: Some(contract),
                 },
             );
+            // Done for this window only if accepted; a refused flatten is tried again on the
+            // next tick while the position is open.
+            let accepted = self
+                .events
+                .iter()
+                .rev()
+                .any(|e| matches!(e, Event::Command { id: i, result: Ok(_), .. } if *i == id));
+            if accepted {
+                self.news_flattened.insert((account, contract, at));
+            }
         }
     }
 

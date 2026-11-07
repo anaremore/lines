@@ -281,6 +281,32 @@ fn flatten_closes_affected_positions_once_when_the_window_opens() {
 }
 
 #[test]
+fn flatten_also_closes_a_resting_entry_that_fills_in_the_window() {
+    let mut r = Rig::new(NewsAction::Flatten);
+    // A buy limit below the market, resting from before the window; nothing trades through it
+    // yet.
+    r.order_on(es(), Side::Buy, OrderKind::Limit { price: px(5995.00) })
+        .expect("before the window");
+    r.go(cpi() - 2 * MIN);
+    assert_eq!(r.rule_flattens(), 0, "flat: nothing to flatten");
+    // At the release a trade prints through the limit and fills it.
+    r.t = cpi();
+    r.core.market(
+        r.now(),
+        es(),
+        &[MarketInput::Trade {
+            time: r.now(),
+            price: px(5994.00),
+            qty: Qty(5),
+        }],
+    );
+    r.wait(1);
+    r.wait(LAT);
+    assert_eq!(r.position(), 0, "flattened on the next tick");
+    assert_eq!(r.rule_flattens(), 1);
+}
+
+#[test]
 fn warn_refuses_nothing_and_never_flattens() {
     let mut r = Rig::new(NewsAction::Warn);
     r.market_fill(Side::Buy);
