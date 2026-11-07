@@ -157,6 +157,10 @@ fn origin_follows_the_source() {
         (Source::Test, Origin::Manual),
         (Source::Rule, Origin::Automated),
         (Source::Api, Origin::Automated),
+        (
+            Source::Strategy(lines_trading::StrategyId(1)),
+            Origin::Automated,
+        ),
     ] {
         assert_eq!(Origin::of(s), o, "{s:?}");
     }

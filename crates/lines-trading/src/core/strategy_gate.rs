@@ -105,12 +105,9 @@ impl TradingCore {
         }
         cfg.limits.validate().map_err(deny)?;
         // One instance per account and contract: its position is the account's position.
-        if let Some(other) = self
-            .strategies
-            .values()
-            .find(|i| i.cfg.id != cfg.id && i.cfg.account == cfg.account)
-            .filter(|i| i.cfg.contract == cfg.contract)
-        {
+        if let Some(other) = self.strategies.values().find(|i| {
+            i.cfg.id != cfg.id && i.cfg.account == cfg.account && i.cfg.contract == cfg.contract
+        }) {
             return Err(deny(format!(
                 "{} already trades this account and contract",
                 other.cfg.label
@@ -157,6 +154,9 @@ impl TradingCore {
         self.pause_strategy(now, id, StrategyState::Stopped, "removed".into());
         self.strategy_event(id, true);
         self.strategies.remove(&id);
+        // Its remaining orders (exits it left working) are nobody's: a new instance with the
+        // same id must not inherit their fills.
+        self.strategy_orders.retain(|_, s| *s != id);
         Ok(Vec::new())
     }
 
@@ -166,6 +166,21 @@ impl TradingCore {
         }
         if let Some(why) = self.strategy_blocker(now, id, false) {
             return Err(deny(format!("can't arm: {why}")));
+        }
+        // Its own books must agree with the account (a person may have closed or changed the
+        // position while it was paused): flat adopts flat; anything else must be flattened.
+        let (account, contract, own) = {
+            let i = &self.strategies[&id];
+            (i.cfg.account.clone(), i.cfg.contract, i.position.qty())
+        };
+        let held = self.position(&account, contract);
+        if held != own {
+            if held != 0 {
+                return Err(deny(format!(
+                    "can't arm: the account holds {held} and the strategy's own books {own}; flatten first"
+                )));
+            }
+            self.strategies.get_mut(&id).expect("checked").position = Default::default();
         }
         let i = self.strategies.get_mut(&id).expect("checked");
         if i.state != StrategyState::Armed {
@@ -433,13 +448,30 @@ impl TradingCore {
             }
             _ => return Err(deny(format!("{label} can't send this command"))),
         };
-        let modify = matches!(cmd, Command::ModifyOrder { .. });
-        if let Some(spec) = &entry {
-            if spec.account != account || spec.contract != contract {
-                return Err(deny(format!(
-                    "{label} trades only its own account and contract"
-                )));
-            }
+        let Some(spec) = &entry else {
+            // A modify that adds nothing (a new price, less quantity): an exit's adjustment.
+            return Ok(());
+        };
+        if spec.account != account || spec.contract != contract {
+            return Err(deny(format!(
+                "{label} trades only its own account and contract"
+            )));
+        }
+        // An order that only closes part of the position (less what open orders already
+        // close) is an exit: never limited by state, hours, size, loss or rate. A bracket
+        // always opens.
+        let position = self.position(&account, contract);
+        let (open_buy, open_sell) = self.open_qty(&account, contract);
+        let closable = match spec.side {
+            Side::Sell if position > 0 => position - open_sell,
+            Side::Buy if position < 0 => -position - open_buy,
+            _ => 0,
+        };
+        let adds = matches!(cmd, Command::ModifyOrder { .. } | Command::PlaceBracket(_));
+        if !adds && spec.qty.0 <= closable {
+            return Ok(());
+        }
+        {
             let i = &self.strategies[&id];
             if i.state != StrategyState::Armed {
                 let why = i
@@ -452,8 +484,7 @@ impl TradingCore {
                 return Err(deny(format!("{label}: outside its allowed hours")));
             }
             let max = i.cfg.limits.max_position;
-            let position = self.position(&account, contract);
-            let (mut b, mut s) = self.open_qty(&account, contract);
+            let (mut b, mut s) = (open_buy, open_sell);
             match spec.side {
                 Side::Buy => b += spec.qty.0,
                 Side::Sell => s += spec.qty.0,
@@ -469,17 +500,26 @@ impl TradingCore {
                 return Err(deny(format!("{label}: its daily loss limit was reached")));
             }
         }
-        if entry.is_some() || modify {
-            let i = self.strategies.get_mut(&id).expect("checked");
-            let max = i.cfg.limits.max_orders_per_min;
-            if i.rate(now) >= max {
-                return Err(deny(format!(
-                    "{label}: more than {max} orders in a minute; slow down"
-                )));
-            }
+        let i = self.strategies.get_mut(&id).expect("checked");
+        let max = i.cfg.limits.max_orders_per_min;
+        if i.rate(now) >= max {
+            return Err(deny(format!(
+                "{label}: more than {max} orders in a minute; slow down"
+            )));
+        }
+        i.counting = true;
+        Ok(())
+    }
+
+    /// After a strategy command: an entry the core accepted counts toward the instance's order
+    /// rate (one refused later by prop rules, risk or guardrails doesn't).
+    pub(super) fn strategy_counted(&mut self, id: StrategyId, now: UtcMillis, accepted: bool) {
+        if let Some(i) = self.strategies.get_mut(&id)
+            && std::mem::take(&mut i.counting)
+            && accepted
+        {
             i.recent.push_back(now);
         }
-        Ok(())
     }
 
     /// Orders a strategy command created belong to the instance.
@@ -537,7 +577,7 @@ impl TradingCore {
         let Some(spec) = self.specs.get(&i.cfg.contract) else {
             return;
         };
-        let (qty, fee) = if owner.is_some() {
+        let (qty, fee) = if owner.is_some() && order.role != Role::Flatten {
             (qty, fee)
         } else {
             let closing = qty.0.min(i.position.qty().abs());

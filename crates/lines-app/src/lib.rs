@@ -415,7 +415,8 @@ struct Cli {
     /// Backtest a strategy (decision 0025) over --replay (a .lfr recording or a stored
     /// contract or day) with the levels recorded in --replay-levels, on the paper broker, and
     /// exit. Needs --backtest-config. The public build has only the example, `level-touch`
-    /// (synthetic, no edge; it reads the `demo` level source).
+    /// (synthetic, no edge): it reads the `demo` level source, so it needs a build with
+    /// `demo-levels` run with --demo-levels, and a `demo-ES.lfr` levels recording.
     #[arg(long, requires_all = ["replay", "backtest_config"])]
     backtest: Option<String>,
     /// Backtest settings (JSON): {"params": {...}, "limits": {"max_position": 1,

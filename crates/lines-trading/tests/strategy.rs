@@ -640,3 +640,103 @@ fn a_flatten_by_someone_else_closes_the_instance_books() {
     r.manual(Command::ArmStrategy { id: ID })
         .expect("its own loss is the $500 realised");
 }
+
+fn sell(qty: i64, kind: OrderKind) -> Command {
+    Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(qty),
+        kind,
+    })
+}
+
+#[test]
+fn exits_are_never_limited_by_hours_size_or_rate() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    // After hours, and paused: closing orders still go, one at a time up to the position.
+    r.t = UtcMillis::parse_iso("2026-11-10T21:30:00Z").unwrap().0;
+    r.core.strategy_heartbeat(r.now());
+    r.bot(Command::PauseStrategy {
+        id: ID,
+        reason: "test".into(),
+    })
+    .unwrap();
+    let stop = r
+        .bot(sell(
+            1,
+            OrderKind::Stop {
+                trigger: px(5990.0),
+            },
+        ))
+        .expect("an exit after hours, while paused");
+    r.bot(sell(1, limit(6010.0)))
+        .expect("a second exit: still within the position");
+    // A third would go beyond the position: it is an entry, and refused.
+    assert!(denied(r.bot(sell(1, limit(6020.0)))).contains("is paused"));
+    // Moving the stop many times is never rate limited.
+    for i in 0..8 {
+        r.bot(Command::ModifyOrder {
+            account: acct(),
+            order: stop[0],
+            qty: None,
+            price: Some(px(5990.0 + 0.25 * i as f64)),
+        })
+        .expect("a stop adjustment");
+        r.wait(30);
+    }
+}
+
+#[test]
+fn one_instance_per_account_and_contract_among_many() {
+    let mut r = Rig::armed();
+    let nq_cfg = |id| StrategyConfig {
+        id: StrategyId(id),
+        label: format!("nq #{id}"),
+        contract: nq(),
+        ..config()
+    };
+    r.manual(Command::AddStrategy(nq_cfg(8))).unwrap();
+    assert!(denied(r.manual(Command::AddStrategy(nq_cfg(9)))).contains("nq #8 already trades"));
+}
+
+#[test]
+fn arming_reconciles_its_books_with_the_account() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 1, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // A person adds to the position: paused, and its books (1) disagree with the account (2).
+    r.manual(buy(es(), 1, OrderKind::Market)).unwrap();
+    r.wait(30);
+    assert_eq!(r.state(), StrategyState::Paused);
+    assert!(denied(r.manual(Command::ArmStrategy { id: ID })).contains("flatten first"));
+    // A person closes everything with a plain order: flat adopts flat.
+    r.manual(sell(2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    r.manual(Command::ArmStrategy { id: ID }).expect("flat");
+    r.bot(buy(es(), 2, limit(5990.0)))
+        .expect("its own books are flat again: the max position of 2 is free");
+}
+
+#[test]
+fn removing_forgets_its_orders() {
+    let mut r = Rig::armed();
+    r.bot(bracket(1, 6000.25)).unwrap();
+    r.wait(30);
+    r.manual(Command::RemoveStrategy { id: ID }).unwrap();
+    r.manual(Command::AddStrategy(config())).unwrap();
+    // The old bracket's exits fill now: the new instance's books stay flat, so a person
+    // flattening and arming is not refused for a mismatch.
+    r.manual(Command::Flatten {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    r.manual(Command::ArmStrategy { id: ID })
+        .expect("flat books");
+}
