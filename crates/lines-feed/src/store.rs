@@ -977,6 +977,19 @@ mod tests {
         drop(d);
         assert!(store.revision() > rev, "the chain pane sees it");
         assert_eq!(store.chart_revision(), chart_rev, "charts don't repaint");
+        // Past the chains' bounds: counted as rejected.
+        let far = |i: i64| MarketEvent::OptionQuote {
+            key: lines_core::OptionKey {
+                expiry: lines_core::CivilDate::new(2027, 1, 1).unwrap().add_days(i),
+                ..key
+            },
+            quote,
+        };
+        let events: Vec<_> = (0..lines_core::chain::MAX_EXPIRIES as i64)
+            .map(far)
+            .collect();
+        store.update_frame(|d| d.apply(&events));
+        assert_eq!(store.read().stats.rejected, 1, "the 401st expiry");
     }
 
     /// The stored → live boundary: a history snapshot older than the newest stored trade

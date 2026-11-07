@@ -445,19 +445,17 @@ mod tests {
             },
         ];
         // Malformed option quotes: unknown mask bits, a negative price.
-        let opt = |mut f: Box<dyn FnMut(&mut Vec<u8>)>| {
+        let opt = |f: fn(&mut Vec<u8>)| {
             let mut b = Vec::new();
             encode(&evs[5], &mut b);
             f(&mut b);
             decode(&b, &mut Vec::new()).is_err()
         };
         // tag(1) time(8) date(4) strike(8) right(1) = 22: the mask byte.
-        assert!(opt(Box::new(|b| b[22] = 32)));
-        assert!(opt(Box::new(
-            |b| b[23..31].copy_from_slice(&(-1i64).to_le_bytes())
-        )));
+        assert!(opt(|b| b[22] = 32));
+        assert!(opt(|b| b[23..31].copy_from_slice(&(-1i64).to_le_bytes())));
         assert!(
-            opt(Box::new(|b| b[13..21].copy_from_slice(&0i64.to_le_bytes()))),
+            opt(|b| b[13..21].copy_from_slice(&0i64.to_le_bytes())),
             "zero strike"
         );
         let mut buf = Vec::new();
@@ -508,6 +506,52 @@ mod tests {
                     aggressor: Some(lines_core::Aggressor::Buy),
                 }
             ]
+        );
+    }
+
+    /// An option quote is SPY's chain; on a product without options (NQ) it is rejected.
+    #[test]
+    fn option_quotes_need_a_product_with_options() {
+        let key = OptionKey {
+            expiry: CivilDate::new(2026, 11, 9).unwrap(),
+            strike: Price(68_400),
+            right: Right::Call,
+        };
+        let quote = OptionQuote {
+            bid: Some(Price(80)),
+            time: UtcMillis(1),
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        encode(
+            &NativeEvent::OptionQuote {
+                time_us: 1_000,
+                key,
+                quote,
+            },
+            &mut buf,
+        );
+        let run = |id| {
+            let mut s = NativeProvider
+                .new_session(&catalog::get(id).unwrap(), None)
+                .unwrap();
+            let mut ev = Vec::new();
+            s.on_frame(
+                &Frame::binary(buf.clone()),
+                UtcMillis(0),
+                &mut ev,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            ev
+        };
+        assert_eq!(
+            run(catalog::SPY),
+            vec![MarketEvent::Ready, MarketEvent::OptionQuote { key, quote }]
+        );
+        assert_eq!(
+            run(catalog::NQ),
+            vec![MarketEvent::Ready, MarketEvent::Rejected { count: 1 }]
         );
     }
 }
