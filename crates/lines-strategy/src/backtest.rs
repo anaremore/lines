@@ -264,22 +264,6 @@ fn ctx<'a>(
 }
 
 impl Run {
-    /// Whether a core event concerns the instance.
-    fn concerns(&self, e: &Event) -> bool {
-        let (a, k) = (&self.cfg.account, self.cfg.contract);
-        match e {
-            Event::Command { source, .. } => *source == Source::Strategy(INSTANCE),
-            Event::Order(o) => &o.account == a && o.contract == k,
-            Event::Fill(f) => &f.account == a && f.contract == k,
-            Event::Position(p) => &p.account == a && p.contract == k,
-            Event::Account(v) => &v.account == a,
-            Event::Breach { account, .. } | Event::Guardrail { account, .. } => account == a,
-            Event::Overfill { account, .. } => account == a,
-            Event::Strategy { id, .. } => *id == INSTANCE,
-            Event::Rebuilt { .. } => true,
-        }
-    }
-
     /// Hand the core's events to the journal and the strategy; run the strategy's answers.
     fn flush(&mut self, now: UtcMillis, budget: &mut usize) {
         loop {
@@ -319,7 +303,7 @@ impl Run {
                     }
                     _ => {}
                 }
-                if self.concerns(e) {
+                if crate::concerns(&self.cfg, e) {
                     let c = ctx(&self.cfg, &self.product, self.state, now);
                     self.strategy.on_input(&c, Input::Trading(e), &mut out);
                 }
@@ -551,7 +535,6 @@ pub fn run(bt: &Backtest) -> Result<Report> {
         // Levels first at an instant, then market data, then the timer.
         if t_lv.is_some_and(|t| t <= t_md.0 && t <= next_timer) {
             now = UtcMillis(t_lv.expect("checked"));
-            run.core.strategy_heartbeat(now);
             run.core.tick(now);
             run.flush(now, &mut MAX_DECISIONS_PER_INPUT.clone());
             for l in levels.iter_mut() {
@@ -603,7 +586,6 @@ pub fn run(bt: &Backtest) -> Result<Report> {
                 );
                 run.harness.insert(id.0, "adding the strategy");
             }
-            run.core.strategy_heartbeat(now);
             run.core.tick(now);
             let inputs = lines_trading::market::from_events(&events);
             run.core.market(now, contract, &inputs);
@@ -614,7 +596,6 @@ pub fn run(bt: &Backtest) -> Result<Report> {
         } else {
             now = UtcMillis(next_timer);
             next_timer += bt.timer_ms;
-            run.core.strategy_heartbeat(now);
             run.core.tick(now);
             run.flush(now, &mut MAX_DECISIONS_PER_INPUT.clone());
             run.input(now, Input::Timer);

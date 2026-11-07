@@ -14,7 +14,7 @@
 //! - [`persist`]: the versioned paper trading file.
 //! - [`journal`]: the automatic trade journal (roadmap 8c): round trips from fills, exact P&L,
 //!   MAE/MFE, tags and notes, statistics, an append-only file.
-//! - [`strategy`]: strategies as the core sees them (decision 0025, pending acceptance):
+//! - [`strategy`]: strategies as the core sees them (decision 0025):
 //!   `Source::Strategy`, the strategy gate, per-instance limits and states.
 //! - [`extension`]: the broker extension point (decision 0020): brokers registered from outside
 //!   the public crates, with capabilities and an account source.
@@ -44,7 +44,7 @@ pub use broker::{
     PaneContext, RequestContext,
 };
 pub use command::{BracketSpec, Command, OrderSpec, Reject, RejectCode, Source};
-pub use core::{AccountConfig, OrderLatency, TradingCore};
+pub use core::{AccountConfig, INTERNAL_COMMAND_IDS, OrderLatency, TradingCore};
 pub use event::{AccountView, Event, FillEvent, PositionView};
 pub use guardrails::{GuardState, GuardrailTracker, Guardrails, LosingStreak, RoundTrip};
 pub use journal::{Journal, JournalObserver, JournalShared, Trade};
@@ -55,6 +55,7 @@ pub use risk::RiskLimits;
 pub use rules::{RulePreset, RuleStatus, RuleTracker};
 pub use service::{Clock, FeedBridge, Observer, TradingHandle, TradingService};
 pub use strategy::{
-    HoursWindow, StrategyConfig, StrategyId, StrategyLimits, StrategyState, TradingHours,
+    DAILY_LOSS, HoursWindow, LOSS_CLOSED_TODAY, StrategyConfig, StrategyId, StrategyLimits,
+    StrategyState, TradingHours,
 };
 pub use types::{AccountId, CommandId, Money, OrderId, OrderKind, Side};

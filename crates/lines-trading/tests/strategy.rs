@@ -1,4 +1,4 @@
-//! The strategy gate (decision 0025, pending acceptance): strategy commands through the
+//! The strategy gate (decision 0025): strategy commands through the
 //! trading core with the paper broker. Deterministic: time is passed in.
 
 use std::sync::Arc;
@@ -159,20 +159,17 @@ impl Rig {
 
     fn bot(&mut self, c: Command) -> Result<Vec<OrderId>, Reject> {
         // The host is alive whenever its strategy acts.
-        self.core.strategy_heartbeat(self.now());
         self.send(BOT, c)
     }
 
     fn wait(&mut self, ms: i64) {
         self.t += ms;
-        self.core.strategy_heartbeat(self.now());
         self.core.tick(self.now());
         self.events.extend(self.core.drain());
     }
 
     fn market(&mut self, inputs: &[MarketInput]) {
         self.t += 1;
-        self.core.strategy_heartbeat(self.now());
         self.core.market(self.now(), es(), inputs);
         self.events.extend(self.core.drain());
     }
@@ -401,7 +398,6 @@ fn outside_allowed_hours_no_entries_but_exits() {
     let id = r.bot(buy(es(), 1, limit(5990.0))).unwrap()[0];
     // 16:30 New York.
     r.t = UtcMillis::parse_iso("2026-11-10T21:30:00Z").unwrap().0;
-    r.core.strategy_heartbeat(r.now());
     assert!(denied(r.bot(buy(es(), 1, limit(5989.0)))).contains("outside its allowed hours"));
     r.bot(Command::CancelOrder {
         account: acct(),
@@ -411,23 +407,44 @@ fn outside_allowed_hours_no_entries_but_exits() {
 }
 
 #[test]
-fn daily_loss_pauses_and_blocks() {
+fn daily_loss_closes_the_trade_and_pauses_for_the_trade_date() {
     let mut r = Rig::armed();
     r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
     r.wait(30);
     assert_eq!(r.core.position(&acct(), es()), 2);
-    // $50/pt × 2 contracts: 10 points down is $1,000, the limit.
+    // A protective stop of its own, below the loss limit.
+    let stop = r
+        .bot(sell(
+            2,
+            OrderKind::Stop {
+                trigger: px(5970.0),
+            },
+        ))
+        .unwrap()[0];
+    r.wait(30);
+    // $50/pt x 2 contracts: 10 points down is $1,000, the limit.
     r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
     r.trade(5990.0, 1);
     assert_eq!(r.state(), StrategyState::Paused);
-    assert!(r.reason().contains("daily loss"), "{}", r.reason());
-    assert!(denied(r.manual(Command::ArmStrategy { id: ID })).contains("daily loss"));
-    // Its own flatten still works.
-    r.bot(Command::Flatten {
-        account: acct(),
-        contract: Some(es()),
-    })
-    .unwrap();
+    assert_eq!(
+        r.reason(),
+        lines_trading::DAILY_LOSS,
+        "the exact text the panel matches"
+    );
+    r.wait(30);
+    // The owner's rule: the trade is closed and its working orders are gone.
+    assert_eq!(r.core.position(&acct(), es()), 0, "flattened");
+    assert!(!r.core.order(stop).unwrap().is_open(), "its stop cancelled");
+    // No entries for the rest of the trade date.
+    assert!(
+        denied(r.manual(Command::ArmStrategy { id: ID }))
+            .contains(lines_trading::LOSS_CLOSED_TODAY)
+    );
+    // The next trade date (Wednesday 10:00 New York) starts over.
+    r.t = UtcMillis::parse_iso("2026-11-11T15:00:00Z").unwrap().0;
+    r.wait(10);
+    r.manual(Command::ArmStrategy { id: ID })
+        .expect("a new trade date");
 }
 
 #[test]
@@ -548,8 +565,9 @@ fn a_strategy_stops_or_pauses_only_itself() {
 #[test]
 fn silent_host_pauses() {
     let mut r = Rig::armed();
-    r.t += 5_001;
-    r.core.tick(r.now());
+    // The trading service calls this when no heartbeat came for HEARTBEAT_TIMEOUT (wall clock).
+    r.core.strategy_host_silent(r.now());
+    r.events.extend(r.core.drain());
     assert_eq!(r.state(), StrategyState::Paused);
     assert!(r.reason().contains("stopped responding"), "{}", r.reason());
 }
@@ -659,7 +677,6 @@ fn exits_are_never_limited_by_hours_size_or_rate() {
     assert_eq!(r.core.position(&acct(), es()), 2);
     // After hours, and paused: closing orders still go, one at a time up to the position.
     r.t = UtcMillis::parse_iso("2026-11-10T21:30:00Z").unwrap().0;
-    r.core.strategy_heartbeat(r.now());
     r.bot(Command::PauseStrategy {
         id: ID,
         reason: "test".into(),
@@ -936,5 +953,141 @@ fn its_flatten_with_a_position_leaves_nothing_to_reopen_it() {
     assert!(
         !r.core.order(stop).unwrap().is_open(),
         "no stop left to open a short"
+    );
+}
+
+#[test]
+fn commands_the_core_issues_never_take_a_callers_id() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 1, limit(5985.0))).unwrap();
+    r.wait(30);
+    // A person's order pauses the instance: the core cancels its entry with its own command.
+    let before: Vec<u64> = ids(&r.events);
+    r.manual(buy(es(), 1, limit(5950.0))).unwrap();
+    r.wait(30);
+    let internal: Vec<u64> = ids(&r.events)
+        .into_iter()
+        .filter(|i| !before.contains(i))
+        .filter(|i| *i >= lines_trading::INTERNAL_COMMAND_IDS)
+        .collect();
+    assert!(
+        !internal.is_empty(),
+        "the pause's cancel is an internal command"
+    );
+    // The next caller's command still gets the next small id.
+    let max_external = ids(&r.events)
+        .into_iter()
+        .filter(|i| *i < lines_trading::INTERNAL_COMMAND_IDS)
+        .max()
+        .unwrap();
+    r.manual(Command::CancelAll {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    let next = ids(&r.events)
+        .into_iter()
+        .filter(|i| *i < lines_trading::INTERNAL_COMMAND_IDS)
+        .max()
+        .unwrap();
+    assert_eq!(next, max_external + 1);
+}
+
+fn ids(events: &[Event]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Command { id, .. } => Some(id.0),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn daily_loss_closes_a_trade_the_host_paused_with() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // The host pauses it (levels went stale) with the trade open.
+    r.bot(Command::PauseStrategy {
+        id: ID,
+        reason: "levels demo are stale".into(),
+    })
+    .unwrap();
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        0,
+        "closed at the daily loss"
+    );
+}
+
+#[test]
+fn daily_loss_never_closes_a_trade_a_person_took_over() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // A person's own order pauses it: the trade is theirs now.
+    r.manual(sell(1, limit(6100.0))).unwrap();
+    r.wait(30);
+    assert!(r.reason().contains("manual order activity"));
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2, "left to the person");
+}
+
+#[test]
+fn a_flatten_better_than_the_limit_still_ends_the_day() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // The limit is hit on a print at 5990.00, but the flatten fills at 5994.00 (a better bid):
+    // the realised loss ends under the limit.
+    r.book(&[(5994.0, 10)], &[(5994.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    let m = denied(r.manual(Command::ArmStrategy { id: ID }));
+    assert!(m.contains("no entries until the next trade date"), "{m}");
+}
+
+#[test]
+fn a_person_taking_over_a_paused_trade_keeps_it_at_the_daily_loss() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    r.bot(Command::PauseStrategy {
+        id: ID,
+        reason: "levels demo are stale".into(),
+    })
+    .unwrap();
+    // While it is paused, a person works the trade.
+    r.manual(sell(1, limit(6100.0))).unwrap();
+    r.wait(30);
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2, "the person's trade now");
+}
+
+#[test]
+fn adding_it_again_after_a_person_took_over_keeps_the_trade_theirs() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    r.manual(sell(1, limit(6100.0))).unwrap();
+    r.wait(30);
+    // Its settings sent again (Disarmed, no reason) don't hand the trade back to it.
+    r.manual(Command::AddStrategy(config())).unwrap();
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        2,
+        "still the person's trade"
     );
 }

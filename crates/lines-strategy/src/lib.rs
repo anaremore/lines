@@ -1,4 +1,4 @@
-//! Strategies (decision 0025, pending acceptance).
+//! Strategies (decision 0025).
 //!
 //! A [`Strategy`] is a **pure, deterministic state machine**, like a provider session
 //! (decision 0011): no I/O, no clock reads, no randomness, no threads. Every input comes with
@@ -12,11 +12,13 @@
 //! - [`extension`]: [`StrategyExtension`], how private strategies plug in (decision 0020).
 //! - [`backtest`]: one instance over a recording (or stored session) plus recorded levels,
 //!   with the paper broker on the market clock: a deterministic [`backtest::Report`].
+//! - [`host`]: runs instances in the app (live sources and replays) on their own thread.
 //! - [`example`]: a trivial, synthetic level-touch strategy with no edge (tests, docs).
 
 pub mod backtest;
 pub mod example;
 pub mod extension;
+pub mod host;
 
 use std::sync::Arc;
 
@@ -110,6 +112,23 @@ pub trait Strategy: Send {
     /// Short lines describing its state (strategy panel, reports).
     fn status(&self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+/// Whether a trading-core event is for an instance: its own commands' results and state, and
+/// what happens on its account and contract. The one definition for the host and backtests.
+pub fn concerns(cfg: &lines_trading::StrategyConfig, e: &Event) -> bool {
+    let (a, k) = (&cfg.account, cfg.contract);
+    match e {
+        Event::Command { source, .. } => *source == lines_trading::Source::Strategy(cfg.id),
+        Event::Order(o) => &o.account == a && o.contract == k,
+        Event::Fill(f) => &f.account == a && f.contract == k,
+        Event::Position(p) => &p.account == a && p.contract == k,
+        Event::Account(v) => &v.account == a,
+        Event::Breach { account, .. } | Event::Guardrail { account, .. } => account == a,
+        Event::Overfill { account, .. } => account == a,
+        Event::Strategy { id, .. } => *id == cfg.id,
+        Event::Rebuilt { .. } => true,
     }
 }
 

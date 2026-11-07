@@ -1,4 +1,4 @@
-//! Strategies as the trading core sees them (decision 0025, pending acceptance).
+//! Strategies as the trading core sees them (decision 0025).
 //!
 //! A strategy runs outside the core (`lines-strategy`) and acts only through commands with
 //! [`Source::Strategy`](crate::Source::Strategy). The **core** enforces the rules, so a buggy
@@ -118,8 +118,17 @@ impl StrategyState {
     }
 }
 
-/// Core time without a heartbeat from the strategy host before armed instances pause.
-pub const HEARTBEAT_TIMEOUT_MS: i64 = 5_000;
+/// Wall-clock time without a heartbeat from the strategy host before the trading service
+/// pauses every armed instance (host liveness is a wall-clock matter: a fast replay moves the
+/// market clock minutes in a moment).
+pub const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The reason an instance paused when it reached its daily loss (its trade was also closed,
+/// decision 0027). Exact text, for the panel to match.
+pub const DAILY_LOSS: &str = "its daily loss limit was reached: its trade was closed";
+/// The reason arming is refused on the trade date its daily loss closed its trade.
+pub const LOSS_CLOSED_TODAY: &str =
+    "its daily loss limit was reached today: no entries until the next trade date";
 /// The order-rate window.
 const RATE_WINDOW_MS: i64 = 60_000;
 
@@ -210,14 +219,17 @@ pub(crate) struct Instance {
     pub day: Option<CivilDate>,
     /// When its recent new orders and modifies passed the gate.
     pub recent: VecDeque<UtcMillis>,
-    /// The host's last heartbeat (or the arm time).
-    pub beat: UtcMillis,
     /// The command in flight passed the gate as an entry: count it if the core accepts it.
     pub counting: bool,
+    /// The trade date its daily loss closed its trade (once per trade date).
+    pub loss_closed: Option<CivilDate>,
+    /// A person's order action on its account and contract while it was not armed: its
+    /// position is theirs (the daily-loss close leaves it alone). Cleared when armed.
+    pub taken_over: bool,
 }
 
 impl Instance {
-    pub fn new(cfg: StrategyConfig, now: UtcMillis) -> Instance {
+    pub fn new(cfg: StrategyConfig) -> Instance {
         Instance {
             cfg,
             state: StrategyState::Disarmed,
@@ -227,8 +239,9 @@ impl Instance {
             day_realised: Money::ZERO,
             day: None,
             recent: VecDeque::new(),
-            beat: now,
             counting: false,
+            loss_closed: None,
+            taken_over: false,
         }
     }
 

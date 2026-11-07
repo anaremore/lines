@@ -2975,6 +2975,7 @@ dependencies = [
  "lines-trading",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

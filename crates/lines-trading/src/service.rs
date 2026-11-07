@@ -69,6 +69,8 @@ enum Msg {
     AddAccounts(Vec<crate::core::AccountConfig>),
     Latency(Sender<(Option<u64>, Option<u64>, usize)>),
     AdvanceTo(UtcMillis),
+    /// The strategy host is alive (decision 0025).
+    StrategyHeartbeat,
     Sync(Sender<()>),
     Shutdown,
 }
@@ -111,6 +113,13 @@ impl TradingHandle {
             pane,
         }));
         id
+    }
+
+    /// The strategy host is alive (decision 0025). Once a host has sent one, armed strategies
+    /// pause when none arrives for `strategy::HEARTBEAT_TIMEOUT` of wall-clock time. A
+    /// message, not a command (no result event).
+    pub fn strategy_heartbeat(&self) {
+        let _ = self.tx.send(Msg::StrategyHeartbeat);
     }
 
     /// Every event from now on.
@@ -316,6 +325,8 @@ fn run(
         last: UtcMillis(0),
     };
     let mut syncs: Vec<Sender<()>> = Vec::new();
+    // The strategy host's last heartbeat (wall clock); `None` until one arrives.
+    let mut last_beat: Option<Instant> = None;
     // Events of this batch so far: observers get them before each market batch (so a trade
     // the batch opened sees the prices that follow), subscribers all of them at the end.
     let mut events: Vec<Event> = Vec::new();
@@ -361,6 +372,7 @@ fn run(
                     core.tick(clock.now());
                 }
                 Ok(Msg::Sync(tx)) => syncs.push(tx),
+                Ok(Msg::StrategyHeartbeat) => last_beat = Some(Instant::now()),
                 Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                     stop = true;
                     break;
@@ -375,6 +387,12 @@ fn run(
         }
         if stop {
             break;
+        }
+        // A silent strategy host: armed strategies pause (once; the next heartbeat re-arms
+        // this watch, never the strategies).
+        if last_beat.is_some_and(|t| t.elapsed() > crate::strategy::HEARTBEAT_TIMEOUT) {
+            last_beat = None;
+            core.strategy_host_silent(clock.now());
         }
         core.tick(clock.now());
         core.note_time(clock.now());

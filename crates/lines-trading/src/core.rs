@@ -175,6 +175,9 @@ pub struct TradingCore {
     /// Set by `PlaceExit` for the order it is about to create: reduce-only at the broker.
     next_reduce_only: bool,
     next_command: u64,
+    /// Ids for commands the core issues itself (a pause's cancels, Stop with flatten, a rule's
+    /// liquidation), from [`INTERNAL_COMMAND_IDS`] up: never an id a `TradingHandle` gave out.
+    next_internal: u64,
     latency: Latency,
     hud: Arc<Mutex<OrderLatency>>,
     events: Vec<Event>,
@@ -199,6 +202,8 @@ pub struct TradingCore {
 }
 
 const KEEP_FINISHED: usize = 2000;
+/// The first id of commands the core issues itself (see [`TradingCore::submit_internal`]).
+pub const INTERNAL_COMMAND_IDS: u64 = 1 << 62;
 /// Execution ids remembered for de-duplication (oldest forgotten first).
 const KEEP_FILL_IDS: usize = 100_000;
 /// External fills held for accounts not added yet.
@@ -227,6 +232,7 @@ impl TradingCore {
             next_order: 1,
             next_reduce_only: false,
             next_command: 1,
+            next_internal: INTERNAL_COMMAND_IDS,
             latency: Latency::default(),
             hud: Arc::default(),
             events: Vec::new(),
@@ -484,10 +490,35 @@ impl TradingCore {
         id
     }
 
+    /// A command the core issues itself, with an id from the internal range (so it can't take
+    /// an id a `TradingHandle` already gave a caller whose command is still on its way).
+    pub(crate) fn submit_internal(
+        &mut self,
+        now: UtcMillis,
+        source: Source,
+        command: Command,
+    ) -> CommandId {
+        let id = CommandId(self.next_internal);
+        self.next_internal += 1;
+        self.handle(
+            now,
+            Envelope {
+                id,
+                source,
+                issued: Instant::now(),
+                command,
+                pane: None,
+            },
+        );
+        id
+    }
+
     /// Handle a command whose id was assigned elsewhere (the threaded runtime assigns ids at
     /// the caller so it can return them without waiting).
     pub fn handle(&mut self, now: UtcMillis, env: Envelope) {
-        self.next_command = self.next_command.max(env.id.0 + 1);
+        if env.id.0 < INTERNAL_COMMAND_IDS {
+            self.next_command = self.next_command.max(env.id.0 + 1);
+        }
         let result = self.run(now, &env);
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
@@ -1637,10 +1668,9 @@ impl TradingCore {
             });
             if liquidate {
                 // The rule closes the account's exposure, through the same command path.
-                self.submit(
+                self.submit_internal(
                     now,
                     Source::Rule,
-                    Instant::now(),
                     Command::Flatten {
                         account: account.clone(),
                         contract: None,
