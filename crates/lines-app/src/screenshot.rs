@@ -49,6 +49,8 @@ pub struct Shot {
     pub paper: Option<String>,
     /// DOMs start with trading enabled (`--enable-trading`, alias `--arm`).
     pub arm: bool,
+    /// DOMs start with order hotkeys on (`--enable-hotkeys`).
+    pub hotkeys: bool,
     /// A synthetic read-only broker; the panes trade its SIM account (`--demo-broker`).
     pub demo_broker: bool,
     /// Synthetic strategy instances for the strategy panel (`--strategies-demo`).
@@ -129,6 +131,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         doc,
         paper,
         arm,
+        hotkeys,
         demo_broker,
         strategies_demo,
         account_menu,
@@ -163,6 +166,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     }
     let mut trading = Trading::start(setup, registry.clone(), ws.env.base.clone());
     trading.start_armed = arm;
+    trading.start_hotkeys = hotkeys;
     if demo_broker {
         trading.wait_for_venues();
         trading.start_account = Some(lines_trading::AccountId::new(crate::demo_broker::SIM));

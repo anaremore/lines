@@ -1413,22 +1413,7 @@ impl WindowView {
                 s.set_pnl_display(m);
                 cx.notify();
             }
-            Command::Trade(tc) => {
-                // The focused pane's account and contract (decision 0016).
-                let issued = std::time::Instant::now();
-                match self.tab().focused_handle().cloned() {
-                    Some(PaneHandle::Dom(d)) => {
-                        d.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
-                    }
-                    Some(PaneHandle::Chart(c)) if crate::trade_bar::chart_runs(tc) => {
-                        c.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
-                    }
-                    Some(PaneHandle::Chart(_)) => {
-                        self.refuse("arming and orders act on a DOM: focus one first", cx);
-                    }
-                    _ => self.refuse("trading commands act on the focused DOM or chart", cx),
-                }
-            }
+            Command::Trade(tc) => self.run_trade(tc, false, cx),
             Command::Menu => {
                 let area = self.content_area(window, cx);
                 let bar = self.bar_h();
@@ -2426,6 +2411,34 @@ impl WindowView {
         cx.notify();
     }
 
+    /// A trading command on the focused pane's account and contract (decision 0016). `key`:
+    /// from its key, run in the key-down handler (order keys need the DOM's order hotkeys).
+    fn run_trade(&mut self, tc: crate::commands::TradeCmd, key: bool, cx: &mut Context<Self>) {
+        let issued = std::time::Instant::now();
+        let run = if key {
+            crate::trade_bar::run_key::<crate::dom_view::DomView>
+        } else {
+            crate::trade_bar::run::<crate::dom_view::DomView>
+        };
+        let run_chart = if key {
+            crate::trade_bar::run_key::<crate::chart_view::ChartView>
+        } else {
+            crate::trade_bar::run::<crate::chart_view::ChartView>
+        };
+        match self.tab().focused_handle().cloned() {
+            Some(PaneHandle::Dom(d)) => {
+                d.update(cx, |v, cx| run(v, tc, issued, cx));
+            }
+            Some(PaneHandle::Chart(c)) if crate::trade_bar::chart_runs(tc) => {
+                c.update(cx, |v, cx| run_chart(v, tc, issued, cx));
+            }
+            Some(PaneHandle::Chart(_)) => {
+                self.refuse("arming and orders act on a DOM: focus one first", cx);
+            }
+            _ => self.refuse("trading commands act on the focused DOM or chart", cx),
+        }
+    }
+
     // ---- input ------------------------------------------------------------------------------
 
     fn on_key_capture(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2447,7 +2460,10 @@ impl WindowView {
             }
             // A held key repeats only commands that may repeat: never an order or arming.
             if !ev.is_held || commands::repeats(cmd) {
-                self.run(cmd, window, cx);
+                match cmd {
+                    Command::Trade(tc) => self.run_trade(tc, true, cx),
+                    _ => self.run(cmd, window, cx),
+                }
             }
             cx.stop_propagation();
         }

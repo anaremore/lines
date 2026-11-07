@@ -285,6 +285,29 @@ pub enum QuickOrder {
     JoinAsk,
     /// One market order for twice the position, on the other side: long 2 becomes short 2.
     Reverse,
+    /// A buy limit at the best ask (takes the offer, never paying more than it).
+    BuyAsk,
+    /// A sell limit at the best bid (hits the bid, never selling for less).
+    SellBid,
+}
+
+/// What an order key says while the DOM's order hotkeys are off.
+pub const HOTKEYS_OFF: &str = "Order keys off: enable hotkeys (Ctrl+Shift+Y)";
+
+/// The command for an order key (`commands::TradeCmd::needs_hotkeys`). Order keys need the
+/// DOM's own hotkey switch ("Keys on", off by default, sticky like the trading switch) on top
+/// of everything a button needs ([`quick`]): with it off nothing is built or sent. `ctx` is
+/// read only once the switch allows it.
+pub fn key_order(
+    q: QuickOrder,
+    hotkeys: bool,
+    arming: Arming,
+    ctx: impl FnOnce() -> Result<EntryCtx, Refusal>,
+) -> Result<TradeCommand, Refusal> {
+    if !hotkeys {
+        return Err(Refusal(HOTKEYS_OFF));
+    }
+    quick(q, arming, &ctx()?)
 }
 
 /// What a DOM with trading disabled says when an entry is tried (click, button or key).
@@ -317,6 +340,14 @@ pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeComma
         }
         QuickOrder::JoinAsk => {
             let p = ctx.best_ask.ok_or(Refusal("no ask to join"))?;
+            (Side::Sell, ctx.qty, OrderKind::Limit { price: p }, Some(p))
+        }
+        QuickOrder::BuyAsk => {
+            let p = ctx.best_ask.ok_or(Refusal("no ask to buy at"))?;
+            (Side::Buy, ctx.qty, OrderKind::Limit { price: p }, Some(p))
+        }
+        QuickOrder::SellBid => {
+            let p = ctx.best_bid.ok_or(Refusal("no bid to sell at"))?;
             (Side::Sell, ctx.qty, OrderKind::Limit { price: p }, Some(p))
         }
         QuickOrder::Reverse => {
@@ -1550,3 +1581,7 @@ mod tests {
         assert_eq!(rule_level(-5, 1000), RuleLevel::Breached);
     }
 }
+
+#[cfg(test)]
+#[path = "dom_keys_tests.rs"]
+mod keys_tests;
