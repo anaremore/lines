@@ -481,6 +481,12 @@ impl DomView {
         if dom_trade::row_of(from.0, units) == dom_trade::row_of(d.to.0, units) {
             return;
         }
+        // A stop never moves across the market (it would trigger at once): refused here, shown
+        // as a rejected drag, nothing sent.
+        if let Some(why) = trade_bar::stop_move_check(&self.store, &o, d.to) {
+            self.trade.flash(why);
+            return;
+        }
         if let Some(cmd) = dom_trade::drag_command(&o, d.to) {
             let id = t.submit(lines_trading::Source::Dom, issued, cmd);
             self.orders.ghosts.push(Ghost {
@@ -519,9 +525,23 @@ impl DomView {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(d) = self.orders.drag.take() {
-            self.drop_order(d, cx);
+            // Released on a ladder row: move there. Anywhere else in the pane: abort.
+            if self.row_at(ev.position).is_some() {
+                self.drop_order(d, cx);
+            }
+            cx.notify();
+        }
+        if self.cols.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A release outside the ladder: an order drag is aborted (nothing sent); a column drag
+    /// ends.
+    fn on_mouse_up_out(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.orders.drag.take().is_some() {
             cx.notify();
         }
         if self.cols.drag.take().is_some() {
@@ -573,6 +593,13 @@ impl DomView {
             return;
         }
         let k = &ev.keystroke;
+        // Escape aborts an order drag (nothing sent).
+        if self.orders.drag.is_some() && k.key == "escape" {
+            self.orders.drag = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if self.trade.account_menu && crate::popover::closes_on_key(&k.key) {
             trade_bar::close_account_menu(self, cx);
             cx.stop_propagation();
@@ -1065,7 +1092,7 @@ impl Render for DomView {
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(body)
                     .when_some(overlay, |d, o| d.child(o)),

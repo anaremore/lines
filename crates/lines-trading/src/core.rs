@@ -927,6 +927,35 @@ impl TradingCore {
                         }
                         k => k,
                     };
+                    // A stop never moves across the market: it would trigger at once (a buy
+                    // stop at or under the ask, a sell stop at or over the bid; the last trade
+                    // without a book). Unknown market: the app's own check is all there is.
+                    let stop = match o.kind {
+                        OrderKind::Stop { .. } => true,
+                        OrderKind::StopLimit { .. } => !o.triggered,
+                        _ => false,
+                    };
+                    if stop && let Some(m) = self.marks.get(&o.contract) {
+                        let market = match o.side {
+                            Side::Buy => m.ask.or(m.last),
+                            Side::Sell => m.bid.or(m.last),
+                        };
+                        match (o.side, market) {
+                            (Side::Buy, Some(x)) if p.0 <= x.0 => {
+                                return Err(Reject::new(
+                                    RejectCode::Invalid,
+                                    "a buy stop must stay above the market",
+                                ));
+                            }
+                            (Side::Sell, Some(x)) if p.0 >= x.0 => {
+                                return Err(Reject::new(
+                                    RejectCode::Invalid,
+                                    "a sell stop must stay below the market",
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
                     let limits = self.accounts[&account].cfg.limits.clone();
                     let ctx = RiskContext {
                         reference: self.marks.get(&o.contract).and_then(Mark::price),

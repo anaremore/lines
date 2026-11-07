@@ -238,6 +238,30 @@ pub fn contract_of(store: &ChartStore) -> Option<ContractKey> {
     store.try_read().and_then(|d| d.contract)
 }
 
+/// Why dragging order `o` to `to` is refused before anything is sent, as a rejected drag
+/// shows it ("5812.25: a sell stop must stay below the market"): a stop moved across the
+/// inside market of the pane's store (`dom_trade::stop_move_refusal`), or the market data
+/// busy. `None`: the move may go.
+pub fn stop_move_check(store: &ChartStore, o: &lines_trading::Order, to: Price) -> Option<String> {
+    let Some(d) = store.try_read() else {
+        return Some("market data busy; try again".to_owned());
+    };
+    let why = dom_trade::stop_move_refusal(
+        o,
+        to,
+        d.book.best_bid().map(|b| b.0).or(d.bid),
+        d.book.best_ask().map(|a| a.0).or(d.ask),
+        d.last_trade,
+    )?;
+    Some(format!(
+        "{}: {why}",
+        d.product.price.format::<32>(to).as_str()
+    ))
+}
+
+/// Entries refused while the pane's feed is stale: its prices may be ones the market has left.
+pub const FEED_STALE: &str = "feed stale: entries wait for fresh market data";
+
 /// Why the pane can't trade, if it can't.
 pub fn cant_trade<V: TradePane>(v: &V, cx: &App) -> Option<&'static str> {
     if Trading::try_global(cx).is_none() {
@@ -271,6 +295,11 @@ pub fn read_only<V: TradePane>(v: &V, cx: &App) -> Option<String> {
 pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &'static str> {
     if let Some(why) = cant_trade(v, cx) {
         return Err(why);
+    }
+    // A stale feed: no entry at a price the market may have left (Flatten, Cancel all, moves
+    // and cancels don't come through here and stay available).
+    if v.trade_store().stale_for().is_some() {
+        return Err(FEED_STALE);
     }
     let t = Trading::try_global(cx).ok_or("trading is not running")?;
     let pt = v.trade_ref();
@@ -900,25 +929,34 @@ fn blocker<V: TradePane>(
     product: &Product,
     data: Option<&BarData>,
     cx: &App,
-) -> Option<&'static str> {
+) -> Option<std::borrow::Cow<'static, str>> {
     if let Some(why) = cant_trade(v, cx) {
-        return Some(match why {
-            "this pane has no market data" => "no market data",
-            "contract unknown: can't trade it" => "contract unknown",
-            w => w,
-        });
+        return Some(
+            match why {
+                "this pane has no market data" => "no market data",
+                "contract unknown: can't trade it" => "contract unknown",
+                w => w,
+            }
+            .into(),
+        );
     }
     if is_read_only(v, cx) {
-        return Some("read-only");
+        return Some("read-only".into());
+    }
+    if let Some(quiet) = v.trade_store().stale_for() {
+        return Some(format!("feed stale {} s", quiet.as_secs()).into());
     }
     if let Some((state, _)) = data.and_then(|d| d.guard.as_ref()) {
-        return Some(match state {
-            lines_trading::GuardState::Cooldown => "cooldown",
-            _ => "locked",
-        });
+        return Some(
+            match state {
+                lines_trading::GuardState::Cooldown => "cooldown",
+                _ => "locked",
+            }
+            .into(),
+        );
     }
     if let Some(b) = data.and_then(|d| d.blocked_short) {
-        return Some(b);
+        return Some(b.into());
     }
     let t = Trading::try_global(cx)?;
     if t.check_sessions
@@ -928,7 +966,7 @@ fn blocker<V: TradePane>(
         )
         && !cal.is_open(now)
     {
-        return Some("market closed");
+        return Some("market closed".into());
     }
     None
 }
@@ -1365,7 +1403,8 @@ pub fn dom_bar<V: TradePane>(
             el
         }
     };
-    let blocker = blocker(v, product, data.as_ref(), cx);
+    let blocked = blocker(v, product, data.as_ref(), cx);
+    let blocker = blocked.as_deref();
 
     let mut panel = div()
         .relative()
