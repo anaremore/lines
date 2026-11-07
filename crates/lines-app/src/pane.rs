@@ -734,6 +734,12 @@ mod tests {
                         None,
                     ),
                     widest_tick.clone(),
+                    // The widest volume chip: the largest typed size, the most to go.
+                    chip_text(
+                        lines_core::Timeframe::Volume(lines_core::ticks::MAX_VOLUME),
+                        true,
+                        Some(lines_core::ticks::MAX_VOLUME - 1),
+                    ),
                 ]);
             for tf in chips {
                 for account in ["Paper", "Paper 50K eval"] {

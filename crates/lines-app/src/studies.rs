@@ -310,9 +310,33 @@ impl Studies {
                 let (yo, yc) = (snap(scale.y(c.open as f64)), snap(scale.y(c.close as f64)));
                 let (yh, yl) = (snap(scale.y(c.high as f64)), snap(scale.y(c.low as f64)));
                 let (top, bot) = (yo.min(yc), yo.max(yc));
-                let (bx, bw, bh) = (x - half, half * 2.0, (bot - top).max(hair));
+                // A change is at least 4 px tall, so its hollow or filled body still reads
+                // (direction never by color alone); no change at all is drawn dashed below.
+                let flat = c.close == c.open;
+                let min_body = if flat {
+                    hair
+                } else {
+                    snap(4.0).max(4.0 * hair)
+                };
+                let (bx, bw, bh) = (x - half, half * 2.0, (bot - top).max(min_body));
+                if flat {
+                    window.paint_quad(gpui::fill(rect(x - hair * 0.5, yh, hair, yl - yh), col));
+                    // Dashes 2 px on, 2 px off across the body's width: no change, by shape.
+                    let dash = snap(2.0).max(hair);
+                    let mut dx = 0.0;
+                    while dx < bw {
+                        let w = dash.min(bw - dx);
+                        window.paint_quad(gpui::fill(
+                            rect(bx + dx, top, w, hair.max(snap(1.0))),
+                            col,
+                        ));
+                        dx += dash * 2.0;
+                    }
+                    continue;
+                }
                 // Direction by shape too (docs/design.md): one direction's bodies are hollow,
-                // as the price candles; under 3 device pixels each way they stay filled.
+                // as the price candles (bodies are at least 4 px, so hollow always reads when
+                // the bar is 3 device pixels wide).
                 let hollow = theme.hollow.is_hollow(up) && bw >= 3.0 * hair && bh >= 3.0 * hair;
                 let wx = x - hair * 0.5;
                 if hollow {

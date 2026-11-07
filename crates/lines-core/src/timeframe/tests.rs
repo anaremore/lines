@@ -77,14 +77,45 @@ fn parse_and_display() {
         ("1t", Timeframe::Ticks(1)),
         ("7t", Timeframe::Ticks(7)),
         ("100000t", Timeframe::Ticks(100_000)),
+        ("500v", Timeframe::Volume(500)),
+        ("1000000v", Timeframe::Volume(1_000_000)),
+        ("10R", Timeframe::Range(10)),
+        ("10000r", Timeframe::Range(10_000)),
+        ("30s", Timeframe::Seconds(30)),
+        ("5sec", Timeframe::Seconds(5)),
+        ("3600s", Timeframe::Seconds(3_600)),
     ] {
         assert_eq!(Timeframe::parse(s), Some(tf), "{s}");
         assert_eq!(tf.source(), BarSource::Trades);
         assert!(tf.is_valid());
     }
     for bad in [
-        "", "m", "7", "0", "3h", "2d", "7s", "0s", "3601s", "99999999", "1x", "t", "0t", "100001t",
-        "5000000t", "70000", "1.5t", "-5t", "0v", "1000001v", "v", "0r", "10001r", "r", "s",
+        "",
+        "m",
+        "7",
+        "0",
+        "3h",
+        "2d",
+        "7s",
+        "0s",
+        "3601s",
+        "99999999",
+        "1x",
+        "t",
+        "0t",
+        "100001t",
+        "5000000t",
+        "70000",
+        "1.5t",
+        "-5t",
+        "0v",
+        "1000001v",
+        "v",
+        "0r",
+        "10001r",
+        "r",
+        "s",
+        "10000000v",
     ] {
         assert_eq!(Timeframe::parse(bad), None, "{bad}");
     }

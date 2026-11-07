@@ -546,7 +546,25 @@ fn tick_bar_updates_do_not_allocate() {
             [TickReset::Session, TickReset::Continuous].map(|r| TickBars::new(n, r, Some(cal), 64))
         })
         .collect();
-    // Trades every 40 s over 20 prices, crossing session closes.
+    // Roadmap 9b's other kinds through the same builder: volume, range (a wide one: more prices
+    // per bar than a new bar reserves) and seconds bars.
+    let scale = lines_core::BarScale {
+        tick: 25,
+        qty_unit: 1,
+    };
+    for kind in [
+        lines_core::BarKind::Volume(500),
+        lines_core::BarKind::Range(4),
+        lines_core::BarKind::Range(40),
+        lines_core::BarKind::Seconds(30),
+        lines_core::BarKind::Seconds(3_600),
+    ] {
+        for r in [TickReset::Session, TickReset::Continuous] {
+            bars.push(TickBars::with_kind(kind, r, Some(cal), scale, 64));
+        }
+    }
+    // Trades every 40 s over 50 prices (a range bar of 40 ticks holds up to 41: more than a new
+    // bar reserves), crossing session closes.
     let trade = |bars: &mut Vec<TickBars>, i: i64| {
         let at = UtcMillis(start + i * 40_000);
         let side = if i % 3 == 0 {
@@ -557,7 +575,7 @@ fn tick_bar_updates_do_not_allocate() {
         for b in bars.iter_mut() {
             b.push(
                 at,
-                Price(500_000 + (i % 20) * 25),
+                Price(500_000 + (i % 50) * 25),
                 Qty(1 + i % 3),
                 Some(side),
             );

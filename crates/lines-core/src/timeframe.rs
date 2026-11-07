@@ -26,7 +26,7 @@
 //! [`Timeframe::Ticks`] bars need trades, not 1-minute bars: their [`Timeframe::source`] is
 //! [`BarSource::Trades`] and they are built by [`crate::ticks::TickBars`] from counted trades
 //! only. The chart sees them through the same [`BarsView`] (with [`BarsView::trades`] set).
-//! Seconds, volume and range bars are phase 2 and will be further `Trades` variants.
+//! Volume, range and seconds bars are `Trades` too (one builder, `crate::ticks::BarKind`).
 
 use std::fmt;
 
@@ -170,7 +170,7 @@ impl Timeframe {
         let s = s.trim().to_ascii_lowercase();
         let digits = s.chars().take_while(|c| c.is_ascii_digit()).count();
         let (num, unit) = s.split_at(digits);
-        if digits > 6 {
+        if digits > 7 {
             return None;
         }
         let n: u32 = if num.is_empty() { 1 } else { num.parse().ok()? };

@@ -1332,7 +1332,8 @@ impl ChartView {
         self.ticks.as_ref().map(TickLease::key)
     }
 
-    /// Tick bars run continuously (no reset at the session open).
+    /// Trade-built bars (tick, volume, range, seconds) run continuously (no reset at the
+    /// session open).
     pub fn tick_continuous(&self) -> bool {
         self.tick_reset == TickReset::Continuous
     }
@@ -2063,7 +2064,7 @@ impl ChartView {
                     }
                     let i = first + k;
                     let mut m = 0;
-                    if tb.is_partial_at(i, now) || tb.is_forming(i) {
+                    if tb.is_partial_at(i, now) || tb.is_forming_at(i, now) {
                         m |= MARK_PARTIAL;
                     }
                     if i > 0 && tb.starts_session(i) {
@@ -4557,7 +4558,7 @@ impl ChartView {
                     .pt_1()
                     .text_color(t.text_dim)
                     .text_size(px(11.0))
-                    .child("Or type 5, 1h, 1d, 500t … + Enter"),
+                    .child("Or type 5, 1h, 500t, 500v, 10r, 30s + Enter"),
             )
             .into_any_element(),
         )

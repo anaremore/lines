@@ -525,7 +525,7 @@ struct Cli {
     timeframe_menu: bool,
     /// Tick, volume, range and seconds bars (`--timeframe 500t`) run across sessions instead of
     /// restarting at each session open. A mode saved with the chart wins. In the app: the palette or the pane
-    /// menu ("Tick bars run continuously").
+    /// menu ("Trade-built bars run continuously").
     #[arg(long)]
     tick_continuous: bool,
     /// Screenshot: charts and DOMs with their account list open (the header's account chip).
