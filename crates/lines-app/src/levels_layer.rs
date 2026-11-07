@@ -582,8 +582,8 @@ impl LevelsLayer {
     }
 }
 
-/// A source's error without its own name in front (`"OptionIdea: not translated: …"` on the
-/// `OptionIdea` row reads `not translated: …`): the legend row already names the source.
+/// A source's error without its own name in front (`"Acme: not translated: …"` on the
+/// `Acme` row reads `not translated: …`): the legend row already names the source.
 pub fn without_name<'a>(label: &str, error: &'a str) -> &'a str {
     let e = error.trim_start();
     match e.get(..label.len()) {

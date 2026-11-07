@@ -196,21 +196,21 @@ fn layer_places_filters_and_reports_freshness() {
 #[test]
 fn legend_reason_does_not_repeat_the_source_name() {
     use super::without_name;
-    // The owner's report: "OptionIdea missing · OptionIdea: not translated: …".
+    // A source's report read "Acme missing · Acme: not translated: …".
     assert_eq!(
-        without_name("OptionIdea", "OptionIdea: not translated: unknown symbol"),
+        without_name("Acme", "Acme: not translated: unknown symbol"),
         "not translated: unknown symbol"
     );
     assert_eq!(
-        without_name("OptionIdea", "optionidea : timeout"),
+        without_name("Acme", "acme : timeout"),
         "timeout",
         "any case, spaces before the colon"
     );
     // Other errors, or the name not followed by a colon, are kept whole.
-    assert_eq!(without_name("OptionIdea", "timeout"), "timeout");
+    assert_eq!(without_name("Acme", "timeout"), "timeout");
     assert_eq!(
-        without_name("OptionIdea", "OptionIdeas unavailable"),
-        "OptionIdeas unavailable"
+        without_name("Acme", "Acmes unavailable"),
+        "Acmes unavailable"
     );
     assert_eq!(
         without_name("Lévels", "Lé"),

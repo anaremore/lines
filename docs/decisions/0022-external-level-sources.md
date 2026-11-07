@@ -2,7 +2,7 @@
 
 **Status:** Accepted (implements 0007 and 0020)
 
-**Context:** The owner wants levels from external services on charts: levels and zones from a private, locally running level service (localhost, display-only plugin contract), and OptionIdea's SPY/QQQ option-structure levels via its authenticated v2 platform API (translated onto ES/MES and NQ/MNQ by its documented anchor rule). Both adapters are private; the display machinery should be reusable for any future level source.
+**Context:** The owner wants levels from external services on charts: levels and zones from a private, locally running level service (localhost, display-only plugin contract), and option-structure levels on SPY/QQQ from a private, authenticated level API (translated onto ES/MES and NQ/MNQ by that service's documented anchor rule). Both adapters are private; the display machinery should be reusable for any future level source.
 
 **Decision:**
 
@@ -11,14 +11,14 @@
 - It publishes **level maps**: horizontal **lines**, **zones/bands** (lower–upper) and **labels**, each with a kind, a source-defined style (colour and weight), optional metadata (as-of time, source session, provenance), and the map's own as-of time.
 - **Fetching runs off the UI thread** on the feed/runtime side. HTTP and SSE responses go through recorded frames (0011), so replays reproduce what was shown.
 - A **levels chart layer** draws maps on matching chart panes, with no paint-path allocation.
-  - **Source-defined colours are allowed** for external levels when the source's contract fixes them (OptionIdea requires this). This is the one exception to "theme tokens only"; labels still use theme text tokens and the legend box (from the clean-chart work).
+  - **Source-defined colours are allowed** for external levels when the source's contract fixes them (one private source requires this). This is the one exception to "theme tokens only"; labels still use theme text tokens and the legend box (from the clean-chart work).
 - **Per-pane controls:** per-source and per-kind visibility, label visibility, clean-chart and hide-all-studies integration, and persistence as optional workspace fields.
 - **Missing or stale maps** show as missing or stale (`docs/design.md` §7), never as current.
 - A **price-at-time helper** returns the chart's price at a given instant from the store or history (open of a start-stamped bar, within a tolerance), so adapters can do anchor translations. If history doesn't cover that instant, translation is withheld.
 
 *Private adapters (one repo each)*
 - **A private local-levels adapter (its own private repo):** follows that service's display-plugin contract (status, level and stat endpoints, plus SSE if suitable). It covers ES/MES and NQ/MNQ, the service's zones, and the contract's required settings: service URL, symbol, refresh interval, stale threshold, line kinds and labels. Localhost only by default.
-- **`anaremore/lines-optionidea`:** follows OptionIdea platform contract v2 (`POST /api/v2/levels/query`; rejects unknown versions, malformed rows, more than 16 levels; no silent historical fallback). It applies the futures translation rule with `referencePrice` / `referencePriceAsOf` against the chart's own price and rounds to tick. The API key comes from the OS keychain (or `OPTIONIDEA_API_KEY`), sent only as `Authorization: Bearer`, never logged or displayed. HTTPS only.
+- **A private option-levels adapter (its own private repo):** follows that service's versioned platform contract (rejects unknown versions, malformed rows and oversized responses; no silent historical fallback). It applies the service's futures translation rule against the chart's own price and rounds to tick. The API key comes from the OS keychain or an environment variable, sent only as a bearer token, never logged or displayed. HTTPS only.
 - Both are display-only: no order entry, account or broker access.
 - The official/personal build (`lines-connectors`) includes them as optional git dependencies, which is fine because all three repos are private.
 
