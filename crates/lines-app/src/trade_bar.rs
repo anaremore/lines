@@ -535,29 +535,43 @@ pub fn protective<'a>(
         (true, _) => 2,
     };
     cands.sort_by_key(|o| (reached(o), role(o), o.id.0));
-    // Every other live order on the exit side (a plain limit or scale-out, a triggered
-    // stop-limit resting as a limit, an oversized stop, a target that isn't a kept stop's
-    // one-cancels-other partner) also closes the position when it fills, without shrinking
-    // the stops: it uses the budget first.
+    // Every other order on the exit side that may fill (live, or still pending: sent and not
+    // yet acknowledged, or unresolved), held bracket exits aside (their entry adds as much
+    // first): a plain limit or scale-out, a triggered stop-limit resting as a limit, an
+    // oversized stop, a bracket's target. Each also closes the position when it fills, so it
+    // uses the budget first.
     let exit = |o: &lines_trading::Order| match position.signum() {
         1 => o.side == lines_trading::Side::Sell,
         -1 => o.side == lines_trading::Side::Buy,
         _ => false,
     };
-    let others: i64 = open
+    let may_fill = |o: &lines_trading::Order| {
+        use lines_trading::OrderState as S;
+        matches!(
+            o.state,
+            S::Submitted | S::Working | S::PartiallyFilled | S::Unresolved
+        )
+    };
+    let counted: Vec<&lines_trading::Order> = open
         .iter()
-        .filter(|o| live(o) && exit(o) && !cands.iter().any(|c| c.id == o.id))
-        .filter(|o| !o.oco.is_some_and(|x| cands.iter().any(|c| c.id == x)))
-        .map(|o| o.remaining().0)
-        .sum();
+        .copied()
+        .filter(|o| may_fill(o) && exit(o) && !cands.iter().any(|c| c.id == o.id))
+        .collect();
+    let left = |o: &lines_trading::Order| (o.qty.0 - o.filled.0).max(0);
+    let others: i64 = counted.iter().map(|o| left(o)).sum();
     // In that order, up to the first that doesn't fit: nothing BE moves is reached after a
-    // stop it leaves behind.
+    // stop it leaves behind. A kept bracket stop and its counted target share the bracket's
+    // quantity (one cancels the other): the pair counts once.
     let mut total = others;
     let kept: Vec<_> = cands
         .iter()
         .copied()
         .take_while(|o| {
-            total += o.remaining().0;
+            let partner = o
+                .oco
+                .and_then(|x| counted.iter().find(|t| t.id == x))
+                .map_or(0, |t| left(t));
+            total += (o.remaining().0 - partner).max(0);
             total <= position.abs()
         })
         .collect();
@@ -2751,6 +2765,27 @@ mod tests {
         bt.oco = Some(bs.id);
         bs.oco = Some(bt.id);
         assert_eq!(protective([&bt, &bs], 1).unwrap().len(), 1);
+        // A bracket of 2 (target and stop) plus a single stop above its stop, long 2: the
+        // target already covers the position, so the single stop isn't moved (moved to BE it
+        // would flip the position after the target fills and cancels the bracket stop).
+        let mut t2 = bt.clone();
+        t2.id = OrderId(50);
+        t2.qty = Qty(2);
+        let mut s2 = bs.clone();
+        s2.id = OrderId(51);
+        s2.qty = Qty(2);
+        t2.oco = Some(s2.id);
+        s2.oco = Some(t2.id);
+        let mut s3 = st.clone();
+        s3.id = OrderId(52);
+        s3.kind = OrderKind::Stop {
+            trigger: Price(599_700),
+        };
+        assert!(protective([&t2, &s2, &s3], 2).is_err());
+        // An exit still pending (sent, not acknowledged) counts too.
+        let mut pend = tp.clone();
+        pend.state = OrderState::Submitted;
+        assert!(protective([&pend, &st], 1).is_err());
         // An oversized stop counts too.
         let mut x = stop(Side::Sell, 2, Role::Single, OrderState::Working);
         x.id = OrderId(42);
