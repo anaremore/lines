@@ -292,6 +292,9 @@ pub struct ChartView {
     /// Study styles a newer build saved for studies this one doesn't have (kept, written
     /// back).
     styles_extra: serde_json::Map<String, serde_json::Value>,
+    /// A press on the plot while a strip limit's pick is armed: where (window px), and the
+    /// price there (the crosshair's, computed at the press). Sent on release if still a click.
+    pick_press: Option<(Point<Pixels>, PickPrice)>,
     /// External levels (decision 0022), saved with the pane.
     levels: LevelsLayer,
     /// `levels.revision()` last drawn.
@@ -509,6 +512,7 @@ impl ChartView {
             styles_extra: serde_json::Map::new(),
             study_draft: None,
             anchoring: None,
+            pick_press: None,
             feed,
             common: PaneCommon::default(),
             profile: VolumeProfileLayer::new(fixture.profile),
@@ -1214,19 +1218,13 @@ impl ChartView {
         {
             return; // the strip's own buttons take their presses
         }
-        if let Some(o) = self.ct.strip_pick {
-            // A strip limit: this click on the plot is its price, the crosshair's there (the
-            // magnet's included); elsewhere keep waiting.
+        if self.ct.strip_pick.is_some() {
+            // A strip limit: a click on the plot is its price, the crosshair's at the press (the
+            // magnet's included), computed now, never last frame's. Sent on release if it stays
+            // a click; a drag pans instead and the pick stays armed. Elsewhere keep waiting.
             if region == Region::Plot {
-                self.ct.strip_pick = None;
-                let at = self
-                    .cross
-                    .filter(|_| self.cross_in_sub.is_none())
-                    .map(|c| c.price)
-                    .or_else(|| {
-                        lines_core::geometry::snap_price(&self.vp, y, self.instrument.price.tick)
-                    });
-                self.strip_send(o, at, cx);
+                let at = self.price_at(x, y, window);
+                self.pick_press = Some((ev.position, at));
                 cx.stop_propagation();
             }
             return;
@@ -1996,6 +1994,16 @@ impl ChartView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
+        if let Some((from, _)) = self.pick_press {
+            let d = ev.position - from;
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.pick_press = None;
+            } else if !crate::chart_trade::is_click(f32::from(d.x), f32::from(d.y)) {
+                // A drag: pan as any press on the plot would (the pick stays armed).
+                self.pick_press = None;
+                self.start_drag(Drag::Pan(from, false));
+            }
+        }
         if ev.pressed_button != Some(MouseButton::Left) && self.drawings.release_lost() {
             cx.notify();
         }
@@ -2057,6 +2065,20 @@ impl ChartView {
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         // The release of a press that closed a popover does nothing here (no drawing finished).
         if popover::dismissing() {
+            return;
+        }
+        if let Some((_, at)) = self.pick_press.take() {
+            // A click while a strip limit's pick was armed (a drag became a pan on the way).
+            match (self.ct.strip_pick, at) {
+                (Some(o), Ok(at)) => {
+                    self.ct.strip_pick = None;
+                    self.strip_send(o, at, cx);
+                }
+                // Market data busy at the press: say so, keep the pick (click again).
+                (Some(_), Err(why)) => self.trade.flash(why),
+                (None, _) => {}
+            }
+            cx.notify();
             return;
         }
         if let Some(id) = self.ct.closing.take() {
@@ -2297,6 +2319,27 @@ impl ChartView {
         }
     }
 
+    /// The crosshair's price at plot-local (`x`, `y`), as paint would draw it there (the
+    /// magnet's included); `Ok(None)` with no bars there.
+    fn price_at(&self, x: f64, y: f64, window: &Window) -> PickPrice {
+        let d = self
+            .store
+            .try_read()
+            .ok_or("market data busy; click again")?;
+        let bars = bars_view(&self.derived, self.tick_key(), &d).bars;
+        Ok(crosshair(
+            bars,
+            &self.vp,
+            self.instrument.price.tick,
+            self.period_ms,
+            window.scale_factor(),
+            self.crosshair_mode,
+            x,
+            y,
+        )
+        .map(|c| c.price))
+    }
+
     /// Send a strip order: the DOM's intent for it (`chart_trade::strip_command`), through the
     /// window like an exit (a linked DOM's switch), or say why not.
     fn strip_send(
@@ -2436,6 +2479,11 @@ impl ChartView {
             cx.notify();
         }
         self.plot = plot;
+        if self.ct.strip_pick.is_some() && !self.strip_box().is_some_and(|b| b.limits) {
+            // Its button is gone (narrow plot): no pick without a way to see and cancel it.
+            self.ct.strip_pick = None;
+            cx.notify();
+        }
         self.vp.set_size(plot_w as f64, plot_h as f64);
         // Only allocates when the window grows wider than ever before.
         self.scene.ensure_capacity(plot_w as f64);
@@ -5931,6 +5979,10 @@ impl Render for ChartView {
             )
     }
 }
+
+/// The price a strip limit's pick press found: `Ok(None)` with no bars there, `Err` with the
+/// market data busy.
+type PickPrice = Result<Option<Price>, &'static str>;
 
 /// The chart's popovers the symbol picker closes when it opens: all of them (their window-wide
 /// backdrops would take the picker's clicks). Pane menus belong to the window.
