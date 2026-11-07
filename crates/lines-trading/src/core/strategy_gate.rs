@@ -643,12 +643,14 @@ impl TradingCore {
         }
     }
 
-    /// Open bracket exits on an account and contract, by side: each bracket's larger exit
-    /// (its take-profit and stop-loss cancel each other, so they close the position once).
+    /// Held bracket exits on an account and contract (their entry still working, nothing live:
+    /// `open_qty` leaves them out), by side: each bracket's larger exit (its take-profit and
+    /// stop-loss cancel each other, so they close the position once). Live exits are in
+    /// `open_qty` already.
     fn held_exits(&self, account: &AccountId, contract: ContractKey) -> (i64, i64) {
         let mut per: std::collections::BTreeMap<OrderId, (Side, i64)> = Default::default();
         for o in self.open_orders(account).filter(|o| o.contract == contract) {
-            if matches!(o.role, Role::TakeProfit | Role::StopLoss) {
+            if self.exit_held(o) {
                 let key = o.parent.unwrap_or(o.id);
                 let e = per.entry(key).or_insert((o.side, 0));
                 e.1 = e.1.max(o.remaining().0);

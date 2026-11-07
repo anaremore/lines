@@ -1945,6 +1945,53 @@ fn a_bracket_never_opens_a_position_on_a_reducing_only_account() {
     assert_eq!(r.core.position(&acct(), es()), 0, "never short");
 }
 
+/// Review round 1: an entry partly filled and then cancelled leaves live exits; a manual
+/// partial close shrinks them, so the stop closes what is left and never flips the position.
+#[test]
+fn exits_of_a_partly_filled_cancelled_entry_follow_the_position() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(3),
+                kind: limit(6000.00),
+            },
+            take_profit: Some(px(6005.00)),
+            stop_loss: Some(px(5995.00)),
+        }))
+        .unwrap();
+    let (entry, sl) = (ids[0], ids[2]);
+    r.wait(LAT);
+    r.trade(5999.75, 2); // 2 of 3
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert!(
+        r.core.order(sl).unwrap().reduce_only,
+        "live from the first fill"
+    );
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: entry,
+    })
+    .unwrap();
+    r.wait(LAT);
+    r.place(Side::Sell, 1, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(
+        r.core.order(sl).unwrap().remaining(),
+        Qty(1),
+        "shrunk with the position"
+    );
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0, "closed, never short");
+}
+
 // ---- critical review 1, finding 3: a quantity increase is checked as a new order -------------
 
 fn grow(r: &mut Rig, order: OrderId, qty: i64) -> Result<Vec<OrderId>, lines_trading::Reject> {

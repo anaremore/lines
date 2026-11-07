@@ -1270,10 +1270,13 @@ impl TradingCore {
         Ok(())
     }
 
-    /// A bracket exit still held for its entry (the entry is working): it closes only what the
-    /// entry will open, so it is not exposure yet. Once the entry is done it is a live order.
+    /// A bracket exit held for its entry: the entry still works and the exit has nothing live
+    /// (never activated, or its sibling closed what was open). It closes only what the entry
+    /// will open, so it is not exposure yet. Once the entry fills, its exits are live orders.
     fn exit_held(&self, o: &Order) -> bool {
         matches!(o.role, Role::TakeProfit | Role::StopLoss)
+            && (matches!(o.state, OrderState::Submitted | OrderState::Acked)
+                || o.remaining().0 == 0)
             && o.parent
                 .and_then(|p| self.orders.get(&p))
                 .is_some_and(Order::is_open)
@@ -1461,8 +1464,8 @@ impl TradingCore {
             .orders
             .values()
             .filter(|o| {
-                let exit = o.reduce_only
-                    || (matches!(o.role, Role::TakeProfit | Role::StopLoss) && !self.exit_held(o));
+                let exit = (o.reduce_only || matches!(o.role, Role::TakeProfit | Role::StopLoss))
+                    && !self.exit_held(o);
                 let position = self.position(account, o.contract);
                 &o.account == account
                     && o.is_open()

@@ -471,7 +471,11 @@ impl PaperBroker {
             .orders
             .values()
             .filter(|p| {
-                p.order.reduce_only && &p.order.account == account && p.order.contract == contract
+                // A held bracket exit has nothing live to budget (its entry fills it again).
+                p.order.reduce_only
+                    && !p.held
+                    && &p.order.account == account
+                    && p.order.contract == contract
             })
             .map(|p| p.order.id)
             .collect();
@@ -529,10 +533,9 @@ impl PaperBroker {
     fn after_fill(&mut self, now: UtcMillis, o: &Order, qty: Qty) {
         match o.role {
             Role::Entry => {
-                // The entry done: its exits only ever close what it opened. Reduce-only from
-                // now on, so they shrink and cancel with the position (a manual close, a
-                // Flatten of part) like any exit, never outliving it.
-                let done = !o.is_open();
+                // Live exits only ever close what the entry opened: reduce-only from its first
+                // fill, so they shrink and cancel with the position (a manual close, a Flatten
+                // of part, the rest of the entry cancelled) like any exit, never outliving it.
                 let exits: Vec<OrderId> = self
                     .orders
                     .values()
@@ -550,7 +553,7 @@ impl PaperBroker {
                     } else {
                         Qty(po.order.qty.0 + qty.0)
                     };
-                    po.order.reduce_only |= done;
+                    po.order.reduce_only = true;
                     let order = po.order.clone();
                     self.out.push(BrokerEvent::Modified { order });
                     if po.held {

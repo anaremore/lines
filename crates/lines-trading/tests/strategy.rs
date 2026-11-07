@@ -1091,3 +1091,42 @@ fn adding_it_again_after_a_person_took_over_keeps_the_trade_theirs() {
         "still the person's trade"
     );
 }
+
+/// Critical review 1 (#1), review round 1: a live bracket's exits close the position once. A
+/// paused instance long 2 with one contract protected (a filled 1-lot bracket) may still close
+/// the other: the live exits are counted once, never again as held exits.
+#[test]
+fn a_paused_instance_closes_what_its_live_bracket_does_not() {
+    let mut r = Rig::armed();
+    r.bot(bracket(1, 6000.25)).unwrap();
+    r.wait(30);
+    r.bot(buy(es(), 1, OrderKind::Market)).unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    r.manual(Command::PauseStrategy {
+        id: ID,
+        reason: "test".into(),
+    })
+    .unwrap();
+    assert_eq!(r.state(), StrategyState::Paused);
+    let close = Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: limit(6010.0),
+    });
+    r.bot(close)
+        .expect("closing the unprotected contract is an exit");
+    let two = Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: limit(6011.0),
+    });
+    assert!(
+        denied(r.bot(two)).contains("is paused"),
+        "nothing left to close"
+    );
+}
