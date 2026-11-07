@@ -49,6 +49,8 @@ pub struct Shot {
     pub paper: Option<String>,
     /// DOMs start armed (`--arm`).
     pub arm: bool,
+    /// Charts and DOMs start with the account list open (`--account-menu`).
+    pub account_menu: bool,
     /// The P&L display (`--pnl`; default: the app's default).
     pub pnl: Option<crate::pnl::PnlDisplay>,
 }
@@ -98,6 +100,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         doc,
         paper,
         arm,
+        account_menu,
         pnl,
     } = shot;
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
@@ -107,6 +110,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         ws.env.base.clone(),
     );
     trading.start_armed = arm;
+    trading.start_account_menu = account_menu;
     let script = match &paper {
         Some(s) => {
             let f = feeds

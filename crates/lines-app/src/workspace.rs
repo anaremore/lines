@@ -2651,6 +2651,13 @@ impl WindowView {
                     )
                     .into_any_element(),
             );
+            // Above any open header dropdown, which would otherwise cover it.
+            let banner = out.pop().expect("just pushed");
+            out.push(
+                gpui::deferred(banner)
+                    .with_priority(crate::dropdown::OVERLAY_PRIORITY)
+                    .into_any_element(),
+            );
         }
         // Focus: always visible on the focused pane (docs/design.md: violet is focus).
         if let Some(i) = tab.layout.index_of(&tab.focused)
@@ -2964,7 +2971,10 @@ impl Render for WindowView {
                     .child(status)
             }))
             .children(menu)
-            .children(self.prompt_overlay())
+            .children(self.prompt_overlay().map(|p| {
+                // Above any open header dropdown, which would otherwise cover it.
+                gpui::deferred(p).with_priority(crate::dropdown::OVERLAY_PRIORITY)
+            }))
             .children(self.drag_ghost())
     }
 }
