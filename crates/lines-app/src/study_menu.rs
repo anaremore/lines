@@ -469,7 +469,7 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             }
             c(
                 "Label",
-                "Show in legend".into(),
+                "Show title".into(),
                 display.label,
                 Swatch::None,
                 set(StudyAction::ToggleLabel(i)),

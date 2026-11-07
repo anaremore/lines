@@ -1066,7 +1066,11 @@ impl ChartView {
         // paint re-renders when that changes).
         let fp = self.footprint.legend();
         let fp = fp.map(|(label, note)| {
+            // Capped at the legend's width (the clearance block assumes it), ending in "…".
             div()
+                .max_w(px(LEGEND_MAX_W))
+                .whitespace_nowrap()
+                .truncate()
                 .flex()
                 .flex_row()
                 .gap_2()
@@ -1381,7 +1385,10 @@ impl ChartView {
             if self.visibility.draws_studies()
                 && self.footprint.config().shown()
                 && self.vp.auto_price
+                && !self.vp.visible_range(bars.len()).is_empty()
             {
+                // (Only after a real fit: with nothing visible the range isn't refitted, and
+                // raising it again each frame would compound.)
                 // Auto-fit leaves the readout and legend block (plus a row) clear of cells.
                 let top = f64::from(self.legend_band.get().1) + crate::footprint::MIN_ROW_PX;
                 crate::footprint::clear_top(&mut self.vp, top);
@@ -1434,6 +1441,9 @@ impl ChartView {
             let max_columns = crate::studies::Studies::max_columns(self.plot.size.width);
             let (bw, bb) = self.legend_band.get();
             self.footprint.set_legend_block(bw, bb);
+            if !self.visibility.draws_studies() {
+                self.footprint.reset(); // hidden: no cells, no line gaps
+            }
             prepare_studies(
                 self.visibility,
                 &mut self.profile,
@@ -1708,7 +1718,9 @@ impl ChartView {
             if self.cross.is_none()
                 && let Some((x, _)) = self.sync_marker
             {
-                window.paint_quad(fill(rect(x - hair * 0.5, 0.0, hair, ph), t.crosshair));
+                fp.vline_segments(x, 0.0, ph, |a, b| {
+                    window.paint_quad(fill(rect(x - hair * 0.5, a, hair, b - a), t.crosshair));
+                });
                 if let Some((y, _)) = self.sync_price {
                     hline(window, y, 0.0, pw, t.crosshair);
                 }
@@ -1717,7 +1729,9 @@ impl ChartView {
                 // Vertical line through the wick; the horizontal one stops either side of it
                 // so the translucent lines don't double up where they cross.
                 let (left, right) = (c.x - hair * 0.5, c.x + hair * 0.5);
-                window.paint_quad(fill(rect(left, 0.0, hair, ph), t.crosshair));
+                fp.vline_segments(c.x, 0.0, ph, |a, b| {
+                    window.paint_quad(fill(rect(left, a, hair, b - a), t.crosshair));
+                });
                 if self.cross_in_sub.is_none() {
                     hline(window, c.y, 0.0, left.max(0.0), t.crosshair);
                     hline(window, c.y, right, pw, t.crosshair);

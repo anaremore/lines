@@ -261,6 +261,10 @@ pub struct Fallbacks {
     pub under_legend: bool,
     /// No counted trades (history).
     pub no_trades: bool,
+    /// A cell cut by the plot's top or bottom edge (a manual pan or zoom).
+    pub at_edge: bool,
+    /// More cells than one frame draws (bounded work).
+    pub too_many: bool,
 }
 
 pub struct FootprintLayer {
@@ -344,6 +348,12 @@ impl FootprintLayer {
         if f.under_legend {
             notes.push("bars under the legend shown as candles");
         }
+        if f.at_edge {
+            notes.push("bars cut by the plot's edge shown as candles");
+        }
+        if f.too_many {
+            notes.push("too many cells: some bars as candles");
+        }
         if f.no_trades {
             notes.push("footprint from live/replay trades only");
         }
@@ -394,6 +404,13 @@ impl FootprintLayer {
         }
     }
 
+    /// Draw nothing and break no lines (the chart's studies are hidden: `prepare` and `paint`
+    /// don't run then).
+    pub fn reset(&mut self) {
+        self.active = false;
+        self.drawn.clear();
+    }
+
     /// Horizontal line segments across `[x0, x1)` at plot-local `y` that don't cross a drawn
     /// cell (price and crosshair lines break where they would strike through numbers).
     pub fn hline_segments(&self, y: f32, x0: f32, x1: f32, mut f: impl FnMut(f32, f32)) {
@@ -414,6 +431,31 @@ impl FootprintLayer {
         }
         if cur < x1 {
             f(cur, x1);
+        }
+    }
+
+    /// Vertical line segments across `[y0, y1)` at plot-local `x` that don't cross the drawn
+    /// cell column there (a bar's cells are consecutive rows: one span). The crosshair and
+    /// the synced-time line break there instead of striking through centred numbers.
+    pub fn vline_segments(&self, x: f32, y0: f32, y1: f32, mut f: impl FnMut(f32, f32)) {
+        let (mut top, mut bottom) = (f32::INFINITY, f32::NEG_INFINITY);
+        if self.active {
+            for r in &self.drawn {
+                if r[0] <= x && x < r[1] {
+                    top = top.min(r[2]);
+                    bottom = bottom.max(r[3]);
+                }
+            }
+        }
+        if top > bottom {
+            f(y0, y1);
+            return;
+        }
+        if top > y0 {
+            f(y0, top.min(y1));
+        }
+        if bottom < y1 {
+            f(bottom.max(y0), y1);
         }
     }
 
@@ -441,6 +483,10 @@ impl FootprintLayer {
                 let top = cell_top(vp, c.row, u, self.tick, row_h, self.scale);
                 if col.strip_x < ex_w && top < ex_h && top + row_h > 0.0 {
                     return Err(format!("bar {}: a cell under the legend", b.bar));
+                }
+                let on = top + row_h > 0.0 && f64::from(top) < vp.height;
+                if on && (top < 0.0 || f64::from(top + row_h) > vp.height) {
+                    return Err(format!("bar {}: a cell cut by the plot's edge", b.bar));
                 }
             }
         }
@@ -501,7 +547,7 @@ impl ChartLayer for FootprintLayer {
         // the rest are candles (never a cut number, a spilled one or a box without one).
         let (mode, qty, m, tick) = (self.config.mode, self.qty, self.metrics, self.tick);
         let (ex_w, ex_h) = self.legend_block;
-        let (mut too_wide, mut under) = (false, false);
+        let (mut too_wide, mut under, mut at_edge) = (false, false, false);
         let cells = &self.frame.cells;
         self.frame.bars.retain(|bc| {
             let col = Column::of(vp, bc.bar, scale);
@@ -519,10 +565,22 @@ impl ChartLayer for FootprintLayer {
                 under = true;
                 return false;
             }
+            // A cell cut by the plot's top or bottom edge (a manual pan or zoom) would show
+            // half its digits: the bar is a candle.
+            if cs.iter().any(|c| {
+                let top = cell_top(vp, c.row, u, tick, row_h, scale);
+                let on = top + row_h > 0.0 && f64::from(top) < vp.height;
+                on && (top < 0.0 || f64::from(top + row_h) > vp.height)
+            }) {
+                at_edge = true;
+                return false;
+            }
             true
         });
         self.fallbacks.too_wide = too_wide;
         self.fallbacks.under_legend = under;
+        self.fallbacks.at_edge = at_edge;
+        self.fallbacks.too_many = self.frame.truncated;
         self.open_close.clear();
         for bc in &self.frame.bars {
             if self.open_close.len() == self.open_close.capacity() {
@@ -921,6 +979,14 @@ mod tests {
         fp.check_drawable(&vp).unwrap();
         assert!(!fp.covers(0) && !fp.covers(1), "under the block: candles");
         assert!(fp.fallbacks().under_legend);
+        // A manual pan that puts rows across the plot's top edge: those bars are candles too.
+        let mut cut = around(base, 25, 80.0, 3.0);
+        cut.price_hi = (base + 2 * 25) as f64 + 5.0; // the top row straddles y = 0
+        fp.set_legend_block(0.0, 0.0);
+        fp.prepare(&d, bars, &cut);
+        fp.check_drawable(&cut).unwrap();
+        assert!(!fp.covers(1) && fp.fallbacks().at_edge);
+        fp.set_legend_block(400.0, 120.0);
         // Auto-fit: the top is raised clear of the block.
         clear_top(&mut vp, 120.0 + MIN_ROW_PX);
         fp.prepare(&d, bars, &vp);
@@ -974,6 +1040,13 @@ mod tests {
             "starts inside a cell"
         );
         assert_eq!(segs(&fp, 35.0, 0.0, 500.0), [(0.0, 500.0)], "between rows");
+        // Vertical: the column at x 120 spans y 10..30.
+        let mut v = Vec::new();
+        fp.vline_segments(120.0, 0.0, 100.0, |a, b| v.push((a, b)));
+        assert_eq!(v, [(0.0, 10.0), (30.0, 100.0)]);
+        v.clear();
+        fp.vline_segments(180.0, 0.0, 100.0, |a, b| v.push((a, b)));
+        assert_eq!(v, [(0.0, 100.0)], "between columns");
     }
 
     /// The minimum is in whole units of the product's quantity: 5 contracts on ES, 5 BTC on a
