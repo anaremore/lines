@@ -62,7 +62,8 @@ pub trait Observer: Send {
 }
 
 enum Msg {
-    Command(Envelope),
+    /// Boxed: a command (with its contracts) is far larger than every other message.
+    Command(Box<Envelope>),
     Market(ContractKey, Vec<MarketInput>),
     Subscribe(Sender<Event>),
     Rebuild,
@@ -105,13 +106,13 @@ impl TradingHandle {
         command: Command,
     ) -> CommandId {
         let id = CommandId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let _ = self.tx.send(Msg::Command(Envelope {
+        let _ = self.tx.send(Msg::Command(Box::new(Envelope {
             id,
             source,
             issued,
             command,
             pane,
-        }));
+        })));
         id
     }
 
@@ -373,7 +374,7 @@ fn run(
             match msg {
                 Ok(Msg::Command(env)) => {
                     let now = clock.now();
-                    core.handle(now, env);
+                    core.handle(now, *env);
                     dirty = true;
                 }
                 Ok(Msg::Market(k, inputs)) => {
