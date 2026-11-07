@@ -381,6 +381,18 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
         return None;
     }
     let key = k.key.as_str();
+    // AltGr arrives as Ctrl+Alt on Windows/Linux: when it types a character other than the
+    // key itself ("ś" from AltGr+S on a Polish layout), it is text, never a command (several
+    // Ctrl+Alt keys send orders).
+    if !mac
+        && m.control
+        && m.alt
+        && k.key_char
+            .as_deref()
+            .is_some_and(|c| !c.is_empty() && !c.eq_ignore_ascii_case(key))
+    {
+        return None;
+    }
     if !ctrl && !m.shift && m.alt {
         let dir = match key {
             "left" => Some(Direction::Left),
@@ -666,6 +678,23 @@ pub fn workspace_hints() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AltGr is Ctrl+Alt on Windows/Linux: a character it types other than the key itself
+    /// ("ś" from AltGr+S, Polish) is text and never sends an order; Ctrl+Alt+S itself (no
+    /// character, or the key's own) is still a market sell.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn altgr_text_never_sends_an_order() {
+        let mut k = Keystroke::parse("ctrl-alt-s").unwrap();
+        assert_eq!(command_for(&k), Some(Command::Trade(TradeCmd::SellMarket)));
+        k.key_char = Some("s".into());
+        assert_eq!(command_for(&k), Some(Command::Trade(TradeCmd::SellMarket)));
+        k.key_char = Some("ś".into());
+        assert_eq!(command_for(&k), None);
+        let mut b = Keystroke::parse("ctrl-alt-b").unwrap();
+        b.key_char = Some("{".into()); // any character other than the key: text
+        assert_eq!(command_for(&b), None);
+    }
 
     fn cmd(s: &str) -> Option<Command> {
         // `parse` wants a `'static` str; leaking a few test strings is fine.
