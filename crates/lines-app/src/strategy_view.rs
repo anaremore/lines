@@ -579,16 +579,18 @@ impl Render for StrategyView {
             .iter()
             .map(|r| self.row_el(r, cx).into_any_element())
             .collect();
-        let empty =
-            if self.source.is_none() || self.rows.is_empty() {
-                Some(
-                    div().px_2().py_2().text_color(t.text_dim).child(
-                        "No strategies. Strategies come from extensions and trade paper only.",
-                    ),
-                )
-            } else {
-                None
+        let problem = self.source.as_ref().and_then(|s| s.problem());
+        let empty = if self.rows.is_empty() {
+            let msg = match &problem {
+                Some(p) => format!("The strategy couldn't start: {p}"),
+                None if self.source.is_some() => "Starting the strategy…".to_owned(),
+                None => "No strategies. Run Lines with --strategy NAME --backtest-config FILE;                          strategies trade paper only."
+                    .to_owned(),
             };
+            Some(div().px_2().py_2().text_color(t.text_dim).child(msg))
+        } else {
+            problem.map(|p| div().px_2().py_1().text_color(t.text_main).child(p))
+        };
         div()
             .size_full()
             .flex()

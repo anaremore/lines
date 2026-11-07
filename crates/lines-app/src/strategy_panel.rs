@@ -29,6 +29,10 @@ pub trait StrategySource: Send + Sync + 'static {
     fn revision(&self) -> u64;
     /// Every instance. A short lock at most; never waits on a running strategy.
     fn snapshot(&self) -> Vec<StrategyInfo>;
+    /// Why an instance couldn't be added (shown in the panel), if one couldn't.
+    fn problem(&self) -> Option<String> {
+        None
+    }
 }
 
 /// One instance as the host knows it.
@@ -89,9 +93,6 @@ impl Phase {
     }
 }
 
-/// The core's daily-loss pause reasons contain this (`core/strategy_gate.rs`).
-const DAILY_LOSS: &str = "daily loss limit";
-
 /// The panel's phase for a state.
 pub fn phase(state: StrategyState, reason: Option<&str>, failed: bool, active: bool) -> Phase {
     if failed {
@@ -101,7 +102,10 @@ pub fn phase(state: StrategyState, reason: Option<&str>, failed: bool, active: b
         StrategyState::Disarmed | StrategyState::Stopped => Phase::Stopped,
         StrategyState::Armed if active => Phase::Running,
         StrategyState::Armed => Phase::Armed,
-        StrategyState::Paused if reason.is_some_and(|r| r.contains(DAILY_LOSS)) => Phase::Halted,
+        // The core's exact reason (decision 0027): its trade was closed at the daily loss.
+        StrategyState::Paused if reason == Some(lines_trading::strategy::DAILY_LOSS) => {
+            Phase::Halted
+        }
         StrategyState::Paused => Phase::Paused,
     }
 }
@@ -181,8 +185,10 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
             let side = if p.qty > 0 { "Long" } else { "Short" };
             let avg = match (p.avg_price, &product) {
                 (Some(a), Some(pr)) => {
+                    // `avg_price` is in price units: shown in the product's notation.
                     let dec = (pr.price.scale.den().max(1) as f64).log10().ceil() as usize;
-                    format!(" @ {a:.dec$}")
+                    let v = lines_trading::journal::price_value(pr, a);
+                    format!(" @ {v:.dec$}")
                 }
                 _ => String::new(),
             };
@@ -284,8 +290,10 @@ impl DemoStrategies {
         }
     }
 
-    /// Four instances on `account` and `contract`, one per interesting state, with decisions
-    /// up to `now`. Synthetic: a level-touch example, no real strategy.
+    /// Four instances on `account`, one per interesting state, with decisions up to `now`:
+    /// the first on `contract`, the others on MES, NQ and MNQ of the same delivery (one
+    /// instance per account and contract, as the core requires). Synthetic: a level-touch
+    /// example, no real strategy.
     pub fn sample(account: &AccountId, contract: ContractKey, now: UtcMillis) -> DemoStrategies {
         use lines_strategy::Decision;
         let limits = StrategyLimits {
@@ -304,13 +312,22 @@ impl DemoStrategies {
             result: None,
             not_sent: None,
         };
+        let products = [
+            contract.product,
+            lines_feed::catalog::MES,
+            lines_feed::catalog::NQ,
+            lines_feed::catalog::MNQ,
+        ];
         let info = |id: u32, state, reason: Option<&str>, decisions| StrategyInfo {
             id: StrategyId(id),
             label: format!("level-touch #{id}"),
             strategy: "level-touch".into(),
             version: "0.1.0".into(),
             account: account.clone(),
-            contract,
+            contract: ContractKey {
+                product: products[(id as usize - 1) % products.len()],
+                ..contract
+            },
             limits: limits.clone(),
             state,
             reason: reason.map(str::to_owned),
@@ -332,7 +349,7 @@ impl DemoStrategies {
             info(
                 2,
                 StrategyState::Paused,
-                Some("manual order activity on ESZ26"),
+                Some("manual order activity on MESZ26"),
                 vec![rec(
                     240,
                     "touch-long",
@@ -342,9 +359,7 @@ impl DemoStrategies {
             info(
                 3,
                 StrategyState::Paused,
-                Some(
-                    "its daily loss limit was reached today: no entries until the next trade date",
-                ),
+                Some(lines_trading::strategy::DAILY_LOSS),
                 Vec::new(),
             ),
             info(4, StrategyState::Disarmed, None, Vec::new()),
@@ -444,7 +459,7 @@ mod tests {
         assert_eq!(words, ["ARMED", "PAUSED", "HALTED", "STOPPED"]);
         assert_eq!(
             rows[1].why.as_deref(),
-            Some("manual order activity on ESZ26")
+            Some("manual order activity on MESZ26")
         );
         assert_eq!(rows[3].why.as_deref(), Some("not started"));
         // Starting is explicit and only from a stopped or paused instance; a halted one waits
@@ -492,7 +507,7 @@ mod tests {
             account: i.account.clone(),
             contract: es(),
             qty: -2,
-            avg_price: Some(6012.25),
+            avg_price: Some(601_225.0),
             unrealised: Money::whole(-25),
         };
         let trades = [

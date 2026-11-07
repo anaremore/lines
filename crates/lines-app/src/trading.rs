@@ -1229,7 +1229,7 @@ impl Trading {
         self.handle.order_latency()
     }
 
-    #[cfg(test)]
+    /// The paper core's handle (the strategy host submits through it).
     pub fn handle(&self) -> &TradingHandle {
         &self.handle
     }
@@ -1289,6 +1289,11 @@ impl Trading {
     }
 
     /// The account a new pane trades on.
+    /// How the paper core reads time (a replay's market clock, the wall clock live).
+    pub fn clock(&self) -> Clock {
+        self.clock
+    }
+
     pub fn default_account(&self) -> Option<AccountId> {
         let all = self.accounts();
         self.start_account

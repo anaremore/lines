@@ -1029,7 +1029,10 @@ mod tests {
         assert!(hint(Command::Strategy(StrategyCmd::Start)).is_empty());
         assert!(!repeats(Command::Strategy(StrategyCmd::StopAll)));
         for c in StrategyCmd::ALL {
-            assert!(p.contains(&Command::Strategy(c)), "{c:?} not in the palette");
+            assert!(
+                p.contains(&Command::Strategy(c)),
+                "{c:?} not in the palette"
+            );
         }
         // US English names: enable, disable, toggle (never "arm").
         for word in ["enable", "disable", "toggle"] {
