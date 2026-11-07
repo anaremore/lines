@@ -12,17 +12,24 @@ use gpui::{
 };
 
 use crate::layout::Rect;
+use crate::popover::OnDismiss;
 
 /// Space between the trigger and its list (logical px).
 pub const GAP: f32 = 2.0;
 /// Space a list keeps from the window's right edge (logical px).
 pub const MARGIN: f32 = 4.0;
 /// Deferred-draw priority of an open list: over the panes.
-pub const PRIORITY: usize = 1;
+pub const PRIORITY: usize = 3;
+/// Deferred-draw priority of every popover's backdrop (`crate::popover`): over the panes,
+/// under Flatten and Cancel all (`LIVE_PRIORITY`) and every list and menu.
+pub const BACKDROP_PRIORITY: usize = 1;
+/// Deferred-draw priority of Flatten and Cancel all (`popover::always_live`): over the
+/// backdrops, so they stay one press with a popover open; under the lists.
+pub const LIVE_PRIORITY: usize = 2;
 /// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
 /// prompts, the switch-all banner): over any open list, so a list never hides or takes the
 /// clicks of a menu opened after it.
-pub const OVERLAY_PRIORITY: usize = 2;
+pub const OVERLAY_PRIORITY: usize = 4;
 
 /// Where a list `popup` (width, height) opens for a trigger at `trigger`, in a window
 /// `window` (width, height) big, all in window logical px: its top-left corner.
@@ -51,12 +58,23 @@ pub fn dropdown(trigger: impl IntoElement, popup: Option<AnyElement>) -> Dropdow
     Dropdown {
         trigger: trigger.into_any_element(),
         popup,
+        dismiss: None,
     }
 }
 
 pub struct Dropdown {
     trigger: AnyElement,
     popup: Option<AnyElement>,
+    dismiss: Option<OnDismiss>,
+}
+
+impl Dropdown {
+    /// Closes the open list on a press anywhere outside it, which goes no further
+    /// (`popover::defer_backdrop`, the popover rule).
+    pub fn on_dismiss(mut self, dismiss: OnDismiss) -> Self {
+        self.dismiss = Some(dismiss);
+        self
+    }
 }
 
 impl IntoElement for Dropdown {
@@ -130,9 +148,15 @@ impl Element for Dropdown {
             (f32::from(s.width), f32::from(s.height)),
             (f32::from(v.width), f32::from(v.height)),
         );
+        let (x, y) = (x.round(), y.round());
+        // Under the list, over everything else: a press outside closes it and does only that.
+        if let Some(dismiss) = self.dismiss.take() {
+            let list = Rect::new(x, y, f32::from(s.width), f32::from(s.height));
+            crate::popover::defer_backdrop(window, cx, BACKDROP_PRIORITY, &[list], dismiss);
+        }
         // Deferred: drawn after (over) the rest of the window, and not clipped by the header
         // or the pane.
-        window.defer_draw(popup, point(px(x.round()), px(y.round())), PRIORITY, None);
+        window.defer_draw(popup, point(px(x), px(y)), PRIORITY, None);
     }
 
     fn paint(

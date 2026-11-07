@@ -349,10 +349,17 @@ impl DomView {
     // ---- input ---------------------------------------------------------------------
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A click that closes a list (the account list, the picker) does only that: never
+        // also an order on the ladder under it. The account list (a popover) takes no focus
+        // either; it normally takes the press on its backdrop (`crate::popover`), this is the
+        // fallback.
+        if self.trade.account_menu {
+            trade_bar::close_account_menu(self, cx);
+            cx.stop_propagation();
+            return;
+        }
         self.focus.focus(window, cx);
-        // A click that closes a list (the picker, the account list) does only that: never
-        // also an order on the ladder under it.
-        if self.picker.close() || std::mem::take(&mut self.trade.account_menu) {
+        if self.picker.close() {
             cx.stop_propagation();
             cx.notify();
             return;
@@ -556,6 +563,11 @@ impl DomView {
             return;
         }
         let k = &ev.keystroke;
+        if self.trade.account_menu && crate::popover::closes_on_key(&k.key) {
+            trade_bar::close_account_menu(self, cx);
+            cx.stop_propagation();
+            return;
+        }
         if trade_bar::editor_key(self, ev, cx) {
             cx.stop_propagation();
             return;
