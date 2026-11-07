@@ -84,7 +84,9 @@ use crate::study_menu::{
 use crate::theme::Theme;
 use crate::wsdoc::{ChartState, PaneDoc, StudyVisibility};
 
-const AXIS_W: f32 = 78.0;
+pub(crate) const AXIS_W: f32 = 78.0;
+/// Where a screenshot opens the style editor: drawing id, tab, and the focus (row, col).
+pub type StyleEditorAt = (u64, usize, Option<(usize, usize)>);
 const AXIS_H: f32 = 24.0;
 const LABEL_PX: f32 = 12.0;
 const MAX_CACHED_LABELS: usize = 4096;
@@ -192,9 +194,9 @@ pub struct Fixture {
     pub timeframe: Timeframe,
     /// Start with the timeframe list open (screenshots: `--timeframe-menu`).
     pub timeframe_menu: bool,
-    /// Open the style editor on this drawing (screenshots: `--style-editor ID[:TAB]`), on
-    /// tab `TAB` (0 = first).
-    pub style_editor: Option<(u64, usize, Option<usize>)>,
+    /// Open the style editor on this drawing (screenshots: `--style-editor
+    /// ID[:TAB[:COL[:ROW]]]`), on tab `TAB` (0 = first), the focus on (row, col).
+    pub style_editor: Option<StyleEditorAt>,
 }
 
 /// Which part of a studies-menu row a click hit.
@@ -381,6 +383,11 @@ pub struct ChartView {
     editor_pane: (f32, f32),
     /// The style editor body's scroll state (its scrollbar).
     editor_scroll: gpui::ScrollHandle,
+    /// The style editor's (tab, row) its body last scrolled to show: a key that moves the
+    /// focus elsewhere scrolls again; a wheel scroll alone doesn't snap back.
+    editor_followed: Option<(usize, usize)>,
+    /// Frames the pending follow waited for the body's first layout.
+    editor_follow_tries: u8,
     measure_lines: HashMap<
         Option<u64>,
         (
@@ -537,6 +544,8 @@ impl ChartView {
             saved_styles,
             editor_pane: (0.0, 0.0),
             editor_scroll: gpui::ScrollHandle::new(),
+            editor_followed: None,
+            editor_follow_tries: 0,
             note_lines: HashMap::new(),
             note_entry_line: None,
             measure_lines: HashMap::new(),
@@ -553,7 +562,10 @@ impl ChartView {
         {
             view.drawings.edit_style(|e| {
                 e.select_tab(tab);
-                if let Some(col) = focus {
+                if let Some((row, col)) = focus {
+                    for _ in 0..row {
+                        e.key("down", false, None);
+                    }
                     e.key("home", false, None);
                     for _ in 0..col {
                         e.key("right", false, None);
@@ -2137,11 +2149,16 @@ impl ChartView {
         // Drawings' price tags too (up to a few per frame, on the plot only, allocation-free).
         let mut drawing_tags = [None; MAX_DRAWING_TAGS];
         if !self.drawings.hidden {
-            for (slot, (_, y, _)) in drawing_tags.iter_mut().zip(self.drawings.axis_tags(ph)) {
-                *slot = Some(Span::around(
-                    drawing_tag_y(y, last_y, ph),
-                    DRAWING_TAG_H * 0.5,
-                ));
+            let mut lines = [0.0f32; MAX_DRAWING_TAGS];
+            let mut n = 0;
+            for (slot, (_, y, _)) in lines.iter_mut().zip(self.drawings.axis_tags(ph)) {
+                *slot = y;
+                n += 1;
+            }
+            let mut at = [0.0f32; MAX_DRAWING_TAGS];
+            drawing_tag_ys(&lines[..n], last_y, ph, &mut at[..n]);
+            for (slot, y) in drawing_tags.iter_mut().zip(&at[..n]) {
+                *slot = Some(Span::around(*y, DRAWING_TAG_H * 0.5));
             }
         }
         let tags = [
@@ -2538,12 +2555,17 @@ impl ChartView {
         }
         let x0 = ox + pw + hair;
         let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
-        for &(price, line_y, style) in &tags[..n] {
+        let mut lines = [0.0f32; MAX_DRAWING_TAGS];
+        for (slot, tag) in lines.iter_mut().zip(&tags[..n]) {
+            *slot = tag.1;
+        }
+        let mut at = [0.0f32; MAX_DRAWING_TAGS];
+        drawing_tag_ys(&lines[..n], last_y, ph, &mut at[..n]);
+        for (&(price, line_y, style), &y) in tags[..n].iter().zip(&at[..n]) {
             let color = t.style_color(style.line.color, &t.drawing, 100);
             let (border, text) = t.drawing_tag(color);
-            // The box: kept inside the plot and off the last-price tag; the notch stays at
-            // the line's own level.
-            let y = drawing_tag_y(line_y, last_y, ph);
+            // The box: kept inside the plot, off the last-price tag and off the other tags it
+            // was stepped onto; the notch stays at the line's own level.
             let top = snap(f64::from(y - DRAWING_TAG_H * 0.5), scale);
             let mid = snap(f64::from(line_y), scale);
             // The notch: the line's level carried from the plot's edge to the tag (and along
@@ -2898,6 +2920,8 @@ impl ChartView {
         self.picker.close();
         self.anchoring = None;
         self.editor_scroll = gpui::ScrollHandle::new();
+        self.editor_followed = None;
+        self.editor_follow_tries = 0;
         self.close_popover(Kind::Studies, cx);
         self.close_popover(Kind::Timeframe, cx);
         self.close_popover(Kind::Account, cx);
@@ -2921,8 +2945,31 @@ impl ChartView {
         let w = crate::style_editor_view::width(area.0);
         let h = crate::style_editor_view::content_height(&e, &warnings, w, &t.drawing_names);
         let at = crate::style_editor_view::place(area, self.drawings.extent(id), h);
-        let editor =
-            crate::style_editor_view::render(&e, t, &warnings, at, h, &self.editor_scroll, cx);
+        // GPUI scrolls a tracked body to an item in prepaint, and only once it has been laid
+        // out (its overflow and bounds come from a frame): until then the follow stays
+        // pending (a few frames at most). Each follow renders the pane once more (a cached
+        // view), so the scrollbar, drawn from the offset at render, shows where it scrolled.
+        let key = (e.tab, e.row);
+        let follow = self.editor_followed != Some(key);
+        if follow {
+            if self.editor_scroll.bounds().size.height > px(0.0) || self.editor_follow_tries >= 3 {
+                self.editor_followed = Some(key);
+                self.editor_follow_tries = 0;
+            } else {
+                self.editor_follow_tries += 1;
+            }
+            cx.notify();
+        }
+        let editor = crate::style_editor_view::render(
+            &e,
+            t,
+            &warnings,
+            at,
+            h,
+            &self.editor_scroll,
+            follow,
+            cx,
+        );
         let dismiss: popover::OnDismiss = Box::new(
             cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::StyleEditor, cx)),
         );
@@ -3822,6 +3869,47 @@ fn drawing_tag_y(y: f32, last: Option<f32>, plot_h: f32) -> f32 {
     }
 }
 
+/// Centres of the drawings' axis tags (`out[i]` for the line at `lines[i]`, plot-local):
+/// each as [`drawing_tag_y`], and a tag stepped off the last-price tag that lands on another
+/// drawing's tag steps again, away from the last price, until it is clear (kept where it was
+/// when that would leave the plot). Tags left on their own lines are never moved (two lines a
+/// tick apart keep overlapping tags, as without a last price). Allocation-free.
+fn drawing_tag_ys(lines: &[f32], last: Option<f32>, plot_h: f32, out: &mut [f32]) {
+    let n = lines.len().min(out.len());
+    for i in 0..n {
+        out[i] = drawing_tag_y(lines[i], last, plot_h);
+    }
+    let Some(last) = last else {
+        return;
+    };
+    let gap = DRAWING_TAG_H + 1.0;
+    let fits = |v: f32| v >= DRAWING_TAG_H * 0.5 && v <= plot_h - DRAWING_TAG_H * 0.5;
+    for i in 0..n {
+        if out[i] == cross_tag_y(lines[i], plot_h) {
+            continue; // on its own line
+        }
+        let away = if out[i] < last { -1.0 } else { 1.0 };
+        // Settled: every tag left on its line, and the stepped ones before this one.
+        let clash = |v: f32, out: &[f32]| {
+            (0..n).any(|j| {
+                j != i
+                    && (j < i || out[j] == cross_tag_y(lines[j], plot_h))
+                    && (out[j] - v).abs() < gap
+            })
+        };
+        let mut v = out[i];
+        for _ in 0..n {
+            if !clash(v, out) {
+                break;
+            }
+            v += away * gap;
+        }
+        if fits(v) && !clash(v, out) {
+            out[i] = v;
+        }
+    }
+}
+
 /// Centre of the last-price tag (plot-local y). `max` last: the plot can be shorter than a
 /// label (tiny windows).
 fn last_tag_y(vp: &Viewport, p: Price, plot_h: f32) -> f32 {
@@ -4187,6 +4275,54 @@ mod tests {
                 assert!(y >= DRAWING_TAG_H * 0.5 && y <= ph - DRAWING_TAG_H * 0.5);
             }
         }
+    }
+
+    /// A tag stepped off the last-price tag never lands on another drawing's tag: it steps
+    /// again, away from the last price; tags on their own lines stay there.
+    #[test]
+    fn stepped_drawing_tags_clear_the_other_tags() {
+        let ph = 400.0;
+        let reach = (TAG_H + DRAWING_TAG_H) * 0.5 + 1.0;
+        let gap = DRAWING_TAG_H + 1.0;
+        // A line at the last price (steps above, the line's side: y <= last) and another
+        // drawing's line exactly where it would land.
+        let lines = [200.0 - reach, 200.0];
+        let mut at = [0.0; 2];
+        drawing_tag_ys(&lines, Some(200.0), ph, &mut at);
+        assert_eq!(at[0], 200.0 - reach, "on its own line: unmoved");
+        assert_eq!(
+            at[1],
+            200.0 - reach - gap,
+            "stepped twice, away from the last price"
+        );
+        // Several lines crowding the last price from both sides: no stepped tag overlaps any
+        // other tag or the last-price tag, and all stay inside the plot.
+        let lines = [
+            196.0,
+            199.0,
+            201.0,
+            204.0,
+            200.0 - reach,
+            200.0 + reach,
+            180.0,
+        ];
+        let mut at = [0.0; 7];
+        drawing_tag_ys(&lines, Some(200.0), ph, &mut at);
+        for i in 0..lines.len() {
+            assert!((at[i] - 200.0).abs() >= reach - 0.01, "{at:?}");
+            assert!(at[i] >= DRAWING_TAG_H * 0.5 && at[i] <= ph - DRAWING_TAG_H * 0.5);
+            if at[i] != lines[i] {
+                for j in 0..lines.len() {
+                    assert!(
+                        j == i || (at[j] - at[i]).abs() >= gap - 0.01,
+                        "{i} {j}: {at:?}"
+                    );
+                }
+            }
+        }
+        // No last price: every tag on its line.
+        drawing_tag_ys(&lines, None, ph, &mut at);
+        assert_eq!(at, lines);
     }
 
     /// While the style editor is open it takes plain, Shift and Alt keys (moves, hex digits,

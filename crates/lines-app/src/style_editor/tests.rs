@@ -218,7 +218,11 @@ fn the_guard_checks_every_theme_and_never_blocks() {
         all.contains("Low contrast in the light theme (1.3:1); lines need 3:1."),
         "{all}"
     );
-    assert!(!all.contains("dark theme ("), "{all}");
+    // No contrast figure for the dark theme.
+    assert!(
+        !all.contains("Low contrast in the dark") && !all.contains("and the dark theme ("),
+        "{all}"
+    );
     // An orange: like the colorblind palette's down candles, named with its swatch; meaning
     // matches come before contrast.
     type_hex(&mut e, "ff9f1a");
@@ -269,19 +273,19 @@ fn where_a_finding_holds_is_worded() {
     assert_eq!(where_phrase(&c, &[true; 4]), "");
     assert_eq!(
         where_phrase(&c, &[false, false, true, true]),
-        " in the light theme"
+        " in the light theme (both palettes)"
     );
     assert_eq!(
         where_phrase(&c, &[false, true, false, true]),
-        " in the colorblind palette"
+        " in the colorblind palette (both themes)"
     );
     assert_eq!(
         where_phrase(&c, &[false, true, false, false]),
-        " in the dark theme with the colorblind palette"
+        " in the dark theme, colorblind palette"
     );
     assert_eq!(
         where_phrase(&c, &[true, true, false, true]),
-        " in the dark theme, the dark theme with the colorblind palette and the light theme with the colorblind palette"
+        " in the dark theme, standard palette; the dark theme, colorblind palette; and the light theme, colorblind palette"
     );
 }
 

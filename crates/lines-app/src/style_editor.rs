@@ -176,14 +176,14 @@ impl ThemeCtx {
         }
     }
 
-    /// The combination in words (a palette isn't a theme): "dark theme", "light theme with
-    /// the colorblind palette".
+    /// The combination in words, always naming the palette (a palette isn't a theme): "dark
+    /// theme, standard palette", "light theme, colorblind palette".
     fn label(&self) -> &'static str {
         match (self.dark, self.colorblind) {
-            (true, false) => "dark theme",
-            (false, false) => "light theme",
-            (true, true) => "dark theme with the colorblind palette",
-            (false, true) => "light theme with the colorblind palette",
+            (true, false) => "dark theme, standard palette",
+            (false, false) => "light theme, standard palette",
+            (true, true) => "dark theme, colorblind palette",
+            (false, true) => "light theme, colorblind palette",
         }
     }
 }
@@ -209,8 +209,8 @@ fn misread(name: &str) -> &'static str {
 }
 
 /// Where a finding holds, from the contexts it holds in (`hit[i]` for `ctxs[i]`): nothing when
-/// it holds in all of them, else " in the light theme", " in the colorblind palette", or the
-/// combinations named.
+/// it holds in all of them, else " in the light theme (both palettes)", " in the colorblind
+/// palette (both themes)", or the combinations named, each with its palette.
 fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
     if hit.iter().all(|h| *h) {
         return String::new();
@@ -219,16 +219,16 @@ fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
         ctxs.iter().filter(|c| f(c)).count() >= 2 && ctxs.iter().zip(hit).all(|(c, h)| *h == f(c))
     };
     if exactly(|c| c.dark) {
-        return " in the dark theme".into();
+        return " in the dark theme (both palettes)".into();
     }
     if exactly(|c| !c.dark) {
-        return " in the light theme".into();
+        return " in the light theme (both palettes)".into();
     }
     if exactly(|c| c.colorblind) {
-        return " in the colorblind palette".into();
+        return " in the colorblind palette (both themes)".into();
     }
     if exactly(|c| !c.colorblind) {
-        return " in the standard palette".into();
+        return " in the standard palette (both themes)".into();
     }
     let names: Vec<&str> = ctxs
         .iter()
@@ -239,7 +239,7 @@ fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
     match names.as_slice() {
         [] => String::new(),
         [one] => format!(" in the {one}"),
-        [init @ .., last] => format!(" in the {} and the {last}", init.join(", the ")),
+        [init @ .., last] => format!(" in the {}; and the {last}", init.join("; the ")),
     }
 }
 

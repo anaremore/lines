@@ -539,15 +539,15 @@ struct Cli {
     #[arg(long, requires = "gallery")]
     gallery_full: bool,
     /// Screenshot: the first chart with the style editor open on drawing ID of --drawings,
-    /// optionally on tab TAB (0 = first) with the keyboard focus on control COL of its first
-    /// row: `--style-editor 3`, `--style-editor 4:1` or `--style-editor 3:0:1`.
+    /// optionally on tab TAB (0 = first) with the keyboard focus on control COL of row ROW
+    /// (default 0, the first): `--style-editor 3`, `4:1`, `3:0:1` or `3:0:1:4`.
     #[arg(long, requires = "drawings", value_parser = parse_style_editor)]
-    style_editor: Option<(u64, usize, Option<usize>)>,
+    style_editor: Option<chart_view::StyleEditorAt>,
 }
 
-/// `ID`, `ID:TAB` or `ID:TAB:COL` (`--style-editor`).
-fn parse_style_editor(s: &str) -> Result<(u64, usize, Option<usize>), String> {
-    let mut it = s.splitn(3, ':');
+/// `ID`, `ID:TAB`, `ID:TAB:COL` or `ID:TAB:COL:ROW` (`--style-editor`); the focus is (row, col).
+fn parse_style_editor(s: &str) -> Result<chart_view::StyleEditorAt, String> {
+    let mut it = s.splitn(4, ':');
     let id = it.next().unwrap_or_default();
     let tab = it.next().unwrap_or("0");
     let id = id.parse().map_err(|_| format!("bad drawing id {id:?}"))?;
@@ -556,7 +556,11 @@ fn parse_style_editor(s: &str) -> Result<(u64, usize, Option<usize>), String> {
         Some(c) => Some(c.parse().map_err(|_| format!("bad focus column {c:?}"))?),
         None => None,
     };
-    Ok((id, tab, col))
+    let row = match it.next() {
+        Some(r) => r.parse().map_err(|_| format!("bad focus row {r:?}"))?,
+        None => 0,
+    };
+    Ok((id, tab, col.map(|c| (row, c))))
 }
 
 /// The CLI with every registered source as a `--source` value, with its help.

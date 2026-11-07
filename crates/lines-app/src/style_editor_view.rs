@@ -8,10 +8,13 @@
 //! label. Keyboard focus is a separate 2 px accent ring around the control.
 //!
 //! Placement ([`place`]): beside the edited drawing (right, left, below, above, in that order),
-//! never over it when there is room; always inside the chart's plot area (above the time axis),
-//! its body scrolling with a visible scrollbar when the area is short, "Save as default" pinned
-//! in the footer. The box is never taller than the height it was placed with
-//! ([`content_height`], an upper bound of what it draws at that width), so it can't spill.
+//! never over it when there is room; always inside the chart's plot area (above the time axis)
+//! and, when the pane is wide enough to spare it, clear of the price axis (the last-price tag
+//! stays visible); its body scrolling with a visible (display-only) scrollbar when the area is
+//! short, the tabs pinned above it and "Save as default" pinned in the footer. Keyboard focus
+//! scrolls its row into view ([`body_child`]). The box is never taller than the height it was
+//! placed with ([`content_height`], an upper bound of what it draws at that width: the lines
+//! that could wrap are counted, the rest don't wrap), so it can't spill.
 
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
@@ -19,8 +22,10 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::chart_view::ChartView;
-use crate::style_editor::{Control, StyleEditor, Warning, color_name, control_label, is_toggle};
+use crate::chart_view::{AXIS_W, ChartView};
+use crate::style_editor::{
+    Control, Row, StyleEditor, Warning, color_name, control_label, is_toggle,
+};
 use crate::theme::{Theme, user_color};
 
 /// Widest the editor gets (logical px).
@@ -32,8 +37,11 @@ const GAP: f32 = 12.0;
 const LABEL_W: f32 = 64.0;
 /// Every control is at least this tall and wide (hit target).
 const HIT: f32 = 20.0;
-/// The price axis, which the default spot keeps clear of.
-const AXIS_W: f32 = 72.0;
+/// The narrowest the editor gets for the price axis's sake: a pane that can't spare the axis
+/// and still give the editor this much lets it cover the axis.
+const MIN_BESIDE_AXIS: f32 = 280.0;
+/// The custom color entry's hint.
+const HEX_HINT: &str = "Type 6 hex digits · Enter applies · Esc cancels";
 
 /// Where the editor goes, chart-local: its box is at most `h` tall.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -44,9 +52,19 @@ pub struct Place {
     pub h: f32,
 }
 
+/// The right edge the editor keeps to in an `area` this wide: left of the price axis (so the
+/// last-price tag stays visible) when that leaves it [`MIN_BESIDE_AXIS`], else the pane's.
+fn right_edge(area_w: f32) -> f32 {
+    if area_w - AXIS_W - 2.0 * MARGIN >= MIN_BESIDE_AXIS {
+        area_w - AXIS_W - MARGIN
+    } else {
+        area_w - MARGIN
+    }
+}
+
 /// The editor's width in an `area` this wide.
 pub fn width(area_w: f32) -> f32 {
-    W.min((area_w - 2.0 * MARGIN).max(0.0))
+    W.min((right_edge(area_w) - MARGIN).max(0.0))
 }
 
 /// The editor's spot in an `area` (w, h: the chart's width and the height above its time
@@ -55,13 +73,14 @@ pub fn width(area_w: f32) -> f32 {
 /// axis). Never past any edge of the area: narrower, shorter and scrolling when it must be.
 pub fn place(area: (f32, f32), target: Option<(f32, f32, f32, f32)>, h: f32) -> Place {
     let (pw, ph) = area;
+    let right = right_edge(pw);
     let w = width(pw);
     let h = h.min((ph - 2.0 * MARGIN).max(0.0));
-    let clamp_x = |x: f32| x.min(pw - w - MARGIN).max(MARGIN);
+    let clamp_x = |x: f32| x.min(right - w).max(MARGIN);
     let clamp_y = |y: f32| y.min(ph - h - MARGIN).max(MARGIN);
     let at = |x: f32, y: f32| Place { x, y, w, h };
     if let Some((x0, y0, x1, y1)) = target {
-        if x1 + GAP + w <= pw - MARGIN {
+        if x1 + GAP + w <= right {
             return at(x1 + GAP, clamp_y(y0));
         }
         if x0 - GAP - w >= MARGIN {
@@ -74,7 +93,7 @@ pub fn place(area: (f32, f32), target: Option<(f32, f32, f32, f32)>, h: f32) -> 
             return at(clamp_x(x0), y0 - GAP - h);
         }
     }
-    at(clamp_x(pw - AXIS_W - w - MARGIN), clamp_y(MARGIN + 16.0))
+    at(clamp_x(right - w), clamp_y(MARGIN + 16.0))
 }
 
 /// GPUI's default line height for text `size` px (1.618 em).
@@ -114,16 +133,36 @@ fn control_w(c: Control, on: bool, names: &[&'static str]) -> f32 {
     }
 }
 
-/// The header and footer (title, "Save as default", the key hint) and the borders.
-fn chrome_height(e: &StyleEditor, hint: bool) -> f32 {
+/// The pinned tab strip (none for one part).
+fn tabs_height(e: &StyleEditor) -> f32 {
+    if e.parts.len() > 1 {
+        4.0 + 24.0 + 4.0 + 1.0
+    } else {
+        0.0
+    }
+}
+
+/// What doesn't scroll: header, tabs and footer (title, "Save as default", the key hint, full
+/// or short) and the borders.
+fn chrome_height(e: &StyleEditor) -> f32 {
     let title = 16.0 + line_h(13.0) + 1.0;
     let save = if e.default_label.is_some() {
         4.0 + 28.0
     } else {
         0.0
     };
-    let hint = if hint { 8.0 + line_h(11.0) } else { 4.0 };
-    2.0 + title + 1.0 + save + hint
+    let hint = 8.0 + line_h(11.0);
+    2.0 + title + tabs_height(e) + 1.0 + save + hint
+}
+
+/// The scroll body's child holding model row `r` (rows are direct children so focus can
+/// scroll them into view; "Save as default" is in the footer: `None`).
+pub fn body_child(rows: &[Row], r: usize) -> Option<usize> {
+    let footer = |row: &Row| matches!(row.controls.as_slice(), [(Control::SaveDefault, _)]);
+    if footer(rows.get(r)?) {
+        return None;
+    }
+    Some(rows[..r].iter().filter(|row| !footer(row)).count())
 }
 
 /// How tall the editor draws at width `w` (logical px), as an upper bound: rows that wrap,
@@ -137,10 +176,7 @@ pub fn content_height(
 ) -> f32 {
     let inner = (w - 2.0 - 24.0).max(1.0);
     let controls_w = (inner - LABEL_W).max(1.0);
-    let mut h = chrome_height(e, true) + 8.0; // the body's padding
-    if e.parts.len() > 1 {
-        h += 24.0 + 4.0 + 1.0;
-    }
+    let mut h = chrome_height(e) + 8.0; // the body's padding
     for r in e.rows() {
         if let [(Control::SaveDefault, _)] = r.controls.as_slice() {
             continue; // in the footer
@@ -150,17 +186,22 @@ pub fn content_height(
             let lines = wrapped_lines(widths, controls_w);
             h += 4.0 + line_h(12.0) + lines * 24.0 + (lines - 1.0) * 4.0 + 2.0;
             if e.hex.is_some() {
-                let hint = "Type 6 hex digits · Enter applies · Esc cancels";
-                let lines = wrapped_lines(
-                    [80.0, hint.chars().count() as f32 * 12.0 * 0.62].into_iter(),
-                    controls_w,
-                );
-                h += 8.0 + lines * line_h(12.0) + (lines - 1.0) * 8.0;
+                // The entry, then its hint beside it or below, wrapping on its own when it
+                // is wider than the row.
+                let hint_w = HEX_HINT.chars().count() as f32 * 12.0 * 0.62;
+                h += 8.0
+                    + if 80.0 + 8.0 + hint_w <= controls_w {
+                        line_h(12.0)
+                    } else {
+                        line_h(12.0)
+                            + 8.0
+                            + text_lines(HEX_HINT.chars().count(), 12.0, controls_w) * line_h(12.0)
+                    };
             }
             if !warnings.is_empty() {
-                // Inside the box: margins, padding, the bar and the marker.
-                let text_w = (inner - 16.0 - 3.0 - 8.0 - 16.0 - 8.0).max(1.0);
-                h += 8.0 + 8.0 + 4.0 * (warnings.len() as f32 - 1.0);
+                // Inside the box: margins, border, padding, the bar and the marker.
+                let text_w = (inner - 2.0 - 16.0 - 3.0 - 8.0 - 16.0 - 8.0).max(1.0);
+                h += 8.0 + 2.0 + 8.0 + 4.0 * (warnings.len() as f32 - 1.0);
                 for wn in warnings {
                     h += text_lines(wn.text.chars().count(), 12.0, text_w) * line_h(12.0);
                 }
@@ -339,6 +380,19 @@ fn warning_box(t: &Theme, warnings: &[Warning]) -> gpui::Div {
         .child(list)
 }
 
+/// How far down a body `view` px tall must be scrolled (from `scrolled`) to show the row at
+/// `top` (content px, from the body's top) `h` tall: the least move that shows all of it, or
+/// its top when it is taller than the body (a color row's name line stays with its swatches).
+pub fn keep_visible(view: f32, top: f32, h: f32, scrolled: f32) -> f32 {
+    if h > view || top < scrolled {
+        top
+    } else if top + h > scrolled + view {
+        top + h - view
+    } else {
+        scrolled
+    }
+}
+
 /// The scrollbar's thumb (top, height) in a body `view` px tall showing `content` px, scrolled
 /// `scrolled` px down; `None` when everything fits.
 pub fn thumb(view: f32, content: f32, scrolled: f32) -> Option<(f32, f32)> {
@@ -352,7 +406,9 @@ pub fn thumb(view: f32, content: f32, scrolled: f32) -> Option<(f32, f32)> {
 }
 
 /// The editor at `at`. `content_h`: [`content_height`] at this width; `scroll`: the body's
-/// scroll state (its scrollbar shows whenever the body doesn't fit).
+/// scroll state (its scrollbar shows whenever the body doesn't fit); `follow`: the focus just
+/// moved, so its row scrolls into view.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     e: &StyleEditor,
     t: &Theme,
@@ -360,18 +416,41 @@ pub fn render(
     at: Place,
     content_h: f32,
     scroll: &ScrollHandle,
+    follow: bool,
     cx: &mut Context<ChartView>,
 ) -> AnyElement {
-    // Short of room: the key hint goes first (the keys still work), then the body scrolls.
-    let hint = content_h <= at.h;
+    // Short of room: the key hint shortens (the keys still work) and the body scrolls.
+    let full_hint = content_h <= at.h;
     let rows = e.rows();
     let focus = (e.row, e.col);
     let names = &t.drawing_names;
-    // The rows keep their own heights (flex_none); the scroll container around them shrinks.
-    let mut body = div().flex_none().flex().flex_col().py(px(4.0));
+    if follow && let Some(ix) = body_child(&rows, e.row) {
+        // From the last frame's layout (a focus move doesn't move rows), so the scrollbar
+        // below is drawn at the new offset; before the first layout GPUI does it in prepaint.
+        let view = scroll.bounds();
+        match scroll.bounds_for_item(ix) {
+            Some(b) if view.size.height > gpui::px(0.0) => {
+                let to = keep_visible(
+                    f32::from(view.size.height),
+                    f32::from(b.top() - view.top()),
+                    f32::from(b.size.height),
+                    -f32::from(scroll.offset().y),
+                )
+                .clamp(0.0, f32::from(scroll.max_offset().y));
+                scroll.set_offset(gpui::point(scroll.offset().x, px(-to)));
+            }
+            _ => scroll.scroll_to_item(ix),
+        }
+    }
+    // Each row (a color row with its name line, hex entry and warnings) is one direct child of
+    // the scroll container, keeping its own height (flex_none).
+    let mut groups: Vec<gpui::Div> = Vec::with_capacity(rows.len());
+    let mut tabs_strip = None;
     if e.parts.len() > 1 {
         let mut tabs = div()
+            .flex_none()
             .px(px(12.0))
+            .pt(px(4.0))
             .pb(px(4.0))
             .flex()
             .flex_row()
@@ -407,7 +486,7 @@ pub fn render(
                     ),
             );
         }
-        body = body.child(tabs);
+        tabs_strip = Some(tabs);
     }
     let mut footer_save = None;
     for (r, row) in rows.iter().enumerate() {
@@ -447,6 +526,7 @@ pub fn render(
             continue;
         }
         let is_color = row.label == "Color";
+        let mut group = div().flex_none().flex().flex_col();
         let mut controls = div()
             .flex()
             .flex_row()
@@ -490,7 +570,7 @@ pub fn render(
                 Some((c, true)) => Some(name(c)),
                 None => selected.map(|(c, _)| name(c)),
             };
-            body = body.child(
+            group = group.child(
                 div()
                     .px(px(12.0))
                     .pt(px(4.0))
@@ -499,10 +579,20 @@ pub fn render(
                     .items_center()
                     .child(label)
                     .when_some(named, |d, n| {
-                        d.child(div().text_size(px(12.0)).text_color(t.text_main).child(n))
+                        // One line: a long name truncates (the height estimate counts one).
+                        d.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .whitespace_nowrap()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(t.text_main)
+                                .child(n),
+                        )
                     }),
             );
-            body = body.child(
+            group = group.child(
                 div()
                     .pl(px(12.0 + LABEL_W))
                     .pr(px(12.0))
@@ -510,7 +600,7 @@ pub fn render(
                     .child(controls),
             );
         } else {
-            body = body.child(
+            group = group.child(
                 div()
                     .px(px(12.0))
                     .py(px(2.0))
@@ -524,7 +614,7 @@ pub fn render(
         if is_color {
             // The custom color entry, then the readability warnings, right under the colors.
             if let Some(hex) = &e.hex {
-                body = body.child(
+                group = group.child(
                     div()
                         .pl(px(12.0 + LABEL_W))
                         .pr(px(12.0))
@@ -544,18 +634,21 @@ pub fn render(
                                 .text_color(t.text_main)
                                 .child(format!("#{hex}▏")),
                         )
-                        .child(
-                            div()
-                                .text_color(t.text_dim)
-                                .child("Type 6 hex digits · Enter applies · Esc cancels"),
-                        ),
+                        .child(div().min_w(px(0.0)).text_color(t.text_dim).child(HEX_HINT)),
                 );
             }
             if !warnings.is_empty() {
-                body = body.child(warning_box(t, warnings));
+                group = group.child(warning_box(t, warnings));
             }
         }
+        groups.push(group);
     }
+    let hint = match (full_hint, e.parts.len() > 1) {
+        (true, true) => "↑↓←→ move · Enter pick · Tab next part · Esc close",
+        (true, false) => "↑↓←→ move · Enter pick · Esc close",
+        (false, true) => "Tab next part · Esc close",
+        (false, false) => "Esc close",
+    };
     let footer = div()
         .flex_none()
         .border_t_1()
@@ -563,26 +656,23 @@ pub fn render(
         .when_some(footer_save, |d, s| {
             d.child(div().px(px(12.0)).pt(px(4.0)).flex().flex_row().child(s))
         })
-        .when(hint, |d| {
-            d.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(4.0))
-                    .text_size(px(11.0))
-                    .text_color(t.text_dim)
-                    .whitespace_nowrap()
-                    .truncate()
-                    .child("↑↓←→ move · Enter pick · Tab next part · Esc close"),
-            )
-        })
-        .when(!hint, |d| d.pb(px(4.0)));
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(4.0))
+                .text_size(px(11.0))
+                .text_color(t.text_dim)
+                .whitespace_nowrap()
+                .truncate()
+                .child(hint),
+        );
     // The scrollbar: from the body's last layout, else (first frame) from the estimate.
     let view_h = f32::from(scroll.bounds().size.height);
     let (view_h, body_h) = if view_h > 0.0 {
         (view_h, view_h + f32::from(scroll.max_offset().y))
     } else {
-        let view = (at.h - chrome_height(e, hint)).max(0.0);
-        (view, (content_h - chrome_height(e, true)).max(0.0))
+        let view = (at.h - chrome_height(e)).max(0.0);
+        (view, (content_h - chrome_height(e)).max(0.0))
     };
     let bar = thumb(view_h, body_h, -f32::from(scroll.offset().y)).map(|(top, h)| {
         div()
@@ -610,7 +700,8 @@ pub fn render(
                 .flex_col()
                 .overflow_y_scroll()
                 .track_scroll(scroll)
-                .child(body),
+                .py(px(4.0))
+                .children(groups),
         )
         .when_some(bar, |d, b| d.child(b));
     div()
@@ -642,6 +733,7 @@ pub fn render(
                         .text_color(t.text_main)
                         .child(e.title.clone()),
                 )
+                .children(tabs_strip)
                 .child(body)
                 .child(footer),
         )
@@ -711,6 +803,58 @@ mod tests {
         assert_eq!(place((300.0, 900.0), None, 400.0).w, 300.0 - 2.0 * MARGIN);
     }
 
+    /// A pane that can spare it keeps the price axis clear (the last-price tag stays
+    /// visible), beside any drawing; a narrower one lets the editor cover it.
+    #[test]
+    fn the_editor_keeps_the_price_axis_clear() {
+        for pane in [(1600.0, 900.0), (700.0, 400.0), (420.0, 300.0)] {
+            for target in [
+                None,
+                Some((10.0, 10.0, 60.0, 40.0)),
+                Some((pane.0 - AXIS_W - 40.0, 100.0, pane.0 - AXIS_W - 10.0, 120.0)),
+                Some((0.0, 200.0, pane.0 - AXIS_W, 200.0)),
+            ] {
+                let p = place(pane, target, 300.0);
+                inside(p, pane);
+                assert!(
+                    p.x + p.w <= pane.0 - AXIS_W - MARGIN + 0.01,
+                    "{p:?} in {pane:?}"
+                );
+                assert!(p.w >= MIN_BESIDE_AXIS.min(W) - 0.01, "{p:?}");
+            }
+        }
+        // Too narrow to spare it: the whole pane's width.
+        assert_eq!(width(330.0), 330.0 - 2.0 * MARGIN);
+    }
+
+    /// Every row the keys reach is its own child of the scroll body (so focus can scroll it
+    /// into view), in order; "Save as default" is in the footer, outside it.
+    #[test]
+    fn each_focusable_row_is_a_child_of_the_scroll_body() {
+        use lines_core::drawings::{Style, Tool};
+        for tool in [Tool::Rect, Tool::Note, Tool::Trend, Tool::HLine] {
+            let mut e = StyleEditor::for_drawing(tool, &Style::DEFAULT);
+            e.default_label = Some("Save as default".into());
+            for tab in 0..e.parts.len() {
+                e.select_tab(tab);
+                let rows = e.rows();
+                let mut next = 0;
+                for (r, row) in rows.iter().enumerate() {
+                    let footer = matches!(row.controls.as_slice(), [(Control::SaveDefault, _)]);
+                    match body_child(&rows, r) {
+                        None => assert!(footer, "{tool:?} {tab} row {r}"),
+                        Some(ix) => {
+                            assert!(!footer);
+                            assert_eq!(ix, next, "{tool:?} {tab} row {r}");
+                            next += 1;
+                        }
+                    }
+                }
+                assert_eq!(body_child(&rows, rows.len()), None);
+            }
+        }
+    }
+
     /// The tallest editor: a zone's line tab with the hex entry open and every warning the
     /// guard can give (each meaning, named in the longest way, and low contrast).
     fn tallest() -> (StyleEditor, Vec<Warning>) {
@@ -720,7 +864,7 @@ mod tests {
         let custom = rows[0].controls.len() - 1;
         e.click(0, custom); // the hex entry
         assert!(e.hex.is_some());
-        let long = " in the dark theme with the colorblind palette, the light theme and the light theme with the colorblind palette";
+        let long = " in the dark theme, colorblind palette; the light theme, standard palette; and the light theme, colorblind palette";
         let mut w: Vec<Warning> = [
             "up",
             "down",
@@ -779,6 +923,42 @@ mod tests {
         let narrow = content_height(&e, &warnings, 260.0, &names);
         assert!(narrow > wide, "{narrow} > {wide}");
         assert!(wide > content_height(&e, &[], W, &names) + 7.0 * 19.0);
+    }
+
+    /// Focus moved to a row out of view scrolls the least that shows it; a row taller than
+    /// the body shows from its top; a row in view doesn't scroll.
+    #[test]
+    fn the_focused_row_scrolls_into_view() {
+        // Body 100 px tall, scrolled 50.
+        assert_eq!(keep_visible(100.0, 80.0, 24.0, 50.0), 50.0, "in view");
+        assert_eq!(
+            keep_visible(100.0, 140.0, 24.0, 50.0),
+            64.0,
+            "below: to its bottom"
+        );
+        assert_eq!(
+            keep_visible(100.0, 20.0, 24.0, 50.0),
+            20.0,
+            "above: to its top"
+        );
+        assert_eq!(keep_visible(100.0, 130.0, 24.0, 50.0), 54.0, "partly below");
+        assert_eq!(
+            keep_visible(100.0, 200.0, 180.0, 0.0),
+            200.0,
+            "taller: its top"
+        );
+        assert_eq!(
+            keep_visible(100.0, 0.0, 180.0, 60.0),
+            0.0,
+            "taller, partly above"
+        );
+        for (top, h, scrolled) in [(0.0, 24.0, 300.0), (500.0, 24.0, 0.0), (90.0, 30.0, 0.0)] {
+            let to = keep_visible(100.0, top, h, scrolled);
+            assert!(
+                top >= to && top + h <= to + 100.0,
+                "{top} {h} {scrolled}: {to}"
+            );
+        }
     }
 
     /// The scrollbar shows exactly when the body doesn't fit, its thumb inside the track and

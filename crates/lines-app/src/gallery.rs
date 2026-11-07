@@ -34,6 +34,9 @@ fn args(s: &str) -> Vec<String> {
     s.split_whitespace().map(str::to_owned).collect()
 }
 
+/// The replay's last price at [`lines_feed::synth::END`] (6019.50), in hundredths.
+const LAST_TICKS: i64 = 601_950;
+
 /// Paper orders around the replay's last price (6019.50): working, held bracket exits,
 /// pending (after the last `ack`).
 const ORDERS: &str =
@@ -266,6 +269,13 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         "1",
     ));
     v.push(edge("style-editor-short", "420x300", "dark", "1"));
+    // Keyboard focus on a row below the fold: the body scrolled to show it.
+    v.push(edge(
+        "style-editor-short-focus",
+        "420x300",
+        "dark",
+        "1:0:0:4",
+    ));
     v.push(edge("style-editor-narrow", "300x700", "dark", "1"));
     let mut t = vec![
         "--workspace".into(),
@@ -284,6 +294,10 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     o.push("--paper".into());
     o.push(ORDERS.into());
     v.push(s("styled-line-near-orders", false, end, o));
+    // Axis tags crowding the last price: stepped off it, and past each other.
+    let mut c = args("--layout chart --size 1200x700 --theme dark --timeframe 5m --drawings");
+    c.push(ws("tags-near-last.json"));
+    v.push(s("drawing-tags-near-last", false, end, c));
     v
 }
 
@@ -387,6 +401,18 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         anchor("19:00", 601_925),
     );
     std::fs::write(dir.join("orders-drawings.json"), near).context("orders-drawings.json")?;
+    let crowd = format!(
+        r##"{{ "version": 1, "product": "ES", "drawings": [
+  {{ "id": 1, "tool": "hline", "a": {}, "line_color": "#f719cb", "axis_tag": true }},
+  {{ "id": 2, "tool": "hline", "a": {}, "color": 1, "axis_tag": true }},
+  {{ "id": 3, "tool": "hline", "a": {}, "color": 3, "axis_tag": true }},
+  {{ "id": 4, "tool": "hline", "a": {}, "line_color": "#9c8756", "axis_tag": true }} ] }}"##,
+        anchor("19:00", LAST_TICKS - 25),
+        anchor("19:00", LAST_TICKS),
+        anchor("19:00", LAST_TICKS + 25),
+        anchor("19:00", LAST_TICKS + 50),
+    );
+    std::fs::write(dir.join("tags-near-last.json"), crowd).context("tags-near-last.json")?;
     let chart_over_dom = format!(
         r#"{{ "split": {{ "axis": "column", "ratio": 0.5, "first": {}, "second": {} }} }}"#,
         pane(
