@@ -704,6 +704,9 @@ impl DomView {
         );
         let oy = top + HEADER_ROW_H;
         let body_h = h - HEADER_ROW_H;
+        if let Some((x, cw)) = price {
+            crate::layout_rec::reserved(window, (x, oy, cw, body_h), "dom-price");
+        }
         if let Some((x, cw)) = orders {
             window.paint_quad(fill(rect(x, oy, cw, body_h), t.panel));
         }
@@ -722,6 +725,8 @@ impl DomView {
             } else {
                 "no depth from this source"
             };
+            // The ladder's own empty state, across its (empty) price column.
+            crate::layout_rec::set_owner("dom-price");
             self.glyphs.paint(
                 msg,
                 table_l + PAD,
@@ -732,6 +737,7 @@ impl DomView {
                 window,
                 cx,
             );
+            crate::layout_rec::set_owner("");
             return;
         }
 
@@ -801,8 +807,10 @@ impl DomView {
                 };
                 s.clear();
                 let _ = fmt.write(r.price, &mut s);
+                crate::layout_rec::set_owner("dom-price");
                 self.glyphs
                     .paint_right(s.as_str(), x + cw - PAD, y, ROW_H, pfg, bold, window, cx);
+                crate::layout_rec::set_owner("");
             }
             if flagged
                 && (r.best_bid || r.best_ask)
@@ -916,7 +924,13 @@ impl DomView {
                             .gap_2()
                             .items_center()
                             .children(pane::link_chip(self.common.link, &t))
-                            .child(div().text_color(t.text_main).child(left))
+                            .child(
+                                div()
+                                    .text_color(t.text_main)
+                                    .relative()
+                                    .children(crate::layout_rec::text_marker(&left))
+                                    .child(left),
+                            )
                             .children(pane::stale_badge(&self.store, &t)),
                     )
                     .child(

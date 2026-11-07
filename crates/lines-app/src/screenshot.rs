@@ -61,7 +61,13 @@ pub struct Shot {
     pub bracket_editor: bool,
     /// The focused pane's header controls show (`--hover-header`).
     pub hover_header: bool,
+    /// Record the frame's layout and write the layout lint's findings beside each PNG
+    /// (`<stem>.lint.txt`, empty when clean): `--layout-report`.
+    pub layout_report: bool,
 }
+
+/// `--layout-report` for this process (set once by `run`).
+static LAYOUT_REPORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     // The first window, wherever it was saved: the screenshot fixes its size.
@@ -116,7 +122,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         bracket_units,
         bracket_editor,
         hover_header,
+        layout_report,
     } = shot;
+    LAYOUT_REPORT.store(layout_report, std::sync::atomic::Ordering::Relaxed);
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut trading = Trading::start(
         TradingSetup::manual(),
@@ -305,7 +313,24 @@ async fn shoot(
         // Two more frames: the first warms the glyph atlas and label cache; the second is
         // what we read back. All draw the identical, already-final data.
         window.draw(cx).clear(cx);
+        let report = LAYOUT_REPORT.load(std::sync::atomic::Ordering::Relaxed);
+        if report {
+            crate::layout_rec::start();
+            // Panes are cached views: without a refresh this frame would replay the previous
+            // scene without painting, and record nothing.
+            window.refresh();
+        }
         window.draw(cx).clear(cx);
+        // The lint's findings, written after the PNG (a failed shot leaves no file at all).
+        let lint = report.then(|| {
+            let items = crate::layout_rec::take();
+            let found = lines_core::layout_lint::lint(&items);
+            let mut text = format!("# {} items\n", items.len());
+            for v in &found {
+                text.push_str(&format!("{:?}: {}\n", v.rule, v.what));
+            }
+            (items.len(), found.len(), text)
+        });
         let img = window.render_to_image()?;
         let want = ((w * actual).round() as u32, (h * actual).round() as u32);
         if (img.width(), img.height()) != want {
@@ -324,6 +349,15 @@ async fn shoot(
         }
         img.save(out)
             .map_err(|e| anyhow!("write {}: {e}", out.display()))?;
+        if let Some((items, found, text)) = lint {
+            let path = out.with_extension("lint.txt");
+            // A report that can't be written fails the shot: no PNG left behind either.
+            if let Err(e) = std::fs::write(&path, text) {
+                let _ = std::fs::remove_file(out);
+                bail!("write {}: {e}", path.display());
+            }
+            println!("layout: {items} items, {found} findings -> {}", path.display());
+        }
         Ok((out.to_path_buf(), img.width(), img.height()))
     })?
 }

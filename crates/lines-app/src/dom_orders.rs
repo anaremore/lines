@@ -243,9 +243,10 @@ impl OrdersLayer {
                 if more && k == 1 {
                     let _ = std::fmt::Write::write_str(&mut buf, "+");
                 }
+                // Inset past the outline (dashed when held) so the label never sits on it.
                 glyphs.paint_right(
                     buf.as_str(),
-                    x + w - 3.0,
+                    x + w - 5.0,
                     y,
                     row_h,
                     text_colour,

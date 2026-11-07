@@ -59,6 +59,10 @@ harness = false
 name = "screenshot_exit"
 required-features = ["screenshot"]
 
+[[test]]
+name = "gallery"
+required-features = ["screenshot"]
+
 [build-dependencies]
 # Windows icon + version resources. Pinned to the version GPUI already uses for its manifest.
 embed-resource = "=3.0.12"

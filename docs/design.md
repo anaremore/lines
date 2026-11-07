@@ -54,3 +54,24 @@ Three layers check every UI change, cheapest first:
 3. **Visual review** (`review-loop`): three fresh `ui-reviewer` agents (scalper, prop evaluator, accessibility) score the screenshots against this document and must point at a region for every finding.
 
 The owner's live check stays the final word on feel: hover, drag, latency and anything a still image can't show.
+
+The commands, in order:
+```sh
+# 1. Layout checks: the quick scene set (run it with gate step 6 for UI changes; CI doesn't build the
+#    screenshot feature), then all scenes.
+cargo test -p lines-app --features screenshot --test gallery
+cargo test -p lines-app --features screenshot --test gallery -- --ignored   # the full set
+# The gallery itself: PNGs + <scene>.lint.txt + gallery.txt in DIR (synthetic data only).
+cargo run -p lines-app --features screenshot -- --gallery target/gallery --gallery-full
+# 2. Evidence for one scene, with the lint's findings beside the PNG (<stem>.lint.txt):
+cargo run -p lines-app --features screenshot -- --replay <file> --at <ISO time> --screenshot out.png --layout-report
+```
+The layout lint (`lines_core::layout_lint`) fails on:
+- text, chips or buttons that overlap in one layer;
+- text clipped without "…", or a control cut by its clip;
+- a hit target under 20×20 px;
+- sibling gaps off the spacing scale;
+- anything drawn over the DOM's price column or the chart's last-price tag;
+- a popup that doesn't touch its trigger.
+
+Panes record what they draw only in screenshot builds while a frame is being recorded (`lines-app/src/layout_rec.rs`), so the shipped app pays nothing. A known, documented finding goes in `gallery::KNOWN` with its reason in `docs/known-gaps.md`; it fails again once it no longer occurs.

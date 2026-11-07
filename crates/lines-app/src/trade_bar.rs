@@ -2209,16 +2209,32 @@ fn account_chip<V: TradePane>(
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
+        .relative()
+        .children(
+            crate::layout_rec::on()
+                .then(|| {
+                    crate::layout_rec::bordered(
+                        lines_core::layout_lint::Kind::Chip,
+                        format!("{name} ▾"),
+                        0,
+                        "",
+                        1.0,
+                    )
+                })
+                .flatten(),
+        )
         .child(format!("{name} ▾"))
         .when(open, |d| d.border_color(accent))
         .hover(move |s| s.border_color(accent));
     let c = tip(c, "Choose the account", None, t);
+    // PAPER first: at narrow widths the account chip gives way, never the badge.
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
         .min_w_0()
+        .when(paper, |d| d.child(paper_badge(t)))
         .child(crate::dropdown::dropdown(
             c.on_mouse_down(
                 MouseButton::Left,
@@ -2231,13 +2247,48 @@ fn account_chip<V: TradePane>(
             ),
             menu,
         ))
-        .when(paper, |d| d.child(paper_badge(t)))
         .into_any_element()
 }
 
 /// PAPER: an inverted chip with the word (never colour alone).
 pub fn paper_badge(t: &Theme) -> gpui::Div {
+    badge(t)
+        .relative()
+        .children(crate::layout_rec::text_marker("PAPER"))
+}
+
+/// LIVE: an outlined chip with the word, where a narrow chart header drops a live account's
+/// chip (paper vs live is always visible, docs/design.md; never color alone).
+pub fn live_badge(t: &Theme) -> gpui::Div {
     div()
+        .flex_shrink_0()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(t.text_main)
+        .text_color(t.text_main)
+        .font_weight(FontWeight::BOLD)
+        .child("LIVE")
+        .relative()
+        .children(crate::layout_rec::text_marker("LIVE"))
+}
+
+/// The chart header's account, for the fit model: its chip text ("Name ▾") and whether it's
+/// paper.
+pub fn chart_account<V: TradePane>(v: &V, cx: &gpui::App) -> Option<(String, bool)> {
+    let trading = Trading::try_global(cx)?;
+    let info = v
+        .trade_ref()
+        .account
+        .as_ref()
+        .and_then(|a| trading.account(a))?;
+    Some((format!("{} ▾", info.name), info.paper))
+}
+
+/// The PAPER chip itself (in menus: not recorded as header text).
+fn badge(t: &Theme) -> gpui::Div {
+    div()
+        .flex_shrink_0()
         .px_1()
         .rounded_sm()
         .bg(t.paper_badge)
@@ -2254,9 +2305,24 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
     let trading = Trading::try_global(cx)?;
     let current = v.trade_ref().account.clone();
     let accent = t.accent;
+    // The trigger's label, only while recording (and only with a current account).
+    let trigger = crate::layout_rec::on()
+        .then(|| current.as_ref().and_then(|a| trading.account(a)))
+        .flatten()
+        .map(|a| format!("{} ▾", a.name));
     let mut list = div()
         .id("account-list")
         .occlude()
+        .relative()
+        .children(trigger.and_then(|trigger| {
+            crate::layout_rec::bordered(
+                lines_core::layout_lint::Kind::Popup { trigger },
+                "account list",
+                crate::layout_rec::POPUP,
+                "",
+                1.0,
+            )
+        }))
         // A fixed width: the rules line wraps rather than widening the list over the header's
         // other controls (the DOM's arm state).
         .w(px(320.0))
@@ -2305,7 +2371,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                                     a.name.clone()
                                 }),
                         )
-                        .when(a.paper, |d| d.child(paper_badge(t))),
+                        .when(a.paper, |d| d.child(badge(t))),
                 )
                 .child(
                     div()
@@ -2326,10 +2392,26 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
 }
 
 /// A chart's header: its account and the PAPER badge (chart trading is roadmap 8).
-pub fn chart_chip<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<AnyElement> {
+/// `fits`: whether the header has room for the account chip (`pane::chart_header_fit`).
+/// Without room only the PAPER or LIVE badge shows: paper vs live is never dropped, and the
+/// chip is dropped whole, never drawn cut (the account stays reachable from the palette).
+pub fn chart_chip<V: TradePane>(
+    v: &V,
+    t: &Theme,
+    fits: bool,
+    cx: &mut Context<V>,
+) -> Option<AnyElement> {
     let trading = Trading::try_global(cx)?;
     let pt = v.trade_ref();
     let info = pt.account.as_ref().and_then(|a| trading.account(a))?;
+    if !fits {
+        let b = if info.paper {
+            paper_badge(t)
+        } else {
+            live_badge(t)
+        };
+        return Some(b.into_any_element());
+    }
     let data = empty_data(info.name.clone(), info.paper);
     Some(account_chip(v, Some(&data), t, cx))
 }

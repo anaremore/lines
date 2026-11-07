@@ -15,6 +15,7 @@ pub mod geometry;
 pub mod instrument;
 pub mod ladder;
 pub mod latency;
+pub mod layout_lint;
 pub mod levels;
 pub mod price;
 pub mod profile;

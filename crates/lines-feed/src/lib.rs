@@ -22,6 +22,7 @@ pub mod recorded;
 pub mod recording;
 pub mod registry;
 pub mod store;
+pub mod synth;
 pub mod transport;
 
 use std::path::PathBuf;
