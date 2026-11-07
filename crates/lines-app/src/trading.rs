@@ -621,6 +621,10 @@ struct Venue {
     notes: Sender<(CommandId, Note)>,
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
     barrier: Sender<Sender<()>>,
+    /// Its watcher looks now and rebuilds if anything changed, then answers (`settle`).
+    /// Only `settle` sends, but every build needs it kept: the watcher stops once it's dropped.
+    #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
+    look: Sender<Sender<()>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -763,6 +767,12 @@ impl Observer for TaggedObserver {
     }
 }
 
+/// Whether a venue's watcher rebuilds its core now: after a change (`pending`), at most every
+/// `VENUE_REBUILD` (a change inside it waits, never dropped), or at once when `asked`.
+fn rebuild_due(pending: bool, asked: bool, last: Option<Instant>, now: Instant) -> bool {
+    pending && (asked || last.is_none_or(|t| now.duration_since(t) >= VENUE_REBUILD))
+}
+
 /// What the account chip shows of a venue's status: connected, detail, and how stale (in
 /// 5 s steps, 0 while fresh). The watcher repaints when it changes.
 fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
@@ -796,7 +806,8 @@ fn venue_accounts(index: usize, source: &dyn AccountSource) -> Vec<AccountInfo> 
 }
 
 /// Watch a venue: new accounts join its core, changes rebuild it from the broker, and the
-/// shared account list follows. Runs until `stop`.
+/// shared account list follows. Runs until `stop`. A request on `looks` makes it look at once
+/// and rebuild without waiting for `VENUE_REBUILD`; it's answered once the rebuild is sent.
 /// `unmarked`: the journal, when the app's prices aren't the venue's market (a replay or the
 /// mock): the venue's accounts are added to its unmarked set (no MAE/MFE from those prices).
 #[allow(clippy::too_many_arguments)]
@@ -808,6 +819,7 @@ fn spawn_watcher(
     accounts: Arc<RwLock<Vec<AccountInfo>>>,
     cache: Arc<TradeCache>,
     unmarked: Option<Arc<JournalShared>>,
+    looks: Receiver<Sender<()>>,
     stop: Arc<AtomicBool>,
 ) {
     let spawned = std::thread::Builder::new()
@@ -818,6 +830,7 @@ fn spawn_watcher(
             let mut last_rebuild: Option<Instant> = None;
             let mut pending = false;
             let mut shown = None;
+            let mut asked: Vec<Sender<()>> = Vec::new();
             while !stop.load(Ordering::Acquire) {
                 let st = source.status();
                 let key = status_key(&st);
@@ -865,12 +878,23 @@ fn spawn_watcher(
                     pending = true;
                     cache.bump(None);
                 }
-                if pending && last_rebuild.is_none_or(|t| t.elapsed() >= VENUE_REBUILD) {
+                let now = Instant::now();
+                if rebuild_due(pending, !asked.is_empty(), last_rebuild, now) {
                     handle.rebuild();
-                    last_rebuild = Some(Instant::now());
+                    last_rebuild = Some(now);
                     pending = false;
                 }
-                std::thread::sleep(VENUE_POLL);
+                for tx in asked.drain(..) {
+                    let _ = tx.send(());
+                }
+                match looks.recv_timeout(VENUE_POLL) {
+                    Ok(tx) => {
+                        asked.push(tx);
+                        asked.extend(looks.try_iter());
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
             }
         });
     if let Err(e) = spawned {
@@ -1045,6 +1069,7 @@ impl Trading {
             let source = ext.accounts();
             let status = Arc::new(RwLock::new(None));
             let stop = Arc::new(AtomicBool::new(false));
+            let (look, looks) = mpsc::channel();
             spawn_watcher(
                 venues.len(),
                 source.clone(),
@@ -1053,6 +1078,7 @@ impl Trading {
                 accounts.clone(),
                 cache.clone(),
                 (!venue_marks).then(|| journal.clone()),
+                looks,
                 stop.clone(),
             );
             venues.push(Venue {
@@ -1065,6 +1091,7 @@ impl Trading {
                 bridge: FeedBridge::new(registry.clone(), base.clone()),
                 notes: vnotes,
                 barrier: vbarrier,
+                look,
                 stop,
             });
         }
@@ -1213,10 +1240,21 @@ impl Trading {
         }
     }
 
-    /// Wait until everything sent so far is handled by the core and in the cache. Blocks:
-    /// screenshots and tests only, never the UI's trading path.
+    /// Wait until everything sent so far is handled by the core and in the cache. Each venue's
+    /// watcher first looks at its accounts and rebuilds at once if they changed (not waiting
+    /// for `VENUE_REBUILD`). Blocks: screenshots and tests only, never the UI's trading path.
     #[cfg(any(test, feature = "screenshot"))]
     pub fn settle(&self) {
+        // Each venue's watcher looks at its accounts now: the list and the rebuild it sends
+        // match the venue's state as of this call (synced below).
+        for v in &self.venues {
+            let (tx, rx) = mpsc::channel();
+            if v.look.send(tx).is_ok()
+                && let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(Duration::from_secs(10))
+            {
+                tracing::warn!("{}: its account watcher didn't answer within 10 s", v.label);
+            }
+        }
         self.handle.sync();
         let (tx, rx) = mpsc::channel();
         if self.barrier.send(tx).is_ok() {
@@ -1247,8 +1285,7 @@ impl Trading {
                     .all(|a| listed.iter().any(|l| l.id == a.id))
             });
             if all {
-                // The join's rebuild, then its events in the cache.
-                std::thread::sleep(VENUE_POLL);
+                // The join's rebuild (the watcher looks now), then its events in the cache.
                 self.settle();
                 return;
             }

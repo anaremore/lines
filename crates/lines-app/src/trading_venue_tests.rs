@@ -386,19 +386,22 @@ fn a_reconnect_rebuilds_from_the_new_snapshot() {
     });
     let t = start(&shared);
     let sim = AccountId::new("venue-sim");
-    assert!(until(&t, |t| t.account(&sim).is_some()));
+    // `settle` has the watcher look now, so each step below sees exactly the venue's state
+    // (no waiting on its poll or rebuild timers).
+    t.settle();
+    assert!(t.account(&sim).is_some());
     {
         // Disconnected: no accounts listed.
         let mut v = shared.v.lock().unwrap();
         v.accounts.clear();
         v.rev = 2;
     }
+    t.settle();
     // Still listed, read-only, with its badge: never shown as another kind or tradable.
-    assert!(until(&t, |t| t
-        .account(&sim)
-        .is_some_and(
-            |a| a.read_only.as_deref() == Some(super::NOT_LISTED)
-        )));
+    assert_eq!(
+        t.account(&sim).unwrap().read_only.as_deref(),
+        Some(super::NOT_LISTED)
+    );
     assert_eq!(t.account(&sim).unwrap().badge, "SIM");
     assert!(t.is_read_only(&sim));
     {
@@ -423,15 +426,27 @@ fn a_reconnect_rebuilds_from_the_new_snapshot() {
         };
         v.rev = 3;
     }
-    assert!(until(&t, |t| t
-        .cache
-        .read()
-        .position(&sim, es())
-        .is_some_and(|p| p.qty == 3)));
+    t.settle();
+    assert_eq!(t.cache.read().position(&sim, es()).map(|p| p.qty), Some(3));
     assert_eq!(
         t.account(&sim).unwrap().read_only.as_deref(),
         Some("Sim: order entry not enabled yet")
     );
+}
+
+/// The watcher's rebuild decision: the first change rebuilds at once, a change within
+/// `VENUE_REBUILD` of the last rebuild waits for it (a quick reconnect is never dropped), and
+/// `settle` asking skips the wait; with nothing changed nothing rebuilds.
+#[test]
+fn the_watcher_rebuilds_at_most_every_venue_rebuild_unless_asked() {
+    use super::{VENUE_REBUILD, rebuild_due};
+    let t0 = Instant::now();
+    assert!(rebuild_due(true, false, None, t0));
+    assert!(!rebuild_due(true, false, Some(t0), t0 + VENUE_REBUILD / 2));
+    assert!(rebuild_due(true, false, Some(t0), t0 + VENUE_REBUILD));
+    assert!(rebuild_due(true, true, Some(t0), t0 + VENUE_REBUILD / 2));
+    assert!(!rebuild_due(false, false, None, t0));
+    assert!(!rebuild_due(false, true, Some(t0), t0 + VENUE_REBUILD));
 }
 
 /// With a broker configured, a pane restored on a broker account not listed yet keeps it
