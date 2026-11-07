@@ -29,7 +29,10 @@ use crate::order::{Order, OrderState, Role};
 use crate::position::Position;
 use crate::risk::{self, RiskContext, RiskLimits};
 use crate::rules::{RulePreset, RuleTracker, TradingState};
+use crate::strategy::{Instance, StrategyId};
 use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind, Side};
+
+mod strategy_gate;
 
 /// An account as configured (saved with the trading state).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +160,9 @@ pub struct TradingCore {
     /// Execution ids already applied, and their order (to forget the oldest).
     fill_ids: HashSet<String>,
     fill_order: VecDeque<String>,
+    /// Strategy instances (decision 0025), and which instance placed each order.
+    strategies: BTreeMap<StrategyId, Instance>,
+    strategy_orders: HashMap<OrderId, StrategyId>,
 }
 
 const KEEP_FINISHED: usize = 2000;
@@ -193,6 +199,8 @@ impl TradingCore {
             overfill: OverfillPolicy::default(),
             fill_ids: HashSet::new(),
             fill_order: VecDeque::new(),
+            strategies: BTreeMap::new(),
+            strategy_orders: HashMap::new(),
         }
     }
 
@@ -407,6 +415,9 @@ impl TradingCore {
     pub fn handle(&mut self, now: UtcMillis, env: Envelope) {
         self.next_command = self.next_command.max(env.id.0 + 1);
         let result = self.run(now, &env);
+        if let (Source::Strategy(s), Ok(ids)) = (env.source, &result) {
+            self.strategy_owns(s, ids);
+        }
         self.events.push(Event::Command {
             id: env.id,
             source: env.source,
@@ -415,10 +426,18 @@ impl TradingCore {
         });
         // Requests may complete at once (zero latency): apply what the broker has.
         self.poll(now);
+        self.strategy_watch(now);
     }
 
     fn run(&mut self, now: UtcMillis, env: &Envelope) -> Result<Vec<OrderId>, Reject> {
-        let account = env.command.account().clone();
+        if let Some(r) = self.strategy_control(now, env) {
+            return r;
+        }
+        let account = env
+            .command
+            .account()
+            .expect("every other command names its account")
+            .clone();
         if !self.accounts.contains_key(&account) {
             return Err(Reject::new(
                 RejectCode::UnknownAccount,
@@ -426,6 +445,15 @@ impl TradingCore {
             ));
         }
         self.roll_day(now, &account);
+        // Strategies (decision 0025): their commands pass the strategy gate first; a person's
+        // order action pauses the strategies trading the same account and contract.
+        if let Source::Strategy(s) = env.source {
+            self.strategy_gate(now, s, &env.command)?;
+        } else if crate::broker::Origin::of(env.source) == crate::broker::Origin::Manual
+            && env.command.is_order_action()
+        {
+            self.strategy_manual(now, &account, &env.command);
+        }
         match env.command.clone() {
             Command::PlaceOrder(spec) => {
                 self.check_new(now, &spec)?;
@@ -593,6 +621,11 @@ impl TradingCore {
                 self.guard_report(&account);
                 Ok(Vec::new())
             }
+            Command::AddStrategy(_)
+            | Command::RemoveStrategy { .. }
+            | Command::ArmStrategy { .. }
+            | Command::PauseStrategy { .. }
+            | Command::StopStrategies { .. } => unreachable!("handled by strategy_control"),
             Command::Flatten { contract, .. } => {
                 let mut ids = self.cancel_all(env, now, &account, contract);
                 let positions: Vec<(ContractKey, i64)> = self.accounts[&account]
@@ -946,6 +979,7 @@ impl TradingCore {
     /// Apply whatever the broker has due by `now` (acks after latency, fills, cancels).
     pub fn tick(&mut self, now: UtcMillis) {
         self.poll(now);
+        self.strategy_watch(now);
     }
 
     /// When the broker next needs a tick.
@@ -1013,6 +1047,7 @@ impl TradingCore {
         while self.finished.len() > KEEP_FINISHED {
             if let Some(old) = self.finished.pop_front() {
                 self.orders.remove(&old);
+                self.strategy_forget(old);
             }
         }
     }
@@ -1094,6 +1129,8 @@ impl TradingCore {
                 if pos.is_flat() {
                     acct.positions.remove(&o.contract);
                 }
+                self.strategy_fill(&o, price, qty, fee, at);
+                let acct = self.accounts.get_mut(&o.account)?;
                 // Guardrails: round trips, losing streaks (a fill's P&L net of its fee).
                 if let Some((date, end)) = day {
                     acct.guard.roll_day(date);
@@ -1147,6 +1184,7 @@ impl TradingCore {
             self.position_event(&a, contract);
             self.account_changed(now, &a);
         }
+        self.strategy_watch(now);
     }
 
     fn mark(&self, contract: ContractKey) -> Option<Price> {

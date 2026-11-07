@@ -1,0 +1,18 @@
+[package]
+name = "lines-strategy"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Strategies (decision 0025, pending acceptance): pure state machines, the extension point, the deterministic backtest harness, a trivial example. Headless: no GPUI."
+
+[dependencies]
+lines-core.workspace = true
+lines-feed.workspace = true
+lines-trading.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+lines-feed = { workspace = true, features = ["demo-levels"] }

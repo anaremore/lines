@@ -30,3 +30,4 @@ Format: Status · Context · Decision · Consequences.
 | 0022 | External level sources: a public levels layer, private adapters |
 | 0023 | Trade execution via Sierra Chart's DTC server |
 | 0024 | Contract alignment for live orders, amends 0023 |
+| 0025 | Strategies: pure state machines behind the trading core, backtested on replays (Proposed) |

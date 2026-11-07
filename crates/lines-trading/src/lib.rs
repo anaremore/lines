@@ -14,6 +14,8 @@
 //! - [`persist`]: the versioned paper trading file.
 //! - [`journal`]: the automatic trade journal (roadmap 8c): round trips from fills, exact P&L,
 //!   MAE/MFE, tags and notes, statistics, an append-only file.
+//! - [`strategy`]: strategies as the core sees them (decision 0025, pending acceptance):
+//!   `Source::Strategy`, the strategy gate, per-instance limits and states.
 //! - [`extension`]: the broker extension point (decision 0020): brokers registered from outside
 //!   the public crates, with capabilities and an account source.
 //!
@@ -34,6 +36,7 @@ pub mod position;
 pub mod risk;
 pub mod rules;
 pub mod service;
+pub mod strategy;
 pub mod types;
 
 pub use broker::{
@@ -51,4 +54,7 @@ pub use paper::{FillModel, PaperBroker, PaperConfig};
 pub use risk::RiskLimits;
 pub use rules::{RulePreset, RuleStatus, RuleTracker};
 pub use service::{Clock, FeedBridge, Observer, TradingHandle, TradingService};
+pub use strategy::{
+    HoursWindow, StrategyConfig, StrategyId, StrategyLimits, StrategyState, TradingHours,
+};
 pub use types::{AccountId, CommandId, Money, OrderId, OrderKind, Side};

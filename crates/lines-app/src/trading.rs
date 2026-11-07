@@ -201,6 +201,8 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
+            // Strategies (decision 0025) have no pane yet: the strategy panel comes later.
+            Event::Strategy { .. } => None,
             Event::Guardrail {
                 account,
                 state,
@@ -699,13 +701,16 @@ impl Trading {
         let note = note_for(&cmd);
         let id = self.handle.submit_at(source, issued, cmd);
         // The pump pairs the note with the answer whichever arrives first.
-        let _ = self.notes.send((id, note));
+        if let Some(note) = note {
+            let _ = self.notes.send((id, note));
+        }
         id
     }
 }
 
-/// The note for a command: its account, contract and price.
-fn note_for(cmd: &TradeCommand) -> Note {
+/// The note for a command: its account, contract and price (`None`: strategy controls, which
+/// name an instance and show in the strategy panel, decision 0025).
+fn note_for(cmd: &TradeCommand) -> Option<Note> {
     let (account, contract, price) = match cmd {
         TradeCommand::PlaceOrder(o) => (o.account.clone(), Some(o.contract), first_price(&o.kind)),
         TradeCommand::PlaceBracket(b) => (
@@ -718,12 +723,17 @@ fn note_for(cmd: &TradeCommand) -> Note {
         TradeCommand::CancelAll { account, contract }
         | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
         TradeCommand::SetGuardrails { account, .. } => (account.clone(), None, None),
+        TradeCommand::AddStrategy(_)
+        | TradeCommand::RemoveStrategy { .. }
+        | TradeCommand::ArmStrategy { .. }
+        | TradeCommand::PauseStrategy { .. }
+        | TradeCommand::StopStrategies { .. } => return None,
     };
-    Note {
+    Some(Note {
         account,
         contract,
         price,
-    }
+    })
 }
 
 fn first_price(k: &OrderKind) -> Option<Price> {
