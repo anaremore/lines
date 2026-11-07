@@ -237,6 +237,9 @@ struct Run {
     states: Vec<StateChange>,
     /// Command id → index of its decision.
     pending: BTreeMap<u64, usize>,
+    /// The harness's own commands (add, arm) and what came of them.
+    harness: BTreeMap<u64, &'static str>,
+    refused: Vec<String>,
     last_position: Option<(i64, Option<f64>, Money)>,
 }
 
@@ -288,6 +291,9 @@ impl Run {
                     Event::Command { id, result, .. } => {
                         if let Some(i) = self.pending.remove(&id.0) {
                             self.decisions[i].result = Some(result.clone());
+                        }
+                        if let (Some(what), Err(r)) = (self.harness.remove(&id.0), result) {
+                            self.refused.push(format!("{what} refused: {}", r.message));
                         }
                     }
                     Event::Strategy {
@@ -419,6 +425,9 @@ pub fn run(bt: &Backtest) -> Result<Report> {
     if bt.timer_ms <= 0 {
         bail!("the timer period must be above 0 ms");
     }
+    bt.limits
+        .validate()
+        .map_err(|e| anyhow!("strategy limits: {e}"))?;
     let strategy = bt
         .strategy
         .create(&bt.params)
@@ -492,6 +501,8 @@ pub fn run(bt: &Backtest) -> Result<Report> {
         decisions: Vec::new(),
         states: Vec::new(),
         pending: BTreeMap::new(),
+        harness: BTreeMap::new(),
+        refused: Vec::new(),
         last_position: None,
     };
     let ctx = LevelContext {
@@ -564,12 +575,13 @@ pub fn run(bt: &Backtest) -> Result<Report> {
             }
             if !added {
                 added = true;
-                run.core.submit(
+                let id = run.core.submit(
                     now,
                     Source::Test,
                     Instant::now(),
                     Command::AddStrategy(cfg.clone()),
                 );
+                run.harness.insert(id.0, "adding the strategy");
             }
             run.core.strategy_heartbeat(now);
             run.core.tick(now);
@@ -633,18 +645,24 @@ pub fn run(bt: &Backtest) -> Result<Report> {
                 (None, StrategyState::Disarmed) if !arm_tried => {
                     // Armed once, by "the trader", when everything it needs is there.
                     arm_tried = true;
-                    run.core.submit(
+                    let id = run.core.submit(
                         now,
                         Source::Test,
                         Instant::now(),
                         Command::ArmStrategy { id: INSTANCE },
                     );
+                    run.harness.insert(id.0, "arming");
                     run.flush(now, &mut MAX_DECISIONS_PER_INPUT.clone());
                 }
                 _ => {}
             }
         }
     }
+    // A run whose instance never existed is no result at all.
+    if let Some(r) = run.refused.iter().find(|r| r.starts_with("adding")) {
+        bail!("{r}");
+    }
+    warnings.extend(run.refused.iter().cloned());
     if md.decode_errors() > 0 {
         warnings.push(format!(
             "{} market frames didn't decode",

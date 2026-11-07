@@ -164,11 +164,9 @@ impl TradingCore {
         if !self.strategies.contains_key(&id) {
             return Err(deny(format!("no {id}")));
         }
-        if let Some(why) = self.strategy_blocker(now, id, false) {
-            return Err(deny(format!("can't arm: {why}")));
-        }
         // Its own books must agree with the account (a person may have closed or changed the
         // position while it was paused): flat adopts flat; anything else must be flattened.
+        // First, so a position a person closed doesn't count toward its daily loss.
         let (account, contract, own) = {
             let i = &self.strategies[&id];
             (i.cfg.account.clone(), i.cfg.contract, i.position.qty())
@@ -181,6 +179,9 @@ impl TradingCore {
                 )));
             }
             self.strategies.get_mut(&id).expect("checked").position = Default::default();
+        }
+        if let Some(why) = self.strategy_blocker(now, id, false) {
+            return Err(deny(format!("can't arm: {why}")));
         }
         let i = self.strategies.get_mut(&id).expect("checked");
         if i.state != StrategyState::Armed {
@@ -244,6 +245,19 @@ impl TradingCore {
         state: StrategyState,
         reason: String,
     ) {
+        self.pause_keeping(now, id, state, reason, None);
+    }
+
+    /// [`Self::pause_strategy`], leaving `keep` alone (the order a person is modifying or
+    /// cancelling themselves).
+    fn pause_keeping(
+        &mut self,
+        now: UtcMillis,
+        id: StrategyId,
+        state: StrategyState,
+        reason: String,
+        keep: Option<OrderId>,
+    ) {
         let Some(i) = self.strategies.get_mut(&id) else {
             return;
         };
@@ -257,7 +271,7 @@ impl TradingCore {
         let entries: Vec<OrderId> = mine
             .into_iter()
             .filter_map(|o| self.orders.get(&o))
-            .filter(|o| o.is_open() && !self.cancelling.contains(&o.id))
+            .filter(|o| o.is_open() && !self.cancelling.contains(&o.id) && Some(o.id) != keep)
             .filter(|o| match o.role {
                 Role::Entry => true,
                 // A single order that only closes part of the position is an exit.
@@ -353,6 +367,10 @@ impl TradingCore {
     /// A person's order action on an account (and contract): pause the armed instances that
     /// trade it (decision 0023: automation pauses until re-enabled).
     pub(super) fn strategy_manual(&mut self, now: UtcMillis, account: &AccountId, cmd: &Command) {
+        let keep = match cmd {
+            Command::ModifyOrder { order, .. } | Command::CancelOrder { order, .. } => Some(*order),
+            _ => None,
+        };
         let contract = match cmd {
             Command::PlaceOrder(s) => Some(s.contract),
             Command::PlaceBracket(b) => Some(b.entry.contract),
@@ -374,11 +392,12 @@ impl TradingCore {
                 || "this contract".into(),
                 |s| k.label(&s.product).as_str().to_owned(),
             );
-            self.pause_strategy(
+            self.pause_keeping(
                 now,
                 id,
                 StrategyState::Paused,
                 format!("manual order activity on {label}"),
+                keep,
             );
         }
     }
@@ -523,7 +542,19 @@ impl TradingCore {
     }
 
     /// Orders a strategy command created belong to the instance.
-    pub(super) fn strategy_owns(&mut self, id: StrategyId, ids: &[OrderId]) {
+    pub(super) fn strategy_owns(&mut self, id: StrategyId, cmd: &Command, ids: &[OrderId]) {
+        // Only what it created: new orders (bracket exits with their entry) and its Flatten's
+        // own orders, never the orders a Cancel All or Flatten cancelled.
+        let ids: Vec<OrderId> = match cmd {
+            Command::PlaceOrder(_) | Command::PlaceBracket(_) => ids.to_vec(),
+            Command::Flatten { .. } => ids
+                .iter()
+                .copied()
+                .filter(|o| self.orders.get(o).is_some_and(|o| o.role == Role::Flatten))
+                .collect(),
+            _ => return,
+        };
+        let ids = &ids[..];
         // Bracket exits are created with their entry; they belong to it too.
         let children: Vec<OrderId> = self
             .orders
