@@ -73,6 +73,8 @@ Run on the exact HEAD you push. Report the SHA and each result.
 - Keep moving: never end a turn waiting for a decision that isn't owner-only (tier C). Take your
   recommended option, say so in the report or PR ("Decided: X, because Y; alternative Z"), and
   continue; the planning thread can still redirect. With queued work, start the next item.
+  Never end a turn while your own background work runs (gate, build, reviewer): call
+  `t3_background_wait` on it, or keep working; nothing else will wake you when it finishes.
 
 ## Risk tiers (state the tier in the PR)
 - A: docs; tests; pane UI with screenshot evidence; chart layers, studies, indicators; picker;
