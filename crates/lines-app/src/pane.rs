@@ -169,15 +169,25 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
         control(I::PopOut, "Pop out", C::PopOut),
         control(I::Menu, "Pane menu", C::Menu),
     ];
+    // Hide away from the menu: a near miss on ⋯ never hides the pane.
     const OTHER: [Control; 3] = [
-        control(I::PopOut, "Pop out", C::PopOut),
         control(I::Hide, "Hide", C::HidePane),
+        control(I::PopOut, "Pop out", C::PopOut),
         control(I::Menu, "Pane menu", C::Menu),
     ];
     match (kind, detached) {
         (_, true) => &DETACHED,
         (PaneKind::Chart, false) => &CHART,
         (PaneKind::Dom | PaneKind::Tape | PaneKind::Journal, false) => &OTHER,
+    }
+}
+
+/// A pane header's height (logical px): its padding, one line of its text and its bottom
+/// border (charts use the larger `text_sm`). The hover controls are centered on it.
+pub fn header_height(kind: PaneKind) -> f32 {
+    match kind {
+        PaneKind::Chart => 33.0,
+        PaneKind::Dom | PaneKind::Tape | PaneKind::Journal => 27.0,
     }
 }
 
