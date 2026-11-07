@@ -56,6 +56,9 @@ pub struct TradeDoc {
     pub qty: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bracket: Option<BracketPreset>,
+    /// Order hotkeys on for this pane ("Keys on"; sticky, written only when on).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hotkeys: bool,
 }
 
 /// One pane's trading state.
@@ -64,6 +67,9 @@ pub struct PaneTrade {
     pub qty: i64,
     pub bracket: Option<BracketPreset>,
     pub arming: Arming,
+    /// Order hotkeys ("Keys on / off", `TradeCmd::ToggleHotkeys`): order keys need it on top
+    /// of the trading switch. Off in new panes; only the trader turns it on or off.
+    pub hotkeys: bool,
     /// Typing a custom quantity (digits so far).
     pub qty_edit: Option<String>,
     pub account_menu: bool,
@@ -85,10 +91,11 @@ pub struct PaneTrade {
 
 impl TradeDoc {
     /// The choices for a new pane made from this one (a split): everything but the trading
-    /// switch, which starts disabled in every new pane.
+    /// switch and the order hotkeys, which start off in every new pane.
     pub fn copied(self) -> TradeDoc {
         TradeDoc {
             enabled: false,
+            hotkeys: false,
             ..self
         }
     }
@@ -119,6 +126,7 @@ impl PaneTrade {
             bracket: saved.and_then(|s| s.bracket),
             // Sticky: restored as saved (new panes: disabled).
             arming: Arming::new(saved.is_some_and(|s| s.enabled)),
+            hotkeys: saved.is_some_and(|s| s.hotkeys),
             qty_edit: None,
             account_menu: trading.is_some_and(|t| t.start_account_menu),
             local_flash: None,
@@ -138,6 +146,7 @@ impl PaneTrade {
             account: self.account.as_ref().map(|a| a.0.clone()),
             qty: (self.qty != 1).then_some(self.qty),
             bracket: self.bracket,
+            hotkeys: self.hotkeys,
         };
         (d != TradeDoc::default()).then_some(d)
     }
@@ -318,6 +327,7 @@ pub fn chart_runs(cmd: TradeCmd) -> bool {
         && !matches!(
             cmd,
             TradeCmd::ToggleArm
+                | TradeCmd::ToggleHotkeys
                 | TradeCmd::Enable
                 | TradeCmd::Disable
                 | TradeCmd::Breakeven
@@ -325,9 +335,15 @@ pub fn chart_runs(cmd: TradeCmd) -> bool {
         )
 }
 
-/// Run a trading command from a hotkey or the palette. `issued`: the input time.
+/// Run a trading command from the palette or a menu. `issued`: the input time.
 pub fn run<V: TradePane>(v: &mut V, cmd: TradeCmd, issued: Instant, cx: &mut Context<V>) {
-    run_from(v, cmd, issued, Source::Hotkey, cx);
+    run_with(v, cmd, issued, Source::Palette, false, cx);
+}
+
+/// Run a trading command from its key, in the key-down handler (never a later frame). Order
+/// keys also need the pane's order hotkeys on (`TradeCmd::needs_hotkeys`).
+pub fn run_key<V: TradePane>(v: &mut V, cmd: TradeCmd, issued: Instant, cx: &mut Context<V>) {
+    run_with(v, cmd, issued, Source::Hotkey, true, cx);
 }
 
 /// Run a trading command; `source`: where it came from (header buttons: `Source::Dom`).
@@ -338,11 +354,27 @@ pub fn run_from<V: TradePane>(
     source: Source,
     cx: &mut Context<V>,
 ) {
+    run_with(v, cmd, issued, source, false, cx);
+}
+
+fn run_with<V: TradePane>(
+    v: &mut V,
+    cmd: TradeCmd,
+    issued: Instant,
+    source: Source,
+    key: bool,
+    cx: &mut Context<V>,
+) {
     if let Some(q) = cmd.quick() {
-        // Header order buttons and their keys: gated by arming exactly like ladder clicks.
-        let built = entry_ctx(v, cx)
-            .map_err(dom_trade::Refusal)
-            .and_then(|ctx| dom_trade::quick(q, v.trade_ref().arming, &ctx));
+        // Header order buttons and their keys: gated by arming exactly like ladder clicks;
+        // keys by the order hotkeys too.
+        let arming = v.trade_ref().arming;
+        let ctx = || entry_ctx(v, cx).map_err(dom_trade::Refusal);
+        let built = if key && cmd.needs_hotkeys() {
+            dom_trade::key_order(q, v.trade_ref().hotkeys, arming, ctx)
+        } else {
+            ctx().and_then(|ctx| dom_trade::quick(q, arming, &ctx))
+        };
         match built {
             Ok(c) => {
                 if let Some(t) = Trading::try_global(cx) {
@@ -374,6 +406,15 @@ pub fn run_from<V: TradePane>(
         TradeCmd::ToggleArm => {
             // Always flips: a reason orders would be denied shows on the switch instead.
             v.trade().arm_event(ArmEvent::Toggle, cx);
+        }
+        TradeCmd::ToggleHotkeys => {
+            let t = v.trade();
+            t.hotkeys = !t.hotkeys;
+        }
+        TradeCmd::QtyCycle => {
+            let q = v.trade_ref().qty;
+            v.trade().qty = dom_trade::cycle_qty(q);
+            v.trade().qty_edit = None;
         }
         TradeCmd::Enable | TradeCmd::Disable => {
             let want = cmd == TradeCmd::Enable;
@@ -490,6 +531,8 @@ pub fn run_from<V: TradePane>(
         | TradeCmd::SellMarket
         | TradeCmd::JoinBid
         | TradeCmd::JoinAsk
+        | TradeCmd::BuyAsk
+        | TradeCmd::SellBid
         | TradeCmd::Reverse => {} // handled above
     }
     cx.notify();
@@ -939,6 +982,60 @@ pub fn switch_text(enabled: bool, blocker: Option<&str>, narrow: bool) -> String
         (_, _, true) => state.to_owned(),
         _ => format!("Trading: {state}"),
     }
+}
+
+/// The order hotkeys chip's text: the state in words (narrow: "Keys" and the knob).
+pub fn keys_text(on: bool, narrow: bool) -> &'static str {
+    match (on, narrow) {
+        (_, true) => "Keys",
+        (true, false) => "Keys on",
+        (false, false) => "Keys off",
+    }
+}
+
+/// The order hotkeys switch: a pill like the trading switch, its knob filled when on (shape
+/// and words, never color alone), outlined in the warning color while keys can trade.
+fn keys_chip<V: TradePane>(
+    on: bool,
+    narrow: bool,
+    t: &Theme,
+    cx: &mut Context<V>,
+) -> gpui::Stateful<gpui::Div> {
+    let knob = div().size(px(8.0)).rounded_full().border_1();
+    let s = div()
+        .id("keys-switch")
+        .flex()
+        .flex_row()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .h(px(MIN_HIT + 2.0))
+        .px_2()
+        .rounded_full()
+        .border_1()
+        .cursor_pointer()
+        .whitespace_nowrap();
+    let s = if on {
+        s.border_color(t.warn)
+            .text_color(t.text_main)
+            .font_weight(FontWeight::BOLD)
+            .child(knob.bg(t.warn).border_color(t.warn))
+    } else {
+        s.border_color(t.axis_line)
+            .text_color(t.text_dim)
+            .child(knob.border_color(t.text_dim))
+    };
+    let s = s.child(keys_text(on, narrow));
+    let name = if on {
+        "Order hotkeys on: turn off"
+    } else {
+        "Order hotkeys off: turn on"
+    };
+    run_on_click(
+        tip(s, name, Some(TradeCmd::ToggleHotkeys), t),
+        TradeCmd::ToggleHotkeys,
+        cx,
+    )
 }
 
 /// A narrow panel's status line for an enabled switch whose orders would be denied.
@@ -1425,6 +1522,7 @@ pub fn dom_bar<V: TradePane>(
             .h(px(HDR_H))
             .child(account_chip(v, data.as_ref(), t, cx))
             .child(div().flex_1())
+            .child(keys_chip(pt.hotkeys, narrow, t, cx))
             .child(switch),
     );
 
@@ -3213,9 +3311,10 @@ mod tests {
             account: Some("paper".into()),
             qty: Some(3),
             bracket: None,
+            hotkeys: true,
         };
         let c = doc.clone().copied();
-        assert!(!c.enabled);
+        assert!(!c.enabled && !c.hotkeys, "a split starts with trading and keys off");
         assert_eq!((c.account, c.qty), (doc.account, doc.qty));
     }
 
@@ -3393,6 +3492,7 @@ mod tests {
                 stop_ticks: 8,
                 target_ticks: 16,
             }),
+            hotkeys: true,
         };
         let json = serde_json::to_string(&d).unwrap();
         assert!(json.starts_with(r#"{"enabled":true"#), "{json}");

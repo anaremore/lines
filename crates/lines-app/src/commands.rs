@@ -210,10 +210,18 @@ pub enum TradeCmd {
     JoinBid,
     JoinAsk,
     Reverse,
+    /// A buy limit at the best ask, and a sell limit at the best bid (order keys only).
+    BuyAsk,
+    SellBid,
+    /// The next quantity preset, back to the first after the last.
+    QtyCycle,
+    /// The DOM's order hotkeys ("Keys on / off"): off by default, sticky, saved per pane.
+    /// Order keys need it as well as the trading switch; buttons and the palette don't.
+    ToggleHotkeys,
 }
 
 impl TradeCmd {
-    pub const ALL: [TradeCmd; 13] = [
+    pub const ALL: [TradeCmd; 17] = [
         TradeCmd::Flatten,
         TradeCmd::CancelAll,
         TradeCmd::ToggleArm,
@@ -227,6 +235,10 @@ impl TradeCmd {
         TradeCmd::JoinAsk,
         TradeCmd::Reverse,
         TradeCmd::Breakeven,
+        TradeCmd::BuyAsk,
+        TradeCmd::SellBid,
+        TradeCmd::QtyCycle,
+        TradeCmd::ToggleHotkeys,
     ];
 
     /// Trading commands with no key of their own (palette and the DOM's panel).
@@ -246,8 +258,17 @@ impl TradeCmd {
             TradeCmd::JoinBid => Q::JoinBid,
             TradeCmd::JoinAsk => Q::JoinAsk,
             TradeCmd::Reverse => Q::Reverse,
+            TradeCmd::BuyAsk => Q::BuyAsk,
+            TradeCmd::SellBid => Q::SellBid,
             _ => return None,
         })
+    }
+
+    /// Whether this command, sent from a key, needs the DOM's order hotkeys on: every key that
+    /// places an order. Flatten and Cancel all never do (exits are never blocked), nor do
+    /// arming, quantity, bracket, account and BE keys (they place nothing new).
+    pub fn needs_hotkeys(self) -> bool {
+        self.quick().is_some()
     }
 }
 
@@ -392,6 +413,17 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Trade(TradeCmd::JoinBid), true, false, true, "j"),
     b(Command::Trade(TradeCmd::JoinAsk), true, false, true, "k"),
     b(Command::Trade(TradeCmd::Reverse), true, false, true, "r"),
+    // A above Z as the ask is above the bid.
+    b(Command::Trade(TradeCmd::BuyAsk), true, false, true, "a"),
+    b(Command::Trade(TradeCmd::SellBid), true, false, true, "z"),
+    b(Command::Trade(TradeCmd::QtyCycle), true, false, true, "q"),
+    b(
+        Command::Trade(TradeCmd::ToggleHotkeys),
+        true,
+        true,
+        false,
+        "y",
+    ),
     b(Command::Trade(TradeCmd::Breakeven), true, false, true, "e"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
@@ -619,6 +651,10 @@ pub fn label(c: Command) -> String {
             TradeCmd::JoinBid => "Trade: Join bid (buy limit at the best bid)",
             TradeCmd::JoinAsk => "Trade: Join ask (sell limit at the best ask)",
             TradeCmd::Reverse => "Trade: Reverse position (market, twice the size)",
+            TradeCmd::BuyAsk => "Trade: Buy at the ask (limit at the best ask)",
+            TradeCmd::SellBid => "Trade: Sell at the bid (limit at the best bid)",
+            TradeCmd::QtyCycle => "Trade: Quantity: next preset (1, 2, 5, 10)",
+            TradeCmd::ToggleHotkeys => "Trade: toggle order hotkeys (Keys on/off)",
         }
         .into(),
     }
@@ -771,6 +807,10 @@ mod tests {
             TradeCmd::JoinBid,
             TradeCmd::JoinAsk,
             TradeCmd::Reverse,
+            TradeCmd::BuyAsk,
+            TradeCmd::SellBid,
+            TradeCmd::QtyCycle,
+            TradeCmd::ToggleHotkeys,
             TradeCmd::ToggleArm,
             TradeCmd::Flatten,
             TradeCmd::CancelAll,

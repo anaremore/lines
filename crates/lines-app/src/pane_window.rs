@@ -46,6 +46,8 @@ fn command(cmd: Command) -> Option<Command> {
         Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
         // A chart's drawing style editor (the rest of the drawing keys: main windows).
         Command::Draw(crate::commands::DrawCmd::Style) => Some(cmd),
+        // Trading keys act on this window's pane, as in main windows.
+        Command::Trade(_) => Some(cmd),
         _ => None,
     }
 }
@@ -98,6 +100,19 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
+            // Only keys reach here with a trading command (the window's menu has none).
+            Some(Command::Trade(tc)) => {
+                let issued = std::time::Instant::now();
+                match &self.handle {
+                    PaneHandle::Dom(d) => {
+                        d.update(cx, |v, cx| crate::trade_bar::run_key(v, tc, issued, cx));
+                    }
+                    PaneHandle::Chart(c) if crate::trade_bar::chart_runs(tc) => {
+                        c.update(cx, |v, cx| crate::trade_bar::run_key(v, tc, issued, cx));
+                    }
+                    _ => {}
+                }
+            }
             Some(Command::Draw(d)) => {
                 if let PaneHandle::Chart(chart) = &self.handle {
                     chart.update(cx, |c, cx| c.drawing_command(d, cx));

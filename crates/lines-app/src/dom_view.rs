@@ -248,13 +248,17 @@ impl DomView {
     }
 
     /// Restore the pane's trading choices (account, quantity, bracket, the trading switch:
-    /// sticky, as saved). The screenshot fixture's `--enable-trading` enables it too.
+    /// sticky, as saved). The screenshot fixtures `--enable-trading` and `--enable-hotkeys`
+    /// turn the switch and the order hotkeys on too.
     pub fn restore_trade(&mut self, doc: Option<&TradeDoc>, cx: &mut Context<Self>) {
         self.trade = PaneTrade::new(doc, cx);
         if let Some(t) = Trading::try_global(cx) {
             let (on, editor) = (t.start_armed, t.start_editor);
             if on && !self.trade.arming.is_armed() {
                 self.trade.arm_event(crate::dom_trade::ArmEvent::Toggle, cx);
+            }
+            if t.start_hotkeys {
+                self.trade.hotkeys = true;
             }
             if editor {
                 trade_bar::run(

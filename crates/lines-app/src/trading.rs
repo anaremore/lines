@@ -585,6 +585,9 @@ pub struct Trading {
     /// Screenshot fixture (`--enable-trading`): DOMs start with trading enabled. Never set in
     /// the app (there, the switch is saved per pane).
     pub start_armed: bool,
+    /// Screenshot fixture (`--enable-hotkeys`): DOMs start with order hotkeys on. Never set
+    /// in the app (there, the hotkeys switch is saved per pane).
+    pub start_hotkeys: bool,
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
@@ -1073,6 +1076,7 @@ impl Trading {
             barrier,
             report,
             start_armed: false,
+            start_hotkeys: false,
             start_account_menu: false,
             start_editor: false,
             check_sessions,

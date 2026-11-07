@@ -427,6 +427,10 @@ struct Cli {
     /// is saved per pane). `--arm` is the old name.
     #[arg(long = "enable-trading", alias = "arm", requires = "screenshot")]
     arm: bool,
+    /// Screenshot: DOMs start with order hotkeys on ("Keys on"; in the app it is saved per
+    /// pane).
+    #[arg(long = "enable-hotkeys", requires = "screenshot")]
+    hotkeys: bool,
     /// Screenshot: DOMs show bracket distances in ticks or points.
     #[arg(long, value_enum, requires = "screenshot")]
     bracket_units: Option<BracketUnitsArg>,
@@ -1125,6 +1129,7 @@ where
                 doc,
                 paper: cli.paper.clone(),
                 arm: cli.arm,
+                hotkeys: cli.hotkeys,
                 demo_broker: cli.demo_broker,
                 account_menu: cli.account_menu,
                 pnl: cli.pnl.map(PnlArg::mode),
