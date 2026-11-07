@@ -35,6 +35,76 @@ fn labels(items: &[Item]) -> Vec<String> {
         .collect()
 }
 
+/// Roadmap 10e: cumulative delta (one per chart, its own sub-pane) and the footprint are
+/// studies like the others: listed, edited, hidden and removed through `StudyAction`s, and
+/// saved in the set (templates, defaults).
+#[test]
+fn cumulative_delta_and_footprint_are_studies() {
+    use crate::footprint::FootprintMode;
+    use lines_indicators::{DeltaReset, IndicatorConfig};
+    let src = sources();
+    let mut set = StudySet::default();
+    set.apply(&StudyAction::AddVwap(Reset::Eth));
+    set.apply(&StudyAction::AddDelta(DeltaReset::Eth));
+    set.apply(&StudyAction::AddDelta(DeltaReset::Rth)); // replaces: one sub-pane
+    set.apply(&StudyAction::AddFootprint(FootprintMode::BidAsk));
+    assert_eq!(set.indicators.iter().filter(|c| c.in_subpane()).count(), 1);
+    let items = StudyMenu::default().items(&input(&set, &src, &[]));
+    let l = labels(&items);
+    assert!(l.contains(&"Cumulative delta · RTH".to_owned()), "{l:?}");
+    assert!(l.contains(&"Footprint · sell × buy".to_owned()), "{l:?}");
+    assert!(
+        !l.iter()
+            .any(|x| x.starts_with("+ Cumulative delta") || x.starts_with("+ Footprint")),
+        "already on the chart: not offered again"
+    );
+    // The editors.
+    set.apply(&StudyAction::SetDeltaReset(1, DeltaReset::None));
+    set.apply(&StudyAction::SetFootprintMode(FootprintMode::Delta));
+    set.apply(&StudyAction::SetImbalanceRatio(400));
+    set.apply(&StudyAction::SetImbalanceMin(10));
+    set.apply(&StudyAction::SetFootprintGrouping(Some(2)));
+    let IndicatorConfig::CumDelta { spec, .. } = set.indicators[1] else {
+        panic!("delta")
+    };
+    assert_eq!(spec.reset, DeltaReset::None);
+    assert_eq!(
+        (
+            set.footprint.mode,
+            set.footprint.imbalance_pct,
+            set.footprint.imbalance_min,
+            set.footprint.grouping
+        ),
+        (FootprintMode::Delta, 400, 10, Some(2))
+    );
+    let m = StudyMenu {
+        editing: Some(StudyRef::Footprint),
+        ..Default::default()
+    };
+    let groups: Vec<&str> = m
+        .items(&input(&set, &src, &[]))
+        .iter()
+        .filter_map(|i| match i {
+            Item::Control { group, .. } => Some(*group),
+            _ => None,
+        })
+        .collect();
+    for g in ["Show", "Imbalance", "Min volume", "Grouping"] {
+        assert!(groups.contains(&g), "{g}: {groups:?}");
+    }
+    // Hide keeps the settings; remove turns off; the set round-trips through JSON.
+    set.apply(&StudyAction::ToggleHidden(StudyRef::Footprint));
+    set.apply(&StudyAction::ToggleHidden(StudyRef::Delta(1)));
+    assert!(set.footprint.hidden && set.indicators[1].display().hidden);
+    assert_eq!(set.footprint.imbalance_pct, 400);
+    let back: StudySet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+    assert_eq!(back, set);
+    set.apply(&StudyAction::Remove(StudyRef::Footprint));
+    set.apply(&StudyAction::Remove(StudyRef::Delta(1)));
+    assert_eq!(set.footprint.mode, FootprintMode::Off);
+    assert_eq!(set.indicators.len(), 1);
+}
+
 #[test]
 fn menu_lists_studies_catalog_and_templates() {
     let src = sources();
@@ -57,6 +127,12 @@ fn menu_lists_studies_catalog_and_templates() {
             "+ VWAP · weekly",
             "+ VWAP · monthly",
             "+ Anchored VWAP (click a bar)",
+            "+ Cumulative delta · ETH session",
+            "+ Cumulative delta · RTH session",
+            "+ Cumulative delta · no reset",
+            "+ Footprint · sell × buy",
+            "+ Footprint · delta",
+            "+ Footprint · volume",
             "# Templates",
             "+ Apply template \"scalp\"",
             "+ Save these studies as a template…",
@@ -173,8 +249,9 @@ fn actions_change_the_set_and_hidden_studies_keep_their_settings() {
     let colours: Vec<u8> = set
         .indicators
         .iter()
-        .map(|c| match c {
-            IndicatorConfig::Vwap { color, .. } => *color,
+        .filter_map(|c| match c {
+            IndicatorConfig::Vwap { color, .. } => Some(*color),
+            _ => None,
         })
         .collect();
     assert_eq!(colours, [0, 1]);
@@ -192,7 +269,10 @@ fn actions_change_the_set_and_hidden_studies_keep_their_settings() {
         spec,
         color,
         display,
-    } = set.indicators[0];
+    } = set.indicators[0]
+    else {
+        panic!("a VWAP")
+    };
     assert_eq!((spec.bands.0, color), (0b101, 2));
     assert_eq!(
         (display.width, display.label, display.hidden),
@@ -204,7 +284,10 @@ fn actions_change_the_set_and_hidden_studies_keep_their_settings() {
         spec: s2,
         display: d2,
         ..
-    } = set.indicators[0];
+    } = set.indicators[0]
+    else {
+        panic!("a VWAP")
+    };
     assert_eq!((s2, d2.hidden, d2.width), (spec, false, 3));
     // Profile: add, edit, hide, remove.
     set.apply(&StudyAction::AddProfile(ProfileMode::Composite));
@@ -270,8 +353,9 @@ fn anchored_vwap_takes_the_clicked_bar() {
     let resets: Vec<Reset> = set
         .indicators
         .iter()
-        .map(|c| match c {
-            IndicatorConfig::Vwap { spec, .. } => spec.reset,
+        .filter_map(|c| match c {
+            IndicatorConfig::Vwap { spec, .. } => Some(spec.reset),
+            _ => None,
         })
         .collect();
     assert_eq!(

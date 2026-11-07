@@ -18,6 +18,7 @@ use std::fmt;
 use lines_core::UtcMillis;
 use serde::{Deserialize, Serialize};
 
+use crate::delta::{CumDelta, DeltaPoint, DeltaSpec};
 use crate::series::{Input, MarketSeries};
 use crate::vwap::{Point, Vwap, VwapSpec};
 
@@ -32,6 +33,8 @@ pub enum Spec {
     Market { period_ms: i64 },
     /// VWAP over the base series at a bar period.
     Vwap { period_ms: i64, vwap: VwapSpec },
+    /// Cumulative aggressor delta over the base series at a bar period.
+    CumDelta { period_ms: i64, delta: DeltaSpec },
     /// A user or plugin indicator, by name; the engine's factory resolves it (its inputs may
     /// name other indicators, which is how cycles could arise).
     Named(String),
@@ -42,6 +45,7 @@ impl Spec {
         match self {
             Spec::Market { .. } => SeriesType::Market,
             Spec::Vwap { .. } | Spec::Named(_) => SeriesType::Line,
+            Spec::CumDelta { .. } => SeriesType::Candles,
         }
     }
 }
@@ -59,6 +63,8 @@ pub enum SeriesType {
     Market,
     /// One value (with σ and flags) per bucket ([`Point`]).
     Line,
+    /// One candle per bucket ([`DeltaPoint`]).
+    Candles,
 }
 
 /// Read access to a node's output.
@@ -66,6 +72,7 @@ pub enum SeriesType {
 pub enum Output<'a> {
     Market(&'a MarketSeries),
     Line(&'a [Point]),
+    Candles(&'a [DeltaPoint]),
 }
 
 impl Output<'_> {
@@ -73,6 +80,7 @@ impl Output<'_> {
         match self {
             Output::Market(_) => SeriesType::Market,
             Output::Line(_) => SeriesType::Line,
+            Output::Candles(_) => SeriesType::Candles,
         }
     }
 }
@@ -127,6 +135,29 @@ impl Indicator for Vwap {
 
     fn output(&self) -> Output<'_> {
         Output::Line(self.points())
+    }
+
+    fn evaluations(&self) -> u64 {
+        self.evaluations
+    }
+}
+
+impl Indicator for CumDelta {
+    fn inputs(&self) -> Vec<Spec> {
+        vec![Spec::Market {
+            period_ms: self.period_ms(),
+        }]
+    }
+
+    fn update(&mut self, inputs: &[Output<'_>], from: UtcMillis) -> usize {
+        match inputs.first() {
+            Some(Output::Market(m)) => CumDelta::update(self, m, from),
+            _ => 0,
+        }
+    }
+
+    fn output(&self) -> Output<'_> {
+        Output::Candles(self.points())
     }
 
     fn evaluations(&self) -> u64 {
@@ -213,6 +244,9 @@ pub fn make_builtin(
         )))),
         Spec::Vwap { period_ms, vwap } => Some(NodeKind::indicator(Box::new(Vwap::new(
             *vwap, *period_ms, calendar,
+        )))),
+        Spec::CumDelta { period_ms, delta } => Some(NodeKind::indicator(Box::new(CumDelta::new(
+            *delta, *period_ms, calendar,
         )))),
         Spec::Named(_) => None,
     }

@@ -98,6 +98,15 @@ enum LabelKind {
     DateTime,
     LastPrice,
     CrossPrice,
+    /// A sub-pane's value labels (cumulative delta): range ends, and the newest-value tag
+    /// (its own kind: the label cache keys by kind and value, and the colors differ).
+    SubValue,
+    SubLast,
+    /// The sub-pane's title (keyed by its reset) and its "≈ from bars" note.
+    SubTitle,
+    SubNote,
+    /// The crosshair's value tag on the sub-pane's axis.
+    SubCross,
     CrossTime,
     Indicator,
 }
@@ -109,6 +118,13 @@ enum Region {
     /// The price axis column, including the corner below it.
     PriceAxis,
     TimeAxis,
+    /// A sub-pane below the plot (`crate::subpane`): drags pan time only.
+    Sub,
+    /// The divider between the plot and the sub-pane.
+    Divider,
+    /// The axis column beside the sub-pane: its scale fits itself, so nothing happens here
+    /// (never the price axis's scaling).
+    SubAxis,
 }
 
 /// A study drawn over the plot (e.g. the volume profile). Implementations keep their own
@@ -170,9 +186,14 @@ pub enum MenuPart {
 }
 
 enum Drag {
-    /// Last pointer position.
-    Pan(Point<Pixels>),
+    /// Last pointer position; `time_only`: started in a sub-pane (no price pan).
+    Pan(Point<Pixels>, bool),
     Scale(ScaleDrag),
+    /// The sub-pane divider: where the drag started (window y) and the ratio then.
+    Divider {
+        y: f32,
+        ratio: f32,
+    },
 }
 
 /// Performance stats for the header (off by default: the "Performance stats" command).
@@ -220,6 +241,23 @@ pub struct ChartView {
     levels: LevelsLayer,
     /// `levels.revision()` last drawn.
     seen_levels: u64,
+    /// The footprint chart mode (roadmap 10e), saved with the pane. Kept typed (it replaces
+    /// candles bar by bar).
+    footprint: crate::footprint::FootprintLayer,
+    /// The sub-pane's share of the height (`crate::subpane`), saved with the pane.
+    subpane_ratio: f32,
+    /// This frame's split between the plot and the sub-pane (`None`: no sub-pane).
+    split: Option<crate::subpane::Split>,
+    /// Height above the time axis this frame (the plot plus any sub-pane).
+    above_axis: f32,
+    /// The pointer is in the sub-pane, this far below its top: the crosshair's vertical line
+    /// and time follow it; the horizontal line is in the sub-pane, with no price.
+    cross_in_sub: Option<f32>,
+    /// The legend and readout block at the plot's top-left (width, bottom; plot-local), as
+    /// the last render built it: the footprint draws no cell number under it.
+    legend_band: std::cell::Cell<(f32, f32)>,
+    /// The footprint's reasons for candles as last rendered in the legend.
+    fp_seen: crate::footprint::Fallbacks,
     /// Study legends/tags or all studies hidden (saved with the pane). Hidden studies keep
     /// their configuration and engine nodes, so showing them again is exact and immediate,
     /// but cost no prepare or paint work while hidden.
@@ -356,6 +394,13 @@ impl ChartView {
             seen_studies: u64::MAX,
             levels,
             seen_levels: u64::MAX,
+            footprint: crate::footprint::FootprintLayer::new(Default::default()),
+            subpane_ratio: crate::subpane::DEFAULT_RATIO,
+            split: None,
+            above_axis: 0.0,
+            cross_in_sub: None,
+            fp_seen: Default::default(),
+            legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, READOUT_BOTTOM)),
             visibility: fixture.visibility,
             picker,
             store,
@@ -430,6 +475,7 @@ impl ChartView {
             indicators: self.studies.configs(),
             profile: self.profile.config(),
             levels: self.levels.config.clone(),
+            footprint: self.footprint.config(),
         }
     }
 
@@ -440,6 +486,7 @@ impl ChartView {
         }
         self.profile.set_config(s.profile);
         self.levels.config = s.levels;
+        self.footprint.set_config(s.footprint);
         self.seen_levels = u64::MAX;
         self.seen_studies = u64::MAX;
     }
@@ -640,7 +687,22 @@ impl ChartView {
         } else if self.plot.contains(&pos) {
             Some(Region::Plot)
         } else if pos.x >= self.plot.right() {
-            Some(Region::PriceAxis)
+            let y = f32::from(pos.y - self.plot.origin.y);
+            if self.split.is_some() && y >= f32::from(self.plot.size.height) && y < self.above_axis
+            {
+                Some(Region::SubAxis)
+            } else {
+                Some(Region::PriceAxis)
+            }
+        } else if let Some(s) = self.split
+            && f32::from(pos.y - self.plot.origin.y) < self.above_axis
+        {
+            let y = f32::from(pos.y - self.plot.origin.y);
+            Some(if s.on_divider(y) {
+                Region::Divider
+            } else {
+                Region::Sub
+            })
         } else {
             Some(Region::TimeAxis)
         }
@@ -700,7 +762,9 @@ impl ChartView {
                 Region::Plot => self.vp.reset(self.series_len),
                 Region::PriceAxis => self.vp.restore_auto_price(),
                 // Each axis resets only itself: time = bar width and the live edge.
-                Region::TimeAxis => self.vp.reset_time(self.series_len),
+                Region::TimeAxis | Region::Sub => self.vp.reset_time(self.series_len),
+                Region::Divider => self.subpane_ratio = crate::subpane::DEFAULT_RATIO,
+                Region::SubAxis => return,
             }
             cx.notify();
             return;
@@ -709,7 +773,17 @@ impl ChartView {
             Region::Plot if ev.modifiers.control => {
                 Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Free, x, y))
             }
-            Region::Plot => Drag::Pan(ev.position),
+            Region::Plot => Drag::Pan(ev.position, false),
+            Region::Sub => Drag::Pan(ev.position, true),
+            // From the split actually drawn (the minimums may have clamped the saved ratio),
+            // so the divider follows the pointer from the first move.
+            Region::Divider => Drag::Divider {
+                y: f32::from(ev.position.y),
+                ratio: self.split.map_or(self.subpane_ratio, |s| {
+                    s.sub_h / (self.above_axis - crate::subpane::DIVIDER_PX).max(1.0)
+                }),
+            },
+            Region::SubAxis => return,
             Region::PriceAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Price, x, y)),
             Region::TimeAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Time, x, y)),
         };
@@ -963,6 +1037,12 @@ impl ChartView {
         if !state.profile.is_default() {
             self.profile.set_config(state.profile);
         }
+        if !state.footprint.is_default() {
+            self.footprint.set_config(state.footprint);
+        }
+        if let Some(r) = state.subpane {
+            self.subpane_ratio = crate::subpane::clamp_ratio(r);
+        }
         // Saved indicators, then any given on the command line (`--vwap`) not among them.
         let mut configs = state.indicators.clone();
         for c in self.studies.configs() {
@@ -977,15 +1057,50 @@ impl ChartView {
     /// chart hides its study labels (render time).
     fn legend(&self, t: &Theme) -> Option<gpui::AnyElement> {
         if !self.visibility.draws_labels() {
+            // The readout still shows over the plot's top-left.
+            self.legend_band.set((8.0 + LEGEND_MAX_W, READOUT_BOTTOM));
             return None;
         }
         let studies = self.studies.legend(t, &self.instrument);
+        // The footprint's line: its mode and why bars are candles (as of the last frame;
+        // paint re-renders when that changes).
+        let fp = self.footprint.legend();
+        let fp = fp.map(|(label, note)| {
+            // Capped at the legend's width (the clearance block assumes it), ending in "…".
+            div()
+                .max_w(px(LEGEND_MAX_W))
+                .whitespace_nowrap()
+                .truncate()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .px(px(8.0))
+                .py(px(4.0))
+                .bg(t.label_bg)
+                .text_size(px(12.0))
+                .child(div().text_color(t.text_main).child(label))
+                .when_some(note, |d, n| d.child(div().text_color(t.text_dim).child(n)))
+        });
         let rows = if self.levels.config.hide_labels {
             Vec::new()
         } else {
             self.levels.legend()
         };
-        if studies.is_none() && rows.is_empty() {
+        // The block this legend takes at the plot's top-left (with the readout above it), for
+        // the footprint to keep its numbers out of (the same frame: render runs before paint).
+        // Rows of 12 px text in boxes padded 4 px, boxes 4 px apart; a margin of one gap.
+        let (boxes, text_rows) = (
+            usize::from(studies.is_some())
+                + usize::from(fp.is_some())
+                + usize::from(!rows.is_empty()),
+            self.studies.legend_rows() + usize::from(fp.is_some()) + rows.len(),
+        );
+        let row_h = 12.0 * 1.3 + 4.0;
+        let bottom = 30.0 + text_rows as f32 * row_h + boxes as f32 * 12.0 + 4.0;
+        self.legend_band
+            .set((8.0 + LEGEND_MAX_W, bottom.max(READOUT_BOTTOM)));
+        if studies.is_none() && rows.is_empty() && fp.is_none() {
+            self.legend_band.set((8.0 + LEGEND_MAX_W, READOUT_BOTTOM));
             return None;
         }
         // Level rows: the source's name, then its state; a long reason ends in an ellipsis at
@@ -1025,6 +1140,7 @@ impl ChartView {
                 .flex_col()
                 .gap_1()
                 .children(studies)
+                .children(fp)
                 .children(levels)
                 .into_any_element(),
         )
@@ -1078,10 +1194,12 @@ impl ChartView {
     /// A click on indicator-menu row `i`.
     /// Track the pointer for the crosshair; it shows only while the pointer is over the plot.
     fn set_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let hover = self.plot.contains(&pos).then(|| {
-            let l = pos - self.plot.origin;
-            (f32::from(l.x), f32::from(l.y))
-        });
+        let l = pos - self.plot.origin;
+        let (x, y) = (f32::from(l.x), f32::from(l.y));
+        let in_sub = self
+            .split
+            .is_some_and(|s| s.in_sub(y) && x >= 0.0 && x < f32::from(self.plot.size.width));
+        let hover = (self.plot.contains(&pos) || in_sub).then_some((x, y));
         if hover != self.hover {
             self.hover = hover;
             cx.notify();
@@ -1107,12 +1225,17 @@ impl ChartView {
         let len = self.series_len;
         let tick = self.instrument.price.tick;
         match &mut self.drag {
-            Some(Drag::Pan(from)) => {
+            Some(Drag::Pan(from, time_only)) => {
                 let d = ev.position - *from;
                 *from = ev.position;
-                self.vp.pan(f64::from(d.x), f64::from(d.y), len);
+                let dy = if *time_only { 0.0 } else { f64::from(d.y) };
+                self.vp.pan(f64::from(d.x), dy, len);
             }
             Some(Drag::Scale(drag)) => drag.update(&mut self.vp, x, y, len, tick),
+            Some(Drag::Divider { y: y0, ratio }) => {
+                let dy = f32::from(ev.position.y) - *y0;
+                self.subpane_ratio = crate::subpane::drag(self.above_axis, *ratio, dy);
+            }
             None => return,
         }
         cx.notify();
@@ -1127,7 +1250,10 @@ impl ChartView {
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
-        if !self.plot.contains(&ev.position) {
+        // The sub-pane shares the plot's time axis: the wheel pans and zooms time there too
+        // (its value scale fits itself, so Ctrl+wheel does nothing).
+        let in_sub = matches!(self.region(ev.position), Some(Region::Sub));
+        if !self.plot.contains(&ev.position) && !in_sub {
             return;
         }
         let d = ev.delta.pixel_delta(window.line_height());
@@ -1148,6 +1274,9 @@ impl ChartView {
             // Wheel up (positive delta) zooms in. ~10% per notch.
             let factor = (dy * 0.005).exp();
             if ev.modifiers.control {
+                if in_sub {
+                    return;
+                }
                 self.vp.zoom_price_at(y, factor, self.instrument.price.tick);
             } else {
                 let anchor = self.vp.time_zoom_anchor(x, len);
@@ -1200,7 +1329,14 @@ impl ChartView {
         let scale = window.scale_factor();
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let plot_w = (w - AXIS_W).max(10.0);
-        let plot_h = (h - AXIS_H).max(10.0);
+        let above_axis = (h - AXIS_H).max(10.0);
+        // A sub-pane (cumulative delta) takes its share below the plot, above the time axis.
+        self.split = (self.visibility.draws_studies() && self.studies.has_subpane())
+            .then(|| crate::subpane::split_at_scale(above_axis, self.subpane_ratio, scale))
+            .flatten();
+        self.above_axis = above_axis;
+        let plot_h = self.split.map_or(above_axis, |s| s.price_h);
+        self.footprint.ensure_capacity(plot_w);
         self.chart = bounds;
         self.plot = Bounds::new(bounds.origin, size(px(plot_w), px(plot_h)));
         self.vp.set_size(plot_w as f64, plot_h as f64);
@@ -1246,6 +1382,17 @@ impl ChartView {
                 }
             }
             self.vp.on_data(bars, fmt.tick);
+            if self.visibility.draws_studies()
+                && self.footprint.config().shown()
+                && self.vp.auto_price
+                && !self.vp.visible_range(bars.len()).is_empty()
+            {
+                // (Only after a real fit: with nothing visible the range isn't refitted, and
+                // raising it again each frame would compound.)
+                // Auto-fit leaves the readout and legend block (plus a row) clear of cells.
+                let top = f64::from(self.legend_band.get().1) + crate::footprint::MIN_ROW_PX;
+                crate::footprint::clear_top(&mut self.vp, top);
+            }
             self.period_ms = view.period_ms;
             // Only once bars are visible, i.e. auto-scale has fitted a real range (the first
             // layout pass can paint at a placeholder size with nothing on screen).
@@ -1256,7 +1403,12 @@ impl ChartView {
             }
             self.scene
                 .build(bars, &self.vp, &fmt, scale, self.period_ms);
-            // Hit-test after the viewport update so the crosshair matches this frame.
+            // Hit-test after the viewport update so the crosshair matches this frame. In the
+            // sub-pane only the time follows the pointer (the plot's y is the top row).
+            self.cross_in_sub = self
+                .hover
+                .and_then(|(_, y)| self.split.filter(|s| s.in_sub(y)).map(|s| y - s.sub_top));
+            let in_sub = self.cross_in_sub.is_some();
             self.cross = self.hover.and_then(|(x, y)| {
                 crosshair(
                     bars,
@@ -1266,7 +1418,7 @@ impl ChartView {
                     scale,
                     self.crosshair_mode,
                     f64::from(x),
-                    f64::from(y),
+                    if in_sub { 0.0 } else { f64::from(y) },
                 )
             });
             self.cross_bar = self.cross.and_then(|c| c.bar).map(|i| bars[i]);
@@ -1287,9 +1439,15 @@ impl ChartView {
                 (y >= 0.0 && f64::from(y) < self.vp.height).then_some((y, p))
             });
             let max_columns = crate::studies::Studies::max_columns(self.plot.size.width);
+            let (bw, bb) = self.legend_band.get();
+            self.footprint.set_legend_block(bw, bb);
+            if !self.visibility.draws_studies() {
+                self.footprint.reset(); // hidden: no cells, no line gaps
+            }
             prepare_studies(
                 self.visibility,
                 &mut self.profile,
+                &mut self.footprint,
                 &mut self.layers,
                 &mut self.studies,
                 &mut self.levels,
@@ -1298,6 +1456,12 @@ impl ChartView {
                 &self.vp,
                 max_columns,
             );
+            // The legend says why footprint bars are candles: re-render when that changes.
+            let fb = self.footprint.fallbacks();
+            if fb != self.fp_seen {
+                self.fp_seen = fb;
+                cx.notify();
+            }
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -1308,6 +1472,7 @@ impl ChartView {
             // Left the plot while the feed held the lock: still hide immediately.
             self.cross = None;
             self.cross_bar = None;
+            self.cross_in_sub = None;
         }
 
         self.draw(bounds, window, cx);
@@ -1315,7 +1480,9 @@ impl ChartView {
         // Crosshair sync: report this frame's time and price under the pointer when changed.
         let now = (
             self.cross.and_then(|c| c.time),
-            self.cross.filter(|c| c.time.is_some()).map(|c| c.price),
+            self.cross
+                .filter(|c| c.time.is_some() && self.cross_in_sub.is_none())
+                .map(|c| c.price),
         );
         if now != self.reported {
             self.reported = now;
@@ -1470,7 +1637,12 @@ impl ChartView {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_back(plot, window);
             }
-            for c in &self.scene.candles {
+            let fp_first = self.footprint.first_bar();
+            for (k, c) in self.scene.candles.iter().enumerate() {
+                // The footprint draws this bar as cells (only where it has trade data).
+                if studies && self.footprint.covers(fp_first + k) {
+                    continue;
+                }
                 let color = if c.up { t.up } else { t.down };
                 let (bx, bw) = (c.x - c.half_width, c.half_width * 2.0);
                 let bh = c.body_bottom - c.body_top;
@@ -1511,6 +1683,7 @@ impl ChartView {
                 }
             }
             if studies {
+                self.footprint.paint(plot, &self.vp, &t, window, cx);
                 for l in &mut self.layers {
                     l.paint(plot, &self.vp, &t, window, cx);
                 }
@@ -1521,9 +1694,16 @@ impl ChartView {
                 self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
             }
+            // Horizontal lines break where they cross footprint cells (never through numbers).
+            let fp = &self.footprint;
+            let hline = |window: &mut Window, y: f32, x0: f32, x1: f32, color| {
+                fp.hline_segments(y, x0, x1, |a, b| {
+                    window.paint_quad(fill(rect(a, y, b - a, hair), color));
+                });
+            };
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
-                window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
+                hline(window, y, 0.0, pw, t.last.opacity(0.6));
             }
             // The open position: a dashed line at its average price (never the last price's
             // solid violet).
@@ -1538,20 +1718,29 @@ impl ChartView {
             if self.cross.is_none()
                 && let Some((x, _)) = self.sync_marker
             {
-                window.paint_quad(fill(rect(x - hair * 0.5, 0.0, hair, ph), t.crosshair));
+                fp.vline_segments(x, 0.0, ph, |a, b| {
+                    window.paint_quad(fill(rect(x - hair * 0.5, a, hair, b - a), t.crosshair));
+                });
                 if let Some((y, _)) = self.sync_price {
-                    window.paint_quad(fill(rect(0.0, y, pw, hair), t.crosshair));
+                    hline(window, y, 0.0, pw, t.crosshair);
                 }
             }
             if let Some(c) = self.cross {
                 // Vertical line through the wick; the horizontal one stops either side of it
                 // so the translucent lines don't double up where they cross.
                 let (left, right) = (c.x - hair * 0.5, c.x + hair * 0.5);
-                window.paint_quad(fill(rect(left, 0.0, hair, ph), t.crosshair));
-                window.paint_quad(fill(rect(0.0, c.y, left.max(0.0), hair), t.crosshair));
-                window.paint_quad(fill(rect(right, c.y, pw - right, hair), t.crosshair));
+                fp.vline_segments(c.x, 0.0, ph, |a, b| {
+                    window.paint_quad(fill(rect(left, a, hair, b - a), t.crosshair));
+                });
+                if self.cross_in_sub.is_none() {
+                    hline(window, c.y, 0.0, left.max(0.0), t.crosshair);
+                    hline(window, c.y, right, pw, t.crosshair);
+                }
             }
         });
+        if let Some(s) = self.split {
+            self.draw_subpane(s, bounds, window, cx);
+        }
 
         // Axis borders.
         window.paint_quad(fill(rect(pw, 0.0, hair, ph), t.axis_line));
@@ -1568,6 +1757,7 @@ impl ChartView {
         let tags = [
             last_y.map(|y| Span::around(y, TAG_H * 0.5)),
             self.cross
+                .filter(|_| self.cross_in_sub.is_none())
                 .map(|c| Span::around(cross_tag_y(c.y, ph), TAG_H * 0.5)),
             sync_price.map(|(y, _)| Span::around(cross_tag_y(y, ph), TAG_H * 0.5)),
         ];
@@ -1637,7 +1827,7 @@ impl ChartView {
             if span.bottom > pw || !label_clear_of_tags(span, &[time_tag]) {
                 continue;
             }
-            let origin = point(px(ox + l.x + 4.0), px(oy + ph + 4.0));
+            let origin = point(px(ox + l.x + 4.0), px(oy + self.above_axis + 4.0));
             self.paint_label(kind, l.time.0, origin, line_h, t.text_dim, window, cx, text);
         }
         if let (Some(p), Some(y)) = (self.last_trade, last_y) {
@@ -1692,10 +1882,7 @@ impl ChartView {
         cx: &mut App,
     ) {
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let (pw, ph) = (
-            f32::from(self.plot.size.width),
-            f32::from(self.plot.size.height),
-        );
+        let pw = f32::from(self.plot.size.width);
         let accent = self.theme.accent;
         let w = f32::from(
             self.label(LabelKind::Indicator, 0, accent, window, |s| {
@@ -1706,7 +1893,7 @@ impl ChartView {
         let corner_w = f32::from(bounds.size.width) - pw;
         let origin = point(
             px(ox + pw + ((corner_w - w) * 0.5).max(4.0)),
-            px(oy + ph + 4.0),
+            px(oy + self.above_axis + 4.0),
         );
         self.paint_label(
             LabelKind::Indicator,
@@ -1723,6 +1910,188 @@ impl ChartView {
     }
 
     /// Price tag on the price axis and time tag on the time axis, drawn over the axis labels.
+    /// The sub-pane (`crate::subpane`) below the plot: background, the divider, the time grid
+    /// (shared with the plot), the studies drawn there (cumulative delta), their scale's zero
+    /// on the axis, and the crosshair's vertical line (and horizontal line when the pointer is
+    /// in it). Quads only.
+    fn draw_subpane(
+        &mut self,
+        s: crate::subpane::Split,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        let hair = 1.0 / window.scale_factor();
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let pw = f32::from(self.plot.size.width);
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
+        };
+        window.paint_quad(fill(rect(0.0, s.sub_top, pw, s.sub_h), t.bg));
+        // The divider: panel colour with a line in its middle (it is dragged).
+        window.paint_quad(fill(
+            rect(0.0, s.divider_top, pw, s.sub_top - s.divider_top),
+            t.panel,
+        ));
+        window.paint_quad(fill(rect(0.0, s.divider_mid(), pw, hair), t.axis_line));
+        let sub = rect(0.0, s.sub_top, pw, s.sub_h);
+        let scale = self.studies.subpane_scale(s.sub_h);
+        window.with_content_mask(Some(ContentMask { bounds: sub }), |window| {
+            for l in &self.scene.time_lines {
+                window.paint_quad(fill(rect(l.x, s.sub_top, hair, s.sub_h), t.grid));
+            }
+            if let Some(sc) = scale.filter(|sc| sc.contains(0.0)) {
+                window.paint_quad(fill(rect(0.0, s.sub_top + sc.y(0.0), pw, hair), t.grid));
+            }
+            if let Some(sc) = &scale {
+                self.studies
+                    .paint_subpane((ox, oy + s.sub_top), sc, &self.vp, &t, window);
+            }
+            let x = self.cross.map(|c| c.x).or(self.sync_marker.map(|(x, _)| x));
+            if let Some(x) = x {
+                window.paint_quad(fill(
+                    rect(x - hair * 0.5, s.sub_top, hair, s.sub_h),
+                    t.crosshair,
+                ));
+            }
+            if let Some(y) = self.cross_in_sub {
+                window.paint_quad(fill(rect(0.0, s.sub_top + y, pw, hair), t.crosshair));
+            }
+        });
+        // Its title at its own top-left, on the legend box (as the price plot's legends).
+        if self.visibility.draws_labels()
+            && let Some((reset, approx)) = self.studies.subpane_title()
+        {
+            let key = reset as i64;
+            let title = move |b: &mut FixedStr<32>| {
+                let _ = write!(b, "Cumulative delta · {}", reset.label());
+            };
+            let note = |b: &mut FixedStr<32>| {
+                let _ = b.write_str("≈ from bars");
+            };
+            let tw = f32::from(
+                self.label(LabelKind::SubTitle, key, t.text_main, window, title)
+                    .width,
+            );
+            let nw = if approx {
+                f32::from(
+                    self.label(LabelKind::SubNote, 0, t.text_dim, window, note)
+                        .width,
+                ) + 8.0
+            } else {
+                0.0
+            };
+            let (bx, by, bh) = (8.0, s.sub_top + 4.0, LABEL_PX * 1.6);
+            window.paint_quad(fill(rect(bx, by, tw + nw + 16.0, bh), t.label_bg));
+            let line_h = px(LABEL_PX * 1.3);
+            let ty = oy + by + bh * 0.5 - LABEL_PX * 0.65;
+            self.paint_label(
+                LabelKind::SubTitle,
+                key,
+                point(px(ox + bx + 8.0), px(ty)),
+                line_h,
+                t.text_main,
+                window,
+                cx,
+                title,
+            );
+            if approx {
+                self.paint_label(
+                    LabelKind::SubNote,
+                    0,
+                    point(px(ox + bx + 16.0 + tw), px(ty)),
+                    line_h,
+                    t.text_dim,
+                    window,
+                    cx,
+                    note,
+                );
+            }
+        }
+        // The axis beside it and the time axis below: borders; the visible range's ends and the
+        // newest value.
+        window.paint_quad(fill(rect(pw, s.sub_top, hair, s.sub_h), t.axis_line));
+        window.paint_quad(fill(rect(0.0, s.sub_top + s.sub_h, pw, hair), t.axis_line));
+        let Some(sc) = scale else { return };
+        let line_h = px(LABEL_PX * 1.3);
+        // Cumulative delta is a quantity: printed in the product's quantity format.
+        let qty = self.instrument.qty;
+        let value = |v: i64| {
+            move |b: &mut FixedStr<32>| {
+                let _ = qty.write(lines_core::Qty(v), b);
+            }
+        };
+        let (top, bottom) = (
+            (sc.hi - (sc.hi - sc.lo) * 0.08).round() as i64,
+            (sc.lo + (sc.hi - sc.lo) * 0.08).round() as i64,
+        );
+        // The newest value's tag, and range labels only where it leaves them whole (as the
+        // price axis: a half-covered number reads as another value).
+        let newest = self.studies.subpane_last().map(|last| {
+            let y = (s.sub_top + sc.y(last as f64))
+                .clamp(s.sub_top + TAG_H * 0.5, s.sub_top + s.sub_h - TAG_H * 0.5);
+            (last, y)
+        });
+        let tag = newest.map(|(_, y)| Span::around(y, TAG_H * 0.5));
+        for v in [top, bottom] {
+            let y = s.sub_top + sc.y(v as f64);
+            if !label_clear_of_tags(Span::around(y, LABEL_PX * 0.65), &[tag]) {
+                continue;
+            }
+            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            self.paint_label(
+                LabelKind::SubValue,
+                v,
+                origin,
+                line_h,
+                t.text_dim,
+                window,
+                cx,
+                value(v),
+            );
+        }
+        if let Some((last, y)) = newest {
+            // A filled chip (inverted text colors), so it never reads as a range label.
+            window.paint_quad(fill(
+                rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
+                t.text_main,
+            ));
+            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            self.paint_label(
+                LabelKind::SubLast,
+                last,
+                origin,
+                line_h,
+                t.bg,
+                window,
+                cx,
+                value(last),
+            );
+        }
+        // The pointer in the sub-pane: its value on the axis, in the crosshair tag's style.
+        if let Some(cy) = self.cross_in_sub {
+            let v = sc.value(cy).round() as i64;
+            let y =
+                (s.sub_top + cy).clamp(s.sub_top + TAG_H * 0.5, s.sub_top + s.sub_h - TAG_H * 0.5);
+            window.paint_quad(fill(
+                rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
+                t.cross_tag,
+            ));
+            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            self.paint_label(
+                LabelKind::SubCross,
+                v,
+                origin,
+                line_h,
+                t.on_cross_tag,
+                window,
+                cx,
+                value(v),
+            );
+        }
+    }
+
     fn draw_crosshair_tags(
         &mut self,
         c: Crosshair,
@@ -1730,7 +2099,9 @@ impl ChartView {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.draw_price_tag(c.y, c.price, bounds, window, cx);
+        if self.cross_in_sub.is_none() {
+            self.draw_price_tag(c.y, c.price, bounds, window, cx);
+        }
         if let Some(time) = c.time {
             self.draw_time_tag(c.x, time, bounds, window, cx);
         }
@@ -1853,13 +2224,12 @@ impl ChartView {
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let ph = f32::from(self.plot.size.height);
         let line_h = px(LABEL_PX * 1.3);
         let text = self.time_tag_text(time);
         let (left, box_w) = self.time_tag_box(x, time, window);
         window.paint_quad(fill(
             Bounds::new(
-                point(px(ox + left), px(oy + ph + hair)),
+                point(px(ox + left), px(oy + self.above_axis + hair)),
                 size(px(box_w), px(AXIS_H - hair)),
             ),
             t.cross_tag,
@@ -1867,7 +2237,7 @@ impl ChartView {
         self.paint_label(
             LabelKind::CrossTime,
             time.0,
-            point(px(ox + left + 6.0), px(oy + ph + 4.0)),
+            point(px(ox + left + 6.0), px(oy + self.above_axis + 4.0)),
             line_h,
             t.on_cross_tag,
             window,
@@ -2280,6 +2650,9 @@ impl Pane for ChartView {
             levels: self.levels.config.clone(),
             magnet: self.magnet(),
             timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
+            footprint: self.footprint.config(),
+            subpane: (self.subpane_ratio != crate::subpane::DEFAULT_RATIO)
+                .then_some(self.subpane_ratio),
         });
         doc.trade = self.trade.doc();
     }
@@ -2350,6 +2723,7 @@ fn quote_text(label: &str, p: Option<Price>, f: &lines_core::PriceFormat) -> (St
 fn prepare_studies(
     visibility: StudyVisibility,
     profile: &mut VolumeProfileLayer,
+    footprint: &mut crate::footprint::FootprintLayer,
     layers: &mut [Box<dyn ChartLayer>],
     studies: &mut crate::studies::Studies,
     levels: &mut LevelsLayer,
@@ -2362,6 +2736,7 @@ fn prepare_studies(
         return;
     }
     profile.prepare(d, bars, vp);
+    footprint.prepare(d, bars, vp);
     for l in layers {
         l.prepare(d, bars, vp);
     }
@@ -2388,6 +2763,10 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
         max_bars: d.series.max_len(),
     }
 }
+
+/// The OHLCV readout box's bottom (it sits 6 px from the top, `LABEL_PX × 1.6` tall), plus
+/// a gap: the footprint keeps its numbers below it.
+const READOUT_BOTTOM: f32 = 6.0 + LABEL_PX * 1.6 + 4.0;
 
 /// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
 const LEGEND_MAX_W: f32 = 360.0;
@@ -2524,6 +2903,7 @@ mod tests {
             prepare_studies(
                 hidden,
                 &mut profile,
+                &mut crate::footprint::FootprintLayer::new(Default::default()),
                 &mut [],
                 &mut studies,
                 &mut LevelsLayer::new(LevelsConfig::default()),
@@ -2543,6 +2923,7 @@ mod tests {
         prepare_studies(
             labels_only,
             &mut profile,
+            &mut crate::footprint::FootprintLayer::new(Default::default()),
             &mut [],
             &mut studies,
             &mut LevelsLayer::new(LevelsConfig::default()),

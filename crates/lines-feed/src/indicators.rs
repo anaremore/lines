@@ -29,7 +29,10 @@ use crate::provider::MarketEvent;
 /// What a consumer reads.
 #[derive(Debug, Default)]
 pub struct OutputData {
+    /// Line indicators (VWAP).
     pub points: Vec<Point>,
+    /// Candle indicators (cumulative delta).
+    pub candles: Vec<lines_indicators::DeltaPoint>,
     /// The spec couldn't be built (shown inline, never silently empty).
     pub error: Option<String>,
 }
@@ -56,12 +59,19 @@ impl OutputCell {
         self.data.lock()
     }
 
-    fn sync_from(&self, points: &[Point], first: usize) {
+    fn sync_from(&self, out: Output<'_>, first: usize) {
+        fn sync<T: Copy>(dst: &mut Vec<T>, src: &[T], first: usize) {
+            let first = first.min(dst.len()).min(src.len());
+            dst.truncate(first);
+            dst.extend_from_slice(&src[first..]);
+        }
         {
             let mut d = self.data.lock();
-            let first = first.min(d.points.len()).min(points.len());
-            d.points.truncate(first);
-            d.points.extend_from_slice(&points[first..]);
+            match out {
+                Output::Line(points) => sync(&mut d.points, points, first),
+                Output::Candles(c) => sync(&mut d.candles, c, first),
+                Output::Market(_) => return,
+            }
         }
         self.revision.fetch_add(1, Ordering::Release);
     }
@@ -226,11 +236,15 @@ impl EventSink for EngineTap {
         for e in events {
             inputs.push(match e {
                 MarketEvent::Trade {
-                    time, price, qty, ..
+                    time,
+                    price,
+                    qty,
+                    aggressor,
                 } => Input::Trade {
                     time: *time,
                     price: *price,
                     qty: *qty,
+                    aggressor: *aggressor,
                 },
                 MarketEvent::History { bars, as_of } => Input::History {
                     bars: bars.clone(),
@@ -336,20 +350,19 @@ fn run(rx: Receiver<Msg>) {
             }
             Msg::Events(feed, inputs) => {
                 for c in st.graph.push(feed, &inputs) {
-                    let (Some(cells), Some(Output::Line(points))) =
-                        (st.cells.get(&c.node), st.graph.output(c.node))
+                    let (Some(cells), Some(out)) = (st.cells.get(&c.node), st.graph.output(c.node))
                     else {
                         continue;
                     };
                     for cell in cells {
-                        cell.sync_from(points, c.first);
+                        cell.sync_from(out, c.first);
                     }
                 }
             }
             Msg::Acquire(info, spec, cell) => match st.acquire(info, spec) {
                 Ok(id) => {
-                    if let Some(Output::Line(points)) = st.graph.output(id) {
-                        cell.sync_from(points, 0);
+                    if let Some(out) = st.graph.output(id) {
+                        cell.sync_from(out, 0);
                     }
                     st.cells.entry(id).or_default().push(cell);
                 }
