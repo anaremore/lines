@@ -681,10 +681,12 @@ impl JournalShared {
             persistent: writer.is_some(),
         });
         shared.publish(&journal);
-        let s = shared.clone();
+        // Weak: when the app drops the journal (and the trading service its observer), the
+        // channel closes and the thread ends, dropping (so flushing) its writer.
+        let s = Arc::downgrade(&shared);
         let spawned = thread::Builder::new()
             .name("lines-journal".into())
-            .spawn(move || run(journal, writer, rx, &s));
+            .spawn(move || run(journal, writer, rx, s));
         if let Err(e) = spawned {
             tracing::error!("journal thread failed to start: {e}");
         }
@@ -698,7 +700,8 @@ impl JournalShared {
         }
     }
 
-    /// Moves whenever a trade opens, closes or is edited (lock-free).
+    /// Moves whenever a trade opens, closes or is edited (lock-free); never on market data or
+    /// position reports alone.
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
@@ -752,23 +755,32 @@ fn run(
     mut j: Journal,
     writer: Option<store::JournalWriter>,
     rx: Receiver<Msg>,
-    shared: &JournalShared,
+    shared: std::sync::Weak<JournalShared>,
 ) {
+    let publish = |j: &Journal| {
+        if let Some(s) = shared.upgrade() {
+            s.publish(j);
+        }
+    };
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Market(k, inputs) => j.on_market(k, &inputs),
             Msg::Events(events) => {
-                let mut changed = false;
+                // Publish only when what the pane shows changed: a trade closed, or the open
+                // count moved. The core reports positions on every market batch; those, and
+                // fills that only grow an open trade, change nothing shown.
+                let open = j.open_trades().count();
+                let mut closed = false;
                 for e in &events {
-                    changed |= matches!(e, Event::Fill(_) | Event::Position(_));
                     for t in j.on_event(e) {
+                        closed = true;
                         if let Some(w) = &writer {
                             w.append(Record::Trade(Box::new(t)));
                         }
                     }
                 }
-                if changed {
-                    shared.publish(&j);
+                if closed || j.open_trades().count() != open {
+                    publish(&j);
                 }
             }
             Msg::Edit(e) => {
@@ -776,7 +788,7 @@ fn run(
                     if let Some(w) = &writer {
                         w.append(Record::Edit(e));
                     }
-                    shared.publish(&j);
+                    publish(&j);
                 }
             }
             Msg::Export(path) => {
