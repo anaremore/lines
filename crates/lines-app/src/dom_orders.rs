@@ -429,7 +429,6 @@ impl OrdersLayer {
     }
 }
 
-/// A rectangle's outline, solid or dashed.
 /// A partial mark's label pill (left, top, width, height) in the mark at (`x`, `yy`, `w`,
 /// `h`) for a label `tw` wide, right-aligned like the label: inside the outline, and clear of
 /// a target's top notch or a stop's bottom notch, so the role's shape stays whole.
@@ -463,6 +462,7 @@ fn label_pill(
     (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
 }
 
+/// A rectangle's outline, solid or dashed.
 fn outline(window: &mut Window, b: Bounds<Pixels>, c: Hsla, hair: f32, dashed: bool) {
     let (x, y) = (f32::from(b.origin.x), f32::from(b.origin.y));
     let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
@@ -517,6 +517,15 @@ mod tests {
                     };
                     assert!(t >= yy + top_clear - 1e-3, "{role:?}");
                     assert!(t + ph <= yy + h - bottom_clear + 1e-3, "{role:?}");
+                    // It covers the label (right-aligned to x + w - 5) when the label fits,
+                    // and is tall enough for a line of digits.
+                    assert!(pw > 0.0 && ph >= 9.0, "{role:?} {tw}");
+                    if tw <= w - 7.0 - lw {
+                        assert!(
+                            l <= x + w - 5.0 - tw && l + pw >= x + w - 5.0,
+                            "{role:?} {tw}"
+                        );
+                    }
                 }
             }
         }
