@@ -1305,10 +1305,11 @@ impl ChartView {
         let fp = self.footprint.legend();
         let fp = fp.map(|(label, note)| {
             // Capped at the legend's width (the clearance block assumes it), ending in "…".
+            // The note shrinks and truncates itself: an ellipsis shows the cut (the label stays).
             div()
                 .max_w(px(LEGEND_MAX_W))
                 .whitespace_nowrap()
-                .truncate()
+                .overflow_hidden()
                 .flex()
                 .flex_row()
                 .gap_2()
@@ -1316,8 +1317,10 @@ impl ChartView {
                 .py(px(4.0))
                 .bg(t.label_bg)
                 .text_size(px(12.0))
-                .child(div().text_color(t.text_main).child(label))
-                .when_some(note, |d, n| d.child(div().text_color(t.text_dim).child(n)))
+                .child(div().flex_shrink_0().text_color(t.text_main).child(label))
+                .when_some(note, |d, n| {
+                    d.child(div().min_w_0().truncate().text_color(t.text_dim).child(n))
+                })
         });
         let rows = if self.levels.config.hide_labels {
             Vec::new()
@@ -1967,11 +1970,13 @@ impl ChartView {
                 }
             }
             if studies {
-                self.footprint.paint(plot, &self.vp, &t, window, cx);
+                // The profile and study lines first: footprint cells are opaque on top of
+                // them, so a VWAP or profile line never runs through a cell's numbers.
                 for l in &mut self.layers {
                     l.paint(plot, &self.vp, &t, window, cx);
                 }
                 self.studies.paint((ox, oy), &t, window);
+                self.footprint.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_front(plot, window);
             }
             // Drawings: the trader's own marks, above the studies (shown unless hidden on

@@ -19,7 +19,10 @@
 //! - With the price axis auto-fitted, the range's top is raised (`clear_top`) so cells start
 //!   below that block; only a manual price zoom can push bars under it.
 //! - Each column has an open → close strip on its left (a candle body: hollow/filled as the
-//!   candles), so a bar's direction stays visible by shape.
+//!   candles) with the open as a tick on the strip's left (as an OHLC bar marks it), so a
+//!   bar's direction shows by shape and position, never by color alone.
+//! - Cells are opaque: the volume profile and study lines (VWAP) are drawn first and pass
+//!   under them, never through a number.
 //! - Price and crosshair lines break where they cross cells (`hline_segments`).
 //! - **Imbalances** are marked by an underline under the imbalanced number (sell: the left
 //!   half, buy: the right half) as well as the number's color: a horizontal mark inside the
@@ -701,6 +704,12 @@ impl ChartLayer for FootprintLayer {
                 } else {
                     window.paint_quad(fill(rect(col.strip_x, top, sw, h), color));
                 }
+                // The open as a tick left of the strip: which end the bar opened at.
+                let (tw, th) = (snap(3.0), snap(2.0).max(2.0 / scale));
+                window.paint_quad(fill(
+                    rect(col.strip_x - tw, snap(f64::from(yo - th * 0.5)), tw, th),
+                    color,
+                ));
             }
             for k in 0..b.len {
                 let c = self.frame.cells[b.first + k];
@@ -717,7 +726,10 @@ impl ChartLayer for FootprintLayer {
                     FootprintMode::Delta if c.delta() < 0 => t.down.opacity(0.12 + 0.4 * shade),
                     _ => t.text_dim.opacity(0.06 + 0.22 * shade),
                 };
-                window.paint_quad(fill(rect(left, top, w, (row_h - hair).max(hair)), bg));
+                // Opaque: what was drawn under the cell (profile, VWAP) never shows through it.
+                let cell = rect(left, top, w, (row_h - hair).max(hair));
+                window.paint_quad(fill(cell, t.bg));
+                window.paint_quad(fill(cell, bg));
                 // Imbalance markers: an underline under the imbalanced number (shape and
                 // position, not only color). Sell × buy: exactly under the number (drawn with
                 // the text below); one-number modes: under the side's half.
