@@ -127,7 +127,7 @@ impl Default for Sigma {
 impl std::fmt::Display for Sigma {
     /// `2σ`, `2.5σ`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0 % 10 == 0 {
+        if self.0.is_multiple_of(10) {
             write!(f, "{}σ", self.0 / 10)
         } else {
             write!(f, "{}.{}σ", self.0 / 10, self.0 % 10)

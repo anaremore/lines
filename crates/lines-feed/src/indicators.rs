@@ -515,14 +515,14 @@ fn run(rx: Receiver<Msg>) {
             }
             Msg::Release(feed, spec, cell) => {
                 // Only a consumer that took a bars reference gives one back.
-                if let Some(id) = st.holds.remove(&(Arc::as_ptr(&cell) as usize)) {
-                    if let Some(e) = st.sources.get_mut(&id) {
-                        e.1 -= 1;
-                        if e.1 == 0 {
-                            st.sources.remove(&id);
-                        }
-                        st.graph.release(id);
+                if let Some(id) = st.holds.remove(&(Arc::as_ptr(&cell) as usize))
+                    && let Some(e) = st.sources.get_mut(&id)
+                {
+                    e.1 -= 1;
+                    if e.1 == 0 {
+                        st.sources.remove(&id);
                     }
+                    st.graph.release(id);
                 }
                 if let Some(id) = st.find(feed, &spec) {
                     if let Some(v) = st.cells.get_mut(&id) {
