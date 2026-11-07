@@ -656,13 +656,14 @@ impl Trading {
     }
 
     /// Now, as the core sees it, for time left on screen (a cooldown): the wall clock live;
-    /// in replays the pane's feed clock (the core follows market time); with a manual clock
-    /// (screenshots, tests) the newer of the feed clock and the time a script advanced to.
+    /// in replays the market time plus the silence since (`ChartStore::market_clock`, as the
+    /// core's market clock runs, also after the replay ends); with a manual clock
+    /// (screenshots, tests) the newer of the frozen feed clock and the scripted time.
     pub fn now(&self, store: &ChartStore) -> Option<lines_core::UtcMillis> {
         use std::sync::atomic::Ordering;
         match self.clock {
             Clock::Wall => Some(lines_feed::now_utc()),
-            Clock::Market => store.feed_clock(),
+            Clock::Market => store.market_clock(),
             Clock::Manual => {
                 let a = self.advanced.load(Ordering::Acquire);
                 let f = store.feed_clock().map_or(i64::MIN, |t| t.0);

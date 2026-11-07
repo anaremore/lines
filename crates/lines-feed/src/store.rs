@@ -548,6 +548,29 @@ impl ChartStore {
         }
     }
 
+    /// The market clock as the trading core's market clock runs it (replays): the newest
+    /// frame or market time plus the silence since the last update, live or not, so a
+    /// finished replay's clock keeps running like the core's. `None` before any data.
+    pub fn market_clock(&self) -> Option<UtcMillis> {
+        let last = self.last_data.load(Ordering::Acquire);
+        let quiet = if last == 0 {
+            0
+        } else {
+            mono_ms().saturating_sub(last)
+        };
+        self.market_clock_after_quiet(Duration::from_millis(quiet))
+    }
+
+    /// [`ChartStore::market_clock`] after `quiet` without data (the decision, clock injected).
+    pub fn market_clock_after_quiet(&self, quiet: Duration) -> Option<UtcMillis> {
+        let t = self
+            .frame_ms
+            .load(Ordering::Acquire)
+            .max(self.market_ms.load(Ordering::Acquire));
+        (t != i64::MIN)
+            .then(|| UtcMillis(t.saturating_add(quiet.as_millis().min(i64::MAX as u128) as i64)))
+    }
+
     /// Lock-free change detector for the UI.
     #[inline]
     pub fn revision(&self) -> u64 {
@@ -775,6 +798,38 @@ mod tests {
         // A finished replay is not live.
         store.update(|d| d.status = FeedStatus::ReplayFinished);
         assert_eq!(store.stale_after_quiet(ms(10_000)), None);
+    }
+
+    /// The core's market clock keeps running after a replay finishes; so does the store's
+    /// `market_clock` (the feed clock freezes, for deterministic pictures).
+    #[test]
+    fn market_clock_runs_on_after_the_last_data() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        let ms = Duration::from_millis;
+        assert_eq!(store.market_clock_after_quiet(ms(5)), None, "no data yet");
+        let t = UtcMillis::parse_iso("2026-11-11T15:00:00Z").unwrap();
+        store.update(|d| {
+            d.apply(&[MarketEvent::Trade {
+                time: t,
+                price: Price(600_000),
+                qty: Qty(1),
+                aggressor: None,
+            }])
+        });
+        store.update(|d| d.status = FeedStatus::ReplayFinished);
+        let base = store.market_clock_after_quiet(ms(0)).unwrap();
+        assert!(base.0 >= t.0);
+        assert_eq!(
+            store.market_clock_after_quiet(ms(300_000)),
+            Some(UtcMillis(base.0 + 300_000)),
+            "not live: still runs"
+        );
+        assert_eq!(
+            store.feed_clock(),
+            Some(base),
+            "the feed clock stays frozen"
+        );
     }
 
     /// docs/design.md §7: silence while the market is closed is not staleness.

@@ -2195,7 +2195,10 @@ impl WindowView {
             if typing && !commands::runs_while_typing(&ev.keystroke, cmd) {
                 return;
             }
-            self.run(cmd, window, cx);
+            // A held key repeats only commands that may repeat: never an order or arming.
+            if !ev.is_held || commands::repeats(cmd) {
+                self.run(cmd, window, cx);
+            }
             cx.stop_propagation();
         }
     }

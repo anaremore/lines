@@ -414,6 +414,12 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
         .map(|b| b.cmd)
 }
 
+/// Whether holding the key down repeats `cmd`. Never for arming or anything that sends or
+/// cancels orders: a held Ctrl+Alt+B must send one order, not one per key repeat.
+pub fn repeats(cmd: Command) -> bool {
+    !matches!(cmd, Command::Trade(_))
+}
+
 /// The hint shown for a command in menus and the palette: its first binding.
 pub fn hint(c: Command) -> String {
     let mac = cfg!(target_os = "macos");
@@ -694,6 +700,24 @@ mod tests {
         let mut b = Keystroke::parse("ctrl-alt-b").unwrap();
         b.key_char = Some("{".into()); // any character other than the key: text
         assert_eq!(command_for(&b), None);
+    }
+
+    /// Review round 3: key repeat must never repeat an order (or flip arming back and forth).
+    #[test]
+    fn trading_keys_never_repeat() {
+        for tc in [
+            TradeCmd::BuyMarket,
+            TradeCmd::SellMarket,
+            TradeCmd::JoinBid,
+            TradeCmd::JoinAsk,
+            TradeCmd::Reverse,
+            TradeCmd::ToggleArm,
+            TradeCmd::Flatten,
+            TradeCmd::CancelAll,
+        ] {
+            assert!(!repeats(Command::Trade(tc)), "{tc:?}");
+        }
+        assert!(repeats(Command::Menu), "navigation may repeat");
     }
 
     fn cmd(s: &str) -> Option<Command> {
