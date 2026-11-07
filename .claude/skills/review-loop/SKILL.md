@@ -15,7 +15,7 @@ Each round (at most 3):
 3. Blocking: a correctness bug with a concrete failure; a broken CLAUDE.md, `docs/invariants.md`,
    `docs/design.md` or accepted-decision rule; changed behavior with no test; data or secret rules.
    Everything else is non-blocking (fix it if it is cheap).
-4. Fix the blocking issues, rerun gate steps 1, 2 and 4 (plus 6 for UI), commit, and start
+4. Fix the blocking issues, rerun gate steps 1, 2 and 4 (plus 6 for UI, 8 for `.claude/`), commit, and start
    the next round. A blocker you dispute stays open unless the next fresh reviewer agrees.
 
 ## Proof: report per round
