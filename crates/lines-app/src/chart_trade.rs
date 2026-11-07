@@ -70,7 +70,7 @@ pub fn exit_pnl(
 }
 
 /// An order's tag, quantity always separate from the role (a bare "S2" read as a short of
-/// 2 on the DOM): `Stop 2 · 5806.50`, `Target 1 · 5820.00`, `Buy lmt 2 · 5999.50`,
+/// 2 on the DOM): `Stop 2 @ 5806.50`, `Target 1 @ 5820.00`, `Buy lmt 2 @ 5999.50`,
 /// `Sell stp 1/2 · …` (partially filled), then ` · held` for a bracket exit waiting on its
 /// entry. The P&L at its price is drawn after it, in its own tone. No allocation.
 pub fn write_order_tag(out: &mut impl Write, m: &OrderMark, fmt: &PriceFormat) -> fmt::Result {
@@ -88,7 +88,7 @@ pub fn write_order_tag(out: &mut impl Write, m: &OrderMark, fmt: &PriceFormat) -
             }
         }
     }
-    out.write_str(" · ")?;
+    out.write_str(" @ ")?;
     fmt.write(m.price, out)?;
     if m.style == MarkStyle::Held {
         out.write_str(" · held")?;
@@ -119,7 +119,7 @@ pub fn write_exit_pnl(
     Ok(crate::pnl::write_pnl(out, mode, Some(ticks), money)?.then_some(money))
 }
 
-/// The edge marker for an order off the plot, as its tag reads: `↑ Target 1 · 5820.00`, and
+/// The edge marker for an order off the plot, as its tag reads: `↑ Target 1 @ 5820.00`, and
 /// `+N` for more beyond that edge. No allocation.
 pub fn write_edge(
     out: &mut impl Write,
@@ -136,16 +136,28 @@ pub fn write_edge(
     Ok(())
 }
 
-/// An edge marker in short, for a narrow cell or both edges at once: `↑Target`, `↓Stop`,
-/// `↑Buy` (no bare quantity digit beside a role letter).
+/// An edge marker in short, for the DOM's title cell: the role in a short word and the price
+/// (`↑Tgt 5819.50`, `↓Stop 5795.00`, `↑Buy 5830.00`), no bare quantity digit beside a role.
 pub fn write_edge_short(out: &mut impl Write, m: &OrderMark, above: bool) -> fmt::Result {
     out.write_str(if above { "↑" } else { "↓" })?;
     out.write_str(match MarkRole::of(m) {
-        MarkRole::Target => "Target",
+        MarkRole::Target => "Tgt",
         MarkRole::Stop => "Stop",
         MarkRole::Entry if m.side == Side::Buy => "Buy",
         MarkRole::Entry => "Sell",
     })
+}
+
+/// [`write_edge_short`] with the order's price: `↑Tgt 5819.50`.
+pub fn write_edge_priced(
+    out: &mut impl Write,
+    m: &OrderMark,
+    above: bool,
+    fmt: &PriceFormat,
+) -> fmt::Result {
+    write_edge_short(out, m, above)?;
+    out.write_char(' ')?;
+    fmt.write(m.price, out)
 }
 
 /// The exit a position handle places at `price`: a target (limit) or a stop for the whole
@@ -210,7 +222,7 @@ use crate::trading::TradeCache;
 #[derive(Clone, Copy)]
 pub struct TagText {
     pub id: u64,
-    /// `Stop 1 · 5806.50`.
+    /// `Stop 1 @ 5806.50`.
     pub text: FixedStr<96>,
     /// The P&L at its price (`-20.0 t  -$250.00`), drawn in its tone; empty: none.
     pub pnl: FixedStr<48>,
@@ -244,6 +256,11 @@ pub struct ChartTradeState {
     pub adding: Option<AddExit>,
     /// A press on a tag's ×: cancels on release if still there.
     pub closing: Option<u64>,
+    /// A tag drag's grab offset (order price − the price under the press), so the order moves
+    /// by how far the pointer moved, never to the pointer's price (tags may sit off their line).
+    pub grab: i64,
+    /// Where a handle drag started: releasing there (a click, no drag) places nothing.
+    pub add_from: Option<Price>,
 }
 
 impl Default for ChartTradeState {
@@ -261,6 +278,8 @@ impl Default for ChartTradeState {
             drag: None,
             adding: None,
             closing: None,
+            grab: 0,
+            add_from: None,
         }
     }
 }
@@ -372,8 +391,8 @@ mod tests {
             let money = write_exit_pnl(&mut p, m, pos, 25, mpu, mode).unwrap();
             (p, money)
         };
-        assert_eq!(tag(&stop), "Stop 1 · 5805.00");
-        assert_eq!(tag(&target), "Target 1 · 5820.00");
+        assert_eq!(tag(&stop), "Stop 1 @ 5805.00");
+        assert_eq!(tag(&target), "Target 1 @ 5820.00");
         assert_eq!(pnl(&stop, PnlDisplay::Currency).0, "-$250.00");
         assert_eq!(pnl(&target, PnlDisplay::Both).0, "+40.0 t  +$500.00");
         assert!(
@@ -387,11 +406,11 @@ mod tests {
         );
         // An entry has no P&L at its price, and reads side and type.
         let entry = mark(Side::Buy, 5800.00, false, Role::Single, false);
-        assert_eq!(tag(&entry), "Buy lmt 1 · 5800.00");
+        assert_eq!(tag(&entry), "Buy lmt 1 @ 5800.00");
         assert_eq!(pnl(&entry, PnlDisplay::Currency).1, None);
         // A chart-added exit (reduce-only, plain role) reads by its kind.
         let added = mark(Side::Sell, 5805.00, true, Role::Single, true);
-        assert_eq!(tag(&added), "Stop 1 · 5805.00");
+        assert_eq!(tag(&added), "Stop 1 @ 5805.00");
     }
 
     #[test]
@@ -399,13 +418,16 @@ mod tests {
         let target = mark(Side::Sell, 5820.00, false, Role::TakeProfit, false);
         let mut s = String::new();
         write_edge(&mut s, &target, true, 1, &fmt()).unwrap();
-        assert_eq!(s, "↑ Target 1 · 5820.00");
+        assert_eq!(s, "↑ Target 1 @ 5820.00");
         s.clear();
         write_edge(&mut s, &target, false, 3, &fmt()).unwrap();
-        assert_eq!(s, "↓ Target 1 · 5820.00 +2");
+        assert_eq!(s, "↓ Target 1 @ 5820.00 +2");
         s.clear();
         write_edge_short(&mut s, &target, true).unwrap();
-        assert_eq!(s, "↑Target", "no bare digit beside a role letter");
+        assert_eq!(s, "↑Tgt", "no bare digit beside a role letter");
+        s.clear();
+        write_edge_priced(&mut s, &target, true, &fmt()).unwrap();
+        assert_eq!(s, "↑Tgt 5820.00");
     }
 
     /// Adding an exit from the position: the closing side, the whole position, reduce-only;

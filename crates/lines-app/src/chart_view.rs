@@ -1659,7 +1659,7 @@ impl ChartView {
                 let tick = self.instrument.price.tick;
                 if let Some(to) = lines_core::geometry::snap_price(&self.vp, y, tick) {
                     if let Some(d) = &mut self.ct.drag {
-                        d.to = to;
+                        d.to = Price(to.0 + self.ct.grab);
                     }
                     if let Some(a) = &mut self.ct.adding {
                         a.to = to;
@@ -1723,7 +1723,10 @@ impl ChartView {
             return;
         }
         if let Some(a) = self.ct.adding.take() {
-            self.place_exit(a, cx);
+            // A click on a handle without dragging it places nothing.
+            if self.ct.add_from.take() != Some(a.to) {
+                self.place_exit(a, cx);
+            }
             cx.notify();
             return;
         }
@@ -1759,6 +1762,9 @@ impl ChartView {
             // Moving and cancelling need no arming, as on the DOM.
             TagHit::Body(id) => {
                 if let Some(m) = self.ct.mark(id).copied() {
+                    let tick = self.instrument.price.tick;
+                    let at = lines_core::geometry::snap_price(&self.vp, y, tick);
+                    self.ct.grab = at.map_or(0, |p| m.price.0 - p.0);
                     self.ct.drag = Some(crate::dom_orders::DragOrder {
                         order: m.id,
                         to: m.price,
@@ -1780,6 +1786,7 @@ impl ChartView {
                         target: handle_is_target(qty, above),
                         to,
                     });
+                    self.ct.add_from = Some(to);
                 }
             }
             TagHit::Edge(price) => {
@@ -1843,12 +1850,6 @@ impl ChartView {
         ) else {
             return;
         };
-        let market = self.store.try_read().and_then(|d| {
-            d.last_trade.or(match (d.bid, d.ask) {
-                (Some(b), Some(k)) => Some(Price((b.0 + k.0) / 2)),
-                _ => None,
-            })
-        });
         // A chart shows no trading switch (trade panel v2): the order goes to the window, which
         // sends it only when a DOM linked to this chart, on the same account and contract, has
         // trading enabled (the same switch as any new order).
@@ -1863,7 +1864,6 @@ impl ChartView {
                 )
             })
             .unwrap_or((None, None, None));
-        let _ = market;
         match crate::chart_trade::exit_command(&account, contract, qty, a.target, a.to, inside) {
             Ok(command) => cx.emit(ChartExit {
                 command,
@@ -2318,8 +2318,19 @@ impl ChartView {
         let refused = self
             .ct
             .prepare(&t.cache, self.trade.account.as_ref(), contract);
+        let shown = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.pnl_display)
+            .unwrap_or_default()
+            .shown();
         for (p, why) in refused {
             let price = self.instrument.price.format::<32>(p);
+            // P&L off: a refusal keeps its reason, never an amount.
+            let why = if shown {
+                std::borrow::Cow::Borrowed(why.as_str())
+            } else {
+                crate::pnl::redact_amounts(&why)
+            };
             self.trade.flash(format!("{}: {why}", price.as_str()));
         }
     }

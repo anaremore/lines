@@ -474,12 +474,16 @@ impl PaperBroker {
             let Some(po) = self.orders.get(&id) else {
                 continue;
             };
-            let sibling = po.order.oco.or_else(|| {
-                self.orders
-                    .values()
-                    .find(|q| q.order.oco == Some(id))
-                    .map(|q| q.order.id)
-            });
+            let sibling = po
+                .order
+                .oco
+                .filter(|s| self.orders.contains_key(s))
+                .or_else(|| {
+                    self.orders
+                        .values()
+                        .find(|q| q.order.oco == Some(id))
+                        .map(|q| q.order.id)
+                });
             // The pair's share: what its first order was allowed (closable before it).
             let paired = sibling.and_then(|s| budgeted.iter().find(|(b, _)| *b == s).map(|b| b.1));
             let Some(po) = self.orders.get_mut(&id) else {

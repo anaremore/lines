@@ -617,6 +617,8 @@ pub struct WindowView {
     active: usize,
     theme: Theme,
     focus: FocusHandle,
+    /// This window's id: its handle must never be read while this view updates.
+    window_id: gpui::WindowId,
     /// Visible on screen (not minimised); always true without visibility tracking.
     window_visible: bool,
     window_active: bool,
@@ -665,6 +667,7 @@ impl WindowView {
             active: 0,
             theme: env.theme.get(),
             focus: cx.focus_handle(),
+            window_id: window.window_handle().window_id(),
             window_visible: true,
             window_active: true,
             screen: screen_rect(window),
@@ -777,6 +780,11 @@ impl WindowView {
         let windows = cx.global::<Workspace>().windows.clone();
         let mut doms: Vec<gpui::Entity<crate::dom_view::DomView>> = Vec::new();
         for w in &windows {
+            // This view is being updated: reading its window through the handle would panic
+            // (GPUI), so its own DOMs come from `self.tabs` below.
+            if w.window_id() == self.window_id {
+                continue;
+            }
             if let Ok(wv) = w.read(cx) {
                 doms.extend(
                     wv.tabs

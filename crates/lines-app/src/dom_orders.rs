@@ -272,7 +272,7 @@ impl OrdersLayer {
                 buf.clear();
                 let _ = std::fmt::Write::write_fmt(
                     &mut buf,
-                    format_args!("{}{}", if q > 0 { "L" } else { "S" }, q.abs()),
+                    format_args!("{}{}", if q > 0 { "▲" } else { "▼" }, q.abs()),
                 );
                 glyphs.paint_right(
                     buf.as_str(),
@@ -328,37 +328,50 @@ impl OrdersLayer {
                     row_of(bottom.price.0, units),
                     units,
                 );
-                let mut s = lines_core::FixedStr::<48>::new();
-                let mut colour = None;
-                match orders {
-                    [Some((m, n)), None] | [None, Some((m, n))] => {
-                        let above = orders[0].is_some();
-                        let _ = crate::chart_trade::write_edge(&mut s, &m, above, n, price_fmt);
-                        if glyphs.width(s.as_str(), t.text_main, true, window) + 8.0 > ow {
-                            s.clear();
-                            let _ = crate::chart_trade::write_edge_short(&mut s, &m, above);
-                        }
-                        colour = Some(mark_colour(t, &m));
-                    }
+                // The nearest of the off-screen orders (fewest rows away), as "↑Tgt 5819.50",
+                // else "↑Tgt" when the price doesn't fit; never cut.
+                let near = match orders {
                     [Some((a, _)), Some((b, _))] => {
-                        let _ = crate::chart_trade::write_edge_short(&mut s, &a, true);
-                        let _ = s.write_char(' ');
-                        let _ = crate::chart_trade::write_edge_short(&mut s, &b, false);
-                        colour = Some(t.text_main);
+                        let top_r = row_of(top.price.0, units);
+                        let bot_r = row_of(bottom.price.0, units);
+                        if row_of(a.price.0, units) - top_r <= bot_r - row_of(b.price.0, units) {
+                            Some((a, true))
+                        } else {
+                            Some((b, false))
+                        }
                     }
-                    [None, None] => {}
-                }
-                if let Some(c) = colour {
-                    let hh = crate::pane_columns::HEADER_ROW_H;
-                    let ty = oy - hh;
-                    let cell = rect(ox + 1.0, ty + 1.0, ow - 2.0, hh - 2.0);
-                    window.with_content_mask(Some(gpui::ContentMask { bounds: cell }), |window| {
-                        window.paint_quad(fill(cell, t.panel));
-                        // A quiet outline (not a focus ring) and a role-coloured bar at its left.
-                        outline(window, cell, t.axis_line, hair, false);
-                        window.paint_quad(fill(rect(ox + 1.0, ty + 1.0, 2.0, hh - 2.0), c));
-                        glyphs.paint(s.as_str(), ox + 7.0, ty, hh, t.text_main, true, window, cx);
-                    });
+                    [Some((m, _)), None] => Some((m, true)),
+                    [None, Some((m, _))] => Some((m, false)),
+                    [None, None] => None,
+                };
+                if let Some((m, above)) = near {
+                    let mut s = lines_core::FixedStr::<48>::new();
+                    let _ = crate::chart_trade::write_edge_priced(&mut s, &m, above, price_fmt);
+                    if glyphs.width(s.as_str(), t.text_main, false, window) + 8.0 > ow {
+                        s.clear();
+                        let _ = crate::chart_trade::write_edge_short(&mut s, &m, above);
+                    }
+                    if glyphs.width(s.as_str(), t.text_main, false, window) + 8.0 <= ow {
+                        let hh = crate::pane_columns::HEADER_ROW_H;
+                        let ty = oy - hh;
+                        let cell = rect(ox, ty, ow, hh);
+                        window.with_content_mask(
+                            Some(gpui::ContentMask { bounds: cell }),
+                            |window| {
+                                window.paint_quad(fill(cell, t.panel));
+                                glyphs.paint(
+                                    s.as_str(),
+                                    ox + 4.0,
+                                    ty,
+                                    hh,
+                                    mark_colour(t, &m),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        );
+                    }
                 }
             }
             if n > 0 && ow > 0.0 {

@@ -560,13 +560,16 @@ impl TradingCore {
                     spec.kind,
                     OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
                 );
+                let open = |id: Option<OrderId>, orders: &BTreeMap<OrderId, Order>| {
+                    id.and_then(|i| orders.get(&i)).is_some_and(|o| o.is_open())
+                };
                 let sibling = self
                     .orders
                     .values()
                     .find(|o| {
                         o.is_open()
                             && o.reduce_only
-                            && o.oco.is_none()
+                            && !open(o.oco, &self.orders)
                             && o.account == spec.account
                             && o.contract == spec.contract
                             && o.side == spec.side
@@ -582,6 +585,10 @@ impl TradingCore {
                     o.oco = Some(s);
                     if let Some(x) = self.orders.get_mut(&o.id) {
                         x.oco = Some(s);
+                    }
+                    // Both ways: the pair is one budget whichever side the broker looks from.
+                    if let Some(x) = self.orders.get_mut(&s) {
+                        x.oco = Some(o.id);
                     }
                 }
                 let id = o.id;

@@ -30,7 +30,7 @@ pub const CLOSE_W: f32 = 22.0;
 pub const TAG_GAP: f32 = 2.0;
 /// A handle's size (logical px).
 pub const HANDLE_W: f32 = 26.0;
-pub const HANDLE_H: f32 = 18.0;
+pub const HANDLE_H: f32 = 20.0;
 /// Space between a handle and the position tag.
 pub const HANDLE_GAP: f32 = 3.0;
 

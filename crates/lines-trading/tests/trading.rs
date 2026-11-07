@@ -1527,3 +1527,44 @@ fn place_exit_pair_survives_a_partial_fill() {
     assert_eq!(r.core.position(&acct(), es()), 0);
     assert_eq!(r.state(s), OrderState::Cancelled);
 }
+
+/// Code review round 2: cancel the stop of a chart-added pair and add a new one: the new stop
+/// pairs with the target (the link is both ways and a finished sibling doesn't hold it), so a
+/// partial target fill leaves the new stop covering what is left.
+#[test]
+fn place_exit_repairs_after_a_cancel() {
+    let exit = |side, qty, kind| {
+        Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side,
+            qty: Qty(qty),
+            kind,
+        })
+    };
+    let stop = |p| OrderKind::Stop { trigger: px(p) };
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let s = r.cmd(exit(Side::Sell, 2, stop(5995.00))).unwrap()[0];
+    let t = r.cmd(exit(Side::Sell, 2, limit(6005.00))).unwrap()[0];
+    r.wait(LAT);
+    assert_eq!(r.core.order(s).unwrap().oco, Some(t), "linked both ways");
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: s,
+    })
+    .unwrap();
+    r.wait(LAT);
+    let s2 = r.cmd(exit(Side::Sell, 2, stop(5994.00))).unwrap()[0];
+    r.wait(LAT);
+    assert_eq!(r.core.order(s2).unwrap().oco, Some(t));
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 1);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    let s2o = r.core.order(s2).unwrap();
+    assert!(s2o.is_open(), "{:?}", s2o.state);
+    assert_eq!(s2o.remaining(), Qty(1));
+}
