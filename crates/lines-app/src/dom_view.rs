@@ -898,6 +898,7 @@ impl DomView {
                 oy,
                 ROW_H,
                 hair,
+                &self.product.price,
                 window,
                 cx,
             );

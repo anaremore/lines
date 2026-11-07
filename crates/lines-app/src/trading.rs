@@ -1291,7 +1291,9 @@ impl Trading {
 /// name an instance and show in the strategy panel, decision 0025).
 fn note_for(cmd: &TradeCommand) -> Option<Note> {
     let (account, contract, price) = match cmd {
-        TradeCommand::PlaceOrder(o) => (o.account.clone(), Some(o.contract), first_price(&o.kind)),
+        TradeCommand::PlaceOrder(o) | TradeCommand::PlaceExit(o) => {
+            (o.account.clone(), Some(o.contract), first_price(&o.kind))
+        }
         TradeCommand::PlaceBracket(b) => (
             b.entry.account.clone(),
             Some(b.entry.contract),

@@ -172,6 +172,8 @@ pub struct TradingCore {
     marks: HashMap<ContractKey, Mark>,
     specs: HashMap<ContractKey, ContractSpec>,
     next_order: u64,
+    /// Set by `PlaceExit` for the order it is about to create: reduce-only at the broker.
+    next_reduce_only: bool,
     next_command: u64,
     latency: Latency,
     hud: Arc<Mutex<OrderLatency>>,
@@ -223,6 +225,7 @@ impl TradingCore {
             marks: HashMap::new(),
             specs: HashMap::new(),
             next_order: 1,
+            next_reduce_only: false,
             next_command: 1,
             latency: Latency::default(),
             hud: Arc::default(),
@@ -536,6 +539,74 @@ impl TradingCore {
                 self.send(env, now, BrokerRequest::Place(o));
                 Ok(vec![id])
             }
+            Command::PlaceExit(spec) => {
+                let pos = self.position(&spec.account, spec.contract);
+                if pos == 0 || (pos > 0) == (spec.side == Side::Buy) {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "no open position for this exit to close",
+                    ));
+                }
+                if spec.qty.0 <= 0 || spec.qty.0 > pos.abs() {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "an exit can't be larger than the position",
+                    ));
+                }
+                self.check_exit(now, &spec)?;
+                // A stop and a target for the same position: only one may fill (OCO), so the
+                // broker budgets them as one and cancels the other when one closes the position.
+                let stop = matches!(
+                    spec.kind,
+                    OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
+                );
+                // A sibling still holding the pair: open and not being cancelled (× then a quick
+                // re-add must pair the new exit, not leave it alone).
+                let cancelling = &self.cancelling;
+                let open = |id: Option<OrderId>, orders: &BTreeMap<OrderId, Order>| {
+                    id.filter(|i| !cancelling.contains(i))
+                        .and_then(|i| orders.get(&i))
+                        .is_some_and(|o| o.is_open())
+                };
+                let sibling = self
+                    .orders
+                    .values()
+                    .find(|o| {
+                        o.is_open()
+                            && !cancelling.contains(&o.id)
+                            && o.reduce_only
+                            && !open(o.oco, &self.orders)
+                            && o.account == spec.account
+                            && o.contract == spec.contract
+                            && o.side == spec.side
+                            && matches!(
+                                o.kind,
+                                OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
+                            ) != stop
+                    })
+                    .map(|o| o.id);
+                self.next_reduce_only = true;
+                let mut o = self.new_order(now, &spec, Role::Single, None);
+                if let Some(s) = sibling {
+                    o.oco = Some(s);
+                    if let Some(x) = self.orders.get_mut(&o.id) {
+                        x.oco = Some(s);
+                    }
+                    // Both ways: the pair is one budget whichever side the broker looks from.
+                    if let Some(x) = self.orders.get_mut(&s) {
+                        x.oco = Some(o.id);
+                        // The app's cache sees the pair from either side (breakeven reads it).
+                        let x = x.clone();
+                        self.events.push(Event::Order(x));
+                    }
+                    // The new exit was published before it was linked: publish it again, so the
+                    // app never holds half a pair.
+                    self.events.push(Event::Order(o.clone()));
+                }
+                let id = o.id;
+                self.send(env, now, BrokerRequest::Place(o));
+                Ok(vec![id])
+            }
             Command::PlaceBracket(b) => {
                 if !self.broker.capabilities().server_brackets {
                     return Err(Reject::new(
@@ -624,11 +695,21 @@ impl TradingCore {
                         "new quantity is not above the filled quantity",
                     ));
                 }
+                // A reduce-only order never grows: a larger exit could flip the position (a
+                // stop sell 2 on a long 2 grown to 5 leaves a short 3). Place another exit.
+                if let Some(q) = qty
+                    && q.0 > o.qty.0
+                    && o.reduce_only
+                {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "reduce-only orders can't grow; place another exit",
+                    ));
+                }
                 // More quantity is more exposure: the guardrails see the increase as an order
                 // of its own (less quantity, or a price change, always passes).
                 if let Some(q) = qty
                     && q.0 > o.qty.0
-                    && !o.reduce_only
                 {
                     self.check_guardrails(
                         now,
@@ -886,6 +967,68 @@ impl TradingCore {
         self.check_risk(now, spec, &cs)
     }
 
+    /// The checks for an exit added to the open position (`PlaceExit`, already on the closing
+    /// side and no larger than the position): the contract, tick grid and broker support, and
+    /// risk; never the entry checks (guardrails, reducing only, the contract cap), which an exit
+    /// passes by definition — the stop/target pair can only ever close the position once, so
+    /// counting the other exit as "already closing" would refuse protection exactly when it
+    /// matters. Refused when the broker can't hold OCO orders (the pair would outlive the
+    /// position there) and when prop rules halted the account.
+    fn check_exit(&mut self, now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
+        let cs = self
+            .spec(spec.contract)
+            .ok_or_else(|| Reject::new(RejectCode::UnknownContract, "unknown contract"))?;
+        if let Some(p) = spec.kind.prices().find(|p| !cs.on_tick_grid(*p)) {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                format!(
+                    "price {} is not on the {} tick grid",
+                    cs.product.price.format::<32>(p),
+                    cs.product.symbol
+                ),
+            ));
+        }
+        let caps = self.broker.capabilities();
+        if matches!(spec.kind, OrderKind::Market) && !caps.market_orders {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                "this broker has no market orders",
+            ));
+        }
+        if !caps.oco {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                format!(
+                    "{} can't hold a stop and a target as one-cancels-other",
+                    self.broker.name()
+                ),
+            ));
+        }
+        if matches!(
+            spec.kind,
+            OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
+        ) && !caps.stop_orders
+        {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                "this broker has no stop orders",
+            ));
+        }
+        let acct = &self.accounts[&spec.account];
+        if let Some(preset) = &acct.cfg.rules
+            && acct.tracker.trading_state(preset) == TradingState::Halted
+        {
+            return Err(Reject::new(
+                RejectCode::PropRule,
+                format!(
+                    "trading halted ({}); only Flatten and Cancel All",
+                    preset.name
+                ),
+            ));
+        }
+        self.check_risk(now, spec, &cs)
+    }
+
     /// The trader's guardrails (roadmap 8b) for a new order (or a quantity increase).
     fn check_guardrails(&mut self, now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
         self.roll_day(now, &spec.account);
@@ -1037,6 +1180,7 @@ impl TradingCore {
         // Flatten's orders, and anything placed while the account may only reduce, are
         // reduce-only at the broker too.
         let reduce_only = role == Role::Flatten
+            || std::mem::take(&mut self.next_reduce_only)
             || self.trading_state(&spec.account) == TradingState::ReducingOnly;
         let o = Order {
             id,
@@ -1130,8 +1274,39 @@ impl TradingCore {
             }
         }
         self.broker_events = evs;
+        for a in &touched {
+            self.cancel_stranded_exits(now, a);
+        }
         for a in touched {
             self.account_changed(now, &a);
+        }
+    }
+
+    /// Reduce-only orders left open on a contract the account is flat in can only open a
+    /// position: cancel them (the broker should already have; this is the core's own guard).
+    fn cancel_stranded_exits(&mut self, now: UtcMillis, account: &AccountId) {
+        let stranded: Vec<OrderId> = self
+            .orders
+            .values()
+            .filter(|o| {
+                &o.account == account
+                    && o.is_open()
+                    && o.reduce_only
+                    && !self.cancelling.contains(&o.id)
+                    && self.position(account, o.contract) == 0
+            })
+            .map(|o| o.id)
+            .collect();
+        for order in stranded {
+            self.submit(
+                now,
+                Source::Rule,
+                Instant::now(),
+                Command::CancelOrder {
+                    account: account.clone(),
+                    order,
+                },
+            );
         }
     }
 

@@ -769,6 +769,8 @@ struct Script {
     requests: Vec<BrokerRequest>,
     due: Vec<BrokerEvent>,
     snapshot: BrokerSnapshot,
+    /// A broker that can't hold one-cancels-other orders.
+    no_oco: bool,
 }
 
 /// A broker the test drives: it records requests and emits exactly the events pushed.
@@ -784,7 +786,7 @@ impl Broker for Scripted {
             stop_orders: true,
             modify: true,
             server_brackets: true,
-            oco: true,
+            oco: !self.0.lock().unwrap().no_oco,
             fractional_qty: false,
             external_fills: false,
         }
@@ -1429,4 +1431,415 @@ fn checklist_12_unanswered_submits_are_unresolved_after_restart() {
         "never shown as working"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Chart trading (roadmap 8): a stop or target added for an open position is reduce-only at
+/// the broker: refused without a position, on the opening side or larger than the position;
+/// once placed it shrinks with the position and is cancelled when it is flat, so it can never
+/// open a new position after the other exit closed this one.
+#[test]
+fn place_exit_is_reduce_only_and_never_outlives_the_position() {
+    let exit = |side, qty, kind| {
+        Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side,
+            qty: Qty(qty),
+            kind,
+        })
+    };
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let stop = OrderKind::Stop {
+        trigger: px(5995.00),
+    };
+    let none = r.cmd(exit(Side::Sell, 1, stop)).unwrap_err();
+    assert!(
+        none.message.contains("no open position"),
+        "{}",
+        none.message
+    );
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert!(
+        r.cmd(exit(Side::Buy, 1, limit(5990.00))).is_err(),
+        "a buy can't close a long"
+    );
+    assert!(
+        r.cmd(exit(Side::Sell, 3, stop)).is_err(),
+        "larger than the position"
+    );
+    let s = r.cmd(exit(Side::Sell, 2, stop)).unwrap()[0];
+    let t = r.cmd(exit(Side::Sell, 2, limit(6005.00))).unwrap()[0];
+    r.wait(LAT);
+    assert!(r.core.order(s).unwrap().reduce_only);
+    assert!(r.core.order(t).unwrap().reduce_only);
+    // Code review: the two whole-position exits are one OCO pair, budgeted once.
+    assert_eq!(r.core.order(t).unwrap().oco, Some(s));
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 2);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(t), OrderState::Filled);
+    assert_eq!(r.state(s), OrderState::Cancelled);
+}
+
+/// Code review round 1: a stop and a target added for a 2-lot position are an OCO pair, so a
+/// partial fill of one leaves both covering what is left (never an unprotected contract), and
+/// the position flat cancels the survivor.
+#[test]
+fn place_exit_pair_survives_a_partial_fill() {
+    let exit = |side, qty, kind| {
+        Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side,
+            qty: Qty(qty),
+            kind,
+        })
+    };
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let t = r.cmd(exit(Side::Sell, 2, limit(6005.00))).unwrap()[0];
+    let s = r
+        .cmd(exit(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5995.00),
+            },
+        ))
+        .unwrap()[0];
+    r.wait(LAT);
+    // One lot of the target fills: position 1; the stop still protects it.
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 1);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    let stop = r.core.order(s).unwrap();
+    assert!(stop.is_open(), "the stop survives: {:?}", stop.state);
+    assert_eq!(stop.remaining(), Qty(1), "and covers the one lot left");
+    assert!(r.core.order(t).unwrap().is_open());
+    // The rest of the target fills: flat; the stop is cancelled.
+    r.trade(6005.25, 5);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(s), OrderState::Cancelled);
+}
+
+/// Code review round 2: cancel the stop of a chart-added pair and add a new one: the new stop
+/// pairs with the target (the link is both ways and a finished sibling doesn't hold it), so a
+/// partial target fill leaves the new stop covering what is left.
+#[test]
+fn place_exit_repairs_after_a_cancel() {
+    let exit = |side, qty, kind| {
+        Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side,
+            qty: Qty(qty),
+            kind,
+        })
+    };
+    let stop = |p| OrderKind::Stop { trigger: px(p) };
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let s = r.cmd(exit(Side::Sell, 2, stop(5995.00))).unwrap()[0];
+    let t = r.cmd(exit(Side::Sell, 2, limit(6005.00))).unwrap()[0];
+    r.wait(LAT);
+    assert_eq!(r.core.order(s).unwrap().oco, Some(t), "linked both ways");
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: s,
+    })
+    .unwrap();
+    r.wait(LAT);
+    let s2 = r.cmd(exit(Side::Sell, 2, stop(5994.00))).unwrap()[0];
+    r.wait(LAT);
+    assert_eq!(r.core.order(s2).unwrap().oco, Some(t));
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 1);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    let s2o = r.core.order(s2).unwrap();
+    assert!(s2o.is_open(), "{:?}", s2o.state);
+    assert_eq!(s2o.remaining(), Qty(1));
+}
+
+fn place_exit_cmd(side: Side, qty: i64, kind: OrderKind) -> Command {
+    Command::PlaceExit(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side,
+        qty: Qty(qty),
+        kind,
+    })
+}
+
+/// Review round 3: a chart exit is never refused as an entry. While the account may only
+/// reduce (a prop breach), both the target and the stop of the position go in, though the
+/// first already "closes" the whole position: only one of the pair can ever fill.
+#[test]
+fn place_exit_protects_while_reducing_only() {
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    r.wait(LAT);
+    r.book(&[(5998.75, 50)], &[(5999.00, 50)]);
+    r.trade(5998.75, 1);
+    assert_eq!(r.core.trading_state(&acct()), TradingState::ReducingOnly);
+    let t = r.cmd(place_exit_cmd(Side::Sell, 3, limit(6010.00)));
+    assert!(t.is_ok(), "{t:?}");
+    let s = r.cmd(place_exit_cmd(
+        Side::Sell,
+        3,
+        OrderKind::Stop {
+            trigger: px(5990.00),
+        },
+    ));
+    assert!(s.is_ok(), "the stop is protection, not an entry: {s:?}");
+}
+
+/// Review round 3: on a broker that can't hold one-cancels-other orders, a chart exit is
+/// refused (the stop would outlive a filled target and could open a position there).
+#[test]
+fn place_exit_needs_a_broker_with_oco() {
+    let (mut r, s) = scripted();
+    let id = working(&mut r, &s, 2);
+    let t = at(&r);
+    r.deliver(&s, vec![fill(id, "f1", 6000.00, 2, t)]);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    s.lock().unwrap().no_oco = true;
+    let e = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: limit(6010.00),
+        }))
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Broker, "{}", e.message);
+}
+
+/// Focused review: an exit sent while the position is open but arriving after it closed
+/// (the target filled during the stop's latency) never opens a position: the broker cancels it
+/// on arrival, and a trade through its trigger leaves the account flat.
+#[test]
+fn place_exit_arriving_after_flat_never_opens_a_position() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let t = r
+        .cmd(place_exit_cmd(Side::Sell, 2, limit(6005.00)))
+        .unwrap()[0];
+    r.wait(LAT);
+    // The stop is sent; before it reaches the broker, the target fills: flat.
+    let s = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5995.00),
+            },
+        ))
+        .unwrap()[0];
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 5);
+    assert_eq!(r.state(t), OrderState::Filled);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    // A trade through the stop's trigger: nothing fills, nothing opens.
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 5);
+    r.wait(LAT);
+    assert_eq!(r.state(s), OrderState::Cancelled);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        0,
+        "the exit never opened a short"
+    );
+}
+
+/// Focused review: a guardrail lockout (daily loss) blocks entries, never the position's
+/// protection: both exits go in while locked.
+#[test]
+fn place_exit_protects_during_a_guardrail_lockout() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: lines_trading::Guardrails {
+            max_daily_loss: Some(50),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    // Down a point on 2 ES: -$100 + fees, past the $50 guardrail: locked.
+    r.book(&[(5999.00, 50)], &[(5999.25, 50)]);
+    r.trade(5999.00, 1);
+    r.wait(LAT);
+    let entry = r.cmd(spec(Side::Buy, 1, limit(5990.00))).unwrap_err();
+    assert_eq!(
+        entry.code,
+        RejectCode::Guardrail,
+        "entries are locked out: {}",
+        entry.message
+    );
+    assert!(r.cmd(place_exit_cmd(Side::Sell, 2, limit(6010.00))).is_ok());
+    let s = r.cmd(place_exit_cmd(
+        Side::Sell,
+        2,
+        OrderKind::Stop {
+            trigger: px(5990.00),
+        },
+    ));
+    assert!(s.is_ok(), "the stop is protection, not an entry: {s:?}");
+}
+
+/// Focused review: a halted account (prop drawdown) refuses even a protective exit; Flatten is
+/// the way out there (deliberate, `check_exit`).
+#[test]
+fn place_exit_refused_while_halted() {
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    r.wait(LAT);
+    r.book(&[(5997.00, 50)], &[(5997.25, 50)]);
+    r.trade(5997.00, 1);
+    assert_eq!(r.core.trading_state(&acct()), TradingState::Halted);
+    let e = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            3,
+            OrderKind::Stop {
+                trigger: px(5990.00),
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::PropRule, "{}", e.message);
+}
+
+/// Focused review: a reduce-only order never grows (a stop sell 2 on a long 2 grown to 5
+/// would leave a short 3 when it triggers): the core refuses the increase.
+#[test]
+fn reduce_only_orders_cant_grow() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let s = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5990.00),
+            },
+        ))
+        .unwrap()[0];
+    r.wait(LAT);
+    let e = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order: s,
+            qty: Some(Qty(5)),
+            price: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Invalid);
+    assert!(e.message.contains("can't grow"), "{}", e.message);
+    // Smaller, or a price change, is fine.
+    assert!(
+        r.cmd(Command::ModifyOrder {
+            account: acct(),
+            order: s,
+            qty: None,
+            price: Some(px(5991.00)),
+        })
+        .is_ok()
+    );
+}
+
+/// Focused review: the target partially fills while the stop is on its way: the stop arrives
+/// at the broker shrunk to what is left (1), never the 2 it was sent for.
+#[test]
+fn place_exit_shrinks_when_the_sibling_partly_filled_meanwhile() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    r.cmd(place_exit_cmd(Side::Sell, 2, limit(6005.00)))
+        .unwrap();
+    r.wait(LAT);
+    let s = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5995.00),
+            },
+        ))
+        .unwrap()[0];
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 1); // one lot of the target fills before the stop arrives
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    let so = r.core.order(s).unwrap();
+    assert!(so.is_open(), "{:?}", so.state);
+    assert_eq!(so.remaining(), Qty(1));
+}
+
+/// Focused review: the core's own guard: a broker that leaves a reduce-only order working on a
+/// flat contract gets a Cancel from the core.
+#[test]
+fn core_cancels_reduce_only_orders_left_on_a_flat_contract() {
+    let (mut r, s) = scripted();
+    let id = working(&mut r, &s, 2);
+    let t = at(&r);
+    r.deliver(&s, vec![fill(id, "f1", 6000.00, 2, t)]);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    let exit = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5990.00),
+            },
+        ))
+        .unwrap()[0];
+    let t = at(&r);
+    r.deliver(
+        &s,
+        vec![
+            BrokerEvent::Acked { id: exit, at: t },
+            BrokerEvent::Working { id: exit, at: t },
+        ],
+    );
+    // The position closes elsewhere; the broker leaves the exit working.
+    let close = r.place(Side::Sell, 2, limit(6001.00));
+    let t = at(&r);
+    r.deliver(
+        &s,
+        vec![
+            BrokerEvent::Acked { id: close, at: t },
+            BrokerEvent::Working { id: close, at: t },
+            fill(close, "f2", 6001.00, 2, t),
+        ],
+    );
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    let sent_cancel = s
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .any(|q| matches!(q, BrokerRequest::Cancel { id } if *id == exit));
+    assert!(sent_cancel, "the core cancels the stranded exit");
 }

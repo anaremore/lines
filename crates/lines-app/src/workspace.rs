@@ -617,6 +617,8 @@ pub struct WindowView {
     active: usize,
     theme: Theme,
     focus: FocusHandle,
+    /// This window's id: its handle must never be read while this view updates.
+    window_id: gpui::WindowId,
     /// Visible on screen (not minimised); always true without visibility tracking.
     window_visible: bool,
     window_active: bool,
@@ -665,6 +667,7 @@ impl WindowView {
             active: 0,
             theme: env.theme.get(),
             focus: cx.focus_handle(),
+            window_id: window.window_handle().window_id(),
             window_visible: true,
             window_active: true,
             screen: screen_rect(window),
@@ -763,6 +766,75 @@ impl WindowView {
         }
     }
 
+    /// A chart's exit from a position handle: sent only when a DOM linked to that chart, on the
+    /// same account and contract, has trading enabled (a chart shows no switch of its own).
+    fn chart_exit(
+        &mut self,
+        _id: PaneId,
+        chart: gpui::Entity<crate::chart_view::ChartView>,
+        ev: &crate::chart_view::ChartExit,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::trade_bar::TradePane;
+        // Link groups span every window (decision 0016): look at the DOMs in all of them.
+        let windows = cx.global::<Workspace>().windows.clone();
+        let mut doms: Vec<gpui::Entity<crate::dom_view::DomView>> = Vec::new();
+        for w in &windows {
+            // This view is being updated: reading its window through the handle would panic
+            // (GPUI), so its own DOMs come from `self.tabs` below.
+            if w.window_id() == self.window_id {
+                continue;
+            }
+            if let Ok(wv) = w.read(cx) {
+                doms.extend(
+                    wv.tabs
+                        .iter()
+                        .flat_map(|t| t.handles())
+                        .filter_map(|h| match h {
+                            PaneHandle::Dom(d) => Some(d.clone()),
+                            _ => None,
+                        }),
+                );
+            }
+        }
+        // This window is being updated (it is not readable through its handle): its own DOMs.
+        doms.extend(
+            self.tabs
+                .iter()
+                .flat_map(|t| t.handles())
+                .filter_map(|h| match h {
+                    PaneHandle::Dom(d) => Some(d.clone()),
+                    _ => None,
+                }),
+        );
+        let mut seen = Vec::with_capacity(doms.len());
+        for d in doms {
+            let l = PaneHandle::Dom(d.clone()).link(cx);
+            let v = d.read(cx);
+            let p = v.trade_ref();
+            seen.push((
+                l,
+                p.account.clone(),
+                crate::trade_bar::contract_of(v.trade_store()),
+                p.arming.is_armed(),
+            ));
+        }
+        let ok = crate::chart_trade::linked_dom_enabled(
+            ev.link,
+            &ev.account,
+            ev.contract,
+            seen.iter().map(|(l, a, k, on)| (*l, a.as_ref(), *k, *on)),
+        );
+        match crate::trading::Trading::try_global(cx) {
+            Some(t) if ok => {
+                t.submit(lines_trading::Source::Chart, ev.issued, ev.command.clone());
+            }
+            _ => chart.update(cx, |c, cx| {
+                c.exit_refused(crate::chart_trade::ENABLE_TO_ADD, cx)
+            }),
+        }
+    }
+
     fn subscribe(
         &self,
         id: PaneId,
@@ -781,6 +853,12 @@ impl WindowView {
                 cx.subscribe(e, move |_, _, ev: &CrosshairTime, cx| {
                     forward_crosshair(id, *ev, cx)
                 }),
+                cx.subscribe(
+                    e,
+                    move |this, chart, ev: &crate::chart_view::ChartExit, cx| {
+                        this.chart_exit(id, chart, ev, cx)
+                    },
+                ),
             ],
             PaneHandle::Dom(e) => vec![
                 cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {

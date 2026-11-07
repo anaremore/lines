@@ -163,12 +163,18 @@ impl OrdersLayer {
         oy: f32,
         row_h: f32,
         hair: f32,
+        price_fmt: &lines_core::PriceFormat,
         window: &mut Window,
         cx: &mut App,
     ) {
         let rect =
             |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
         let side_colour = |s: Side| if s == Side::Buy { t.up } else { t.down };
+        let mark_colour = |t: &Theme, m: &OrderMark| match MarkRole::of(m) {
+            MarkRole::Entry => side_colour(m.side),
+            MarkRole::Target => t.order_target,
+            MarkRole::Stop => t.order_stop,
+        };
         let pos_row = self.position.map(|(_, avg)| position_row(avg, tick, units));
         let mut buf = lines_core::FixedStr::<24>::new();
         for (i, r) in rows.iter().enumerate() {
@@ -266,7 +272,7 @@ impl OrdersLayer {
                 buf.clear();
                 let _ = std::fmt::Write::write_fmt(
                     &mut buf,
-                    format_args!("{}{}", if q > 0 { "L" } else { "S" }, q.abs()),
+                    format_args!("{}{}", if q > 0 { "▲" } else { "▼" }, q.abs()),
                 );
                 glyphs.paint_right(
                     buf.as_str(),
@@ -312,6 +318,62 @@ impl OrdersLayer {
                 units,
             );
             let n = edges[0].n + edges[1].n;
+            // Orders off the visible rows (the owner's case: a target nobody could see): the
+            // title cell names the nearest one ("↑ T1 5820.00"), or both edges in short
+            // ("↑T1 ↓S1"); refusals, brief and urgent, take the cell first.
+            if n == 0 && ow > 0.0 {
+                let orders = crate::dom_trade::offscreen_orders(
+                    &self.marks,
+                    row_of(top.price.0, units),
+                    row_of(bottom.price.0, units),
+                    units,
+                );
+                // The nearest of the off-screen orders (fewest rows away), as "↑Tgt 5819.50",
+                // else "↑Tgt" when the price doesn't fit; never cut.
+                let near = match orders {
+                    [Some((a, _)), Some((b, _))] => {
+                        let top_r = row_of(top.price.0, units);
+                        let bot_r = row_of(bottom.price.0, units);
+                        if row_of(a.price.0, units) - top_r <= bot_r - row_of(b.price.0, units) {
+                            Some((a, true))
+                        } else {
+                            Some((b, false))
+                        }
+                    }
+                    [Some((m, _)), None] => Some((m, true)),
+                    [None, Some((m, _))] => Some((m, false)),
+                    [None, None] => None,
+                };
+                if let Some((m, above)) = near {
+                    let mut s = lines_core::FixedStr::<48>::new();
+                    let _ = crate::chart_trade::write_edge_priced(&mut s, &m, above, price_fmt);
+                    if glyphs.width(s.as_str(), t.text_main, false, window) + 8.0 > ow {
+                        s.clear();
+                        let _ = crate::chart_trade::write_edge_short(&mut s, &m, above);
+                    }
+                    if glyphs.width(s.as_str(), t.text_main, false, window) + 8.0 <= ow {
+                        let hh = crate::pane_columns::HEADER_ROW_H;
+                        let ty = oy - hh;
+                        let cell = rect(ox, ty, ow, hh);
+                        window.with_content_mask(
+                            Some(gpui::ContentMask { bounds: cell }),
+                            |window| {
+                                window.paint_quad(fill(cell, t.panel));
+                                glyphs.paint(
+                                    s.as_str(),
+                                    ox + 4.0,
+                                    ty,
+                                    hh,
+                                    mark_colour(t, &m),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        );
+                    }
+                }
+            }
             if n > 0 && ow > 0.0 {
                 let mut s = lines_core::FixedStr::<32>::new();
                 let _ = write!(s, "{n} hidden");

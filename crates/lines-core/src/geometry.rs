@@ -11,6 +11,8 @@
 //! ([`snap_center`]); a line drawn there covers `[x - ½, x + ½)` device px. Candle bodies are
 //! an odd number of device pixels wide so the wick runs exactly through the middle.
 
+pub mod order_tags;
+
 use crate::bars::Bar;
 use crate::price::{DisplayStyle, Price, PriceFormat};
 use crate::qty::QtyFormat;

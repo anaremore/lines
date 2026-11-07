@@ -5,6 +5,7 @@
 mod bench;
 mod brackets;
 mod chart_draw;
+mod chart_trade;
 mod chart_view;
 mod commands;
 #[cfg(feature = "screenshot")]

@@ -372,7 +372,7 @@ impl TradingCore {
             _ => None,
         };
         let contract = match cmd {
-            Command::PlaceOrder(s) => Some(s.contract),
+            Command::PlaceOrder(s) | Command::PlaceExit(s) => Some(s.contract),
             Command::PlaceBracket(b) => Some(b.entry.contract),
             Command::ModifyOrder { order, .. } | Command::CancelOrder { order, .. } => {
                 self.orders.get(order).map(|o| o.contract)
@@ -610,7 +610,9 @@ impl TradingCore {
         // Only what it created: new orders (bracket exits with their entry) and its Flatten's
         // own orders, never the orders a Cancel All or Flatten cancelled.
         let ids: Vec<OrderId> = match cmd {
-            Command::PlaceOrder(_) | Command::PlaceBracket(_) => ids.to_vec(),
+            Command::PlaceOrder(_) | Command::PlaceExit(_) | Command::PlaceBracket(_) => {
+                ids.to_vec()
+            }
             Command::Flatten { .. } => ids
                 .iter()
                 .copied()
