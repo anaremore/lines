@@ -17,6 +17,7 @@
 //!   plus `L n` / `S n` in the orders column;
 //! - a **rejection** is a warning bar across its row with the reason, for a few seconds.
 
+use std::fmt::Write as _;
 use std::time::Instant;
 
 use gpui::{App, Bounds, Hsla, Pixels, Window, fill, point, px, size};
@@ -36,6 +37,8 @@ use crate::trading::TradeCache;
 #[derive(Clone, Copy, Debug)]
 struct RowFlash {
     price: Price,
+    /// DENIED / REJECTED.
+    label: &'static str,
     start: usize,
     mid: usize,
     end: usize,
@@ -118,6 +121,7 @@ impl OrdersLayer {
                 self.text.push_str(short);
                 self.flashes.push(RowFlash {
                     price,
+                    label: f.kind.label(),
                     start,
                     mid,
                     end: self.text.len(),
@@ -294,6 +298,35 @@ impl OrdersLayer {
         let Some((ox, ow)) = orders else {
             return;
         };
+        // Refused prices off the visible rows: counted in the orders column's title cell
+        // ("2 hidden"), never in a price row (it would read as a refusal at that row's price),
+        // never a bare number beside "Ord" (it would read as an order count), never over the
+        // title; when the words don't fit, nothing (the panel's status line counts them).
+        if let (Some(top), Some(bottom)) = (rows.first(), rows.last()) {
+            let edges = crate::dom_trade::offscreen_refusals(
+                self.flashes.iter().map(|f| (f.price, f.label)),
+                row_of(top.price.0, units),
+                row_of(bottom.price.0, units),
+                units,
+            );
+            let n = edges[0].n + edges[1].n;
+            if n > 0 && ow > 0.0 {
+                let mut s = lines_core::FixedStr::<32>::new();
+                let _ = write!(s, "{n} hidden");
+                let room = ow - glyphs.width("Ord", t.text_dim, false, window) - 16.0;
+                let w = glyphs.width(s.as_str(), t.text_main, true, window) + 6.0;
+                if w + 2.0 <= room {
+                    let hh = crate::pane_columns::HEADER_ROW_H;
+                    let ty = oy - hh;
+                    let pill = rect(ox + 4.0, ty + 1.0, w, hh - 2.0);
+                    window.with_content_mask(Some(gpui::ContentMask { bounds: pill }), |window| {
+                        window.paint_quad(fill(pill, t.panel));
+                        outline(window, pill, t.warn, hair, false);
+                        glyphs.paint(s.as_str(), ox + 7.0, ty, hh, t.text_main, true, window, cx);
+                    });
+                }
+            }
+        }
         for f in &self.flashes {
             let row = row_of(f.price.0, units);
             let Some(i) = rows.iter().position(|r| row_of(r.price.0, units) == row) else {

@@ -977,14 +977,73 @@ pub fn guard_line(
     Some(out)
 }
 
-/// The panel's refusal line: the newest (label, text), with `×N` when there were N refusals
-/// in the last few seconds (like the footer's notices), so a burst never stacks rows.
+/// The panel's refusal line: the newest (label, text), led by the ladder tag's own word when
+/// the message doesn't already say it (`5806.75: far · price is 400 ticks from the market`),
+/// with `+N more` for the others still shown, so a burst never stacks rows and the header
+/// and the ladder read the same.
 pub fn flash_line(flashes: &[(&'static str, String)]) -> Option<(&'static str, String)> {
     let (label, text) = flashes.last()?;
-    Some(match flashes.len() {
-        1 => (*label, text.clone()),
-        n => (*label, format!("{text} ×{n}")),
-    })
+    let (price, message) = match text.split_once(": ") {
+        Some((p, m))
+            if p.bytes()
+                .all(|b| b.is_ascii_digit() || b == b'.' || b == b'\'' || b == b'-') =>
+        {
+            (Some(p), m)
+        }
+        _ => (None, text.as_str()),
+    };
+    let short = dom_trade::short_reason(message);
+    let mut out = String::with_capacity(text.len() + 24);
+    if let Some(p) = price {
+        let _ = write!(out, "{p}: ");
+    }
+    if !short.is_empty() && !message.to_lowercase().contains(&short.to_lowercase()) {
+        let _ = write!(out, "{short} · ");
+    }
+    out.push_str(message);
+    if flashes.len() > 1 {
+        let _ = write!(out, "  +{} more", flashes.len() - 1);
+    }
+    Some((*label, out))
+}
+
+/// A status text split into the items it is laid out as, each shown whole or not at all (no
+/// number is ever cut): at " · " and before "+N more".
+pub fn status_parts(text: &str) -> impl Iterator<Item = &str> {
+    text.split(" · ")
+        .flat_map(|p| p.split("  "))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+}
+
+/// `text` as whole items in a row of fixed height: an item that doesn't fit wraps into the
+/// hidden overflow instead of being cut (a limit, minutes left, a price).
+fn whole_items(text: &str, color: gpui::Hsla, bold: bool) -> gpui::Div {
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap_x_1()
+        .min_w_0()
+        .h(px(STATUS_H))
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap();
+    let n = status_parts(text).count();
+    for (i, part) in status_parts(text).enumerate() {
+        let mut item = div().flex_shrink_0().text_color(color);
+        if bold {
+            item = item.font_weight(FontWeight::BOLD);
+        }
+        // The separator stays with the item before it, so a dropped item takes its own.
+        let s = if i + 1 < n && !part.starts_with('+') {
+            format!("{part} ·")
+        } else {
+            part.to_owned()
+        };
+        row = row.child(item.child(s));
+    }
+    row
 }
 
 /// An average price: exact on the tick grid, else one more decimal than the product shows.
@@ -1389,7 +1448,7 @@ pub fn dom_bar<V: TradePane>(
                             .font_weight(FontWeight::BOLD)
                             .child(label),
                     )
-                    .child(div().min_w_0().truncate().text_color(t.text_main).child(f)),
+                    .child(whole_items(&f, t.text_main, false)),
             ),
             (None, Some((_, g)), _) => status.child(lock_strip(
                 g,
@@ -1495,14 +1554,7 @@ fn lock_strip(text: &str, after: &str, narrow: bool, t: &Theme) -> gpui::Div {
         .rounded_sm()
         .border_1()
         .border_color(t.warn)
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .font_weight(FontWeight::BOLD)
-                .text_color(t.text_main)
-                .child(text.to_owned()),
-        )
+        .child(whole_items(text, t.text_main, true))
         .when(!narrow, |d| {
             d.child(
                 div()
@@ -3155,13 +3207,43 @@ mod tests {
         assert_eq!(flash_line(&[]), None);
         let three = vec![
             ("REJECTED", "6000.00: ES market is closed".to_owned()),
-            ("REJECTED", "6004.00: bracket entry rejected".to_owned()),
-            ("REJECTED", "5998.00: bracket entry rejected".to_owned()),
+            (
+                "REJECTED",
+                "6004.00: bracket entry not placed: ES market is closed".to_owned(),
+            ),
+            (
+                "REJECTED",
+                "5998.00: bracket entry not placed: ES market is closed".to_owned(),
+            ),
         ];
+        // The newest, its price, and how many more; "rejected" only in the label; the ladder's
+        // word ("closed") isn't repeated when the message says it.
+        let (label, text) = flash_line(&three).unwrap();
+        assert_eq!(label, "REJECTED");
         assert_eq!(
-            flash_line(&three),
-            Some(("REJECTED", "5998.00: bracket entry rejected ×3".to_owned()))
+            text,
+            "5998.00: bracket entry not placed: ES market is closed  +2 more"
         );
+        assert!(!text.to_lowercase().contains("rejected"));
+        // A message that doesn't say the ladder's word gets it first.
+        let far = [(
+            "DENIED",
+            "6100.00: price is 400 ticks from the market".to_owned(),
+        )];
+        assert_eq!(
+            flash_line(&far).unwrap().1,
+            "6100.00: far · price is 400 ticks from the market"
+        );
+    }
+
+    /// Review round 3: a narrow panel cut the lockout mid-number ("limit of 10" for 1,000,
+    /// "· 1" for 12 min left). Status text is laid out as whole items instead.
+    #[test]
+    fn status_text_splits_into_whole_items() {
+        let parts: Vec<&str> = status_parts("Cooldown · 3 losses in a row · 12 min left").collect();
+        assert_eq!(parts, ["Cooldown", "3 losses in a row", "12 min left"]);
+        let parts: Vec<&str> = status_parts("5830.00: ES market is closed  +2 more").collect();
+        assert_eq!(parts, ["5830.00: ES market is closed", "+2 more"]);
     }
 
     /// The switch reads Enabled / Disabled in words; when orders would be denied anyway it

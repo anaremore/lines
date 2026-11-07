@@ -593,6 +593,49 @@ pub fn short_reason(message: &str) -> &str {
     &word[..end]
 }
 
+/// Refusals at one edge of the ladder, off its visible rows.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct EdgeRefusals {
+    pub n: usize,
+    /// "denied" or "rejected" when they are all one kind, else "refused".
+    pub word: &'static str,
+}
+
+/// Refused prices above the top row and below the bottom row (rows as `price / units`
+/// floored), each with its word: `[above, below]`. Warnings are not refusals. Pure and
+/// allocation-free.
+pub fn offscreen_refusals(
+    flashes: impl Iterator<Item = (Price, &'static str)>,
+    top_row: i64,
+    bottom_row: i64,
+    units: i64,
+) -> [EdgeRefusals; 2] {
+    let mut out = [EdgeRefusals::default(); 2];
+    for (price, label) in flashes {
+        let row = price.0.div_euclid(units.max(1));
+        let k = if row > top_row {
+            0
+        } else if row < bottom_row {
+            1
+        } else {
+            continue;
+        };
+        let word = match label {
+            "DENIED" => "denied",
+            "REJECTED" => "rejected",
+            _ => continue,
+        };
+        let e = &mut out[k];
+        e.word = if e.n == 0 || e.word == word {
+            word
+        } else {
+            "refused"
+        };
+        e.n += 1;
+    }
+    out
+}
+
 // ---- rule strip --------------------------------------------------------------------------
 
 /// How close an account is to a prop rule's limit.
@@ -663,6 +706,54 @@ mod tests {
             TradeCommand::PlaceBracket(b) => &b.entry,
             other => panic!("not an order: {other:?}"),
         }
+    }
+
+    /// The ladder accounts for every refusal the header counts: ones off the visible rows are
+    /// counted (and warnings are not refusals).
+    #[test]
+    fn offscreen_refusals_are_counted_at_their_edge() {
+        let at = |row: i64| Price(row * 25);
+        let none = offscreen_refusals(
+            [(at(10), "DENIED"), (at(6), "REJECTED")].into_iter(),
+            10,
+            6,
+            25,
+        );
+        assert_eq!(
+            none,
+            [EdgeRefusals::default(); 2],
+            "on screen: tagged on their rows"
+        );
+        let e = offscreen_refusals(
+            [
+                (at(12), "DENIED"),
+                (at(11), "DENIED"),
+                (at(5), "REJECTED"),
+                (at(2), "DENIED"),
+                (at(1), "WARNING"),
+            ]
+            .into_iter(),
+            10,
+            6,
+            25,
+        );
+        assert_eq!(
+            e[0],
+            EdgeRefusals {
+                n: 2,
+                word: "denied"
+            }
+        );
+        assert_eq!(
+            e[1],
+            EdgeRefusals {
+                n: 2,
+                word: "refused"
+            },
+            "mixed kinds; no warning"
+        );
+        let g = offscreen_refusals([(Price(6 * 50 + 25), "REJECTED")].into_iter(), 10, 6, 50);
+        assert_eq!(g[1].n, 0, "inside the bottom grouped row");
     }
 
     #[test]
@@ -1202,7 +1293,7 @@ mod tests {
     fn row_tags_are_short() {
         // The owner's case: a bracket on a closed market.
         assert_eq!(
-            short_reason("bracket entry rejected: ES market is closed"),
+            short_reason("bracket entry not placed: ES market is closed"),
             "closed"
         );
         assert_eq!(
@@ -1222,7 +1313,7 @@ mod tests {
         assert_eq!(short_reason("insufficient margin"), "insuffici");
         assert_eq!(short_reason(""), "");
         for m in [
-            "bracket entry rejected: ES market is closed",
+            "bracket entry not placed: ES market is closed",
             "insufficient margin for this order at this time",
         ] {
             assert!(short_reason(m).chars().count() <= 9, "{m}");

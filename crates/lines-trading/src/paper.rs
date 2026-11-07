@@ -240,7 +240,7 @@ impl PaperBroker {
                 if let Err(e) = self.validate(&entry, now) {
                     self.reject(entry_id, e.clone(), now);
                     for x in exits {
-                        self.reject(x.id, format!("bracket entry rejected: {e}"), now);
+                        self.reject(x.id, format!("bracket entry not placed: {e}"), now);
                     }
                     return;
                 }

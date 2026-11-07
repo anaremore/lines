@@ -402,7 +402,7 @@ impl GuardrailTracker {
                 self.lock = Some(Lockout {
                     state: GuardState::Cooldown,
                     reason: match ls.losses {
-                        1 => "a losing trade".to_owned(),
+                        1 => "1 loss in a row".to_owned(),
                         n => format!("{n} losses in a row"),
                     },
                     until: UtcMillis(now.0 + ls.cooldown_min as i64 * 60_000),

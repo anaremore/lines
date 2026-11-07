@@ -819,13 +819,15 @@ impl DomView {
                     );
                 }
             }
-            // Price: the last trade's row is tagged like the chart's last-price tag.
+            // Price: the last trade's row is tagged like the chart's last-price tag. Only the last trade's row is emphasized (one last-price
+            // treatment, as on the chart); the inside market is marked in the bid and ask
+            // columns.
             if let Some((x, cw)) = price {
                 let (pfg, bold) = if r.last {
                     window.paint_quad(fill(rect(x, y, cw, ROW_H), t.last));
                     (t.on_last, true)
                 } else {
-                    (t.text_main, r.best_bid || r.best_ask)
+                    (t.text_main, false)
                 };
                 s.clear();
                 let _ = fmt.write(r.price, &mut s);
