@@ -333,7 +333,8 @@ const TIME_STEPS: [i64; 26] = [
 /// What a time gridline's label shows.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TimeLabel {
-    /// `HH:MM`: same day as the line before it.
+    /// `HH:MM`: same day as the line before it (`HH:MM:SS` off a whole minute: steps under a
+    /// minute, seconds bars and fast tick bars).
     Time,
     /// `MM-DD`: the first line of a new day, on midnight (or every line of a step of a day
     /// or more).
@@ -345,8 +346,11 @@ pub enum TimeLabel {
 impl TimeLabel {
     /// Write the label for `t` (UTC, as the axis), without allocating.
     pub fn write<W: std::fmt::Write>(self, t: UtcMillis, out: &mut W) -> std::fmt::Result {
-        let (_, mo, d, h, mi, _) = t.to_civil();
+        let (_, mo, d, h, mi, sec) = t.to_civil();
         match self {
+            TimeLabel::Time if t.0.rem_euclid(MIN) != 0 => {
+                write!(out, "{h:02}:{mi:02}:{sec:02}")
+            }
             TimeLabel::Time => write!(out, "{h:02}:{mi:02}"),
             TimeLabel::Date => write!(out, "{mo:02}-{d:02}"),
             TimeLabel::DateTime => write!(out, "{mo:02}-{d:02} {h:02}:{mi:02}"),
@@ -359,7 +363,9 @@ impl TimeLabel {
 pub fn time_step(vp: &Viewport, period_ms: i64, min_px: f64) -> i64 {
     let period = period_ms.max(1);
     let px_per_ms = vp.bar_px / period as f64;
-    let fits = |ms: i64| ms as f64 * px_per_ms >= min_px;
+    // Under a minute, labels carry seconds (`HH:MM:SS`): they need about half as much room
+    // again.
+    let fits = |ms: i64| ms as f64 * px_per_ms >= if ms < MIN { min_px * 1.5 } else { min_px };
     if let Some(s) = TIME_STEPS
         .iter()
         .copied()
@@ -871,6 +877,29 @@ mod tests {
         // Beyond the table: whole weeks, doubling.
         vp.bar_px = 1.0;
         assert_eq!(time_step(&vp, DAY, 56.0), 8 * WEEK);
+    }
+
+    /// Seconds bars (roadmap 9b): steps under a minute label to the second and get room for
+    /// it; whole minutes stay `HH:MM`.
+    #[test]
+    fn sub_minute_steps_label_seconds() {
+        let mut vp = Viewport {
+            bar_px: 60.0,
+            ..Viewport::default()
+        };
+        // 30 s bars at 60 px: 30 s would leave 60 px, short of 1.5 × 56: a minute.
+        assert_eq!(time_step(&vp, 30_000, 56.0), MIN);
+        vp.bar_px = 90.0;
+        assert_eq!(time_step(&vp, 30_000, 56.0), 30 * SEC);
+        let mut s = String::new();
+        let t = UtcMillis::parse_iso("2026-11-05T18:53:30Z").unwrap();
+        TimeLabel::Time.write(t, &mut s).unwrap();
+        assert_eq!(s, "18:53:30");
+        s.clear();
+        TimeLabel::Time
+            .write(UtcMillis(t.0 - 30_000), &mut s)
+            .unwrap();
+        assert_eq!(s, "18:53");
     }
 
     /// One-minute bars from `start` (UTC ms), `n` of them, skipping minutes in `gaps`.

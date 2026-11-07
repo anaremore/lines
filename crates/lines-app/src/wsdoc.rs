@@ -752,7 +752,7 @@ mod tests {
         assert!(json.contains(r#""hide_drawings":true"#), "{json}");
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
         let future: ChartState =
-            serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "3s"}"#).unwrap();
+            serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "3x"}"#).unwrap();
         assert_eq!(future.timeframe.0, Timeframe::ONE_MINUTE);
     }
 
@@ -774,14 +774,18 @@ mod tests {
                 "w" if n == 1 => Timeframe::Week,
                 _ => return None,
             };
-            Timeframe::ALL[..12].contains(&tf).then_some(tf)
+            (Timeframe::ALL.contains(&tf) && tf.bar_kind().is_none()).then_some(tf)
         }
         let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
         assert!(old.tick_continuous.is_none() && !json_has(&old, "tick_continuous"));
+        // Roadmap 9b's other trade-built kinds go the same way (`"500v"`, `"10r"`, `"30s"`).
         for tf in [
             Timeframe::Ticks(500),
             Timeframe::Ticks(233),
             Timeframe::Ticks(777),
+            Timeframe::Volume(500),
+            Timeframe::Range(10),
+            Timeframe::Seconds(30),
         ] {
             let state = ChartState {
                 timeframe: TimeframeDoc(tf),

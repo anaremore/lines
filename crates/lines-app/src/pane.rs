@@ -206,12 +206,13 @@ pub fn controls_gutter(kind: PaneKind) -> f32 {
 /// The chip's timeframe: "233t", with "∞" when tick bars run continuously ("1000t ∞").
 pub fn chip_timeframe(tf: lines_core::Timeframe, continuous: bool) -> String {
     match tf {
-        lines_core::Timeframe::Ticks(_) if continuous => format!("{tf} ∞"),
+        tf if continuous && tf.bar_kind().is_some() => format!("{tf} ∞"),
         _ => tf.to_string(),
     }
 }
 
-/// The chip's quiet part: a forming tick bar's trades still to come (" · 41 left").
+/// The chip's quiet part: a forming bar's distance to done, in its kind's unit (" · 41 left":
+/// trades of a tick bar, contracts of a volume bar, ticks of a range bar).
 pub fn chip_to_go(n: u32) -> String {
     format!(" · {n} left")
 }
@@ -223,11 +224,16 @@ pub fn chip_text(tf: lines_core::Timeframe, continuous: bool, to_go: Option<u32>
     format!("{}{rest} ▾", chip_timeframe(tf, continuous))
 }
 
-/// A timeframe as lists and the palette name it: "5m", "233-trade bars" (the chip's short
-/// "233t" spelled out: "t" also means price ticks elsewhere).
+/// A timeframe as lists and the palette name it: "5m", "233-trade bars", "500-volume bars",
+/// "10-tick range bars", "30-second bars" (the chip's short "233t", "500v", "10r", "30s" spelled
+/// out: "t" also means price ticks elsewhere).
 pub fn timeframe_name(tf: lines_core::Timeframe) -> String {
+    use lines_core::Timeframe as T;
     match tf {
-        lines_core::Timeframe::Ticks(n) => format!("{n}-trade bars"),
+        T::Ticks(n) => format!("{n}-trade bars"),
+        T::Volume(n) => format!("{n}-volume bars"),
+        T::Range(n) => format!("{n}-tick range bars"),
+        T::Seconds(n) => format!("{n}-second bars"),
         _ => tf.to_string(),
     }
 }

@@ -49,6 +49,12 @@ pub enum Timeframe {
     Week,
     /// Tick bars: `n` counted trades each (1..=[`crate::ticks::MAX_TICKS`]).
     Ticks(u32),
+    /// Volume bars: at least `n` whole contracts each (1..=[`crate::ticks::MAX_VOLUME`]).
+    Volume(u32),
+    /// Range bars: at most `n` price ticks each (1..=[`crate::ticks::MAX_RANGE`]).
+    Range(u32),
+    /// Seconds bars from counted trades: `n` seconds each (dividing the day, at most an hour).
+    Seconds(u32),
 }
 
 /// What a timeframe is built from.
@@ -56,7 +62,7 @@ pub enum Timeframe {
 pub enum BarSource {
     /// The store's 1-minute bars (every timeframe today).
     OneMinute,
-    /// Counted trades (tick bars; phase 2: seconds, volume and range bars).
+    /// Counted trades (tick, volume, range and seconds bars).
     Trades,
 }
 
@@ -69,9 +75,10 @@ impl Default for Timeframe {
 impl Timeframe {
     pub const ONE_MINUTE: Timeframe = Timeframe::Minutes(1);
 
-    /// Every timeframe offered in lists (header, palette): time-based shortest first, then the
-    /// tick presets. Any `Ticks(1..=100_000)` is valid too (typed).
-    pub const ALL: [Timeframe; 17] = [
+    /// Every timeframe offered in lists (header, palette): time-based shortest first, then
+    /// the trade-built presets: ticks, seconds, volume, range. Any size within a kind's limits
+    /// is valid too (typed: [`crate::BarKind::is_valid`]).
+    pub const ALL: [Timeframe; 23] = [
         Timeframe::Minutes(1),
         Timeframe::Minutes(2),
         Timeframe::Minutes(3),
@@ -89,21 +96,39 @@ impl Timeframe {
         Timeframe::Ticks(500),
         Timeframe::Ticks(1000),
         Timeframe::Ticks(2000),
+        Timeframe::Seconds(15),
+        Timeframe::Seconds(30),
+        Timeframe::Volume(500),
+        Timeframe::Volume(1000),
+        Timeframe::Range(4),
+        Timeframe::Range(10),
     ];
 
-    /// Whether this is one of the offered timeframes (a listed one, or any tick count in
-    /// `1..=MAX_TICKS`).
+    /// Whether this is one of the offered timeframes (a listed one, or any trade-built size
+    /// within its kind's limits).
     pub fn is_valid(self) -> bool {
-        match self {
-            Timeframe::Ticks(n) => (1..=crate::ticks::MAX_TICKS).contains(&n),
-            _ => Self::ALL.contains(&self),
+        match self.bar_kind() {
+            Some(k) => k.is_valid(),
+            None => Self::ALL.contains(&self),
         }
     }
 
     pub fn source(self) -> BarSource {
+        match self.bar_kind() {
+            Some(_) => BarSource::Trades,
+            None => BarSource::OneMinute,
+        }
+    }
+
+    /// The trade-built kind (tick, volume, range or seconds bars).
+    pub fn bar_kind(self) -> Option<crate::BarKind> {
+        use crate::BarKind;
         match self {
-            Timeframe::Ticks(_) => BarSource::Trades,
-            _ => BarSource::OneMinute,
+            Timeframe::Ticks(n) => Some(BarKind::Ticks(n)),
+            Timeframe::Volume(n) => Some(BarKind::Volume(n)),
+            Timeframe::Range(n) => Some(BarKind::Range(n)),
+            Timeframe::Seconds(n) => Some(BarKind::Seconds(n)),
+            _ => None,
         }
     }
 
@@ -124,7 +149,8 @@ impl Timeframe {
     /// a minute here (their view uses the bars' own average, [`crate::ticks::TickBars::view`]).
     pub fn nominal_ms(self) -> i64 {
         match self {
-            Timeframe::Ticks(_) => MINUTE,
+            Timeframe::Ticks(_) | Timeframe::Volume(_) | Timeframe::Range(_) => MINUTE,
+            Timeframe::Seconds(n) => i64::from(n) * 1000,
             Timeframe::Minutes(n) => i64::from(n) * MINUTE,
             Timeframe::Hours(n) => i64::from(n) * HOUR,
             Timeframe::Day => DAY,
@@ -137,8 +163,9 @@ impl Timeframe {
         matches!(self, Timeframe::Day | Timeframe::Week)
     }
 
-    /// `5`, `5m`, `1h`, `4h`, `d`, `1d`, `w`, `1w`, `500t` (any case). A bare number is
-    /// minutes; ticks need their count. Only offered timeframes parse.
+    /// `5`, `5m`, `1h`, `4h`, `d`, `1d`, `w`, `1w`, `500t`, `500v`, `10r`, `30s` (any case). A
+    /// bare number is minutes; trade-built kinds need their size. Only offered timeframes
+    /// parse.
     pub fn parse(s: &str) -> Option<Timeframe> {
         let s = s.trim().to_ascii_lowercase();
         let digits = s.chars().take_while(|c| c.is_ascii_digit()).count();
@@ -154,6 +181,9 @@ impl Timeframe {
             "d" if n == 1 => Timeframe::Day,
             "w" if n == 1 => Timeframe::Week,
             "t" if !num.is_empty() => Timeframe::Ticks(n),
+            "v" if !num.is_empty() => Timeframe::Volume(n),
+            "r" if !num.is_empty() => Timeframe::Range(n),
+            "s" | "sec" if !num.is_empty() => Timeframe::Seconds(n),
             _ => return None,
         };
         tf.is_valid().then_some(tf)
@@ -161,10 +191,13 @@ impl Timeframe {
 }
 
 impl fmt::Display for Timeframe {
-    /// `1m`, `5m`, `1h`, `1D`, `1W`, `500t`.
+    /// `1m`, `5m`, `1h`, `1D`, `1W`, `500t`, `500v`, `10r`, `30s`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Timeframe::Ticks(n) => write!(f, "{n}t"),
+            Timeframe::Volume(n) => write!(f, "{n}v"),
+            Timeframe::Range(n) => write!(f, "{n}r"),
+            Timeframe::Seconds(n) => write!(f, "{n}s"),
             Timeframe::Minutes(n) => write!(f, "{n}m"),
             Timeframe::Hours(n) => write!(f, "{n}h"),
             Timeframe::Day => f.write_str("1D"),

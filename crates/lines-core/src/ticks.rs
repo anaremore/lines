@@ -1,4 +1,16 @@
-//! Tick bars (roadmap 9b): a bar every `n` counted trades.
+//! Bars built from counted trades (roadmap 9b): tick, volume, range and seconds bars.
+//!
+//! **Kinds** ([`BarKind`]), each closing its bar by its own rule:
+//! - `Ticks(n)`: `n` trades.
+//! - `Volume(n)`: at least `n` whole contracts (units of the product's quantity); the trade
+//!   that reaches it stays whole in its bar (never split), so a bar can hold a little more.
+//! - `Range(r)`: never wider than `r` price ticks, by integer tick arithmetic. A bar is done
+//!   once its high − low is exactly `r` ticks; a trade that would make it wider opens the
+//!   next bar at its own price. A price gap shows as a gap: no bars are invented across it,
+//!   so a bar closed by a gap spans fewer than `r` ticks, never more.
+//! - `Seconds(n)`: the trades of each `n`-second slot, slots aligned to UTC (`n` divides the
+//!   day). A bar starts at its slot's start and spans the slot; slots without trades have no
+//!   bar.
 //!
 //! [`TickBars`] is an incremental builder fed one counted trade at a time (the trades the
 //! store's tape, volume at price and footprints take: `lines_feed::store`), in feed order. It
@@ -42,6 +54,85 @@ use crate::timeframe::BarsView;
 pub const TICK_PRESETS: [u32; 5] = [100, 233, 500, 1000, 2000];
 /// The largest tick count.
 pub const MAX_TICKS: u32 = 100_000;
+/// The largest volume-bar size (whole contracts).
+pub const MAX_VOLUME: u32 = 1_000_000;
+/// The widest range bar (price ticks).
+pub const MAX_RANGE: u32 = 10_000;
+/// The longest seconds bar (an hour).
+pub const MAX_SECONDS: u32 = 3_600;
+
+/// How a trade-built bar closes (see the module docs).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BarKind {
+    /// `n` trades.
+    Ticks(u32),
+    /// At least `n` whole contracts.
+    Volume(u32),
+    /// At most `r` price ticks from low to high.
+    Range(u32),
+    /// The trades of an `n`-second slot.
+    Seconds(u32),
+}
+
+impl BarKind {
+    /// Within its kind's limits (`1..=MAX_*`; seconds: dividing the day).
+    pub fn is_valid(self) -> bool {
+        match self {
+            BarKind::Ticks(n) => (1..=MAX_TICKS).contains(&n),
+            BarKind::Volume(n) => (1..=MAX_VOLUME).contains(&n),
+            BarKind::Range(r) => (1..=MAX_RANGE).contains(&r),
+            BarKind::Seconds(n) => (1..=MAX_SECONDS).contains(&n) && 86_400 % n == 0,
+        }
+    }
+
+    /// The tick count of tick bars.
+    pub fn ticks(self) -> Option<u32> {
+        match self {
+            BarKind::Ticks(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// The kind's size (`n` trades, contracts, ticks or seconds).
+    pub fn size(self) -> u32 {
+        match self {
+            BarKind::Ticks(n) | BarKind::Volume(n) | BarKind::Range(n) | BarKind::Seconds(n) => n,
+        }
+    }
+
+    fn clamped(self) -> BarKind {
+        match self {
+            BarKind::Ticks(n) => BarKind::Ticks(n.clamp(1, MAX_TICKS)),
+            BarKind::Volume(n) => BarKind::Volume(n.clamp(1, MAX_VOLUME)),
+            BarKind::Range(r) => BarKind::Range(r.clamp(1, MAX_RANGE)),
+            BarKind::Seconds(n) if BarKind::Seconds(n).is_valid() => BarKind::Seconds(n),
+            BarKind::Seconds(_) => BarKind::Seconds(60),
+        }
+    }
+}
+
+/// The product's units a kind is measured in: its price tick (range bars) and quantity units
+/// per whole contract (volume bars).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BarScale {
+    pub tick: i64,
+    pub qty_unit: i64,
+}
+
+impl BarScale {
+    /// One price unit per tick, whole-number quantities (tests, tick bars).
+    pub const UNIT: BarScale = BarScale {
+        tick: 1,
+        qty_unit: 1,
+    };
+
+    pub fn of(product: &crate::Product) -> BarScale {
+        BarScale {
+            tick: product.price.tick.max(1),
+            qty_unit: 10i64.saturating_pow(u32::from(product.qty.decimals)),
+        }
+    }
+}
 
 const DAY: i64 = 86_400_000;
 
@@ -65,7 +156,8 @@ const LEVELS_RESERVE: usize = 32;
 /// Tick bars of one count, built incrementally from counted trades.
 #[derive(Clone, Debug)]
 pub struct TickBars {
-    n: u32,
+    kind: BarKind,
+    scale: BarScale,
     reset: TickReset,
     cal: Option<&'static SessionCalendar>,
     capacity: usize,
@@ -101,9 +193,25 @@ impl TickBars {
         cal: Option<&'static SessionCalendar>,
         capacity: usize,
     ) -> TickBars {
+        TickBars::with_kind(BarKind::Ticks(n), reset, cal, BarScale::UNIT, capacity)
+    }
+
+    /// Bars of `kind` (clamped to its limits) in the product's `scale`, at most `capacity`
+    /// kept.
+    pub fn with_kind(
+        kind: BarKind,
+        reset: TickReset,
+        cal: Option<&'static SessionCalendar>,
+        scale: BarScale,
+        capacity: usize,
+    ) -> TickBars {
         let capacity = capacity.max(16);
         TickBars {
-            n: n.clamp(1, MAX_TICKS),
+            kind: kind.clamped(),
+            scale: BarScale {
+                tick: scale.tick.max(1),
+                qty_unit: scale.qty_unit.max(1),
+            },
             reset,
             cal,
             capacity,
@@ -124,8 +232,8 @@ impl TickBars {
         }
     }
 
-    pub fn ticks(&self) -> u32 {
-        self.n
+    pub fn kind(&self) -> BarKind {
+        self.kind
     }
 
     pub fn reset(&self) -> TickReset {
@@ -174,21 +282,71 @@ impl TickBars {
         self.partial.get(i).copied().unwrap_or(false)
     }
 
-    /// Whether bar `i` is the newest and still short of `n` trades (not closed by a reset).
+    /// Whether bar `i` reached its kind's size (a seconds bar: never by itself; its slot's
+    /// end closes it, [`TickBars::is_forming_at`]).
+    fn is_done(&self, i: usize) -> bool {
+        let Some(b) = self.bars.get(i) else {
+            return false;
+        };
+        match self.kind {
+            BarKind::Ticks(n) => self.count(i) >= n,
+            BarKind::Volume(n) => b.volume.0 >= i64::from(n).saturating_mul(self.scale.qty_unit),
+            BarKind::Range(r) => {
+                b.high.0.saturating_sub(b.low.0) >= i64::from(r).saturating_mul(self.scale.tick)
+            }
+            BarKind::Seconds(_) => false,
+        }
+    }
+
+    /// Whether bar `i` is the newest and still short of its size (not closed by a reset).
     pub fn is_forming(&self, i: usize) -> bool {
-        i + 1 == self.bars.len() && self.count(i) < self.n && !self.is_partial(i)
+        i + 1 == self.bars.len() && !self.is_done(i) && !self.is_partial(i)
+    }
+
+    /// The newest bar's distance to done, in its kind's unit: trades (tick bars), whole
+    /// contracts, rounded up (volume bars), price ticks of range (range bars). `None` when it
+    /// isn't forming at `now`, and for seconds bars (their clock, not their trades, closes
+    /// them).
+    pub fn to_go(&self, now: Option<UtcMillis>) -> Option<u32> {
+        let i = self.bars.len().checked_sub(1)?;
+        if !self.is_forming_at(i, now) {
+            return None;
+        }
+        let b = &self.bars[i];
+        let left = match self.kind {
+            BarKind::Ticks(n) => i64::from(n) - i64::from(self.count(i)),
+            BarKind::Volume(n) => {
+                let u = self.scale.qty_unit;
+                (i64::from(n).saturating_mul(u) - b.volume.0 + u - 1).div_euclid(u)
+            }
+            BarKind::Range(r) => i64::from(r) - (b.high.0 - b.low.0).div_euclid(self.scale.tick),
+            BarKind::Seconds(_) => return None,
+        };
+        u32::try_from(left.max(0)).ok()
     }
 
     /// Whether the newest bar's session part has closed by `now` (session resets only): it can
     /// never take another trade.
     fn newest_closed(&self, now: Option<UtcMillis>) -> bool {
-        self.reset == TickReset::Session && now.is_some_and(|t| t.0 >= self.bar_close)
+        let slot_over = match self.kind {
+            BarKind::Seconds(_) => self
+                .ends
+                .last()
+                .zip(now)
+                .is_some_and(|(end, t)| t.0 >= end.0),
+            _ => false,
+        };
+        slot_over
+            || (self.reset == TickReset::Session && now.is_some_and(|t| t.0 >= self.bar_close))
     }
 
-    /// [`TickBars::is_partial`] at market time `now`: also the newest bar short of `n` trades
-    /// once its session part has closed.
+    /// [`TickBars::is_partial`] at market time `now`: also the newest bar short of its size
+    /// once its session part has closed (a seconds bar's slot ending is no shortfall).
     pub fn is_partial_at(&self, i: usize, now: Option<UtcMillis>) -> bool {
-        self.is_partial(i) || (self.is_forming(i) && self.newest_closed(now))
+        self.is_partial(i)
+            || (self.is_forming(i)
+                && !matches!(self.kind, BarKind::Seconds(_))
+                && self.newest_closed(now))
     }
 
     /// [`TickBars::is_forming`] at market time `now`: not once its session part has closed.
@@ -213,8 +371,9 @@ impl TickBars {
     /// The bars for display. Their nominal period (axis steps, extrapolation past the ends)
     /// is the bars' average span rounded down to a step the time axis uses.
     pub fn view(&self) -> BarsView<'_> {
-        let period_ms = match (self.bars.first(), self.last.last()) {
-            (Some(f), Some(l)) => nice_period((l.0 - f.time.0) / self.bars.len() as i64),
+        let period_ms = match (self.kind, self.bars.first(), self.last.last()) {
+            (BarKind::Seconds(n), _, _) => i64::from(n) * 1000,
+            (_, Some(f), Some(l)) => nice_period((l.0 - f.time.0) / self.bars.len() as i64),
             _ => 60_000,
         };
         BarsView {
@@ -247,7 +406,10 @@ impl TickBars {
         }
         let new_session = key != self.bar_session;
         let reset = new_session && self.reset == TickReset::Session;
-        let full = self.counts.last().is_none_or(|c| *c >= self.n);
+        let full = match self.bars.len().checked_sub(1) {
+            None => true,
+            Some(i) => self.is_done(i) || self.overflows(i, time, price),
+        };
         if !full && reset {
             // A new session closes the forming bar short.
             if let Some(p) = self.partial.last_mut() {
@@ -274,7 +436,9 @@ impl TickBars {
             b.volume = b.volume.saturating_add(qty);
             self.counts[i] += 1;
             self.last[i] = self.last[i].max(time);
-            self.ends[i] = UtcMillis(self.last[i].0.saturating_add(1)).max(self.ends[i]);
+            if !matches!(self.kind, BarKind::Seconds(_)) {
+                self.ends[i] = UtcMillis(self.last[i].0.saturating_add(1)).max(self.ends[i]);
+            }
         }
         let levels = self.levels.last_mut().expect("a bar is open");
         match levels.binary_search_by_key(&price.0, |(p, _)| *p) {
@@ -291,9 +455,19 @@ impl TickBars {
             self.trimmed += k as u64;
             self.drop_front(k);
         }
+        // A seconds bar starts at its slot's start and spans the slot.
+        let (time, span_end) = match self.kind {
+            BarKind::Seconds(n) => {
+                let len = i64::from(n) * 1000;
+                let start = time.0.div_euclid(len) * len;
+                (UtcMillis(start), Some(UtcMillis(start.saturating_add(len))))
+            }
+            _ => (time, None),
+        };
         // Starts never go backwards (a late trade), so the bars stay sorted for time lookups.
         let time = self.bars.last().map_or(time, |b| time.max(b.time));
         if let Some(i) = self.bars.len().checked_sub(1)
+            && span_end.is_none()
             && (key == self.bar_session || self.reset == TickReset::Continuous)
         {
             // Contiguous (within a session, or always when continuous): the previous bar runs
@@ -308,15 +482,20 @@ impl TickBars {
             close: price,
             volume: qty,
         });
-        self.ends.push(UtcMillis(time.0.saturating_add(1)));
+        self.ends
+            .push(span_end.unwrap_or(UtcMillis(time.0.saturating_add(1))));
         self.last.push(time);
         self.counts.push(1);
         self.partial.push(false);
         self.first.push(first);
+        let reserve = self
+            .kind
+            .ticks()
+            .map_or(LEVELS_RESERVE, |n| LEVELS_RESERVE.min(n as usize));
         let mut levels = self
             .spare
             .pop()
-            .unwrap_or_else(|| Vec::with_capacity(LEVELS_RESERVE.min(self.n as usize)));
+            .unwrap_or_else(|| Vec::with_capacity(reserve));
         levels.clear();
         self.levels.push(levels);
         self.bar_session = key;
@@ -335,6 +514,22 @@ impl TickBars {
                 l.clear();
                 self.spare.push(l);
             }
+        }
+    }
+
+    /// Whether a trade at `time`, `price` can't join bar `i` (the newest): a range bar it
+    /// would make wider than `r` ticks, or a seconds bar whose slot it is past.
+    fn overflows(&self, i: usize, time: UtcMillis, price: Price) -> bool {
+        let b = &self.bars[i];
+        match self.kind {
+            BarKind::Range(r) => {
+                let hi = b.high.0.max(price.0);
+                let lo = b.low.0.min(price.0);
+                hi.saturating_sub(lo) > i64::from(r).saturating_mul(self.scale.tick)
+            }
+            // A late trade from an earlier slot joins the newest bar (bars never go back).
+            BarKind::Seconds(_) => self.ends.get(i).is_some_and(|end| time.0 >= end.0),
+            _ => false,
         }
     }
 
@@ -370,7 +565,7 @@ impl TickBars {
 
     /// The same bars, counts, spans and per-price volumes (tests: rebuilt equals live-built).
     pub fn same_bars(&self, other: &TickBars) -> bool {
-        self.n == other.n
+        self.kind == other.kind
             && self.bars == other.bars
             && self.ends == other.ends
             && self.last == other.last

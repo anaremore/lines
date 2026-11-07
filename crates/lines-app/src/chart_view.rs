@@ -1940,8 +1940,9 @@ impl ChartView {
                         && !m.alt
                         && !m.platform
                         && c.len() == 1
-                        && (c.as_bytes()[0].is_ascii_digit() || "mhdwtMHDWT".contains(*c))
-                }) && entry.len() < 7
+                        // Units: m h d w; trade-built t (ticks), v (volume), r (range), s (seconds).
+                        && (c.as_bytes()[0].is_ascii_digit() || "mhdwtvrsMHDWTVRS".contains(*c))
+                }) && entry.len() < 8
                 {
                     entry.push_str(c);
                 }
@@ -2111,7 +2112,7 @@ impl ChartView {
                 } else {
                     TickState::Full
                 };
-                Some((tb.last_trade(i)?, tb.count(i), tb.ticks(), state))
+                Some((tb.last_trade(i)?, tb.count(i), tb.kind().ticks(), state))
             });
             // Another chart's crosshair time, where this chart has a bar for it (each chart
             // maps it into its own timeframe's bars).
@@ -3849,8 +3850,11 @@ impl ChartView {
                 Timeframe::Week => {
                     let _ = write!(s, "Week of {}", bar_date(tf, calendar, time));
                 }
-                // Tick bars start at a trade: to the second.
-                Timeframe::Ticks(_) => {
+                // Trade-built bars start at a trade (or a seconds slot): to the second.
+                Timeframe::Ticks(_)
+                | Timeframe::Volume(_)
+                | Timeframe::Range(_)
+                | Timeframe::Seconds(_) => {
                     let _ = time.write_crosshair_label(1_000, s);
                     let _ = s.write_str(" UTC");
                 }
@@ -4210,10 +4214,7 @@ impl ChartView {
         // The forming tick bar's trades to go, beside the timeframe in the chip (none once its
         // session has closed: it can't take another trade).
         let now = self.store.feed_clock();
-        let to_go = tick_bars.and_then(|b| {
-            let i = b.len().checked_sub(1)?;
-            b.is_forming_at(i, now).then(|| b.ticks() - b.count(i))
-        });
+        let to_go = tick_bars.and_then(|b| b.to_go(now));
         if self.frozen {
             // Frozen clock: only data-derived time is shown, so screenshots are reproducible.
             if let Some(mt) = d.market_time {
@@ -4514,7 +4515,8 @@ impl ChartView {
         ];
         for (i, tf) in Timeframe::ALL.into_iter().enumerate() {
             let on = tf == self.timeframe;
-            let col = usize::from(tf.ticks().is_some());
+            // Time-based left; trade-built (tick, seconds, volume, range bars) right.
+            let col = usize::from(tf.bar_kind().is_some());
             let name = pane::timeframe_name(tf);
             columns[col] = std::mem::replace(&mut columns[col], div()).child(
                 div()
@@ -4927,7 +4929,9 @@ fn measure_parts(mode: PnlDisplay) -> lines_core::drawings::MeasureParts {
 
 /// A hovered tick bar: its last trade time, trade count, the chart's count and its state
 /// (`None` on time bars).
-type TickInfo = Option<(UtcMillis, u32, u32, TickState)>;
+/// A trade-built bar under the crosshair: last trade, trade count, the tick bars' size (none
+/// for other kinds), state.
+type TickInfo = Option<(UtcMillis, u32, Option<u32>, TickState)>;
 
 /// A tick bar's state for the readout.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -4944,34 +4948,46 @@ const MARK_PARTIAL: u8 = 1;
 /// `tick_marks`: the candle takes its session's first trade (a divider before it).
 const MARK_SESSION: u8 = 2;
 
-/// A tick bar's span and size for the readout: "14:32:05 to 14:32:41  500 trades" (UTC, as
-/// the time axis); short ones "… partial (41 of 233 trades)" or "… forming (41 of 233
-/// trades)". Allocation-free.
+/// A trade-built bar's span and size for the readout: "14:32:05 to 14:32:41  500 trades"
+/// (UTC, as the time axis); short tick bars "… partial (41 of 233 trades)" or "… forming (41
+/// of 233 trades)"; other kinds (`n`: none) "… partial (41 trades)". Allocation-free.
 pub fn write_tick_span(
     first: UtcMillis,
     last: UtcMillis,
     count: u32,
-    n: u32,
+    n: Option<u32>,
     state: TickState,
     out: &mut impl std::fmt::Write,
 ) -> std::fmt::Result {
     let (_, _, _, h0, m0, s0) = first.to_civil();
     let (_, _, _, h1, m1, s1) = last.to_civil();
     write!(out, "{h0:02}:{m0:02}:{s0:02} to {h1:02}:{m1:02}:{s1:02}  ")?;
-    let plural = if n == 1 { "" } else { "s" };
-    match state {
-        TickState::Full => {
-            let plural = if count == 1 { "" } else { "s" };
-            write!(out, "{count} trade{plural}")
+    let word = match state {
+        TickState::Full => "",
+        TickState::Partial => "partial (",
+        TickState::Forming => "forming (",
+    };
+    out.write_str(word)?;
+    match n {
+        Some(n) if state != TickState::Full => {
+            let plural = if n == 1 { "" } else { "s" };
+            write!(out, "{count} of {n} trade{plural}")?;
         }
-        TickState::Partial => write!(out, "partial ({count} of {n} trade{plural})"),
-        TickState::Forming => write!(out, "forming ({count} of {n} trade{plural})"),
+        _ => {
+            let plural = if count == 1 { "" } else { "s" };
+            write!(out, "{count} trade{plural}")?;
+        }
+    }
+    if state == TickState::Full {
+        Ok(())
+    } else {
+        out.write_str(")")
     }
 }
 
 /// The tick series a chart on `tf` holds with `reset` (none on time bars).
 fn wanted_tick_key(tf: Timeframe, reset: TickReset) -> Option<TickKey> {
-    tf.ticks().map(|n| TickKey { n, reset })
+    tf.bar_kind().map(|kind| TickKey { kind, reset })
 }
 
 /// The tick mode a restored chart takes: the saved one; with none saved (an older file, or a
@@ -5127,7 +5143,7 @@ fn tick_span_text() {
     let b = UtcMillis::parse_iso("2026-11-05T14:32:41Z").unwrap();
     let text = |count, state| {
         let mut s = FixedStr::<64>::new();
-        write_tick_span(a, b, count, 233, state, &mut s).unwrap();
+        write_tick_span(a, b, count, Some(233), state, &mut s).unwrap();
         s.as_str().to_owned()
     };
     assert_eq!(
