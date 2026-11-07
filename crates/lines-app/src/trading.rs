@@ -496,6 +496,10 @@ pub struct Trading {
     pub start_armed: bool,
     /// Screenshot fixture (a `--paper` script's first `account`): the panes' account.
     pub start_account: Option<AccountId>,
+    /// The core's clock kind, so the UI reads time the way the core does (`now`).
+    clock: Clock,
+    /// Manual clock: the newest time a script advanced the core to (ms; `i64::MIN`: none).
+    advanced: std::sync::atomic::AtomicI64,
 }
 
 impl Global for Trading {}
@@ -587,6 +591,7 @@ impl Trading {
                 rules: c.rules.clone(),
             })
             .collect();
+        let clock = setup.clock;
         let service = TradingService::start_with(core, setup.file.map(|p| (p, paper)), setup.clock)
             .expect("spawn the trading thread");
         let handle = service.handle();
@@ -608,7 +613,33 @@ impl Trading {
             report,
             start_armed: false,
             start_account: None,
+            clock,
+            advanced: std::sync::atomic::AtomicI64::new(i64::MIN),
         }
+    }
+
+    /// Now, as the core sees it, for time left on screen (a cooldown): the wall clock live;
+    /// in replays the pane's feed clock (the core follows market time); with a manual clock
+    /// (screenshots, tests) the newer of the feed clock and the time a script advanced to.
+    pub fn now(&self, store: &ChartStore) -> Option<lines_core::UtcMillis> {
+        use std::sync::atomic::Ordering;
+        match self.clock {
+            Clock::Wall => Some(lines_feed::now_utc()),
+            Clock::Market => store.feed_clock(),
+            Clock::Manual => {
+                let a = self.advanced.load(Ordering::Acquire);
+                let f = store.feed_clock().map_or(i64::MIN, |t| t.0);
+                (a.max(f) != i64::MIN).then(|| lines_core::UtcMillis(a.max(f)))
+            }
+        }
+    }
+
+    /// Advance a manual-clock core (scripts), remembering the time for [`Trading::now`].
+    #[cfg(feature = "screenshot")]
+    fn advance_to(&self, t: lines_core::UtcMillis) {
+        self.advanced
+            .fetch_max(t.0, std::sync::atomic::Ordering::AcqRel);
+        self.handle.advance_to(t);
     }
 
     pub fn try_global(cx: &App) -> Option<&Trading> {
@@ -927,7 +958,7 @@ impl Trading {
     /// the cache shows the result.
     pub fn run_script(&self, steps: &[Step], start: lines_core::UtcMillis, latency_ms: i64) {
         let mut t = start;
-        self.handle.advance_to(t);
+        self.advance_to(t);
         for s in steps {
             match s {
                 Step::Command(c) => {
@@ -935,7 +966,7 @@ impl Trading {
                 }
                 Step::Ack => {
                     t = lines_core::UtcMillis(t.0 + latency_ms + 1);
-                    self.handle.advance_to(t);
+                    self.advance_to(t);
                 }
                 Step::Account(_) => {}
             }

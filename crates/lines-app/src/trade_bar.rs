@@ -382,6 +382,8 @@ struct BarData {
     rules: Vec<(&'static str, Money, Money)>,
     /// The account's trading state, as words, when it isn't active.
     blocked: Option<String>,
+    /// The guardrail lockout in force, as words (`guard_line`).
+    guard: Option<String>,
     /// (label, text): DENIED / REJECTED / WARNING / NOT SENT.
     flashes: Vec<(&'static str, String)>,
     unresolved: usize,
@@ -406,11 +408,23 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
             .unwrap_or_default(),
         rules: Vec::new(),
         blocked: None,
+        guard: None,
         flashes: Vec::new(),
         unresolved: 0,
         working: 0,
     };
     if let Some(s) = t.cache.try_read() {
+        if let Some(g) = s.guard(account) {
+            // Time left on the core's clock (wall live, market time in replays).
+            let now = t.now(v.trade_store());
+            data.guard = guard_line(
+                g.state,
+                g.reason.as_deref().unwrap_or(""),
+                g.until,
+                now,
+                data.mode.money(),
+            );
+        }
         if let Some(k) = contract {
             data.working = s.open_orders(account, k).count();
             if let Some(p) = s.position(account, k) {
@@ -471,6 +485,40 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         data.flashes.push(("NOT SENT", m.to_owned()));
     }
     Some(data)
+}
+
+/// The guardrail strip's text for a lockout: "Cooldown · 3 losses in a row · 12 min left",
+/// "Locked · max 5 trades reached · until the next trade date"; `None` while active. Minutes
+/// round up (as the core's denial does); without a clock the time left is left out. Amounts
+/// (a daily loss limit) show only when the P&L display shows currency, like the rule strip.
+pub fn guard_line(
+    state: lines_trading::GuardState,
+    reason: &str,
+    until: Option<lines_core::UtcMillis>,
+    now: Option<lines_core::UtcMillis>,
+    money: bool,
+) -> Option<String> {
+    use lines_trading::GuardState as G;
+    let reason = if money {
+        std::borrow::Cow::Borrowed(reason)
+    } else {
+        crate::pnl::redact_amounts(reason)
+    };
+    let mut out = String::with_capacity(64);
+    let _ = match state {
+        G::Active => return None,
+        G::Cooldown => write!(out, "Cooldown · {reason}"),
+        G::Locked => write!(out, "Locked · {reason}"),
+    };
+    match (state, until, now) {
+        (G::Cooldown, Some(u), Some(n)) => {
+            let min = ((u.0 - n.0).max(0) + 59_999) / 60_000;
+            let _ = write!(out, " · {min} min left");
+        }
+        (G::Locked, ..) => out.push_str(" · until the next trade date"),
+        _ => {}
+    }
+    Some(out)
 }
 
 /// The header's refusal line: the newest (label, text), with `×N` when there were N
@@ -547,6 +595,9 @@ pub fn dom_bar<V: TradePane>(
     Trading::try_global(cx)?;
     let pt = v.trade_ref();
     let armed = pt.arming.is_armed();
+    // A guardrail lockout: entry buttons dim (the core still decides; a click is denied
+    // with the reason). Flatten and Cancel all never dim.
+    let guarded = data.as_ref().is_some_and(|d| d.guard.is_some());
     let mut rows = div()
         .flex()
         .flex_col()
@@ -729,7 +780,7 @@ pub fn dom_bar<V: TradePane>(
             (Some(c), false) => b.border_color(c).text_color(c),
             (None, _) => b.border_color(t.axis_line).text_color(t.text_main),
         };
-        if !armed {
+        if !armed || guarded {
             b = b.opacity(0.45);
         }
         r2 = r2.child(b.on_mouse_down(
@@ -767,6 +818,32 @@ pub fn dom_bar<V: TradePane>(
         }),
     ));
     rows = rows.child(r2);
+
+    // The guardrail lockout, while it lasts: persistent, in words, with what still works.
+    if let Some(g) = data.as_ref().and_then(|d| d.guard.as_ref()) {
+        rows = rows.child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap_2()
+                .px_2()
+                .pb_1()
+                .child(
+                    div()
+                        .px_1()
+                        .bg(t.warn)
+                        .text_color(t.on_warn)
+                        .font_weight(FontWeight::BOLD)
+                        .child(g.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(t.text_dim)
+                        .child("exits, Flatten and Cancel all still work"),
+                ),
+        );
+    }
 
     // Row 3: the prop-rule strip (accounts with a preset).
     if let Some(d) = &data
@@ -1024,6 +1101,7 @@ pub fn chart_chip<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option
         mode: crate::pnl::PnlDisplay::default(),
         rules: Vec::new(),
         blocked: None,
+        guard: None,
         flashes: Vec::new(),
         unresolved: 0,
         working: 0,
@@ -1039,6 +1117,60 @@ pub fn qty(v: &PaneTrade) -> Qty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guardrail strip: state, reason and time left in words; minutes round up; P&L
+    /// off (or ticks) keeps the reason but never a loss amount.
+    #[test]
+    fn guard_strip_text() {
+        use lines_core::UtcMillis as T;
+        use lines_trading::GuardState as G;
+        assert_eq!(guard_line(G::Active, "x", None, None, true), None);
+        let now = T(1_000_000);
+        let until = T(now.0 + 11 * 60_000 + 1);
+        assert_eq!(
+            guard_line(
+                G::Cooldown,
+                "3 losses in a row",
+                Some(until),
+                Some(now),
+                true
+            )
+            .unwrap(),
+            "Cooldown · 3 losses in a row · 12 min left"
+        );
+        assert_eq!(
+            guard_line(G::Cooldown, "3 losses in a row", Some(until), None, true).unwrap(),
+            "Cooldown · 3 losses in a row",
+            "no clock: no time left rather than a wrong one"
+        );
+        assert_eq!(
+            guard_line(
+                G::Cooldown,
+                "a losing trade",
+                Some(now),
+                Some(T(now.0 + 5)),
+                true
+            )
+            .unwrap(),
+            "Cooldown · a losing trade · 0 min left"
+        );
+        let loss = "daily loss limit of 1000 reached";
+        assert_eq!(
+            guard_line(G::Locked, loss, None, Some(now), true).unwrap(),
+            "Locked · daily loss limit of 1000 reached · until the next trade date"
+        );
+        let off = guard_line(G::Locked, loss, None, Some(now), false).unwrap();
+        assert_eq!(
+            off,
+            "Locked · daily loss limit reached · until the next trade date"
+        );
+        assert!(!off.bytes().any(|b| b.is_ascii_digit()));
+        // Counts aren't amounts: they stay.
+        assert_eq!(
+            guard_line(G::Locked, "max 5 trades reached", None, None, false).unwrap(),
+            "Locked · max 5 trades reached · until the next trade date"
+        );
+    }
 
     #[test]
     fn money_and_average_text() {
