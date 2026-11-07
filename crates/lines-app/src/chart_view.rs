@@ -106,6 +106,8 @@ const MANUAL_LABEL: &str = "manual";
 enum LabelKind {
     Price,
     Time,
+    /// A time gridline's `HH:MM:SS` (steps under a minute; its own kind for the label cache).
+    TimeSeconds,
     /// A time gridline's date (`MM-DD`), and date with time.
     Date,
     DateTime,
@@ -2986,6 +2988,7 @@ impl ChartView {
             let kind = match l.label {
                 _ if tf.is_daily() => LabelKind::Date,
                 TimeLabel::Time => LabelKind::Time,
+                TimeLabel::TimeSeconds => LabelKind::TimeSeconds,
                 TimeLabel::Date => LabelKind::Date,
                 TimeLabel::DateTime => LabelKind::DateTime,
             };

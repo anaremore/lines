@@ -333,9 +333,10 @@ const TIME_STEPS: [i64; 26] = [
 /// What a time gridline's label shows.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TimeLabel {
-    /// `HH:MM`: same day as the line before it (`HH:MM:SS` off a whole minute: steps under a
-    /// minute, seconds bars and fast tick bars).
+    /// `HH:MM`: same day as the line before it.
     Time,
+    /// `HH:MM:SS`: the same, on a step under a minute (seconds bars, fast tick bars).
+    TimeSeconds,
     /// `MM-DD`: the first line of a new day, on midnight (or every line of a step of a day
     /// or more).
     Date,
@@ -348,10 +349,8 @@ impl TimeLabel {
     pub fn write<W: std::fmt::Write>(self, t: UtcMillis, out: &mut W) -> std::fmt::Result {
         let (_, mo, d, h, mi, sec) = t.to_civil();
         match self {
-            TimeLabel::Time if t.0.rem_euclid(MIN) != 0 => {
-                write!(out, "{h:02}:{mi:02}:{sec:02}")
-            }
             TimeLabel::Time => write!(out, "{h:02}:{mi:02}"),
+            TimeLabel::TimeSeconds => write!(out, "{h:02}:{mi:02}:{sec:02}"),
             TimeLabel::Date => write!(out, "{mo:02}-{d:02}"),
             TimeLabel::DateTime => write!(out, "{mo:02}-{d:02} {h:02}:{mi:02}"),
         }
@@ -424,7 +423,11 @@ pub fn build_time_grid(
         }
         let day = t.0.div_euclid(DAY);
         let label = if last.is_some_and(|(_, _, d)| d == day) {
-            TimeLabel::Time
+            if step < MIN {
+                TimeLabel::TimeSeconds
+            } else {
+                TimeLabel::Time
+            }
         } else if step >= DAY || t.0.rem_euclid(DAY) == 0 {
             TimeLabel::Date
         } else {
@@ -432,6 +435,7 @@ pub fn build_time_grid(
         };
         let room = match label {
             TimeLabel::DateTime => space.date_time_px,
+            TimeLabel::TimeSeconds => space.time_px * 1.5,
             _ => space.time_px,
         };
         out.push(TimeGridLine {
@@ -893,13 +897,36 @@ mod tests {
         assert_eq!(time_step(&vp, 30_000, 56.0), 30 * SEC);
         let mut s = String::new();
         let t = UtcMillis::parse_iso("2026-11-05T18:53:30Z").unwrap();
-        TimeLabel::Time.write(t, &mut s).unwrap();
+        TimeLabel::TimeSeconds.write(t, &mut s).unwrap();
         assert_eq!(s, "18:53:30");
         s.clear();
-        TimeLabel::Time
-            .write(UtcMillis(t.0 - 30_000), &mut s)
-            .unwrap();
+        // A step of a minute or more keeps `HH:MM`, even for a bar starting off the minute
+        // (tick, volume and range bars start at a trade).
+        TimeLabel::Time.write(t, &mut s).unwrap();
         assert_eq!(s, "18:53");
+        // The grid picks the seconds label only under a minute.
+        let b: Vec<Bar> = (0..40)
+            .map(|i| Bar {
+                time: UtcMillis(t.0 + i * 30_000),
+                open: Price(1),
+                high: Price(1),
+                low: Price(1),
+                close: Price(1),
+                volume: Qty(1),
+            })
+            .collect();
+        let mut vp = Viewport::default();
+        vp.set_size(1200.0, 400.0);
+        vp.on_data(&b, 90);
+        vp.bar_px = 90.0;
+        let mut out = Vec::with_capacity(MAX_GRID_LINES);
+        build_time_grid(&b, &vp, 30_000, 1.0, &GridSpace::default(), &mut out);
+        assert!(
+            out.iter()
+                .skip(1)
+                .all(|l| l.label == TimeLabel::TimeSeconds),
+            "{out:?}"
+        );
     }
 
     /// One-minute bars from `start` (UTC ms), `n` of them, skipping minutes in `gaps`.
