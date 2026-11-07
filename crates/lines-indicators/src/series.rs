@@ -4,7 +4,9 @@
 //! the chart period:
 //! - the stitched bar (exactly the chart's bar: the same `lines_core::stitch` rule over the
 //!   same events), and
-//! - exact trade sums ([`Sums`]) of the trades that arrived as trades.
+//! - exact trade sums ([`Sums`]) of the trades that arrived as trades, and
+//! - their aggressor delta ([`DeltaSums`]: buying minus selling, with the bucket's running
+//!   extremes, for cumulative delta candles).
 //!
 //! A bucket is **exact** when every trade in it arrived as a trade: the bucket lies inside a
 //! run where the trade stream was complete (after the newest history snapshot's `as_of`, with
@@ -13,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use lines_core::{Bar, BarSeries, Price, Qty, Stitcher, UtcMillis};
+use lines_core::{Aggressor, Bar, BarSeries, Price, Qty, Stitcher, UtcMillis};
 
 /// Exact integer sums for a volume-weighted average, scaled so trades and bar typical prices
 /// share one form: a trade at `p` × `v` adds `3pv` and `9p²v`; a bar adds `(H+L+C)·v` and
@@ -80,6 +82,60 @@ impl Sums {
     }
 }
 
+/// Aggressor delta of one bucket: buying (buyer took the offer) minus selling (seller hit
+/// the bid), exact `Qty` sums; `high`/`low` are the running delta's extremes inside the
+/// bucket, counted from 0 at its start in arrival order. Trades without a side count in
+/// neither.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeltaSums {
+    pub buy: i64,
+    pub sell: i64,
+    pub high: i64,
+    pub low: i64,
+}
+
+impl DeltaSums {
+    pub fn delta(&self) -> i64 {
+        self.buy.saturating_sub(self.sell)
+    }
+
+    pub fn trade(&mut self, qty: Qty, aggressor: Option<Aggressor>) {
+        match aggressor {
+            Some(Aggressor::Buy) => self.buy = self.buy.saturating_add(qty.0),
+            Some(Aggressor::Sell) => self.sell = self.sell.saturating_add(qty.0),
+            None => return,
+        }
+        let d = self.delta();
+        self.high = self.high.max(d);
+        self.low = self.low.min(d);
+    }
+
+    /// A bar without trades (the approximate fallback): its whole volume on the side its
+    /// close moved to (none for an unchanged bar), the classic bar-level tick rule.
+    pub fn bar(b: &Bar) -> DeltaSums {
+        let v = b.volume.0;
+        let (buy, sell) = match b.close.cmp(&b.open) {
+            std::cmp::Ordering::Greater => (v, 0),
+            std::cmp::Ordering::Less => (0, v),
+            std::cmp::Ordering::Equal => (0, 0),
+        };
+        let d = buy - sell;
+        DeltaSums {
+            buy,
+            sell,
+            high: d.max(0),
+            low: d.min(0),
+        }
+    }
+}
+
+/// What the base series keeps of a bucket's trades.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct TradeSums {
+    sums: Sums,
+    delta: DeltaSums,
+}
+
 /// One bucket of the base series.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Bucket {
@@ -88,6 +144,8 @@ pub struct Bucket {
     pub bar: Bar,
     /// Trade sums if exact, else the bar's typical-price sums.
     pub sums: Sums,
+    /// Aggressor delta if exact, else the bar's tick-rule estimate.
+    pub delta: DeltaSums,
     pub exact: bool,
 }
 
@@ -102,6 +160,8 @@ pub enum Input {
         time: UtcMillis,
         price: Price,
         qty: Qty,
+        /// Who took liquidity (`None`: the source doesn't say).
+        aggressor: Option<Aggressor>,
     },
     /// A closed history snapshot (`lines_core::stitch`).
     History {
@@ -158,7 +218,7 @@ pub struct MarketSeries {
     stitch: Stitcher,
     seen_trimmed: u64,
     /// Exact trade sums per bucket start (trades that arrived as trades).
-    trades: BTreeMap<i64, Sums>,
+    trades: BTreeMap<i64, TradeSums>,
     /// The current run of complete trades starts here (`None`: no complete run now).
     run_start: Option<i64>,
     /// Waiting for history to say where trades become complete.
@@ -231,17 +291,21 @@ impl MarketSeries {
                     self.awaiting_history = *expect_history;
                     self.restart_on_trade = !*expect_history;
                 }
-                Input::Trade { time, price, qty } => {
+                Input::Trade {
+                    time,
+                    price,
+                    qty,
+                    aggressor,
+                } => {
                     if self.restart_on_trade && !self.awaiting_history {
                         self.restart_on_trade = false;
                         self.run_start = Some(time.0);
                     }
                     if self.stitch.trade(&mut self.bars, *time, *price, *qty) {
                         let b = time.0.div_euclid(p) * p;
-                        self.trades
-                            .entry(b)
-                            .or_default()
-                            .add(&Sums::trade(*price, *qty));
+                        let t = self.trades.entry(b).or_default();
+                        t.sums.add(&Sums::trade(*price, *qty));
+                        t.delta.trade(*qty, *aggressor);
                         self.newest_trade =
                             Some(self.newest_trade.map_or(time.0, |n| n.max(time.0)));
                         mark(time.0, &mut dirty);
@@ -317,14 +381,15 @@ impl MarketSeries {
         for i in self.buckets.len()..self.bars.len() {
             let bar = self.bars.bars()[i];
             let exact = self.exact(bar.time.0);
-            let sums = match self.trades.get(&bar.time.0) {
-                Some(s) if exact => *s,
-                _ => Sums::bar(&bar),
+            let (sums, delta) = match self.trades.get(&bar.time.0) {
+                Some(s) if exact => (s.sums, s.delta),
+                _ => (Sums::bar(&bar), DeltaSums::bar(&bar)),
             };
             self.buckets.push(Bucket {
                 time: bar.time,
                 bar,
                 sums,
+                delta,
                 exact: exact && self.trades.contains_key(&bar.time.0),
             });
         }
@@ -344,7 +409,63 @@ mod tests {
             time: t(min, ms),
             price: Price(p),
             qty: Qty(q),
+            aggressor: None,
         }
+    }
+
+    fn side(min: i64, ms: i64, q: i64, a: Aggressor) -> Input {
+        Input::Trade {
+            time: t(min, ms),
+            price: Price(100),
+            qty: Qty(q),
+            aggressor: Some(a),
+        }
+    }
+
+    #[test]
+    fn delta_is_exact_with_running_extremes_and_bars_are_estimates() {
+        use Aggressor::{Buy, Sell};
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Connect {
+                expect_history: false,
+            },
+            Input::TradesFrom(t(0, 0)),
+            side(0, 1, 3, Buy),
+            side(0, 2, 5, Sell),
+            side(0, 3, 4, Buy),
+            trade(0, 4, 100, 9), // no side: neither
+            side(1, 0, 2, Sell),
+        ]);
+        let b = m.buckets();
+        assert!(b[0].exact);
+        // Running delta 3, -2, 2: high 3, low -2, close 2.
+        assert_eq!(
+            b[0].delta,
+            DeltaSums {
+                buy: 7,
+                sell: 5,
+                high: 3,
+                low: -2
+            }
+        );
+        assert_eq!(b[0].delta.delta(), 2);
+        assert_eq!(b[1].delta.delta(), -2);
+        // A bar from history: its volume on the side of its close.
+        let up = Bar {
+            time: UtcMillis(0),
+            open: Price(1),
+            high: Price(3),
+            low: Price(1),
+            close: Price(2),
+            volume: Qty(10),
+        };
+        assert_eq!(DeltaSums::bar(&up).delta(), 10);
+        let flat = Bar {
+            close: up.open,
+            ..up
+        };
+        assert_eq!(DeltaSums::bar(&flat), DeltaSums::default());
     }
 
     #[test]

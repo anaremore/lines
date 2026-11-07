@@ -13,13 +13,15 @@
 //! - [`IndicatorConfig`]: the serialisable per-chart configuration (persisted with the
 //!   workspace).
 
+pub mod delta;
 pub mod graph;
 pub mod render;
 pub mod series;
 pub mod vwap;
 
+pub use delta::{CumDelta, DeltaPoint, DeltaReset, DeltaSpec};
 pub use graph::{FeedId, Graph, GraphError, Indicator, Output, SeriesKey, SeriesType, Spec};
-pub use series::{Input, MarketSeries, Sums};
+pub use series::{DeltaSums, Input, MarketSeries, Sums};
 pub use vwap::{Bands, Point, Reset, Vwap, VwapSpec};
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,13 @@ pub enum IndicatorConfig {
         #[serde(default)]
         color: u8,
         /// How it is shown (line width, label, hidden): optional, defaulted.
+        #[serde(flatten, default)]
+        display: Display,
+    },
+    /// Cumulative delta (roadmap 10e), drawn as candles in a sub-pane below the price plot.
+    CumDelta {
+        #[serde(flatten)]
+        spec: DeltaSpec,
         #[serde(flatten, default)]
         display: Display,
     },
@@ -77,12 +86,38 @@ impl Display {
 }
 
 impl IndicatorConfig {
+    /// How it is shown (every kind has one).
+    pub fn display(&self) -> &Display {
+        match self {
+            IndicatorConfig::Vwap { display, .. } | IndicatorConfig::CumDelta { display, .. } => {
+                display
+            }
+        }
+    }
+
+    pub fn display_mut(&mut self) -> &mut Display {
+        match self {
+            IndicatorConfig::Vwap { display, .. } | IndicatorConfig::CumDelta { display, .. } => {
+                display
+            }
+        }
+    }
+
+    /// Drawn in a sub-pane below the price plot (not in it).
+    pub fn in_subpane(&self) -> bool {
+        matches!(self, IndicatorConfig::CumDelta { .. })
+    }
+
     /// The graph spec for a chart of bar period `period_ms`.
     pub fn spec(&self, period_ms: i64) -> Spec {
         match self {
             IndicatorConfig::Vwap { spec, .. } => Spec::Vwap {
                 period_ms,
                 vwap: *spec,
+            },
+            IndicatorConfig::CumDelta { spec, .. } => Spec::CumDelta {
+                period_ms,
+                delta: *spec,
             },
         }
     }
@@ -111,8 +146,19 @@ mod tests {
                 display: Default::default(),
             },
         ];
+        let mut cfgs = cfgs;
+        cfgs.push(IndicatorConfig::CumDelta {
+            spec: DeltaSpec {
+                reset: DeltaReset::Rth,
+            },
+            display: Default::default(),
+        });
         let json = serde_json::to_string(&cfgs).unwrap();
         assert!(json.contains(r#""kind":"vwap""#), "{json}");
+        assert!(
+            json.contains(r#"{"kind":"cum_delta","reset":"rth"}"#),
+            "{json}"
+        );
         let back: Vec<IndicatorConfig> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, cfgs);
     }

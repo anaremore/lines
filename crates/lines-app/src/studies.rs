@@ -1,5 +1,6 @@
 //! A chart pane's indicators (roadmap 5c): VWAPs from the shared indicator engine, drawn in the
-//! plot, with a legend and a small keyboard-first menu (Ctrl+I).
+//! plot, and cumulative delta (roadmap 10e) drawn as candles in a sub-pane below it
+//! (`crate::subpane`), with a legend.
 //!
 //! The pane owns a [`Studies`]: one [`IndicatorConfig`] per indicator (what the workspace
 //! saves) and an engine handle for each. Paint reads each handle's cell with `try_lock`, builds
@@ -15,15 +16,19 @@ use gpui::{
 };
 use lines_core::{BarsView, Product, Viewport};
 use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
-use lines_indicators::render::{Column, build_columns};
+use lines_indicators::render::{Column, DeltaCandle, build_columns, build_delta_candles};
 use lines_indicators::{Bands, IndicatorConfig, Reset};
 
+use crate::subpane::Scale;
 use crate::theme::Theme;
 
 struct Study {
     config: IndicatorConfig,
     handle: Option<IndicatorHandle>,
     columns: Vec<Column>,
+    /// Cumulative delta: this frame's candles and their extremes.
+    candles: Vec<DeltaCandle>,
+    extent: Option<(i64, i64)>,
     /// The newest value is approximate (from bars); shown in the legend.
     approx: bool,
     error: Option<String>,
@@ -54,6 +59,8 @@ impl Studies {
                     config,
                     handle: None,
                     columns: Vec::new(),
+                    candles: Vec::new(),
+                    extent: None,
                     approx: false,
                     error: None,
                 })
@@ -72,9 +79,8 @@ impl Studies {
     pub fn attach(&mut self, feed: FeedInfo) {
         self.feed = Some(feed);
         for s in &mut self.list {
-            let IndicatorConfig::Vwap { display, .. } = &s.config;
-            s.handle =
-                (!display.hidden).then(|| engine().acquire(feed, s.config.spec(feed.period_ms)));
+            let hidden = s.config.display().hidden;
+            s.handle = (!hidden).then(|| engine().acquire(feed, s.config.spec(feed.period_ms)));
         }
     }
 
@@ -92,17 +98,35 @@ impl Studies {
     /// `bars`: the chart's bars (its timeframe's); the engine's points are per 1-minute bar.
     pub fn prepare(&mut self, bars: BarsView<'_>, vp: &Viewport, max_columns: usize) {
         for s in &mut self.list {
-            if s.columns.capacity() < max_columns {
+            let delta = s.config.in_subpane();
+            let buf_len = if delta {
+                s.candles.capacity()
+            } else {
+                s.columns.capacity()
+            };
+            if buf_len < max_columns {
                 // Only when the plot grows wider than ever before (as the candle scene).
-                s.columns.reserve(max_columns - s.columns.len());
+                if delta {
+                    s.candles.reserve(max_columns - s.candles.len());
+                } else {
+                    s.columns.reserve(max_columns - s.columns.len());
+                }
             }
             let Some(h) = &s.handle else { continue };
             let Some(out) = h.cell().try_read() else {
                 continue; // the engine is writing: keep last frame's columns
             };
-            let IndicatorConfig::Vwap { spec, .. } = &s.config;
-            build_columns(&out.points, bars, vp, spec.bands, &mut s.columns);
-            s.approx = out.points.last().is_some_and(|p| p.approx);
+            match &s.config {
+                IndicatorConfig::Vwap { spec, .. } => {
+                    build_columns(&out.points, bars, vp, spec.bands, &mut s.columns);
+                    s.approx = out.points.last().is_some_and(|p| p.approx);
+                }
+                IndicatorConfig::CumDelta { .. } => {
+                    let range = vp.visible_range(bars.len());
+                    s.extent = build_delta_candles(&out.candles, bars, range, &mut s.candles);
+                    s.approx = s.candles.iter().any(|c| c.approx);
+                }
+            }
             if s.error.is_none()
                 && let Some(e) = &out.error
             {
@@ -121,7 +145,14 @@ impl Studies {
         let (ox, oy) = (origin.0, origin.1);
         let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
         for s in &self.list {
-            let IndicatorConfig::Vwap { display, .. } = &s.config;
+            let IndicatorConfig::Vwap {
+                spec,
+                color,
+                display,
+            } = &s.config
+            else {
+                continue; // sub-pane studies paint in `paint_subpane`
+            };
             if display.hidden {
                 continue;
             }
@@ -130,7 +161,6 @@ impl Studies {
                 3 => 2.5,
                 _ => 1.75,
             });
-            let IndicatorConfig::Vwap { spec, color, .. } = &s.config;
             let base = theme.study[*color as usize % theme.study.len()];
             let cols = &s.columns;
             // Runs of columns that continue one another (same period, adjacent bars, same
@@ -193,12 +223,79 @@ impl Studies {
         }
     }
 
+    /// A shown study needs the sub-pane (cumulative delta).
+    pub fn has_subpane(&self) -> bool {
+        self.list
+            .iter()
+            .any(|s| s.config.in_subpane() && !s.config.display().hidden)
+    }
+
+    /// This frame's sub-pane scale (cumulative delta's visible extremes), for `height` px.
+    pub fn subpane_scale(&self, height: f32) -> Option<Scale> {
+        let s = self
+            .list
+            .iter()
+            .find(|s| s.config.in_subpane() && !s.config.display().hidden)?;
+        let (lo, hi) = s.extent?;
+        Some(Scale::fit(lo, hi, height))
+    }
+
+    /// The newest visible sub-pane value (cumulative delta's last close), for its axis tag.
+    pub fn subpane_last(&self) -> Option<i64> {
+        self.list
+            .iter()
+            .find(|s| s.config.in_subpane() && !s.config.display().hidden)?
+            .candles
+            .last()
+            .map(|c| c.close)
+    }
+
+    /// Cumulative delta's candles in the sub-pane (`origin`: its top-left; x from the chart's
+    /// viewport, so bars line up with the price plot). Quads only: no allocation.
+    pub fn paint_subpane(
+        &self,
+        origin: (f32, f32),
+        scale: &Scale,
+        vp: &Viewport,
+        theme: &Theme,
+        window: &mut Window,
+    ) {
+        let hair = 1.0 / window.scale_factor();
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            gpui::Bounds::new(
+                point(px(origin.0 + x), px(origin.1 + y)),
+                gpui::size(px(w), px(h)),
+            )
+        };
+        for s in &self.list {
+            if !s.config.in_subpane() || s.config.display().hidden {
+                continue;
+            }
+            let half = ((vp.bar_px * 0.35) as f32).max(hair * 0.5);
+            for c in &s.candles {
+                let x = vp.index_to_x(c.bar as f64) as f32;
+                let up = c.close >= c.open;
+                let col = if up { theme.up } else { theme.down };
+                // Approximate (bar-derived) candles are fainter; the legend says so.
+                let col = if c.approx { col.opacity(0.45) } else { col };
+                let (yo, yc) = (scale.y(c.open as f64), scale.y(c.close as f64));
+                let (yh, yl) = (scale.y(c.high as f64), scale.y(c.low as f64));
+                window.paint_quad(gpui::fill(rect(x - hair * 0.5, yh, hair, yl - yh), col));
+                let (top, bot) = (yo.min(yc), yo.max(yc));
+                window.paint_quad(gpui::fill(
+                    rect(x - half, top, half * 2.0, (bot - top).max(hair)),
+                    col,
+                ));
+            }
+        }
+    }
+
     /// The legend under the readout: one row per study (render time, not paint), on a
     /// `label_bg` box so lines and profile rows never run through the text.
     pub fn legend(&self, theme: &Theme, product: &Product) -> Option<AnyElement> {
         let shown = |s: &&Study| {
-            let IndicatorConfig::Vwap { display, .. } = &s.config;
-            !display.hidden && display.label
+            let d = s.config.display();
+            !d.hidden && d.label
         };
         if !self.list.iter().any(|s| shown(&s)) {
             return None;
@@ -213,7 +310,27 @@ impl Studies {
             .bg(theme.label_bg)
             .text_size(px(12.0));
         for s in self.list.iter().filter(shown) {
-            let IndicatorConfig::Vwap { spec, color, .. } = &s.config;
+            if let IndicatorConfig::CumDelta { spec, .. } = &s.config {
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(12.0)).h(px(3.0)).bg(theme.up))
+                    .child(
+                        div()
+                            .text_color(theme.text_main)
+                            .child(format!("Cumulative delta {}", spec.reset.label())),
+                    );
+                if s.approx {
+                    row = row.child(div().text_color(theme.text_dim).child("≈ from bars"));
+                }
+                col = col.child(row);
+                continue;
+            }
+            let IndicatorConfig::Vwap { spec, color, .. } = &s.config else {
+                continue;
+            };
             let c = theme.study[*color as usize % theme.study.len()];
             let mut row = div()
                 .flex()
