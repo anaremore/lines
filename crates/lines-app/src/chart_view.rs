@@ -2972,6 +2972,7 @@ impl ChartView {
                         .flex_wrap()
                         .min_w_0()
                         .h(px(QUOTE_ROW_H))
+                        .line_height(px(QUOTE_ROW_H))
                         .overflow_hidden()
                         .children(quotes),
                 )
@@ -3261,10 +3262,10 @@ fn cross_tag_y(y: f32, plot_h: f32) -> f32 {
     y.min(plot_h - TAG_H * 0.5).max(TAG_H * 0.5)
 }
 
-/// A header quote: `bid 6005.25`, or `bid —` (and `true`: show it dimmed) without a value.
-/// The header's quote row: one line of `text_sm`.
+/// The header's quote row: one line, its line height set to this (`text_sm` fits).
 const QUOTE_ROW_H: f32 = 20.0;
 
+/// A header quote: `bid 6005.25`, or `bid —` (and `true`: show it dimmed) without a value.
 fn quote_text(label: &str, p: Option<Price>, f: &lines_core::PriceFormat) -> (String, bool) {
     match p {
         Some(p) => (format!("{label} {}", f.format::<32>(p)), false),

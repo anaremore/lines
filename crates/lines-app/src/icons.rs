@@ -110,27 +110,15 @@ impl Icon {
                 &[(6.0, 14.0), (2.0, 14.0), (2.0, 10.0)],
             ],
             Icon::Menu => &[
-                // Three dots: small squares stroked closed (solid at 1.5 px).
+                // Three dots: 2-unit squares on whole grid units, closed (solid when stroked).
+                &[(2.0, 7.0), (4.0, 7.0), (4.0, 9.0), (2.0, 9.0), (2.0, 7.0)],
+                &[(7.0, 7.0), (9.0, 7.0), (9.0, 9.0), (7.0, 9.0), (7.0, 7.0)],
                 &[
-                    (2.5, 7.25),
-                    (4.0, 7.25),
-                    (4.0, 8.75),
-                    (2.5, 8.75),
-                    (2.5, 7.25),
-                ],
-                &[
-                    (7.25, 7.25),
-                    (8.75, 7.25),
-                    (8.75, 8.75),
-                    (7.25, 8.75),
-                    (7.25, 7.25),
-                ],
-                &[
-                    (12.0, 7.25),
-                    (13.5, 7.25),
-                    (13.5, 8.75),
-                    (12.0, 8.75),
-                    (12.0, 7.25),
+                    (12.0, 7.0),
+                    (14.0, 7.0),
+                    (14.0, 9.0),
+                    (12.0, 9.0),
+                    (12.0, 7.0),
                 ],
             ],
             Icon::Close => &[&[(4.0, 4.0), (12.0, 12.0)], &[(12.0, 4.0), (4.0, 12.0)]],
@@ -167,7 +155,11 @@ pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Windo
     let y0 = f32::from(bounds.origin.y) + (f32::from(bounds.size.height) - GRID * unit) * 0.5;
     for line in icon.lines() {
         let mut b = PathBuilder::stroke(px(stroke_width(scale)));
-        for (i, &(x, y)) in line.iter().enumerate() {
+        // A line ending where it began is a closed shape: closed with a join, so its first
+        // corner isn't cut by the stroke's flat end.
+        let closed = line.len() > 2 && line.first() == line.last();
+        let n = if closed { line.len() - 1 } else { line.len() };
+        for (i, &(x, y)) in line[..n].iter().enumerate() {
             let p = point(
                 px(snap(x0 + x * unit, scale)),
                 px(snap(y0 + y * unit, scale)),
@@ -177,6 +169,9 @@ pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Windo
             } else {
                 b.line_to(p);
             }
+        }
+        if closed {
+            b.close();
         }
         if let Ok(path) = b.build() {
             window.paint_path(path, color);
