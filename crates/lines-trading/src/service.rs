@@ -212,7 +212,32 @@ impl TradingService {
         };
         let thread = thread::Builder::new()
             .name("lines-trading".into())
-            .spawn(move || run(core, rx, file, clock, observers))?;
+            .spawn(move || run(core, rx, file, None, clock, observers))?;
+        Ok(TradingService {
+            handle,
+            thread: Some(thread),
+        })
+    }
+
+    /// [`TradingService::start_observed`] for a broker venue's core: no trading file (the
+    /// broker holds accounts and positions), but its accounts' guardrail progress is saved to
+    /// `guards` (lockouts at once, other progress at most once a second) to be restored with
+    /// `TradingCore::set_join_guardrails` at the next start.
+    pub fn start_venue(
+        core: TradingCore,
+        clock: Clock,
+        observers: Vec<Box<dyn Observer>>,
+        guards: Option<PathBuf>,
+    ) -> Result<TradingService> {
+        let (tx, rx) = mpsc::channel();
+        let handle = TradingHandle {
+            tx,
+            next_id: Arc::new(AtomicU64::new(1)),
+            order_latency: core.order_latency(),
+        };
+        let thread = thread::Builder::new()
+            .name("lines-trading-venue".into())
+            .spawn(move || run(core, rx, None, guards, clock, observers))?;
         Ok(TradingService {
             handle,
             thread: Some(thread),
@@ -314,9 +339,16 @@ fn run(
     mut core: TradingCore,
     rx: Receiver<Msg>,
     file: Option<(PathBuf, PaperConfig)>,
+    guards: Option<PathBuf>,
     clock: Clock,
     mut observers: Vec<Box<dyn Observer>>,
 ) {
+    let mut guard_saves = guards.map(|path| GuardSaves {
+        path,
+        written: None,
+        dirty: false,
+        last: Instant::now(),
+    });
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     let mut dirty = false;
     let mut last_save = Instant::now();
@@ -403,6 +435,9 @@ fn run(
         }
         events.extend(rest);
         let events = std::mem::take(&mut events);
+        if let Some(g) = &mut guard_saves {
+            g.after(&core, &events);
+        }
         if !events.is_empty() {
             dirty = true;
             subscribers.retain(|s| events.iter().all(|e| s.send(e.clone()).is_ok()));
@@ -417,6 +452,45 @@ fn run(
         }
     }
     save(&core, &file);
+    if let Some(g) = &mut guard_saves {
+        g.dirty = true;
+        g.write(&core);
+    }
+}
+
+/// A venue's guardrails file: written when what it would hold changed, at once for a lockout
+/// (or its end), else at most once a second.
+struct GuardSaves {
+    path: PathBuf,
+    written: Option<crate::persist::GuardFile>,
+    dirty: bool,
+    last: Instant,
+}
+
+impl GuardSaves {
+    fn after(&mut self, core: &TradingCore, events: &[Event]) {
+        self.dirty |= !events.is_empty();
+        let lock = events.iter().any(|e| matches!(e, Event::Guardrail { .. }));
+        if lock || (self.dirty && self.last.elapsed() >= Duration::from_secs(1)) {
+            self.write(core);
+        }
+    }
+
+    fn write(&mut self, core: &TradingCore) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        self.last = Instant::now();
+        let f = core.guard_file();
+        if self.written.as_ref() == Some(&f) {
+            return;
+        }
+        match crate::persist::save_guards(&self.path, &f) {
+            Ok(()) => self.written = Some(f),
+            Err(e) => tracing::error!("can't save {}: {e:#}", self.path.display()),
+        }
+    }
 }
 
 fn save(core: &TradingCore, file: &Option<(PathBuf, PaperConfig)>) {

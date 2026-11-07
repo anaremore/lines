@@ -142,6 +142,70 @@ pub fn save(path: &Path, file: &TradingFile) -> Result<()> {
     Ok(())
 }
 
+/// The guardrails file's version (its own, apart from the trading file's).
+pub const GUARDS_VERSION: u64 = 1;
+
+/// Guardrail progress of accounts the trading file doesn't hold, by account id: a broker
+/// venue's (its accounts, positions and balances live at the broker). A lockout written here
+/// survives a restart; the venue's core restores it when the account joins.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardFile {
+    pub version: u64,
+    pub accounts: std::collections::BTreeMap<String, VenueGuard>,
+}
+
+/// One venue account's saved guardrail progress.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VenueGuard {
+    /// Guardrails in force, pending looser ones, the day's counts and any lockout.
+    pub guardrails: GuardrailTracker,
+    /// The trade date and the balance it opened with: the daily loss counts from it, so a
+    /// restart the same day keeps today's loss.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::rules::opt_date"
+    )]
+    pub day: Option<lines_core::CivilDate>,
+    #[serde(default)]
+    pub day_open_balance: crate::types::Money,
+}
+
+/// A guardrails file; `None` if there is none. A newer version is refused (never half-read);
+/// the app sets a refused file aside and reports it.
+pub fn load_guards(path: &Path) -> Result<Option<GuardFile>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    let v: Value =
+        serde_json::from_str(&text).with_context(|| format!("{} is damaged", path.display()))?;
+    let version = v
+        .get("version")
+        .and_then(Value::as_u64)
+        .with_context(|| format!("{} has no version", path.display()))?;
+    if version > GUARDS_VERSION {
+        bail!(
+            "guardrails file is version {version}, newer than this build reads ({GUARDS_VERSION})"
+        );
+    }
+    serde_json::from_value(v)
+        .map(Some)
+        .with_context(|| format!("{} doesn't match the guardrails format", path.display()))
+}
+
+/// Write atomically (temporary file, then rename over the old one).
+pub fn save_guards(path: &Path, file: &GuardFile) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

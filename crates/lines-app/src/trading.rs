@@ -510,6 +510,10 @@ pub struct TradingSetup {
     /// synthetic screenshot venue, tests). Otherwise a replay's or the mock's prices would mark
     /// a real venue's positions.
     pub venue_marks_always: bool,
+    /// Where broker venues keep their accounts' guardrail progress (`<name>.guardrails.json`):
+    /// a venue is a real broker, so this doesn't depend on the data source (replays too).
+    /// `None`: nothing is saved (screenshots, tests).
+    pub venue_dir: Option<PathBuf>,
 }
 
 impl TradingSetup {
@@ -528,6 +532,7 @@ impl TradingSetup {
             prop_rules: BTreeMap::new(),
             brokers: Vec::new(),
             venue_marks_always: false,
+            venue_dir: config_dir.map(|d| d.join("paper")),
             journal: (!replay)
                 .then(|| {
                     config_dir.map(|d| {
@@ -586,6 +591,7 @@ impl TradingSetup {
             journal: None,
             brokers: Vec::new(),
             venue_marks_always: false,
+            venue_dir: None,
         }
     }
 }
@@ -1082,6 +1088,7 @@ impl Trading {
                 lines_feed::Source::Replay { .. } | lines_feed::Source::CqgMock(_)
             );
         let clock = setup.clock;
+        let guards_dir = setup.venue_dir.clone();
         let service = TradingService::start_observed(
             core,
             setup.file.map(|p| (p, paper)),
@@ -1120,17 +1127,50 @@ impl Trading {
                     continue;
                 }
             };
-            // Accounts join when the broker discovers them (the watcher).
-            let core = TradingCore::new(broker);
+            // Accounts join when the broker discovers them (the watcher), each with its saved
+            // guardrail progress (a lockout survives a restart) and the trader's settings.
+            let mut core = TradingCore::new(broker);
+            let mut guards_path = guards_dir
+                .as_ref()
+                .map(|d| d.join(format!("{}.guardrails.json", ext.name())));
+            let saved = match guards_path.as_deref().map(persist::load_guards) {
+                Some(Ok(Some(f))) => f.accounts,
+                Some(Err(e)) => {
+                    let path = guards_path.take().expect("loaded from it");
+                    let aside =
+                        path.with_extension(format!("unreadable-{}.json", lines_feed::now_utc().0));
+                    let msg = match std::fs::rename(&path, &aside) {
+                        Ok(()) => {
+                            guards_path = Some(path);
+                            format!(
+                                "{}: guardrails file unreadable ({e:#}); moved to {}, settings apply",
+                                ext.label(),
+                                aside.display()
+                            )
+                        }
+                        Err(re) => format!(
+                            "{}: guardrails file unreadable ({e:#}) and couldn't be moved aside ({re}); guardrail progress is not saved this run",
+                            ext.label()
+                        ),
+                    };
+                    tracing::warn!("{msg}");
+                    report = Some(match report {
+                        Some(r) => format!("{r}  ·  {msg}"),
+                        None => msg,
+                    });
+                    BTreeMap::new()
+                }
+                _ => BTreeMap::new(),
+            };
+            core.set_join_guardrails(setup.guardrails.clone(), saved);
             let ids = Arc::new(Mutex::new(VenueIds::new(venues.len())));
             // A venue's time is the wall's (in a replay its market data, if any, is no clock).
             let vclock = match clock {
                 Clock::Market => Clock::Wall,
                 c => c,
             };
-            let service = match TradingService::start_observed(
+            let service = match TradingService::start_venue(
                 core,
-                None,
                 vclock,
                 vec![Box::new(TaggedObserver {
                     ids: ids.clone(),
@@ -1138,6 +1178,7 @@ impl Trading {
                     fills_only: ext.capabilities().external_fills,
                     joined: Default::default(),
                 })],
+                guards_path,
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -2001,6 +2042,7 @@ mod tests {
             journal: None,
             brokers: Vec::new(),
             venue_marks_always: false,
+            venue_dir: None,
         }
     }
 

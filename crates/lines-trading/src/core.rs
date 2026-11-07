@@ -92,6 +92,9 @@ struct AccountCache {
     /// Prop rules asked for that are looser than those in force: they take over with the
     /// next trade date (`Command::SetRules`).
     pending_rules: Option<PendingRules>,
+    /// A venue account's saved trade date and opening balance, applied when the broker
+    /// first lists it (its real balance known).
+    restore_day: Option<(CivilDate, Money)>,
     /// When recent new orders and modifies were sent (rate limits, decision 0006).
     submits: VecDeque<UtcMillis>,
     modifies: VecDeque<UtcMillis>,
@@ -213,6 +216,15 @@ pub struct TradingCore {
     news_flattened: HashSet<(AccountId, ContractKey, UtcMillis)>,
     /// The latest time the core was given (for `next_wake`, which takes none).
     seen_now: UtcMillis,
+    /// Guardrails for accounts joining later (`set_join_guardrails`).
+    join_guards: JoinGuards,
+}
+
+/// Saved guardrail progress (by id) and settings (by name or id) for accounts that join.
+#[derive(Default)]
+struct JoinGuards {
+    defaults: BTreeMap<String, crate::guardrails::Guardrails>,
+    saved: BTreeMap<String, crate::persist::VenueGuard>,
 }
 
 const KEEP_FINISHED: usize = 2000;
@@ -263,6 +275,7 @@ impl TradingCore {
             econ: Some(lines_feed::econ::bundled()),
             news_flattened: HashSet::new(),
             seen_now: UtcMillis(i64::MIN),
+            join_guards: JoinGuards::default(),
         }
     }
 
@@ -284,6 +297,70 @@ impl TradingCore {
             a.guard.active.news,
             a.cfg.rules.as_ref().and_then(|r| r.news),
         )
+    }
+
+    /// Guardrails for accounts that join later through [`TradingCore::add_accounts`] (a
+    /// broker venue's, discovered after it connects): the progress saved for each (by id,
+    /// lockouts included) is restored when it joins, then the trader's settings (by name,
+    /// else id) are asked for as `SetGuardrails` would (tighter now, looser with the next
+    /// trade date; nothing clears a lockout).
+    pub fn set_join_guardrails(
+        &mut self,
+        defaults: BTreeMap<String, crate::guardrails::Guardrails>,
+        saved: BTreeMap<String, crate::persist::VenueGuard>,
+    ) {
+        self.join_guards = JoinGuards { defaults, saved };
+    }
+
+    /// Every account's guardrail progress, by id (a venue's saved guardrails file), with the
+    /// saved progress of accounts that haven't joined yet (never dropped by a save before the
+    /// broker lists them).
+    pub fn guard_file(&self) -> crate::persist::GuardFile {
+        let mut accounts = self.join_guards.saved.clone();
+        accounts.extend(
+            self.accounts
+                .iter()
+                .filter(|(_, a)| !a.guard.is_default())
+                .map(|(id, a)| {
+                    (
+                        id.0.clone(),
+                        crate::persist::VenueGuard {
+                            guardrails: a.guard.clone(),
+                            day: a.tracker.day,
+                            day_open_balance: a.tracker.day_open_balance,
+                        },
+                    )
+                }),
+        );
+        crate::persist::GuardFile {
+            version: crate::persist::GUARDS_VERSION,
+            accounts,
+        }
+    }
+
+    /// A joining account's guardrails: saved progress, then settings; a restored lockout is
+    /// reported (the UI learns of it like any other).
+    fn join_guardrails(&mut self, account: &AccountId) {
+        let Some(a) = self.accounts.get_mut(account) else {
+            return;
+        };
+        if let Some(saved) = self.join_guards.saved.remove(account.0.as_str()) {
+            a.guard = saved.guardrails;
+            // The same trade date again: today's loss still counts from its opening balance,
+            // once the broker lists the account with its real balance (`rebuild`); before
+            // that its balance is unknown and the day's loss would read wrong.
+            a.restore_day = saved.day.map(|d| (d, saved.day_open_balance));
+        }
+        let wanted = self
+            .join_guards
+            .defaults
+            .get(&a.cfg.name)
+            .or_else(|| self.join_guards.defaults.get(account.0.as_str()))
+            .cloned();
+        if let Some(g) = wanted {
+            a.guard.request(g);
+        }
+        self.guard_report(account);
     }
 
     pub fn set_overfill_policy(&mut self, p: OverfillPolicy) {
@@ -325,7 +402,9 @@ impl TradingCore {
         let mut added = false;
         for cfg in accounts {
             if !self.accounts.contains_key(&cfg.id) {
+                let id = cfg.id.clone();
                 self.add_account(cfg, None);
+                self.join_guardrails(&id);
                 added = true;
             }
         }
@@ -348,6 +427,7 @@ impl TradingCore {
                 guard: GuardrailTracker::default(),
                 guard_seen: GuardrailTracker::default().change(),
                 pending_rules: None,
+                restore_day: None,
                 balance: start,
                 positions: BTreeMap::new(),
                 cfg,
@@ -2048,6 +2128,10 @@ impl TradingCore {
                 continue;
             };
             a.balance = ba.balance;
+            if let Some((day, open)) = a.restore_day.take() {
+                a.tracker.day = Some(day);
+                a.tracker.day_open_balance = open;
+            }
             a.positions = ba
                 .positions
                 .iter()
