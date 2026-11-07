@@ -36,6 +36,7 @@ impl Broker for Recorder {
             server_brackets: true,
             oco: true,
             fractional_qty: false,
+            external_fills: false,
         }
     }
     fn request(&mut self, _now: UtcMillis, _req: BrokerRequest) {

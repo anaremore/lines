@@ -41,6 +41,7 @@ impl BrokerExtension for DummyBroker {
             server_brackets: true,
             oco: true,
             fractional_qty: false,
+            external_fills: false,
         }
     }
     fn accounts(&self) -> Arc<dyn AccountSource> {

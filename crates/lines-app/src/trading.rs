@@ -15,8 +15,16 @@
 //! pane's running feed (`FeedBridge::follow_store`), so the paper broker sees exactly what the
 //! DOM shows, from the same connection or replay.
 //!
-//! **Accounts:** paper only for now (decision 0018: the account decides the broker and the
-//! rules). The paper state lives in `<config dir>/paper/<source>.json` per data source (paper
+//! **Accounts:** paper, plus the accounts of each registered broker extension (decision 0020;
+//! decision 0018: the account decides the broker and the rules). Each extension's broker runs in
+//! its own core and service, with its own event pump into the same [`TradeCache`]; a watcher
+//! thread adds the accounts it discovers after connecting, keeps their badge, connection state
+//! and read-only reason current, and asks its core to rebuild from the broker whenever the
+//! venue changed. An account the extension marks not tradable is **read-only**: every command on
+//! it (orders, cancels, Flatten and Cancel All too) is refused here, never sent, and shown as
+//! DENIED with the extension's reason.
+//!
+//! The paper state lives in `<config dir>/paper/<source>.json` per data source (paper
 //! fills on one source's prices never mark against another's); replays and screenshots keep
 //! theirs in memory only (market time runs in the past). A damaged file is moved aside, never
 //! overwritten, and reported.
@@ -29,9 +37,9 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use gpui::{App, Global};
@@ -39,16 +47,18 @@ use lines_core::{ContractKey, Price};
 use lines_feed::FeedConfig;
 use lines_feed::registry::FeedRegistry;
 use lines_feed::store::ChartStore;
+use lines_trading::core::EXTERNAL_ORDER;
+use lines_trading::extension::{AccountKind, AccountSource, BrokerExtension, VenueStatus};
 use lines_trading::order::Order;
 use lines_trading::persist;
 use lines_trading::rules;
-use lines_trading::service::Clock;
+use lines_trading::service::{Clock, Observer};
 use lines_trading::{
     AccountConfig, AccountId, AccountView, Command as TradeCommand, CommandId, Event, FeedBridge,
-    OrderId, OrderKind, PaperBroker, PaperConfig, PositionView, Reject, RulePreset, Source,
-    TradingCore, TradingHandle, TradingService,
+    MarketInput, OrderId, OrderKind, PaperBroker, PaperConfig, PositionView, Reject, RulePreset,
+    Source, TradingCore, TradingHandle, TradingService,
 };
-use lines_trading::{GuardState, Guardrails, Journal, JournalShared};
+use lines_trading::{GuardState, Guardrails, Journal, JournalShared, RejectCode};
 
 /// How long a rejection stays on screen where it happened.
 pub const FLASH: Duration = Duration::from_secs(4);
@@ -62,10 +72,39 @@ const KEEP_FINISHED: usize = 256;
 pub struct AccountInfo {
     pub id: AccountId,
     pub name: String,
-    /// Paper accounts only for now; live ones come with the private connectors (0014).
+    /// A paper account (Lines' own simulation).
     pub paper: bool,
     /// The prop preset, for the rule strip's limits.
     pub rules: Option<RulePreset>,
+    /// The broker extension the account belongs to (index into the venues; `None`: paper).
+    pub venue: Option<usize>,
+    /// The badge beside its name: PAPER, SIM (the venue's simulation) or LIVE (real money, or a
+    /// mode the venue didn't say: never shown as simulated).
+    pub badge: &'static str,
+    /// Why Lines can't trade the account (`None`: it can). Every command on it is refused here.
+    pub read_only: Option<String>,
+}
+
+impl AccountInfo {
+    fn paper(id: AccountId, name: String, rules: Option<RulePreset>) -> AccountInfo {
+        AccountInfo {
+            id,
+            name,
+            paper: true,
+            rules,
+            venue: None,
+            badge: "PAPER",
+            read_only: None,
+        }
+    }
+}
+
+/// The badge for an extension account's kind.
+pub fn badge(kind: AccountKind) -> &'static str {
+    match kind {
+        AccountKind::Simulated => "SIM",
+        AccountKind::Live | AccountKind::Unknown => "LIVE",
+    }
 }
 
 /// Whose refusal a flash reports (docs/inspiration.md: denied is not rejected).
@@ -245,6 +284,24 @@ impl TradeState {
         }
     }
 
+    /// A command refused before it was sent (a read-only account): its result and a DENIED
+    /// flash, as if the core had refused it.
+    fn deny(&mut self, id: CommandId, n: Note, message: String, now: Instant) {
+        self.flashes.push_back(Flash {
+            kind: FlashKind::Denied,
+            account: n.account,
+            contract: n.contract,
+            price: n.price,
+            message: message.clone(),
+            at: now,
+        });
+        self.results
+            .push_back((id, Err(Reject::new(RejectCode::Invalid, message))));
+        while self.results.len() > KEEP_RESULTS {
+            self.results.pop_front();
+        }
+    }
+
     /// What the UI sent with command `id`. If the answer is already here (the note lost the
     /// race) and was a refusal, it flashes now. Returns whether it did.
     fn note(&mut self, id: CommandId, n: Note, now: Instant) -> bool {
@@ -411,6 +468,12 @@ pub struct TradingSetup {
     pub guardrails: BTreeMap<String, Guardrails>,
     /// The trade journal's file and the source label in its header (`None`: in memory).
     pub journal: Option<(PathBuf, String)>,
+    /// Broker extensions (decision 0020): each runs its own core beside the paper one.
+    pub brokers: Vec<Arc<dyn BrokerExtension>>,
+    /// Feed venues' cores the panes' market data even when the source isn't live (the
+    /// synthetic screenshot venue, tests). Otherwise a replay's or the mock's prices would mark
+    /// a real venue's positions.
+    pub venue_marks_always: bool,
 }
 
 impl TradingSetup {
@@ -426,6 +489,8 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            brokers: Vec::new(),
+            venue_marks_always: false,
             journal: (!replay)
                 .then(|| {
                     config_dir.map(|d| {
@@ -481,6 +546,8 @@ impl TradingSetup {
             check_sessions: true,
             guardrails: BTreeMap::new(),
             journal: None,
+            brokers: Vec::new(),
+            venue_marks_always: false,
         }
     }
 }
@@ -502,7 +569,13 @@ pub struct Trading {
     /// Dropped with the global at exit: stops the thread after a last save.
     _service: Arc<TradingService>,
     bridge: FeedBridge,
-    pub accounts: Vec<AccountInfo>,
+    /// Paper accounts first, then each venue's (they change while venues connect).
+    accounts: Arc<RwLock<Vec<AccountInfo>>>,
+    venues: Vec<Venue>,
+    /// Ids for commands refused before they were sent (never the core's).
+    local_ids: AtomicU64,
+    /// Whether panes' feeds reach the venues' cores (see `TradingSetup::venue_marks_always`).
+    venue_marks: bool,
     pub cache: Arc<TradeCache>,
     notes: Sender<(CommandId, Note)>,
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
@@ -532,6 +605,270 @@ pub struct Trading {
 
 impl Global for Trading {}
 
+/// A broker extension's core, as the app runs it.
+struct Venue {
+    label: String,
+    handle: TradingHandle,
+    _service: Arc<TradingService>,
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    source: Arc<dyn AccountSource>,
+    /// The source's status as the watcher last read it (the UI never calls the extension).
+    status: Arc<RwLock<Option<VenueStatus>>>,
+    /// Its ids in the shared cache (see [`VenueIds`]).
+    ids: Arc<Mutex<VenueIds>>,
+    /// The panes' feeds into its core: it marks the venue's positions (open P&L).
+    bridge: FeedBridge,
+    notes: Sender<(CommandId, Note)>,
+    #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
+    barrier: Sender<Sender<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Trading {
+    fn drop(&mut self) {
+        for v in &self.venues {
+            v.stop.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// How often a venue's watcher looks at its account source.
+const VENUE_POLL: Duration = Duration::from_millis(250);
+/// At most one rebuild from a venue's broker this often (the snapshot is the truth).
+const VENUE_REBUILD: Duration = Duration::from_millis(500);
+/// Why a broker account the broker doesn't list right now (disconnected, or not yet
+/// connected after a start) can't be used.
+pub const NOT_LISTED: &str = "not listed by its broker now (disconnected?)";
+
+/// A connected venue that sent nothing for this long is shown stale.
+pub const VENUE_STALE_AFTER_S: i64 = 15;
+
+/// A venue's order and command ids as the shared cache and the journal see them. Every core
+/// numbers its own commands and orders from 1, and a venue's broker picks its own order ids,
+/// so ids from two cores would collide in the cache shared with paper. A venue's ids are
+/// translated to ids no other core uses (the venue's tag in the top 16 bits; paper's stay
+/// below it), and back for commands sent to the venue. One entry per order seen.
+struct VenueIds {
+    tag: u64,
+    next: u64,
+    global: HashMap<OrderId, OrderId>,
+    local: HashMap<OrderId, OrderId>,
+}
+
+const VENUE_TAG_SHIFT: u32 = 48;
+
+/// A venue's command id in the shared cache.
+fn venue_command(tag: u64, id: CommandId) -> CommandId {
+    CommandId(tag | (id.0 & ((1 << VENUE_TAG_SHIFT) - 1)))
+}
+
+impl VenueIds {
+    fn new(index: usize) -> VenueIds {
+        VenueIds {
+            tag: (index as u64 + 1) << VENUE_TAG_SHIFT,
+            next: 1,
+            global: HashMap::new(),
+            local: HashMap::new(),
+        }
+    }
+
+    fn order(&mut self, id: OrderId) -> OrderId {
+        if id == EXTERNAL_ORDER {
+            return id;
+        }
+        if let Some(g) = self.global.get(&id) {
+            return *g;
+        }
+        let g = OrderId(self.tag | self.next);
+        self.next += 1;
+        self.global.insert(id, g);
+        self.local.insert(g, id);
+        g
+    }
+
+    /// A command for the venue's core, in its own ids.
+    fn to_local(&self, mut cmd: TradeCommand) -> TradeCommand {
+        if let TradeCommand::CancelOrder { order, .. } | TradeCommand::ModifyOrder { order, .. } =
+            &mut cmd
+            && let Some(l) = self.local.get(order)
+        {
+            *order = *l;
+        }
+        cmd
+    }
+
+    fn event(&mut self, mut e: Event) -> Event {
+        match &mut e {
+            Event::Command { id, result, .. } => {
+                *id = venue_command(self.tag, *id);
+                if let Ok(orders) = result {
+                    for o in orders {
+                        *o = self.order(*o);
+                    }
+                }
+            }
+            Event::Order(o) => {
+                o.id = self.order(o.id);
+                o.parent = o.parent.map(|p| self.order(p));
+                o.oco = o.oco.map(|p| self.order(p));
+            }
+            Event::Fill(f) => f.order = self.order(f.order),
+            Event::Overfill { order, .. } => *order = self.order(*order),
+            _ => {}
+        }
+        e
+    }
+}
+
+/// The journal on a venue's thread, seeing the venue's events in the shared ids.
+///
+/// For a broker that reports external fills, the journal follows a venue account's position
+/// from its fills alone: position reports pass only in the batch where the account joins (to
+/// seed what was open then). A later report can reach the core before the execution that
+/// made it, and seeding from it would count that execution twice.
+struct TaggedObserver {
+    ids: Arc<Mutex<VenueIds>>,
+    inner: Box<dyn Observer>,
+    fills_only: bool,
+    joined: std::collections::HashSet<AccountId>,
+}
+
+impl Observer for TaggedObserver {
+    // The paper core's observer already forwards every followed feed to the journal, in its
+    // own order; a venue thread forwarding the same batches would interleave them out of order.
+    fn market(&mut self, _contract: ContractKey, _inputs: &[MarketInput]) {}
+    fn events(&mut self, events: &[Event]) {
+        let mut mapped: Vec<Event> = {
+            let mut ids = self.ids.lock().unwrap_or_else(|e| e.into_inner());
+            events.iter().cloned().map(|e| ids.event(e)).collect()
+        };
+        if self.fills_only {
+            let joined = &self.joined;
+            mapped.retain(|e| !matches!(e, Event::Position(p) if joined.contains(&p.account)));
+            for e in events {
+                if let Event::Account(a) = e {
+                    self.joined.insert(a.account.clone());
+                }
+            }
+        }
+        self.inner.events(&mapped);
+    }
+}
+
+/// What the account chip shows of a venue's status: connected, detail, and how stale (in
+/// 5 s steps, 0 while fresh). The watcher repaints when it changes.
+fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
+    let s = s.as_ref()?;
+    let silent = s
+        .last_message
+        .map_or(0, |m| (lines_feed::now_utc().0 - m.0) / 1000);
+    let stale = if s.connected && silent >= VENUE_STALE_AFTER_S {
+        1 + silent / 5
+    } else {
+        0
+    };
+    Some((s.connected, s.detail.clone(), stale))
+}
+
+/// The UI's view of a venue's accounts.
+fn venue_accounts(index: usize, source: &dyn AccountSource) -> Vec<AccountInfo> {
+    source
+        .accounts()
+        .into_iter()
+        .map(|a| AccountInfo {
+            id: a.id,
+            name: a.label,
+            paper: false,
+            rules: None,
+            venue: Some(index),
+            badge: badge(a.kind),
+            read_only: a.tradable.err(),
+        })
+        .collect()
+}
+
+/// Watch a venue: new accounts join its core, changes rebuild it from the broker, and the
+/// shared account list follows. Runs until `stop`.
+/// `unmarked`: the journal, when the app's prices aren't the venue's market (a replay or the
+/// mock): the venue's accounts are added to its unmarked set (no MAE/MFE from those prices).
+#[allow(clippy::too_many_arguments)]
+fn spawn_watcher(
+    index: usize,
+    source: Arc<dyn AccountSource>,
+    status: Arc<RwLock<Option<VenueStatus>>>,
+    handle: TradingHandle,
+    accounts: Arc<RwLock<Vec<AccountInfo>>>,
+    cache: Arc<TradeCache>,
+    unmarked: Option<Arc<JournalShared>>,
+    stop: Arc<AtomicBool>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("lines-venue-watch".into())
+        .spawn(move || {
+            let mut seen_rev = u64::MAX;
+            let mut known: Vec<AccountId> = Vec::new();
+            let mut last_rebuild: Option<Instant> = None;
+            let mut pending = false;
+            let mut shown = None;
+            while !stop.load(Ordering::Acquire) {
+                let st = source.status();
+                let key = status_key(&st);
+                *status.write().unwrap_or_else(|e| e.into_inner()) = st;
+                if key != shown {
+                    shown = key;
+                    cache.bump(None);
+                }
+                let rev = source.revision();
+                if rev != seen_rev {
+                    seen_rev = rev;
+                    let mut infos = venue_accounts(index, source.as_ref());
+                    let new: Vec<AccountConfig> = infos
+                        .iter()
+                        .filter(|a| !known.contains(&a.id))
+                        .map(|a| {
+                            let mut c = AccountConfig::paper(&a.id.0, 0);
+                            c.name = a.name.clone();
+                            c
+                        })
+                        .collect();
+                    {
+                        let mut all = accounts.write().unwrap_or_else(|e| e.into_inner());
+                        // An account the venue stops listing (a disconnect) stays, read-only,
+                        // with its badge: never shown as another kind or as tradable.
+                        for a in all.iter().filter(|a| a.venue == Some(index)) {
+                            if !infos.iter().any(|i| i.id == a.id) {
+                                let mut kept = a.clone();
+                                kept.read_only = Some(NOT_LISTED.to_owned());
+                                infos.push(kept);
+                            }
+                        }
+                        known = infos.iter().map(|a| a.id.clone()).collect();
+                        all.retain(|a| a.venue != Some(index));
+                        all.extend(infos);
+                    }
+                    if let Some(j) = &unmarked {
+                        j.add_unmarked(known.clone());
+                    }
+                    if !new.is_empty() {
+                        handle.add_accounts(new);
+                    }
+                    // Every change rebuilds from the broker (a reconnect lists the same
+                    // accounts again: the core already has them, the snapshot is new).
+                    pending = true;
+                    cache.bump(None);
+                }
+                if pending && last_rebuild.is_none_or(|t| t.elapsed() >= VENUE_REBUILD) {
+                    handle.rebuild();
+                    last_rebuild = Some(Instant::now());
+                    pending = false;
+                }
+                std::thread::sleep(VENUE_POLL);
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!("can't start a broker venue watcher: {e}");
+    }
+}
 impl Trading {
     /// Build the paper core (from the setup's file, else the default accounts), start it and
     /// the event pump.
@@ -615,13 +952,15 @@ impl Trading {
         let _ = core.drain();
         let accounts: Vec<AccountInfo> = core
             .accounts()
-            .map(|(c, _)| AccountInfo {
-                id: c.id.clone(),
-                name: c.name.clone(),
-                paper: true,
-                rules: c.rules.clone(),
-            })
+            .map(|(c, _)| AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone()))
             .collect();
+        let brokers = std::mem::take(&mut setup.brokers);
+        let venue_marks = setup.venue_marks_always
+            || !matches!(
+                base.source,
+                lines_feed::Source::Replay { .. } | lines_feed::Source::CqgMock(_)
+            );
+        let clock = setup.clock;
         let service = TradingService::start_observed(
             core,
             setup.file.map(|p| (p, paper)),
@@ -629,7 +968,7 @@ impl Trading {
             vec![Box::new(journal.observer())],
         )
         .expect("spawn the trading thread");
-        let report = match (report, journal_report) {
+        let mut report = match (report, journal_report) {
             (Some(a), Some(b)) => Some(format!("{a}  ·  {b}")),
             (a, b) => a.or(b),
         };
@@ -637,14 +976,98 @@ impl Trading {
         let cache = Arc::new(TradeCache::new(&accounts));
         let (notes, notes_rx) = mpsc::channel();
         let (barrier, barrier_rx) = mpsc::channel();
-        spawn_pump(handle.subscribe(), notes_rx, barrier_rx, cache.clone());
+        spawn_pump(
+            handle.subscribe(),
+            notes_rx,
+            barrier_rx,
+            cache.clone(),
+            None,
+        );
         // The full state as the first events.
         handle.rebuild();
+        let accounts = Arc::new(RwLock::new(accounts));
+        let mut venues = Vec::new();
+        for ext in brokers {
+            let broker = match ext.open() {
+                Ok(b) => b,
+                Err(e) => {
+                    let msg = format!("{}: not started ({e:#})", ext.label());
+                    report = Some(match report {
+                        Some(r) => format!("{r}  ·  {msg}"),
+                        None => msg,
+                    });
+                    continue;
+                }
+            };
+            // Accounts join when the broker discovers them (the watcher).
+            let core = TradingCore::new(broker);
+            let ids = Arc::new(Mutex::new(VenueIds::new(venues.len())));
+            // A venue's time is the wall's (in a replay its market data, if any, is no clock).
+            let vclock = match clock {
+                Clock::Market => Clock::Wall,
+                c => c,
+            };
+            let service = match TradingService::start_observed(
+                core,
+                None,
+                vclock,
+                vec![Box::new(TaggedObserver {
+                    ids: ids.clone(),
+                    inner: Box::new(journal.observer()),
+                    fills_only: ext.capabilities().external_fills,
+                    joined: Default::default(),
+                })],
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("{}: can't start its trading thread: {e}", ext.label());
+                    continue;
+                }
+            };
+            let vh = service.handle();
+            let (vnotes, vnotes_rx) = mpsc::channel();
+            let (vbarrier, vbarrier_rx) = mpsc::channel();
+            spawn_pump(
+                vh.subscribe(),
+                vnotes_rx,
+                vbarrier_rx,
+                cache.clone(),
+                Some(ids.clone()),
+            );
+            let source = ext.accounts();
+            let status = Arc::new(RwLock::new(None));
+            let stop = Arc::new(AtomicBool::new(false));
+            spawn_watcher(
+                venues.len(),
+                source.clone(),
+                status.clone(),
+                vh.clone(),
+                accounts.clone(),
+                cache.clone(),
+                (!venue_marks).then(|| journal.clone()),
+                stop.clone(),
+            );
+            venues.push(Venue {
+                label: ext.label().to_owned(),
+                handle: vh,
+                _service: Arc::new(service),
+                source,
+                status,
+                ids,
+                bridge: FeedBridge::new(registry.clone(), base.clone()),
+                notes: vnotes,
+                barrier: vbarrier,
+                stop,
+            });
+        }
         Trading {
             bridge: FeedBridge::new(registry, base),
             handle,
             _service: Arc::new(service),
             accounts,
+            venues,
+            local_ids: AtomicU64::new(0),
+            venue_marks,
             cache,
             notes,
             barrier,
@@ -699,28 +1122,87 @@ impl Trading {
         &self.handle
     }
 
-    pub fn account(&self, id: &AccountId) -> Option<&AccountInfo> {
-        self.accounts.iter().find(|a| &a.id == id)
+    /// Every account: paper first, then each venue's (as discovered so far).
+    pub fn accounts(&self) -> Vec<AccountInfo> {
+        self.accounts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Whether the account is read-only (no copy: render paths call this). An account no one
+    /// lists while brokers are configured is a broker account not connected yet: read-only.
+    pub fn is_read_only(&self, id: &AccountId) -> bool {
+        match self
+            .accounts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|a| &a.id == id)
+        {
+            Some(a) => a.read_only.is_some(),
+            None => !self.venues.is_empty(),
+        }
+    }
+
+    /// Why the account is read-only, if it is (see [`Trading::is_read_only`]).
+    pub fn read_only_reason(&self, id: &AccountId) -> Option<String> {
+        match self.account(id) {
+            Some(a) => a.read_only,
+            None => (!self.venues.is_empty()).then(|| NOT_LISTED.to_owned()),
+        }
+    }
+
+    /// Whether a pane restored on this account keeps it: a listed account, or (brokers
+    /// configured) a broker account not listed yet, since brokers connect after start. It
+    /// then shows as waiting and read-only until listed; the saved choice is never replaced.
+    pub fn keeps_saved_account(&self, id: &AccountId) -> bool {
+        !self.venues.is_empty() || self.account(id).is_some()
+    }
+
+    pub fn account(&self, id: &AccountId) -> Option<AccountInfo> {
+        self.accounts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|a| &a.id == id)
+            .cloned()
+    }
+
+    /// A venue's name and connection state (for the account chip).
+    pub fn venue_status(&self, venue: usize) -> Option<(String, Option<VenueStatus>)> {
+        let v = self.venues.get(venue)?;
+        let status = v.status.read().unwrap_or_else(|e| e.into_inner()).clone();
+        Some((v.label.clone(), status))
     }
 
     /// The account a new pane trades on.
     pub fn default_account(&self) -> Option<AccountId> {
+        let all = self.accounts();
         self.start_account
             .clone()
-            .filter(|a| self.account(a).is_some())
-            .or_else(|| self.accounts.first().map(|a| a.id.clone()))
+            .filter(|a| all.iter().any(|x| &x.id == a))
+            .or_else(|| all.first().map(|a| a.id.clone()))
     }
 
     /// The account after `id` (wrapping), for the selector's hotkey.
     pub fn next_account(&self, id: Option<&AccountId>) -> Option<AccountId> {
-        let i = id.and_then(|id| self.accounts.iter().position(|a| &a.id == id));
-        let next = i.map_or(0, |i| (i + 1) % self.accounts.len().max(1));
-        self.accounts.get(next).map(|a| a.id.clone())
+        let all = self.accounts();
+        let i = id.and_then(|id| all.iter().position(|a| &a.id == id));
+        let next = i.map_or(0, |i| (i + 1) % all.len().max(1));
+        all.get(next).map(|a| a.id.clone())
     }
 
-    /// Paper fills see the pane's own feed (once per feed).
+    /// Paper fills see the pane's own feed (once per feed). With a live source each venue's core
+    /// sees it too, to mark its positions (its broker gets the data but needs none); a replay's
+    /// or the mock's prices never mark a real venue's positions.
     pub fn follow(&self, store: &Arc<ChartStore>) {
         self.bridge.follow_store(store, &self.handle);
+        if self.venue_marks {
+            for v in &self.venues {
+                v.bridge.follow_store(store, &v.handle);
+            }
+        }
     }
 
     /// Wait until everything sent so far is handled by the core and in the cache. Blocks:
@@ -732,18 +1214,75 @@ impl Trading {
         if self.barrier.send(tx).is_ok() {
             let _ = rx.recv_timeout(Duration::from_secs(10));
         }
+        for v in &self.venues {
+            v.handle.sync();
+            let (tx, rx) = mpsc::channel();
+            if v.barrier.send(tx).is_ok() {
+                let _ = rx.recv_timeout(Duration::from_secs(10));
+            }
+        }
         // The journal applied every event the core sent before the sync above.
         self.journal.sync();
     }
 
-    /// Send a command; returns at once. `issued`: the input event's time (the click).
-    pub fn submit(&self, source: Source, issued: Instant, cmd: TradeCommand) -> CommandId {
-        let note = note_for(&cmd);
-        let id = self.handle.submit_at(source, issued, cmd);
-        // The pump pairs the note with the answer whichever arrives first.
-        if let Some(note) = note {
-            let _ = self.notes.send((id, note));
+    /// Wait (bounded, 5 s) until every venue's accounts are listed and its core has rebuilt
+    /// from the broker. Blocks: screenshots only.
+    #[cfg(feature = "screenshot")]
+    pub fn wait_for_venues(&self) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end {
+            let listed = self.accounts();
+            let all = self.venues.iter().all(|v| {
+                v.source
+                    .accounts()
+                    .iter()
+                    .all(|a| listed.iter().any(|l| l.id == a.id))
+            });
+            if all {
+                // The join's rebuild, then its events in the cache.
+                std::thread::sleep(VENUE_POLL);
+                self.settle();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Send a command; returns at once. `issued`: the input event's time (the click).
+    ///
+    /// A command on a read-only account is refused here and never sent (DENIED, with the
+    /// account's reason): orders, modifies, cancels, and Flatten and Cancel All too.
+    pub fn submit(&self, source: Source, issued: Instant, cmd: TradeCommand) -> CommandId {
+        // Strategy controls name an instance, not an account: the paper core's (decision 0025).
+        let Some(note) = note_for(&cmd) else {
+            return self.handle.submit_at(source, issued, cmd);
+        };
+        let info = self.account(&note.account);
+        let reason = match &info {
+            Some(a) => a.read_only.clone(),
+            None => (!self.venues.is_empty()).then(|| NOT_LISTED.to_owned()),
+        };
+        if let Some(reason) = reason {
+            // Ids from the top of the range: never one the core hands out.
+            let n = self.local_ids.fetch_add(1, Ordering::Relaxed);
+            let id = CommandId(u64::MAX - n);
+            let account = note.account.clone();
+            self.cache.read().deny(id, note, reason, Instant::now());
+            self.cache.bump(Some(&account));
+            return id;
+        }
+        // The pump pairs the note with the answer whichever arrives first.
+        if let Some(v) = info.and_then(|a| a.venue).and_then(|v| self.venues.get(v)) {
+            let (cmd, tag) = {
+                let ids = v.ids.lock().unwrap_or_else(|e| e.into_inner());
+                (ids.to_local(cmd), ids.tag)
+            };
+            let id = v.handle.submit_at(source, issued, cmd);
+            let _ = v.notes.send((id, note));
+            return venue_command(tag, id);
+        }
+        let id = self.handle.submit_at(source, issued, cmd);
+        let _ = self.notes.send((id, note));
         id
     }
 }
@@ -837,7 +1376,20 @@ fn spawn_pump(
     notes: Receiver<(CommandId, Note)>,
     barriers: Receiver<Sender<()>>,
     cache: Arc<TradeCache>,
+    ids: Option<Arc<Mutex<VenueIds>>>,
 ) {
+    // A venue's ids, translated into the shared cache's.
+    let tag = ids
+        .as_ref()
+        .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()).tag);
+    let note_in = move |(id, n): (CommandId, Note)| match tag {
+        Some(tag) => (venue_command(tag, id), n),
+        None => (id, n),
+    };
+    let event_in = move |e: Event| match &ids {
+        Some(m) => m.lock().unwrap_or_else(|e| e.into_inner()).event(e),
+        None => e,
+    };
     let spawned = std::thread::Builder::new()
         .name("lines-trading-ui".into())
         .spawn(move || {
@@ -851,7 +1403,7 @@ fn spawn_pump(
                 let mut touched: Vec<Option<AccountId>> = Vec::new();
                 {
                     let mut s = cache.read();
-                    while let Ok((id, n)) = notes.try_recv() {
+                    while let Ok((id, n)) = notes.try_recv().map(note_in) {
                         if s.note(id, n, now) {
                             touched.push(None);
                         }
@@ -863,7 +1415,7 @@ fn spawn_pump(
                     }
                     let mut next = first;
                     while let Some(e) = next {
-                        let a = s.apply(e, now);
+                        let a = s.apply(event_in(e), now);
                         if !touched.contains(&a) {
                             touched.push(a);
                         }
@@ -881,13 +1433,13 @@ fn spawn_pump(
                     let mut touched: Vec<Option<AccountId>> = Vec::new();
                     {
                         let mut s = cache.read();
-                        while let Ok((id, n)) = notes.try_recv() {
+                        while let Ok((id, n)) = notes.try_recv().map(note_in) {
                             if s.note(id, n, now) {
                                 touched.push(None);
                             }
                         }
                         while let Ok(e) = events.try_recv() {
-                            let a = s.apply(e, now);
+                            let a = s.apply(event_in(e), now);
                             if !touched.contains(&a) {
                                 touched.push(a);
                             }
@@ -1241,6 +1793,8 @@ mod tests {
             check_sessions: true,
             guardrails: BTreeMap::new(),
             journal: None,
+            brokers: Vec::new(),
+            venue_marks_always: false,
         }
     }
 
@@ -1858,3 +2412,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "trading_venue_tests.rs"]
+mod venue_tests;

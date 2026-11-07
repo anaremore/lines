@@ -49,6 +49,8 @@ pub struct Shot {
     pub paper: Option<String>,
     /// DOMs start with trading enabled (`--enable-trading`, alias `--arm`).
     pub arm: bool,
+    /// A synthetic read-only broker; the panes trade its SIM account (`--demo-broker`).
+    pub demo_broker: bool,
     /// Charts and DOMs start with the account list open (`--account-menu`).
     pub account_menu: bool,
     /// The P&L display (`--pnl`; default: the app's default).
@@ -125,6 +127,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         doc,
         paper,
         arm,
+        demo_broker,
         account_menu,
         pnl,
         drawings: seed,
@@ -139,15 +142,31 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         crate::settings_view::check_shot(&s.section, &s.set)?;
     }
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
-    let mut trading = Trading::start(
-        TradingSetup::manual(),
-        registry.clone(),
-        ws.env.base.clone(),
-    );
+    let mut setup = TradingSetup::manual();
+    if demo_broker {
+        let d = feeds
+            .iter()
+            .map(|f| f.store().read())
+            .find(|d| d.contract.is_some() && d.last_trade.is_some())
+            .ok_or_else(|| anyhow!("--demo-broker: the recording has no contract with trades"))?;
+        setup.brokers = vec![crate::demo_broker::extension(
+            d.contract.expect("checked"),
+            d.last_trade.expect("checked"),
+            d.product.price.tick,
+            d.market_time.unwrap_or(lines_core::UtcMillis(0)),
+        )];
+        // Synthetic venue: its positions may be marked from the recording.
+        setup.venue_marks_always = true;
+    }
+    let mut trading = Trading::start(setup, registry.clone(), ws.env.base.clone());
     trading.start_armed = arm;
+    if demo_broker {
+        trading.wait_for_venues();
+        trading.start_account = Some(lines_trading::AccountId::new(crate::demo_broker::SIM));
+    }
     trading.start_account_menu = account_menu;
     trading.start_editor = bracket_editor;
-    let account_ids: Vec<String> = trading.accounts.iter().map(|a| a.id.0.clone()).collect();
+    let account_ids: Vec<String> = trading.accounts().iter().map(|a| a.id.0.clone()).collect();
     let script = match &paper {
         Some(s) => {
             let f = feeds

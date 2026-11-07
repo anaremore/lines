@@ -240,6 +240,9 @@ pub struct Journal {
     /// Each order's command source (from the command results).
     sources: HashMap<OrderId, Source>,
     specs: HashMap<ContractKey, ContractSpec>,
+    /// Accounts whose trades take no MAE/MFE from market batches (a broker venue's accounts
+    /// while the app's prices aren't that venue's market: a replay or the mock).
+    unmarked: HashSet<AccountId>,
 }
 
 impl Journal {
@@ -329,18 +332,26 @@ impl Journal {
         Some(s)
     }
 
-    /// Market prices seen (the batches the paper broker sees): MAE/MFE of open trades.
+    /// Trades of these accounts take no MAE/MFE from market batches from now on (added to
+    /// those already set).
+    pub fn add_unmarked(&mut self, accounts: impl IntoIterator<Item = AccountId>) {
+        self.unmarked.extend(accounts);
+    }
+
+    /// Market prices seen (the batches the paper broker sees): MAE/MFE of open trades, except
+    /// those of `unmarked` accounts.
     pub fn on_market(&mut self, contract: ContractKey, inputs: &[MarketInput]) {
         if !self.open.keys().any(|(_, k)| *k == contract) {
             return;
         }
+        let unmarked = &self.unmarked;
         for i in inputs {
             let p = match *i {
                 MarketInput::Trade { price, .. } | MarketInput::Last(price) => price,
                 _ => continue,
             };
-            for ((_, k), o) in self.open.iter_mut() {
-                if *k == contract {
+            for ((a, k), o) in self.open.iter_mut() {
+                if *k == contract && !unmarked.contains(a) {
                     o.saw(p);
                 }
             }
@@ -657,6 +668,8 @@ enum Msg {
     Sync(Sender<()>),
     /// Reply once everything sent before is on disk (quitting).
     Flush(Sender<()>),
+    /// See [`Journal::add_unmarked`].
+    Unmarked(Vec<AccountId>),
 }
 
 /// The journal on its own thread (`lines-journal`). The trading thread sends it the core's
@@ -709,6 +722,11 @@ impl JournalShared {
     /// The latest snapshot. Never waits: `None` if it is being swapped this instant.
     pub fn snapshot(&self) -> Option<Arc<Snapshot>> {
         self.published.try_lock().ok().map(|s| s.clone())
+    }
+
+    /// Trades of these accounts take no MAE/MFE from market batches ([`Journal::add_unmarked`]).
+    pub fn add_unmarked(&self, accounts: Vec<AccountId>) {
+        let _ = self.tx.send(Msg::Unmarked(accounts));
     }
 
     /// Edit a trade's tags and note (applied and saved on the journal thread).
@@ -765,6 +783,7 @@ fn run(
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Market(k, inputs) => j.on_market(k, &inputs),
+            Msg::Unmarked(accounts) => j.add_unmarked(accounts),
             Msg::Events(events) => {
                 // Publish only when what the pane shows changed: a trade closed, or the open
                 // count moved. The core reports positions on every market batch; those, and

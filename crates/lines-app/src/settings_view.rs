@@ -386,12 +386,13 @@ fn gather_facts(cx: &App) -> Facts {
     );
     if let Some(t) = crate::trading::Trading::try_global(cx) {
         f.accounts = t
-            .accounts
+            .accounts()
             .iter()
             .map(|a| AccountFact {
                 id: a.id.0.clone(),
                 name: a.name.clone(),
                 paper: a.paper,
+                kind: a.badge,
                 rules: a.rules.as_ref().map(|r| r.name.clone()),
             })
             .collect();

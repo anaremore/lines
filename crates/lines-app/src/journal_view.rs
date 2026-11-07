@@ -492,13 +492,13 @@ impl JournalView {
             stats_all: Vec::new(),
             names: Trading::try_global(cx)
                 .map(|t| {
-                    t.accounts
+                    t.accounts()
                         .iter()
                         .map(|a| (a.id.0.clone(), a.name.clone()))
                         .collect()
                 })
                 .unwrap_or_default(),
-            paper: Trading::try_global(cx).is_some_and(|t| t.accounts.iter().all(|a| a.paper)),
+            paper: Trading::try_global(cx).is_some_and(|t| t.accounts().iter().all(|a| a.paper)),
             all_dates: false,
             selected: None,
             scroll: 0,

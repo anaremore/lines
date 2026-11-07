@@ -7,6 +7,8 @@ mod brackets;
 mod chart_draw;
 mod chart_view;
 mod commands;
+#[cfg(feature = "screenshot")]
+mod demo_broker;
 mod diagnostics;
 mod dom_orders;
 mod dom_trade;
@@ -432,6 +434,10 @@ struct Cli {
     /// confirmation. Repeatable.
     #[arg(long, requires = "settings")]
     settings_set: Vec<String>,
+    /// Screenshot: a synthetic read-only broker (observe mode) with a SIM and a LIVE account;
+    /// the panes trade its SIM account, long 2 with a working order on the recording's contract.
+    #[arg(long, requires = "screenshot")]
+    demo_broker: bool,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -1048,6 +1054,7 @@ where
                 doc,
                 paper: cli.paper.clone(),
                 arm: cli.arm,
+                demo_broker: cli.demo_broker,
                 account_menu: cli.account_menu,
                 pnl: cli.pnl.map(PnlArg::mode),
                 drawings,
@@ -1128,6 +1135,8 @@ where
     let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.
     setup.guardrails = settings.settings.guardrails.clone();
+    // Broker extensions (decision 0020): each runs beside the paper core.
+    setup.brokers = ext.brokers().to_vec();
     let trading = trading::Trading::start(setup, registry.clone(), config.clone());
     // Kept to flush the journal's last records on quit.
     let journal = trading.journal.clone();

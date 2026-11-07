@@ -41,11 +41,26 @@ pub struct ExtensionAccount {
     pub tradable: Result<(), String>,
 }
 
+/// How the venue's connection is doing, for the account chip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VenueStatus {
+    pub connected: bool,
+    /// Short words for the UI ("connected", "logging on", "disconnected: …").
+    pub detail: String,
+    /// When the venue last sent anything (staleness).
+    pub last_message: Option<lines_core::UtcMillis>,
+}
+
 /// The accounts an extension offers right now (they can change while connected).
 pub trait AccountSource: Send + Sync {
     fn accounts(&self) -> Vec<ExtensionAccount>;
-    /// Bumped whenever [`AccountSource::accounts`] may have changed, so callers can poll cheaply.
+    /// Bumped whenever [`AccountSource::accounts`], the venue's state (positions, orders,
+    /// fills) or [`AccountSource::status`] may have changed, so callers can poll cheaply.
     fn revision(&self) -> u64;
+    /// The connection's state, if the venue has one to report.
+    fn status(&self) -> Option<VenueStatus> {
+        None
+    }
 }
 
 /// A broker registered from outside the public crates.
