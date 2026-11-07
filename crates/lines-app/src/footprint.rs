@@ -615,16 +615,20 @@ impl ChartLayer for FootprintLayer {
         self.fallbacks.at_edge = at_edge;
         self.fallbacks.too_many = self.frame.truncated;
         // Count only cells on the plot (what the trader can find as `?N` or in a mixed cell).
-        self.fallbacks.no_side = self
-            .frame
-            .bars
-            .iter()
-            .flat_map(|b| self.frame.cells_of(b))
-            .filter(|c| {
-                let top = cell_top(vp, c.row, u, tick, row_h, scale);
-                top + row_h > 0.0 && f64::from(top) < vp.height
-            })
-            .fold(0i64, |a, c| a.saturating_add(c.unknown.0));
+        // Volume mode has no sides to miss: side-less volume is in its totals, with no `?N`.
+        self.fallbacks.no_side = if self.config.mode == FootprintMode::Volume {
+            0
+        } else {
+            self.frame
+                .bars
+                .iter()
+                .flat_map(|b| self.frame.cells_of(b))
+                .filter(|c| {
+                    let top = cell_top(vp, c.row, u, tick, row_h, scale);
+                    top + row_h > 0.0 && f64::from(top) < vp.height
+                })
+                .fold(0i64, |a, c| a.saturating_add(c.unknown.0))
+        };
         self.open_close.clear();
         for bc in &self.frame.bars {
             if self.open_close.len() == self.open_close.capacity() {
@@ -1116,8 +1120,15 @@ mod tests {
         assert_eq!(fp.fallbacks().no_side, 21);
         let note = fp.legend().unwrap().1.unwrap();
         assert!(note.starts_with("? 21 without aggressor side"), "{note}");
-        // With other reasons too (here: bars cut at the plot's top), the count still comes
-        // first, so the capped legend line never cuts it off.
+        // With a reason too, the count comes first and the reason before the key, so the
+        // capped legend line cuts the key, never the count.
+        fp.fallbacks.under_legend = true;
+        let note = fp.legend().unwrap().1.unwrap();
+        assert_eq!(
+            note,
+            "? 21 without aggressor side · bars under the legend shown as candles · underline = imbalance"
+        );
+        // Bars cut at the plot's top: none drawn, nothing counted.
         let mut cut = around(600_000, 25, 80.0, 3.0);
         cut.price_hi = 600_000.0 + 5.0;
         fp.prepare(&d, bars, &cut);
@@ -1145,6 +1156,20 @@ mod tests {
         dm.prepare(&d, bars, &vp);
         dm.check_drawable(&vp).unwrap();
         assert!(dm.covers(1));
+        assert_eq!(dm.fallbacks().no_side, 21);
+        // Volume mode shows side-less volume in its totals: nothing to flag.
+        let mut vm = FootprintLayer::new(FootprintConfig {
+            mode: FootprintMode::Volume,
+            ..Default::default()
+        });
+        vm.ensure_capacity(800.0);
+        vm.prepare(&d, bars, &vp);
+        vm.check_drawable(&vp).unwrap();
+        assert_eq!(vm.fallbacks().no_side, 0);
+        assert_eq!(
+            vm.legend().unwrap().1.as_deref(),
+            Some("underline = imbalance")
+        );
     }
 
     /// The imbalance mark is a horizontal underline inside the cell, under its side's half:
