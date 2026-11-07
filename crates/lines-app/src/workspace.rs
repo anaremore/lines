@@ -606,6 +606,8 @@ pub struct WindowView {
     /// The pane and tab under the pointer, from geometry on mouse move: only they get hover
     /// controls, so a frame doesn't build (and lay out) controls for every pane.
     hover_pane: Option<PaneId>,
+    /// Screenshots (`--hover-header`): the hovered pane is fixed, not the pointer's.
+    hover_pinned: bool,
     hover_tab: Option<usize>,
     menu: Option<Menu>,
     prompt: Option<Prompt>,
@@ -648,6 +650,7 @@ impl WindowView {
             tab_drag: None,
             pane_drag: None,
             hover_pane: None,
+            hover_pinned: false,
             hover_tab: None,
             menu: None,
             prompt: None,
@@ -2331,25 +2334,21 @@ impl WindowView {
             let title = tab.title(cx);
             // Close: on the active tab, and on any tab while hovered.
             let close = (active || hovered == Some(i)).then(|| {
-                div()
-                    .id(("tab-close", i))
-                    .flex_none()
-                    .w(px(16.0))
-                    .h(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .text_color(t.text_dim)
-                    .hover(|s| s.bg(t.axis_line).text_color(t.text_main))
-                    .child("×")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.close_tab(i, window, cx);
-                        }),
-                    )
+                crate::icons::button(
+                    ("tab-close", i),
+                    crate::icons::Icon::Close,
+                    "Close tab",
+                    Some(Command::CloseTab),
+                    false,
+                    &t,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(i, window, cx);
+                    }),
+                )
             });
             bar = bar.child(
                 div()
@@ -2534,6 +2533,15 @@ impl WindowView {
             )
     }
 
+    /// Screenshots (`--hover-header`): show the focused pane's header controls as if the
+    /// pointer were over it.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub(crate) fn hover_focused_pane(&mut self, cx: &mut Context<Self>) {
+        self.hover_pane = Some(self.tab().focused);
+        self.hover_pinned = true;
+        cx.notify();
+    }
+
     fn panes(&self, area: Rect, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.theme;
         let tab = self.tab();
@@ -2549,26 +2557,14 @@ impl WindowView {
             let r = p.rect;
             let kind = h.kind();
             let controls = (hovered == Some(id)).then(|| {
-                // Labels from `pane::control_labels` (the gutter headers keep free is sized
-                // for them), commands in the same order.
-                let labels = crate::pane::control_labels(kind, false);
-                let buttons: Vec<(&'static str, Command, bool)> = match kind {
-                    PaneKind::Chart => {
-                        let on = tabstate::is_chart_only(&tab.leaves(cx), id);
-                        vec![
-                            (labels[0], Command::ChartOnly, on),
-                            (labels[1], Command::PopOut, false),
-                        ]
-                    }
-                    _ => vec![
-                        (labels[0], Command::PopOut, false),
-                        (labels[1], Command::HidePane, false),
-                    ],
-                };
+                // From `pane::controls` (the gutter headers keep free is sized for them).
+                let chart_only =
+                    kind == PaneKind::Chart && tabstate::is_chart_only(&tab.leaves(cx), id);
                 header_controls(
                     &t,
                     kind,
-                    buttons,
+                    false,
+                    chart_only,
                     |this: &mut Self, cmd, id, window, cx| {
                         this.focus_pane(id, window, cx);
                         this.run(cmd, window, cx);
@@ -2957,7 +2953,7 @@ impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         self.screen = screen_rect(window);
-        if !window.is_window_hovered() {
+        if !window.is_window_hovered() && !self.hover_pinned {
             // GPUI on Windows sends no exit event: the pointer left, so nothing is hovered.
             self.hover_pane = None;
             self.hover_tab = None;
@@ -3035,14 +3031,15 @@ impl Render for WindowView {
     }
 }
 
-/// Small text controls over the right end of a pane's header. Callers build them only for
-/// the hovered pane (docs/design.md: no permanent chrome; and no per-frame cost for the
-/// others). Each is `(label, command, on)`; `on` draws it in the accent colour (e.g. "chart
-/// only" while active). `run` issues the command on pane `id`.
+/// Icon controls over the right end of a pane's header (`pane::controls`). Callers build
+/// them only for the hovered pane (docs/design.md: no permanent chrome; and no per-frame cost
+/// for the others). `chart_only` draws the chart-only icon in the accent color while active.
+/// `run` issues the command on pane `id`.
 pub(crate) fn header_controls<V: 'static>(
     t: &Theme,
     kind: PaneKind,
-    buttons: Vec<(&'static str, Command, bool)>,
+    detached: bool,
+    chart_only: bool,
     run: fn(&mut V, Command, PaneId, &mut Window, &mut Context<V>),
     id: PaneId,
     cx: &mut Context<V>,
@@ -3057,22 +3054,17 @@ pub(crate) fn header_controls<V: 'static>(
         .w(px(crate::pane::controls_gutter(kind)))
         .overflow_hidden()
         .justify_end()
-        .px_1()
+        .px(px(crate::pane::CONTROL_PAD))
         .flex()
         .flex_row()
         .items_center()
-        .gap_1()
-        .bg(t.panel)
-        .text_size(px(11.0));
-    for (i, (label, cmd, on)) in buttons.into_iter().enumerate() {
+        .gap(px(crate::pane::CONTROL_GAP))
+        .bg(t.panel);
+    for (i, c) in crate::pane::controls(kind, detached).iter().enumerate() {
+        let cmd = c.cmd;
+        let on = chart_only && cmd == Command::ChartOnly;
         row = row.child(
-            div()
-                .id(("pane-control", i))
-                .px_1()
-                .rounded_sm()
-                .text_color(if on { t.accent } else { t.text_dim })
-                .hover(|s| s.bg(t.axis_line).text_color(t.text_main))
-                .child(label)
+            crate::icons::button(("pane-control", i), c.icon, c.name, Some(cmd), on, t)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {

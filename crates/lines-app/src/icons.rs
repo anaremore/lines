@@ -1,0 +1,240 @@
+//! Small line icons for pane headers and tabs, drawn in code (no vendored artwork, so no
+//! third-party licence): polylines on a 16-unit grid, stroked 1.5 px, every point snapped to
+//! the device-pixel grid when painted so lines stay crisp at any DPI. Original shapes, not
+//! copied from any trading platform. Colors come from the caller (theme tokens).
+
+use gpui::{
+    Bounds, Div, ElementId, Hsla, InteractiveElement, ParentElement, PathBuilder, Pixels, Stateful,
+    Styled, Window, canvas, div, point, px,
+};
+
+use crate::commands::Command;
+use crate::theme::Theme;
+
+/// The icon grid (units per side) and the stroke width (logical px).
+pub const GRID: f32 = 16.0;
+pub const STROKE: f32 = 1.5;
+/// A clickable icon's box (logical px): never under 20 × 20.
+pub const HIT: f32 = 20.0;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Icon {
+    /// A square with an arrow leaving up-right: pop the pane out into its own window.
+    PopOut,
+    /// An arrow coming into a square: re-attach a popped-out pane where it was.
+    Reattach,
+    /// Two panes side by side, an arrow into the right one: dock beside the chart.
+    Dock,
+    /// An eye with a stroke through it: hide the pane.
+    Hide,
+    /// Four corners pointing out: chart only (the chart takes the space).
+    ChartOnly,
+    /// Three dots: the pane menu.
+    Menu,
+    /// ×: close.
+    Close,
+}
+
+impl Icon {
+    #[cfg(test)]
+    pub const ALL: [Icon; 7] = [
+        Icon::PopOut,
+        Icon::Reattach,
+        Icon::Dock,
+        Icon::Hide,
+        Icon::ChartOnly,
+        Icon::Menu,
+        Icon::Close,
+    ];
+
+    /// The polylines, in grid units (0..=16, y down).
+    pub fn lines(self) -> &'static [&'static [(f32, f32)]] {
+        match self {
+            Icon::PopOut => &[
+                // The box, open at the top right.
+                &[
+                    (8.0, 3.0),
+                    (3.0, 3.0),
+                    (3.0, 13.0),
+                    (13.0, 13.0),
+                    (13.0, 8.0),
+                ],
+                // The arrow up-right.
+                &[(7.0, 9.0), (13.0, 3.0)],
+                &[(9.0, 3.0), (13.0, 3.0), (13.0, 7.0)],
+            ],
+            Icon::Reattach => &[
+                &[
+                    (8.0, 3.0),
+                    (3.0, 3.0),
+                    (3.0, 13.0),
+                    (13.0, 13.0),
+                    (13.0, 8.0),
+                ],
+                // The arrow down-left, into the box.
+                &[(13.0, 3.0), (7.0, 9.0)],
+                &[(7.0, 5.0), (7.0, 9.0), (11.0, 9.0)],
+            ],
+            Icon::Dock => &[
+                &[
+                    (2.0, 3.0),
+                    (14.0, 3.0),
+                    (14.0, 13.0),
+                    (2.0, 13.0),
+                    (2.0, 3.0),
+                ],
+                &[(8.0, 3.0), (8.0, 13.0)],
+                // The arrow into the right pane.
+                &[(4.0, 8.0), (12.0, 8.0)],
+                &[(10.0, 6.0), (12.0, 8.0), (10.0, 10.0)],
+            ],
+            Icon::Hide => &[
+                // The eye's lids.
+                &[(2.0, 8.0), (5.0, 5.0), (8.0, 4.0), (11.0, 5.0), (14.0, 8.0)],
+                &[
+                    (2.0, 8.0),
+                    (5.0, 11.0),
+                    (8.0, 12.0),
+                    (11.0, 11.0),
+                    (14.0, 8.0),
+                ],
+                // The pupil, a small diamond.
+                &[(8.0, 6.0), (10.0, 8.0), (8.0, 10.0), (6.0, 8.0), (8.0, 6.0)],
+                // The stroke through it.
+                &[(3.0, 13.0), (13.0, 3.0)],
+            ],
+            Icon::ChartOnly => &[
+                &[(2.0, 6.0), (2.0, 2.0), (6.0, 2.0)],
+                &[(10.0, 2.0), (14.0, 2.0), (14.0, 6.0)],
+                &[(14.0, 10.0), (14.0, 14.0), (10.0, 14.0)],
+                &[(6.0, 14.0), (2.0, 14.0), (2.0, 10.0)],
+            ],
+            Icon::Menu => &[
+                // Three dots: small squares stroked closed (solid at 1.5 px).
+                &[(2.5, 7.0), (4.0, 7.0), (4.0, 8.5), (2.5, 8.5), (2.5, 7.0)],
+                &[(7.25, 7.0), (8.75, 7.0), (8.75, 8.5), (7.25, 8.5), (7.25, 7.0)],
+                &[(12.0, 7.0), (13.5, 7.0), (13.5, 8.5), (12.0, 8.5), (12.0, 7.0)],
+            ],
+            Icon::Close => &[&[(4.0, 4.0), (12.0, 12.0)], &[(12.0, 4.0), (4.0, 12.0)]],
+        }
+    }
+}
+
+/// Snap a logical coordinate to the nearest device-pixel center for a stroke of `STROKE`.
+pub fn snap(v: f32, scale: f32) -> f32 {
+    let s = scale.max(1.0);
+    let w = (STROKE * s).round();
+    // Odd device widths sit on pixel centers, even ones on pixel edges.
+    let offset = if w as i32 % 2 == 1 { 0.5 } else { 0.0 };
+    ((v * s - offset).round() + offset) / s
+}
+
+/// Paint `icon` centered in `bounds` (logical px) in `color`. Builds a few short GPUI paths
+/// (GPUI tessellates them per frame); called only for the hovered pane's header.
+pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+    let scale = window.scale_factor();
+    let side = f32::from(bounds.size.width).min(f32::from(bounds.size.height));
+    let unit = side.min(GRID) / GRID;
+    let x0 = f32::from(bounds.origin.x) + (f32::from(bounds.size.width) - GRID * unit) * 0.5;
+    let y0 = f32::from(bounds.origin.y) + (f32::from(bounds.size.height) - GRID * unit) * 0.5;
+    for line in icon.lines() {
+        let mut b = PathBuilder::stroke(px(STROKE));
+        for (i, &(x, y)) in line.iter().enumerate() {
+            let p = point(
+                px(snap(x0 + x * unit, scale)),
+                px(snap(y0 + y * unit, scale)),
+            );
+            if i == 0 {
+                b.move_to(p);
+            } else {
+                b.line_to(p);
+            }
+        }
+        if let Ok(path) = b.build() {
+            window.paint_path(path, color);
+        }
+    }
+}
+
+/// A clickable icon: [`HIT`] px square, `text_dim` at rest, `text_main` under the pointer,
+/// `accent` while `on` (e.g. chart only active). Carries its tooltip ("Pop out · Ctrl+Shift+O"
+/// after `tooltip::DELAY`), the button role and `name` as its accessible label. The caller
+/// adds the click.
+pub fn button(
+    id: impl Into<ElementId>,
+    icon: Icon,
+    name: &str,
+    cmd: Option<Command>,
+    on: bool,
+    t: &Theme,
+) -> Stateful<Div> {
+    let (dim, main, accent, hover_bg) = (t.text_dim, t.text_main, t.accent, t.axis_line);
+    let el = div()
+        .id(id)
+        .flex_none()
+        .w(px(HIT))
+        .h(px(HIT))
+        .rounded_sm()
+        .cursor_pointer()
+        // The hover style also makes the window repaint when the pointer enters or leaves.
+        .hover(move |s| s.bg(hover_bg))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, (), window, _| {
+                    let hot = b.contains(&window.mouse_position());
+                    let c = if on {
+                        accent
+                    } else if hot {
+                        main
+                    } else {
+                        dim
+                    };
+                    paint(icon, b, c, window);
+                },
+            )
+            .size_full(),
+        );
+    crate::tooltip::with_tip(el, name, cmd, t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every icon stays inside its grid with a margin (the stroke never clips), has at least
+    /// one line of two points, and no two icons are drawn the same.
+    #[test]
+    fn icons_fit_their_grid_and_differ() {
+        for icon in Icon::ALL {
+            let lines = icon.lines();
+            assert!(!lines.is_empty(), "{icon:?}");
+            for l in lines {
+                assert!(l.len() >= 2, "{icon:?}");
+                for &(x, y) in *l {
+                    let m = STROKE / 2.0;
+                    assert!(
+                        (m..=GRID - m).contains(&x) && (m..=GRID - m).contains(&y),
+                        "{icon:?} ({x}, {y})"
+                    );
+                }
+            }
+        }
+        for (i, a) in Icon::ALL.iter().enumerate() {
+            for b in &Icon::ALL[i + 1..] {
+                assert_ne!(a.lines(), b.lines(), "{a:?} vs {b:?}");
+            }
+        }
+        const { assert!(HIT >= 20.0) };
+    }
+
+    /// Points land on device-pixel centers (odd stroke widths) at DPI 1.0 and 2.0.
+    #[test]
+    fn strokes_snap_to_device_pixels() {
+        // 1.5 px at 1.0 rounds to 2 device px (even): edges.
+        assert_eq!(snap(10.3, 1.0), 10.0);
+        // 1.5 px at 2.0 is 3 device px (odd): centers (half device pixels).
+        assert_eq!(snap(10.3, 2.0), 10.25);
+        assert_eq!(snap(10.0, 2.0), 10.25);
+    }
+}

@@ -136,26 +136,60 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
     .detach();
 }
 
+/// One hover control in a pane header: an icon button with its action's name (tooltip and
+/// accessible label) and command.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Control {
+    pub icon: crate::icons::Icon,
+    pub name: &'static str,
+    pub cmd: crate::commands::Command,
+}
+
+const fn control(
+    icon: crate::icons::Icon,
+    name: &'static str,
+    cmd: crate::commands::Command,
+) -> Control {
+    Control { icon, name, cmd }
+}
+
 /// The hover controls a pane's header shows, in drawing order: in a main window, or in its
 /// own window when popped out (`detached`). The workspace and the pane window draw them and
-/// run their commands; their labels live here so every header keeps room for them.
-pub fn control_labels(kind: PaneKind, detached: bool) -> &'static [&'static str] {
+/// run their commands; they live here so every header keeps room for them.
+pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
+    use crate::commands::Command as C;
+    use crate::icons::Icon as I;
+    const DETACHED: [Control; 2] = [
+        control(I::Dock, "Dock beside chart", C::DockBesideChart),
+        control(I::Reattach, "Re-attach", C::Reattach),
+    ];
+    const CHART: [Control; 3] = [
+        control(I::ChartOnly, "Chart only", C::ChartOnly),
+        control(I::PopOut, "Pop out", C::PopOut),
+        control(I::Menu, "Pane menu", C::Menu),
+    ];
+    const OTHER: [Control; 3] = [
+        control(I::PopOut, "Pop out", C::PopOut),
+        control(I::Hide, "Hide", C::HidePane),
+        control(I::Menu, "Pane menu", C::Menu),
+    ];
     match (kind, detached) {
-        (_, true) => &["dock", "re-attach"],
-        (PaneKind::Chart, false) => &["chart only", "pop out"],
-        (PaneKind::Dom | PaneKind::Tape | PaneKind::Journal, false) => &["pop out", "hide"],
+        (_, true) => &DETACHED,
+        (PaneKind::Chart, false) => &CHART,
+        (PaneKind::Dom | PaneKind::Tape | PaneKind::Journal, false) => &OTHER,
     }
 }
 
+/// Gap between header icons and the row's padding (logical px).
+pub const CONTROL_GAP: f32 = 4.0;
+pub const CONTROL_PAD: f32 = 4.0;
+
 /// Logical px every pane header keeps free at its right end, where the hover controls draw:
 /// header content never reaches it (`header_content` clips there), so the controls never
-/// cover anything (the account chip, status text). Checked against the labels at a wide
-/// glyph width in the tests.
+/// cover anything (the account chip, status text). Sized for the most icons any header shows.
 pub fn controls_gutter(kind: PaneKind) -> f32 {
-    match kind {
-        PaneKind::Chart => 150.0,
-        PaneKind::Dom | PaneKind::Tape | PaneKind::Journal => 120.0,
-    }
+    let n = controls(kind, false).len().max(controls(kind, true).len()) as f32;
+    n * crate::icons::HIT + (n - 1.0) * CONTROL_GAP + 2.0 * CONTROL_PAD
 }
 
 /// The timeframe chip's text in a chart header ("5m ▾"): one place for the renderer and the
@@ -350,10 +384,6 @@ mod tests {
     /// the row's padding as `workspace::header_controls` lays them out.
     #[test]
     fn hover_controls_fit_the_gutter_headers_keep_free() {
-        const CHAR: f32 = 7.0;
-        const BUTTON_PAD: f32 = 8.0; // px_1 each side
-        const GAP: f32 = 4.0; // gap_1
-        const ROW_PAD: f32 = 8.0; // px_1 each side
         for (kind, detached) in [
             PaneKind::Chart,
             PaneKind::Dom,
@@ -363,13 +393,13 @@ mod tests {
         .into_iter()
         .flat_map(|k| [(k, false), (k, true)])
         {
-            let labels = control_labels(kind, detached);
-            let need: f32 = labels
-                .iter()
-                .map(|l| l.chars().count() as f32 * CHAR + BUTTON_PAD)
-                .sum::<f32>()
-                + GAP * (labels.len() as f32 - 1.0)
-                + ROW_PAD;
+            let c = controls(kind, detached);
+            let n = c.len() as f32;
+            let need = n * crate::icons::HIT + CONTROL_GAP * (n - 1.0) + 2.0 * CONTROL_PAD;
+            // Icons, not words: about 3 × 20 px plus gaps.
+            assert!(controls_gutter(kind) <= 80.0, "{kind:?}");
+            // Every control is named (tooltip, accessible label).
+            assert!(c.iter().all(|c| !c.name.is_empty()));
             assert!(
                 controls_gutter(kind) >= need,
                 "{kind:?} (detached: {detached}): gutter {} < {need}",
