@@ -59,14 +59,26 @@ pub fn clamp_ratio(r: f32) -> f32 {
 
 /// Split `total` px (above the time axis) for a sub-pane of share `ratio`. `None` when there
 /// isn't room for both panes at their minimums (the sub-pane is then not shown).
+#[cfg(test)]
 pub fn split(total: f32, ratio: f32) -> Option<Split> {
+    split_at_scale(total, ratio, 1.0)
+}
+
+/// [`split`] at a display scale: the sub-pane's height is a whole number of device pixels,
+/// so its top (and every snapped edge drawn from it) sits on a device pixel when `total`
+/// does.
+pub fn split_at_scale(total: f32, ratio: f32, scale: f32) -> Option<Split> {
     let avail = total - DIVIDER_PX;
     if avail < MIN_PRICE_PX + MIN_SUB_PX {
         return None;
     }
-    let sub_h = (avail * clamp_ratio(ratio))
-        .round()
-        .clamp(MIN_SUB_PX, avail - MIN_PRICE_PX);
+    let s = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let sub_h =
+        ((avail * clamp_ratio(ratio) * s).round() / s).clamp(MIN_SUB_PX, avail - MIN_PRICE_PX);
     let price_h = avail - sub_h;
     Some(Split {
         price_h,
@@ -141,6 +153,21 @@ mod tests {
         assert_eq!(split(MIN_PRICE_PX + MIN_SUB_PX, 0.25), None);
         // A damaged saved ratio falls back to the default.
         assert_eq!(split(606.0, f32::NAN).unwrap().sub_h, 150.0);
+    }
+
+    #[test]
+    fn at_fractional_scales_the_sub_pane_starts_on_a_device_pixel() {
+        for scale in [1.25f32, 1.5, 1.75, 2.0] {
+            for ratio in [0.1, 0.25, 0.33, 0.5] {
+                let s = split_at_scale(600.0, ratio, scale).unwrap();
+                let dev = s.sub_top * scale;
+                assert!(
+                    (dev - dev.round()).abs() < 1e-3,
+                    "{scale} {ratio}: {}",
+                    s.sub_top
+                );
+            }
+        }
     }
 
     #[test]

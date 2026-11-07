@@ -98,8 +98,10 @@ enum LabelKind {
     DateTime,
     LastPrice,
     CrossPrice,
-    /// A sub-pane's value labels (cumulative delta).
+    /// A sub-pane's value labels (cumulative delta): range ends, and the newest-value tag
+    /// (its own kind: the label cache keys by kind and value, and the colors differ).
     SubValue,
+    SubLast,
     CrossTime,
     Indicator,
 }
@@ -1310,7 +1312,7 @@ impl ChartView {
         let above_axis = (h - AXIS_H).max(10.0);
         // A sub-pane (cumulative delta) takes its share below the plot, above the time axis.
         self.split = (self.visibility.draws_studies() && self.studies.has_subpane())
-            .then(|| crate::subpane::split(above_axis, self.subpane_ratio))
+            .then(|| crate::subpane::split_at_scale(above_axis, self.subpane_ratio, scale))
             .flatten();
         self.above_axis = above_axis;
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
@@ -1953,7 +1955,7 @@ impl ChartView {
             ));
             let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
             self.paint_label(
-                LabelKind::SubValue,
+                LabelKind::SubLast,
                 last,
                 origin,
                 line_h,

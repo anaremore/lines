@@ -45,6 +45,8 @@ impl DeltaReset {
 /// A cumulative delta's identity: with the feed it keys the shared node.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeltaSpec {
+    /// Optional in files (absent: ETH).
+    #[serde(default)]
     pub reset: DeltaReset,
 }
 
