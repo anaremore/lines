@@ -695,6 +695,8 @@ impl JournalView {
             }
         }
         self.cols.layout(w);
+        // A narrow pane leaves out columns it can't hold whole (never half a number).
+        self.cols.drop_overflow(w);
         let left: [bool; 11] = JournalCol::ALL.map(JournalCol::left_aligned);
         self.cols
             .paint_header(&mut self.glyphs, &t, bounds, PAD, &left, window, cx);
@@ -830,10 +832,9 @@ impl JournalView {
             .border_color(t.axis_line)
             .text_size(px(12.0))
             .text_color(t.text_main)
-            .whitespace_nowrap()
-            .overflow_hidden()
             .cursor_pointer()
-            .child(text)
+            // Cut with "…" when the pane is narrower than the line.
+            .child(div().min_w_0().truncate().child(text))
             // A click switches between the current trade date and all dates.
             .on_mouse_down(
                 MouseButton::Left,
