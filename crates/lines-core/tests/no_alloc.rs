@@ -514,3 +514,77 @@ fn timeframe_updates_do_not_allocate() {
     assert!(series.trimmed() > 0, "the test covers a trim");
     assert_eq!(n, 0, "timeframe updates allocated {n} times");
 }
+
+/// Drawings (roadmap 11): projecting a product's drawings for a frame, hit-testing the
+/// pointer, snapping an anchor and writing a measure's text never allocate.
+#[test]
+fn drawings_do_not_allocate() {
+    use lines_core::drawings::{
+        Anchor, Drawing, MeasureParts, Style, TimeAxis, Tool, measure, pick, project, snap_anchor,
+        write_measure,
+    };
+    use lines_core::instrument::Ratio;
+    use lines_core::{BarsView, Derived, Timeframe};
+    let fmt = PriceFormat::new(
+        PriceScale::decimal(2),
+        DisplayStyle::Decimal { digits: 2 },
+        25,
+    );
+    let mut series = BarSeries::new(UtcMillis::MINUTE, 5_000);
+    for i in 0..3_000i64 {
+        series.apply_trade(
+            UtcMillis(i * 20_000),
+            Price(600_000 + (i % 37) * 25),
+            Qty(1),
+        );
+    }
+    let mut derived = Derived::new(Timeframe::Minutes(15), series.capacity());
+    derived.update(&series, None);
+    let drawings: Vec<Drawing> = (0..64i64)
+        .map(|i| {
+            let tool = Tool::ALL[(i % 8) as usize];
+            let a = Anchor {
+                time: UtcMillis(i * 600_000),
+                price: Price(600_000 + i * 25),
+            };
+            let b = Anchor {
+                time: UtcMillis(i * 600_000 + 3_600_000),
+                price: Price(600_500 - i * 25),
+            };
+            Drawing {
+                id: i as u64 + 1,
+                ..Drawing::new(tool, a, b, Style::DEFAULT)
+            }
+        })
+        .collect();
+    let mut vp = Viewport::default();
+    vp.set_size(1200.0, 700.0);
+    vp.price_lo = 599_000.0;
+    vp.price_hi = 602_000.0;
+    let mut drawn = Vec::with_capacity(drawings.len());
+    let n = allocs_during(|| {
+        for frame in 0..300 {
+            let one = BarsView::fixed(series.bars(), UtcMillis::MINUTE);
+            let view = if frame % 2 == 0 { one } else { derived.view() };
+            let axis = TimeAxis::new(view);
+            vp.right_index = view.len() as f64 - 1.0 - (frame % 50) as f64;
+            vp.bar_px = [3.0, 7.0][frame % 2];
+            drawn.clear();
+            for d in &drawings {
+                if let Some(p) = project(d, &axis, &vp) {
+                    drawn.push(p);
+                }
+            }
+            let (x, y) = ((frame * 4) as f32, (frame * 2) as f32);
+            let _ = pick(&drawn, Some(3), x, y, 4.0, 5.0);
+            let a = snap_anchor(&axis, &vp, 25, frame % 3 == 0, x as f64, y as f64);
+            if let Some(a) = a {
+                let m = measure(drawings[0].a, a, &axis, &fmt, Ratio::new(50, 1));
+                let mut s = FixedStr::<96>::new();
+                let _ = write_measure(&m, &fmt, MeasureParts::ALL, &mut s);
+            }
+        }
+    });
+    assert!(!drawn.is_empty());
+    assert_eq!(n, 0, "drawings allocated {n} times");
+}

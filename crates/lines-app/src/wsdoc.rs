@@ -278,6 +278,10 @@ pub struct ChartState {
     /// the default. Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subpane: Option<f32>,
+    /// The product's drawings hidden on this chart (roadmap 11; the drawings themselves live
+    /// in `drawings/<PRODUCT>.json`, never here). Optional: written only when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_drawings: bool,
 }
 
 /// A chart timeframe in the workspace file, as its label (`"5m"`).
@@ -708,6 +712,10 @@ mod tests {
 
     /// Roadmap 9: a chart's timeframe is optional in the file (absent = 1 minute), saved as its
     /// label, and an unknown value loads as 1 minute rather than failing the file.
+    fn json_has(state: &ChartState, key: &str) -> bool {
+        serde_json::to_string(state).unwrap().contains(key)
+    }
+
     #[test]
     fn chart_timeframe_is_optional_and_round_trips() {
         let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
@@ -725,6 +733,15 @@ mod tests {
             }
             assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), state);
         }
+        // Drawings hidden on a chart (roadmap 11): optional, written only when set.
+        assert!(!json_has(&old, "hide_drawings"));
+        let hidden = ChartState {
+            hide_drawings: true,
+            ..old.clone()
+        };
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert!(json.contains(r#""hide_drawings":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
         let future: ChartState =
             serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "3s"}"#).unwrap();
         assert_eq!(future.timeframe.0, Timeframe::ONE_MINUTE);
@@ -737,6 +754,7 @@ mod tests {
         assert!(old.indicators.is_empty());
         let state = ChartState {
             timeframe: Default::default(),
+            hide_drawings: false,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -759,6 +777,7 @@ mod tests {
         // None saved: the field is left out, so the file stays as before.
         let none = serde_json::to_string(&ChartState {
             timeframe: Default::default(),
+            hide_drawings: false,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -841,6 +860,7 @@ mod tests {
                     layout: Layout::Pane(PaneDoc {
                         chart: Some(ChartState {
                             timeframe: Default::default(),
+                            hide_drawings: false,
                             bar_px: 9.5,
                             visibility: StudyVisibility::default(),
                             levels: Default::default(),
@@ -914,6 +934,7 @@ mod tests {
         // Set: flat keys, round-trip; unset: not written.
         let hidden = ChartState {
             timeframe: Default::default(),
+            hide_drawings: false,
             bar_px: 7.0,
             visibility: StudyVisibility {
                 hide_study_labels: true,
@@ -1019,6 +1040,7 @@ mod tests {
         let chart = |profile| PaneDoc {
             chart: Some(ChartState {
                 timeframe: Default::default(),
+                hide_drawings: false,
                 bar_px: 7.0,
                 visibility: StudyVisibility::default(),
                 levels: Default::default(),
@@ -1049,6 +1071,7 @@ mod tests {
         // Beside VWAP: two independent optional fields; each loads without the other.
         let both = ChartState {
             timeframe: Default::default(),
+            hide_drawings: false,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
             levels: Default::default(),
@@ -1125,6 +1148,7 @@ mod tests {
             leaves[0].chart,
             Some(ChartState {
                 timeframe: Default::default(),
+                hide_drawings: false,
                 bar_px: 6.0,
                 visibility: StudyVisibility::default(),
                 levels: Default::default(),

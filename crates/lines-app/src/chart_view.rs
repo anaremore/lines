@@ -53,6 +53,7 @@ use gpui::{
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
     Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
+use lines_core::drawings::{Anchor, TimeAxis, Tool, snap_anchor, write_measure};
 use lines_core::geometry::{
     Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
     snap, write_ohlcv,
@@ -67,6 +68,8 @@ use lines_feed::ChartData;
 use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
 
+use crate::chart_draw::{self, ChartDrawings};
+use crate::commands::{Command, DrawCmd};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
@@ -110,6 +113,9 @@ enum LabelKind {
     CrossTime,
     Indicator,
 }
+
+/// Behind a drawing's note text: the box's padding (logical px).
+const NOTE_PAD: f32 = 6.0;
 
 /// Where a pointer event landed.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -331,6 +337,24 @@ pub struct ChartView {
     tf_entry: Option<String>,
     /// The hovered bar was cut short by a session break.
     cross_partial: bool,
+    /// The product's drawings on this chart (roadmap 11).
+    drawings: ChartDrawings,
+    /// Note texts shaped (by drawing id; re-shaped only when the text changes).
+    note_lines: HashMap<u64, (String, ShapedLine)>,
+    /// The note being typed, shaped once per key.
+    note_entry_line: Option<(String, ShapedLine)>,
+    /// Measure readouts (`None`: the temporary one; else a pinned measure's id), shaped once
+    /// per distinct reading.
+    measure_lines: HashMap<
+        Option<u64>,
+        (
+            (
+                lines_core::drawings::MeasureStats,
+                lines_core::drawings::MeasureParts,
+            ),
+            ShapedLine,
+        ),
+    >,
 }
 
 impl crate::trade_bar::TradePane for ChartView {
@@ -384,6 +408,7 @@ impl ChartView {
         }
         let trade = crate::trade_bar::PaneTrade::new(None, cx);
         let timeframe = fixture.timeframe;
+        let drawings = ChartDrawings::new(crate::drawings_store::for_product(&instrument, cx));
 
         let mut view = ChartView {
             study_menu: None,
@@ -458,6 +483,10 @@ impl ChartView {
             tf_menu: fixture.timeframe_menu,
             tf_entry: None,
             cross_partial: false,
+            drawings,
+            note_lines: HashMap::new(),
+            note_entry_line: None,
+            measure_lines: HashMap::new(),
         };
         view.apply_timeframe(timeframe);
         if let Some(set) = fixture_studies {
@@ -761,6 +790,16 @@ impl ChartView {
             }
             return;
         }
+        // Drawings take a press only in drawing mode or on a drawing, never with Ctrl (chart
+        // trading's); otherwise the chart pans and scales as usual.
+        if region == Region::Plot {
+            let anchor = self.drawing_anchor(x, y);
+            let ctrl = ev.modifiers.control || ev.modifiers.platform;
+            if self.drawings.on_down(x as f32, y as f32, ctrl, anchor) {
+                cx.notify();
+                return;
+            }
+        }
         if ev.click_count >= 2 {
             match region {
                 Region::Plot => self.vp.reset(self.series_len),
@@ -815,6 +854,23 @@ impl ChartView {
         }
         if self.anchoring.is_some() && k.key == "escape" {
             self.anchoring = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
+        // go to them when they have a use for it (a tool, a measure, a selection).
+        // A note takes what the layout types: AltGr arrives as Ctrl+Alt on Windows, Option
+        // characters with Alt on macOS; plain Ctrl or Cmd shortcuts are never text.
+        let note_text = !m.platform && (!m.control || m.alt);
+        let typed = k.key_char.as_deref().filter(|_| note_text);
+        if ((self.drawings.typing() && note_text)
+            || (!m.control
+                && !m.platform
+                && self.tf_entry.is_none()
+                && matches!(k.key.as_str(), "escape" | "enter" | "delete" | "backspace")))
+            && self.drawings.key(&k.key, typed) == chart_draw::Key::Handled
+        {
             cx.stop_propagation();
             cx.notify();
             return;
@@ -1020,6 +1076,7 @@ impl ChartView {
 
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
+        self.drawings.hidden = state.hide_drawings;
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -1218,6 +1275,9 @@ impl ChartView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
+        if ev.pressed_button != Some(MouseButton::Left) && self.drawings.release_lost() {
+            cx.notify();
+        }
         if self.drag.is_none() {
             return;
         }
@@ -1245,7 +1305,15 @@ impl ChartView {
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (x, y) = self.local(ev.position);
+        // A release off the plot (an axis) never places an anchor.
+        let anchor = (self.region(ev.position) == Some(Region::Plot))
+            .then(|| self.drawing_anchor(x, y))
+            .flatten();
+        if self.drawings.on_up(x as f32, y as f32, anchor) {
+            cx.notify();
+        }
         if self.drag.is_some() {
             self.end_drag();
             cx.notify();
@@ -1466,6 +1534,17 @@ impl ChartView {
                 self.fp_seen = fb;
                 cx.notify();
             }
+            // Drawings: projected for this timeframe; previews and drags follow the pointer.
+            let magnet = self.magnet();
+            self.drawings.set_pointer(self.hover);
+            self.drawings.prepare(
+                &TimeAxis::new(view),
+                &self.vp,
+                fmt.tick,
+                magnet,
+                &fmt,
+                self.instrument.point_value,
+            );
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -1694,6 +1773,12 @@ impl ChartView {
                 self.studies.paint((ox, oy), &t, window);
                 self.levels.paint_front(plot, window);
             }
+            // Drawings: the trader's own marks, above the studies (shown unless hidden on
+            // this chart; hiding studies or a clean chart leaves them).
+            if !self.drawings.hidden {
+                self.drawings.paint((ox, oy), hair, &t, window);
+                self.paint_drawing_text((ox, oy), window, cx);
+            }
             if labels {
                 self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
@@ -1713,10 +1798,11 @@ impl ChartView {
             // solid violet).
             if let Some((_, avg, _, _)) = position {
                 let y = self.vp.price_to_y(avg) as f32;
+                let d = crate::theme::POSITION_DASH;
                 let mut x = 0.0;
                 while x < pw {
-                    window.paint_quad(fill(rect(x, y, 6.0_f32.min(pw - x), hair), t.text_dim));
-                    x += 10.0;
+                    window.paint_quad(fill(rect(x, y, d.on.min(pw - x), hair), t.text_dim));
+                    x += d.on + d.off;
                 }
             }
             if self.cross.is_none()
@@ -2174,6 +2260,271 @@ impl ChartView {
             date_time_px: date_time + gap,
         };
         self.space_measured = true;
+    }
+
+    /// The pointer at plot-local (`x`, `y`) as a drawing anchor: the bar's start and a price
+    /// on the tick grid (or its O/H/L/C with the magnet).
+    fn drawing_anchor(&self, x: f64, y: f64) -> Option<Anchor> {
+        let d = self.store.try_read()?;
+        let axis = TimeAxis::new(bars_view(&self.derived, &d));
+        snap_anchor(
+            &axis,
+            &self.vp,
+            self.instrument.price.tick,
+            self.magnet(),
+            x,
+            y,
+        )
+    }
+
+    /// Notes' text and the measure's readout, on `label_bg` boxes (inside the plot mask).
+    /// Shaped text is cached: a note re-shapes only when its text changes.
+    fn paint_drawing_text(&mut self, origin: (f32, f32), window: &mut Window, cx: &mut App) {
+        let t = self.theme;
+        let (ox, oy) = origin;
+        let line_h = px(LABEL_PX * 1.3);
+        let box_h = LABEL_PX * 1.3 + NOTE_PAD;
+        for i in 0..self.drawings.drawn().len() {
+            let d = self.drawings.drawn()[i];
+            if d.tool != Tool::Note {
+                continue;
+            }
+            let Some(text) = self.drawings.note_text(d.id) else {
+                continue;
+            };
+            if self.note_lines.get(&d.id).is_none_or(|(s, _)| s != text) {
+                let text = text.to_owned();
+                let line = self.shape(&text, t.text_main, window);
+                self.note_lines.insert(d.id, (text, line));
+            }
+            let Some((_, line)) = self.note_lines.get(&d.id) else {
+                continue;
+            };
+            let w = f32::from(line.width) + 2.0 * NOTE_PAD;
+            let (x, y) = d.p0;
+            window.paint_quad(fill(
+                Bounds::new(point(px(ox + x + 2.0), px(oy + y)), size(px(w), px(box_h))),
+                t.panel,
+            ));
+            let _ = line.paint(
+                point(px(ox + x + 2.0 + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5)),
+                line_h,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+            self.drawings.set_note_box(i, (w + 2.0, box_h));
+        }
+        // Forget deleted notes' shaped text now and then (not every frame).
+        if self.note_lines.len() > 64 {
+            let d = &self.drawings;
+            self.note_lines.retain(|id, _| d.note_text(*id).is_some());
+        }
+        if let Some((d, text)) = self.drawings.note_entry() {
+            // The note being typed: re-shaped only when a key changed it.
+            if self
+                .note_entry_line
+                .as_ref()
+                .is_none_or(|(s, _)| s.strip_suffix('▏') != Some(text))
+            {
+                let shown = format!("{text}▏");
+                let line = self.shape(&shown, t.text_main, window);
+                self.note_entry_line = Some((shown, line));
+            }
+            let Some((_, line)) = &self.note_entry_line else {
+                return;
+            };
+            let w = f32::from(line.width) + 2.0 * NOTE_PAD;
+            let b = Bounds::new(
+                point(px(ox + d.p0.0 + 2.0), px(oy + d.p0.1)),
+                size(px(w), px(box_h)),
+            );
+            window.paint_quad(fill(b, t.panel));
+            window.paint_quad(gpui::outline(b, t.accent, gpui::BorderStyle::Solid));
+            let _ = line.paint(
+                point(
+                    px(ox + d.p0.0 + 2.0 + NOTE_PAD),
+                    px(oy + d.p0.1 + NOTE_PAD * 0.5),
+                ),
+                line_h,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+        for i in 0..self.drawings.pinned_measures().len() {
+            let (k, stats) = self.drawings.pinned_measures()[i];
+            let m = self.drawings.drawn()[k];
+            self.paint_measure_label(Some(m.id), m, stats, origin, window, cx);
+        }
+        if let Some((m, stats)) = self.drawings.measure_shown() {
+            self.paint_measure_label(None, m, stats, origin, window, cx);
+        }
+    }
+
+    /// A measure's readout beside its end anchor, kept inside the plot.
+    fn paint_measure_label(
+        &mut self,
+        key: Option<u64>,
+        m: lines_core::drawings::Projected,
+        stats: lines_core::drawings::MeasureStats,
+        (ox, oy): (f32, f32),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        // The P&L display setting decides which amounts show; the cache is keyed on it too,
+        // so changing the setting re-shapes every readout.
+        let mode = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.pnl_display)
+            .unwrap_or_default();
+        let parts = measure_parts(mode);
+        if self
+            .measure_lines
+            .get(&key)
+            .is_none_or(|(s, _)| *s != (stats, parts))
+        {
+            let mut s = FixedStr::<128>::new();
+            let _ = write_measure(&stats, &self.instrument.price, parts, &mut s);
+            let line = self.shape(s.as_str(), t.text_main, window);
+            if self.measure_lines.len() > 64 {
+                self.measure_lines.clear();
+            }
+            self.measure_lines.insert(key, ((stats, parts), line));
+        }
+        let Some((_, line)) = self.measure_lines.get(&key) else {
+            return;
+        };
+        let box_h = LABEL_PX * 1.3 + NOTE_PAD;
+        let w = f32::from(line.width) + 2.0 * NOTE_PAD;
+        let pw = f32::from(self.plot.size.width);
+        let ph = f32::from(self.plot.size.height);
+        let (x, y) = measure_label_at(m, (w, box_h), (pw, ph));
+        window.paint_quad(fill(
+            Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(box_h))),
+            t.label_bg,
+        ));
+        let _ = line.paint(
+            point(px(ox + x + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5)),
+            px(LABEL_PX * 1.3),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    /// Takes typed text now (symbol search, a timeframe, a note, a menu's filter): the
+    /// workspace leaves plain and Alt keys to it (`commands::runs_while_typing`).
+    pub fn takes_text(&self) -> bool {
+        self.picker.is_open()
+            || self.tf_entry.is_some()
+            || self.drawings.typing()
+            || self.study_menu.is_some()
+    }
+
+    /// A drawing command (`Command::Draw`) on this chart.
+    pub fn drawing_command(&mut self, cmd: DrawCmd, cx: &mut Context<Self>) {
+        use lines_core::drawings::Style;
+        let d = &mut self.drawings;
+        match cmd {
+            DrawCmd::Tool(tool) => {
+                self.picker.close();
+                self.tf_menu = false;
+                self.tf_entry = None;
+                self.drawings.set_tool(tool);
+            }
+            DrawCmd::Undo => {
+                d.undo();
+            }
+            DrawCmd::Redo => {
+                d.redo();
+            }
+            DrawCmd::DeleteSelected => {
+                d.delete_selected();
+            }
+            DrawCmd::ToggleVisible => {
+                let hide = !d.hidden;
+                d.set_hidden(hide);
+            }
+            DrawCmd::DeleteAll => d.confirm_clear = d.count() > 0,
+            DrawCmd::NextColor => d.restyle(|s| Style {
+                color: (s.color + 1) % Style::COLORS,
+                ..s
+            }),
+            DrawCmd::ToggleWidth => d.restyle(|s| Style {
+                width: 3 - s.width,
+                ..s
+            }),
+            DrawCmd::ToggleDashed => d.restyle(|s| Style {
+                dashed: !s.dashed,
+                ..s
+            }),
+            DrawCmd::PinMeasure => {
+                d.pin_measure();
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn drawings_hidden(&self) -> bool {
+        self.drawings.hidden
+    }
+
+    pub fn product_symbol(&self) -> &'static str {
+        self.instrument.symbol
+    }
+
+    /// The banner for drawing mode, a temporary measure or the delete-all confirmation.
+    fn drawing_banner(&self, t: &Theme) -> Option<AnyElement> {
+        let d = &self.drawings;
+        let text = if d.confirm_clear {
+            let n = d.count();
+            let plural = if n == 1 { "" } else { "s" };
+            format!(
+                "Delete all {n} drawing{plural} for {}?  Enter: delete  ·  Esc: keep  ({} undoes)",
+                crate::commands::hint(Command::Draw(DrawCmd::Undo)),
+                self.instrument.symbol
+            )
+        } else if let Some(tool) = d.tool() {
+            let how = if tool.anchors() == 2 {
+                "click two points (or drag)"
+            } else {
+                "click to place"
+            };
+            format!("Drawing: {}  ·  {how}  ·  Esc cancels", tool.label())
+        } else if d.typing() {
+            "Note: type, Enter to keep, Esc to cancel".to_owned()
+        } else if d.measure_shown().is_some() {
+            "Measure: Enter pins it  ·  Esc or a click clears it".to_owned()
+        } else {
+            return None;
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(6.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(t.panel)
+                        .border_1()
+                        .border_color(if d.confirm_clear { t.warn } else { t.accent })
+                        .text_color(t.text_main)
+                        .text_size(px(12.0))
+                        .child(text),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The crosshair time tag's text: date and time, or on daily and weekly charts the trade
@@ -2654,6 +3005,7 @@ impl Pane for ChartView {
             visibility: self.visibility,
             levels: self.levels.config.clone(),
             magnet: self.magnet(),
+            hide_drawings: self.drawings.hidden,
             timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
             footprint: self.footprint.config(),
             subpane: (self.subpane_ratio != crate::subpane::DEFAULT_RATIO)
@@ -2670,6 +3022,9 @@ impl Pane for ChartView {
         self.picker.close();
         let follow = feed.sub.is_some();
         self.apply_feed(feed);
+        self.drawings
+            .set_data(crate::drawings_store::for_product(&self.instrument, cx));
+        self.note_lines.clear();
         self.trade.feed_changed(&self.store, follow, cx);
         cx.notify();
     }
@@ -2688,7 +3043,10 @@ impl Pane for ChartView {
     /// New indicator values (they arrive from the indicator thread after the store's), or new
     /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
-        let rates = std::mem::take(&mut self.rates_changed) | self.trade.changed();
+        // Drawings changed on any chart of this product (shown here).
+        let rates = std::mem::take(&mut self.rates_changed)
+            | self.trade.changed()
+            | (self.drawings.changed() && !self.drawings.hidden);
         if !self.visibility.draws_studies() {
             return rates;
         }
@@ -2750,6 +3108,37 @@ fn prepare_studies(
     levels.prepare(d, bars, vp, last_y);
 }
 
+/// Where a measure's readout goes (plot-local top-left): on the far side of the measured
+/// range from the live edge (left-aligned at the range's older end), above the box, or below
+/// it when there's no room above; kept inside the plot. So it never covers the newest bars
+/// to the right of the range.
+fn measure_label_at(
+    m: lines_core::drawings::Projected,
+    (w, h): (f32, f32),
+    (pw, ph): (f32, f32),
+) -> (f32, f32) {
+    let (left, right) = (m.p0.0.min(m.p1.0), m.p0.0.max(m.p1.0));
+    let (top, bottom) = (m.p0.1.min(m.p1.1), m.p0.1.max(m.p1.1));
+    // Never past the range's newer (right) end: a readout wider than the range grows left,
+    // over older bars; kept inside the plot.
+    let x = left.min(right - w).min(pw - w).max(0.0);
+    let y = if top - h - 4.0 >= 0.0 {
+        top - h - 4.0
+    } else {
+        (bottom + 4.0).min(ph - h).max(0.0)
+    };
+    (x, y)
+}
+
+/// The amounts a measure shows for a P&L display setting: exactly the setting's (off: no
+/// ticks or money).
+fn measure_parts(mode: PnlDisplay) -> lines_core::drawings::MeasureParts {
+    lines_core::drawings::MeasureParts {
+        ticks: mode.ticks(),
+        money: mode.money(),
+    }
+}
+
 /// The bars a chart shows: its timeframe's, or the store's 1-minute bars.
 fn bars_view<'a>(derived: &'a Option<Derived>, d: &'a ChartData) -> BarsView<'a> {
     match derived {
@@ -2777,7 +3166,7 @@ const READOUT_BOTTOM: f32 = 6.0 + LABEL_PX * 1.6 + 4.0;
 const LEGEND_MAX_W: f32 = 360.0;
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Ctrl+I studies  ·  Alt+V profile";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2835,6 +3224,11 @@ impl Render for ChartView {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_exit(cx.listener(Self::on_mouse_exit))
                     .on_scroll(cx.listener(Self::on_scroll))
+                    .when(self.drawings.active(), |d| d.cursor_crosshair())
+                    .when(
+                        !self.drawings.active() && self.drawings.hover_hit().is_some(),
+                        |d| d.cursor_pointer(),
+                    )
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -2856,7 +3250,8 @@ impl Render for ChartView {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
                     .when_some(overlay, |d, overlay| d.child(overlay))
-                    .when_some(self.timeframe_entry(&t), |d, e| d.child(e)),
+                    .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
+                    .when_some(self.drawing_banner(&t), |d, b| d.child(b)),
             )
     }
 }
@@ -2936,6 +3331,60 @@ mod tests {
         );
         assert!(profile.has_built());
         assert!(studies.reserved_columns() >= 256);
+    }
+
+    /// The measure's readout sits at the measured range's older (left) end, above it, so it
+    /// never covers the newer bars to its right; below when there's no room above.
+    #[test]
+    fn measure_readout_stays_off_the_live_edge() {
+        let m = |p0: (f32, f32), p1: (f32, f32)| lines_core::drawings::Projected {
+            id: 1,
+            tool: lines_core::drawings::Tool::Measure,
+            style: Default::default(),
+            p0,
+            p1,
+            handles: [p0, p1],
+            n_handles: 2,
+        };
+        let plot = (1000.0, 600.0);
+        // Drawn right to left or left to right: the label starts at the left end.
+        for (a, b) in [
+            ((300.0, 400.0), (900.0, 200.0)),
+            ((900.0, 200.0), (300.0, 400.0)),
+        ] {
+            let (x, y) = measure_label_at(m(a, b), (250.0, 20.0), plot);
+            assert_eq!((x, y), (300.0, 176.0));
+            assert!(
+                x + 250.0 <= 900.0,
+                "inside the range, not past its newer end"
+            );
+        }
+        // At the top of the plot: below the box.
+        assert_eq!(
+            measure_label_at(m((300.0, 10.0), (900.0, 300.0)), (250.0, 20.0), plot),
+            (300.0, 304.0)
+        );
+        // Narrower than its readout (a few bars at the live edge): the readout ends at the
+        // range's newer end and grows left, never over the bars after it.
+        assert_eq!(
+            measure_label_at(m((900.0, 400.0), (990.0, 200.0)), (250.0, 20.0), plot).0,
+            740.0
+        );
+        assert_eq!(
+            measure_label_at(m((20.0, 400.0), (60.0, 200.0)), (250.0, 20.0), plot).0,
+            0.0
+        );
+    }
+
+    /// The measure shows exactly what the P&L display setting allows.
+    #[test]
+    fn measure_follows_pnl_display() {
+        use lines_core::drawings::MeasureParts;
+        let p = |ticks, money| MeasureParts { ticks, money };
+        assert_eq!(measure_parts(PnlDisplay::Off), p(false, false));
+        assert_eq!(measure_parts(PnlDisplay::Ticks), p(true, false));
+        assert_eq!(measure_parts(PnlDisplay::Currency), p(false, true));
+        assert_eq!(measure_parts(PnlDisplay::Both), p(true, true));
     }
 
     #[test]

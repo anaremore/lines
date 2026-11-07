@@ -102,6 +102,7 @@ pub fn run(
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
         cx.set_global(AppSettings::ephemeral());
+        cx.set_global(crate::drawings_store::Drawings::ephemeral(Vec::new()));
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);
         let handle = match workspace::open_doc_window(
