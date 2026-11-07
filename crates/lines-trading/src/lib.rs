@@ -16,6 +16,7 @@
 //!   MAE/MFE, tags and notes, statistics, an append-only file.
 //! - [`strategy`]: strategies as the core sees them (decision 0025):
 //!   `Source::Strategy`, the strategy gate, per-instance limits and states.
+//! - [`news`]: the news blackout (roadmap 8b) on the economic calendar.
 //! - [`extension`]: the broker extension point (decision 0020): brokers registered from outside
 //!   the public crates, with capabilities and an account source.
 //!
@@ -29,6 +30,7 @@ pub mod extension;
 pub mod guardrails;
 pub mod journal;
 pub mod market;
+pub mod news;
 pub mod order;
 pub mod paper;
 pub mod persist;

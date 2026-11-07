@@ -8,7 +8,8 @@ description = "Trading core (decisions 0004, 0005, 0006, 0012, 0018): commands, 
 
 [dependencies]
 lines-core.workspace = true
-# Market-data subscriptions, the product catalog and session calendars only.
+# Market-data subscriptions, the product catalog, session calendars and the bundled economic
+# calendar only.
 lines-feed.workspace = true
 serde.workspace = true
 jiff.workspace = true

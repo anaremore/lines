@@ -11,6 +11,7 @@ pub mod coinbase;
 pub mod connection;
 pub mod cqg;
 pub mod disk;
+pub mod econ;
 pub mod extension;
 pub mod indicators;
 pub mod kraken;
