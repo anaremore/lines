@@ -31,7 +31,7 @@ use crate::market::MarketInput;
 use crate::order::{Order, OrderState, Role};
 use crate::position::Position;
 use crate::risk::{self, RiskContext, RiskLimits};
-use crate::rules::{RulePreset, RuleTracker, TradingState};
+use crate::rules::{PendingRules, RulePreset, RuleTracker, TradingState};
 use crate::strategy::{Instance, StrategyId};
 use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind, Side};
 
@@ -85,6 +85,9 @@ struct AccountCache {
     guard: GuardrailTracker,
     /// The guardrail state last reported (an event when it changes).
     guard_seen: GuardChange,
+    /// Prop rules asked for that are looser than those in force: they take over with the
+    /// next trade date (`Command::SetRules`).
+    pending_rules: Option<PendingRules>,
     /// When recent new orders and modifies were sent (rate limits, decision 0006).
     submits: VecDeque<UtcMillis>,
     modifies: VecDeque<UtcMillis>,
@@ -310,6 +313,7 @@ impl TradingCore {
                 tracker: tracker.unwrap_or_else(|| RuleTracker::new(start)),
                 guard: GuardrailTracker::default(),
                 guard_seen: GuardrailTracker::default().change(),
+                pending_rules: None,
                 balance: start,
                 positions: BTreeMap::new(),
                 cfg,
@@ -317,6 +321,24 @@ impl TradingCore {
                 modifies: VecDeque::new(),
             },
         );
+    }
+
+    /// Prop rules asked for that wait for the next trade date (they are looser).
+    pub fn pending_rules(&self, account: &AccountId) -> Option<&PendingRules> {
+        self.accounts.get(account)?.pending_rules.as_ref()
+    }
+
+    /// Restore an account's saved prop rules and the looser ones still waiting.
+    pub fn restore_rules(
+        &mut self,
+        account: &AccountId,
+        rules: Option<RulePreset>,
+        pending: Option<PendingRules>,
+    ) {
+        if let Some(a) = self.accounts.get_mut(account) {
+            a.cfg.rules = rules;
+            a.pending_rules = pending;
+        }
     }
 
     /// Restore an account's saved guardrail progress (a restart keeps a lockout).
@@ -452,6 +474,12 @@ impl TradingCore {
     }
 
     // ---- commands -------------------------------------------------------------------
+
+    /// No time yet: a replay's start (market or manual clock) before its first data, which
+    /// is also what the service's market clock reads then. Nothing at or before it rolls the
+    /// trade date (startup's rebuilds and settings), so the first data's date is never taken
+    /// for a new one, which would bring in looser rules waiting for the next session early.
+    pub const BEFORE_DATA: UtcMillis = UtcMillis(0);
 
     /// The single entry point (decision 0018). Returns the command's id; its result is an
     /// [`Event::Command`] in the stream.
@@ -802,9 +830,82 @@ impl TradingCore {
                 Ok(self.cancel_all(env, now, &account, contract))
             }
             Command::SetGuardrails { guardrails, .. } => {
+                let unrealised = self.unrealised(&account);
+                let day = (now > Self::BEFORE_DATA)
+                    .then(|| self.trade_day(&account, now))
+                    .flatten();
                 let a = self.accounts.get_mut(&account).expect("checked");
                 a.guard.request(guardrails);
+                // A tighter daily loss applies to the next order: today's loss is checked
+                // now (a guardrail lock never liquidates, nor blocks exits).
+                if let Some((_, end)) = day {
+                    let day_pnl = a.balance + unrealised - a.tracker.day_open_balance;
+                    a.guard.on_day_pnl(day_pnl, end);
+                }
                 self.guard_report(&account);
+                // The account's view says what is in force now and what waits.
+                self.publish_view(&account);
+                Ok(Vec::new())
+            }
+            Command::SetRules { rules, .. } => {
+                let unrealised = self.unrealised(&account);
+                let micros = self.micros_used(&account, None);
+                let a = self.accounts.get_mut(&account).expect("checked");
+                if let Some(w) = &rules
+                    && w.account_size != a.cfg.starting_balance
+                {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        format!(
+                            "this account is ${}: choose rules for that size",
+                            grouped(a.cfg.starting_balance)
+                        ),
+                    ));
+                }
+                // Tighter now, looser with the next trade date (a breach can't be talked
+                // away): orders already sent keep the rules they were checked against.
+                let in_force = crate::rules::tightest_rules(a.cfg.rules.as_ref(), rules.as_ref());
+                // A tighter rule the account is already past would breach (and liquidate)
+                // now, mid-order, or block its own exits: refused, with the reason.
+                if let Some(p) = &in_force {
+                    let equity = a.balance + unrealised;
+                    let st = a.tracker.status(p, a.balance, equity, micros);
+                    let was = a.cfg.rules.as_ref();
+                    let changed = |f: fn(&RulePreset) -> Option<i64>| was.map(f) != Some(f(p));
+                    // (Already breached: tightening is always allowed, nothing new happens.)
+                    if changed(|r| r.daily_loss_limit)
+                        && !a.tracker.daily_breached
+                        && st.daily_loss_left.is_some_and(|l| l <= Money::ZERO)
+                    {
+                        return Err(Reject::new(
+                            RejectCode::Invalid,
+                            "today's loss is already past that daily loss limit: it would end the day now",
+                        ));
+                    }
+                    // Amount, mode or lock: a higher lock moves a locked threshold up too.
+                    if was.map(|r| &r.trailing_drawdown) != Some(&p.trailing_drawdown)
+                        && !a.tracker.drawdown_breached
+                        && st.to_drawdown.is_some_and(|l| l <= Money::ZERO)
+                    {
+                        return Err(Reject::new(
+                            RejectCode::Invalid,
+                            "the account is already past that drawdown: it would fail the account now",
+                        ));
+                    }
+                    if changed(|r| r.max_micro_contracts.map(i64::from))
+                        && p.max_micro_contracts.is_some_and(|m| micros > m)
+                    {
+                        return Err(Reject::new(
+                            RejectCode::Invalid,
+                            format!(
+                                "{micros} micro-equivalent contracts are open or working: the cap can't be below that"
+                            ),
+                        ));
+                    }
+                }
+                a.pending_rules = (in_force != rules).then_some(PendingRules { rules });
+                a.cfg.rules = in_force;
+                self.publish_view(&account);
                 Ok(Vec::new())
             }
             Command::AddStrategy(_)
@@ -1606,6 +1707,9 @@ impl TradingCore {
 
     /// A new trade date for the account's day calendar closes the previous day.
     fn roll_day(&mut self, now: UtcMillis, account: &AccountId) {
+        if now <= Self::BEFORE_DATA {
+            return;
+        }
         let Some(a) = self.accounts.get(account) else {
             return;
         };
@@ -1615,8 +1719,14 @@ impl TradingCore {
         let date = lines_feed::disk::partition::trade_date(&product, now);
         let balance = a.balance;
         let a = self.accounts.get_mut(account).expect("checked");
+        let new_day = a.tracker.day.is_some_and(|d| d != date);
+        // The day closes under the rules it was traded with ...
         let preset = a.cfg.rules.clone().unwrap_or_else(no_rules);
         a.tracker.roll_day(&preset, date, balance);
+        // ... then looser prop rules asked for earlier take over.
+        if new_day && let Some(p) = a.pending_rules.take() {
+            a.cfg.rules = p.rules;
+        }
         // Guardrails: a new trade date ends a lock and brings in looser settings.
         a.guard.roll_day(date);
         a.guard.expire(now);
@@ -1638,7 +1748,21 @@ impl TradingCore {
             a.tracker.status(&preset, balance, equity, micros)
         });
         let liquidate = a.cfg.rules.as_ref().is_some_and(|r| r.liquidate_on_breach);
-        let view = AccountView {
+        let view = Self::view_of(account, a, unrealised, status);
+        self.events.push(Event::Account(view));
+        self.after_account_view(now, account, breaches, liquidate, equity);
+    }
+
+    /// The account's view (rules status already computed).
+    fn view_of(
+        account: &AccountId,
+        a: &AccountCache,
+        unrealised: Money,
+        status: Option<crate::rules::RuleStatus>,
+    ) -> AccountView {
+        let balance = a.balance;
+        let equity = balance + unrealised;
+        AccountView {
             account: account.clone(),
             balance,
             unrealised,
@@ -1651,11 +1775,49 @@ impl TradingCore {
                 .rules
                 .as_ref()
                 .map_or(TradingState::Active, |r| a.tracker.trading_state(r)),
+            limits: Box::new(crate::event::AccountLimits {
+                account_size: a.cfg.starting_balance,
+                rules_in_force: a.cfg.rules.clone(),
+                rules_pending: a.pending_rules.clone(),
+                guardrails_in_force: a.guard.active.clone(),
+                guardrails_pending: a.guard.pending.clone(),
+            }),
+        }
+    }
+
+    /// The account's view after a settings change: what is in force and what waits. No
+    /// breach is checked here (the next equity update does that, with the real balance), so
+    /// changing a setting never breaches, liquidates or locks by itself.
+    fn publish_view(&mut self, account: &AccountId) {
+        let unrealised = self.unrealised(account);
+        let micros = self.micros_used(account, None);
+        let Some(a) = self.accounts.get(account) else {
+            return;
         };
+        let equity = a.balance + unrealised;
+        let status = a
+            .cfg
+            .rules
+            .as_ref()
+            .map(|p| a.tracker.status(p, a.balance, equity, micros));
+        let view = Self::view_of(account, a, unrealised, status);
         self.events.push(Event::Account(view));
+    }
+
+    /// What follows an account view: the day's loss for guardrails, breach events and a
+    /// liquidating rule.
+    fn after_account_view(
+        &mut self,
+        now: UtcMillis,
+        account: &AccountId,
+        breaches: Vec<crate::rules::Breach>,
+        liquidate: bool,
+        equity: Money,
+    ) {
         // Guardrails: the day's loss (realised + unrealised, fees included).
         let day_pnl = equity - self.accounts[account].tracker.day_open_balance;
-        if let Some((_, end)) = self.trade_day(account, now)
+        if now > Self::BEFORE_DATA
+            && let Some((_, end)) = self.trade_day(account, now)
             && let Some(a) = self.accounts.get_mut(account)
         {
             a.guard.on_day_pnl(day_pnl, end);
@@ -1808,4 +1970,17 @@ fn no_rules() -> RulePreset {
         liquidate_on_breach: false,
         on_breach: crate::rules::BreachStates::default(),
     }
+}
+
+/// Whole dollars with thousands separators ("50,000").
+fn grouped(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
 }

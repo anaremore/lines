@@ -78,6 +78,77 @@ pub struct RulePreset {
     pub on_breach: BreachStates,
 }
 
+/// The tighter of two optional maxima (a limit is tighter than none).
+fn tighter_max<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
+    }
+}
+
+impl RulePreset {
+    /// Field by field, the tighter of `self` (in force) and `wanted` for every limit that
+    /// restricts trading: daily loss, contracts, the trailing drawdown (a smaller amount,
+    /// intraday over end of day, trailing longer: no lock, or a higher one), liquidation on a
+    /// breach, and what a breach allows (kept as in force unless the same). The profit target
+    /// and consistency only report progress: `wanted`'s apply. The account size is the
+    /// account's own (never changed here).
+    pub fn tightest(&self, wanted: &RulePreset) -> RulePreset {
+        let trailing = match (&self.trailing_drawdown, &wanted.trailing_drawdown) {
+            (Some(a), Some(w)) => Some(TrailingDrawdown {
+                amount: a.amount.min(w.amount),
+                mode: if a.mode == w.mode {
+                    a.mode
+                } else {
+                    DrawdownMode::Intraday
+                },
+                lock_at_start_plus: match (a.lock_at_start_plus, w.lock_at_start_plus) {
+                    (Some(x), Some(y)) => Some(x.max(y)),
+                    _ => None,
+                },
+            }),
+            (Some(a), None) => Some(a.clone()),
+            (None, w) => w.clone(),
+        };
+        RulePreset {
+            name: wanted.name.clone(),
+            label: wanted.label.clone(),
+            account_size: self.account_size,
+            trailing_drawdown: trailing,
+            daily_loss_limit: tighter_max(self.daily_loss_limit, wanted.daily_loss_limit),
+            max_micro_contracts: tighter_max(self.max_micro_contracts, wanted.max_micro_contracts),
+            profit_target: wanted.profit_target,
+            consistency: wanted.consistency.clone(),
+            liquidate_on_breach: self.liquidate_on_breach || wanted.liquidate_on_breach,
+            on_breach: if self.on_breach == wanted.on_breach {
+                wanted.on_breach
+            } else {
+                self.on_breach
+            },
+        }
+    }
+}
+
+/// The rules in force after `wanted` is asked for over `active` (`None`: no prop rules):
+/// adding rules is tighter; removing them is looser (kept).
+pub fn tightest_rules(
+    active: Option<&RulePreset>,
+    wanted: Option<&RulePreset>,
+) -> Option<RulePreset> {
+    match (active, wanted) {
+        (Some(a), Some(w)) => Some(a.tightest(w)),
+        (Some(a), None) => Some(a.clone()),
+        (None, w) => w.cloned(),
+    }
+}
+
+/// Prop rules asked for but not yet in force (looser ones wait for the next trade date).
+/// `rules: None` means "no prop rules" was asked for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRules {
+    pub rules: Option<RulePreset>,
+}
+
 /// An account's trading state (decision 0006). After a prop breach an account is not simply
 /// "blocked": it may still close what it holds, or nothing at all. Cancels, Cancel All and
 /// Flatten work in every state.
@@ -403,6 +474,57 @@ mod tests {
             liquidate_on_breach: false,
             on_breach: BreachStates::default(),
         }
+    }
+
+    /// Field by field: the in-force rules' tighter limits stay, a wanted tighter one applies,
+    /// reporting-only fields (target, consistency) follow the wanted rules.
+    #[test]
+    fn tightest_takes_each_limit_from_the_tighter_side() {
+        let a = preset(DrawdownMode::EndOfDay, Some(100));
+        // Looser everywhere: nothing loosens now.
+        let looser = RulePreset {
+            daily_loss_limit: None,
+            max_micro_contracts: Some(100),
+            trailing_drawdown: Some(TrailingDrawdown {
+                amount: 3_000,
+                mode: DrawdownMode::EndOfDay,
+                lock_at_start_plus: Some(0),
+            }),
+            liquidate_on_breach: false,
+            profit_target: Some(9_000),
+            ..a.clone()
+        };
+        let t = a.tightest(&looser);
+        assert_eq!(t.daily_loss_limit, Some(1_000));
+        assert_eq!(t.max_micro_contracts, Some(50));
+        assert_eq!(
+            t.trailing_drawdown, a.trailing_drawdown,
+            "a lower lock is looser"
+        );
+        assert_eq!(t.profit_target, Some(9_000), "the target only reports");
+        // Tighter everywhere: all of it now.
+        let tighter = RulePreset {
+            daily_loss_limit: Some(500),
+            max_micro_contracts: Some(20),
+            trailing_drawdown: Some(TrailingDrawdown {
+                amount: 1_500,
+                mode: DrawdownMode::Intraday,
+                lock_at_start_plus: None,
+            }),
+            liquidate_on_breach: true,
+            ..a.clone()
+        };
+        assert_eq!(a.tightest(&tighter), tighter);
+        // The account size never changes here.
+        let other = RulePreset {
+            account_size: 100_000,
+            ..tighter.clone()
+        };
+        assert_eq!(a.tightest(&other).account_size, 50_000);
+        // Adding rules tightens; removing them is looser (kept).
+        assert_eq!(tightest_rules(None, Some(&a)), Some(a.clone()));
+        assert_eq!(tightest_rules(Some(&a), None), Some(a.clone()));
+        assert_eq!(tightest_rules(None, None), None);
     }
 
     fn d(day: u8) -> CivilDate {

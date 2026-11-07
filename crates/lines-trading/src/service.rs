@@ -246,6 +246,7 @@ pub fn trading_file(core: &TradingCore, paper: &PaperConfig) -> Option<TradingFi
                 config: c.clone(),
                 tracker: t.clone(),
                 guardrails: core.guardrails(&c.id).cloned().unwrap_or_default(),
+                pending_rules: core.pending_rules(&c.id).cloned(),
             })
             .collect(),
         next_order_id: core.next_order_id(),

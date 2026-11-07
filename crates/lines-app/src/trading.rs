@@ -466,6 +466,10 @@ pub struct TradingSetup {
     /// `settings.json` (roadmap 8b). Asked for at every start: tighter ones apply at once,
     /// looser ones with the next trade date; a saved lockout stays.
     pub guardrails: BTreeMap<String, Guardrails>,
+    /// The trader's prop rules per account, keyed by account name (else id), from
+    /// `settings.json` (resolved; `None`: no prop rules). Sent at start like guardrails:
+    /// tighter now, looser from the next trade date.
+    pub prop_rules: BTreeMap<String, Option<lines_trading::rules::RulePreset>>,
     /// The trade journal's file and the source label in its header (`None`: in memory).
     pub journal: Option<(PathBuf, String)>,
     /// Broker extensions (decision 0020): each runs its own core beside the paper one.
@@ -489,6 +493,7 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            prop_rules: BTreeMap::new(),
             brokers: Vec::new(),
             venue_marks_always: false,
             journal: (!replay)
@@ -545,6 +550,7 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            prop_rules: BTreeMap::new(),
             journal: None,
             brokers: Vec::new(),
             venue_marks_always: false,
@@ -926,9 +932,12 @@ impl Trading {
                 let mut core = TradingCore::new(Box::new(PaperBroker::from_state(paper, f.broker)));
                 for a in f.accounts {
                     let id = a.config.id.clone();
+                    let rules = a.config.rules.clone();
                     core.add_account(a.config, Some(a.tracker));
-                    // A lockout survives the restart.
+                    // A lockout survives the restart, and so do looser prop rules waiting
+                    // for the next trade date.
                     core.restore_guardrails(&id, a.guardrails);
+                    core.restore_rules(&id, rules, a.pending_rules);
                 }
                 core.set_next_order_id(f.next_order_id);
                 // Sent before the app stopped, no answer: unresolved until the broker says.
@@ -956,6 +965,20 @@ impl Trading {
                 (core, setup.paper)
             }
         };
+        // The wall time live; a replay (market or manual clock) has no time until its first
+        // data, so nothing at startup rolls its trade date (the service's first rebuild reads
+        // the same `BEFORE_DATA` from its clock).
+        let at = if setup.clock == Clock::Wall {
+            lines_feed::now_utc()
+        } else {
+            TradingCore::BEFORE_DATA
+        };
+        // Orders the broker still holds (brackets survive restarts) come back through rebuild,
+        // with the account's real balance: only then are settings applied.
+        core.rebuild(at);
+        // What settings asked for and the core refused (wrong size, already past a limit):
+        // reported at start, like a setting that doesn't resolve.
+        let mut sent: Vec<(lines_trading::CommandId, String)> = Vec::new();
         // The trader's guardrails from settings, through the command path (tighter now, looser
         // with the next trade date; a saved lockout is never cleared).
         let wanted: Vec<(AccountId, Guardrails)> = core
@@ -969,8 +992,9 @@ impl Trading {
             })
             .collect();
         for (account, guardrails) in wanted {
-            core.submit(
-                lines_feed::now_utc(),
+            let name = format!("guardrails for {account}");
+            let id = core.submit(
+                at,
                 Source::Api,
                 Instant::now(),
                 TradeCommand::SetGuardrails {
@@ -978,10 +1002,43 @@ impl Trading {
                     guardrails,
                 },
             );
+            sent.push((id, name));
         }
-        // Orders the broker still holds (brackets survive restarts) come back through rebuild.
-        core.rebuild(lines_feed::now_utc());
-        let _ = core.drain();
+        // The trader's prop rules from settings, the same way.
+        let wanted: Vec<(AccountId, Option<lines_trading::rules::RulePreset>)> = core
+            .accounts()
+            .filter_map(|(c, _)| {
+                setup
+                    .prop_rules
+                    .get(&c.name)
+                    .or_else(|| setup.prop_rules.get(c.id.0.as_str()))
+                    .map(|r| (c.id.clone(), r.clone()))
+            })
+            .collect();
+        for (account, rules) in wanted {
+            let name = format!("prop rules for {account}");
+            let id = core.submit(
+                at,
+                Source::Api,
+                Instant::now(),
+                TradeCommand::SetRules { account, rules },
+            );
+            sent.push((id, name));
+        }
+        for e in core.drain() {
+            if let lines_trading::Event::Command {
+                id, result: Err(r), ..
+            } = e
+                && let Some((_, name)) = sent.iter().find(|(s, _)| *s == id)
+            {
+                let msg = format!("Settings: {name} not applied ({})", r.message);
+                tracing::warn!("{msg}");
+                report = Some(match report {
+                    Some(p) => format!("{p}  ·  {msg}"),
+                    None => msg,
+                });
+            }
+        }
         let accounts: Vec<AccountInfo> = core
             .accounts()
             .map(|(c, _)| AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone()))
@@ -1348,7 +1405,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::CancelOrder { account, .. } => (account.clone(), None, None),
         TradeCommand::CancelAll { account, contract }
         | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
-        TradeCommand::SetGuardrails { account, .. } => (account.clone(), None, None),
+        TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
+            (account.clone(), None, None)
+        }
         TradeCommand::AddStrategy(_)
         | TradeCommand::RemoveStrategy { .. }
         | TradeCommand::ArmStrategy { .. }
@@ -1852,6 +1911,7 @@ mod tests {
             accounts: Some(accounts),
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            prop_rules: BTreeMap::new(),
             journal: None,
             brokers: Vec::new(),
             venue_marks_always: false,
@@ -1949,8 +2009,117 @@ mod tests {
         }
     }
 
+    /// Prop rules from settings reach the core at start: a tighter contract cap denies the
+    /// next order, and the account's view reports the rules in force.
+    #[test]
+    fn prop_rules_from_settings_reach_the_core() {
+        let mut cfg = AccountConfig::paper("paper", 50_000);
+        let eod = lines_trading::rules::presets()
+            .into_iter()
+            .find(|p| p.daily_loss_limit == Some(1_000))
+            .unwrap();
+        cfg.rules = Some(eod.clone());
+        let mut setup = paper_setup(vec![cfg]);
+        setup.prop_rules.insert(
+            "paper".into(),
+            Some(lines_trading::rules::RulePreset {
+                max_micro_contracts: Some(10),
+                ..eod
+            }),
+        );
+        let base = FeedConfig::new(FeedSource::Replay {
+            path: "unused.lfr".into(),
+            speed: 0.0,
+            stop_at: None,
+        });
+        let t = Trading::start(setup, FeedRegistry::new(), base);
+        let account = AccountId::new("paper");
+        let id = t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::PlaceOrder(OrderSpec {
+                account: account.clone(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(2),
+                kind: OrderKind::Limit { price: px(5990.00) },
+            }),
+        );
+        t.settle();
+        let s = t.cache.read();
+        let Some(Err(r)) = s.result(id) else {
+            panic!("not denied: {:?}", s.result(id))
+        };
+        assert_eq!(r.code, RejectCode::PropRule, "{r:?}");
+        assert_eq!(
+            s.account(&account)
+                .and_then(|v| v.limits.rules_in_force.as_ref())
+                .and_then(|r| r.max_micro_contracts),
+            Some(10)
+        );
+    }
+
     /// Roadmap 8b: guardrails from settings reach the core at start, a guardrail denial reaches
     /// the DOM header as a short reason, and a lockout reaches the cache.
+    #[test]
+    /// A replay's start (manual or market clock) rolls no trade date: looser prop rules from
+    /// settings wait through startup's rebuilds and the first data, for the next session.
+    fn looser_settings_wait_through_a_replay_start() {
+        let mut cfg = AccountConfig::paper("paper", 50_000);
+        let eod = lines_trading::rules::presets()
+            .into_iter()
+            .find(|p| p.daily_loss_limit == Some(1_000))
+            .unwrap();
+        cfg.rules = Some(lines_trading::rules::RulePreset {
+            max_micro_contracts: Some(10),
+            ..eod.clone()
+        });
+        let mut setup = paper_setup(vec![cfg]);
+        assert_eq!(setup.clock, Clock::Manual);
+        setup.prop_rules.insert("paper".into(), Some(eod));
+        let base = FeedConfig::new(FeedSource::Replay {
+            path: "unused.lfr".into(),
+            speed: 0.0,
+            stop_at: None,
+        });
+        let t = Trading::start(setup, FeedRegistry::new(), base);
+        let account = AccountId::new("paper");
+        t.settle();
+        let waiting = |t: &Trading| {
+            let s = t.cache.read();
+            let v = s.account(&account).expect("the account's view");
+            (
+                v.limits.rules_pending.is_some(),
+                v.limits
+                    .rules_in_force
+                    .as_ref()
+                    .and_then(|r| r.max_micro_contracts),
+            )
+        };
+        assert_eq!(waiting(&t), (true, Some(10)), "after startup");
+        // The first data's time: still today's rules.
+        t.advance_to(lines_core::UtcMillis::parse_iso("2026-11-05T15:00:00Z").unwrap());
+        let id = t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::PlaceOrder(OrderSpec {
+                account: account.clone(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(2),
+                kind: OrderKind::Limit { price: px(5990.00) },
+            }),
+        );
+        t.settle();
+        let s = t.cache.read();
+        let Some(Err(r)) = s.result(id) else {
+            panic!("20 of 10 micros allowed: {:?}", s.result(id))
+        };
+        assert_eq!(r.code, RejectCode::PropRule, "{r:?}");
+        drop(s);
+        assert_eq!(waiting(&t), (true, Some(10)), "after the first data");
+    }
+
     #[test]
     fn guardrails_from_settings_deny_and_report() {
         let mut setup = paper_setup(vec![AccountConfig::paper("paper", 50_000)]);

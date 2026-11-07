@@ -1456,6 +1456,16 @@ where
     let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.
     setup.guardrails = settings.settings.guardrails.clone();
+    // Prop rules from settings; one that doesn't resolve (an unknown preset) is reported and
+    // left out (the account keeps its rules).
+    for (account, doc) in &settings.settings.prop_rules {
+        match doc.resolve() {
+            Ok(r) => {
+                setup.prop_rules.insert(account.clone(), r);
+            }
+            Err(e) => reports.push(format!("settings: prop rules for {account}: {e}")),
+        }
+    }
     // Broker extensions (decision 0020): each runs beside the paper core.
     setup.brokers = ext.brokers().to_vec();
     let trading = trading::Trading::start(setup, registry.clone(), config.clone());
