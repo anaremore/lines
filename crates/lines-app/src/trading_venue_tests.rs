@@ -386,19 +386,22 @@ fn a_reconnect_rebuilds_from_the_new_snapshot() {
     });
     let t = start(&shared);
     let sim = AccountId::new("venue-sim");
-    assert!(until(&t, |t| t.account(&sim).is_some()));
+    // `settle` has the watcher look now, so each step below sees exactly the venue's state
+    // (no waiting on its poll or rebuild timers).
+    t.settle();
+    assert!(t.account(&sim).is_some());
     {
         // Disconnected: no accounts listed.
         let mut v = shared.v.lock().unwrap();
         v.accounts.clear();
         v.rev = 2;
     }
+    t.settle();
     // Still listed, read-only, with its badge: never shown as another kind or tradable.
-    assert!(until(&t, |t| t
-        .account(&sim)
-        .is_some_and(
-            |a| a.read_only.as_deref() == Some(super::NOT_LISTED)
-        )));
+    assert_eq!(
+        t.account(&sim).unwrap().read_only.as_deref(),
+        Some(super::NOT_LISTED)
+    );
     assert_eq!(t.account(&sim).unwrap().badge, "SIM");
     assert!(t.is_read_only(&sim));
     {
@@ -423,20 +426,8 @@ fn a_reconnect_rebuilds_from_the_new_snapshot() {
         };
         v.rev = 3;
     }
-    // Two paths publish the reconnect: the watcher re-lists the account (after its next poll)
-    // and the core rebuilds from the snapshot (a rebuild queued for rev 2 may run first and
-    // already read rev 3's snapshot). Wait for both, never for one and assume the other.
-    assert!(
-        until(&t, |t| t
-            .cache
-            .read()
-            .position(&sim, es())
-            .is_some_and(|p| p.qty == 3)
-            && t.account(&sim).is_some_and(
-                |a| a.read_only.as_deref() != Some(super::NOT_LISTED)
-            )),
-        "the reconnect's position and listing both arrive"
-    );
+    t.settle();
+    assert_eq!(t.cache.read().position(&sim, es()).map(|p| p.qty), Some(3));
     assert_eq!(
         t.account(&sim).unwrap().read_only.as_deref(),
         Some("Sim: order entry not enabled yet")
