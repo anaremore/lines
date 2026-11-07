@@ -17,7 +17,7 @@
 *Commands, and what the core enforces*
 - Strategy commands carry **`Source::Strategy(StrategyId)`**, which is `Origin::Automated`. They go through `TradingHandle::submit` like any other command. A strategy has no other way to act and no access to a broker.
 - The **trading core enforces the strategy rules**, not the host. A buggy or hung host can't get around them. Before prop rules, risk and guardrails, the core's strategy gate checks each strategy command against:
-  - the instance's **state**: Disarmed, Armed, Paused (with a reason) or Stopped. Only Armed may enter. Paused, Stopped and Disarmed may only cancel their own orders, flatten their own contract, and modify without adding quantity (moving a stop).
+  - the instance's **state**: Disarmed, Armed, Paused (with a reason) or Stopped. Only Armed may enter. Paused, Stopped and Disarmed may only reduce: cancel their own orders, flatten their own contract, modify without adding quantity (moving a stop), and place orders that only close part of the position. **Exits are never limited** by state, hours, size, loss or rate.
   - its **account and contract**: an instance trades only its own.
   - its **limits** (`StrategyLimits`, all required, no "unlimited"): max position (worst case with its open orders), max daily loss (realized + unrealized on its own fills, per trade date of the account's day product), max orders per minute (submits and modifies; cancels and Flatten are never limited), and allowed hours (windows in a named time zone, from the bundled tz database).
   - **paper only:** strategy orders go only to the built-in paper broker (live sources' paper accounts, replays, backtests), until Live is enabled under *Live* below.
@@ -42,7 +42,7 @@
   - **Trading:** a `TradingCore` with a `PaperBroker` (the configured fill model, trade-through by default (0005), latency and fees) on the manual market clock. The strategy gate, prop rules, risk and guardrails are all enforced, as live.
   - **Journal:** the same journal turns fills into trades, with exact P&L and MAE/MFE.
 - The result is a **deterministic report**: identical inputs (files, parameters, strategy version, broker config) give a byte-identical report, and a test checks this. It lists inputs with content hashes; trades; P&L, fees, MAE/MFE and summary statistics; every decision with its reason; denials; pauses; and the position open at the end, if any (marked to the last price, never closed silently).
-- Headless entry: `lines --backtest <strategy> --replay <file|dir> [--replay-levels <dir>] --params <json> --report <out.json>` (official builds list their strategies; the public build lists the example).
+- Headless entry: `lines --backtest <strategy> --replay <file|dir> [--replay-levels <dir>] --backtest-config <settings.json> [--report <out.json>]` (settings: parameters, limits, balance, paper broker) (official builds list their strategies; the public build lists the example).
 - Backtests never touch a live broker, a live feed or a level service.
 
 *Audit*
@@ -70,8 +70,9 @@
 - Chart markers for a strategy's orders and fills, tagged with the instance.
 
 **Consequences:**
-- New public crate `lines-strategy` (depends on lines-core, lines-feed, lines-trading; lines-app depends on it). `lines-trading` gains `Source::Strategy`, the strategy gate, its commands (`ArmStrategy`, `PauseStrategy`, `StopStrategies`, `SetStrategyLimits`, `StrategyHeartbeat`) and `Event::Strategy`. This is tier B.
-- `Source` gains a variant, and the journal's saved form now carries it. A journal file written with strategy fills can't be read by older builds. That is acceptable: a newer file is already left alone by design. A test pins the saved form. The paper trading file does not save strategy state, because armed state is never saved and limits live with the instance configuration.
+- New public crate `lines-strategy` (depends on lines-core, lines-feed, lines-trading; lines-app depends on it). `lines-trading` gains `Source::Strategy`, the strategy gate, its commands (`AddStrategy` (also how limits change, while not armed), `RemoveStrategy`, `ArmStrategy`, `PauseStrategy`, `StopStrategies`), `Event::Strategy` and the host heartbeat (`TradingCore::strategy_heartbeat`, a handle message, not a command, so it never floods the event stream). This is tier B.
+- `Source` gains a variant, and the journal's saved form now carries it. An older build reading a journal with strategy fills skips those trades with a warning (it can't parse the source); it doesn't damage the file. That is acceptable for a pre-release, and no version bump is needed: new builds read old files unchanged. A test pins the saved form. The paper trading file does not save strategy state, because armed state is never saved and limits live with the instance configuration.
 - Strategy limits are separate from, and in addition to, account risk, prop rules and guardrails. The tightest one wins.
 - One instance is one account and one contract. Coordination across instances is later work: combined MES/MNQ exposure in micro-equivalents, and staggered multi-account batches. Until then, the account's own max position and risk limits cap the total.
+- An arm reconciles the instance's own books with the account: flat adopts flat, any other mismatch must be flattened first (a person may have traded the position while it was paused).
 - The roadmap gains a strategies milestone. On acceptance, `docs/positioning.md` changes to say Lines automates the trader's own method, while staying out of quant research. Phases: (a) the public framework, the core gate and the backtest harness; (b) private strategies and backtests on recorded data; (c) the UI; (d) Live, owner-gated.

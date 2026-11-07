@@ -5,7 +5,8 @@
 //! or hung strategy host can't get around them:
 //!
 //! - **State** ([`StrategyState`]): Disarmed, Armed, Paused or Stopped. Only Armed may enter.
-//!   The others may only cancel, flatten its own contract, and modify without adding quantity.
+//!   The others may only reduce: cancel, flatten its own contract, modify without adding
+//!   quantity, and place orders that only close part of the position.
 //! - **Scope**: an instance trades only its own account and contract, and modifies or cancels
 //!   only orders it placed.
 //! - **Limits** ([`StrategyLimits`], all required): max position (worst case with open
@@ -52,7 +53,7 @@ pub struct HoursWindow {
     pub end: String,
 }
 
-/// When an instance may enter (exits are never limited by time).
+/// When an instance may enter (exits are never limited by time, size, loss or rate).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradingHours {
     /// IANA time zone (bundled database: identical on every machine), e.g. `America/New_York`.
@@ -206,6 +207,8 @@ pub(crate) struct Instance {
     pub recent: VecDeque<UtcMillis>,
     /// The host's last heartbeat (or the arm time).
     pub beat: UtcMillis,
+    /// The command in flight passed the gate as an entry: count it if the core accepts it.
+    pub counting: bool,
 }
 
 impl Instance {
@@ -220,6 +223,7 @@ impl Instance {
             day: None,
             recent: VecDeque::new(),
             beat: now,
+            counting: false,
         }
     }
 

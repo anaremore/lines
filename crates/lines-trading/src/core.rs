@@ -415,8 +415,11 @@ impl TradingCore {
     pub fn handle(&mut self, now: UtcMillis, env: Envelope) {
         self.next_command = self.next_command.max(env.id.0 + 1);
         let result = self.run(now, &env);
-        if let (Source::Strategy(s), Ok(ids)) = (env.source, &result) {
-            self.strategy_owns(s, ids);
+        if let Source::Strategy(s) = env.source {
+            self.strategy_counted(s, now, result.is_ok());
+            if let Ok(ids) = &result {
+                self.strategy_owns(s, ids);
+            }
         }
         self.events.push(Event::Command {
             id: env.id,
