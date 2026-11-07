@@ -235,8 +235,8 @@ impl Theme {
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
-            // ink, warm gray, forest, maroon
-            drawing: [c(brand::INK), c(0x695a5a), c(0x0f2d00), c(0x4b0000)],
+            // ink, warm gray, olive, slate: none in the red or green families
+            drawing: [c(brand::INK), c(0x695a5a), c(0x707000), c(0x3a3a50)],
             label_bg: c(brand::PAPER).opacity(0.9),
             profile_va: c(0x565b6e).opacity(0.24),
             profile_poc: c(brand::INK).opacity(0.65),
@@ -638,6 +638,14 @@ mod tests {
             for (i, d) in t.drawing.iter().enumerate() {
                 let r = contrast(*d, t.bg);
                 assert!(r >= 3.0, "{}: drawing color {i}: {r:.2}", t.name);
+                for (j, e) in t.drawing.iter().enumerate().skip(i + 1) {
+                    let de = delta_e_2000(*d, *e);
+                    assert!(
+                        de >= 12.0,
+                        "{}: drawing colors {i} and {j}: dE {de:.1}",
+                        t.name
+                    );
+                }
                 for (what, c) in reserved {
                     let de = delta_e_2000(*d, c);
                     assert!(

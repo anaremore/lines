@@ -228,22 +228,33 @@ impl ChartDrawings {
             }
             return true;
         }
-        if let Some((id, hit)) = pick(&self.drawn, self.selected, x, y, HIT_TOL, HANDLE_R)
-            && let (Some(d), Some(from)) = (self.data.lock().get(id).cloned(), anchor)
-        {
-            self.selected = Some(id);
-            self.drag = Some(Drag {
-                hit,
-                original: d,
-                from,
-                press: (x, y),
-            });
-            return true;
+        match pick(&self.drawn, self.selected, x, y, HIT_TOL, HANDLE_R) {
+            // The selected drawing (a handle or its body) drags.
+            Some((id, hit)) if Some(id) == self.selected => {
+                if let (Some(d), Some(from)) = (self.data.lock().get(id).cloned(), anchor) {
+                    self.drag = Some(Drag {
+                        hit,
+                        original: d,
+                        from,
+                        press: (x, y),
+                    });
+                    return true;
+                }
+                false
+            }
+            // Another drawing: selected, and the press still pans the chart (a drawing
+            // never captures the pointer before it is selected).
+            Some((id, _)) => {
+                self.selected = Some(id);
+                false
+            }
+            // Elsewhere: the measure goes, the selection too; the chart pans.
+            None => {
+                self.measure = None;
+                self.selected = None;
+                false
+            }
         }
-        // A click elsewhere: the measure goes, the selection too; the chart pans.
-        self.measure = None;
-        self.selected = None;
-        false
     }
 
     /// The press ended at plot-local (`x`, `y`). Returns whether it was the drawings'.
