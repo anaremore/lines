@@ -7,14 +7,13 @@
 //! `Input::Stored`).
 //!
 //! Which stored trades count:
-//! - only inside the contract's **trade coverage** (`ContractDir::trade_coverage`): segments
-//!   also hold trades outside it (re-delivered overlap, REST back-fill), which were never
-//!   counted live and are not complete there;
+//! - the segments hold exactly the trades live counted (the writer stores the trades
+//!   `ChartData::apply` counted in each frame), late ones included, a reconnect's re-sent
+//!   ones not, so a stored session replays to what live built;
+//! - only inside the contract's **trade coverage** (`ContractDir::trade_coverage`): outside it
+//!   (an outage, a connection whose history never completed) the stored trades are not known
+//!   to be every trade;
 //! - only from the **lookback** start (`from_ms`);
-//! - every stored trade once: the writer never stores a trade an earlier connection stored
-//!   (`ContractWriter`'s stored mark), so a reconnect's re-sent trades aren't in the segments,
-//!   while a connection's own late trades (a REST fill after newer streamed ones) are, as
-//!   live counted them;
 //! - a segment that ends **corrupt or torn** stops there: its coverage after the last good
 //!   block is withdrawn, so consumers stay approximate for the rest of that day.
 
@@ -67,7 +66,7 @@ pub fn lookback_start(dir: &ContractDir, reference: UtcMillis, sessions: u32) ->
 }
 
 /// Read the stored trades from `from_ms` on, oldest trade date first, handing each date's
-/// [`Chunk`] to `each` (one pass; nothing is kept between dates but the re-delivery mark).
+/// [`Chunk`] to `each` (one pass; nothing is kept between dates).
 pub fn read(dir: &ContractDir, from_ms: i64, mut each: impl FnMut(Chunk)) -> io::Result<ReadStats> {
     let started = Instant::now();
     let mut stats = ReadStats::default();
