@@ -69,7 +69,7 @@ use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
 
 use crate::chart_draw::{self, ChartDrawings};
-use crate::commands::DrawCmd;
+use crate::commands::{Command, DrawCmd};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
@@ -345,7 +345,16 @@ pub struct ChartView {
     note_entry_line: Option<(String, ShapedLine)>,
     /// Measure readouts (`None`: the temporary one; else a pinned measure's id), shaped once
     /// per distinct reading.
-    measure_lines: HashMap<Option<u64>, (lines_core::drawings::MeasureStats, ShapedLine)>,
+    measure_lines: HashMap<
+        Option<u64>,
+        (
+            (
+                lines_core::drawings::MeasureStats,
+                lines_core::drawings::MeasureParts,
+            ),
+            ShapedLine,
+        ),
+    >,
 }
 
 impl crate::trade_bar::TradePane for ChartView {
@@ -2295,7 +2304,7 @@ impl ChartView {
             let (x, y) = d.p0;
             window.paint_quad(fill(
                 Bounds::new(point(px(ox + x + 2.0), px(oy + y)), size(px(w), px(box_h))),
-                t.label_bg,
+                t.panel,
             ));
             let _ = line.paint(
                 point(px(ox + x + 2.0 + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5)),
@@ -2331,7 +2340,7 @@ impl ChartView {
                 point(px(ox + d.p0.0 + 2.0), px(oy + d.p0.1)),
                 size(px(w), px(box_h)),
             );
-            window.paint_quad(fill(b, t.label_bg));
+            window.paint_quad(fill(b, t.panel));
             window.paint_quad(gpui::outline(b, t.accent, gpui::BorderStyle::Solid));
             let _ = line.paint(
                 point(
@@ -2366,26 +2375,25 @@ impl ChartView {
         cx: &mut App,
     ) {
         let t = self.theme;
+        // The P&L display setting decides which amounts show; the cache is keyed on it too,
+        // so changing the setting re-shapes every readout.
+        let mode = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.pnl_display)
+            .unwrap_or_default();
+        let parts = measure_parts(mode);
         if self
             .measure_lines
             .get(&key)
-            .is_none_or(|(s, _)| *s != stats)
+            .is_none_or(|(s, _)| *s != (stats, parts))
         {
-            let mode = cx
-                .try_global::<crate::picker_view::AppSettings>()
-                .map(|a| a.settings.pnl_display)
-                .unwrap_or_default();
-            let parts = lines_core::drawings::MeasureParts {
-                ticks: mode.shown(),
-                money: mode.money(),
-            };
             let mut s = FixedStr::<128>::new();
             let _ = write_measure(&stats, &self.instrument.price, parts, &mut s);
             let line = self.shape(s.as_str(), t.text_main, window);
             if self.measure_lines.len() > 64 {
                 self.measure_lines.clear();
             }
-            self.measure_lines.insert(key, (stats, line));
+            self.measure_lines.insert(key, ((stats, parts), line));
         }
         let Some((_, line)) = self.measure_lines.get(&key) else {
             return;
@@ -2477,7 +2485,8 @@ impl ChartView {
             let n = d.count();
             let plural = if n == 1 { "" } else { "s" };
             format!(
-                "Delete all {n} drawing{plural} for {}?  Enter: delete  ·  Esc: keep  (Ctrl+Z undoes)",
+                "Delete all {n} drawing{plural} for {}?  Enter: delete  ·  Esc: keep  ({} undoes)",
+                crate::commands::hint(Command::Draw(DrawCmd::Undo)),
                 self.instrument.symbol
             )
         } else if let Some(tool) = d.tool() {
@@ -3108,15 +3117,26 @@ fn measure_label_at(
     (w, h): (f32, f32),
     (pw, ph): (f32, f32),
 ) -> (f32, f32) {
-    let left = m.p0.0.min(m.p1.0);
+    let (left, right) = (m.p0.0.min(m.p1.0), m.p0.0.max(m.p1.0));
     let (top, bottom) = (m.p0.1.min(m.p1.1), m.p0.1.max(m.p1.1));
-    let x = left.min(pw - w).max(0.0);
+    // Never past the range's newer (right) end: a readout wider than the range grows left,
+    // over older bars; kept inside the plot.
+    let x = left.min(right - w).min(pw - w).max(0.0);
     let y = if top - h - 4.0 >= 0.0 {
         top - h - 4.0
     } else {
         (bottom + 4.0).min(ph - h).max(0.0)
     };
     (x, y)
+}
+
+/// The amounts a measure shows for a P&L display setting: exactly the setting's (off: no
+/// ticks or money).
+fn measure_parts(mode: PnlDisplay) -> lines_core::drawings::MeasureParts {
+    lines_core::drawings::MeasureParts {
+        ticks: mode.ticks(),
+        money: mode.money(),
+    }
 }
 
 /// The bars a chart shows: its timeframe's, or the store's 1-minute bars.
@@ -3344,11 +3364,27 @@ mod tests {
             measure_label_at(m((300.0, 10.0), (900.0, 300.0)), (250.0, 20.0), plot),
             (300.0, 304.0)
         );
-        // Near the right edge: kept inside the plot.
+        // Narrower than its readout (a few bars at the live edge): the readout ends at the
+        // range's newer end and grows left, never over the bars after it.
         assert_eq!(
             measure_label_at(m((900.0, 400.0), (990.0, 200.0)), (250.0, 20.0), plot).0,
-            750.0
+            740.0
         );
+        assert_eq!(
+            measure_label_at(m((20.0, 400.0), (60.0, 200.0)), (250.0, 20.0), plot).0,
+            0.0
+        );
+    }
+
+    /// The measure shows exactly what the P&L display setting allows.
+    #[test]
+    fn measure_follows_pnl_display() {
+        use lines_core::drawings::MeasureParts;
+        let p = |ticks, money| MeasureParts { ticks, money };
+        assert_eq!(measure_parts(PnlDisplay::Off), p(false, false));
+        assert_eq!(measure_parts(PnlDisplay::Ticks), p(true, false));
+        assert_eq!(measure_parts(PnlDisplay::Currency), p(false, true));
+        assert_eq!(measure_parts(PnlDisplay::Both), p(true, true));
     }
 
     #[test]

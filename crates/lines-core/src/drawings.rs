@@ -440,8 +440,17 @@ pub fn hit(d: &Projected, x: f32, y: f32, tol: f32, handles: bool, handle_r: f32
             && y >= a.1.min(b.1) - tol
             && y <= a.1.max(b.1) + tol
     };
+    // Zones and measures are hit on their edges only, so the chart still pans from inside a
+    // wide zone; a note (a small text box) anywhere on it.
+    let edges = |a: (f32, f32), b: (f32, f32)| {
+        let (c, d) = ((a.0, b.1), (b.0, a.1));
+        [(a, c), (c, b), (b, d), (d, a)]
+            .iter()
+            .any(|&(s, e)| segment_distance(p, s, e) <= tol)
+    };
     let on = match d.tool {
-        Tool::Rect | Tool::Measure | Tool::Note => inside(d.p0, d.p1),
+        Tool::Note => inside(d.p0, d.p1),
+        Tool::Rect | Tool::Measure => edges(d.p0, d.p1),
         _ => segment_distance(p, d.p0, d.p1) <= tol,
     };
     on.then_some(Hit::Body)
@@ -520,8 +529,9 @@ pub fn measure(
     }
 }
 
-/// Which amounts a measure shows (the app maps its P&L display setting onto this: with P&L
-/// display off, no ticks or money; ticks only; money only; both).
+/// Which amounts a measure shows. The app maps its P&L display setting onto this exactly:
+/// off = neither, ticks = ticks, currency = money, both = both (points, bars and duration
+/// always show).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MeasureParts {
     pub ticks: bool,

@@ -115,11 +115,13 @@ fn clicks_belong_to_drawings_only_in_drawing_mode_or_on_a_drawing() {
     assert!(r.down(100.0, 100.0));
     assert_eq!(r.items().len(), 1);
     r.d.selected = None;
-    // On the line: the drawings take it (select, drag); off it: the chart does.
+    // On an unselected line: it is selected and the chart still pans; once selected, the
+    // line takes the press (drag); off it: the chart does.
     r.frame(0.0, 0.0);
     let y = r.d.drawn()[0].p0.1;
-    assert!(r.down(500.0, y + 2.0));
+    assert!(!r.down(500.0, y + 2.0), "selects, doesn't capture");
     assert_eq!(r.d.selected, Some(r.items()[0].id));
+    assert!(r.down(500.0, y + 2.0), "selected: drags");
     assert!(r.up(500.0, y + 2.0));
     assert!(!r.down(500.0, y + 40.0));
     assert_eq!(r.d.selected, None);
@@ -334,7 +336,11 @@ fn hiding_clears_the_selection_and_a_lost_release_drops_the_drag() {
     r.down(400.0, 150.0);
     r.frame(0.0, 0.0);
     let y = r.d.drawn()[0].p0.1;
-    assert!(r.down(500.0, y), "selects the line; the measure stays");
+    assert!(
+        !r.down(500.0, y),
+        "selects the line (the chart pans); the measure stays"
+    );
+    assert!(r.d.selected.is_some());
     r.d.set_hidden(true);
     assert_eq!(r.d.selected, None);
     assert_eq!(r.d.key("delete", None), Key::Ignored);
@@ -343,6 +349,7 @@ fn hiding_clears_the_selection_and_a_lost_release_drops_the_drag() {
 
     let before = r.items()[0].clone();
     r.frame(0.0, 0.0);
+    r.down(500.0, y); // select
     assert!(r.down(500.0, y));
     r.frame(500.0, y + 60.0);
     assert!(r.d.release_lost());
@@ -366,4 +373,24 @@ fn axis_aligned_lines_snap_to_device_pixels() {
             );
         }
     }
+}
+
+/// Inside a zone the chart pans: only its edges select it, and only a selected zone drags.
+#[test]
+fn the_chart_pans_inside_a_zone() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Rect);
+    r.down(100.0, 100.0);
+    r.down(500.0, 300.0);
+    r.d.selected = None;
+    r.frame(0.0, 0.0);
+    assert!(!r.down(300.0, 200.0), "inside: the chart's");
+    assert_eq!(r.d.selected, None);
+    let (x0, _) = r.d.drawn()[0].p0;
+    assert!(
+        !r.down(x0, 200.0),
+        "edge of an unselected zone: selects only"
+    );
+    assert!(r.d.selected.is_some());
+    assert!(r.down(x0, 200.0), "edge of the selected zone: drags");
 }

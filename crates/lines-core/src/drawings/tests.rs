@@ -199,16 +199,26 @@ fn hit_testing_lines_zones_and_handles() {
         ..d.clone()
     };
     let z = project(&zone, &axis, &vp).unwrap();
+    // A zone is hit on its edges; inside it the chart keeps panning.
+    assert_eq!(hit(&z, mid.0, mid.1 - 20.0, 4.0, false, 5.0), None);
     assert_eq!(
-        hit(&z, mid.0, mid.1 - 20.0, 4.0, false, 5.0),
+        hit(&z, z.p0.0 + 2.0, mid.1, 4.0, false, 5.0),
+        Some(Hit::Body)
+    );
+    assert_eq!(
+        hit(&z, mid.0, z.p1.1 - 1.0, 4.0, false, 5.0),
         Some(Hit::Body)
     );
 
     // `pick`: the selected drawing's handles, then the top-most (last drawn) body.
     let drawn = [p, z];
     assert_eq!(
-        pick(&drawn, None, mid.0, mid.1, 4.0, 5.0),
+        pick(&drawn, None, z.p0.0, z.p0.1 - 30.0, 4.0, 5.0),
         Some((9, Hit::Body))
+    );
+    assert_eq!(
+        pick(&drawn, None, mid.0, mid.1, 4.0, 5.0),
+        Some((7, Hit::Body))
     );
     assert_eq!(
         pick(&drawn, Some(7), p.p0.0, p.p0.1, 4.0, 5.0),
