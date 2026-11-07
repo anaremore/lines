@@ -26,9 +26,10 @@ struct Study {
     config: IndicatorConfig,
     handle: Option<IndicatorHandle>,
     columns: Vec<Column>,
-    /// Cumulative delta: this frame's candles and their extremes.
+    /// Cumulative delta: this frame's candles and their extremes, and the newest value.
     candles: Vec<DeltaCandle>,
     extent: Option<(i64, i64)>,
+    newest: Option<i64>,
     /// The newest value is approximate (from bars); shown in the legend.
     approx: bool,
     error: Option<String>,
@@ -61,6 +62,7 @@ impl Studies {
                     columns: Vec::new(),
                     candles: Vec::new(),
                     extent: None,
+                    newest: None,
                     approx: false,
                     error: None,
                 })
@@ -124,6 +126,7 @@ impl Studies {
                 IndicatorConfig::CumDelta { .. } => {
                     let range = vp.visible_range(bars.len());
                     s.extent = build_delta_candles(&out.candles, bars, range, &mut s.candles);
+                    s.newest = out.candles.last().map(|p| p.close);
                     s.approx = s.candles.iter().any(|c| c.approx);
                 }
             }
@@ -240,14 +243,13 @@ impl Studies {
         Some(Scale::fit(lo, hi, height))
     }
 
-    /// The newest visible sub-pane value (cumulative delta's last close), for its axis tag.
+    /// The newest sub-pane value (cumulative delta's latest close, wherever the view is), for
+    /// its axis tag.
     pub fn subpane_last(&self) -> Option<i64> {
         self.list
             .iter()
             .find(|s| s.config.in_subpane() && !s.config.display().hidden)?
-            .candles
-            .last()
-            .map(|c| c.close)
+            .newest
     }
 
     /// Cumulative delta's candles in the sub-pane (`origin`: its top-left; x from the chart's
@@ -280,12 +282,31 @@ impl Studies {
                 let col = if c.approx { col.opacity(0.45) } else { col };
                 let (yo, yc) = (scale.y(c.open as f64), scale.y(c.close as f64));
                 let (yh, yl) = (scale.y(c.high as f64), scale.y(c.low as f64));
-                window.paint_quad(gpui::fill(rect(x - hair * 0.5, yh, hair, yl - yh), col));
                 let (top, bot) = (yo.min(yc), yo.max(yc));
-                window.paint_quad(gpui::fill(
-                    rect(x - half, top, half * 2.0, (bot - top).max(hair)),
-                    col,
-                ));
+                let (bx, bw, bh) = (x - half, half * 2.0, (bot - top).max(hair));
+                // Direction by shape too (docs/design.md): one direction's bodies are hollow,
+                // as the price candles; under 3 device pixels each way they stay filled.
+                let hollow = theme.hollow.is_hollow(up) && bw >= 3.0 * hair && bh >= 3.0 * hair;
+                let wx = x - hair * 0.5;
+                if hollow {
+                    // The wick above and below the body only.
+                    window.paint_quad(gpui::fill(rect(wx, yh, hair, top - yh), col));
+                    window.paint_quad(gpui::fill(rect(wx, top + bh, hair, yl - top - bh), col));
+                } else {
+                    window.paint_quad(gpui::fill(rect(wx, yh, hair, yl - yh), col));
+                }
+                if hollow {
+                    for q in [
+                        rect(bx, top, bw, hair),
+                        rect(bx, top + bh - hair, bw, hair),
+                        rect(bx, top, hair, bh),
+                        rect(bx + bw - hair, top, hair, bh),
+                    ] {
+                        window.paint_quad(gpui::fill(q, col));
+                    }
+                } else {
+                    window.paint_quad(gpui::fill(rect(bx, top, bw, bh), col));
+                }
             }
         }
     }
