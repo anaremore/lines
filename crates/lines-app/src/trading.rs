@@ -673,7 +673,7 @@ impl Trading {
     }
 
     /// Advance a manual-clock core (scripts), remembering the time for [`Trading::now`].
-    #[cfg(feature = "screenshot")]
+    #[cfg(any(test, feature = "screenshot"))]
     fn advance_to(&self, t: lines_core::UtcMillis) {
         self.advanced
             .fetch_max(t.0, std::sync::atomic::Ordering::AcqRel);
