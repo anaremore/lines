@@ -341,6 +341,8 @@ impl Run {
                     result: None,
                 });
                 if self.state == StrategyState::Armed {
+                    // Once: the state only updates at the next flush.
+                    self.state = StrategyState::Paused;
                     self.core.submit(
                         now,
                         Source::Strategy(INSTANCE),

@@ -630,7 +630,6 @@ impl TradingCore {
             | Command::PauseStrategy { .. }
             | Command::StopStrategies { .. } => unreachable!("handled by strategy_control"),
             Command::Flatten { contract, .. } => {
-                let mut ids = self.cancel_all(env, now, &account, contract);
                 let positions: Vec<(ContractKey, i64)> = self.accounts[&account]
                     .positions
                     .iter()
@@ -638,6 +637,14 @@ impl TradingCore {
                     .map(|(k, p)| (*k, p.qty()))
                     .filter(|(_, q)| *q != 0)
                     .collect();
+                // Closing a position cancels every order on it, whoever placed it: a trader's
+                // stop left working after the position is gone would open a new one. With
+                // nothing to close, a strategy's Flatten is its Cancel All (its own orders).
+                let mut ids = if positions.is_empty() {
+                    self.cancel_all(env, now, &account, contract)
+                } else {
+                    self.cancel_every(env, now, &account, contract)
+                };
                 for (k, q) in positions {
                     let spec = OrderSpec {
                         account: account.clone(),
@@ -678,6 +685,28 @@ impl TradingCore {
     ) -> Vec<OrderId> {
         // A strategy cancels only its own orders (decision 0025).
         let scope = self.cancel_scope(env.source);
+        self.cancel_scoped(env, now, account, contract, scope)
+    }
+
+    /// Every open order on the account (and contract), whoever's: a Flatten closing positions.
+    fn cancel_every(
+        &mut self,
+        env: &Envelope,
+        now: UtcMillis,
+        account: &AccountId,
+        contract: Option<ContractKey>,
+    ) -> Vec<OrderId> {
+        self.cancel_scoped(env, now, account, contract, None)
+    }
+
+    fn cancel_scoped(
+        &mut self,
+        env: &Envelope,
+        now: UtcMillis,
+        account: &AccountId,
+        contract: Option<ContractKey>,
+        scope: Option<std::collections::BTreeSet<OrderId>>,
+    ) -> Vec<OrderId> {
         let ids: Vec<OrderId> = self
             .orders
             .values()

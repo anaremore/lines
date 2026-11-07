@@ -437,9 +437,25 @@ impl TradingCore {
                 };
                 // Changing an entry (its price too: a new price can make it marketable) is an
                 // entry; so is adding quantity to anything. Moving an exit is not.
+                // Closing, as for a new order: within the position less what every other open
+                // order and held bracket exit on that side already closes.
                 let position = self.position(&account, contract);
-                let closing =
-                    o.side.sign() == -position.signum() && o.remaining().0 <= position.abs();
+                let (open_buy, open_sell) = self.open_qty(&account, contract);
+                let (held_buy, held_sell) = self.held_exits(&account, contract);
+                let others = match o.side {
+                    Side::Buy => open_buy + held_buy,
+                    Side::Sell => open_sell + held_sell,
+                } - if matches!(o.role, Role::TakeProfit | Role::StopLoss) {
+                    0
+                } else {
+                    o.remaining().0
+                };
+                let closable = match o.side {
+                    Side::Sell if position > 0 => position - others,
+                    Side::Buy if position < 0 => -position - others,
+                    _ => 0,
+                };
+                let closing = o.remaining().0 <= closable;
                 let entry_order = match o.role {
                     Role::Entry => true,
                     Role::Single => !closing,
