@@ -811,3 +811,73 @@ fn limits_reject_unknown_fields() {
         "weekdays":["mon"]}}"#;
     assert!(serde_json::from_str::<StrategyLimits>(json).is_err());
 }
+
+#[test]
+fn a_paused_instance_cant_reprice_an_entry_into_a_fill() {
+    let mut r = Rig::armed();
+    let entry = r.bot(buy(es(), 1, limit(5985.0))).unwrap()[0];
+    r.wait(30);
+    // A person moves it: paused, the order left to them but still the instance's.
+    r.manual(Command::ModifyOrder {
+        account: acct(),
+        order: entry,
+        qty: None,
+        price: Some(px(5986.0)),
+    })
+    .unwrap();
+    r.wait(30);
+    assert_eq!(r.state(), StrategyState::Paused);
+    // Repricing it to a marketable price is an entry: refused.
+    assert!(
+        denied(r.bot(Command::ModifyOrder {
+            account: acct(),
+            order: entry,
+            qty: None,
+            price: Some(px(6000.25)),
+        }))
+        .contains("is paused")
+    );
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+#[test]
+fn its_cancel_all_and_flatten_leave_the_traders_orders() {
+    let mut r = Rig::armed();
+    let mine = r.bot(buy(es(), 1, limit(5985.0))).unwrap()[0];
+    r.wait(30);
+    let theirs = r.manual(buy(es(), 1, limit(5950.0))).unwrap()[0];
+    r.wait(30);
+    r.bot(Command::CancelAll {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.bot(Command::Flatten {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(30);
+    assert!(!r.core.order(mine).unwrap().is_open());
+    assert!(
+        r.core.order(theirs).unwrap().is_open(),
+        "the trader's order stays"
+    );
+}
+
+#[test]
+fn working_bracket_exits_count_as_closing() {
+    let mut r = Rig::armed();
+    // Long 1 with a bracket's exits working.
+    r.bot(bracket(1, 6000.25)).unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    r.bot(Command::PauseStrategy {
+        id: ID,
+        reason: "test".into(),
+    })
+    .unwrap();
+    // A further sell is not an exit: the bracket already closes the position.
+    assert!(denied(r.bot(sell(1, limit(6010.0)))).contains("is paused"));
+}

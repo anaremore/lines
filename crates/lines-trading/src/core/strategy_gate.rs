@@ -435,12 +435,22 @@ impl TradingCore {
                 let Some(o) = self.orders.get(order) else {
                     return Err(deny(format!("{label} may change only its own orders")));
                 };
-                // More quantity is a new entry; less, or a new price, is not.
-                qty.filter(|q| q.0 > o.qty.0).map(|q| OrderSpec {
+                // Changing an entry (its price too: a new price can make it marketable) is an
+                // entry; so is adding quantity to anything. Moving an exit is not.
+                let position = self.position(&account, contract);
+                let closing =
+                    o.side.sign() == -position.signum() && o.remaining().0 <= position.abs();
+                let entry_order = match o.role {
+                    Role::Entry => true,
+                    Role::Single => !closing,
+                    Role::TakeProfit | Role::StopLoss | Role::Flatten => false,
+                };
+                let added = qty.map_or(0, |q| (q.0 - o.qty.0).max(0));
+                (entry_order || added > 0).then(|| OrderSpec {
                     account: account.clone(),
                     contract,
                     side: o.side,
-                    qty: Qty(q.0 - o.qty.0),
+                    qty: Qty(added),
                     kind: o.kind,
                 })
             }
@@ -481,6 +491,10 @@ impl TradingCore {
         // always opens.
         let position = self.position(&account, contract);
         let (open_buy, open_sell) = self.open_qty(&account, contract);
+        // Held bracket exits close the position too (each bracket once: its two exits are
+        // one-cancels-other).
+        let (held_buy, held_sell) = self.held_exits(&account, contract);
+        let (open_buy, open_sell) = (open_buy + held_buy, open_sell + held_sell);
         let closable = match spec.side {
             Side::Sell if position > 0 => position - open_sell,
             Side::Buy if position < 0 => -position - open_buy,
@@ -503,7 +517,7 @@ impl TradingCore {
                 return Err(deny(format!("{label}: outside its allowed hours")));
             }
             let max = i.cfg.limits.max_position;
-            let (mut b, mut s) = (open_buy, open_sell);
+            let (mut b, mut s) = self.open_qty(&account, contract);
             match spec.side {
                 Side::Buy => b += spec.qty.0,
                 Side::Sell => s += spec.qty.0,
@@ -538,6 +552,40 @@ impl TradingCore {
             && accepted
         {
             i.recent.push_back(now);
+        }
+    }
+
+    /// Open bracket exits on an account and contract, by side: each bracket's larger exit
+    /// (its take-profit and stop-loss cancel each other, so they close the position once).
+    fn held_exits(&self, account: &AccountId, contract: ContractKey) -> (i64, i64) {
+        let mut per: std::collections::BTreeMap<OrderId, (Side, i64)> = Default::default();
+        for o in self.open_orders(account).filter(|o| o.contract == contract) {
+            if matches!(o.role, Role::TakeProfit | Role::StopLoss) {
+                let key = o.parent.unwrap_or(o.id);
+                let e = per.entry(key).or_insert((o.side, 0));
+                e.1 = e.1.max(o.remaining().0);
+            }
+        }
+        per.values().fold((0, 0), |(b, s), (side, q)| match side {
+            Side::Buy => (b + q, s),
+            Side::Sell => (b, s + q),
+        })
+    }
+
+    /// The orders a strategy's Cancel All or Flatten may cancel: only its own (decision 0025:
+    /// it never touches the trader's orders). `None` for everyone else's commands.
+    pub(super) fn cancel_scope(
+        &self,
+        source: Source,
+    ) -> Option<std::collections::BTreeSet<OrderId>> {
+        match source {
+            Source::Strategy(id) => Some(
+                self.strategies
+                    .get(&id)
+                    .map(|i| i.orders.clone())
+                    .unwrap_or_default(),
+            ),
+            _ => None,
         }
     }
 
