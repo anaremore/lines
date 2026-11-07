@@ -820,9 +820,14 @@ impl TradingCore {
                         OrderKind::StopLimit { .. } => !o.triggered,
                         _ => false,
                     };
-                    // A bracket exit held for its entry isn't in the market: it can't trigger.
+                    // A bracket exit not activated yet (its entry hasn't filled) isn't in the
+                    // market: it can't trigger. An exit held after a fill (Working) is checked:
+                    // the entry's next fill makes it live again.
                     let held = matches!(o.role, Role::TakeProfit | Role::StopLoss)
-                        && matches!(o.state, OrderState::Submitted | OrderState::Acked);
+                        && matches!(o.state, OrderState::Submitted | OrderState::Acked)
+                        && o.parent
+                            .and_then(|e| self.orders.get(&e))
+                            .is_some_and(Order::is_open);
                     if stop
                         && !held
                         && let Some(m) = self.marks.get(&o.contract)
