@@ -405,3 +405,210 @@ fn no_entries_just_before_the_close() {
     r.order(Side::Sell, 1, OrderKind::Limit { price: px(6010.00) })
         .expect("an exit");
 }
+
+/// A broker venue's account (it joins after connecting, `add_accounts`): the trader's
+/// guardrails from settings apply when it joins, its lockout is saved by the venue's service
+/// at once, and after a restart, with the setting switched off, it is still locked.
+#[test]
+fn a_venue_lockout_survives_a_restart() {
+    use lines_trading::service::{Clock, TradingService};
+    use std::collections::BTreeMap;
+    let dir = std::env::temp_dir().join(format!("lines-venue-guards-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("venue.guardrails.json");
+    let cfg = AccountConfig::paper("paper-1", 50_000);
+    let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+    let book = |bid: f64, ask: f64| {
+        vec![
+            MarketInput::BookClear,
+            MarketInput::Book {
+                side: BookSide::Bid,
+                price: px(bid),
+                qty: Qty(100),
+            },
+            MarketInput::Book {
+                side: BookSide::Ask,
+                price: px(ask),
+                qty: Qty(100),
+            },
+            MarketInput::Last(px(bid)),
+        ]
+    };
+    let market = |side| {
+        Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side,
+            qty: Qty(1),
+            kind: OrderKind::Market,
+        })
+    };
+    // Start a venue: its core, the guardrails saved and wanted, the account joining.
+    let start = |defaults: BTreeMap<String, Guardrails>,
+                 saved: BTreeMap<String, persist::VenueGuard>| {
+        let mut b = PaperBroker::new(paper());
+        b.open_account(cfg.id.clone(), Money::whole(cfg.starting_balance));
+        let mut core = TradingCore::new(Box::new(b));
+        core.set_join_guardrails(defaults, saved);
+        let s = TradingService::start_venue(core, Clock::Manual, Vec::new(), Some(path.clone()))
+            .unwrap();
+        let h = s.handle();
+        let events = h.subscribe();
+        h.advance_to(UtcMillis(t0));
+        h.add_accounts(vec![cfg.clone()]);
+        h.market(es(), book(5999.75, 6000.25));
+        h.sync();
+        (s, h, events)
+    };
+
+    // Max 1 trade per day, by account name, from settings.
+    let defaults: BTreeMap<String, Guardrails> = [(
+        cfg.name.clone(),
+        Guardrails {
+            max_trades_per_day: Some(1),
+            ..Default::default()
+        },
+    )]
+    .into();
+    let (s, h, _events) = start(defaults, BTreeMap::new());
+    for (side, at) in [(Side::Buy, LAT), (Side::Sell, 2 * LAT)] {
+        h.submit(Source::Test, market(side));
+        h.sync();
+        h.advance_to(UtcMillis(t0 + at));
+        h.market(es(), book(5999.75, 6000.25));
+        h.sync();
+    }
+    // The lockout was written at once (the service is still running).
+    let saved = persist::load_guards(&path).unwrap().expect("written");
+    assert_eq!(saved.version, persist::GUARDS_VERSION);
+    let entry = &saved.accounts["paper-1"];
+    assert_eq!(entry.guardrails.state(), GuardState::Locked, "{saved:?}");
+    assert!(
+        entry.day.is_some(),
+        "the trade date and its opening balance: {saved:?}"
+    );
+    assert_eq!(entry.day_open_balance, Money::whole(50_000));
+    drop(s);
+
+    // Restart with a looser setting (5 trades): still locked (looser waits for the next
+    // trade date), and reported.
+    let looser: BTreeMap<String, Guardrails> = [(
+        cfg.name.clone(),
+        Guardrails {
+            max_trades_per_day: Some(5),
+            ..Default::default()
+        },
+    )]
+    .into();
+    let saved = persist::load_guards(&path).unwrap().unwrap().accounts;
+    let (_s, h, events) = start(looser, saved);
+    let id = h.submit(Source::Test, market(Side::Buy));
+    h.sync();
+    let all: Vec<Event> = events.try_iter().collect();
+    assert!(
+        all.iter().any(|e| matches!(
+            e,
+            Event::Guardrail {
+                state: GuardState::Locked,
+                ..
+            }
+        )),
+        "the restored lockout is reported: {all:?}"
+    );
+    let r = all
+        .iter()
+        .find_map(|e| match e {
+            Event::Command { id: i, result, .. } if *i == id => Some(result.clone()),
+            _ => None,
+        })
+        .expect("answered");
+    let e = r.expect_err("still locked");
+    assert_eq!(e.code, RejectCode::Guardrail, "{e:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A venue core with `saved` guardrail progress and `defaults`, its account joining with
+/// the broker at `balance` (`None`: the broker doesn't list the account yet).
+fn venue_rig(
+    balance: Option<i64>,
+    defaults: std::collections::BTreeMap<String, Guardrails>,
+    saved: std::collections::BTreeMap<String, persist::VenueGuard>,
+) -> Rig {
+    let cfg = AccountConfig::paper("paper-1", 50_000);
+    let mut b = PaperBroker::new(paper());
+    if let Some(bal) = balance {
+        b.open_account(cfg.id.clone(), Money::whole(bal));
+    }
+    let mut core = TradingCore::new(Box::new(b));
+    core.set_join_guardrails(defaults, saved);
+    let t = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+    core.add_accounts(UtcMillis(t), vec![cfg]);
+    let mut r = Rig {
+        core,
+        t,
+        events: Vec::new(),
+    };
+    r.collect();
+    r.book();
+    r
+}
+
+fn loss_limit(n: i64) -> std::collections::BTreeMap<String, Guardrails> {
+    [(
+        "paper-1".to_owned(),
+        Guardrails {
+            max_daily_loss: Some(n),
+            ..Default::default()
+        },
+    )]
+    .into()
+}
+
+fn saved_today(open: i64) -> std::collections::BTreeMap<String, persist::VenueGuard> {
+    let mut g = lines_trading::GuardrailTracker::default();
+    g.request(Guardrails {
+        max_daily_loss: Some(500),
+        ..Default::default()
+    });
+    [(
+        "paper-1".to_owned(),
+        persist::VenueGuard {
+            guardrails: g,
+            day: lines_core::CivilDate::new(2026, 11, 10),
+            day_open_balance: Money::whole(open),
+        },
+    )]
+    .into()
+}
+
+/// A same-day restart keeps today's loss: down $300 before, a $500 limit locks after $200
+/// more, not $500 more.
+#[test]
+fn a_venue_restart_keeps_todays_loss() {
+    let mut r = venue_rig(Some(49_700), loss_limit(500), saved_today(50_000));
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Active);
+    // About $275 more (5.5 points on one lot, fees included).
+    r.market_fill(Side::Buy, 1);
+    r.book_at(5994.75, 5995.25);
+    r.market_fill(Side::Sell, 1);
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
+}
+
+/// Before the broker lists the account its balance is unknown: the saved opening balance
+/// waits, so the day's loss never reads as the whole balance (no false lockout).
+#[test]
+fn a_venue_account_not_listed_yet_is_not_locked_by_its_saved_day() {
+    let r = venue_rig(None, loss_limit(500), saved_today(50_000));
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Active);
+    assert!(
+        !r.events.iter().any(|e| matches!(
+            e,
+            Event::Guardrail {
+                state: GuardState::Locked,
+                ..
+            }
+        )),
+        "{:?}",
+        r.events
+    );
+}
