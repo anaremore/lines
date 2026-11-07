@@ -126,7 +126,8 @@ def check_git(args, cwd, raw):
         refs = [a for a in rest if not a.startswith("-")]
         if any(re.search(r"(^|:)(refs/heads/)?main$", r) for r in refs[1:]):
             deny("pushing to main (open a PR)")
-        if len(refs) <= 1 or "HEAD" in refs[1:]:
+        # `git push [remote] --tags` pushes tags only (asked below), never the current branch.
+        if (len(refs) <= 1 and "--tags" not in rest) or "HEAD" in refs[1:]:
             branch = current_branch(cwd)
             if branch == "main":
                 deny("pushing from main (open a PR)")
