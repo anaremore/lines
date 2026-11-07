@@ -168,10 +168,13 @@ async fn drive<T: Transport>(
                 let Some(frame) = frame? else { return Ok(ConnectionEnd::Closed) };
                 last_rx = Instant::now();
                 // Replay supplies the recorded time, so sessions see a frozen, deterministic clock.
-                let now = transport.clock().unwrap_or_else(crate::now_utc);
+                let recorded = transport.clock();
+                let now = recorded.unwrap_or_else(crate::now_utc);
                 events.clear();
                 // Decode + convert outside the store lock.
                 let result = session.on_frame(&frame, now, &mut events, &mut out);
+                let backfill = frame.kind == crate::provider::FrameKind::Http
+                    || session.backfill_frame();
                 let len = frame.data.len() as u64;
                 store.set_frame_time(now);
                 store.update_frame(|d| {
@@ -181,6 +184,16 @@ async fn drive<T: Transport>(
                         d.stats.decode_errors += 1;
                     }
                     d.apply(&events);
+                    // Latency HUD (roadmap 6b): nothing recorded while it is hidden (and its
+                    // windows freed). Back-fill is not latency: REST responses and the
+                    // session's snapshots of past trades are left out.
+                    if lines_core::latency::enabled() {
+                        if !backfill {
+                            d.record_latency(&events, now, recorded.is_none());
+                        }
+                    } else if d.latency.is_some() {
+                        d.latency = None;
+                    }
                 });
                 sink.frame(&events, now);
                 result?;

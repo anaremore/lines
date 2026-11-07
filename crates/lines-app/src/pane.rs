@@ -72,6 +72,9 @@ pub trait Pane: EventEmitter<FeedChanged> + Sized + 'static {
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>);
     /// Called on every poll tick while visible (e.g. rate counters); default nothing.
     fn on_tick(&mut self) {}
+    /// Called on every poll tick while hidden: bookkeeping only (a few atomics), never paint
+    /// work. Default nothing.
+    fn on_hidden_tick(&mut self) {}
     /// Something besides the store changed (e.g. indicator values from the indicator
     /// thread); polled every visible tick, redraws when true. Default: nothing.
     fn changed(&mut self) -> bool {
@@ -106,6 +109,7 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
                 .await;
             let alive = this.update(cx, |pane, cx| {
                 if !pane.common().visible {
+                    pane.on_hidden_tick();
                     return;
                 }
                 pane.on_tick();

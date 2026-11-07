@@ -45,7 +45,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, Font, FontWeight,
@@ -319,6 +319,16 @@ pub struct ChartView {
     perf_stats: bool,
     /// The rates changed since the last paint (redraw once a second while shown).
     rates_changed: bool,
+    /// Show the latency HUD in the header (workspace preference, read at render; roadmap 6b).
+    latency_hud: bool,
+    /// Receive → paint for this chart (recorded only while the HUD is shown).
+    paint_latency: crate::latency_hud::PaintLatency,
+    /// The HUD's text and clock status, rebuilt at most once a second (at render).
+    hud_text: String,
+    hud_clock: Option<(String, bool)>,
+    hud_at: Option<Instant>,
+    /// The HUD text was built in its compact form (a narrow chart).
+    hud_compact: bool,
     /// The chart's account (chart trading is roadmap 8; Flatten/Cancel All hotkeys work now).
     trade: crate::trade_bar::PaneTrade,
     /// The position tag's text (glyphs shaped once).
@@ -475,6 +485,12 @@ impl ChartView {
             paint_time_ewma_us: 0.0,
             perf_stats: false,
             rates_changed: false,
+            latency_hud: false,
+            paint_latency: Default::default(),
+            hud_text: String::new(),
+            hud_clock: None,
+            hud_at: None,
+            hud_compact: false,
             trade,
             pos_glyphs: crate::text::Glyphs::new(LABEL_PX),
             timeframe: Timeframe::ONE_MINUTE,
@@ -683,6 +699,101 @@ impl ChartView {
     #[allow(dead_code)] // the seam for the volume profile milestone
     pub fn add_layer(&mut self, layer: Box<dyn ChartLayer>) {
         self.layers.push(layer);
+    }
+
+    /// Rebuild the latency HUD's text (render time; at most once a second unless frozen).
+    fn refresh_hud(&mut self, cx: &App) {
+        use crate::latency_hud::{Measure, Snapshot};
+        if !self.latency_hud {
+            self.hud_at = None;
+            return;
+        }
+        if !self.frozen
+            && self
+                .hud_at
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
+        {
+            return;
+        }
+        // Copy each window's values out and drop its lock at once: the feed and the trading
+        // core never wait on this text (decisions 0001, 0012).
+        let mut stamped_on_receipt = false;
+        let feed_now = self.store.feed_clock().map(|c| c.0);
+        let (feed, bound) = {
+            let Some(d) = self.store.try_read() else {
+                return; // the feed holds the lock this instant: next frame
+            };
+            match d.latency.as_deref() {
+                Some(l) => {
+                    // The feed's clock (runs on while live) so old samples leave a quiet feed.
+                    let now = self
+                        .store
+                        .feed_clock()
+                        .map_or(l.at_ms, |c| c.0.max(l.at_ms));
+                    let offset = l.offset.bound_ms(now);
+                    // All-zero transit with a zero offset bound: no separate exchange time.
+                    // (A clock behind the exchange also records 0s, but a negative bound.)
+                    stamped_on_receipt = offset == Some(0);
+                    let bound = if l.wall_clock { offset } else { None };
+                    (Some(Snapshot::of(&l.exch_recv, now)), bound)
+                }
+                None => (None, None),
+            }
+        };
+        // Wall-clock measures (paint, order) are not shown in a frozen (screenshot) frame;
+        // feed and ack run on the data's and the core's clocks, so they are reproducible.
+        let paint = (!self.frozen)
+            .then(|| self.paint_latency.window())
+            .flatten()
+            .map(|w| Snapshot::of(w, (lines_feed::store::mono_us() / 1000) as i64));
+        let orders =
+            match crate::trading::Trading::try_global(cx).map(|t| t.order_latency().try_lock()) {
+                Some(Ok(h)) => Some(h),
+                // A panic while recording leaves plain counters: still readable.
+                Some(Err(std::sync::TryLockError::Poisoned(p))) => Some(p.into_inner()),
+                Some(Err(std::sync::TryLockError::WouldBlock)) => return, // recording: next frame
+                None => None,
+            };
+        let (order, ack) = match orders {
+            Some(h) => {
+                // The core's clock, or this chart's feed clock when that is newer (the core
+                // idles without orders): old samples leave the window either way.
+                let now = h
+                    .at_ms
+                    .unwrap_or(i64::MIN)
+                    .max(feed_now.unwrap_or(i64::MIN));
+                (
+                    (!self.frozen).then(|| Snapshot::of(&h.click_sent, now)),
+                    Some(Snapshot::of(&h.ack_rtt, now)),
+                )
+            }
+            None => (None, None),
+        };
+        let m = |label, data, ms_resolution| Measure {
+            label,
+            data,
+            ms_resolution,
+            zero_is_unknown: false,
+        };
+        // Feed and ack are timed in whole milliseconds; paint and order in µs.
+        let mut measures = vec![Measure {
+            zero_is_unknown: stamped_on_receipt,
+            ..m("feed", feed, true)
+        }];
+        if !self.frozen {
+            measures.push(m("paint", paint, false));
+            measures.push(m("order", order, false));
+        }
+        // The app's trading runs the paper broker: its ack time is simulated.
+        measures.push(m("ack (sim)", ack, true));
+        // A narrow chart gets the p99s only (no sparklines), so the HUD isn't cut away.
+        let compact = hud_compact(f32::from(self.chart.size.width));
+        self.hud_compact = compact;
+        let mut text = String::with_capacity(200);
+        let clock = crate::latency_hud::write_hud(&mut text, &measures, compact, bound);
+        self.hud_text = text;
+        self.hud_clock = clock;
+        self.hud_at = Some(Instant::now());
     }
 
     /// Once a second while the performance stats are shown; `true` if they changed.
@@ -1410,6 +1521,11 @@ impl ChartView {
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
         self.footprint.ensure_capacity(plot_w);
         self.chart = bounds;
+        // The HUD's form follows the chart's width: rebuild it when the width crosses over.
+        if self.latency_hud && hud_compact(w) != self.hud_compact {
+            self.hud_at = None;
+            cx.notify();
+        }
         self.plot = Bounds::new(bounds.origin, size(px(plot_w), px(plot_h)));
         self.vp.set_size(plot_w as f64, plot_h as f64);
         // Only allocates when the window grows wider than ever before.
@@ -1423,6 +1539,15 @@ impl ChartView {
 
         // Sample the feed. If it holds the lock this instant, redraw the previous scene.
         if let Some(d) = self.store.try_read() {
+            // Receive → paint (latency HUD), only for frames that draw the data: one relaxed
+            // load while hidden.
+            if lines_core::latency::enabled() {
+                self.paint_latency.on_paint(
+                    self.store.chart_revision(),
+                    self.store.chart_data_age_us(),
+                    (lines_feed::store::mono_us() / 1000) as i64,
+                );
+            }
             // A higher timeframe: bring its bars up to date (only what changed).
             if let Some(dv) = &mut self.derived {
                 dv.update(&d.series, lines_feed::catalog::sessions(d.product.id));
@@ -2811,6 +2936,14 @@ impl ChartView {
         if let FeedStatus::Failed(msg) | FeedStatus::Reconnecting { reason: msg, .. } = &d.status {
             let _ = write!(right, "  ·  {msg}");
         }
+        if self.latency_hud {
+            // The latency HUD (roadmap 6b), with the performance stats, after the feed's state
+            // and failures (a narrow header truncates the HUD first, never those).
+            let _ = write!(right, "  ·  {}", self.hud_text);
+            if let Some((c, false)) = &self.hud_clock {
+                let _ = write!(right, "  ·  {c}");
+            }
+        }
         let list = self.timeframe_list(&t, cx);
         let timeframe = crate::dropdown::dropdown(self.timeframe_chip(&t, cx), list);
         bar().child(
@@ -2827,7 +2960,8 @@ impl ChartView {
                         .child(timeframe)
                         .children(account)
                         .children(quotes)
-                        .children(pane::stale_badge(&self.store, &t)),
+                        .children(pane::stale_badge(&self.store, &t))
+                        .children(self.clock_warning(&t)),
                 )
                 .child(
                     div()
@@ -2843,6 +2977,23 @@ impl ChartView {
 // ---- timeframe controls (roadmap 9) ---------------------------------------------------
 
 impl ChartView {
+    /// The latency HUD's clock warning (beyond 250 ms), as a badge beside the quotes: never
+    /// truncated away with the right-hand text. The ⚠ and its words carry it, not color.
+    fn clock_warning(&self, t: &Theme) -> Option<gpui::AnyElement> {
+        let (text, true) = self.hud_clock.as_ref()? else {
+            return None;
+        };
+        Some(
+            div()
+                .px_1()
+                .border_1()
+                .border_color(t.warn)
+                .text_color(t.text_main)
+                .child(text.clone())
+                .into_any_element(),
+        )
+    }
+
     /// The header's timeframe chip ("5m ▾"): opens the list.
     fn timeframe_chip(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = t.accent;
@@ -3029,9 +3180,25 @@ impl Pane for ChartView {
         cx.notify();
     }
 
+    fn on_hidden_tick(&mut self) {
+        // A hidden chart paints nothing: its wait to be shown is not receive → paint.
+        if self.latency_hud {
+            self.paint_latency.hidden(self.store.chart_revision());
+        }
+    }
+
     fn on_tick(&mut self) {
         if self.perf_stats && !self.frozen {
             self.rates_changed |= self.update_rates();
+        }
+        // The latency HUD refreshes once a second (render rebuilds its text).
+        if self.latency_hud
+            && !self.frozen
+            && self
+                .hud_at
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+        {
+            self.rates_changed = true;
         }
     }
 
@@ -3165,6 +3332,14 @@ const READOUT_BOTTOM: f32 = 6.0 + LABEL_PX * 1.6 + 4.0;
 /// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
 const LEGEND_MAX_W: f32 = 360.0;
 
+/// Charts narrower than this show the latency HUD's p99s only (no sparklines).
+const HUD_COMPACT_BELOW_PX: f32 = 1_200.0;
+
+/// The latency HUD's compact form for a chart `w` px wide (0: not laid out yet).
+fn hud_compact(w: f32) -> bool {
+    w > 0.0 && w < HUD_COMPACT_BELOW_PX
+}
+
 /// Key and mouse hints for a focused chart, in the window's status line.
 pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
 
@@ -3176,6 +3351,14 @@ impl Render for ChartView {
         self.perf_stats = cx
             .try_global::<crate::workspace::Workspace>()
             .is_some_and(|w| w.show_perf_stats);
+        self.latency_hud = cx
+            .try_global::<crate::workspace::Workspace>()
+            .is_some_and(|w| w.show_latency_hud);
+        self.paint_latency.prepare(
+            self.latency_hud && !self.frozen,
+            self.store.chart_revision(),
+        );
+        self.refresh_hud(cx);
         // This frame's level-source snapshot: the legend below and the levels painted later
         // in this frame both describe it.
         let market_time = self.store.try_read().and_then(|d| d.market_time);

@@ -654,6 +654,11 @@ impl Trading {
         cx.try_global::<Trading>()
     }
 
+    /// The latency HUD's order windows (roadmap 6b): read with `try_lock` only.
+    pub fn order_latency(&self) -> &Arc<std::sync::Mutex<lines_trading::OrderLatency>> {
+        self.handle.order_latency()
+    }
+
     #[cfg(test)]
     pub fn handle(&self) -> &TradingHandle {
         &self.handle

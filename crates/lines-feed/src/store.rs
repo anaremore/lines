@@ -19,6 +19,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use lines_core::latency::{ClockOffset, LatencyWindow};
 use lines_core::{
     BarSeries, Capabilities, ContractKey, OrderBook, Price, Print, Product, SessionProfiles,
     Stitcher, Tape, UtcMillis, VolumeAtPrice,
@@ -26,6 +27,35 @@ use lines_core::{
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::provider::MarketEvent;
+
+/// Exchange → receive latency of this feed's trades and the clock-offset bound (roadmap 6b),
+/// recorded only while the latency HUD is shown (`lines_core::latency::enabled`).
+#[derive(Debug)]
+pub struct FeedLatency {
+    /// Receive time − the trade's exchange time.
+    pub exch_recv: LatencyWindow,
+    /// `min(receive − exchange)`: bounds the local clock's lead over the exchange's.
+    pub offset: ClockOffset,
+    /// Receive times are this machine's wall clock (live). A replay's are the recording's,
+    /// which describe the recording machine's clock, not this one.
+    pub wall_clock: bool,
+    /// The newest receive time (ms): the windows' "now" for display.
+    pub at_ms: i64,
+}
+
+/// A trade received more than this after its exchange time is back-fill, not latency.
+pub const BACKFILL_AFTER_MS: i64 = 60_000;
+
+impl FeedLatency {
+    fn new() -> Self {
+        FeedLatency {
+            exch_recv: LatencyWindow::new(),
+            offset: ClockOffset::default(),
+            wall_clock: false,
+            at_ms: i64::MIN,
+        }
+    }
+}
 
 /// History back-fill state, shown as state (docs/design.md: no spinners; missing data shows
 /// as missing).
@@ -138,9 +168,33 @@ pub struct ChartData {
     /// Moves when [`ChartData::apply`] changed anything but depth below the touch (trades,
     /// bars, quotes, status, counters shown in headers). See [`ChartStore::chart_revision`].
     pub chart_epoch: u64,
+    /// Feed latency (roadmap 6b): `None` until the latency HUD is first shown.
+    pub latency: Option<Box<FeedLatency>>,
 }
 
 impl ChartData {
+    /// Record exchange → receive latency for this frame's trades, received at `recv`
+    /// (`wall_clock`: this machine's clock, not a recording's). Back-fill (trades received
+    /// more than [`BACKFILL_AFTER_MS`] late) is not latency and is skipped.
+    pub fn record_latency(&mut self, events: &[MarketEvent], recv: UtcMillis, wall_clock: bool) {
+        let l = self
+            .latency
+            .get_or_insert_with(|| Box::new(FeedLatency::new()));
+        l.wall_clock = wall_clock;
+        l.at_ms = l.at_ms.max(recv.0);
+        for e in events {
+            if let MarketEvent::Trade { time, .. } = e {
+                let d = recv.0.saturating_sub(time.0);
+                if d > BACKFILL_AFTER_MS {
+                    continue;
+                }
+                // A negative transit is the clock's offset, not latency: the offset shows it.
+                l.exch_recv.record(recv.0, d.max(0) as u64 * 1000);
+                l.offset.record(recv.0, time.0);
+            }
+        }
+    }
+
     /// Fold normalized events into the chart state.
     pub fn apply(&mut self, events: &[MarketEvent]) {
         let mut book_touched = false;
@@ -327,6 +381,9 @@ pub struct ChartStore {
     chart_revision: AtomicU64,
     /// Monotonic ms (see [`mono_ms`]) of the last update; 0 = never.
     last_data: AtomicU64,
+    /// Monotonic µs (see [`mono_us`]) of the last update that moved `chart_revision`; 0 =
+    /// never. For receive → paint (a depth frame below the touch doesn't reset it).
+    last_chart_us: AtomicU64,
     /// The feed is live (status `Live`).
     live: AtomicBool,
     stale_after_ms: AtomicU64,
@@ -348,6 +405,11 @@ static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// Monotonic milliseconds since the first use (never 0).
 fn mono_ms() -> u64 {
     EPOCH.elapsed().as_millis() as u64 + 1
+}
+
+/// Monotonic microseconds on the same epoch as [`mono_ms`] (never 0).
+pub fn mono_us() -> u64 {
+    EPOCH.elapsed().as_micros() as u64 + 1
 }
 
 impl ChartStore {
@@ -390,10 +452,12 @@ impl ChartStore {
                 status: FeedStatus::Connecting,
                 stats: FeedStats::default(),
                 chart_epoch: 0,
+                latency: None,
             }),
             revision: AtomicU64::new(0),
             chart_revision: AtomicU64::new(0),
             last_data: AtomicU64::new(0),
+            last_chart_us: AtomicU64::new(0),
             live: AtomicBool::new(false),
             stale_after_ms: AtomicU64::new(5_000),
         }
@@ -475,6 +539,15 @@ impl ChartStore {
         Some(UtcMillis(t.saturating_add(quiet as i64)))
     }
 
+    /// Microseconds since the last update that moved [`Self::chart_revision`] was published
+    /// (receive → paint for a chart that paints it now), lock-free; `None` before any.
+    pub fn chart_data_age_us(&self) -> Option<u64> {
+        match self.last_chart_us.load(Ordering::Acquire) {
+            0 => None,
+            t => Some(mono_us().saturating_sub(t)),
+        }
+    }
+
     /// Lock-free change detector for the UI.
     #[inline]
     pub fn revision(&self) -> u64 {
@@ -511,6 +584,7 @@ impl ChartStore {
         self.last_data.store(mono_ms(), Ordering::Release);
         self.live.store(live, Ordering::Release);
         if chart {
+            self.last_chart_us.store(mono_us(), Ordering::Release);
             self.chart_revision.fetch_add(1, Ordering::Release);
         }
         self.revision.fetch_add(1, Ordering::Release);
@@ -544,6 +618,49 @@ mod tests {
     use super::*;
     use crate::catalog;
     use lines_core::{Month, Qty, Side};
+
+    /// Exchange → receive per trade on the receive clock; back-fill skipped; the clock
+    /// offset bound is the smallest receive − exchange (negative: the local clock is behind).
+    #[test]
+    fn trade_latency_and_the_clock_offset() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        let trade = |t: i64| MarketEvent::Trade {
+            time: UtcMillis(t),
+            price: Price(600_000),
+            qty: Qty(1),
+            aggressor: None,
+        };
+        store.update_frame(|d| {
+            assert!(d.latency.is_none(), "nothing until the HUD is shown");
+            // Received at 100 000: 30 ms and 5 ms late, one back-filled (2 min old), one
+            // stamped 20 ms in the future (the local clock is behind).
+            d.record_latency(
+                &[trade(99_970), trade(99_995), trade(-20_000), trade(100_020)],
+                UtcMillis(100_000),
+                true,
+            );
+        });
+        let d = store.read();
+        let l = d.latency.as_ref().unwrap();
+        assert!(l.wall_clock);
+        assert_eq!(l.at_ms, 100_000);
+        let s = l.exch_recv.summary(100_000);
+        assert_eq!(s.n, 3, "back-fill is not latency");
+        assert!((30_000..=37_500).contains(&s.p99_us.unwrap()), "{s:?}");
+        assert_eq!(l.offset.bound_ms(100_000), Some(-20));
+    }
+
+    #[test]
+    fn chart_data_age_counts_from_chart_updates_only() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        assert_eq!(store.chart_data_age_us(), None);
+        store.update_frame(|_| ()); // nothing a chart shows changed
+        assert_eq!(store.chart_data_age_us(), None, "not a chart update");
+        store.update(|_| ());
+        assert!(store.chart_data_age_us().is_some());
+    }
 
     /// The feed clock: frame time or market time, whichever is newer; runs on (by the
     /// silence) only while live, frozen otherwise.

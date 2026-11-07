@@ -131,6 +131,9 @@ pub struct Workspace {
     /// Show the chart header's performance stats (feed rate, paints/s, paint time): a
     /// workspace preference, off by default.
     pub show_perf_stats: bool,
+    /// Show the latency HUD in chart headers (roadmap 6b): off by default. Mirrored in
+    /// `lines_core::latency::enabled` (nothing records while it is off).
+    pub show_latency_hud: bool,
     autosave: Option<Autosave>,
     config_dir: Option<PathBuf>,
     writer: Option<Writer>,
@@ -152,6 +155,7 @@ impl Workspace {
             last_chart: None,
             notices: Notices::default(),
             show_perf_stats: false,
+            show_latency_hud: false,
             autosave: None,
             config_dir: None,
             writer: None,
@@ -1218,6 +1222,10 @@ impl WindowView {
                 let show = !cx.global::<Workspace>().show_perf_stats;
                 set_show_perf_stats(show, cx);
             }
+            Command::ToggleLatencyHud => {
+                let show = !cx.global::<Workspace>().show_latency_hud;
+                set_show_latency_hud(show, cx);
+            }
             Command::DomTrail | Command::DomTrailHalfLife => {
                 let Some(PaneHandle::Dom(dom)) = self.tab().focused_handle().cloned() else {
                     self.refuse("the price trail is on a DOM: focus one first", cx);
@@ -2049,6 +2057,11 @@ impl WindowView {
             "Performance stats",
             Command::TogglePerfStats,
             cx.global::<Workspace>().show_perf_stats,
+        ));
+        items.push(MenuItem::named(
+            "Latency HUD",
+            Command::ToggleLatencyHud,
+            cx.global::<Workspace>().show_latency_hud,
         ));
         items.push(MenuItem::of(Command::ExportDiagnostics, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
@@ -3289,6 +3302,17 @@ fn set_show_perf_stats(show: bool, cx: &mut App) {
     }
 }
 
+/// Show or hide the latency HUD (a workspace preference, saved with it). Recording follows
+/// it: nothing is measured while it is hidden.
+pub fn set_show_latency_hud(show: bool, cx: &mut App) {
+    lines_core::latency::set_enabled(show);
+    let ws = cx.global_mut::<Workspace>();
+    if ws.show_latency_hud != show {
+        ws.show_latency_hud = show;
+        cx.refresh_windows();
+    }
+}
+
 /// Show or hide the key-hint bar in every window (a workspace preference, saved with it).
 fn set_hide_hints(hide: bool, cx: &mut App) {
     let ws = cx.global_mut::<Workspace>();
@@ -3305,6 +3329,7 @@ pub fn set_meta(doc: &WorkspaceDoc, cx: &mut App) {
     ws.crosshair_sync = doc.crosshair_sync;
     ws.hide_hints = doc.hide_hints;
     ws.show_perf_stats = doc.show_perf_stats;
+    set_show_latency_hud(doc.show_latency_hud, cx);
 }
 
 /// Open a whole workspace (startup).
@@ -3338,6 +3363,7 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
         ws.hide_hints = doc.hide_hints;
         ws.show_perf_stats = doc.show_perf_stats;
     }
+    set_show_latency_hud(doc.show_latency_hud, cx);
     for w in &doc.windows {
         if let Err(e) = open_doc_window(w, None, cx) {
             cx.global_mut::<Workspace>()
@@ -3527,12 +3553,13 @@ fn snapshot_with(
     cx: &mut App,
 ) -> Option<WorkspaceDoc> {
     let ws = cx.global::<Workspace>();
-    let (name, sync, sync_price, hide_hints, show_perf_stats, windows) = (
+    let (name, sync, sync_price, hide_hints, show_perf_stats, show_latency_hud, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
         ws.crosshair_sync_price,
         ws.hide_hints,
         ws.show_perf_stats,
+        ws.show_latency_hud,
         ws.windows.clone(),
     );
     let mut docs = Vec::new();
@@ -3550,6 +3577,7 @@ fn snapshot_with(
         crosshair_sync_price: sync_price,
         hide_hints,
         show_perf_stats,
+        show_latency_hud,
         windows: docs,
     })
 }
@@ -3572,12 +3600,13 @@ pub fn all_panes(cx: &App) -> Vec<(PaneId, PaneHandle)> {
 
 pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     let ws = cx.global::<Workspace>();
-    let (name, sync, sync_price, hide_hints, show_perf_stats, windows) = (
+    let (name, sync, sync_price, hide_hints, show_perf_stats, show_latency_hud, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
         ws.crosshair_sync_price,
         ws.hide_hints,
         ws.show_perf_stats,
+        ws.show_latency_hud,
         ws.windows.clone(),
     );
     let windows = windows
@@ -3590,6 +3619,7 @@ pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
         crosshair_sync_price: sync_price,
         hide_hints,
         show_perf_stats,
+        show_latency_hud,
         windows,
     }
 }

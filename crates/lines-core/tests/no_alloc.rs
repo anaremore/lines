@@ -588,3 +588,25 @@ fn drawings_do_not_allocate() {
     assert!(!drawn.is_empty());
     assert_eq!(n, 0, "drawings allocated {n} times");
 }
+
+/// The latency HUD (roadmap 6b): recording a sample (feed thread, chart paint) and reading
+/// p50/p99 and the sparkline never allocate once a window exists.
+#[test]
+fn latency_windows_do_not_allocate() {
+    use lines_core::latency::{ClockOffset, LatencyWindow, WINDOW_S};
+    let mut w = LatencyWindow::new();
+    let mut c = ClockOffset::default();
+    let mut spark = [0u64; WINDOW_S];
+    let mut seen = 0u64;
+    let n = allocs_during(|| {
+        for i in 0..20_000i64 {
+            w.record(i * 7, (i as u64 * 37) % 50_000);
+            c.record(i * 7, i * 7 - 20);
+        }
+        let s = w.summary(140_000);
+        w.sparkline(140_000, 0.99, &mut spark);
+        seen = s.n + c.bound_ms(140_000).unwrap_or(0) as u64;
+    });
+    assert_eq!(n, 0, "latency windows allocated {n} times");
+    assert!(seen > 0);
+}

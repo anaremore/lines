@@ -74,6 +74,8 @@ pub struct FuturesSession {
     rest_done: bool,
     rest_newest: Option<UtcMillis>,
     ws_oldest: Option<UtcMillis>,
+    /// The frame being handled is a `trade_snapshot` (past trades).
+    backfill: bool,
     fill_attempts: u32,
     complete: bool,
     uids: HashSet<String>,
@@ -221,6 +223,7 @@ impl FuturesSession {
             rest_done: false,
             rest_newest: None,
             ws_oldest: None,
+            backfill: false,
             fill_attempts: 0,
             complete: false,
             uids: HashSet::new(),
@@ -653,6 +656,7 @@ impl FuturesSession {
                 }
             }
             Some("trade_snapshot") => {
+                self.backfill = true;
                 let mut trades: Vec<_> = m.trades.iter().collect();
                 trades.sort_by_key(|t| t.time);
                 if let Some(t) = trades.first() {
@@ -726,6 +730,10 @@ impl FuturesSession {
 }
 
 impl ProviderSession for FuturesSession {
+    fn backfill_frame(&self) -> bool {
+        self.backfill
+    }
+
     fn start(&mut self, ctx: StartContext, out: &mut Vec<Outgoing>) {
         self.ctx = Some(ctx);
         out.push(Outgoing::HttpGet(format!(
@@ -741,6 +749,7 @@ impl ProviderSession for FuturesSession {
         events: &mut Vec<MarketEvent>,
         out: &mut Vec<Outgoing>,
     ) -> Result<(), SessionError> {
+        self.backfill = false;
         match frame.kind {
             FrameKind::Http => self.on_http(&frame.data, events, out),
             FrameKind::Text if self.subscribed => self.on_text(&frame.data, events, out),
@@ -916,8 +925,11 @@ mod tests {
             ],
             "oldest first"
         );
+        // The snapshot is back-fill (the latency HUD leaves it out); live trades are not.
+        assert!(s.backfill_frame());
         let again = r#"{"feed":"trade","product_id":"PF_XBTUSD","uid":"b","side":"buy","time":2000,"qty":0.0045,"price":75647.0}"#;
         assert_eq!(text(&mut s, again).0, []);
+        assert!(!s.backfill_frame());
     }
 
     #[test]

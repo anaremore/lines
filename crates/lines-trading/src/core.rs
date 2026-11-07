@@ -14,7 +14,10 @@
 //! broker events and replaced wholesale by [`TradingCore::rebuild`] after a (re)connect.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use lines_core::latency::{self as lat, LatencyWindow};
 
 use lines_core::sessions::SessionKind;
 use lines_core::{CivilDate, ContractKey, Price, ProductId, Qty, UtcMillis};
@@ -109,6 +112,25 @@ impl Mark {
     }
 }
 
+/// Order latency for the latency HUD (roadmap 6b) over the last 60 s of the core's clock:
+/// click → sent, and the broker's ack round trip (sent → acked, on the broker's clock; the
+/// paper broker simulates it). Recorded only while the HUD is shown. Both sides only
+/// `try_lock` (decision 0012: the core never waits on a lock the UI holds); a sample that
+/// meets the UI reading the windows is dropped.
+#[derive(Debug, Default)]
+pub struct OrderLatency {
+    pub click_sent: LatencyWindow,
+    pub ack_rtt: LatencyWindow,
+    /// The core's newest time (ms): the windows' "now" for display.
+    pub at_ms: Option<i64>,
+}
+
+impl OrderLatency {
+    fn saw(&mut self, now: UtcMillis) {
+        self.at_ms = Some(self.at_ms.map_or(now.0, |a| a.max(now.0)));
+    }
+}
+
 /// Click → order-sent latency (decision 0012), in microseconds.
 #[derive(Debug, Default)]
 pub struct Latency {
@@ -150,6 +172,7 @@ pub struct TradingCore {
     next_order: u64,
     next_command: u64,
     latency: Latency,
+    hud: Arc<Mutex<OrderLatency>>,
     events: Vec<Event>,
     broker_events: Vec<BrokerEvent>,
     /// Terminal orders kept for display, oldest dropped first.
@@ -192,6 +215,7 @@ impl TradingCore {
             next_order: 1,
             next_command: 1,
             latency: Latency::default(),
+            hud: Arc::default(),
             events: Vec::new(),
             broker_events: Vec::new(),
             finished: VecDeque::new(),
@@ -305,6 +329,21 @@ impl TradingCore {
 
     pub fn latency(&self) -> &Latency {
         &self.latency
+    }
+
+    /// The latency HUD's order windows (shared; the UI reads them with `try_lock`).
+    pub fn order_latency(&self) -> Arc<Mutex<OrderLatency>> {
+        self.hud.clone()
+    }
+
+    /// Move the HUD windows' "now" to the core's clock (so old samples leave on screen
+    /// while no orders are sent). Nothing while the HUD is hidden.
+    pub fn note_time(&self, now: UtcMillis) {
+        if lat::enabled()
+            && let Ok(mut h) = self.hud.try_lock()
+        {
+            h.saw(now);
+        }
     }
 
     pub fn next_order_id(&self) -> u64 {
@@ -1000,6 +1039,12 @@ impl TradingCore {
         self.broker.request_in_context(now, req, &ctx);
         let us = env.issued.elapsed().as_micros() as u64;
         self.latency.record(us);
+        if lat::enabled()
+            && let Ok(mut h) = self.hud.try_lock()
+        {
+            h.saw(now);
+            h.click_sent.record(now.0, us);
+        }
         tracing::info!(
             target: "lines::latency",
             command = env.id.0,
@@ -1089,7 +1134,19 @@ impl TradingCore {
 
     fn apply(&mut self, e: BrokerEvent) -> Option<AccountId> {
         match e {
-            BrokerEvent::Acked { id, at } => self.transition(id, OrderState::Acked, at),
+            BrokerEvent::Acked { id, at } => {
+                // The ack round trip: first ack of a sent order, on the broker's clock.
+                if lat::enabled()
+                    && let Some(o) = self.orders.get(&id)
+                    && matches!(o.state, OrderState::Submitted)
+                    && let Ok(mut h) = self.hud.try_lock()
+                {
+                    h.saw(at);
+                    let ms = at.0.saturating_sub(o.created.0).max(0);
+                    h.ack_rtt.record(at.0, ms as u64 * 1000);
+                }
+                self.transition(id, OrderState::Acked, at)
+            }
             BrokerEvent::Working { id, at } => self.transition(id, OrderState::Working, at),
             BrokerEvent::Rejected { id, reason, at } => {
                 self.transition(id, OrderState::Rejected { reason }, at)
