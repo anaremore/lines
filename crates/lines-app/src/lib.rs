@@ -485,6 +485,12 @@ struct Cli {
     /// open/high/low/close (Ctrl+Shift+G in the app).
     #[arg(long)]
     magnet: bool,
+    /// Screenshot: show the order strip on the first chart (the pane menu's "Order strip").
+    #[arg(long, requires = "screenshot")]
+    order_strip: bool,
+    /// Screenshot: the order strip with a limit's price pick armed (`buy` or `sell`).
+    #[arg(long, requires = "screenshot", value_parser = ["buy", "sell"])]
+    strip_pick: Option<String>,
     /// Screenshot: start the chart with these studies (a `StudySet` JSON file, as a template
     /// or the defaults for new charts hold them).
     #[arg(long, requires = "screenshot")]
@@ -1322,6 +1328,14 @@ where
             },
             studies_menu: cli.studies_menu.clone(),
             magnet: cli.magnet,
+            order_strip: cli.order_strip,
+            strip_pick: cli.strip_pick.as_deref().map(|s| {
+                if s == "buy" {
+                    crate::chart_trade::StripOrder::BuyLimit
+                } else {
+                    crate::chart_trade::StripOrder::SellLimit
+                }
+            }),
             timeframe: cli.timeframe.unwrap_or_default(),
             timeframe_menu: cli.timeframe_menu,
             style_editor: cli.style_editor,

@@ -205,6 +205,10 @@ pub struct Fixture {
     pub studies_menu: Option<String>,
     /// Start with the magnet crosshair (screenshots: `--magnet`).
     pub magnet: bool,
+    /// Start with the order strip shown (screenshots: `--order-strip`).
+    pub order_strip: bool,
+    /// Start with a strip limit's price pick armed (screenshots: `--strip-pick buy|sell`).
+    pub strip_pick: Option<crate::chart_trade::StripOrder>,
     /// Initial timeframe (`--timeframe`). One saved with the pane takes precedence.
     pub timeframe: Timeframe,
     /// Start with the timeframe list open (screenshots: `--timeframe-menu`).
@@ -288,6 +292,9 @@ pub struct ChartView {
     /// Study styles a newer build saved for studies this one doesn't have (kept, written
     /// back).
     styles_extra: serde_json::Map<String, serde_json::Value>,
+    /// A press on the plot while a strip limit's pick is armed: where (window px), and the
+    /// price there (the crosshair's, computed at the press). Sent on release if still a click.
+    pick_press: Option<(Point<Pixels>, PickPrice)>,
     /// External levels (decision 0022), saved with the pane.
     levels: LevelsLayer,
     /// `levels.revision()` last drawn.
@@ -340,6 +347,8 @@ pub struct ChartView {
     sync_price: Option<(f32, Price)>,
     /// Magnet crosshair: snap to the hovered bar's open/high/low/close (saved).
     crosshair_mode: CrosshairMode,
+    /// The order strip (phase 2b) is shown (saved).
+    order_strip: bool,
     /// Axis label spacing has been measured with this window's font.
     space_measured: bool,
     /// The time this chart last reported under its own crosshair.
@@ -503,6 +512,7 @@ impl ChartView {
             styles_extra: serde_json::Map::new(),
             study_draft: None,
             anchoring: None,
+            pick_press: None,
             feed,
             common: PaneCommon::default(),
             profile: VolumeProfileLayer::new(fixture.profile),
@@ -544,6 +554,7 @@ impl ChartView {
             } else {
                 CrosshairMode::Normal
             },
+            order_strip: fixture.order_strip || fixture.strip_pick.is_some(),
             space_measured: false,
             reported: (None, None),
             hover: fixture.cursor,
@@ -574,7 +585,10 @@ impl ChartView {
             hud_compact: false,
             trade,
             pos_glyphs: crate::text::Glyphs::new(LABEL_PX),
-            ct: crate::chart_trade::ChartTradeState::default(),
+            ct: crate::chart_trade::ChartTradeState {
+                strip_pick: fixture.strip_pick,
+                ..Default::default()
+            },
             drag_position: fixture.drag_position,
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
@@ -1198,6 +1212,23 @@ impl ChartView {
         }
         self.end_drag();
         let (x, y) = self.local(ev.position);
+        if self
+            .strip_box()
+            .is_some_and(|b| b.contains(x as f32, y as f32))
+        {
+            return; // the strip's own buttons take their presses
+        }
+        if self.ct.strip_pick.is_some() {
+            // A strip limit: a click on the plot is its price, the crosshair's at the press (the
+            // magnet's included), computed now, never last frame's. Sent on release if it stays
+            // a click; a drag pans instead and the pick stays armed. Elsewhere keep waiting.
+            if region == Region::Plot {
+                let at = self.price_at(x, y, window);
+                self.pick_press = Some((ev.position, at));
+                cx.stop_propagation();
+            }
+            return;
+        }
         if let Some(index) = self.anchoring {
             // Anchored VWAP: this click picks the bar (off the bars: keep waiting).
             if region == Region::Plot
@@ -1342,6 +1373,12 @@ impl ChartView {
             cx.notify();
             return;
         }
+        if self.ct.strip_pick.is_some() && k.key == "escape" {
+            self.ct.strip_pick = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
         // go to them when they have a use for it (a tool, a measure, a selection).
         // A note takes what the layout types: AltGr arrives as Ctrl+Alt on Windows, Option
@@ -1456,6 +1493,8 @@ impl ChartView {
         self.seen_revision = u64::MAX;
         self.cross = None;
         self.cross_bar = None;
+        // A limit pick belongs to the symbol it was armed on.
+        self.ct.feed_changed();
         self.readout = None;
         self.labels.clear();
         // The same timeframe on the new market.
@@ -1621,11 +1660,140 @@ impl ChartView {
         cx.notify();
     }
 
+    /// The order strip shown on this chart.
+    pub fn order_strip(&self) -> bool {
+        self.order_strip
+    }
+
+    /// The order strip's box this frame (plot-local), if shown and it fits.
+    fn strip_box(&self) -> Option<crate::chart_trade::StripBox> {
+        if !self.order_strip {
+            return None;
+        }
+        crate::chart_trade::strip_box(
+            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.height),
+        )
+    }
+
+    /// The order strip over the plot's bottom-left corner: the chart's quantity, BUY/SELL MKT
+    /// filled in the side's color, BUY/SELL LMT outlined (as the DOM's buttons; filled while
+    /// its price pick is armed). Dimmed while the chart is in no link group (no DOM's switch
+    /// can send).
+    fn order_strip_view(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::chart_trade::{
+            STRIP_GAP, STRIP_H, STRIP_LMT_W, STRIP_MKT_W, STRIP_PAD, STRIP_QTY_W, StripOrder,
+        };
+        let b = self.strip_box()?;
+        let dim = self.common.link.is_none();
+        let pick = self.ct.strip_pick;
+        let mut buttons = vec![
+            (
+                StripOrder::BuyMarket,
+                "BUY MKT".to_owned(),
+                STRIP_MKT_W,
+                Some(t.up),
+                t.up,
+            ),
+            (
+                StripOrder::SellMarket,
+                "SELL MKT".to_owned(),
+                STRIP_MKT_W,
+                Some(t.down),
+                t.down,
+            ),
+        ];
+        if b.limits {
+            buttons.push((
+                StripOrder::BuyLimit,
+                "BUY LMT".to_owned(),
+                STRIP_LMT_W,
+                (pick == Some(StripOrder::BuyLimit)).then_some(t.up),
+                t.up,
+            ));
+            buttons.push((
+                StripOrder::SellLimit,
+                "SELL LMT".to_owned(),
+                STRIP_LMT_W,
+                (pick == Some(StripOrder::SellLimit)).then_some(t.down),
+                t.down,
+            ));
+        }
+        let mut strip = div()
+            .id("order-strip")
+            .occlude()
+            .absolute()
+            .left(px(b.x))
+            .top(px(b.y))
+            .w(px(b.w))
+            .h(px(STRIP_H))
+            .p(px(STRIP_PAD))
+            .flex()
+            .flex_row()
+            .gap(px(STRIP_GAP))
+            .bg(t.panel)
+            .rounded_sm()
+            .text_size(px(11.0))
+            .child(
+                div()
+                    .w(px(STRIP_QTY_W))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(t.text_main)
+                    .child(format!("Qty {}", crate::trade_bar::qty(&self.trade).0)),
+            );
+        for (o, label, w, fill, line) in buttons {
+            let el = div()
+                .id(("strip", o as u64))
+                .w(px(w))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(line)
+                .font_weight(FontWeight::BOLD)
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .cursor_pointer()
+                .child(label);
+            // Filled in the side's color, text in the background color (as the DOM's).
+            let el = match fill {
+                Some(c) => el.bg(c).text_color(t.bg),
+                None => el.text_color(t.text_main),
+            };
+            let el = if dim { el.opacity(0.4) } else { el };
+            strip = strip.child(el.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, window, cx| {
+                    cx.stop_propagation();
+                    // The chart takes focus, so Esc reaches an armed pick.
+                    v.focus.focus(window, cx);
+                    v.strip_pressed(o, cx);
+                }),
+            ));
+        }
+        Some(strip.into_any_element())
+    }
+
+    /// The `ToggleOrderStrip` command.
+    pub fn toggle_order_strip(&mut self, cx: &mut Context<Self>) {
+        self.order_strip = !self.order_strip;
+        self.ct.strip_pick = None;
+        cx.notify();
+    }
+
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
         self.drawings.hidden = state.hide_drawings;
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
+        }
+        if state.order_strip {
+            self.order_strip = true;
         }
 
         // A saved timeframe wins; a pane without one keeps its initial (CLI) timeframe.
@@ -1812,7 +1980,8 @@ impl ChartView {
         let in_sub = self
             .split
             .is_some_and(|s| s.in_sub(y) && x >= 0.0 && x < f32::from(self.plot.size.width));
-        let hover = (self.plot.contains(&pos) || in_sub).then_some((x, y));
+        let on_strip = self.strip_box().is_some_and(|b| b.contains(x, y));
+        let hover = ((self.plot.contains(&pos) || in_sub) && !on_strip).then_some((x, y));
         if hover != self.hover {
             self.hover = hover;
             cx.notify();
@@ -1827,6 +1996,16 @@ impl ChartView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
+        if let Some((from, _)) = self.pick_press {
+            let d = ev.position - from;
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.pick_press = None;
+            } else if !crate::chart_trade::is_click(f32::from(d.x), f32::from(d.y)) {
+                // A drag: pan as any press on the plot would (the pick stays armed).
+                self.pick_press = None;
+                self.start_drag(Drag::Pan(from, false));
+            }
+        }
         if ev.pressed_button != Some(MouseButton::Left) && self.drawings.release_lost() {
             cx.notify();
         }
@@ -1888,6 +2067,27 @@ impl ChartView {
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         // The release of a press that closed a popover does nothing here (no drawing finished).
         if popover::dismissing() {
+            return;
+        }
+        if let Some((from, at)) = self.pick_press.take() {
+            // A click while a strip limit's pick was armed. A press that left the chart before a
+            // move reached it (released anywhere, through `on_mouse_up_out`) is measured here
+            // too: past the click rule it was a drag, and nothing is sent (the pick stays).
+            let d = ev.position - from;
+            if !crate::chart_trade::is_click(f32::from(d.x), f32::from(d.y)) {
+                cx.notify();
+                return;
+            }
+            match (self.ct.strip_pick, at) {
+                (Some(o), Ok(at)) => {
+                    self.ct.strip_pick = None;
+                    self.strip_send(o, at, cx);
+                }
+                // Market data busy at the press: say so, keep the pick (click again).
+                (Some(_), Err(why)) => self.trade.flash(why),
+                (None, _) => {}
+            }
+            cx.notify();
             return;
         }
         if let Some(id) = self.ct.closing.take() {
@@ -2099,8 +2299,9 @@ impl ChartView {
             })
             .unwrap_or((None, None, None));
         match crate::chart_trade::exit_command(&account, contract, qty, a.target, a.to, inside) {
-            Ok(command) => cx.emit(ChartExit {
+            Ok(command) => cx.emit(ChartOrder {
                 command,
+                refused: crate::chart_trade::ENABLE_TO_ADD,
                 account,
                 contract,
                 link: self.common.link,
@@ -2108,6 +2309,77 @@ impl ChartView {
             }),
             Err(crate::dom_trade::Refusal(why)) => self.trade.flash(why),
         }
+    }
+
+    /// An order strip button: market sends at once; a limit arms (or disarms) the pick, and the
+    /// next click on the plot sends it at that price.
+    fn strip_pressed(&mut self, o: crate::chart_trade::StripOrder, cx: &mut Context<Self>) {
+        use crate::chart_trade::{LINK_TO_TRADE, StripOrder};
+        match o {
+            StripOrder::BuyLimit | StripOrder::SellLimit => {
+                if self.common.link.is_none() {
+                    self.trade.flash(LINK_TO_TRADE);
+                } else {
+                    self.ct.arm_pick(o);
+                }
+                cx.notify();
+            }
+            StripOrder::BuyMarket | StripOrder::SellMarket => self.strip_send(o, None, cx),
+        }
+    }
+
+    /// The crosshair's price at plot-local (`x`, `y`), as paint would draw it there (the
+    /// magnet's included); `Ok(None)` with no bars there.
+    fn price_at(&self, x: f64, y: f64, window: &Window) -> PickPrice {
+        let d = self
+            .store
+            .try_read()
+            .ok_or("market data busy; click again")?;
+        let bars = bars_view(&self.derived, self.tick_key(), &d).bars;
+        Ok(crosshair(
+            bars,
+            &self.vp,
+            self.instrument.price.tick,
+            self.period_ms,
+            window.scale_factor(),
+            self.crosshair_mode,
+            x,
+            y,
+        )
+        .map(|c| c.price))
+    }
+
+    /// Send a strip order: the DOM's intent for it (`chart_trade::strip_command`), through the
+    /// window like an exit (a linked DOM's switch), or say why not.
+    fn strip_send(
+        &mut self,
+        o: crate::chart_trade::StripOrder,
+        at: Option<Price>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::chart_trade::{ENABLE_TO_ORDER, LINK_TO_TRADE, strip_command};
+        let issued = std::time::Instant::now();
+        let built = if self.common.link.is_none() {
+            Err(LINK_TO_TRADE)
+        } else {
+            crate::trade_bar::entry_ctx(self, cx).and_then(|ctx| {
+                strip_command(o, at, &ctx)
+                    .map(|c| (c, ctx))
+                    .map_err(|crate::dom_trade::Refusal(why)| why)
+            })
+        };
+        match built {
+            Ok((command, ctx)) => cx.emit(ChartOrder {
+                command,
+                refused: ENABLE_TO_ORDER,
+                account: ctx.account,
+                contract: ctx.contract,
+                link: self.common.link,
+                issued,
+            }),
+            Err(why) => self.trade.flash(why),
+        }
+        cx.notify();
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2210,7 +2482,17 @@ impl ChartView {
             self.hud_at = None;
             cx.notify();
         }
-        self.plot = Bounds::new(bounds.origin, size(px(plot_w), px(plot_h)));
+        let plot = Bounds::new(bounds.origin, size(px(plot_w), px(plot_h)));
+        if self.order_strip && plot.size != self.plot.size {
+            // The strip is placed from the plot's size (render): place it again.
+            cx.notify();
+        }
+        self.plot = plot;
+        if self.ct.strip_pick.is_some() && !self.strip_box().is_some_and(|b| b.limits) {
+            // Its button is gone (narrow plot): no pick without a way to see and cancel it.
+            self.ct.strip_pick = None;
+            cx.notify();
+        }
         self.vp.set_size(plot_w as f64, plot_h as f64);
         // Only allocates when the window grows wider than ever before.
         self.scene.ensure_capacity(plot_w as f64);
@@ -4938,10 +5220,12 @@ impl ChartView {
 
 impl EventEmitter<FeedChanged> for ChartView {}
 
-/// A chart asks its window to send an exit it built from a position handle; the window sends it
-/// only when a linked DOM (same account and contract) has trading enabled.
-pub struct ChartExit {
+/// A chart asks its window to send an order it built (an exit from a position handle or line, or
+/// an order strip button); the window sends it only when a linked DOM (same account and
+/// contract) has trading enabled, else shows `refused` on the chart.
+pub struct ChartOrder {
     pub command: lines_trading::Command,
+    pub refused: &'static str,
     /// The chart's link group: the DOMs whose switch may send it.
     pub link: crate::layout::LinkGroup,
     pub account: lines_trading::AccountId,
@@ -4949,10 +5233,10 @@ pub struct ChartExit {
     pub issued: std::time::Instant,
 }
 
-impl EventEmitter<ChartExit> for ChartView {}
+impl EventEmitter<ChartOrder> for ChartView {}
 
 impl ChartView {
-    /// The window refused a chart exit (no linked DOM with trading enabled): say so on the
+    /// The window refused a chart order (no linked DOM with trading enabled): say so on the
     /// chart.
     pub fn exit_refused(&mut self, why: &'static str, cx: &mut Context<Self>) {
         self.trade.flash(why);
@@ -4994,6 +5278,7 @@ impl Pane for ChartView {
             visibility: self.visibility,
             levels: self.levels.config.clone(),
             magnet: self.magnet(),
+            order_strip: self.order_strip,
             hide_drawings: self.drawings.hidden,
             // Saved on tick charts, and on any chart set to run them continuously.
             tick_continuous: (self.on_ticks() || self.tick_continuous())
@@ -5669,6 +5954,7 @@ impl Render for ChartView {
                         .size_full(),
                     )
                     .when_some(self.legend(&t), |d, l| d.child(l))
+                    .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
                     .when_some(
                         self.study_menu.as_ref().map(|m| {
                             let items = self.menu_items(m, cx);
@@ -5685,6 +5971,16 @@ impl Render for ChartView {
                     .when(self.anchoring.is_some(), |d| {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
+                    .when_some(self.ct.strip_pick, |d, o| {
+                        d.child(crate::study_menu_view::pick_banner(
+                            &t,
+                            if o == crate::chart_trade::StripOrder::BuyLimit {
+                                "Click a price for the buy limit · Esc cancels"
+                            } else {
+                                "Click a price for the sell limit · Esc cancels"
+                            },
+                        ))
+                    })
                     .when_some(self.style_editor_layer(&t, cx), |d, e| d.child(e))
                     .when_some(overlay, |d, overlay| d.child(overlay))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
@@ -5692,6 +5988,10 @@ impl Render for ChartView {
             )
     }
 }
+
+/// The price a strip limit's pick press found: `Ok(None)` with no bars there, `Err` with the
+/// market data busy.
+type PickPrice = Result<Option<Price>, &'static str>;
 
 /// The chart's popovers the symbol picker closes when it opens: all of them (their window-wide
 /// backdrops would take the picker's clicks). Pane menus belong to the window.
