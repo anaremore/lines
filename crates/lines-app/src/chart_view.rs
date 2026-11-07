@@ -393,6 +393,10 @@ pub struct ChartView {
     pos_glyphs: crate::text::Glyphs,
     /// The chart's orders this frame: lines, tags, edge markers, handles, drags.
     pub(crate) ct: crate::chart_trade::ChartTradeState,
+    /// Strategy markers (decision 0025): entries, exits and skipped signals on this contract.
+    marks: crate::strategy_marks::StrategyMarksLayer,
+    strategies: Option<Arc<dyn crate::strategy_panel::StrategySource>>,
+    trading_cache: Option<Arc<crate::trading::TradeCache>>,
     /// Screenshot fixture: the position line held dragged to this plot-local y.
     drag_position: Option<f32>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
@@ -607,6 +611,11 @@ impl ChartView {
                 strip_pick: fixture.strip_pick,
                 ..Default::default()
             },
+            marks: crate::strategy_marks::StrategyMarksLayer::default(),
+            strategies: cx
+                .try_global::<crate::strategy_panel::Strategies>()
+                .map(|s| s.0.clone()),
+            trading_cache: crate::trading::Trading::try_global(cx).map(|t| t.cache.clone()),
             drag_position: fixture.drag_position,
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
@@ -1892,6 +1901,7 @@ impl ChartView {
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
         self.drawings.hidden = state.hide_drawings;
+        self.marks.hidden = state.hide_strategy_marks;
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -2853,6 +2863,12 @@ impl ChartView {
                 &self.vp,
                 max_columns,
             );
+            self.marks.prepare(
+                view,
+                &self.vp,
+                f32::from(self.plot.size.width),
+                f32::from(self.plot.size.height),
+            );
             // The legend says why footprint bars are candles: re-render when that changes.
             let fb = self.footprint.fallbacks();
             if fb != self.fp_seen {
@@ -3663,6 +3679,8 @@ impl ChartView {
                 self.drawings.paint((ox, oy), hair, &t, window);
                 self.paint_drawing_text((ox, oy), window, cx);
             }
+            // Strategy markers: above studies and drawings, under the crosshair.
+            self.marks.paint(plot, &t, window, cx);
             if labels {
                 self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
@@ -4668,6 +4686,62 @@ impl ChartView {
     }
 
     /// The banner for drawing mode, a temporary measure or the delete-all confirmation.
+    /// Rebuild the strategy markers when the instances, the fills or the contract moved (the
+    /// poll, never paint). True when they changed.
+    fn poll_marks(&mut self) -> bool {
+        let Some(source) = self.strategies.clone() else {
+            return false;
+        };
+        let Some(trading) = self.trading_cache.clone() else {
+            return false;
+        };
+        let Some(contract) = self.store.try_read().and_then(|d| d.contract) else {
+            return false;
+        };
+        let Some(state) = trading.try_read() else {
+            return false; // busy this instant: the next poll
+        };
+        let key = (source.revision(), state.fills_seen, contract);
+        let product = self.instrument.clone();
+        self.marks.update(key, || {
+            let fills: Vec<lines_trading::FillEvent> = state.fills().cloned().collect();
+            crate::strategy_marks::build(&source.snapshot(), &fills, contract, &product)
+        })
+    }
+
+    /// The hovered strategy marker's text, beside it.
+    fn strategy_mark_tip(&self, t: &Theme) -> Option<AnyElement> {
+        let (x, y) = self.hover?;
+        let m = self.marks.hit(x, y)?;
+        Some(
+            div()
+                .absolute()
+                .left(px(x + 12.0))
+                .top(px(y + 12.0))
+                .max_w(px(360.0))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(t.label_bg)
+                .border_1()
+                .border_color(t.axis_line)
+                .text_color(t.text_main)
+                .text_size(px(12.0))
+                .child(m.text.clone())
+                .into_any_element(),
+        )
+    }
+
+    /// Show or hide the strategy markers on this chart (saved with it).
+    pub fn toggle_strategy_marks(&mut self, cx: &mut Context<Self>) {
+        self.marks.hidden = !self.marks.hidden;
+        cx.notify();
+    }
+
+    pub fn strategy_marks_hidden(&self) -> bool {
+        self.marks.hidden
+    }
+
     fn drawing_banner(&self, t: &Theme) -> Option<AnyElement> {
         let d = &self.drawings;
         let text = if d.confirm_clear {
@@ -5549,6 +5623,7 @@ impl Pane for ChartView {
             magnet: self.magnet(),
             order_strip: self.order_strip,
             hide_drawings: self.drawings.hidden,
+            hide_strategy_marks: self.marks.hidden,
             // Saved on tick charts, and on any chart set to run them continuously.
             tick_continuous: (self.on_ticks() || self.tick_continuous())
                 .then_some(self.tick_continuous()),
@@ -5615,8 +5690,10 @@ impl Pane for ChartView {
         {
             group |= menu.refresh(|o| s.order(o).and_then(crate::dom_trade::order_mark).is_some());
         }
-        // Drawings changed on any chart of this product (shown here).
+        let marks = self.poll_marks();
+                // Drawings changed on any chart of this product (shown here).
         let rates = group
+            | marks
             | std::mem::take(&mut self.rates_changed)
             | self.trade.changed()
             | (self.drawings.changed() && !self.drawings.hidden);
@@ -6279,7 +6356,8 @@ impl Render for ChartView {
                     .when_some(self.style_editor_layer(&t, cx), |d, e| d.child(e))
                     .when_some(overlay, |d, overlay| d.child(overlay))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
-                    .when_some(self.drawing_banner(&t), |d, b| d.child(b)),
+                    .when_some(self.drawing_banner(&t), |d, b| d.child(b))
+                    .when_some(self.strategy_mark_tip(&t), |d, b| d.child(b)),
             )
     }
 }

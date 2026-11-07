@@ -325,7 +325,7 @@ pub fn submit_stop_all(trading: &crate::trading::Trading, flatten: bool, source:
 /// A fixed set of instances (tests and `--strategies-demo` screenshots).
 #[cfg(any(test, feature = "screenshot"))]
 pub struct DemoStrategies {
-    infos: Vec<StrategyInfo>,
+    infos: std::sync::Mutex<Vec<StrategyInfo>>,
     revision: AtomicU64,
 }
 
@@ -333,9 +333,68 @@ pub struct DemoStrategies {
 impl DemoStrategies {
     pub fn new(infos: Vec<StrategyInfo>) -> DemoStrategies {
         DemoStrategies {
-            infos,
+            infos: std::sync::Mutex::new(infos),
             revision: AtomicU64::new(1),
         }
+    }
+
+    /// Give instance `id` decisions behind its fills (screenshots: after a `strategy N`
+    /// script, so its markers have reasons): the first fill's order is an entry at a support
+    /// level, the others its stop; plus a signal it skipped at `skip_at`.
+    pub fn attach(
+        &self,
+        id: StrategyId,
+        fills: &[lines_trading::FillEvent],
+        skip_at: Option<(UtcMillis, lines_core::Price)>,
+    ) {
+        use lines_strategy::{Decision, LevelRef};
+        let level = |p: lines_core::Price| LevelRef {
+            source: "demo".into(),
+            kind: "support".into(),
+            label: Some("Support".into()),
+            price: p,
+        };
+        let mut out: Vec<DecisionRecord> = Vec::new();
+        let mut seen: Vec<lines_trading::OrderId> = Vec::new();
+        for f in fills {
+            if seen.contains(&f.order) {
+                continue;
+            }
+            let first = seen.is_empty();
+            seen.push(f.order);
+            out.push(DecisionRecord {
+                at: f.at,
+                decision: Decision {
+                    rule: if first { "touch-long" } else { "stop" }.into(),
+                    reason: if first {
+                        "Buy at Support: price touched it from above".into()
+                    } else {
+                        "Stop: Support broke".into()
+                    },
+                    levels: vec![level(f.price)],
+                    command: None,
+                },
+                result: Some(Ok(vec![f.order])),
+                not_sent: None,
+            });
+        }
+        if let Some((at, price)) = skip_at {
+            let mut d =
+                Decision::note("skip-wide", "Skipped: the target crosses the zone boundary");
+            d.levels.push(level(price));
+            out.push(DecisionRecord {
+                at,
+                decision: d,
+                result: None,
+                not_sent: None,
+            });
+        }
+        out.sort_by_key(|d| d.at.0);
+        let mut infos = self.infos.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = infos.iter_mut().find(|i| i.id == id) {
+            i.decisions = out;
+        }
+        self.revision.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Four instances on `account`, one per interesting state, with decisions up to `now`:
@@ -428,7 +487,7 @@ impl StrategySource for DemoStrategies {
     }
 
     fn snapshot(&self) -> Vec<StrategyInfo> {
-        self.infos.clone()
+        self.infos.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 

@@ -152,15 +152,18 @@ pub enum StrategyCmd {
     Start,
     /// Stop the selected strategy and flatten its position.
     Stop,
+    /// The focused chart: show or hide strategy markers (entries, exits, skipped signals).
+    ToggleMarks,
 }
 
 impl StrategyCmd {
-    pub const ALL: [StrategyCmd; 5] = [
+    pub const ALL: [StrategyCmd; 6] = [
         StrategyCmd::StopAll,
         StrategyCmd::StopAllKeep,
         StrategyCmd::Open,
         StrategyCmd::Start,
         StrategyCmd::Stop,
+        StrategyCmd::ToggleMarks,
     ];
 }
 
@@ -743,6 +746,7 @@ pub fn label(c: Command) -> String {
             StrategyCmd::Open => "Open strategies",
             StrategyCmd::Start => "Strategies: start the selected strategy (paper)",
             StrategyCmd::Stop => "Strategies: stop the selected strategy (flatten)",
+            StrategyCmd::ToggleMarks => "Chart: show/hide strategy markers",
         }
         .into(),
         Command::Trade(t) => match t {

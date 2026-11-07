@@ -291,6 +291,7 @@ impl StrategyView {
                 }
             }
             StrategyCmd::Open => return Ok(()),
+            StrategyCmd::ToggleMarks => return Err("focus a chart first"),
         };
         let sent = trading.submit(source, issued, c);
         if let Some(id) = id {
