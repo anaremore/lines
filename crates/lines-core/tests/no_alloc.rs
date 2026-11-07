@@ -725,7 +725,7 @@ fn chart_order_tags_do_not_allocate() {
         for frame in 0..200 {
             let m = edge_markers(&vp, &lines, 800.0, 400.0, [80.0, 80.0]);
             let band = tag_band(&m, 400.0);
-            let k = layout_tags(&vp, &lines, 800.0, band, 1.0, &mut tags);
+            let k = layout_tags(&vp, &lines, 800.0, 400.0, band, 1.0, &mut tags);
             let h = handles(&tags[0], [true, true]);
             let y = frame as f32 % 400.0;
             let _ = hit(&tags[..k], &m, &h, 700.0, y);

@@ -92,12 +92,12 @@ pub type StyleEditorAt = (u64, usize, Option<(usize, usize)>);
 const AXIS_H: f32 = 24.0;
 const LABEL_PX: f32 = 12.0;
 const MAX_CACHED_LABELS: usize = 4096;
-/// Height of the last-price and crosshair price tags on the price axis.
 /// Colours in signatures (theme tokens only).
 type Colour = gpui::Hsla;
 
 /// Gap between a chart tag and the plot's right edge.
 const TAG_GAP_PX: f32 = lines_core::geometry::order_tags::TAG_GAP;
+/// Height of the last-price and crosshair price tags on the price axis.
 const TAG_H: f32 = LABEL_PX * 1.5;
 /// Shown in the price-axis corner while price auto-scale is off.
 const MANUAL_LABEL: &str = "manual";
@@ -1701,6 +1701,22 @@ impl ChartView {
         if popover::dismissing() {
             return;
         }
+        if let Some(id) = self.ct.closing.take() {
+            let (x, y) = self.local(ev.position);
+            let n = self.ct.n_tags;
+            let still = lines_core::geometry::order_tags::hit(
+                &self.ct.tags[..n],
+                &self.ct.markers,
+                &self.ct.handles,
+                x as f32,
+                y as f32,
+            ) == Some(lines_core::geometry::order_tags::TagHit::Close(id));
+            if still {
+                self.cancel_order(id, cx);
+            }
+            cx.notify();
+            return;
+        }
         if let Some(d) = self.ct.drag.take() {
             self.drop_order(d, cx);
             cx.notify();
@@ -1749,21 +1765,9 @@ impl ChartView {
                     });
                 }
             }
+            // × cancels on release, and only if the pointer is still on that ×.
             TagHit::Close(id) => {
-                if let (Some(m), Some(account), Some(t)) = (
-                    self.ct.mark(id).copied(),
-                    self.trade.account.clone(),
-                    crate::trading::Trading::try_global(cx),
-                ) {
-                    t.submit(
-                        lines_trading::Source::Chart,
-                        std::time::Instant::now(),
-                        lines_trading::Command::CancelOrder {
-                            account,
-                            order: m.id,
-                        },
-                    );
-                }
+                self.ct.closing = Some(id);
             }
             // Adding an exit is a new order: trading must be enabled (checked on release
             // too, with the price).
@@ -1787,6 +1791,24 @@ impl ChartView {
         }
         cx.notify();
         true
+    }
+
+    /// Cancel one of the chart's orders (its tag's ×): no switch needed, as on the DOM.
+    fn cancel_order(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let (Some(m), Some(account), Some(t)) = (
+            self.ct.mark(id).copied(),
+            self.trade.account.clone(),
+            crate::trading::Trading::try_global(cx),
+        ) {
+            t.submit(
+                lines_trading::Source::Chart,
+                std::time::Instant::now(),
+                lines_trading::Command::CancelOrder {
+                    account,
+                    order: m.id,
+                },
+            );
+        }
     }
 
     /// Release after dragging an order's tag: move it to the snapped price (unless unchanged),
@@ -1830,13 +1852,24 @@ impl ChartView {
         // A chart shows no trading switch (trade panel v2): the order goes to the window, which
         // sends it only when a DOM linked to this chart, on the same account and contract, has
         // trading enabled (the same switch as any new order).
-        match crate::chart_trade::exit_command(
-            true, &account, contract, qty, a.target, a.to, market,
-        ) {
+        let inside = self
+            .store
+            .try_read()
+            .map(|d| {
+                (
+                    d.book.best_bid().map(|b| b.0).or(d.bid),
+                    d.book.best_ask().map(|a| a.0).or(d.ask),
+                    d.last_trade,
+                )
+            })
+            .unwrap_or((None, None, None));
+        let _ = market;
+        match crate::chart_trade::exit_command(&account, contract, qty, a.target, a.to, inside) {
             Ok(command) => cx.emit(ChartExit {
                 command,
                 account,
                 contract,
+                link: self.common.link,
                 issued,
             }),
             Err(crate::dom_trade::Refusal(why)) => self.trade.flash(why),
@@ -2351,15 +2384,25 @@ impl ChartView {
         for i in 0..self.ct.marks.len() {
             let m = self.ct.marks[i];
             let mut pnl = FixedStr::<48>::new();
-            let _ = write_exit_pnl(&mut pnl, &m, self.ct.position, fmt.tick, mpu, mode);
+            let money = write_exit_pnl(&mut pnl, &m, self.ct.position, fmt.tick, mpu, mode)
+                .ok()
+                .flatten();
             let mut text = FixedStr::<96>::new();
-            let _ = write_order_tag(&mut text, &m, &fmt, pnl.as_str());
-            let w = self
+            let _ = write_order_tag(&mut text, &m, &fmt);
+            let mut w = self
                 .pos_glyphs
                 .width(text.as_str(), t.text_main, true, window);
+            if money.is_some() {
+                w += 8.0
+                    + self
+                        .pos_glyphs
+                        .width(pnl.as_str(), t.text_main, true, window);
+            }
             self.ct.texts.push(TagText {
                 id: m.id.0,
                 text,
+                pnl,
+                money,
                 mark: m,
             });
             self.ct.lines.push(LineIn {
@@ -2377,6 +2420,14 @@ impl ChartView {
                 && let Some(m) = self.ct.mark(e.id).copied()
             {
                 let _ = write_edge(&mut edge_text[k], &m, e.above, e.n, &fmt);
+                let mut pnl = FixedStr::<48>::new();
+                if write_exit_pnl(&mut pnl, &m, self.ct.position, fmt.tick, mpu, mode)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    let _ = write!(edge_text[k], " · {}", pnl.as_str());
+                }
                 edge_w[k] = self
                     .pos_glyphs
                     .width(edge_text[k].as_str(), t.text_main, true, window);
@@ -2384,7 +2435,15 @@ impl ChartView {
         }
         self.ct.markers = edge_markers(&self.vp, &self.ct.lines, pw, ph, edge_w);
         let band = tag_band(&self.ct.markers, ph);
-        self.ct.n_tags = layout_tags(&self.vp, &self.ct.lines, pw, band, scale, &mut self.ct.tags);
+        self.ct.n_tags = layout_tags(
+            &self.vp,
+            &self.ct.lines,
+            pw,
+            ph,
+            band,
+            scale,
+            &mut self.ct.tags,
+        );
         // Lines across the plot: solid working, dashed held or pending.
         for i in 0..self.ct.texts.len() {
             let m = self.ct.texts[i].mark;
@@ -2437,9 +2496,15 @@ impl ChartView {
                     exit: true,
                 };
                 let mut pnl = FixedStr::<48>::new();
-                let _ = write_exit_pnl(&mut pnl, &preview, self.ct.position, fmt.tick, mpu, mode);
                 let mut text = FixedStr::<96>::new();
-                let _ = write_order_tag(&mut text, &preview, &fmt, pnl.as_str());
+                let _ = write_order_tag(&mut text, &preview, &fmt);
+                if write_exit_pnl(&mut pnl, &preview, self.ct.position, fmt.tick, mpu, mode)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    let _ = write!(text, " · {}", pnl.as_str());
+                }
                 let w = self.pos_glyphs.width(text.as_str(), c, true, window) + 12.0;
                 let left = (pw - TAG_GAP_PX - w).max(0.0);
                 let top = (y - TAG_H * 0.5).clamp(0.0, (ph - TAG_H).max(0.0));
@@ -2466,10 +2531,9 @@ impl ChartView {
             let m = tt.mark;
             let c = self.mark_colour(&m);
             let pending = m.style == MarkStyle::Pending;
-            // Pending: outline only (nothing confirmed yet); otherwise a filled label.
-            if !pending {
-                window.paint_quad(fill(rect(b.left, b.top, b.w, TAG_H), t.label_bg));
-            }
+            // Always on the label background (readable over candles); pending reads by its dim
+            // text and outline only (no role bar), held by a dashed outline.
+            window.paint_quad(fill(rect(b.left, b.top, b.w, TAG_H), t.label_bg));
             if m.style == MarkStyle::Held {
                 self.dashed_outline(rect(b.left, b.top, b.w, TAG_H), c, hair, window);
             } else {
@@ -2485,6 +2549,7 @@ impl ChartView {
             }
             window.paint_quad(fill(rect(b.close_left, b.top, hair, TAG_H), c));
             let fg = if pending { t.text_dim } else { t.text_main };
+            let head_w = self.pos_glyphs.width(tt.text.as_str(), fg, true, window);
             self.pos_glyphs.paint(
                 tt.text.as_str(),
                 ox + b.left + 6.0,
@@ -2495,6 +2560,24 @@ impl ChartView {
                 window,
                 cx,
             );
+            // The P&L at its price, signed and in its tone (never colour alone).
+            if let Some(money) = tt.money {
+                let tone = match crate::pnl::tone(money) {
+                    crate::pnl::Tone::Up => t.up,
+                    crate::pnl::Tone::Down => t.down,
+                    crate::pnl::Tone::Flat => t.text_main,
+                };
+                self.pos_glyphs.paint(
+                    tt.pnl.as_str(),
+                    ox + b.left + 6.0 + head_w + 8.0,
+                    oy + b.top,
+                    TAG_H,
+                    tone,
+                    true,
+                    window,
+                    cx,
+                );
+            }
             // × cancels.
             self.pos_glyphs.paint(
                 "×",
@@ -4515,6 +4598,8 @@ impl EventEmitter<FeedChanged> for ChartView {}
 /// only when a linked DOM (same account and contract) has trading enabled.
 pub struct ChartExit {
     pub command: lines_trading::Command,
+    /// The chart's link group: the DOMs whose switch may send it.
+    pub link: crate::layout::LinkGroup,
     pub account: lines_trading::AccountId,
     pub contract: lines_core::ContractKey,
     pub issued: std::time::Instant,

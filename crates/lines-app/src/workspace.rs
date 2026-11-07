@@ -767,24 +767,38 @@ impl WindowView {
     /// same account and contract, has trading enabled (a chart shows no switch of its own).
     fn chart_exit(
         &mut self,
-        id: PaneId,
+        _id: PaneId,
         chart: gpui::Entity<crate::chart_view::ChartView>,
         ev: &crate::chart_view::ChartExit,
         cx: &mut Context<Self>,
     ) {
         use crate::trade_bar::TradePane;
-        let Some(link) = self.tab().handle(id).cloned().map(|h| h.link(cx)) else {
-            return;
-        };
-        let doms: Vec<_> = self
-            .tabs
-            .iter()
-            .flat_map(|t| t.handles())
-            .filter_map(|h| match h {
-                PaneHandle::Dom(d) => Some(d.clone()),
-                _ => None,
-            })
-            .collect();
+        // Link groups span every window (decision 0016): look at the DOMs in all of them.
+        let windows = cx.global::<Workspace>().windows.clone();
+        let mut doms: Vec<gpui::Entity<crate::dom_view::DomView>> = Vec::new();
+        for w in &windows {
+            if let Ok(wv) = w.read(cx) {
+                doms.extend(
+                    wv.tabs
+                        .iter()
+                        .flat_map(|t| t.handles())
+                        .filter_map(|h| match h {
+                            PaneHandle::Dom(d) => Some(d.clone()),
+                            _ => None,
+                        }),
+                );
+            }
+        }
+        // This window is being updated (it is not readable through its handle): its own DOMs.
+        doms.extend(
+            self.tabs
+                .iter()
+                .flat_map(|t| t.handles())
+                .filter_map(|h| match h {
+                    PaneHandle::Dom(d) => Some(d.clone()),
+                    _ => None,
+                }),
+        );
         let mut seen = Vec::with_capacity(doms.len());
         for d in doms {
             let l = PaneHandle::Dom(d.clone()).link(cx);
@@ -798,7 +812,7 @@ impl WindowView {
             ));
         }
         let ok = crate::chart_trade::linked_dom_enabled(
-            link,
+            ev.link,
             &ev.account,
             ev.contract,
             seen.iter().map(|(l, a, k, on)| (*l, a.as_ref(), *k, *on)),

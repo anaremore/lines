@@ -465,24 +465,42 @@ impl PaperBroker {
             })
             .map(|p| p.order.id)
             .collect();
-        // What the position lets reduce-only orders close, oldest first.
+        // What the position lets reduce-only orders close, oldest first. An OCO pair (a stop
+        // and a target for the same position: only one of them can fill) is budgeted once:
+        // both may cover what is left, and the second of the pair consumes nothing.
         let mut closable = position.abs();
+        let mut budgeted: Vec<(OrderId, i64)> = Vec::with_capacity(ids.len());
         for id in ids {
+            let Some(po) = self.orders.get(&id) else {
+                continue;
+            };
+            let sibling = po.order.oco.or_else(|| {
+                self.orders
+                    .values()
+                    .find(|q| q.order.oco == Some(id))
+                    .map(|q| q.order.id)
+            });
+            // The pair's share: what its first order was allowed (closable before it).
+            let paired = sibling.and_then(|s| budgeted.iter().find(|(b, _)| *b == s).map(|b| b.1));
             let Some(po) = self.orders.get_mut(&id) else {
                 continue;
             };
             let opposes = position != 0 && po.order.side.sign() == -position.signum();
-            let allowed = if opposes { closable } else { 0 };
+            let pool = paired.unwrap_or(closable);
+            let allowed = if opposes { pool } else { 0 };
             let left = po.order.remaining().0;
             if allowed == 0 {
                 self.cancel(now, id, "reduce-only: nothing left to close");
-            } else if left > allowed {
+                continue;
+            }
+            if left > allowed {
                 po.order.qty = Qty(po.order.filled.0 + allowed);
                 let order = po.order.clone();
                 self.out.push(BrokerEvent::Modified { order });
-                closable -= allowed;
-            } else {
-                closable -= left;
+            }
+            if paired.is_none() {
+                budgeted.push((id, allowed));
+                closable -= left.min(allowed);
             }
         }
     }

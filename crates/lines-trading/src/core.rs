@@ -554,8 +554,36 @@ impl TradingCore {
                     ));
                 }
                 self.check_new(now, &spec)?;
+                // A stop and a target for the same position: only one may fill (OCO), so the
+                // broker budgets them as one and cancels the other when one closes the position.
+                let stop = matches!(
+                    spec.kind,
+                    OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
+                );
+                let sibling = self
+                    .orders
+                    .values()
+                    .find(|o| {
+                        o.is_open()
+                            && o.reduce_only
+                            && o.oco.is_none()
+                            && o.account == spec.account
+                            && o.contract == spec.contract
+                            && o.side == spec.side
+                            && matches!(
+                                o.kind,
+                                OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
+                            ) != stop
+                    })
+                    .map(|o| o.id);
                 self.next_reduce_only = true;
-                let o = self.new_order(now, &spec, Role::Single, None);
+                let mut o = self.new_order(now, &spec, Role::Single, None);
+                if let Some(s) = sibling {
+                    o.oco = Some(s);
+                    if let Some(x) = self.orders.get_mut(&o.id) {
+                        x.oco = Some(s);
+                    }
+                }
                 let id = o.id;
                 self.send(env, now, BrokerRequest::Place(o));
                 Ok(vec![id])

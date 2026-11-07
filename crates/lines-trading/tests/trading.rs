@@ -1473,11 +1473,57 @@ fn place_exit_is_reduce_only_and_never_outlives_the_position() {
     r.wait(LAT);
     assert!(r.core.order(s).unwrap().reduce_only);
     assert!(r.core.order(t).unwrap().reduce_only);
-    // The target fills: flat, and the stop is cancelled (it would have opened a short).
+    // Code review: the two whole-position exits are one OCO pair, budgeted once.
+    assert_eq!(r.core.order(t).unwrap().oco, Some(s));
     r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
     r.trade(6005.25, 2);
     r.wait(LAT);
     assert_eq!(r.core.position(&acct(), es()), 0);
     assert_eq!(r.state(t), OrderState::Filled);
+    assert_eq!(r.state(s), OrderState::Cancelled);
+}
+
+/// Code review round 1: a stop and a target added for a 2-lot position are an OCO pair, so a
+/// partial fill of one leaves both covering what is left (never an unprotected contract), and
+/// the position flat cancels the survivor.
+#[test]
+fn place_exit_pair_survives_a_partial_fill() {
+    let exit = |side, qty, kind| {
+        Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side,
+            qty: Qty(qty),
+            kind,
+        })
+    };
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let t = r.cmd(exit(Side::Sell, 2, limit(6005.00))).unwrap()[0];
+    let s = r
+        .cmd(exit(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5995.00),
+            },
+        ))
+        .unwrap()[0];
+    r.wait(LAT);
+    // One lot of the target fills: position 1; the stop still protects it.
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 1);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    let stop = r.core.order(s).unwrap();
+    assert!(stop.is_open(), "the stop survives: {:?}", stop.state);
+    assert_eq!(stop.remaining(), Qty(1), "and covers the one lot left");
+    assert!(r.core.order(t).unwrap().is_open());
+    // The rest of the target fills: flat; the stop is cancelled.
+    r.trade(6005.25, 5);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
     assert_eq!(r.state(s), OrderState::Cancelled);
 }

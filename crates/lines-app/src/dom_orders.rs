@@ -354,8 +354,10 @@ impl OrdersLayer {
                     let cell = rect(ox + 1.0, ty + 1.0, ow - 2.0, hh - 2.0);
                     window.with_content_mask(Some(gpui::ContentMask { bounds: cell }), |window| {
                         window.paint_quad(fill(cell, t.panel));
-                        outline(window, cell, c, hair, false);
-                        glyphs.paint(s.as_str(), ox + 4.0, ty, hh, t.text_main, true, window, cx);
+                        // A quiet outline (not a focus ring) and a role-coloured bar at its left.
+                        outline(window, cell, t.axis_line, hair, false);
+                        window.paint_quad(fill(rect(ox + 1.0, ty + 1.0, 2.0, hh - 2.0), c));
+                        glyphs.paint(s.as_str(), ox + 7.0, ty, hh, t.text_main, true, window, cx);
                     });
                 }
             }

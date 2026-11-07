@@ -69,22 +69,18 @@ pub fn exit_pnl(
     (ticks, Money(money as i128))
 }
 
-/// An order's tag: `S1 · 5806.50`, `T1 · 5820.00`, `BUY LMT 2 · 5999.50`, `SELL STP 1/2 · …`
-/// (partially filled), then ` · held` for a bracket exit waiting on its entry, then the exit's
-/// P&L at its price (`pnl`, already written per the P&L display; empty: none). No allocation.
-pub fn write_order_tag(
-    out: &mut impl Write,
-    m: &OrderMark,
-    fmt: &PriceFormat,
-    pnl: &str,
-) -> fmt::Result {
+/// An order's tag, quantity always separate from the role (a bare "S2" read as a short of
+/// 2 on the DOM): `Stop 2 · 5806.50`, `Target 1 · 5820.00`, `Buy lmt 2 · 5999.50`,
+/// `Sell stp 1/2 · …` (partially filled), then ` · held` for a bracket exit waiting on its
+/// entry. The P&L at its price is drawn after it, in its own tone. No allocation.
+pub fn write_order_tag(out: &mut impl Write, m: &OrderMark, fmt: &PriceFormat) -> fmt::Result {
     let left = m.qty.0 - m.filled.0;
     match MarkRole::of(m) {
-        MarkRole::Target => write!(out, "T{left}")?,
-        MarkRole::Stop => write!(out, "S{left}")?,
+        MarkRole::Target => write!(out, "Target {left}")?,
+        MarkRole::Stop => write!(out, "Stop {left}")?,
         MarkRole::Entry => {
-            let side = if m.side == Side::Buy { "BUY" } else { "SELL" };
-            let kind = if m.stop { "STP" } else { "LMT" };
+            let side = if m.side == Side::Buy { "Buy" } else { "Sell" };
+            let kind = if m.stop { "stp" } else { "lmt" };
             if m.style == MarkStyle::Partial {
                 write!(out, "{side} {kind} {}/{}", m.filled.0, m.qty.0)?;
             } else {
@@ -97,15 +93,11 @@ pub fn write_order_tag(
     if m.style == MarkStyle::Held {
         out.write_str(" · held")?;
     }
-    if !pnl.is_empty() {
-        out.write_str(" · ")?;
-        out.write_str(pnl)?;
-    }
     Ok(())
 }
 
 /// An exit's P&L at its price as the P&L display shows it (ticks, currency, both; nothing when
-/// off or for an order that doesn't close the position).
+/// off or for an order that doesn't close the position), and its money (for the tone).
 #[allow(clippy::too_many_arguments)]
 pub fn write_exit_pnl(
     out: &mut impl Write,
@@ -114,21 +106,21 @@ pub fn write_exit_pnl(
     tick: i64,
     mpu: Option<i128>,
     mode: PnlDisplay,
-) -> Result<bool, fmt::Error> {
+) -> Result<Option<Money>, fmt::Error> {
     let (Some((pos, avg)), Some(mpu)) = (position, mpu) else {
-        return Ok(false);
+        return Ok(None);
     };
     // Only orders that close (part of) the position: the opposite side.
     if pos == 0 || (pos > 0) == (m.side == Side::Buy) {
-        return Ok(false);
+        return Ok(None);
     }
     let qty = (m.qty.0 - m.filled.0).min(pos.abs());
     let (ticks, money) = exit_pnl(pos, avg, m.price, qty, tick, mpu);
-    crate::pnl::write_pnl(out, mode, Some(ticks), money)
+    Ok(crate::pnl::write_pnl(out, mode, Some(ticks), money)?.then_some(money))
 }
 
-/// The edge marker for an order off the plot: `↑ T1 5820.00`, `↓ S1 5795.00`, and `+N` for
-/// more beyond that edge. No allocation.
+/// The edge marker for an order off the plot, as its tag reads: `↑ Target 1 · 5820.00`, and
+/// `+N` for more beyond that edge. No allocation.
 pub fn write_edge(
     out: &mut impl Write,
     m: &OrderMark,
@@ -137,74 +129,60 @@ pub fn write_edge(
     fmt: &PriceFormat,
 ) -> fmt::Result {
     out.write_str(if above { "↑ " } else { "↓ " })?;
-    let left = m.qty.0 - m.filled.0;
-    match MarkRole::of(m) {
-        MarkRole::Target => write!(out, "T{left} ")?,
-        MarkRole::Stop => write!(out, "S{left} ")?,
-        MarkRole::Entry => write!(
-            out,
-            "{} {left} ",
-            if m.side == Side::Buy { "BUY" } else { "SELL" }
-        )?,
-    }
-    fmt.write(m.price, out)?;
+    write_order_tag(out, m, fmt)?;
     if n > 1 {
         write!(out, " +{}", n - 1)?;
     }
     Ok(())
 }
 
-/// An edge marker in short (`↑T1`, `↓S2`, `↑BUY`), for a narrow cell or both edges at once.
+/// An edge marker in short, for a narrow cell or both edges at once: `↑Target`, `↓Stop`,
+/// `↑Buy` (no bare quantity digit beside a role letter).
 pub fn write_edge_short(out: &mut impl Write, m: &OrderMark, above: bool) -> fmt::Result {
     out.write_str(if above { "↑" } else { "↓" })?;
-    let left = m.qty.0 - m.filled.0;
-    match MarkRole::of(m) {
-        MarkRole::Target => write!(out, "T{left}"),
-        MarkRole::Stop => write!(out, "S{left}"),
-        MarkRole::Entry => out.write_str(if m.side == Side::Buy { "BUY" } else { "SELL" }),
-    }
+    out.write_str(match MarkRole::of(m) {
+        MarkRole::Target => "Target",
+        MarkRole::Stop => "Stop",
+        MarkRole::Entry if m.side == Side::Buy => "Buy",
+        MarkRole::Entry => "Sell",
+    })
 }
 
 /// The exit a position handle places at `price`: a target (limit) or a stop for the whole
-/// position, reduce-only (`PlaceExit`). Refused when trading is off, or when it would fill or
-/// trigger at once: a long's target must be above the market and its stop below (a short's
-/// the other way round). `market`: the last trade, else the mid.
-#[allow(clippy::too_many_arguments)]
+/// position, reduce-only (`PlaceExit`). Refused when it would fill or trigger at once, by the
+/// DOM's rules against the inside market (`bid`, `ask`; else the last trade): a long's target
+/// must be above the best bid and its stop below it; a short's target below the best ask and
+/// its stop above it (equal counts as at once).
 pub fn exit_command(
-    enabled: bool,
     account: &AccountId,
     contract: ContractKey,
     position: i64,
     target: bool,
     price: Price,
-    market: Option<Price>,
+    (bid, ask, last): (Option<Price>, Option<Price>, Option<Price>),
 ) -> Result<TradeCommand, Refusal> {
-    if !enabled {
-        return Err(Refusal(ENABLE_TO_ADD));
-    }
     if position == 0 {
         return Err(Refusal("no position to protect"));
     }
     let long = position > 0;
-    let market = market.ok_or(Refusal("no market price yet"))?;
-    // Profit side: above the market for a long, below for a short.
+    // A long exits by selling into the bid; a short by buying from the ask.
+    let reference = if long { bid.or(last) } else { ask.or(last) };
+    let market = reference.ok_or(Refusal("no market price yet"))?;
     let profit_side = if long { price > market } else { price < market };
-    match (target, profit_side) {
-        (true, false) => {
-            return Err(Refusal(if long {
-                "a target must be above the market"
-            } else {
-                "a target must be below the market"
-            }));
-        }
-        (false, true) => {
-            return Err(Refusal(if long {
-                "a stop must be below the market"
-            } else {
-                "a stop must be above the market"
-            }));
-        }
-        _ => {}
+    let loss_side = if long { price < market } else { price > market };
+    if target && !profit_side {
+        return Err(Refusal(if long {
+            "a target must be above the bid"
+        } else {
+            "a target must be below the ask"
+        }));
+    }
+    if !target && !loss_side {
+        return Err(Refusal(if long {
+            "a stop must be below the bid"
+        } else {
+            "a stop must be above the ask"
+        }));
     }
     let kind = if target {
         OrderKind::Limit { price }
@@ -232,8 +210,11 @@ use crate::trading::TradeCache;
 #[derive(Clone, Copy)]
 pub struct TagText {
     pub id: u64,
-    /// `S1 · 5806.50 · -$175.00`.
+    /// `Stop 1 · 5806.50`.
     pub text: FixedStr<96>,
+    /// The P&L at its price (`-20.0 t  -$250.00`), drawn in its tone; empty: none.
+    pub pnl: FixedStr<48>,
+    pub money: Option<Money>,
     pub mark: OrderMark,
 }
 
@@ -261,6 +242,8 @@ pub struct ChartTradeState {
     pub ghosts: Vec<Ghost>,
     pub drag: Option<DragOrder>,
     pub adding: Option<AddExit>,
+    /// A press on a tag's ×: cancels on release if still there.
+    pub closing: Option<u64>,
 }
 
 impl Default for ChartTradeState {
@@ -277,6 +260,7 @@ impl Default for ChartTradeState {
             ghosts: Vec::with_capacity(8),
             drag: None,
             adding: None,
+            closing: None,
         }
     }
 }
@@ -370,41 +354,114 @@ mod tests {
         lines_feed::catalog::get(lines_feed::catalog::ES).unwrap()
     }
 
-    /// The owner's case: LONG 1 @ 5810.00 with a 20/40 bracket on ES: the stop at 5805.00 and
-    /// the target at 5820.00 say what they make or lose there.
+    /// The owner's case: LONG 1 @ 5810.00 with a 20/40 bracket on ES: the stop and the target
+    /// say their role in words, their quantity apart from it, and what they make or lose there.
     #[test]
-    fn exit_tags_say_role_price_and_pnl_at_that_price() {
+    fn exit_tags_say_role_quantity_price_and_pnl() {
         let mpu = money_per_unit(&es());
         let pos = Some((1, 581_000.0));
         let stop = mark(Side::Sell, 5805.00, true, Role::StopLoss, false);
         let target = mark(Side::Sell, 5820.00, false, Role::TakeProfit, false);
-        let tag = |m: &OrderMark, mode| {
-            let mut p = String::new();
-            write_exit_pnl(&mut p, m, pos, 25, mpu, mode).unwrap();
+        let tag = |m: &OrderMark| {
             let mut s = String::new();
-            write_order_tag(&mut s, m, &fmt(), &p).unwrap();
+            write_order_tag(&mut s, m, &fmt()).unwrap();
             s
         };
-        assert_eq!(tag(&stop, PnlDisplay::Currency), "S1 · 5805.00 · -$250.00");
-        assert_eq!(
-            tag(&target, PnlDisplay::Currency),
-            "T1 · 5820.00 · +$500.00"
+        let pnl = |m: &OrderMark, mode| {
+            let mut p = String::new();
+            let money = write_exit_pnl(&mut p, m, pos, 25, mpu, mode).unwrap();
+            (p, money)
+        };
+        assert_eq!(tag(&stop), "Stop 1 · 5805.00");
+        assert_eq!(tag(&target), "Target 1 · 5820.00");
+        assert_eq!(pnl(&stop, PnlDisplay::Currency).0, "-$250.00");
+        assert_eq!(pnl(&target, PnlDisplay::Both).0, "+40.0 t  +$500.00");
+        assert!(
+            pnl(&target, PnlDisplay::Currency).1.unwrap().0 > 0,
+            "its tone: up"
         );
         assert_eq!(
-            tag(&target, PnlDisplay::Both),
-            "T1 · 5820.00 · +40.0 t  +$500.00"
-        );
-        assert_eq!(
-            tag(&stop, PnlDisplay::Off),
-            "S1 · 5805.00",
+            pnl(&stop, PnlDisplay::Off),
+            (String::new(), None),
             "P&L off: no amount"
         );
-        // An entry has no P&L at its price.
+        // An entry has no P&L at its price, and reads side and type.
         let entry = mark(Side::Buy, 5800.00, false, Role::Single, false);
-        assert_eq!(tag(&entry, PnlDisplay::Currency), "BUY LMT 1 · 5800.00");
-        // A chart-added exit (reduce-only, plain role) reads by its kind: stop S, limit T.
+        assert_eq!(tag(&entry), "Buy lmt 1 · 5800.00");
+        assert_eq!(pnl(&entry, PnlDisplay::Currency).1, None);
+        // A chart-added exit (reduce-only, plain role) reads by its kind.
         let added = mark(Side::Sell, 5805.00, true, Role::Single, true);
-        assert_eq!(tag(&added, PnlDisplay::Off), "S1 · 5805.00");
+        assert_eq!(tag(&added), "Stop 1 · 5805.00");
+    }
+
+    #[test]
+    fn edge_markers_read_like_their_tags() {
+        let target = mark(Side::Sell, 5820.00, false, Role::TakeProfit, false);
+        let mut s = String::new();
+        write_edge(&mut s, &target, true, 1, &fmt()).unwrap();
+        assert_eq!(s, "↑ Target 1 · 5820.00");
+        s.clear();
+        write_edge(&mut s, &target, false, 3, &fmt()).unwrap();
+        assert_eq!(s, "↓ Target 1 · 5820.00 +2");
+        s.clear();
+        write_edge_short(&mut s, &target, true).unwrap();
+        assert_eq!(s, "↑Target", "no bare digit beside a role letter");
+    }
+
+    /// Adding an exit from the position: the closing side, the whole position, reduce-only;
+    /// refused when it would fill or trigger at once by the DOM's rules (inclusive, against
+    /// the bid for a long and the ask for a short).
+    #[test]
+    fn handles_place_reduce_only_exits_on_the_safe_side() {
+        let a = AccountId::new("paper");
+        let k = lines_trading::types::ContractDoc {
+            product: 1,
+            year: Some(2026),
+            month: Some(12),
+        }
+        .to_key()
+        .unwrap();
+        let p = |v: f64| Price((v * 100.0).round() as i64);
+        // Bid 5809.75, ask 5810.00, last 5810.00 (traded at the ask).
+        let mkt = (Some(p(5809.75)), Some(p(5810.00)), Some(p(5810.00)));
+        let TradeCommand::PlaceExit(s) = exit_command(&a, k, 2, false, p(5805.0), mkt).unwrap()
+        else {
+            panic!("an exit")
+        };
+        assert_eq!((s.side, s.qty), (Side::Sell, Qty(2)));
+        assert_eq!(s.kind, OrderKind::Stop { trigger: p(5805.0) });
+        // Code review: a long's stop at the bid (one tick under the last) triggers on the next
+        // print at the bid: refused; so is a target at the bid.
+        assert!(
+            exit_command(&a, k, 2, false, p(5809.75), mkt).is_err(),
+            "stop at the bid"
+        );
+        assert!(
+            exit_command(&a, k, 2, true, p(5809.75), mkt).is_err(),
+            "target at the bid"
+        );
+        assert!(
+            exit_command(&a, k, 2, true, p(5810.00), mkt).is_ok(),
+            "above the bid"
+        );
+        // A short: the stop above the ask, the target below it, buying.
+        let TradeCommand::PlaceExit(s) = exit_command(&a, k, -1, false, p(5815.0), mkt).unwrap()
+        else {
+            panic!("an exit")
+        };
+        assert_eq!((s.side, s.qty), (Side::Buy, Qty(1)));
+        assert!(
+            exit_command(&a, k, -1, false, p(5810.00), mkt).is_err(),
+            "stop at the ask"
+        );
+        assert!(
+            exit_command(&a, k, -1, true, p(5810.00), mkt).is_err(),
+            "target at the ask"
+        );
+        assert!(
+            exit_command(&a, k, 1, true, p(5815.0), (None, None, None)).is_err(),
+            "no market"
+        );
     }
 
     /// A chart shows no switch: its exits go out only through a linked DOM's switch, on the
@@ -441,63 +498,6 @@ mod tests {
         assert!(
             !linked_dom_enabled(None, &a, k, [(None, Some(&a), Some(k), true)]),
             "unlinked"
-        );
-    }
-
-    #[test]
-    fn edge_markers_name_the_order_and_count_the_rest() {
-        let target = mark(Side::Sell, 5820.00, false, Role::TakeProfit, false);
-        let mut s = String::new();
-        write_edge(&mut s, &target, true, 1, &fmt()).unwrap();
-        assert_eq!(s, "↑ T1 5820.00");
-        s.clear();
-        write_edge(&mut s, &target, false, 3, &fmt()).unwrap();
-        assert_eq!(s, "↓ T1 5820.00 +2");
-    }
-
-    /// Adding an exit from the position: trading enabled, the closing side, the whole
-    /// position, reduce-only; refused when it would fill or trigger at once.
-    #[test]
-    fn handles_place_reduce_only_exits_on_the_safe_side() {
-        let a = AccountId::new("paper");
-        let k = lines_trading::types::ContractDoc {
-            product: 1,
-            year: Some(2026),
-            month: Some(12),
-        }
-        .to_key()
-        .unwrap();
-        let p = |v: f64| Price((v * 100.0).round() as i64);
-        let m = Some(p(5810.00));
-        assert_eq!(
-            exit_command(false, &a, k, 1, false, p(5805.0), m),
-            Err(Refusal(ENABLE_TO_ADD))
-        );
-        let TradeCommand::PlaceExit(s) = exit_command(true, &a, k, 2, false, p(5805.0), m).unwrap()
-        else {
-            panic!("an exit")
-        };
-        assert_eq!((s.side, s.qty), (Side::Sell, Qty(2)));
-        assert_eq!(s.kind, OrderKind::Stop { trigger: p(5805.0) });
-        let TradeCommand::PlaceExit(s) = exit_command(true, &a, k, 2, true, p(5820.0), m).unwrap()
-        else {
-            panic!("an exit")
-        };
-        assert_eq!(s.kind, OrderKind::Limit { price: p(5820.0) });
-        // Would fill or trigger at once: refused.
-        assert!(exit_command(true, &a, k, 2, true, p(5805.0), m).is_err());
-        assert!(exit_command(true, &a, k, 2, false, p(5815.0), m).is_err());
-        // A short: the stop above, the target below, buying.
-        let TradeCommand::PlaceExit(s) =
-            exit_command(true, &a, k, -1, false, p(5815.0), m).unwrap()
-        else {
-            panic!("an exit")
-        };
-        assert_eq!((s.side, s.qty), (Side::Buy, Qty(1)));
-        assert!(exit_command(true, &a, k, -1, true, p(5815.0), m).is_err());
-        assert!(
-            exit_command(true, &a, k, 1, true, p(5815.0), None).is_err(),
-            "no market"
         );
     }
 }

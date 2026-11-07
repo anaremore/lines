@@ -155,6 +155,7 @@ impl Command {
         matches!(
             self,
             Command::PlaceOrder(_)
+                | Command::PlaceExit(_)
                 | Command::PlaceBracket(_)
                 | Command::ModifyOrder { .. }
                 | Command::CancelOrder { .. }

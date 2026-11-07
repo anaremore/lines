@@ -24,12 +24,15 @@ use crate::{Price, Viewport};
 pub const MAX_TAGS: usize = 32;
 /// Tag height and the `×` box's width, logical px.
 pub const TAG_H: f32 = 16.0;
-pub const CLOSE_W: f32 = 16.0;
+/// The `×` box: wider than its glyph, so a cancel is aimed, not grazed.
+pub const CLOSE_W: f32 = 22.0;
 /// Gap between stacked tags and between a tag and the plot's right edge.
 pub const TAG_GAP: f32 = 2.0;
 /// A handle's size (logical px).
 pub const HANDLE_W: f32 = 26.0;
-pub const HANDLE_H: f32 = 16.0;
+pub const HANDLE_H: f32 = 18.0;
+/// Space between a handle and the position tag.
+pub const HANDLE_GAP: f32 = 3.0;
 
 /// One line to tag: an id the caller chooses (order id; the position uses its own), its
 /// price, and the tag's text width (measured by the caller, logical px).
@@ -186,28 +189,31 @@ pub fn tag_band(markers: &[Option<EdgeMarker>; 2], plot_h: f32) -> (f32, f32) {
     (top, bottom.max(top))
 }
 
-/// Lay out `lines`' tags in a plot `plot_w` wide, right-aligned at `plot_w`, inside the band
-/// `band` (`(top, bottom)`, from [`tag_band`]), into `out`; returns how many (at most
-/// `out.len()` and [`MAX_TAGS`]). Lines whose price is off the band get no tag (edge markers
-/// stand for them). Overlapping tags are pushed down in price order (highest price first),
-/// then the stack is pulled back up if it ran off the bottom. Allocation-free.
+/// Lay out the tags of `lines` on a plot `plot_w` × `plot_h`, right-aligned at `plot_w`, inside
+/// the band `band` (`(top, bottom)`, from [`tag_band`]), into `out`; returns how many (at most
+/// `out.len()`, [`MAX_TAGS`] and what the band holds). Every order on the plot gets a tag,
+/// clamped into the band (off the plot: the edge markers stand for them). Overlapping tags are
+/// pushed down in price order (highest price first), then the stack is pulled back up if it
+/// ran off the bottom; it never leaves the band. Allocation-free.
 pub fn layout_tags(
     vp: &Viewport,
     lines: &[LineIn],
     plot_w: f32,
+    plot_h: f32,
     band: (f32, f32),
     scale_factor: f32,
     out: &mut [TagBox],
 ) -> usize {
     let (lo, hi) = band;
-    let cap = out.len().min(MAX_TAGS);
+    let fits = (((hi - lo) + TAG_GAP) / (TAG_H + TAG_GAP)).floor().max(0.0) as usize;
+    let cap = out.len().min(MAX_TAGS).min(fits);
     let mut n = 0;
     for l in lines {
         if n == cap {
             break;
         }
         let y = vp.price_to_y(l.price.0 as f64);
-        if !(y.is_finite() && (lo as f64..=hi as f64).contains(&y)) {
+        if !(y.is_finite() && (0.0..=plot_h as f64).contains(&y)) {
             continue;
         }
         let line_y = snap(y, scale_factor);
@@ -244,6 +250,7 @@ pub fn layout_tags(
         };
         tags[i].top = tags[i].top.max(floor);
     }
+    // (`cap` keeps the stack within the band, so the pull-up below never passes `lo`.)
     let mut ceiling = hi;
     for t in tags.iter_mut().rev() {
         if t.top + TAG_H > ceiling {
@@ -261,12 +268,12 @@ pub fn handles(tag: &TagBox, want: [bool; 2]) -> [Option<Handle>; 2] {
         want[0].then_some(Handle {
             above: true,
             left,
-            top: tag.top - HANDLE_H,
+            top: tag.top - HANDLE_GAP - HANDLE_H,
         }),
         want[1].then_some(Handle {
             above: false,
             left,
-            top: tag.top + TAG_H,
+            top: tag.top + TAG_H + HANDLE_GAP,
         }),
     ]
 }
@@ -354,7 +361,7 @@ mod tests {
     fn tags_sit_on_their_line_at_the_right_edge() {
         let v = vp();
         let mut out = [TagBox::default(); 4];
-        let n = layout_tags(&v, &[line(7, 605_000)], 400.0, FULL, 1.0, &mut out);
+        let n = layout_tags(&v, &[line(7, 605_000)], 400.0, 100.0, FULL, 1.0, &mut out);
         assert_eq!(n, 1);
         let t = out[0];
         assert_eq!(t.line_y, snap(v.price_to_y(605_000.0), 1.0));
@@ -363,7 +370,7 @@ mod tests {
         assert_eq!(t.close_left, 400.0 - TAG_GAP - CLOSE_W);
         // Off the plot: no tag.
         assert_eq!(
-            layout_tags(&v, &[line(1, 620_000)], 400.0, FULL, 1.0, &mut out),
+            layout_tags(&v, &[line(1, 620_000)], 400.0, 100.0, FULL, 1.0, &mut out),
             0
         );
     }
@@ -380,7 +387,7 @@ mod tests {
             line(4, 600_000),
         ];
         let band = (20.0, 80.0);
-        let n = layout_tags(&v, &lines, 400.0, band, 1.0, &mut out);
+        let n = layout_tags(&v, &lines, 400.0, 100.0, band, 1.0, &mut out);
         // The order at the very bottom (y 100) is outside the band: an edge marker's job.
         assert_eq!(n, 3);
         let tags = &out[..n];
@@ -399,6 +406,33 @@ mod tests {
             top_of(2) < top_of(1) && top_of(1) < top_of(3),
             "price order kept"
         );
+    }
+
+    /// Code review: an order on the plot but outside the band (under an edge marker) still
+    /// gets a tag, clamped into the band; a stack taller than the band never leaves it.
+    #[test]
+    fn tags_stay_in_the_band_and_none_is_lost_under_a_marker() {
+        let v = vp();
+        let mut out = [TagBox::default(); 32];
+        // y 2: on the plot, above a band that starts at 20.
+        let n = layout_tags(
+            &v,
+            &[line(1, 609_800)],
+            400.0,
+            100.0,
+            (20.0, 80.0),
+            1.0,
+            &mut out,
+        );
+        assert_eq!(n, 1, "not lost under the marker");
+        assert!(out[0].top >= 20.0);
+        // Twelve orders in a band that holds three: three tags, all inside.
+        let many: Vec<LineIn> = (0..12).map(|i| line(i, 605_000 + i as i64 * 25)).collect();
+        let n = layout_tags(&v, &many, 400.0, 100.0, (20.0, 80.0), 1.0, &mut out);
+        assert_eq!(n, 3);
+        for t in &out[..n] {
+            assert!(t.top >= 20.0 && t.top + TAG_H <= 80.0, "{t:?}");
+        }
     }
 
     /// The owner's screenshot: a long with its target off the plot was invisible everywhere.
@@ -439,7 +473,7 @@ mod tests {
     fn hits_tell_handles_markers_close_and_body_apart() {
         let v = vp();
         let mut out = [TagBox::default(); 2];
-        let n = layout_tags(&v, &[line(9, 605_000)], 400.0, FULL, 1.0, &mut out);
+        let n = layout_tags(&v, &[line(9, 605_000)], 400.0, 100.0, FULL, 1.0, &mut out);
         let t = out[0];
         let y = t.top + TAG_H * 0.5;
         let none: [Option<EdgeMarker>; 2] = [None, None];
