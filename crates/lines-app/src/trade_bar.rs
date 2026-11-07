@@ -2917,6 +2917,8 @@ mod tests {
             product: 1,
             year: Some(2026),
             month: Some(12),
+            equity: false,
+            option: None,
         }
         .to_key()
         .unwrap();

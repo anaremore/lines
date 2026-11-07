@@ -6,6 +6,11 @@
 //!   so every machine and recording agrees on it without a lookup table.
 //! - Spot products (Coinbase BTC/USD) have no delivery months. They are modelled explicitly
 //!   as [`Delivery::Spot`]: one perpetual contract per product, no expiry, never rolls.
+//! - Equities (SPY, decision 0028) are [`Delivery::Equity`]: one contract per product, no
+//!   expiry, quantity in shares. Their listed options are [`Delivery::Option`] on the
+//!   *underlying's* product: expiry date, exact strike (a [`crate::Price`] in the underlying's
+//!   price units) and right. The multiplier and exercise style are the product's
+//!   [`OptionRules`]; the key never carries them, so one OCC symbol is one key.
 //!
 //! Vendor symbols never appear here; providers derive theirs from a key by rule inside
 //! `lines-feed`.
@@ -14,7 +19,7 @@ use std::fmt;
 
 use crate::calendar::CivilDate;
 use crate::fixed_str::FixedStr;
-use crate::price::PriceFormat;
+use crate::price::{Price, PriceFormat};
 use crate::qty::{Qty, QtyFormat};
 
 /// Permanent product identifier. Never renumber or reuse one.
@@ -97,6 +102,97 @@ pub enum Delivery {
     Monthly { year: u16, month: Month },
     /// A spot product's single perpetual "contract": no expiry, never rolls.
     Spot,
+    /// An equity's shares (decision 0028): no expiry, never rolls.
+    Equity,
+    /// A listed option on the product (the underlying).
+    Option(OptionKey),
+}
+
+/// Call or put.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Right {
+    Call,
+    Put,
+}
+
+impl Right {
+    /// `C` or `P` (OCC and our labels).
+    pub fn letter(self) -> char {
+        match self {
+            Right::Call => 'C',
+            Right::Put => 'P',
+        }
+    }
+
+    pub fn from_letter(c: char) -> Option<Right> {
+        match c.to_ascii_uppercase() {
+            'C' => Some(Right::Call),
+            'P' => Some(Right::Put),
+            _ => None,
+        }
+    }
+}
+
+/// One listed option series of an underlying: what an OCC symbol names (decision 0028).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OptionKey {
+    /// The expiration date (the last trade date; settlement per the product's rules).
+    pub expiry: CivilDate,
+    /// Exact, in the underlying product's price units (SPY 450.50 = `Price(45050)`).
+    pub strike: Price,
+    pub right: Right,
+}
+
+/// How an option may be exercised.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ExerciseStyle {
+    /// Any business day up to expiry (equity and ETF options).
+    American,
+    /// At expiry only (index options).
+    European,
+}
+
+/// An option's minimum price increment, in the underlying's price units.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum OptionTick {
+    /// One increment at every price (the penny interval program: SPY, QQQ).
+    Flat(i64),
+    /// `below` under `threshold`, `above` at or over it (e.g. 0.01 below $3, 0.05 above).
+    Split {
+        threshold: i64,
+        below: i64,
+        above: i64,
+    },
+}
+
+impl OptionTick {
+    /// The increment for an option premium `price`. Providers may report a chain's own rule;
+    /// theirs wins where they differ (decision 0028).
+    pub fn at(self, price: Price) -> i64 {
+        match self {
+            OptionTick::Flat(t) => t,
+            OptionTick::Split {
+                threshold,
+                below,
+                above,
+            } => {
+                if price.0 < threshold {
+                    below
+                } else {
+                    above
+                }
+            }
+        }
+    }
+}
+
+/// A product's listed options (catalog data).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OptionRules {
+    /// Shares (or units) per contract: money = premium × multiplier × quantity.
+    pub multiplier: u32,
+    pub style: ExerciseStyle,
+    pub tick: OptionTick,
 }
 
 /// One contract, computed from the product and its delivery.
@@ -119,15 +215,56 @@ impl ContractKey {
             delivery: Delivery::Spot,
         }
     }
+    pub fn equity(product: ProductId) -> ContractKey {
+        ContractKey {
+            product,
+            delivery: Delivery::Equity,
+        }
+    }
+    /// An option on `underlying` (the equity product's id).
+    pub fn option(
+        underlying: ProductId,
+        expiry: CivilDate,
+        strike: Price,
+        right: Right,
+    ) -> ContractKey {
+        ContractKey {
+            product: underlying,
+            delivery: Delivery::Option(OptionKey {
+                expiry,
+                strike,
+                right,
+            }),
+        }
+    }
     pub fn year_month(&self) -> Option<(u16, Month)> {
         match self.delivery {
             Delivery::Monthly { year, month } => Some((year, month)),
-            Delivery::Spot => None,
+            Delivery::Spot | Delivery::Equity | Delivery::Option(_) => None,
         }
     }
 
-    /// Canonical Lines label: product symbol + month code + 2-digit year (`ESZ26`), or the
-    /// bare symbol for spot (`BTC/USD`). Ours, not any vendor's format.
+    pub fn option_key(&self) -> Option<OptionKey> {
+        match self.delivery {
+            Delivery::Option(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Units of the product per contract for money: the option multiplier (100 for SPY
+    /// options), else 1 (a future's point value already is per contract). `None`: an option
+    /// on a product that lists none.
+    pub fn multiplier(&self, product: &Product) -> Option<i64> {
+        match self.delivery {
+            Delivery::Option(_) => product.options().map(|o| i64::from(o.multiplier)),
+            _ => Some(1),
+        }
+    }
+
+    /// Canonical Lines label: product symbol + month code + 2-digit year (`ESZ26`), the bare
+    /// symbol for spot and equities (`BTC/USD`, `SPY`), and for an option the underlying,
+    /// expiry (`YYMMDD`), strike without trailing zeros and right (`SPY 261218 450.5C`). Ours,
+    /// not any vendor's format (OCC symbols are derived in `lines-feed`).
     pub fn label(&self, product: &Product) -> FixedStr<24> {
         let mut s = FixedStr::new();
         let _ = match self.delivery {
@@ -135,7 +272,29 @@ impl ContractKey {
                 &mut s,
                 format_args!("{}{}{:02}", product.symbol, month.code(), year % 100),
             ),
-            Delivery::Spot => fmt::Write::write_str(&mut s, product.symbol),
+            Delivery::Spot | Delivery::Equity => fmt::Write::write_str(&mut s, product.symbol),
+            Delivery::Option(o) => {
+                let mut strike = FixedStr::<20>::new();
+                let _ = product.price.write(o.strike, &mut strike);
+                let st = strike.as_str();
+                let st = if st.contains('.') {
+                    st.trim_end_matches('0').trim_end_matches('.')
+                } else {
+                    st
+                };
+                fmt::Write::write_fmt(
+                    &mut s,
+                    format_args!(
+                        "{} {:02}{:02}{:02} {}{}",
+                        product.symbol,
+                        o.expiry.year % 100,
+                        o.expiry.month,
+                        o.expiry.day,
+                        st,
+                        o.right.letter()
+                    ),
+                )
+            }
         };
         s
     }
@@ -218,6 +377,10 @@ pub enum ProductKind {
         roll: RollRule,
     },
     Spot,
+    /// Shares (decision 0028), with the options listed on them, if any.
+    Equity {
+        options: Option<OptionRules>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -248,16 +411,47 @@ impl Product {
         Some((m.micro, Qty(qty.0.checked_mul(m.per_contract as i64)?)))
     }
 
+    /// No delivery months and no expiry (crypto spot and perpetuals). Equities are not spot:
+    /// see [`Product::is_equity`].
     pub fn is_spot(&self) -> bool {
         matches!(self.kind, ProductKind::Spot)
     }
 
+    pub fn is_equity(&self) -> bool {
+        matches!(self.kind, ProductKind::Equity { .. })
+    }
+
+    /// The product's listed options, if any.
+    pub fn options(&self) -> Option<OptionRules> {
+        match self.kind {
+            ProductKind::Equity { options } => options,
+            _ => None,
+        }
+    }
+
+    /// Whether `key` is a contract of this product: its delivery kind matches the product's
+    /// (an option needs listed options and a strike on the price grid's unit, > 0).
+    pub fn lists(&self, key: &ContractKey) -> bool {
+        key.product == self.id
+            && match (self.kind, key.delivery) {
+                (ProductKind::Future { cycle, .. }, Delivery::Monthly { month, .. }) => {
+                    cycle.contains(month)
+                }
+                (ProductKind::Spot, Delivery::Spot) => true,
+                (ProductKind::Equity { .. }, Delivery::Equity) => true,
+                (ProductKind::Equity { options: Some(_) }, Delivery::Option(o)) => o.strike.0 > 0,
+                _ => false,
+            }
+    }
+
     /// Contracts listed after `date`'s month, in delivery order, starting with the first
-    /// listed month at or after `date`'s month. Spot yields its single contract.
+    /// listed month at or after `date`'s month. Spot and equities yield their single contract
+    /// (options are listed by the provider's chain, not computed).
     pub fn contracts_from(&self, date: CivilDate) -> impl Iterator<Item = ContractKey> + '_ {
         let id = self.id;
+        let equity = self.is_equity();
         let (spot, cycle) = match self.kind {
-            ProductKind::Spot => (true, MonthCycle(0)),
+            ProductKind::Spot | ProductKind::Equity { .. } => (true, MonthCycle(0)),
             ProductKind::Future { cycle, .. } => (false, cycle),
         };
         let mut y = date.year as i32;
@@ -269,7 +463,11 @@ impl Product {
                     return None;
                 }
                 emitted_spot = true;
-                return Some(ContractKey::spot(id));
+                return Some(if equity {
+                    ContractKey::equity(id)
+                } else {
+                    ContractKey::spot(id)
+                });
             }
             if cycle.0 == 0 {
                 return None;
@@ -336,6 +534,31 @@ pub(crate) mod testing {
         }
     }
 
+    /// An ETF with listed options (as the catalog's SPY).
+    pub fn spy() -> Product {
+        Product {
+            id: ProductId(2001),
+            symbol: "SPY",
+            description: "SPDR S&P 500 ETF",
+            price: PriceFormat::new(
+                PriceScale::decimal(2),
+                DisplayStyle::Decimal { digits: 2 },
+                1,
+            ),
+            qty: QtyFormat::WHOLE,
+            currency: Currency::USD,
+            point_value: Ratio::new(1, 1),
+            kind: ProductKind::Equity {
+                options: Some(OptionRules {
+                    multiplier: 100,
+                    style: ExerciseStyle::American,
+                    tick: OptionTick::Flat(1),
+                }),
+            },
+            micro: None,
+        }
+    }
+
     pub fn btc() -> Product {
         Product {
             id: ProductId(1001),
@@ -389,6 +612,52 @@ mod tests {
         );
         let btc = btc();
         assert_eq!(ContractKey::spot(btc.id).label(&btc).as_str(), "BTC/USD");
+    }
+
+    /// Decision 0028: equities and listed options, keyed exactly.
+    #[test]
+    fn equities_and_options() {
+        let spy = spy();
+        let eq = ContractKey::equity(spy.id);
+        assert_eq!(eq.label(&spy).as_str(), "SPY");
+        assert!(spy.lists(&eq) && !spy.lists(&ContractKey::spot(spy.id)));
+        assert_eq!(
+            spy.contracts_from(CivilDate::new(2026, 11, 7).unwrap())
+                .collect::<Vec<_>>(),
+            [eq]
+        );
+        let expiry = CivilDate::new(2026, 12, 18).unwrap();
+        let call = ContractKey::option(spy.id, expiry, Price(45_050), Right::Call);
+        let put = ContractKey::option(spy.id, expiry, Price(45_000), Right::Put);
+        assert_eq!(call.label(&spy).as_str(), "SPY 261218 450.5C");
+        assert_eq!(put.label(&spy).as_str(), "SPY 261218 450P");
+        assert!(spy.lists(&call));
+        assert!(!spy.lists(&ContractKey::option(spy.id, expiry, Price(0), Right::Call)));
+        assert_eq!(call.option_key().unwrap().strike, Price(45_050));
+        assert_eq!(call.year_month(), None);
+        // Money: 100 shares per contract; a future or the shares themselves: 1.
+        assert_eq!(call.multiplier(&spy), Some(100));
+        assert_eq!(eq.multiplier(&spy), Some(1));
+        let es = es();
+        let es_opt = ContractKey::option(es.id, expiry, Price(600_000), Right::Call);
+        assert_eq!(es_opt.multiplier(&es), None, "ES lists no options here");
+        assert!(!es.lists(&es_opt) && !es.lists(&ContractKey::equity(es.id)));
+        // Distinct keys, and the same series is the same key.
+        assert_ne!(call, put);
+        assert_eq!(
+            call,
+            ContractKey::option(spy.id, expiry, Price(45_050), Right::Call)
+        );
+        // Option ticks: flat, or split at a premium threshold.
+        assert_eq!(OptionTick::Flat(1).at(Price(1_000)), 1);
+        let split = OptionTick::Split {
+            threshold: 300,
+            below: 1,
+            above: 5,
+        };
+        assert_eq!((split.at(Price(299)), split.at(Price(300))), (1, 5));
+        assert_eq!(Right::from_letter('p'), Some(Right::Put));
+        assert_eq!(Right::from_letter('x'), None);
     }
 
     #[test]
