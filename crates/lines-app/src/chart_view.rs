@@ -1164,9 +1164,14 @@ impl ChartView {
                 EditorKey::Pass => {}
             }
         }
-        // Escape aborts an order tag drag (nothing sent).
-        if self.ct.drag.is_some() && k.key == "escape" {
+        // Escape aborts an order drag: a tag, a handle or the position line (nothing sent).
+        if (self.ct.drag.is_some() || self.ct.adding.is_some() || self.ct.pos_drag)
+            && k.key == "escape"
+        {
             self.ct.drag = None;
+            self.ct.adding = None;
+            self.ct.pos_drag = false;
+            self.ct.add_from = None;
             cx.stop_propagation();
             cx.notify();
             return;
@@ -1753,7 +1758,12 @@ impl ChartView {
         // An add drag (a handle or the position line): place, move the existing exit of that
         // kind, or nothing (a click, or released at the average) — `chart_trade::release_action`.
         if std::mem::take(&mut self.ct.pos_drag) || self.ct.adding.is_some() {
-            let adding = self.ct.adding.take();
+            // Released off the plot (another pane, the axes): abort, nothing sent.
+            let adding = self
+                .ct
+                .adding
+                .take()
+                .filter(|_| self.plot.contains(&ev.position));
             self.ct.add_from = None;
             let existing = |target: bool| self.ct.existing_exit(target).map(|m| m.id);
             let action = crate::chart_trade::release_action(adding, self.ct.moved, existing);
@@ -1885,13 +1895,16 @@ impl ChartView {
         let Some(o) = order else {
             return;
         };
+        let Some(cmd) = crate::dom_trade::drag_command(&o, d.to) else {
+            return; // it didn't move
+        };
         // A stop never moves across the market (it would trigger at once): refused here, shown
         // as a rejected drag, nothing sent.
         if let Some(why) = crate::trade_bar::stop_move_check(&self.store, &o, d.to) {
             self.trade.flash(why);
             return;
         }
-        if let Some(cmd) = crate::dom_trade::drag_command(&o, d.to) {
+        {
             let id = t.submit(lines_trading::Source::Chart, issued, cmd);
             self.ct.ghosts.push(crate::dom_trade::Ghost {
                 order: o.id,

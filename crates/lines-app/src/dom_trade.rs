@@ -529,7 +529,11 @@ pub fn stop_move_refusal(
         OrderKind::StopLimit { .. } => !o.triggered,
         _ => false,
     };
-    if !stop {
+    // A bracket exit held for its entry isn't in the market yet: it can't trigger, and it
+    // moves anywhere (a breakout's stop above the market until the entry fills).
+    let held = matches!(o.role, Role::TakeProfit | Role::StopLoss)
+        && matches!(o.state, OrderState::Submitted | OrderState::Acked);
+    if !stop || held {
         return None;
     }
     let market = match o.side {
@@ -1371,6 +1375,22 @@ mod tests {
         );
         sl.triggered = true;
         assert_eq!(stop_move_refusal(&sl, Price(599_000), bid, ask, None), None);
+        // A bracket's stop held for its entry (not in the market) moves anywhere; live, it
+        // follows the rule.
+        let mut held = order(
+            OrderState::Acked,
+            OrderKind::Stop {
+                trigger: Price(600_800),
+            },
+        );
+        held.side = Side::Sell;
+        held.role = Role::StopLoss;
+        assert_eq!(
+            stop_move_refusal(&held, Price(600_900), bid, ask, None),
+            None
+        );
+        held.state = OrderState::Working;
+        assert!(stop_move_refusal(&held, Price(600_900), bid, ask, None).is_some());
     }
 
     #[test]
