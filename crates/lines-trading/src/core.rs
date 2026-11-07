@@ -676,11 +676,14 @@ impl TradingCore {
         account: &AccountId,
         contract: Option<ContractKey>,
     ) -> Vec<OrderId> {
+        // A strategy cancels only its own orders (decision 0025).
+        let scope = self.cancel_scope(env.source);
         let ids: Vec<OrderId> = self
             .orders
             .values()
             .filter(|o| &o.account == account && o.is_open())
             .filter(|o| contract.is_none_or(|c| c == o.contract))
+            .filter(|o| scope.as_ref().is_none_or(|s| s.contains(&o.id)))
             .map(|o| o.id)
             .collect();
         for &id in &ids {

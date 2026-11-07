@@ -130,6 +130,9 @@ pub struct DecisionRecord {
     /// The command's result: the orders it created or touched, or why it was denied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Result<Vec<OrderId>, Reject>>,
+    /// Why its command was never sent (the per-input decision budget ran out).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_sent: Option<String>,
 }
 
 /// The instance's state changes.
@@ -329,6 +332,14 @@ impl Run {
     fn decide(&mut self, now: UtcMillis, out: Vec<Decision>, budget: &mut usize) {
         for d in out {
             if *budget == 0 {
+                let why =
+                    format!("over the budget of {MAX_DECISIONS_PER_INPUT} decisions for one input");
+                self.decisions.push(DecisionRecord {
+                    at: now,
+                    not_sent: d.command.is_some().then(|| why.clone()),
+                    decision: d,
+                    result: None,
+                });
                 if self.state == StrategyState::Armed {
                     self.core.submit(
                         now,
@@ -342,7 +353,7 @@ impl Run {
                         },
                     );
                 }
-                return;
+                continue;
             }
             *budget -= 1;
             let i = self.decisions.len();
@@ -351,6 +362,7 @@ impl Run {
                 at: now,
                 decision: d,
                 result: None,
+                not_sent: None,
             });
             if let Some(c) = command {
                 let id = self
@@ -389,6 +401,12 @@ fn input_files(path: &Path) -> Result<Vec<InputFile>> {
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_file())
+            // A stored contract replays its day segments only (not its bars index, coverage
+            // or writer lock).
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|e| e == lines_feed::disk::SEGMENT_EXT)
+            })
             .collect();
         v.sort();
         v
