@@ -2096,22 +2096,6 @@ fn growing_an_order_meets_risk_limits_and_the_contract_cap() {
     let stop = r.place(
         Side::Sell,
         1,
-/// Critical review 1, finding 4: a stop is never moved across the market (it would trigger at
-/// once and close the position at market); moves that keep it on its side go through.
-#[test]
-fn a_stop_never_moves_across_the_market() {
-    let mut r = Rig::new(FillModel::TradeThrough);
-    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
-    // The core's marks: the inside market (the app sends it with the book).
-    r.market(
-        es(),
-        &[MarketInput::Bid(px(5999.75)), MarketInput::Ask(px(6000.25))],
-    );
-    r.place(Side::Buy, 2, OrderKind::Market);
-    r.wait(LAT);
-    let stop = r.place(
-        Side::Sell,
-        2,
         OrderKind::Stop {
             trigger: px(5995.00),
         },
@@ -2143,6 +2127,29 @@ fn a_halted_account_cant_grow_an_order() {
     assert_eq!(e.code, RejectCode::PropRule);
     assert!(e.message.contains("halted"), "{}", e.message);
     assert_eq!(r.core.order(sell).unwrap().qty, Qty(1));
+}
+
+/// Critical review 1, finding 4: a stop is never moved across the market (it would trigger at
+/// once and close the position at market); moves that keep it on its side go through.
+#[test]
+fn a_stop_never_moves_across_the_market() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    // The core's marks: the inside market (the app sends it with the book).
+    r.market(
+        es(),
+        &[MarketInput::Bid(px(5999.75)), MarketInput::Ask(px(6000.25))],
+    );
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let stop = r.place(
+        Side::Sell,
+        2,
+        OrderKind::Stop {
+            trigger: px(5995.00),
+        },
+    );
+    r.wait(LAT);
     let modify = |p: f64| Command::ModifyOrder {
         account: acct(),
         order: stop,
