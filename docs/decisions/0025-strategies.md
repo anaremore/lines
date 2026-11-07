@@ -1,6 +1,6 @@
 # 0025: Strategies: pure state machines behind the trading core, backtested on replays
 
-**Status:** Proposed (owner request, 2026-11-06; implements 0004, 0006, 0011, 0012, 0018, 0020, 0022, 0023 for automation)
+**Status:** Accepted (owner, 2026-11-07; requested 2026-11-06; implements 0004, 0006, 0011, 0012, 0018, 0020, 0022, 0023 for automation)
 
 **Context:** The owner wants Lines to run rule-based automation of their own trading method, starting with a private Rocket Scooter strategy that trades from the RS levels Lines already draws (0022). The owner's previous attempt (the private `rithmic-trades` project) mixed strategy logic, I/O, persistence and order routing in one long-running server. That made it hard to replay a day and get the same decisions, and hard to say why an order was sent. Lines already has the parts a safer design needs. Provider sessions do no I/O, so replays are exact (0011). Every order is a typed command through one trading core that runs risk, prop rules and guardrails before any broker (0006, 0018). The paper broker is deterministic (0004, 0005). The journal turns fills into round trips with exact P&L and MAE/MFE. Recorded levels replay with the market (0022). `docs/positioning.md` says Lines is not for quant developers and that a backtesting engine is breadth for its own sake. This decision narrows that: Lines automates the trader's own discretionary method under the same guardrails as their clicks. It does not become a research platform. There is no optimizer, no parameter sweeps and no Python.
 
