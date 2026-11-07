@@ -31,6 +31,8 @@ Each round (at most 3):
 - UI changes: each persona's verdict line, and after-screenshots of every visual fix.
 
 ## Stop and ask instead of continuing
-- Round 3 ends with open blockers: report them and stop.
+- Round 3 ends with open blockers: don't stop. Open the PR with "[blockers open]" in the title and
+  each open blocker in a "Review" section, then report. Nobody merges it until they're resolved
+  or the planning thread or owner accepts them in writing.
 - The reviewer finds two documented rules that conflict.
 - A fix would need tier B or C changes that weren't in the task.
