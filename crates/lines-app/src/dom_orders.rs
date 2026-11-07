@@ -300,8 +300,8 @@ impl OrdersLayer {
         };
         // Refused prices off the visible rows: counted in the orders column's title cell
         // ("2 hidden"), never in a price row (it would read as a refusal at that row's price),
-        // never a bare number beside "Ord" (it would read as an order count), never over the
-        // title; when the words don't fit, nothing (the panel's status line counts them).
+        // never a bare number (it would read as an order count): beside the "Ord" title when
+        // there is room, else in its place while they last (`dom_trade::hidden_placement`).
         if let (Some(top), Some(bottom)) = (rows.first(), rows.last()) {
             let edges = crate::dom_trade::offscreen_refusals(
                 self.flashes.iter().map(|f| (f.price, f.label)),
@@ -313,16 +313,26 @@ impl OrdersLayer {
             if n > 0 && ow > 0.0 {
                 let mut s = lines_core::FixedStr::<32>::new();
                 let _ = write!(s, "{n} hidden");
-                let room = ow - glyphs.width("Ord", t.text_dim, false, window) - 16.0;
+                let title_w = glyphs.width("Ord", t.text_dim, false, window);
                 let w = glyphs.width(s.as_str(), t.text_main, true, window) + 6.0;
-                if w + 2.0 <= room {
-                    let hh = crate::pane_columns::HEADER_ROW_H;
-                    let ty = oy - hh;
-                    let pill = rect(ox + 4.0, ty + 1.0, w, hh - 2.0);
+                let hh = crate::pane_columns::HEADER_ROW_H;
+                let ty = oy - hh;
+                let pill = match crate::dom_trade::hidden_placement(ow, title_w, w) {
+                    crate::dom_trade::HiddenPlacement::Beside => {
+                        Some(rect(ox + 4.0, ty + 1.0, w, hh - 2.0))
+                    }
+                    // In the title's place: the whole cell, so "Ord" never shows half covered.
+                    crate::dom_trade::HiddenPlacement::InsteadOfTitle => {
+                        Some(rect(ox + 1.0, ty + 1.0, ow - 2.0, hh - 2.0))
+                    }
+                    crate::dom_trade::HiddenPlacement::None => None,
+                };
+                if let Some(pill) = pill {
                     window.with_content_mask(Some(gpui::ContentMask { bounds: pill }), |window| {
                         window.paint_quad(fill(pill, t.panel));
                         outline(window, pill, t.warn, hair, false);
-                        glyphs.paint(s.as_str(), ox + 7.0, ty, hh, t.text_main, true, window, cx);
+                        let x = f32::from(pill.origin.x) + 3.0;
+                        glyphs.paint(s.as_str(), x, ty, hh, t.text_main, true, window, cx);
                     });
                 }
             }

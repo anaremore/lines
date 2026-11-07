@@ -601,6 +601,27 @@ pub struct EdgeRefusals {
     pub word: &'static str,
 }
 
+/// Where the off-screen refusal count goes in the orders column's title cell (`ow` wide): beside
+/// the right-aligned title (`title_w`) when the count (`count_w`, padding included) fits left of
+/// it, else in the title's place while it lasts (the default column is too narrow for both),
+/// else nowhere (a column narrower than the words).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum HiddenPlacement {
+    Beside,
+    InsteadOfTitle,
+    None,
+}
+
+pub fn hidden_placement(ow: f32, title_w: f32, count_w: f32) -> HiddenPlacement {
+    if count_w + 2.0 <= ow - title_w - 16.0 {
+        HiddenPlacement::Beside
+    } else if count_w + 4.0 <= ow {
+        HiddenPlacement::InsteadOfTitle
+    } else {
+        HiddenPlacement::None
+    }
+}
+
 /// Refused prices above the top row and below the bottom row (rows as `price / units`
 /// floored), each with its word: `[above, below]`. Warnings are not refusals. Pure and
 /// allocation-free.
@@ -710,6 +731,19 @@ mod tests {
 
     /// The ladder accounts for every refusal the header counts: ones off the visible rows are
     /// counted (and warnings are not refusals).
+    /// Focused review: at the orders column's default width (~84 px, sized for two marks) the
+    /// count didn't fit beside "Ord" and never showed. It takes the title's place instead.
+    #[test]
+    fn hidden_count_shows_at_the_default_column_width() {
+        // "1 hidden" bold at 12 px with padding ~ 56 px; "Ord" ~ 20 px.
+        assert_eq!(
+            hidden_placement(84.0, 20.0, 56.0),
+            HiddenPlacement::InsteadOfTitle
+        );
+        assert_eq!(hidden_placement(110.0, 20.0, 56.0), HiddenPlacement::Beside);
+        assert_eq!(hidden_placement(50.0, 20.0, 56.0), HiddenPlacement::None);
+    }
+
     #[test]
     fn offscreen_refusals_are_counted_at_their_edge() {
         let at = |row: i64| Price(row * 25);

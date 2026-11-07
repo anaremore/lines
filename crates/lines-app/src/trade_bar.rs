@@ -1565,9 +1565,11 @@ fn lock_strip(text: &str, after: &str, narrow: bool, t: &Theme) -> gpui::Div {
         .border_color(t.warn)
         .child(whole_items(text, t.text_main, true))
         .when(!narrow, |d| {
+            // The hint gives way first, so the lockout's reason keeps its room.
             d.child(
                 div()
-                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
                     .text_color(t.text_dim)
                     .child(after.to_owned()),
             )
