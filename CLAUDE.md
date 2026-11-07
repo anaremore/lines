@@ -114,6 +114,8 @@ Run on the exact HEAD you push. Report the SHA and each result.
   (decisions 0010, 0014).
 - Edit `third_party/`, `LICENSE.md`, or an accepted decision record (except adding
   "Superseded by NNNN" with the owner's yes, per `docs/decisions/README.md`).
+- Name the owner's private level services or strategies in this repo (code, docs, commits, PRs):
+  say "a private level source" / "a private strategy"; names live only in the private repos.
 - Add `vendor-cqg` to default features or release builds, or put live connectors in this repo
   (they belong in private `lines-connectors`, decision 0020).
 - Drive the real mouse or keyboard, or capture the screen. Verify UI with screenshot mode and tests.
