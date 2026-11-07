@@ -75,3 +75,16 @@ fn screenshot_failures_exit_non_zero_without_a_file() {
     assert!(!r.status.success());
     assert!(!out.exists());
 }
+
+/// The dropdown fixtures render and exit 0 with a file (`--timeframe-menu`, `--account-menu`).
+#[test]
+fn dropdown_fixtures_render() {
+    let rec = recording();
+    for flag in ["--timeframe-menu", "--account-menu"] {
+        let out = dir().join(format!("{}.png", flag.trim_start_matches('-')));
+        let r = shoot(&rec, &out, &["--layout", "chart", flag]);
+        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert!(r.status.success(), "{flag} failed: {stderr}");
+        assert!(out.exists(), "{flag}: no file");
+    }
+}

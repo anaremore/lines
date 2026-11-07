@@ -806,7 +806,11 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
     let mut list = div()
         .id("account-list")
         .occlude()
-        .min_w(px(220.0))
+        // A fixed width: the rules line wraps rather than widening the list over the header's
+        // other controls (the DOM's arm state).
+        .w(px(320.0))
+        // Not the header's no-wrap text style.
+        .whitespace_normal()
         .flex()
         .flex_col()
         .py_1()
