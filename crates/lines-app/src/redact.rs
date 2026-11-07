@@ -4,9 +4,12 @@
 //! Lines never logs credentials, account ids, API keys or level values from paid sources on
 //! purpose; this is the second line of defence:
 //! - JSON (settings, workspaces): the value of any key that names a secret or an identity
-//!   (password, token, API key, account, user, email, …) is replaced, whatever its type.
-//! - Text (logs): `key=value` and `key: value` for those keys, e-mail addresses, and long
-//!   token-like strings are replaced.
+//!   (password, token, API key, account, user, email, …) is replaced, whatever its type;
+//!   maps keyed by account (`guardrails`, `bracket_presets`, `prop_rules`) get their keys
+//!   replaced too, and every other key is redacted as text.
+//! - Text (logs): `key=value` and `key: value` for those keys (an `Authorization` header to
+//!   the end of its line), e-mail addresses, long token-like strings and the user's name in
+//!   home-folder paths are replaced.
 //!
 //! Pure and tested; the redaction test in `diagnostics` builds a whole bundle from synthetic
 //! settings full of fake secrets and checks none survive.
@@ -38,6 +41,13 @@ const SENSITIVE: &[&str] = &[
     "clientid",
 ];
 
+/// Keys that are sensitive only as a whole word (as fragments they'd match ordinary keys,
+/// "hotkey", "design"): URL signing parameters and API keys.
+const SENSITIVE_EXACT: &[&str] = &["key", "sig", "signature", "nonce"];
+
+/// Settings maps keyed by account name or id: their keys are identities.
+const ACCOUNT_KEYED: &[&str] = &["guardrails", "bracket_presets", "prop_rules"];
+
 fn normalise(key: &str) -> String {
     key.chars()
         .filter(|c| !matches!(c, '_' | '-' | ' ' | '.'))
@@ -48,7 +58,7 @@ fn normalise(key: &str) -> String {
 /// Whether a key names something that must not leave the machine.
 pub fn is_sensitive_key(key: &str) -> bool {
     let k = normalise(key);
-    SENSITIVE.iter().any(|s| k.contains(s))
+    SENSITIVE.iter().any(|s| k.contains(s)) || SENSITIVE_EXACT.contains(&k.as_str())
 }
 
 /// A JSON document with every sensitive key's value replaced and every e-mail-looking or
@@ -60,10 +70,21 @@ pub fn json(v: &Value) -> Value {
                 .map(|(k, v)| {
                     let v = if is_sensitive_key(k) {
                         Value::String(REDACTED.into())
+                    } else if ACCOUNT_KEYED.contains(&k.as_str())
+                        && let Value::Object(by_account) = v
+                    {
+                        // One entry per account, numbered so they stay apart.
+                        Value::Object(
+                            by_account
+                                .values()
+                                .enumerate()
+                                .map(|(i, v)| (format!("[redacted-account-{}]", i + 1), json(v)))
+                                .collect(),
+                        )
                     } else {
                         json(v)
                     };
-                    (k.clone(), v)
+                    (text(k), v)
                 })
                 .collect(),
         ),
@@ -97,6 +118,7 @@ fn looks_like_email(w: &str) -> bool {
 /// One line (or any text) with secrets replaced: values after a sensitive key (`=` or `:`,
 /// quoted or not), e-mail addresses and token-like words.
 pub fn text(s: &str) -> String {
+    let s = &home_paths(s);
     // 1. Whole whitespace-separated chunks that are e-mail addresses or tokens.
     let mut chunks = String::with_capacity(s.len());
     for piece in s.split_inclusive(char::is_whitespace) {
@@ -148,9 +170,15 @@ pub fn text(s: &str) -> String {
         while j < chars.len() && chars[j] == ' ' {
             j += 1;
         }
-        // The value: quoted, or up to whitespace or a delimiter.
+        // The value: quoted, or up to whitespace or a delimiter (an Authorization header's
+        // scheme and credentials: to the end of the line).
         let mut k = j;
-        if k < chars.len() && matches!(chars[k], '"' | '\'') {
+        let quoted = k < chars.len() && matches!(chars[k], '"' | '\'');
+        if normalise(&word) == "authorization" && !quoted {
+            while k < chars.len() && !matches!(chars[k], '\n' | '\r') {
+                k += 1;
+            }
+        } else if quoted {
             let q = chars[k];
             k += 1;
             while k < chars.len() && chars[k] != q {
@@ -170,6 +198,39 @@ pub fn text(s: &str) -> String {
             out.push_str(REDACTED);
         }
         i = k;
+    }
+    out
+}
+
+/// The user's name in home-folder paths (`C:\Users\<name>\`, `/Users/<name>/`,
+/// `/home/<name>/`, any slashes, escaped or not) replaced by `[redacted-user]`.
+fn home_paths(s: &str) -> String {
+    const SEP: [char; 2] = ['/', '\\'];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    'scan: while !rest.is_empty() {
+        if out.ends_with(SEP) {
+            for root in ["Users", "users", "home"] {
+                let Some(after) = rest.strip_prefix(root) else {
+                    continue;
+                };
+                let seps = after.len() - after.trim_start_matches(SEP).len();
+                let name = &after[seps..];
+                let name_len = name
+                    .find(['/', '\\', '"', '\'', ' ', '\n', '\r'])
+                    .unwrap_or(name.len());
+                if seps > 0 && name_len > 0 {
+                    out.push_str(root);
+                    out.push_str(&after[..seps]);
+                    out.push_str("[redacted-user]");
+                    rest = &name[name_len..];
+                    continue 'scan;
+                }
+            }
+        }
+        let c = rest.chars().next().expect("not empty");
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
     }
     out
 }
@@ -238,7 +299,17 @@ mod tests {
                 &["trader7", "hunter2"][..],
             ),
             (r#"{"password": "hunter2", "symbol": "ES"}"#, &["hunter2"]),
-            ("Authorization: Bearer abc", &["Bearer"]),
+            ("Authorization: Bearer abc", &["Bearer", "abc"]),
+            (
+                "GET /v1/feed?key=k9secret&sig=s1gned&n=2 then Authorization: Basic dXNlcjpwYXNz",
+                &["k9secret", "s1gned", "dXNlcjpwYXNz"],
+            ),
+            (r"log dir C:\Users\jsmith\AppData\Local\lines", &["jsmith"]),
+            (r#"path "C:\\Users\\jsmith\\AppData""#, &["jsmith"]),
+            (
+                "saved /Users/jsmith/Library/x and /home/jsmith/.config/y",
+                &["jsmith"],
+            ),
             ("api_key='k-123' then", &["k-123"]),
             (
                 "sent to someone@example.org today",
@@ -261,5 +332,23 @@ mod tests {
         let plain =
             "feed ESZ26 live: 5000 updates/s, gaps 0, reconnects 2 (wss://example.invalid/ws)";
         assert_eq!(text(plain), plain);
+        // Other folders and ordinary words are kept.
+        let kept = "store /data/lines/users.idx, monkey hotkey design";
+        assert_eq!(text(kept), kept);
+    }
+
+    /// Maps keyed by account lose their keys, numbered; nothing else is renamed.
+    #[test]
+    fn account_keyed_maps_lose_their_keys() {
+        let v: Value = serde_json::from_str(
+            r#"{"guardrails":{"PA-123456":{"max_trades_per_day":3},"Rithmic 50K":{}},"bracket_presets":{"PA-123456":{}},"prop_rules":{"PA-9":{"preset":"50K"}},"drawing_styles":{"trend":{}}}"#,
+        )
+        .unwrap();
+        let s = json(&v).to_string();
+        for id in ["PA-123456", "Rithmic 50K", "PA-9"] {
+            assert!(!s.contains(id), "{id} survived: {s}");
+        }
+        assert!(s.contains("[redacted-account-2]") && s.contains("max_trades_per_day"));
+        assert!(s.contains("\"trend\""), "{s}");
     }
 }
