@@ -61,7 +61,7 @@ Run on the exact HEAD you push. Report the SHA and each result.
 - CI re-runs 1, 2 and 4 on Windows/macOS/Linux, 3 on Windows, 8, and cargo-deny. 5 and 6 are local only.
 
 ## Git and PRs
-- Branch in a worktree off origin/main. Never commit or push to main (hook-blocked; PRs only).
+- Branch in a worktree off origin/main. Never commit on main; pushing to main is hook-blocked (PRs only).
 - Rebase on origin/main before review and before merge; `--force-with-lease` to your own branch is fine.
 - PR body: `.github/pull_request_template.md`, filled with gate output, screenshots and the risk tier.
 - Merge only with `gh pr merge <n> --merge`. Never `--admin` or `--delete-branch`.
@@ -76,10 +76,10 @@ Run on the exact HEAD you push. Report the SHA and each result.
   theme tokens; feed parsing covered by fuzz smoke tests; benches. Agents merge when green.
 - B: `crates/lines-trading/**`; DOM/chart click-to-order paths (`dom_trade.rs`, `trade_bar.rs`,
   `trading.rs`); any saved format or migration (workspace, settings, trading file, `.lfr`, store
-  segments); dependencies, `deny.toml`, toolchain, GPUI pin; `.github/**`; `CLAUDE.md`, skills;
-  anything needing a decision record. Agents merge when green, with extra proof: a "Risk" section
+  segments); dependencies, `deny.toml`, toolchain, GPUI pin; anything needing a decision record. Agents merge when green, with extra proof: a "Risk" section
   in the PR (what could go wrong, which tests cover it) and a clean final review round.
-- C: everything under "Owner only", plus any change to `.claude/hooks/` or `.claude/settings.json`.
+- C: everything under "Owner only", plus any change to the agent rules and guardrails:
+  `CLAUDE.md`, `.claude/**` (hooks, settings, skills, agents) and `.github/**` (the hook asks).
   Ask the owner first and say exactly what and why. Proceed (including merging) only on an explicit
   yes for that specific change; a yes never carries over to another change.
 
