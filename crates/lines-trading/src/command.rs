@@ -10,6 +10,7 @@ use std::time::Instant;
 use lines_core::{ContractKey, Price, Qty};
 use serde::{Deserialize, Serialize};
 
+use crate::strategy::{StrategyConfig, StrategyId};
 use crate::types::{
     AccountId, CommandId, OrderId, OrderKind, Side, contract_serde, opt_price_serde, qty_serde,
 };
@@ -85,18 +86,51 @@ pub enum Command {
         account: AccountId,
         guardrails: crate::guardrails::Guardrails,
     },
+    /// Create or replace a strategy instance (decision 0025). It starts Disarmed; an armed
+    /// instance must be stopped or paused first. Not from a strategy.
+    AddStrategy(StrategyConfig),
+    /// Stop an instance (its entries cancelled) and forget it. Not from a strategy.
+    RemoveStrategy {
+        id: StrategyId,
+    },
+    /// Let an instance trade. A person's command only (never a strategy, a rule or the API);
+    /// nothing else ever arms.
+    ArmStrategy {
+        id: StrategyId,
+    },
+    /// Pause an armed instance until it is armed again by hand: its entry orders are
+    /// cancelled, protective exits stay. A strategy may pause only itself.
+    PauseStrategy {
+        id: StrategyId,
+        reason: String,
+    },
+    /// Stop one instance (`id`) or all of them, at once: never gated by anything. Entry orders
+    /// are cancelled; with `flatten` each account and contract they trade is flattened too,
+    /// otherwise protective exits stay while a position is open. A strategy may stop only
+    /// itself.
+    StopStrategies {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<StrategyId>,
+        flatten: bool,
+    },
 }
 
 impl Command {
-    pub fn account(&self) -> &AccountId {
+    /// The account the command acts on (`None`: strategy controls that name an instance).
+    pub fn account(&self) -> Option<&AccountId> {
         match self {
-            Command::PlaceOrder(o) => &o.account,
-            Command::PlaceBracket(b) => &b.entry.account,
+            Command::PlaceOrder(o) => Some(&o.account),
+            Command::PlaceBracket(b) => Some(&b.entry.account),
             Command::ModifyOrder { account, .. }
             | Command::CancelOrder { account, .. }
             | Command::CancelAll { account, .. }
             | Command::Flatten { account, .. }
-            | Command::SetGuardrails { account, .. } => account,
+            | Command::SetGuardrails { account, .. } => Some(account),
+            Command::AddStrategy(c) => Some(&c.account),
+            Command::RemoveStrategy { .. }
+            | Command::ArmStrategy { .. }
+            | Command::PauseStrategy { .. }
+            | Command::StopStrategies { .. } => None,
         }
     }
 
@@ -104,7 +138,24 @@ impl Command {
     pub fn always_allowed(&self) -> bool {
         matches!(
             self,
-            Command::CancelAll { .. } | Command::Flatten { .. } | Command::CancelOrder { .. }
+            Command::CancelAll { .. }
+                | Command::Flatten { .. }
+                | Command::CancelOrder { .. }
+                | Command::StopStrategies { .. }
+        )
+    }
+
+    /// An order action (new, modify, cancel, flatten): a person doing one on a strategy's
+    /// account and contract pauses that strategy (decisions 0023, 0025).
+    pub fn is_order_action(&self) -> bool {
+        matches!(
+            self,
+            Command::PlaceOrder(_)
+                | Command::PlaceBracket(_)
+                | Command::ModifyOrder { .. }
+                | Command::CancelOrder { .. }
+                | Command::CancelAll { .. }
+                | Command::Flatten { .. }
         )
     }
 }
@@ -154,6 +205,8 @@ pub enum Source {
     Rule,
     Api,
     Test,
+    /// A strategy instance (decision 0025): automated, held to the strategy gate.
+    Strategy(StrategyId),
 }
 
 /// A command on its way in. `issued` is the input event's time (the click), so the
@@ -196,6 +249,9 @@ pub enum RejectCode {
     MarketClosed,
     /// The broker can't do it (capabilities) or refused it.
     Broker,
+    /// The strategy gate (decision 0025): the instance's state, scope or limits, or a
+    /// strategy control the source may not issue.
+    Strategy,
 }
 
 impl Reject {
