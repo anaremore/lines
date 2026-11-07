@@ -454,8 +454,8 @@ pub fn run_from<V: TradePane>(
 }
 
 pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut Context<V>) {
+    close_account_menu(v, cx);
     let t = v.trade();
-    t.account_menu = false;
     if account.is_some() && account != t.account {
         t.account = account;
         t.seen = u64::MAX;
@@ -1192,6 +1192,10 @@ fn run_on_click<V: TradePane>(
         MouseButton::Left,
         cx.listener(move |v: &mut V, _, _, cx| {
             cx.stop_propagation();
+            if matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll) {
+                // Drawn over an open popover's backdrop (`popover::always_live`): it closes.
+                crate::popover::close_any(cx);
+            }
             run_from(v, cmd, Instant::now(), Source::Dom, cx);
         }),
     )
@@ -1392,7 +1396,13 @@ pub fn dom_bar<V: TradePane>(
         if cmd == TradeCmd::Reverse {
             b = gate(b);
         }
-        row = row.child(run_on_click(tip(b, name, Some(cmd), t), cmd, cx));
+        let b = run_on_click(tip(b, name, Some(cmd), t), cmd, cx);
+        row = if entry {
+            row.child(b)
+        } else {
+            // Cancel all and Flatten: one press even with a popover open (design.md §3).
+            row.child(crate::popover::always_live(b))
+        };
     }
     panel = panel.child(row);
     Some(panel.into_any_element())
@@ -2221,35 +2231,38 @@ fn account_chip<V: TradePane>(
         .gap_1()
         .min_w_0()
         .when(paper, |d| d.child(paper_badge(t)))
-        .child(crate::dropdown::dropdown(
-            // The chip is recorded from a wrapper: the chip clips its own children.
-            div()
-                .relative()
-                .min_w_0()
-                .flex()
-                .child(c.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|v: &mut V, _, _, cx| {
-                        cx.stop_propagation();
-                        let t = v.trade();
-                        t.account_menu = !t.account_menu;
-                        cx.notify();
-                    }),
-                ))
-                .children(
-                    crate::layout_rec::on()
-                        .then(|| {
-                            crate::layout_rec::marker(
-                                lines_core::layout_lint::Kind::Chip,
-                                format!("{name} ▾"),
-                                0,
-                                "",
-                            )
-                        })
-                        .flatten(),
-                ),
-            menu,
-        ))
+        .child(
+            crate::dropdown::dropdown(
+                // The chip is recorded from a wrapper: the chip clips its own children.
+                div()
+                    .relative()
+                    .min_w_0()
+                    .flex()
+                    .child(c.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v: &mut V, _, _, cx| {
+                            cx.stop_propagation();
+                            toggle_account_menu(v, cx);
+                        }),
+                    ))
+                    .children(
+                        crate::layout_rec::on()
+                            .then(|| {
+                                crate::layout_rec::marker(
+                                    lines_core::layout_lint::Kind::Chip,
+                                    format!("{name} ▾"),
+                                    0,
+                                    "",
+                                )
+                            })
+                            .flatten(),
+                    ),
+                menu,
+            )
+            .on_dismiss(Box::new(cx.listener(
+                |v: &mut V, _: &gpui::MouseDownEvent, _, cx| close_account_menu(v, cx),
+            ))),
+        )
         .into_any_element()
 }
 
@@ -2298,6 +2311,26 @@ fn badge(t: &Theme) -> gpui::Div {
         .text_color(t.on_paper_badge)
         .font_weight(FontWeight::BOLD)
         .child("PAPER")
+}
+
+/// Open or close the account list (the account chip).
+pub fn toggle_account_menu<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
+    if v.trade_ref().account_menu {
+        return close_account_menu(v, cx);
+    }
+    v.trade().account_menu = true;
+    crate::popover::opened(cx, crate::popover::Kind::Account, |v: &mut V, cx| {
+        close_account_menu(v, cx)
+    });
+    cx.notify();
+}
+
+/// Close the account list if open (an outside click, Esc, another popover opening).
+pub fn close_account_menu<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
+    if std::mem::take(&mut v.trade().account_menu) {
+        crate::popover::closed(cx, crate::popover::Kind::Account);
+        cx.notify();
+    }
 }
 
 /// The account list, while the selector is open: under the account chip (`dropdown`).

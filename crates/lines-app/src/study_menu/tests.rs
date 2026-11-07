@@ -405,3 +405,36 @@ fn templates_save_apply_and_round_trip() {
     );
     assert_eq!(m.naming, None);
 }
+
+/// The popover rule: a menu closed half-edited (an outside click, Esc, another popover
+/// opening) comes back exactly as it was: the editor open on the same study, the cursor on the
+/// same control, a template name half typed.
+#[test]
+fn a_closed_menu_reopens_with_its_draft() {
+    use crate::popover::{reopen, shut};
+    let src = sources();
+    let mut set = StudySet::default();
+    set.apply(&StudyAction::AddVwap(Reset::Eth));
+    let mut open = Some(StudyMenu::default());
+    let mut draft = None;
+    let m = open.as_mut().unwrap();
+    let items = m.items(&input(&set, &src, &[]));
+    m.clamp(&items);
+    let cmd = m.key(&items, "enter", None).unwrap();
+    assert_eq!(m.local(cmd), None);
+    let items = m.items(&input(&set, &src, &[]));
+    m.key(&items, "down", None);
+    m.naming = Some("scal".into());
+    let before = m.clone();
+    assert_eq!(before.editing, Some(StudyRef::Vwap(0)));
+
+    assert!(shut(&mut open, &mut draft));
+    assert_eq!(open, None);
+    let mut again = reopen(&mut draft);
+    again.clamp(&again.items(&input(&set, &src, &[])));
+    assert_eq!(again, before);
+    let l = labels(&again.items(&input(&set, &src, &[])));
+    assert_eq!(l[2], "  Reset: ETH *", "the editor is open again");
+    // Once reopened the draft is used up: closing a finished menu starts fresh next time.
+    assert_eq!(draft, None);
+}

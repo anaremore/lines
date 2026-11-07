@@ -1816,6 +1816,17 @@ impl WindowView {
 
     // ---- menu and prompt --------------------------------------------------------------------
 
+    /// Open a pane, tab or column menu: any other popover closes (`crate::popover`).
+    fn show_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        self.menu = Some(menu);
+        crate::popover::opened(cx, crate::popover::Kind::Menu, |this: &mut Self, cx| {
+            if this.menu.take().is_some() {
+                cx.notify();
+            }
+        });
+        cx.notify();
+    }
+
     /// The focused pane's menu: pane actions (layout and workspace actions are on the tab's).
     fn open_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(h) = self.tab().focused_handle().cloned() else {
@@ -1991,8 +2002,7 @@ impl WindowView {
         }
         items.push(MenuItem::of(Command::ExportDiagnostics, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
-        self.menu = Some(Menu::new(at, items));
-        cx.notify();
+        self.show_menu(Menu::new(at, items), cx);
     }
 
     /// A DOM's or tape's column menu (right-click on its header row): show or hide each
@@ -2023,8 +2033,7 @@ impl WindowView {
         items.push(MenuItem::sep());
         items.push(MenuItem::of(Command::Columns(ColumnCmd::AutoFitAll), false));
         items.push(MenuItem::of(Command::Columns(ColumnCmd::Reset), false));
-        self.menu = Some(Menu::new(at, items));
-        cx.notify();
+        self.show_menu(Menu::new(at, items), cx);
     }
 
     /// A tab's menu: tab, layout and workspace actions.
@@ -2073,8 +2082,7 @@ impl WindowView {
         ));
         items.push(MenuItem::of(Command::ExportDiagnostics, false));
         items.push(MenuItem::named("All commands…", Command::Palette, false));
-        self.menu = Some(Menu::new(at, items));
-        cx.notify();
+        self.show_menu(Menu::new(at, items), cx);
     }
 
     fn menu_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2584,7 +2592,8 @@ impl WindowView {
                     .overflow_hidden()
                     .capture_any_mouse_down(cx.listener(
                         move |this, ev: &MouseDownEvent, window, cx| {
-                            this.menu = None;
+                            // An open menu's backdrop (`crate::popover`) takes presses while
+                            // it is open: this pane sees none of them.
                             this.focus_pane(id, window, cx);
                             // The header is a handle: drag it out of the window to pop out.
                             let y = f32::from(ev.position.y) - bar - r.y;

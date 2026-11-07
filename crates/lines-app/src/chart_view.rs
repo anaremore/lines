@@ -75,6 +75,7 @@ use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::pnl::PnlDisplay;
+use crate::popover::{self, Kind};
 use crate::profile::{ProfileConfig, VolumeProfileLayer};
 use crate::study_menu::{
     Item, MenuCmd, MenuInput, SourceInfo, StudyAction, StudyMenu, StudyRef, StudySet, anchor_at,
@@ -243,6 +244,9 @@ pub struct ChartView {
     seen_studies: u64,
     /// The studies menu (Ctrl+I, "Studies…"), while open.
     study_menu: Option<StudyMenu>,
+    /// The studies menu as it was when last closed without finishing (an editor open, a
+    /// template name half typed): reopening restores it (the popover rule).
+    study_draft: Option<StudyMenu>,
     /// Waiting for a click on a bar to anchor a VWAP: `Some(None)` adds a new one.
     anchoring: Option<Option<usize>>,
     /// External levels (decision 0022), saved with the pane.
@@ -422,6 +426,7 @@ impl ChartView {
 
         let mut view = ChartView {
             study_menu: None,
+            study_draft: None,
             anchoring: None,
             feed,
             common: PaneCommon::default(),
@@ -575,15 +580,40 @@ impl ChartView {
     pub fn toggle_studies_menu(&mut self, cx: &mut Context<Self>) {
         self.picker.close();
         self.anchoring = None;
-        self.study_menu = match self.study_menu.take() {
-            Some(_) => None,
-            None => {
-                let mut m = StudyMenu::default();
-                let items = self.menu_items(&m, cx);
-                m.clamp(&items);
-                Some(m)
+        if self.study_menu.is_some() {
+            self.close_popover(Kind::Studies, cx);
+            return;
+        }
+        self.close_popover(Kind::Timeframe, cx);
+        self.close_popover(Kind::Account, cx);
+        let mut m = popover::reopen(&mut self.study_draft);
+        let items = self.menu_items(&m, cx);
+        m.clamp(&items);
+        self.study_menu = Some(m);
+        popover::opened(cx, Kind::Studies, |v: &mut Self, cx| {
+            v.close_popover(Kind::Studies, cx)
+        });
+        cx.notify();
+    }
+
+    /// Close this chart's popover `kind` if open (an outside click, Esc, another popover
+    /// opening). The studies menu keeps its state as the draft the next open restores.
+    pub fn close_popover(&mut self, kind: Kind, cx: &mut Context<Self>) {
+        match kind {
+            Kind::Studies => {
+                if !popover::shut(&mut self.study_menu, &mut self.study_draft) {
+                    return;
+                }
             }
-        };
+            Kind::Timeframe => {
+                if !std::mem::take(&mut self.tf_menu) {
+                    return;
+                }
+            }
+            Kind::Account => return crate::trade_bar::close_account_menu(self, cx),
+            Kind::Menu => return,
+        }
+        popover::closed(cx, kind);
         cx.notify();
     }
 
@@ -654,7 +684,10 @@ impl ChartView {
                 self.set_study_set(s);
             }
             Some(MenuCmd::BeginAnchor(i)) => {
+                // Finished with the menu: no draft to come back to.
                 self.study_menu = None;
+                self.study_draft = None;
+                popover::closed(cx, Kind::Studies);
                 self.anchoring = Some(i);
             }
             Some(MenuCmd::ApplyTemplate(name)) => {
@@ -684,7 +717,7 @@ impl ChartView {
                 let set = self.study_set();
                 crate::picker_view::update_settings(cx, |s| s.chart_defaults = Some(set));
             }
-            Some(MenuCmd::Close) => self.study_menu = None,
+            Some(MenuCmd::Close) => self.close_popover(Kind::Studies, cx),
             Some(MenuCmd::Edit(_) | MenuCmd::StartSaveTemplate) | None => {}
         }
         if let Some(mut m) = self.study_menu.take() {
@@ -867,17 +900,22 @@ impl ChartView {
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        popover::clear_dismissing();
         let Some(region) = self.region(ev.position) else {
             return;
         };
-        self.focus.focus(window, cx);
-        let tf = std::mem::take(&mut self.tf_menu);
-        if std::mem::take(&mut self.trade.account_menu) || tf {
-            // Clicking the chart dismisses the timeframe or account list (their rows handle
-            // their clicks).
-            cx.notify();
+        // An open list or menu normally takes this press on its backdrop (`crate::popover`);
+        // this is the fallback (a list whose chip is clipped away draws none). A press that
+        // closes something does only that: no focus change, no pan.
+        if self.tf_menu || self.trade.account_menu || self.study_menu.is_some() {
+            popover::mark_dismissing();
+            self.close_popover(Kind::Timeframe, cx);
+            self.close_popover(Kind::Account, cx);
+            self.close_popover(Kind::Studies, cx);
+            cx.stop_propagation();
             return;
         }
+        self.focus.focus(window, cx);
         if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
             cx.notify();
@@ -959,7 +997,15 @@ impl ChartView {
             return;
         }
         if self.study_menu.is_some() {
+            // Esc steps back (a template name, an editor, the filter) and at the top closes
+            // the menu (`MenuCmd::Close`), its state kept as a draft (the popover rule).
             self.menu_key(ev, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if (self.tf_menu || self.trade.account_menu) && popover::closes_on_key(&k.key) {
+            self.close_popover(Kind::Timeframe, cx);
+            self.close_popover(Kind::Account, cx);
             cx.stop_propagation();
             return;
         }
@@ -988,12 +1034,6 @@ impl ChartView {
         }
         if self.tf_entry.is_some() {
             self.timeframe_key(k, cx);
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-        if self.tf_menu && k.key == "escape" {
-            self.tf_menu = false;
             cx.stop_propagation();
             cx.notify();
             return;
@@ -1035,6 +1075,11 @@ impl ChartView {
 
     fn open_picker(&mut self, query: &str, cx: &mut Context<Self>) {
         self.end_drag();
+        // The picker covers the chart: its lists and menu close (their backdrops would take
+        // the picker's clicks).
+        self.close_popover(Kind::Timeframe, cx);
+        self.close_popover(Kind::Account, cx);
+        self.close_popover(Kind::Studies, cx);
         self.picker.open(query, cx);
     }
 
@@ -1101,7 +1146,7 @@ impl ChartView {
     /// where it is (with no pointer, the plot's middle, unless the chart follows the live
     /// edge, which it keeps doing).
     pub fn set_timeframe(&mut self, tf: Timeframe, cx: &mut Context<Self>) {
-        self.tf_menu = false;
+        self.close_popover(Kind::Timeframe, cx);
         self.tf_entry = None;
         if tf != self.timeframe && tf.is_valid() {
             let x = match self.hover {
@@ -1141,13 +1186,18 @@ impl ChartView {
 
     /// Open or close the timeframe list (header chip, pane menu, palette).
     pub fn toggle_timeframe_menu(&mut self, cx: &mut Context<Self>) {
-        self.tf_menu = !self.tf_menu;
         if self.tf_menu {
-            self.picker.close();
-            self.study_menu = None;
-            self.tf_entry = None;
-            self.trade.account_menu = false;
+            self.close_popover(Kind::Timeframe, cx);
+            return;
         }
+        self.picker.close();
+        self.close_popover(Kind::Studies, cx);
+        self.close_popover(Kind::Account, cx);
+        self.tf_entry = None;
+        self.tf_menu = true;
+        popover::opened(cx, Kind::Timeframe, |v: &mut Self, cx| {
+            v.close_popover(Kind::Timeframe, cx)
+        });
         cx.notify();
     }
 
@@ -1417,6 +1467,10 @@ impl ChartView {
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // The release of a press that closed a popover does nothing here (no drawing finished).
+        if popover::dismissing() {
+            return;
+        }
         let (x, y) = self.local(ev.position);
         // A release off the plot (an axis) never places an anchor.
         let anchor = (self.region(ev.position) == Some(Region::Plot))
@@ -3021,9 +3075,12 @@ impl ChartView {
         );
         let desc_w = measure(i.description).ceil() + 1.0;
         let account = crate::trade_bar::chart_chip(self, &t, fit.account, cx);
-        let timeframe = fit
-            .timeframe
-            .then(|| crate::dropdown::dropdown(self.timeframe_chip(&t, cx), list));
+        let timeframe = fit.timeframe.then(|| {
+            let dismiss: popover::OnDismiss = Box::new(
+                cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::Timeframe, cx)),
+            );
+            crate::dropdown::dropdown(self.timeframe_chip(&t, cx), list).on_dismiss(dismiss)
+        });
         bar().child(
             pane::header_content()
                 .child(
@@ -3611,7 +3668,13 @@ impl Render for ChartView {
                     .when_some(
                         self.study_menu.as_ref().map(|m| {
                             let items = self.menu_items(m, cx);
-                            crate::study_menu_view::render(m, &items, &t, cx)
+                            let menu = crate::study_menu_view::render(m, &items, &t, cx);
+                            // Over the window with a backdrop under it (`crate::popover`).
+                            let dismiss: popover::OnDismiss =
+                                Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                                    v.close_popover(Kind::Studies, cx)
+                                }));
+                            popover::layer(menu, dismiss)
                         }),
                         |d, m| d.child(m),
                     )

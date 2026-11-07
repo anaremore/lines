@@ -94,6 +94,12 @@ impl PaneWindow {
     }
 
     fn open_menu(&mut self, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        // Any other popover closes (`crate::popover`).
+        crate::popover::opened(cx, crate::popover::Kind::Menu, |this: &mut Self, cx| {
+            if this.menu.take().is_some() {
+                cx.notify();
+            }
+        });
         self.menu = Some(Menu::new(
             at,
             vec![

@@ -198,26 +198,37 @@ impl Menu {
                     ),
             );
         }
-        // Deferred above any open header dropdown (`dropdown::OVERLAY_PRIORITY`).
-        gpui::deferred(
-            div()
-                .absolute()
-                .size_full()
-                .child(
-                    // Clicking anywhere else closes the menu.
+        // The menu deferred above any open header dropdown (`dropdown::OVERLAY_PRIORITY`); its
+        // backdrop at every popover's (under Flatten and Cancel all, `crate::popover`).
+        let rect = crate::layout::Rect::new(x, y, MENU_W, h);
+        div()
+            .absolute()
+            .size_full()
+            .child(
+                gpui::deferred(
+                    // A press anywhere else closes the menu and does nothing else
+                    // (`crate::popover`): it occludes, and stops the press.
                     div()
                         .id("menu-backdrop")
                         .absolute()
                         .size_full()
-                        .on_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            *slot(this) = None;
-                            cx.notify();
+                        .occlude()
+                        .on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let p = (f32::from(ev.position.x), f32::from(ev.position.y));
+                            if let Some(d) = crate::popover::outside_click(true, p, &[rect]) {
+                                if d.consume {
+                                    cx.stop_propagation();
+                                }
+                                crate::popover::mark_dismissing();
+                                *slot(this) = None;
+                                cx.notify();
+                            }
                         })),
                 )
-                .child(list),
-        )
-        .with_priority(crate::dropdown::OVERLAY_PRIORITY)
-        .into_any_element()
+                .with_priority(crate::dropdown::BACKDROP_PRIORITY),
+            )
+            .child(gpui::deferred(list).with_priority(crate::dropdown::OVERLAY_PRIORITY))
+            .into_any_element()
     }
 }
 
