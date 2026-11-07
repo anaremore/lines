@@ -261,6 +261,51 @@ pub struct ChartTradeState {
     pub grab: i64,
     /// Where a handle drag started: releasing there (a click, no drag) places nothing.
     pub add_from: Option<Price>,
+    /// The position tag as last drawn (plot-local): pressing it starts a position-line drag.
+    pub pos_tag: Option<TagBox>,
+    /// The position line is being dragged (phase 2): `adding` follows the pointer's side.
+    pub pos_drag: bool,
+    /// Where an add drag (handle or position line) was pressed, plot-local y, and the farthest
+    /// the pointer has moved from it (px): under [`DRAG_PX`] it was a click.
+    pub press_y: f32,
+    pub moved: f32,
+}
+
+/// An add drag shorter than this (px) is a click and places nothing.
+pub const DRAG_PX: f32 = 4.0;
+
+/// What releasing an add drag (a "+T"/"+S" handle or the position line) does.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Release {
+    /// A click, or released where no exit side applies (at the average).
+    Nothing,
+    /// No exit of that kind yet: place one (`PlaceExit`).
+    Place(AddExit),
+    /// The position already has that exit: move it there (the DOM's modify path), never a
+    /// second, unpaired one.
+    Move {
+        order: lines_trading::OrderId,
+        to: Price,
+    },
+}
+
+/// The release decision, pure: `adding` (the previewed exit, if any), how far the pointer moved
+/// (px), and the position's existing exit of that kind.
+pub fn release_action(
+    adding: Option<AddExit>,
+    moved: f32,
+    existing: impl Fn(bool) -> Option<lines_trading::OrderId>,
+) -> Release {
+    let Some(a) = adding else {
+        return Release::Nothing;
+    };
+    if moved < DRAG_PX {
+        return Release::Nothing;
+    }
+    match existing(a.target) {
+        Some(order) => Release::Move { order, to: a.to },
+        None => Release::Place(a),
+    }
 }
 
 impl Default for ChartTradeState {
@@ -280,6 +325,10 @@ impl Default for ChartTradeState {
             closing: None,
             grab: 0,
             add_from: None,
+            pos_tag: None,
+            pos_drag: false,
+            press_y: 0.0,
+            moved: 0.0,
         }
     }
 }
@@ -329,6 +378,16 @@ impl ChartTradeState {
     /// The order behind a tag id (open, as of this frame).
     pub fn mark(&self, id: u64) -> Option<&OrderMark> {
         self.marks.iter().find(|m| m.id.0 == id)
+    }
+
+    /// The position's existing exit of a kind (`target`), if any: a drag of that kind moves it.
+    pub fn existing_exit(&self, target: bool) -> Option<OrderMark> {
+        let want = if target {
+            MarkRole::Target
+        } else {
+            MarkRole::Stop
+        };
+        self.marks.iter().copied().find(|m| MarkRole::of(m) == want)
     }
 
     /// Whether the position already has a target / a stop working: `(target, stop)`.
@@ -483,6 +542,42 @@ mod tests {
         assert!(
             exit_command(&a, k, 1, true, p(5815.0), (None, None, None)).is_err(),
             "no market"
+        );
+    }
+
+    /// Review: a click (under 4 px) places nothing; released at the average, nothing; a kind the
+    /// position already has is moved, never doubled.
+    #[test]
+    fn releasing_an_add_drag_places_moves_or_does_nothing() {
+        use lines_trading::OrderId;
+        let a = AddExit {
+            target: true,
+            to: Price(582_000),
+        };
+        let none = |_: bool| None;
+        assert_eq!(
+            release_action(None, 40.0, none),
+            Release::Nothing,
+            "at the average"
+        );
+        assert_eq!(
+            release_action(Some(a), 2.0, none),
+            Release::Nothing,
+            "a click"
+        );
+        assert_eq!(release_action(Some(a), 40.0, none), Release::Place(a));
+        let has_target = |t: bool| t.then_some(OrderId(9));
+        assert_eq!(
+            release_action(Some(a), 40.0, has_target),
+            Release::Move {
+                order: OrderId(9),
+                to: Price(582_000)
+            }
+        );
+        let stop = AddExit { target: false, ..a };
+        assert_eq!(
+            release_action(Some(stop), 40.0, has_target),
+            Release::Place(stop)
         );
     }
 

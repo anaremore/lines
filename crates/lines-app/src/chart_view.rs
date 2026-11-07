@@ -181,6 +181,9 @@ pub trait ChartLayer: 'static {
 pub struct Fixture {
     /// Fixed pointer position, plot-local logical px.
     pub cursor: Option<(f32, f32)>,
+    /// The position line dragged to this plot-local y (screenshots: `--drag-position Y`):
+    /// the exit it would set is previewed, never placed.
+    pub drag_position: Option<f32>,
     /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
     /// would (turns auto-scale off).
     pub price_zoom: Option<f64>,
@@ -369,6 +372,8 @@ pub struct ChartView {
     pos_glyphs: crate::text::Glyphs,
     /// The chart's orders this frame: lines, tags, edge markers, handles, drags.
     ct: crate::chart_trade::ChartTradeState,
+    /// Screenshot fixture: the position line held dragged to this plot-local y.
+    drag_position: Option<f32>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
     /// groups: they share the market only.
     timeframe: Timeframe,
@@ -560,6 +565,7 @@ impl ChartView {
             trade,
             pos_glyphs: crate::text::Glyphs::new(LABEL_PX),
             ct: crate::chart_trade::ChartTradeState::default(),
+            drag_position: fixture.drag_position,
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
             ticks: None,
@@ -1653,10 +1659,11 @@ impl ChartView {
         if ev.pressed_button != Some(MouseButton::Left) && self.drawings.release_lost() {
             cx.notify();
         }
-        if self.ct.drag.is_some() || self.ct.adding.is_some() {
+        if self.ct.drag.is_some() || self.ct.adding.is_some() || self.ct.pos_drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.ct.drag = None;
                 self.ct.adding = None;
+                self.ct.pos_drag = false;
             } else {
                 let (_, y) = self.local(ev.position);
                 let tick = self.instrument.price.tick;
@@ -1664,7 +1671,15 @@ impl ChartView {
                     if let Some(d) = &mut self.ct.drag {
                         d.to = Price(to.0 + self.ct.grab);
                     }
-                    if let Some(a) = &mut self.ct.adding {
+                    if self.ct.pos_drag || self.ct.adding.is_some() {
+                        self.ct.moved = self.ct.moved.max((y as f32 - self.ct.press_y).abs());
+                    }
+                    if self.ct.pos_drag {
+                        let (qty, avg) = self.ct.position.unwrap_or((0, f64::NAN));
+                        self.ct.adding =
+                            lines_core::geometry::order_tags::position_drag_exit(qty, avg, to)
+                                .map(|target| crate::chart_trade::AddExit { target, to });
+                    } else if let Some(a) = &mut self.ct.adding {
                         a.to = to;
                     }
                 }
@@ -1725,10 +1740,19 @@ impl ChartView {
             cx.notify();
             return;
         }
-        if let Some(a) = self.ct.adding.take() {
-            // A click on a handle without dragging it places nothing.
-            if self.ct.add_from.take() != Some(a.to) {
-                self.place_exit(a, cx);
+        // An add drag (a handle or the position line): place, move the existing exit of that
+        // kind, or nothing (a click, or released at the average) — `chart_trade::release_action`.
+        if std::mem::take(&mut self.ct.pos_drag) || self.ct.adding.is_some() {
+            let adding = self.ct.adding.take();
+            self.ct.add_from = None;
+            let existing = |target: bool| self.ct.existing_exit(target).map(|m| m.id);
+            let action = crate::chart_trade::release_action(adding, self.ct.moved, existing);
+            match action {
+                crate::chart_trade::Release::Nothing => {}
+                crate::chart_trade::Release::Place(a) => self.place_exit(a, cx),
+                crate::chart_trade::Release::Move { order, to } => {
+                    self.drop_order(crate::dom_orders::DragOrder { order, to }, cx)
+                }
             }
             cx.notify();
             return;
@@ -1759,6 +1783,23 @@ impl ChartView {
             x as f32,
             y as f32,
         ) else {
+            // The position line's tag (phase 2): drag it toward profit for a target, toward
+            // loss for a stop; released, the same reduce-only exit as the handles.
+            if self.ct.position.is_some()
+                && self
+                    .ct
+                    .pos_tag
+                    .is_some_and(|t| t.contains(x as f32, y as f32))
+            {
+                self.ct.pos_drag = true;
+                self.ct.adding = None;
+                self.ct.press_y = y as f32;
+                self.ct.moved = 0.0;
+                self.ct.add_from =
+                    lines_core::geometry::snap_price(&self.vp, y, self.instrument.price.tick);
+                cx.notify();
+                return true;
+            }
             return false;
         };
         match h {
@@ -1790,6 +1831,8 @@ impl ChartView {
                         to,
                     });
                     self.ct.add_from = Some(to);
+                    self.ct.press_y = y as f32;
+                    self.ct.moved = 0.0;
                 }
             }
             TagHit::Edge(price) => {
@@ -2322,6 +2365,16 @@ impl ChartView {
         let refused = self
             .ct
             .prepare(&t.cache, self.trade.account.as_ref(), contract);
+        // Screenshot fixture: the position line held dragged (a preview, never placed: it sets
+        // only `adding`, never `pos_drag` or `moved`, so a release would see a click; and the
+        // flag exists only with `--screenshot`, which has no pointer).
+        if let (Some(y), Some((qty, avg))) = (self.drag_position, self.ct.position)
+            && let Some(to) =
+                lines_core::geometry::snap_price(&self.vp, y as f64, self.instrument.price.tick)
+        {
+            self.ct.adding = lines_core::geometry::order_tags::position_drag_exit(qty, avg, to)
+                .map(|target| crate::chart_trade::AddExit { target, to });
+        }
         let shown = cx
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
@@ -2513,14 +2566,21 @@ impl ChartView {
                 let mut pnl = FixedStr::<48>::new();
                 let mut text = FixedStr::<96>::new();
                 let _ = write_order_tag(&mut text, &preview, &fmt);
-                if write_exit_pnl(&mut pnl, &preview, self.ct.position, fmt.tick, mpu, mode)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    let _ = write!(text, " · {}", pnl.as_str());
-                }
-                let w = self.pos_glyphs.width(text.as_str(), c, true, window) + 12.0;
+                let money =
+                    write_exit_pnl(&mut pnl, &preview, self.ct.position, fmt.tick, mpu, mode)
+                        .ok()
+                        .flatten();
+                let head_w = self
+                    .pos_glyphs
+                    .width(text.as_str(), t.text_main, true, window);
+                let pnl_w = if money.is_some() {
+                    8.0 + self
+                        .pos_glyphs
+                        .width(pnl.as_str(), t.text_main, true, window)
+                } else {
+                    0.0
+                };
+                let w = head_w + pnl_w + 12.0;
                 let left = (pw - TAG_GAP_PX - w).max(0.0);
                 let top = (y - TAG_H * 0.5).clamp(0.0, (ph - TAG_H).max(0.0));
                 window.paint_quad(fill(rect(left, top, w, TAG_H), t.label_bg));
@@ -2535,6 +2595,23 @@ impl ChartView {
                     window,
                     cx,
                 );
+                if let Some(money) = money {
+                    let tone = match crate::pnl::tone(money) {
+                        crate::pnl::Tone::Up => t.up,
+                        crate::pnl::Tone::Down => t.down,
+                        crate::pnl::Tone::Flat => t.text_main,
+                    };
+                    self.pos_glyphs.paint(
+                        pnl.as_str(),
+                        ox + left + 6.0 + head_w + 8.0,
+                        oy + top,
+                        TAG_H,
+                        tone,
+                        true,
+                        window,
+                        cx,
+                    );
+                }
             }
         }
         // Tags.
@@ -2630,6 +2707,7 @@ impl ChartView {
         // The position tag's handles: add a target or a stop while the position has none.
         // Live in the exit's colour with trading enabled; dim otherwise (a press says how).
         self.ct.handles = [None, None];
+        self.ct.pos_tag = pos_tag;
         if let (Some(tag), Some((qty, _))) = (pos_tag, self.ct.position) {
             let (has_t, has_s) = self.ct.exits();
             self.ct.handles = handles(&tag, wanted_handles(qty, has_t, has_s));

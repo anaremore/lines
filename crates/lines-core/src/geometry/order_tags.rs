@@ -307,6 +307,18 @@ pub fn handle_is_target(position_qty: i64, above: bool) -> bool {
     (position_qty > 0) == above
 }
 
+/// Dragging the position line itself to `to` (roadmap 8, phase 2): which exit it sets, by
+/// direction from the average price `avg`: toward profit a target, toward loss a stop
+/// (`Some(true)`: target); at the average, nothing yet. The order is checked against the
+/// market when released (`chart_trade::exit_command`).
+pub fn position_drag_exit(position_qty: i64, avg: f64, to: Price) -> Option<bool> {
+    let p = to.0 as f64;
+    if position_qty == 0 || p == avg || !avg.is_finite() {
+        return None;
+    }
+    Some((p > avg) == (position_qty > 0))
+}
+
 /// Whether the handle for a target / stop is offered: only while the position has none (a
 /// working order on the exit side of that kind), as the owner asked ("when the bracket has
 /// none"). `[above, below]` for the given position.
@@ -529,6 +541,22 @@ mod tests {
             "short with a target: stop above"
         );
         assert_eq!(wanted_handles(0, false, false), [false, false]);
+    }
+
+    /// Phase 2: dragging the position line up from a long's average sets a target, down a
+    /// stop; a short the other way round; back at the average, nothing.
+    #[test]
+    fn position_line_drag_picks_the_exit_by_direction() {
+        let avg = 581_000.0;
+        assert_eq!(position_drag_exit(2, avg, Price(581_500)), Some(true));
+        assert_eq!(position_drag_exit(2, avg, Price(580_500)), Some(false));
+        assert_eq!(position_drag_exit(-1, avg, Price(580_500)), Some(true));
+        assert_eq!(position_drag_exit(-1, avg, Price(581_500)), Some(false));
+        assert_eq!(position_drag_exit(2, avg, Price(581_000)), None);
+        assert_eq!(position_drag_exit(0, avg, Price(581_500)), None);
+        // Review: a fractional average (fills at 100 and 101) never rounds a valid exit away.
+        assert_eq!(position_drag_exit(2, 100.5, Price(101)), Some(true));
+        assert_eq!(position_drag_exit(2, 100.5, Price(100)), Some(false));
     }
 
     #[test]
