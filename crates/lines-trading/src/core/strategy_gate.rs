@@ -16,6 +16,9 @@ use crate::types::{AccountId, Money, OrderId, Side};
 
 /// Why an instance paused when it reached its daily loss (it is also flattened).
 const DAILY_LOSS: &str = "its daily loss limit was reached: its trade was closed";
+/// Why it can't enter again on the trade date its daily loss closed its trade.
+const LOSS_CLOSED_TODAY: &str =
+    "its daily loss limit was reached today: no entries until the next trade date";
 
 fn deny(message: impl Into<String>) -> Reject {
     Reject::new(RejectCode::Strategy, message)
@@ -198,6 +201,7 @@ impl TradingCore {
         if i.state != StrategyState::Armed {
             i.state = StrategyState::Armed;
             i.reason = None;
+            i.taken_over = false;
             self.strategy_event(id, false);
         }
         Ok(Vec::new())
@@ -348,6 +352,17 @@ impl TradingCore {
         if self.strategy_day_pnl(now, id) <= -limit {
             return Some(DAILY_LOSS.into());
         }
+        // Its daily loss closed its trade today: no entries until the next trade date, even if
+        // the flatten filled better than the limit.
+        let day = self.trade_day(&account, now).map(|(d, _)| d);
+        if day.is_some()
+            && self
+                .strategies
+                .get(&id)
+                .is_some_and(|i| i.loss_closed == day)
+        {
+            return Some(LOSS_CLOSED_TODAY.into());
+        }
         None
     }
 
@@ -379,10 +394,10 @@ impl TradingCore {
         let Some(i) = self.strategies.get(&id) else {
             return;
         };
-        let manual = i
-            .reason
-            .as_deref()
-            .is_some_and(|r| r.starts_with("manual order activity"));
+        let manual = i.taken_over
+            || i.reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("manual order activity"));
         if i.state == StrategyState::Stopped || manual {
             return;
         }
@@ -392,8 +407,12 @@ impl TradingCore {
             Money::whole(i.cfg.limits.max_daily_loss),
             i.state,
         );
-        let day = self.trade_day(&account, now).map(|(d, _)| d);
-        if day.is_some() && self.strategies[&id].loss_closed == day {
+        // No trade date (an account without a day calendar): no day to close for.
+        let Some(day) = self.trade_day(&account, now).map(|(d, _)| d) else {
+            return;
+        };
+        let day = Some(day);
+        if self.strategies[&id].loss_closed == day {
             return;
         }
         if self.strategy_day_pnl(now, id) > -limit {
@@ -431,6 +450,16 @@ impl TradingCore {
             Command::CancelAll { contract, .. } | Command::Flatten { contract, .. } => *contract,
             _ => return,
         };
+        // Paused or disarmed: the person is taking over its trade (the daily-loss close leaves
+        // it alone until it is armed again).
+        for i in self.strategies.values_mut() {
+            if !matches!(i.state, StrategyState::Armed | StrategyState::Stopped)
+                && &i.cfg.account == account
+                && contract.is_none_or(|c| c == i.cfg.contract)
+            {
+                i.taken_over = true;
+            }
+        }
         let hit: Vec<(StrategyId, ContractKey)> = self
             .strategies
             .values()

@@ -153,7 +153,7 @@ impl Extensions {
         &self.brokers
     }
 
-    /// Add a strategy (decision 0025, pending acceptance): `--backtest <name>` runs it over a
+    /// Add a strategy (decision 0025): `--backtest <name>` runs it over a
     /// replay. Names must be unique.
     pub fn with_strategy(mut self, strategy: Arc<dyn lines_strategy::StrategyExtension>) -> Self {
         self.strategies.push(strategy);
@@ -1198,8 +1198,11 @@ where
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
     }
 
-    if cli.backtest_config.is_some() && cli.backtest.is_none() && cli.run_strategy.is_none() {
-        bail!("--backtest-config goes with --backtest or --run-strategy");
+    if (cli.backtest_config.is_some() || cli.report.is_some())
+        && cli.backtest.is_none()
+        && cli.run_strategy.is_none()
+    {
+        bail!("--backtest-config and --report go with --backtest or --run-strategy");
     }
     if let Some(name) = &cli.backtest {
         return run_backtest(&cli, &ext, name);

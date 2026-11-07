@@ -1,4 +1,4 @@
-//! Strategies as the trading core sees them (decision 0025, pending acceptance).
+//! Strategies as the trading core sees them (decision 0025).
 //!
 //! A strategy runs outside the core (`lines-strategy`) and acts only through commands with
 //! [`Source::Strategy`](crate::Source::Strategy). The **core** enforces the rules, so a buggy
@@ -216,6 +216,9 @@ pub(crate) struct Instance {
     pub counting: bool,
     /// The trade date its daily loss closed its trade (once per trade date).
     pub loss_closed: Option<CivilDate>,
+    /// A person's order action on its account and contract while it was not armed: its
+    /// position is theirs (the daily-loss close leaves it alone). Cleared when armed.
+    pub taken_over: bool,
 }
 
 impl Instance {
@@ -231,6 +234,7 @@ impl Instance {
             recent: VecDeque::new(),
             counting: false,
             loss_closed: None,
+            taken_over: false,
         }
     }
 

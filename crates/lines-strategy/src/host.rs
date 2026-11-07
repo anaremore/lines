@@ -92,6 +92,8 @@ pub struct InstanceView {
     pub reason: Option<String>,
     /// The strategy failed (panicked or was refused); it is never called again.
     pub fault: Option<String>,
+    /// Its feed moved to another contract: kept paused, never fed again.
+    pub rolled: Option<String>,
     pub status: Vec<String>,
     /// Newest last (the newest [`KEEP_DECISIONS`] only).
     pub decisions: Vec<DecisionRecord>,
@@ -120,6 +122,8 @@ struct Running {
     state: StrategyState,
     reason: Option<String>,
     fault: Option<String>,
+    /// The feed moved to another contract: never fed again, kept paused (sticky).
+    rolled: Option<String>,
     /// When the last batch arrived (wall clock), and the newest trade time in it.
     last_batch: Instant,
     market_time: Option<(UtcMillis, Instant)>,
@@ -222,6 +226,7 @@ impl StrategyHost {
             state: StrategyState::Disarmed,
             reason: None,
             fault: None,
+            rolled: None,
             last_batch: Instant::now(),
             market_time: None,
             decisions: VecDeque::new(),
@@ -348,6 +353,7 @@ impl Running {
             state: self.state,
             reason: self.reason.clone(),
             fault: self.fault.clone(),
+            rolled: self.rolled.clone(),
             status: catch_unwind(AssertUnwindSafe(|| self.strategy.status())).unwrap_or_default(),
             decisions: self.decisions.iter().cloned().collect(),
             decided: self.decided,
@@ -516,16 +522,20 @@ impl Host {
         {
             r.market_time = Some((UtcMillis(t), Instant::now()));
         }
-        let rolled = batch.iter().find_map(|e| match e {
+        let moved = batch.iter().find_map(|e| match e {
             MarketEvent::ContractChanged(k) if *k != r.cfg.contract => Some(*k),
             _ => None,
         });
-        if let Some(k) = rolled {
+        if let Some(k) = moved {
             let label = k.label(&r.product).as_str().to_owned();
-            self.pause(
-                id,
-                format!("the feed moved to {label}: add the strategy for the new contract"),
-            );
+            r.rolled = Some(format!(
+                "the feed moved to {label}: add the strategy for the new contract"
+            ));
+            self.changed = true;
+        }
+        // A rolled instance never sees the new contract's prices (its orders are on the old).
+        if let Some(why) = r.rolled.clone() {
+            self.pause(id, why);
             return;
         }
         self.input(id, Input::Market(batch));
@@ -570,7 +580,7 @@ impl Host {
             // A strategy that failed is never called again: armed (by a person, or the arm
             // and the failure crossed), it is paused at once.
             if *state == StrategyState::Armed
-                && let Some(f) = r.fault.clone()
+                && let Some(f) = r.fault.clone().or_else(|| r.rolled.clone())
             {
                 let sid = *id;
                 self.pause(sid, f);

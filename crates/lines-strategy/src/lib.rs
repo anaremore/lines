@@ -1,4 +1,4 @@
-//! Strategies (decision 0025, pending acceptance).
+//! Strategies (decision 0025).
 //!
 //! A [`Strategy`] is a **pure, deterministic state machine**, like a provider session
 //! (decision 0011): no I/O, no clock reads, no randomness, no threads. Every input comes with

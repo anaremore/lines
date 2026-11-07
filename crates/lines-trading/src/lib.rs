@@ -14,7 +14,7 @@
 //! - [`persist`]: the versioned paper trading file.
 //! - [`journal`]: the automatic trade journal (roadmap 8c): round trips from fills, exact P&L,
 //!   MAE/MFE, tags and notes, statistics, an append-only file.
-//! - [`strategy`]: strategies as the core sees them (decision 0025, pending acceptance):
+//! - [`strategy`]: strategies as the core sees them (decision 0025):
 //!   `Source::Strategy`, the strategy gate, per-instance limits and states.
 //! - [`extension`]: the broker extension point (decision 0020): brokers registered from outside
 //!   the public crates, with capabilities and an account source.

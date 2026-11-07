@@ -247,8 +247,10 @@ fn a_person_trading_the_same_contract_pauses_it() {
 
 #[test]
 fn stale_levels_pause_it() {
-    let r = Rig::new(Arc::new(LevelTouchExt::new("demo")), "paper-1");
+    let mut r = Rig::new(Arc::new(LevelTouchExt::new("demo")), "paper-1");
     r.arm();
+    // Freshness is judged on the market clock: known once a trade has printed.
+    r.trade(6010.00);
     r.levels.set_status(LevelStatus::Stale { age_ms: 999_999 });
     let v = r.until("paused", |v| v.state == StrategyState::Paused);
     assert_eq!(v.reason.as_deref(), Some("levels demo are stale"));
@@ -269,11 +271,33 @@ fn a_contract_change_pauses_it() {
     );
 }
 
+#[test]
+fn a_roll_while_disarmed_keeps_it_paused_when_armed() {
+    let r = Rig::new(Arc::new(LevelTouchExt::new("demo")), "paper-1");
+    r.until("added", |_| true);
+    let mar = ContractKey::monthly(catalog::ES, 2027, Month::new(3).unwrap());
+    r.market
+        .send(Arc::from(vec![MarketEvent::ContractChanged(mar)]))
+        .unwrap();
+    r.until("rolled", |v| v.rolled.is_some());
+    // A person arms it anyway: it is paused again at once.
+    r.handle
+        .submit(Source::Test, Command::ArmStrategy { id: ID });
+    let v = r.until("paused after the arm", |v| {
+        v.state == StrategyState::Paused && v.reason.as_deref().is_some_and(|x| x.contains("ESH27"))
+    });
+    assert!(v.rolled.unwrap().contains("ESH27"));
+}
+
+/// Calls a panicking strategy got (it must get none after its panic).
+static PANICS_CALLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// A strategy that panics on market data.
 struct Panics;
 
 impl Strategy for Panics {
     fn on_input(&mut self, _: &Ctx<'_>, input: Input<'_>, _: &mut Vec<Decision>) {
+        PANICS_CALLED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Input::Market(_) = input {
             panic!("boom");
         }
@@ -312,11 +336,19 @@ fn a_panicking_strategy_is_paused_and_never_called_again() {
         v.fault.is_some() && v.state == StrategyState::Paused
     });
     assert_eq!(v.fault.as_deref(), Some("the strategy failed: boom"));
-    // Re-armed by a person, it still never runs.
+    let calls = PANICS_CALLED.load(std::sync::atomic::Ordering::SeqCst);
+    // Re-armed by a person: paused again at once, and never called.
     r.handle
         .submit(Source::Test, Command::ArmStrategy { id: ID });
     r.trade(6001.00);
-    r.until("armed, not called", |v| v.state == StrategyState::Armed);
+    r.until("re-paused", |v| {
+        v.state == StrategyState::Paused && v.reason.as_deref() == Some("the strategy failed: boom")
+    });
+    assert_eq!(
+        PANICS_CALLED.load(std::sync::atomic::Ordering::SeqCst),
+        calls,
+        "never called after the panic"
+    );
 }
 
 #[test]

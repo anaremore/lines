@@ -220,6 +220,6 @@ fn run_strategy_flag_runs_it_through_the_host_on_a_replay() {
     )
     .unwrap_err()
     .to_string();
-    assert!(e.contains("goes with --backtest or --run-strategy"), "{e}");
+    assert!(e.contains("go with --backtest or --run-strategy"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,4 +1,4 @@
-//! The strategy gate (decision 0025, pending acceptance): strategy commands through the
+//! The strategy gate (decision 0025): strategy commands through the
 //! trading core with the paper broker. Deterministic: time is passed in.
 
 use std::sync::Arc;
@@ -1030,4 +1030,38 @@ fn daily_loss_never_closes_a_trade_a_person_took_over() {
     r.trade(5990.0, 1);
     r.wait(30);
     assert_eq!(r.core.position(&acct(), es()), 2, "left to the person");
+}
+
+#[test]
+fn a_flatten_better_than_the_limit_still_ends_the_day() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // The limit is hit on a print at 5990.00, but the flatten fills at 5994.00 (a better bid):
+    // the realised loss ends under the limit.
+    r.book(&[(5994.0, 10)], &[(5994.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    let m = denied(r.manual(Command::ArmStrategy { id: ID }));
+    assert!(m.contains("no entries until the next trade date"), "{m}");
+}
+
+#[test]
+fn a_person_taking_over_a_paused_trade_keeps_it_at_the_daily_loss() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    r.bot(Command::PauseStrategy {
+        id: ID,
+        reason: "levels demo are stale".into(),
+    })
+    .unwrap();
+    // While it is paused, a person works the trade.
+    r.manual(sell(1, limit(6100.0))).unwrap();
+    r.wait(30);
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2, "the person's trade now");
 }

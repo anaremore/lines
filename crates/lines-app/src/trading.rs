@@ -657,9 +657,17 @@ struct VenueIds {
 
 const VENUE_TAG_SHIFT: u32 = 48;
 
+/// Inside a venue's tag: the ids of commands its core issued itself (`INTERNAL_COMMAND_IDS`
+/// and up) have this bit set, so they never meet an ordinary command's id after the mask.
+const VENUE_INTERNAL_BIT: u64 = 1 << (VENUE_TAG_SHIFT - 1);
+
 /// A venue's command id in the shared cache.
 fn venue_command(tag: u64, id: CommandId) -> CommandId {
-    CommandId(tag | (id.0 & ((1 << VENUE_TAG_SHIFT) - 1)))
+    if id.0 >= lines_trading::INTERNAL_COMMAND_IDS {
+        let n = id.0 - lines_trading::INTERNAL_COMMAND_IDS;
+        return CommandId(tag | VENUE_INTERNAL_BIT | (n & (VENUE_INTERNAL_BIT - 1)));
+    }
+    CommandId(tag | (id.0 & (VENUE_INTERNAL_BIT - 1)))
 }
 
 impl VenueIds {
@@ -1660,6 +1668,19 @@ impl Trading {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn venue_command_ids_keep_internal_ones_apart() {
+        let tag = 1u64 << VENUE_TAG_SHIFT;
+        let first = venue_command(tag, CommandId(1));
+        let internal = venue_command(tag, CommandId(lines_trading::INTERNAL_COMMAND_IDS + 1));
+        assert_ne!(
+            first, internal,
+            "a core's own command never takes a person's id"
+        );
+        assert_eq!(first, CommandId(tag | 1));
+        assert_eq!(internal, CommandId(tag | VENUE_INTERNAL_BIT | 1));
+    }
+
     use std::time::Duration;
 
     use lines_core::{ContractKey, Month, Qty, UtcMillis};
