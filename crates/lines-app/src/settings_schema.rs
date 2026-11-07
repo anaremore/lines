@@ -262,21 +262,43 @@ impl Appearance {
         (s, f)
     }
 
-    /// An undo of the look field `key` ("appearance.theme", …): that field back as it was
-    /// saved and flagged (`then`), every other field as it is `now` (later changes stay).
+    /// An undo of look field `field`: that field back as it was saved and flagged (`then`),
+    /// every other field as it is `now` (later changes stay).
     pub fn undo_field(
-        key: &str,
+        field: LookField,
         now: (Appearance, Appearance),
         then: (Appearance, Appearance),
     ) -> (Appearance, Appearance) {
         let ((mut s, mut f), (s0, f0)) = (now, then);
-        match key {
-            "appearance.theme" => (s.theme, f.theme) = (s0.theme, f0.theme),
-            "appearance.palette" => (s.palette, f.palette) = (s0.palette, f0.palette),
-            "appearance.hollow" => (s.hollow, f.hollow) = (s0.hollow, f0.hollow),
-            _ => {}
+        match field {
+            LookField::Theme => (s.theme, f.theme) = (s0.theme, f0.theme),
+            LookField::Palette => (s.palette, f.palette) = (s0.palette, f0.palette),
+            LookField::Hollow => (s.hollow, f.hollow) = (s0.hollow, f0.hollow),
         }
         (s, f)
+    }
+}
+
+/// The look's fields (a look flag can hold each); the settings that set them.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LookField {
+    Theme,
+    Palette,
+    Hollow,
+}
+
+impl LookField {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const ALL: [LookField; 3] = [LookField::Theme, LookField::Palette, LookField::Hollow];
+
+    /// The look field setting `key` sets, if it sets one.
+    pub fn of(key: &str) -> Option<LookField> {
+        match key {
+            "appearance.theme" => Some(LookField::Theme),
+            "appearance.palette" => Some(LookField::Palette),
+            "appearance.hollow" => Some(LookField::Hollow),
+            _ => None,
+        }
     }
 }
 
@@ -1448,10 +1470,139 @@ mod tests {
         assert_eq!((s.theme, f.theme), (Some(ThemeName::Dark), None));
     }
 
+    /// Absent means the default, and the defaults are exactly the app's look when nothing is
+    /// saved and no flag is given (the old `--theme dark --palette standard --hollow up`): the
+    /// as-shown compare in `Appearance::changed` relies on it.
+    #[test]
+    fn absent_look_fields_are_the_apps_fallback() {
+        use crate::theme::{HollowBodies, Palette, Theme};
+        assert_eq!(ThemeName::default(), ThemeName::Dark);
+        assert_eq!(PaletteName::default(), PaletteName::Standard);
+        assert_eq!(HollowName::default(), HollowName::Up);
+        assert_eq!(Palette::default(), Palette::Standard);
+        assert_eq!(HollowBodies::default(), HollowBodies::Up);
+        let mut fallback = Theme::dark(Palette::Standard);
+        fallback.hollow = HollowBodies::Up;
+        assert_eq!(theme_for(&Appearance::default()), fallback);
+        // Each field's absent value reads as its default, and the window's reset value is it.
+        let p = Prefs::default();
+        let (t, f) = (Target::default(), Facts::default());
+        for field in LookField::ALL {
+            let st = all()
+                .iter()
+                .find(|s| LookField::of(s.key) == Some(field))
+                .expect("a setting per look field");
+            assert_eq!((st.get)(&p, &t, &f), Value::Choice(0), "{}", st.key);
+            assert_eq!(st.default, Some(Value::Choice(0)), "{}", st.key);
+        }
+    }
+
+    /// Every look setting in the table is a look field, and an undo of it changes that
+    /// field (and no other).
+    #[test]
+    fn every_look_setting_undoes_its_own_field() {
+        let mut seen = Vec::new();
+        for st in all().iter().filter(|s| s.section == Section::Appearance) {
+            let Some(field) = LookField::of(st.key) else {
+                assert_eq!(st.scope, Scope::Workspace, "{}: not a look field", st.key);
+                continue;
+            };
+            seen.push(field);
+            // `then`: this field saved non-default and flagged; `now`: everything default.
+            let mut then_s = Appearance::default();
+            let mut then_f = Appearance::default();
+            match field {
+                LookField::Theme => {
+                    then_s.theme = Some(ThemeName::Light);
+                    then_f.theme = Some(ThemeName::Dark);
+                }
+                LookField::Palette => {
+                    then_s.palette = Some(PaletteName::Colorblind);
+                    then_f.palette = Some(PaletteName::Standard);
+                }
+                LookField::Hollow => {
+                    then_s.hollow = Some(HollowName::Down);
+                    then_f.hollow = Some(HollowName::Up);
+                }
+            }
+            let now = (Appearance::default(), Appearance::default());
+            let (s, f) = Appearance::undo_field(field, now, (then_s, then_f));
+            assert_eq!((s, f), (then_s, then_f), "{}", st.key);
+            // Other fields are left as they are now.
+            for other in LookField::ALL.into_iter().filter(|o| *o != field) {
+                let (s2, _) = Appearance::undo_field(other, now, (then_s, then_f));
+                assert_eq!(s2, Appearance::default(), "{} via {other:?}", st.key);
+            }
+        }
+        assert_eq!(
+            seen,
+            LookField::ALL.to_vec(),
+            "every look field has its setting"
+        );
+    }
+
     /// Re-picking the value a default-valued flag shows saves nothing over a saved value;
     /// an undo restores only its field, never saving a flag.
     #[test]
     fn re_picks_and_undos_never_save_a_flag() {
+        // Every field: saved non-default, run with the default as a flag, pick the shown
+        // (default) value: nothing is saved over, the flag stays.
+        let cases = [
+            (
+                Appearance {
+                    theme: Some(ThemeName::Light),
+                    ..Default::default()
+                },
+                Appearance {
+                    theme: Some(ThemeName::Dark),
+                    ..Default::default()
+                },
+            ),
+            (
+                Appearance {
+                    palette: Some(PaletteName::Colorblind),
+                    ..Default::default()
+                },
+                Appearance {
+                    palette: Some(PaletteName::Standard),
+                    ..Default::default()
+                },
+            ),
+            (
+                Appearance {
+                    hollow: Some(HollowName::Down),
+                    ..Default::default()
+                },
+                Appearance {
+                    hollow: Some(HollowName::Up),
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (saved, flags) in cases {
+            let shown = saved.with_flags(flags);
+            // The setters store the default as absent.
+            let picked = Appearance {
+                theme: shown.theme.filter(|t| *t != ThemeName::default()),
+                palette: shown.palette.filter(|p| *p != PaletteName::default()),
+                hollow: shown.hollow.filter(|h| *h != HollowName::default()),
+            };
+            let (s, f) = Appearance::changed(saved, flags, shown, picked);
+            assert_eq!((s, f), (saved, flags), "{saved:?} {flags:?}");
+        }
+        // Nothing saved, no flag, the default picked explicitly: nothing to save.
+        let none = Appearance::default();
+        let explicit = Appearance {
+            theme: Some(ThemeName::Dark),
+            palette: Some(PaletteName::Standard),
+            hollow: Some(HollowName::Up),
+        };
+        assert_eq!(
+            Appearance::changed(none, none, none, explicit),
+            (none, none),
+            "the default picked over the default changes nothing"
+        );
+
         // Saved light, run with --theme dark (the default), the trader picks Dark.
         let saved = Appearance {
             theme: Some(ThemeName::Light),
@@ -1497,7 +1648,7 @@ mod tests {
                 ..shown1
             },
         );
-        let (s3, f3) = Appearance::undo_field("appearance.theme", (s2, f2), then);
+        let (s3, f3) = Appearance::undo_field(LookField::Theme, (s2, f2), then);
         assert_eq!(s3.theme, None, "the flag's Light is never saved");
         assert_eq!(f3.theme, Some(ThemeName::Light), "it holds again");
         assert_eq!(

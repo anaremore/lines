@@ -60,8 +60,12 @@ fn look_now(cx: &App) -> (schema::Appearance, schema::Appearance) {
 }
 
 /// Put one look field back as it was saved and flagged (an undo of a look change).
-fn restore_look(key: &str, then: (schema::Appearance, schema::Appearance), cx: &mut App) {
-    let (saved, flags) = schema::Appearance::undo_field(key, look_now(cx), then);
+fn restore_look(
+    field: schema::LookField,
+    then: (schema::Appearance, schema::Appearance),
+    cx: &mut App,
+) {
+    let (saved, flags) = schema::Appearance::undo_field(field, look_now(cx), then);
     update_settings(cx, move |s| s.appearance = saved);
     if let Some(w) = cx.try_global::<Workspace>() {
         w.env.look_flags.set(flags);
@@ -514,11 +518,7 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
-        let look = matches!(
-            st.key,
-            "appearance.theme" | "appearance.palette" | "appearance.hollow"
-        )
-        .then(|| look_now(cx));
+        let look = schema::LookField::of(st.key).map(|_| look_now(cx));
         commit(&before, &after, &self.target, cx);
         self.undo.push(UndoEntry {
             index: i,
@@ -582,9 +582,10 @@ impl SettingsWindow {
         let i = entry.index;
         // The setting it undoes, for its account: what is undone (or asked) is in view.
         self.show(i);
-        if let Some(then) = entry.look {
+        if let (Some(then), Some(field)) = (entry.look, schema::LookField::of(schema::all()[i].key))
+        {
             // A look change: that field as saved and flagged before it, nothing else.
-            restore_look(schema::all()[i].key, then, cx);
+            restore_look(field, then, cx);
             self.note = Some((i, "Undone".to_owned(), Tone::Done));
             cx.notify();
             return;
