@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "cqg-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -2876,7 +2876,7 @@ checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
 
 [[package]]
 name = "lines-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2901,14 +2901,14 @@ dependencies = [
 
 [[package]]
 name = "lines-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jiff",
 ]
 
 [[package]]
 name = "lines-feed"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2931,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "lines-fuzz"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "cqg-proto",
@@ -2944,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "lines-indicators"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lines-core",
  "serde",
@@ -2953,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "lines-sierra"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2966,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "lines-trading"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "lines-core",
