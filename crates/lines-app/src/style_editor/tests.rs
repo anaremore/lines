@@ -129,6 +129,15 @@ fn custom_colors_are_typed_in_hex() {
     assert_eq!(e.key("escape", false, None), Outcome::Nothing);
     assert_eq!(e.hex, None);
     assert_eq!(e.key("escape", false, None), Outcome::Close);
+    // A click on any other control ends the entry: the keys move again.
+    click(&mut e, Control::Custom);
+    assert!(e.hex.is_some());
+    let line = e.rows().iter().position(|r| r.label == "Line").unwrap();
+    e.click(line, 0);
+    assert_eq!(e.hex, None);
+    let row = e.row;
+    e.key("down", false, None);
+    assert_eq!(e.row, row + 1, "arrows reach the controls");
 }
 
 #[test]
@@ -268,7 +277,11 @@ fn where_a_finding_holds_is_worded() {
     );
     assert_eq!(
         where_phrase(&c, &[false, true, false, false]),
-        " in the dark colorblind theme"
+        " in the dark theme with the colorblind palette"
+    );
+    assert_eq!(
+        where_phrase(&c, &[true, true, false, true]),
+        " in the dark theme, the dark theme with the colorblind palette and the light theme with the colorblind palette"
     );
 }
 

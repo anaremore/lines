@@ -194,7 +194,7 @@ pub struct Fixture {
     pub timeframe_menu: bool,
     /// Open the style editor on this drawing (screenshots: `--style-editor ID[:TAB]`), on
     /// tab `TAB` (0 = first).
-    pub style_editor: Option<(u64, usize)>,
+    pub style_editor: Option<(u64, usize, Option<usize>)>,
 }
 
 /// Which part of a studies-menu row a click hit.
@@ -376,8 +376,11 @@ pub struct ChartView {
     /// The per-tool drawing styles last read from the settings (new defaults saved on any
     /// chart are picked up when a tool is next chosen).
     saved_styles: crate::chart_draw::ToolStyles,
-    /// The pane size the style editor was last placed in (a new size places it again).
+    /// The area the style editor was last placed in (the chart's width and the height above
+    /// its time axis; a new size places it again).
     editor_pane: (f32, f32),
+    /// The style editor body's scroll state (its scrollbar).
+    editor_scroll: gpui::ScrollHandle,
     measure_lines: HashMap<
         Option<u64>,
         (
@@ -533,6 +536,7 @@ impl ChartView {
             drawings,
             saved_styles,
             editor_pane: (0.0, 0.0),
+            editor_scroll: gpui::ScrollHandle::new(),
             note_lines: HashMap::new(),
             note_entry_line: None,
             measure_lines: HashMap::new(),
@@ -544,11 +548,17 @@ impl ChartView {
         if let Some(spec) = fixture_menu {
             view.open_menu_at(&spec, cx);
         }
-        if let Some((id, tab)) = fixture_style_editor
+        if let Some((id, tab, focus)) = fixture_style_editor
             && view.open_style_editor(id, cx)
         {
             view.drawings.edit_style(|e| {
                 e.select_tab(tab);
+                if let Some(col) = focus {
+                    e.key("home", false, None);
+                    for _ in 0..col {
+                        e.key("right", false, None);
+                    }
+                }
                 crate::style_editor::Outcome::Nothing
             });
         }
@@ -1162,9 +1172,9 @@ impl ChartView {
         self.end_drag();
         // The picker covers the chart: its lists and menu close (their backdrops would take
         // the picker's clicks).
-        self.close_popover(Kind::Timeframe, cx);
-        self.close_popover(Kind::Account, cx);
-        self.close_popover(Kind::Studies, cx);
+        for kind in PICKER_CLOSES {
+            self.close_popover(kind, cx);
+        }
         self.picker.open(query, cx);
     }
 
@@ -1663,7 +1673,7 @@ impl ChartView {
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
         self.footprint.ensure_capacity(plot_w);
         self.chart = bounds;
-        if self.drawings.editing() && self.editor_pane != (w, h) {
+        if self.drawings.editing() && self.editor_pane != (w, above_axis) {
             // The style editor is placed from the pane's size: place it again.
             cx.notify();
         }
@@ -2128,7 +2138,10 @@ impl ChartView {
         let mut drawing_tags = [None; MAX_DRAWING_TAGS];
         if !self.drawings.hidden {
             for (slot, (_, y, _)) in drawing_tags.iter_mut().zip(self.drawings.axis_tags(ph)) {
-                *slot = Some(Span::around(cross_tag_y(y, ph), DRAWING_TAG_H * 0.5));
+                *slot = Some(Span::around(
+                    drawing_tag_y(y, last_y, ph),
+                    DRAWING_TAG_H * 0.5,
+                ));
             }
         }
         let tags = [
@@ -2524,13 +2537,17 @@ impl ChartView {
             n += 1;
         }
         let x0 = ox + pw + hair;
-        for &(price, y, style) in &tags[..n] {
+        let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
+        for &(price, line_y, style) in &tags[..n] {
             let color = t.style_color(style.line.color, &t.drawing, 100);
             let (border, text) = t.drawing_tag(color);
-            let y = cross_tag_y(y, ph);
+            // The box: kept inside the plot and off the last-price tag; the notch stays at
+            // the line's own level.
+            let y = drawing_tag_y(line_y, last_y, ph);
             let top = snap(f64::from(y - DRAWING_TAG_H * 0.5), scale);
-            let mid = snap(f64::from(y), scale);
-            // The notch: the line's level carried from the plot's edge to the tag.
+            let mid = snap(f64::from(line_y), scale);
+            // The notch: the line's level carried from the plot's edge to the tag (and along
+            // its edge to the box when the box moved).
             window.paint_quad(fill(
                 Bounds::new(
                     point(px(x0), px(oy + mid - hair)),
@@ -2538,6 +2555,21 @@ impl ChartView {
                 ),
                 border,
             ));
+            let (box_top, box_bottom) = (top, top + DRAWING_TAG_H);
+            if mid < box_top || mid > box_bottom {
+                let (a, b) = if mid < box_top {
+                    (mid - hair, box_top)
+                } else {
+                    (box_bottom, mid + hair)
+                };
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(px(x0 + DRAWING_TAG_INSET - 2.0 * hair), px(oy + a)),
+                        size(px(2.0 * hair), px(b - a)),
+                    ),
+                    border,
+                ));
+            }
             window.paint_quad(
                 fill(
                     Bounds::new(
@@ -2865,6 +2897,7 @@ impl ChartView {
         }
         self.picker.close();
         self.anchoring = None;
+        self.editor_scroll = gpui::ScrollHandle::new();
         self.close_popover(Kind::Studies, cx);
         self.close_popover(Kind::Timeframe, cx);
         self.close_popover(Kind::Account, cx);
@@ -2882,14 +2915,14 @@ impl ChartView {
         let id = self.drawings.editor_target()?;
         let ctxs: Vec<_> = Theme::all().iter().map(Theme::style_ctx).collect();
         let warnings = e.warnings(&ctxs);
-        let pane = (
-            f32::from(self.chart.size.width),
-            f32::from(self.chart.size.height),
-        );
-        self.editor_pane = pane;
-        let h = crate::style_editor_view::estimated_height(&e, warnings.len());
-        let at = crate::style_editor_view::place(pane, self.drawings.extent(id), h);
-        let editor = crate::style_editor_view::render(&e, t, &warnings, at, cx);
+        // Inside the plot area: never over the time axis, the status bar or a pane below.
+        let area = (f32::from(self.chart.size.width), self.above_axis);
+        self.editor_pane = area;
+        let w = crate::style_editor_view::width(area.0);
+        let h = crate::style_editor_view::content_height(&e, &warnings, w, &t.drawing_names);
+        let at = crate::style_editor_view::place(area, self.drawings.extent(id), h);
+        let editor =
+            crate::style_editor_view::render(&e, t, &warnings, at, h, &self.editor_scroll, cx);
         let dismiss: popover::OnDismiss = Box::new(
             cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::StyleEditor, cx)),
         );
@@ -2911,8 +2944,6 @@ impl ChartView {
 
     /// A drawing command (`Command::Draw`) on this chart.
     pub fn drawing_command(&mut self, cmd: DrawCmd, cx: &mut Context<Self>) {
-        use lines_core::drawings::Style;
-        use lines_core::style::{Color, LineType};
         let d = &mut self.drawings;
         match cmd {
             DrawCmd::Tool(tool) => {
@@ -2923,44 +2954,18 @@ impl ChartView {
                 self.refresh_tool_styles(cx);
                 self.drawings.set_tool(tool);
             }
-            DrawCmd::Style => {
-                if let Some(id) = d.selected.filter(|_| d.selection_shown()) {
+            DrawCmd::Style => match d.selected.filter(|_| d.selection_shown()) {
+                Some(id) => {
                     self.open_style_editor(id, cx);
                 }
-            }
-            DrawCmd::Undo => {
-                d.undo();
-            }
-            DrawCmd::Redo => {
-                d.redo();
-            }
-            DrawCmd::DeleteSelected => {
-                d.delete_selected();
-            }
-            DrawCmd::ToggleVisible => {
-                let hide = !d.hidden;
-                d.set_hidden(hide);
-            }
-            DrawCmd::DeleteAll => d.confirm_clear = d.count() > 0,
-            DrawCmd::NextColor => d.restyle(|mut s| {
-                s.line.color =
-                    Color::Palette(s.palette_index().map_or(0, |i| i + 1) % Style::COLORS);
-                s
-            }),
-            DrawCmd::ToggleWidth => d.restyle(|mut s| {
-                s.line.width = s.line.width % lines_core::style::MAX_WIDTH + 1;
-                s
-            }),
-            DrawCmd::ToggleDashed => d.restyle(|mut s| {
-                s.line.line = match s.line.line {
-                    LineType::Solid => LineType::Dashed,
-                    _ => LineType::Solid,
-                };
-                s
-            }),
-            DrawCmd::PinMeasure => {
-                d.pin_measure();
-            }
+                None => {
+                    let why = d.style_unavailable();
+                    if cx.has_global::<crate::workspace::Workspace>() {
+                        crate::workspace::notice(why.to_owned(), cx);
+                    }
+                }
+            },
+            other => d.run(other),
         }
         cx.notify();
     }
@@ -3789,6 +3794,34 @@ impl Pane for ChartView {
     }
 }
 
+/// Centre of a drawing's axis tag for its line at plot-local `y`: inside the plot, and moved
+/// one tag off the last-price tag (centre `last`) when that would cover it, to the line's side
+/// if there is room, else the other.
+fn drawing_tag_y(y: f32, last: Option<f32>, plot_h: f32) -> f32 {
+    let at = cross_tag_y(y, plot_h);
+    let Some(last) = last else {
+        return at;
+    };
+    let reach = (TAG_H + DRAWING_TAG_H) * 0.5 + 1.0;
+    if (at - last).abs() >= reach {
+        return at;
+    }
+    let fits = |v: f32| v >= DRAWING_TAG_H * 0.5 && v <= plot_h - DRAWING_TAG_H * 0.5;
+    let (above, below) = (last - reach, last + reach);
+    let (first, second) = if y <= last {
+        (above, below)
+    } else {
+        (below, above)
+    };
+    if fits(first) {
+        first
+    } else if fits(second) {
+        second
+    } else {
+        at
+    }
+}
+
 /// Centre of the last-price tag (plot-local y). `max` last: the plot can be shorter than a
 /// label (tiny windows).
 fn last_tag_y(vp: &Viewport, p: Price, plot_h: f32) -> f32 {
@@ -4051,6 +4084,15 @@ impl Render for ChartView {
     }
 }
 
+/// The chart's popovers the symbol picker closes when it opens: all of them (their window-wide
+/// backdrops would take the picker's clicks). Pane menus belong to the window.
+const PICKER_CLOSES: [Kind; 4] = [
+    Kind::Timeframe,
+    Kind::Account,
+    Kind::Studies,
+    Kind::StyleEditor,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4059,6 +4101,93 @@ mod tests {
     use lines_feed::provider::MarketEvent;
 
     use crate::profile::{ProfileConfig, ProfileMode};
+
+    /// Opening the symbol picker closes every popover a chart owns, the style editor
+    /// included (its backdrop would eat the picker's clicks).
+    #[test]
+    fn opening_the_picker_closes_every_chart_popover() {
+        for kind in [
+            Kind::Studies,
+            Kind::Timeframe,
+            Kind::Account,
+            Kind::Menu,
+            Kind::StyleEditor,
+        ] {
+            // Exhaustive: a new kind fails to compile here until it's decided.
+            let chart_owned = match kind {
+                Kind::Studies | Kind::Timeframe | Kind::Account | Kind::StyleEditor => true,
+                Kind::Menu => false,
+            };
+            assert_eq!(PICKER_CLOSES.contains(&kind), chart_owned, "{kind:?}");
+        }
+    }
+
+    /// Undo while the style editor is open: the key the chart keeps for itself
+    /// (`editor_key`) runs the drawings' undo, and the open editor shows the style as it
+    /// was (re-synced), still open on its drawing.
+    #[test]
+    fn undo_with_the_style_editor_open_resyncs_it() {
+        use lines_core::drawings::{Anchor, Drawing, Style, Tool};
+        let es = catalog::get(catalog::ES).unwrap();
+        let at = Anchor {
+            time: UtcMillis(1_800_000_000_000),
+            price: Price(600_000),
+        };
+        let mut line = Drawing::new(Tool::HLine, at, at, Style::DEFAULT);
+        line.id = 1;
+        let mut d = crate::chart_draw::ChartDrawings::new(
+            crate::drawings_store::ProductDrawings::ephemeral(es, vec![line]),
+        );
+        assert!(d.open_editor(1));
+        d.edit_style(|e| e.click(2, 3)); // Width 4
+        let width = |d: &mut crate::chart_draw::ChartDrawings| {
+            d.editor()
+                .unwrap()
+                .drawing_style(&Style::DEFAULT)
+                .line
+                .width
+        };
+        assert_eq!(width(&mut d), 4);
+        let k = |s: &str| gpui::Keystroke::parse(Box::leak(s.to_owned().into_boxed_str())).unwrap();
+        let ctrl = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        let was = Style::DEFAULT.line.width;
+        for (key, want) in [(format!("{ctrl}-z"), was), (format!("{ctrl}-y"), 4)] {
+            let EditorKey::Draw(cmd) = editor_key(&k(&key)) else {
+                panic!("{key} goes to the drawings");
+            };
+            d.run(cmd);
+            assert!(d.editing(), "still open");
+            assert_eq!(width(&mut d), want, "{key}: the editor follows");
+        }
+    }
+
+    /// A drawing's axis tag the last-price tag would cover moves one tag off it, to the
+    /// line's side (the other near an edge); clear of it, it stays on its line.
+    #[test]
+    fn drawing_tags_step_off_the_last_price_tag() {
+        let ph = 400.0;
+        assert_eq!(drawing_tag_y(100.0, Some(300.0), ph), 100.0);
+        assert_eq!(drawing_tag_y(100.0, None, ph), 100.0);
+        let reach = (TAG_H + DRAWING_TAG_H) * 0.5 + 1.0;
+        // Just above the last price: above its tag; just below: below.
+        assert_eq!(drawing_tag_y(198.0, Some(200.0), ph), 200.0 - reach);
+        assert_eq!(drawing_tag_y(203.0, Some(200.0), ph), 200.0 + reach);
+        // At the top edge there's no room above: below.
+        let y = drawing_tag_y(4.0, Some(9.0), ph);
+        assert_eq!(y, 9.0 + reach);
+        // Never overlapping, never out of the plot.
+        for line in [0.0f32, 5.0, 150.0, 199.0, 200.0, 201.0, 395.0, 400.0] {
+            for last in [9.0f32, 200.0, 390.0] {
+                let y = drawing_tag_y(line, Some(last), ph);
+                assert!((y - last).abs() >= reach - 0.01, "{line} {last}: {y}");
+                assert!(y >= DRAWING_TAG_H * 0.5 && y <= ph - DRAWING_TAG_H * 0.5);
+            }
+        }
+    }
 
     /// While the style editor is open it takes plain, Shift and Alt keys (moves, hex digits,
     /// Esc closes it), and Undo/Redo still reach the drawings (the workspace leaves them to a

@@ -155,6 +155,17 @@ impl Style {
         s
     }
 
+    /// The line in color `c`; a fill that matched the old line color follows it (a zone's or
+    /// a measure's fill stays its line's color unless it was set apart).
+    pub fn with_line_color(self, c: Color) -> Style {
+        let mut s = self;
+        if s.fill.color == s.line.color {
+            s.fill.color = c;
+        }
+        s.line.color = c;
+        s
+    }
+
     /// The line's color as a palette index, if it is one (the legacy single color).
     pub fn palette_index(&self) -> Option<u8> {
         match self.line.color {

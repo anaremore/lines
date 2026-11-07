@@ -34,7 +34,7 @@ cargo test --release -p lines-indicators --test bench -- --ignored --nocapture  
 cargo test --release -p lines-trading --test session -- --ignored --nocapture   # perf: click->order-sent p50/p99 budget (< 1 ms), run alone
 cargo test --release -p lines-app --lib -- --ignored dom_click_latency_budget --nocapture   # perf: DOM click->order sent, run alone
 # Drawings (screenshots): --drawings FILE (a drawings file naming its product; screenshots never read saved drawings);
-#   --style-editor ID[:TAB] (the first chart's style editor open on drawing ID of that file, on tab TAB, 0 = first).
+#   --style-editor ID[:TAB[:COL]] (the first chart's style editor open on drawing ID of that file, on tab TAB, 0 = first, with the keyboard focus on control COL of its first row).
 #   In the app: Alt+H/T/Z/L/N/U, Alt+Shift+H/T, Esc, Delete, Enter (pin measure), Ctrl+Z / Ctrl+Y; palette "Drawings: …".
 # Timeframe: --timeframe 5m (1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w; first chart; a saved one wins). In the app: type 5 / 1h / 1d + Enter on a chart, or the header chip.
 # VWAP: --vwap eth|rth|week|month|anchor@TIME, optional bands after a slash ("eth/1,2,3", quoted in PowerShell); repeatable; first chart; also in screenshots. Ctrl+I in the app.

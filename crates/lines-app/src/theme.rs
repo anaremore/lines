@@ -61,6 +61,9 @@ pub struct Theme {
     pub panel: Hsla,
     pub grid: Hsla,
     pub axis_line: Hsla,
+    /// A control's edge where the edge is what shows it (unselected chips, checkboxes,
+    /// swatch rims, the style editor's warning box): 3:1 on `panel` and `bg` (WCAG 1.4.11).
+    pub control_edge: Hsla,
     pub text_dim: Hsla,
     pub text_main: Hsla,
     pub up: Hsla,
@@ -148,7 +151,7 @@ pub const DRAWING_DASH: Dash = Dash { on: 12.0, off: 4.0 };
 
 /// A drawing's (or a styled study line's) dash pattern for its line type and width (logical
 /// px). Dashed is [`DRAWING_DASH`]; dotted dots are as long as the line is wide (at least 2
-/// px) with about twice that between; dash-dot is a long dash, a dot, and gaps. None of
+/// px) with twice the width plus 4 px between; dash-dot is a long dash, a dot, and gaps. None of
 /// them matches [`POSITION_DASH`] or [`HELD_DASH`] (tested). No allocation.
 pub fn drawing_dash(line: LineType, width: f32) -> DashPattern {
     let w = width.max(1.0);
@@ -158,9 +161,10 @@ pub fn drawing_dash(line: LineType, width: f32) -> DashPattern {
             seg: [DRAWING_DASH.on, DRAWING_DASH.off, 0.0, 0.0],
             n: 2,
         },
-        // Dots at least 2 px long, so a thin dotted line still reads (on dark especially).
+        // Dots at least 2 px long, so a thin dotted line still reads (on dark especially),
+        // with wide gaps: never the even rhythm of a held order (3/3).
         LineType::Dotted => DashPattern {
-            seg: [w.max(2.0), 2.0 * w + 2.0, 0.0, 0.0],
+            seg: [w.max(2.0), 2.0 * w + 4.0, 0.0, 0.0],
             n: 2,
         },
         LineType::DashDot => DashPattern {
@@ -300,6 +304,7 @@ impl Theme {
             panel: c(0x171b24),
             grid: c(0x20242f),
             axis_line: c(0x2a3040),
+            control_edge: c(0x6e7489),
             text_dim: c(0x9a9fb2),
             text_main: c(brand::PAPER),
             up: c(up),
@@ -355,6 +360,7 @@ impl Theme {
             panel: c(brand::PAPER),
             grid: c(0xe4e2ec),
             axis_line: c(0xcdcad9),
+            control_edge: c(0x7d7a8c),
             text_dim: c(0x565b6e),
             text_main: c(brand::INK),
             up: c(up),
@@ -813,10 +819,31 @@ mod tests {
         assert_ne!(POSITION_DASH, HELD_DASH);
     }
 
-    /// Every line type's pattern is its own: none matches the position line or a held order
-    /// at any width (decision 0026), and only solid is solid.
+    /// Control edges read (WCAG 1.4.11) on the panels they sit on, in every theme.
+    #[test]
+    fn control_edges_read_on_panels() {
+        for t in Theme::all() {
+            for bg in [t.panel, t.bg] {
+                let r = contrast(t.control_edge, bg);
+                assert!(r >= 3.0, "{}: control edge {r:.2}:1", t.name);
+            }
+        }
+    }
+
+    /// Every line type's pattern is its own: none looks like the position line or a held
+    /// order at any width (decision 0026), and only solid is solid. "Looks like": two
+    /// segments whose period is within a third and whose duty (the drawn share) is within
+    /// 0.2 of a trading pattern's, so a thin dotted line (2/6) never reads as a held order
+    /// (3/3) nor a dotted 2 px one (2/8) as the position line (6/4).
     #[test]
     fn drawing_line_types_never_look_like_trading_lines() {
+        let looks_alike = |d: DashPattern, t: Dash| {
+            let period = d.seg[0] + d.seg[1];
+            let tp = t.on + t.off;
+            d.n == 2
+                && (period - tp).abs() <= tp / 3.0
+                && (d.seg[0] / period - t.on / tp).abs() <= 0.2
+        };
         for w in 1..=4 {
             let w = f32::from(w as u8);
             for lt in LineType::ALL {
@@ -826,13 +853,21 @@ mod tests {
                     continue;
                 }
                 for trading in [POSITION_DASH, HELD_DASH] {
-                    let same = d.n == 2
-                        && (d.seg[0] - trading.on).abs() < 0.5
-                        && (d.seg[1] - trading.off).abs() < 0.5;
-                    assert!(!same, "{lt:?} at {w} px looks like {trading:?}");
+                    assert!(
+                        !looks_alike(d, trading),
+                        "{lt:?} at {w} px ({:?}) looks like {trading:?}",
+                        &d.seg[..d.n]
+                    );
                 }
             }
         }
+        // The check itself catches the near misses it is for.
+        let p = |on, off| DashPattern {
+            seg: [on, off, 0.0, 0.0],
+            n: 2,
+        };
+        assert!(looks_alike(p(2.0, 4.0), HELD_DASH));
+        assert!(looks_alike(p(6.0, 5.0), POSITION_DASH));
     }
 
     /// A style's opacity scales a token's own alpha exactly once.

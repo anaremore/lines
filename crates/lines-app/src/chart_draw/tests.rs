@@ -247,6 +247,46 @@ fn restyling_applies_to_the_selection_or_new_drawings() {
     assert_eq!((now.line.width, now.line.line), (2, LineType::Dashed));
     assert!(r.d.undo());
     assert_eq!(r.items()[0].style, d.style);
+
+    // "Next color" on a zone: its fill moves with the line (it matched), on the selection
+    // and on the session default the next zone is drawn with.
+    r.d.set_tool(Tool::Rect);
+    assert!(r.down(200.0, 50.0));
+    assert!(r.up(400.0, 150.0));
+    let zone = r.items()[1].clone();
+    assert_eq!(r.d.selected, Some(zone.id));
+    assert_eq!(zone.style.fill.color, zone.style.line.color);
+    r.d.restyle(next_color);
+    let s = r.items()[1].style;
+    assert_ne!(s.line.color, zone.style.line.color);
+    assert_eq!(s.fill.color, s.line.color, "the fill follows the line");
+    // A fill set apart stays.
+    r.d.restyle(|s| Style {
+        fill: lines_core::style::FillStyle {
+            color: Color::Palette(3),
+            ..s.fill
+        },
+        line: LineStyle {
+            color: Color::Palette(0),
+            ..s.line
+        },
+        ..s
+    });
+    r.d.restyle(next_color);
+    let s = r.items()[1].style;
+    assert_eq!(
+        (s.line.color, s.fill.color),
+        (Color::Palette(1), Color::Palette(3))
+    );
+    // Nothing selected: the session defaults, fills included.
+    r.d.selected = None;
+    r.d.restyle(next_color);
+    r.d.set_tool(Tool::Rect);
+    assert!(r.down(200.0, 250.0));
+    assert!(r.up(400.0, 350.0));
+    let s = r.items()[2].style;
+    assert_eq!(s.fill.color, s.line.color);
+    assert_ne!(s.line.color, Style::DEFAULT.line.color);
 }
 
 /// The style editor: opened on a drawing under the pointer, each change one undo step,
@@ -530,4 +570,23 @@ fn axis_tags_off_the_plot_are_left_out() {
     let id = r.items()[0].id;
     let (x0, y0, x1, y1) = r.d.extent(id).unwrap();
     assert!(x0 <= 200.0 && x1 >= 300.0 && y0 <= 150.0 && y1 >= 250.0);
+}
+
+/// "Drawing style…" with nothing selected on screen says why.
+#[test]
+fn the_style_command_says_why_it_cant_open() {
+    let mut r = Rig::new();
+    assert_eq!(
+        r.d.style_unavailable(),
+        "No drawings on this chart to style"
+    );
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    r.d.selected = None;
+    assert!(
+        r.d.style_unavailable()
+            .starts_with("Select a drawing first")
+    );
+    r.d.set_hidden(true);
+    assert!(r.d.style_unavailable().starts_with("Drawings are hidden"));
 }

@@ -231,6 +231,57 @@ impl ChartDrawings {
                 .is_some_and(|id| self.drawn.iter().any(|d| d.id == id))
     }
 
+    /// A drawing command that needs only the drawings (the chart handles choosing a tool and
+    /// opening the style editor): undo/redo, delete, show/hide, the quick restyles, pin.
+    pub fn run(&mut self, cmd: crate::commands::DrawCmd) {
+        use crate::commands::DrawCmd;
+        use lines_core::style::LineType;
+        match cmd {
+            DrawCmd::Undo => {
+                self.undo();
+            }
+            DrawCmd::Redo => {
+                self.redo();
+            }
+            DrawCmd::DeleteSelected => {
+                self.delete_selected();
+            }
+            DrawCmd::ToggleVisible => {
+                let hide = !self.hidden;
+                self.set_hidden(hide);
+            }
+            DrawCmd::DeleteAll => self.confirm_clear = self.count() > 0,
+            DrawCmd::NextColor => self.restyle(next_color),
+            DrawCmd::ToggleWidth => self.restyle(|mut s| {
+                s.line.width = s.line.width % lines_core::style::MAX_WIDTH + 1;
+                s
+            }),
+            DrawCmd::ToggleDashed => self.restyle(|mut s| {
+                s.line.line = match s.line.line {
+                    LineType::Solid => LineType::Dashed,
+                    _ => LineType::Solid,
+                };
+                s
+            }),
+            DrawCmd::PinMeasure => {
+                self.pin_measure();
+            }
+            DrawCmd::Tool(_) | DrawCmd::Style => {}
+        }
+    }
+
+    /// Why "Drawing style…" (Alt+S, the palette) can't open with no drawing selected on
+    /// screen: the reason shown as a notice.
+    pub fn style_unavailable(&self) -> &'static str {
+        if self.hidden {
+            "Drawings are hidden on this chart: show them to style one"
+        } else if self.count() == 0 {
+            "No drawings on this chart to style"
+        } else {
+            "Select a drawing first: click it (or double-click to open its style)"
+        }
+    }
+
     /// Drawing `id`'s extent on screen this frame, plot-local (x0, y0, x1, y1): a note with
     /// its box, a line with its handles. `None` when it isn't drawn.
     pub fn extent(&self, id: DrawingId) -> Option<(f32, f32, f32, f32)> {
@@ -910,6 +961,13 @@ fn paint_shape(
             window.paint_quad(fill(rect(origin, x, y, 2.0, d.p1.1 - y), line));
         }
     }
+}
+
+/// "Drawings: next color": the next theme drawing color; a fill that matched the line follows
+/// it (`Style::with_line_color`).
+pub fn next_color(s: Style) -> Style {
+    let next = s.palette_index().map_or(0, |i| i + 1) % Style::COLORS;
+    s.with_line_color(lines_core::style::Color::Palette(next))
 }
 
 #[cfg(test)]

@@ -176,12 +176,14 @@ impl ThemeCtx {
         }
     }
 
+    /// The combination in words (a palette isn't a theme): "dark theme", "light theme with
+    /// the colorblind palette".
     fn label(&self) -> &'static str {
         match (self.dark, self.colorblind) {
-            (true, false) => "dark",
-            (false, false) => "light",
-            (true, true) => "dark colorblind",
-            (false, true) => "light colorblind",
+            (true, false) => "dark theme",
+            (false, false) => "light theme",
+            (true, true) => "dark theme with the colorblind palette",
+            (false, true) => "light theme with the colorblind palette",
         }
     }
 }
@@ -236,8 +238,8 @@ fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
         .collect();
     match names.as_slice() {
         [] => String::new(),
-        [one] => format!(" in the {one} theme"),
-        [init @ .., last] => format!(" in the {} and {last} themes", init.join(", ")),
+        [one] => format!(" in the {one}"),
+        [init @ .., last] => format!(" in the {} and the {last}", init.join(", the ")),
     }
 }
 
@@ -480,6 +482,9 @@ impl StyleEditor {
 
     /// A click on control `col` of row `row`.
     pub fn click(&mut self, row: usize, col: usize) -> Outcome {
+        // A click anywhere ends the hex entry (keys go back to the controls); "Custom…"
+        // opens it again.
+        self.hex = None;
         self.row = row;
         self.col = col;
         let rows = self.rows();
