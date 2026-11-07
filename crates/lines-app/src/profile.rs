@@ -184,8 +184,8 @@ pub struct VolumeProfileLayer {
     key: Option<BuildKey>,
     /// Rows are valid and should be drawn.
     active: bool,
-    label: FixedStr<64>,
-    shaped: Option<(FixedStr<64>, ShapedLine)>,
+    label: FixedStr<96>,
+    shaped: Option<(FixedStr<96>, ShapedLine)>,
 }
 
 impl VolumeProfileLayer {
@@ -307,9 +307,19 @@ fn auto_grouping(vp: &Viewport, tick: i64) -> u32 {
         .unwrap_or(GROUPING_PRESETS[GROUPING_PRESETS.len() - 1])
 }
 
-fn write_partial(s: &mut FixedStr<64>, from: UtcMillis) {
+fn write_partial(s: &mut FixedStr<96>, from: UtcMillis) {
     let (_, _, _, h, m, _) = from.to_civil();
     let _ = write!(s, " · partial from {h:02}:{m:02}Z");
+}
+
+/// ` · gap 15:02–15:40Z` (and ` +N` more): counted trades are missing inside the range.
+fn write_gap(s: &mut FixedStr<96>, (a, b): (i64, i64), more: u32) {
+    let (_, _, _, h1, m1, _) = UtcMillis(a).to_civil();
+    let (_, _, _, h2, m2, _) = UtcMillis(b).to_civil();
+    let _ = write!(s, " · gap {h1:02}:{m1:02}–{h2:02}:{m2:02}Z");
+    if more > 0 {
+        let _ = write!(s, " +{more}");
+    }
 }
 
 impl ChartLayer for VolumeProfileLayer {
@@ -329,12 +339,11 @@ impl ChartLayer for VolumeProfileLayer {
             .max(1);
         let profiles = &data.profiles;
         let kind = cfg.session.kind();
-        let data_start = profiles.data_start();
         let name = match cfg.session {
             ProfileSession::Eth => "ETH",
             ProfileSession::Rth => "RTH",
         };
-        let mut label = FixedStr::<64>::new();
+        let mut label = FixedStr::<96>::new();
         // The range the profile covers, for the key and the partial check.
         let (from, to) = match cfg.mode {
             ProfileMode::Off => return,
@@ -369,10 +378,16 @@ impl ChartLayer for VolumeProfileLayer {
                 (bars.bars[r.start].time, bars.end(r.end - 1))
             }
         };
-        if let Some(s) = data_start
-            && s > from
-        {
-            write_partial(&mut label, s);
+        // Where the counted trades (stored and live) don't cover the range: it starts later
+        // (`partial from`), or has holes (`gap`).
+        let gaps = data.counted_gaps(from.0, to.0 - 1);
+        if gaps.any {
+            if let Some(s) = gaps.data_from {
+                write_partial(&mut label, UtcMillis(s));
+            }
+            if let Some(g) = gaps.first_gap {
+                write_gap(&mut label, g, gaps.more_gaps);
+            }
         }
         self.label = label;
         let key = BuildKey {

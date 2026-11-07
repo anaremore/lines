@@ -73,13 +73,30 @@ pub const BOOK_LEVELS: i64 = 10;
 
 /// Write the sessions to `out`; returns the number of trades.
 pub fn write_es_sessions(out: &Path, depth: bool, transit: bool) -> io::Result<u64> {
+    write(out, depth, transit, None)
+}
+
+/// Only trade date `day` (1 or 2) of the same trades, its first frame at that session's open
+/// and a last quote at its close (as a live feed sends): day 1 into a local store, then day
+/// 2 replayed over it, shows the stored order flow after a restart (`--store-dir`).
+pub fn write_es_day(out: &Path, day: usize, depth: bool, transit: bool) -> io::Result<u64> {
+    if !(1..=DAYS.len()).contains(&day) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("day {day}: 1..={}", DAYS.len()),
+        ));
+    }
+    write(out, depth, transit, Some(day))
+}
+
+fn write(out: &Path, depth: bool, transit: bool, only_day: Option<usize>) -> io::Result<u64> {
     let mut jitter = Rng(0x7a17_5eed_0000_0042);
     let es = catalog::get(catalog::ES).expect("ES");
     let contract = ContractKey::monthly(es.id, 2026, Month::new(12).expect("month"));
     let ms = |s: &str| UtcMillis::parse_iso(s).expect("time").0;
     let tick = es.price.tick; // 25 units = 0.25
     let pts = |p: f64| (p * 100.0).round() as i64;
-    let start = ms(DAYS[0].open);
+    let start = ms(DAYS[only_day.map_or(0, |d| d - 1)].open);
 
     let header = Header {
         start_wall_ms: start,
@@ -94,7 +111,9 @@ pub fn write_es_sessions(out: &Path, depth: bool, transit: bool) -> io::Result<u
     let mut price = pts(DAYS[0].overnight);
     let mut buf = Vec::new();
     let mut trades = 0u64;
-    for day in &DAYS {
+    for (i, day) in DAYS.iter().enumerate() {
+        // Every day is generated (the same random walk); only the chosen one is written.
+        let write = only_day.is_none_or(|d| d == i + 1);
         let (open, rth_open, rth_close, close) = (
             ms(day.open),
             ms(day.rth_open),
@@ -177,18 +196,38 @@ pub fn write_es_sessions(out: &Path, depth: bool, transit: bool) -> io::Result<u
             } else {
                 2 + jitter.below(39) as i64
             };
-            w.write(
-                Direction::FromServer,
-                Duration::from_millis((t + late - start) as u64),
-                &Frame::binary(buf.clone()),
-            )?;
-            trades += 1;
+            if write {
+                w.write(
+                    Direction::FromServer,
+                    Duration::from_millis((t + late - start) as u64),
+                    &Frame::binary(buf.clone()),
+                )?;
+                trades += 1;
+            }
             // Overnight: a trade every 1-3 s; RTH: every 0.5-2 s.
             t += if rth {
                 500 + rng.below(1_500) as i64
             } else {
                 1_000 + rng.below(2_000) as i64
             };
+        }
+        // One day: a last quote at the close, so a store built from it is complete to the
+        // close (its last minute isn't cut at the last trade).
+        if write && only_day.is_some() {
+            buf.clear();
+            native::encode(
+                &NativeEvent::Bbo {
+                    time_us: close * 1000,
+                    bid: Some(Price(price - tick)),
+                    ask: Some(Price(price)),
+                },
+                &mut buf,
+            );
+            w.write(
+                Direction::FromServer,
+                Duration::from_millis((close - start) as u64),
+                &Frame::binary(buf.clone()),
+            )?;
         }
     }
     w.finish()?;

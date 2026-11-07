@@ -309,6 +309,17 @@ struct Cli {
     /// Local store size budget in GiB; the oldest trade dates are removed beyond it.
     #[arg(long, default_value_t = 4.0)]
     store_budget_gb: f64,
+    /// Use the local store under DIR (its `store-v1/`) for any source, the mock, replays and
+    /// screenshots included (evidence and tests with a synthetic stored session). Without it
+    /// those never store. The run writes into DIR as a live feed would: give a screenshot a
+    /// fresh copy each time for repeatable images.
+    #[arg(long, value_name = "DIR")]
+    store_dir: Option<PathBuf>,
+    /// At startup, replay the local store's trades of the newest N stored sessions into the
+    /// volume profile, footprint, cumulative delta, VWAP, DOM volume and time & sales
+    /// (0 = off). Default 2: the current and the previous session.
+    #[arg(long, value_name = "N", default_value_t = lines_feed::disk::orderflow::DEFAULT_SESSIONS)]
+    orderflow_sessions: u32,
     /// Run the feed without a window for N seconds and print stats (useful for recording).
     #[arg(long)]
     headless: Option<u64>,
@@ -729,25 +740,43 @@ fn feed_config(cli: &Cli, choice: &SourceChoice) -> Result<FeedConfig> {
     }
     cfg.record = cli.record.clone();
     cfg.store = store_config(cli, choice);
+    cfg.orderflow_sessions = cli.orderflow_sessions;
     Ok(cfg)
 }
 
 /// The local store (decision 0019) for live sources: the mock invents a new market every
-/// run and replays and screenshots must not write, so those never store.
+/// run and replays and screenshots must not write, so those never store, unless `--store-dir`
+/// names a store for this run.
 fn store_config(cli: &Cli, choice: &SourceChoice) -> Option<lines_feed::disk::StoreConfig> {
+    if cli.no_store {
+        return None;
+    }
+    let forced = cli.store_dir.is_some();
     let source = match choice {
-        _ if cli.no_store || cli.screenshot.is_some() => return None,
-        SourceChoice::Extension(e) if e.local_store() => e.name(),
+        _ if cli.screenshot.is_some() && !forced => return None,
+        // A replay (screenshots replay too, whatever `--source` says) keeps its own store.
+        _ if forced && cli.replay.is_some() => "replay",
+        SourceChoice::Extension(e) if e.local_store() || forced => e.name(),
         SourceChoice::Builtin(SourceKind::Coinbase) => "coinbase",
         SourceChoice::Builtin(SourceKind::Kraken) => "kraken",
         #[cfg(feature = "vendor-cqg")]
         SourceChoice::Builtin(SourceKind::Cqg) => "cqg",
+        SourceChoice::Builtin(SourceKind::Mock) if forced => "mock",
+        SourceChoice::Builtin(SourceKind::Replay) if forced => "replay",
         SourceChoice::Extension(_)
         | SourceChoice::Builtin(SourceKind::Mock | SourceKind::Replay) => return None,
     };
-    let Some(root) = lines_feed::disk::default_root() else {
-        tracing::warn!("no data directory (set LINES_DATA_DIR); running without the local store");
-        return None;
+    let root = match &cli.store_dir {
+        Some(dir) => dir.clone(),
+        None => match lines_feed::disk::default_root() {
+            Some(r) => r,
+            None => {
+                tracing::warn!(
+                    "no data directory (set LINES_DATA_DIR); running without the local store"
+                );
+                return None;
+            }
+        },
     };
     let mut cfg = lines_feed::disk::StoreConfig::new(root, source);
     cfg.depth_products = cli.store_depth.clone();

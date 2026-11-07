@@ -78,6 +78,11 @@ pub struct ContractWriter {
     io: Option<thread::JoinHandle<()>>,
     coverage: Coverage,
     run: Run,
+    /// Which of the frame's trades the chart counted (`ChartData::frame_counted`, copied
+    /// under the store's lock): only those are stored, so the segments hold exactly the
+    /// trades live counted (each once, late ones included) and a stored session replays to
+    /// what live showed.
+    counted: Vec<bool>,
     buf: Vec<u8>,
     last_save: Instant,
     _lock: File,
@@ -157,6 +162,10 @@ impl ContractWriter {
                 opened.bars = dir.rebuild_bars(period_ms, max_bars)?;
                 opened.rebuilt = true;
                 bars::save(&dir.bars_path(), period_ms, &opened.bars)?;
+                // Segments hold only counted trades: bars rebuilt from them are complete only
+                // where the trades are; history fills the rest.
+                coverage.bars = coverage.trades.clone();
+                coverage.save(&dir.coverage_path())?;
             }
             None => {}
         }
@@ -179,6 +188,7 @@ impl ContractWriter {
                 io: Some(io),
                 coverage,
                 run: Run::default(),
+                counted: Vec::new(),
                 buf: Vec::with_capacity(4096),
                 last_save: Instant::now(),
                 dir,
@@ -241,6 +251,12 @@ fn segment_header(dir: &ContractDir, product: &Product, date: CivilDate) -> Segm
     }
 }
 
+/// `*k`, then `*k += 1` (indexing the frame's trades in order inside a match guard).
+fn post_inc(k: &mut usize) -> usize {
+    *k += 1;
+    *k - 1
+}
+
 impl EventSink for ContractWriter {
     fn begin(
         &mut self,
@@ -271,9 +287,31 @@ impl EventSink for ContractWriter {
     fn frame(&mut self, events: &[MarketEvent], now: UtcMillis) {
         let now_us = now.0.saturating_mul(1000);
         self.buf.clear();
+        // Which trades the chart counted when it applied this frame (just before, on this
+        // thread). Without that record (a writer driven directly, as in tests) every trade is
+        // stored.
+        let trades = events
+            .iter()
+            .filter(|e| matches!(e, MarketEvent::Trade { .. }))
+            .count();
+        self.counted.clear();
+        {
+            let d = self.store.read();
+            if d.frame_counted.len() == trades {
+                self.counted.extend_from_slice(&d.frame_counted);
+            }
+        }
+        if self.counted.len() != trades {
+            self.counted.clear();
+            self.counted.resize(trades, true);
+        }
+        let mut k = 0;
         let mut block_us = None::<i64>;
         for e in events {
             let ne = match *e {
+                MarketEvent::Trade { .. } if !self.counted[post_inc(&mut k)] => {
+                    None // not counted live (already in a snapshot, or replayed from here)
+                }
                 MarketEvent::Trade {
                     time,
                     price,

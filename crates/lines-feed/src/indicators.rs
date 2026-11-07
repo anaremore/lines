@@ -209,6 +209,28 @@ impl EngineTap {
     }
 }
 
+impl EngineTap {
+    /// The local store's cached bars (before the feed connects): the engine's series starts
+    /// from the same bars as the chart.
+    pub fn cached(&mut self, bars: Vec<lines_core::Bar>) {
+        if !bars.is_empty() {
+            self.engine
+                .send(Msg::Events(self.info.feed, vec![Input::Cached(bars)]));
+        }
+    }
+
+    /// Stored order flow replayed at startup (`disk::orderflow`): one trade date's trades and
+    /// where they are complete.
+    pub fn stored(&mut self, trades: Vec<lines_core::Print>, covered: Vec<(i64, i64)>) {
+        if !trades.is_empty() || !covered.is_empty() {
+            self.engine.send(Msg::Events(
+                self.info.feed,
+                vec![Input::Stored { trades, covered }],
+            ));
+        }
+    }
+}
+
 impl EventSink for EngineTap {
     fn begin(
         &mut self,

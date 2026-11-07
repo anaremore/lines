@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lines_core::latency::{ClockOffset, LatencyWindow};
+use lines_core::sessions::SessionKind;
 use lines_core::{
     BarSeries, Capabilities, ContractKey, OrderBook, Price, Print, Product, SessionProfiles,
     Stitcher, Tape, UtcMillis, VolumeAtPrice,
@@ -27,6 +28,23 @@ use lines_core::{
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::provider::MarketEvent;
+
+/// Inner holes in the counted trades shorter than this (open-market time) are not reported:
+/// footprint bars are a minute wide, and a session's first trade lands just after its open.
+pub const MIN_GAP_MS: i64 = UtcMillis::MINUTE;
+
+/// Holes in the counted trades over a span ([`ChartData::counted_gaps`]).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CountedGaps {
+    /// Some counted trades fall in the span.
+    pub any: bool,
+    /// The span starts before the counted trades: they start here (`partial from`).
+    pub data_from: Option<i64>,
+    /// The first hole inside the span, inclusive ms.
+    pub first_gap: Option<(i64, i64)>,
+    /// Holes after the first.
+    pub more_gaps: u32,
+}
 
 /// Exchange → receive latency of this feed's trades and the clock-offset bound (roadmap 6b),
 /// recorded only while the latency HUD is shown (`lines_core::latency::enabled`).
@@ -170,6 +188,20 @@ pub struct ChartData {
     pub chart_epoch: u64,
     /// Feed latency (roadmap 6b): `None` until the latency HUD is first shown.
     pub latency: Option<Box<FeedLatency>>,
+    /// Stored order flow is being replayed into `tape`, `vap` and `profiles` (feed startup,
+    /// `disk::orderflow`): panes show bars first and say so.
+    pub orderflow_loading: bool,
+    /// Where `vap`, `profiles` and `tape` hold every trade: the stored ranges replayed at
+    /// startup and the closed live runs (see [`ChartData::counted_ranges`]).
+    counted: crate::disk::Ranges,
+    /// The current live run of counted trades, `[start, newest]` (closed at a reconnect or
+    /// gap).
+    live_run: Option<(i64, i64)>,
+    /// Newest stored trade time replayed: a live trade at or before it is already counted.
+    stored_through: Option<i64>,
+    /// Whether each `Trade` of the last applied frame was counted (in order): the local
+    /// store's writer stores exactly those (`disk::writer`).
+    pub frame_counted: Vec<bool>,
 }
 
 impl ChartData {
@@ -203,6 +235,7 @@ impl ChartData {
         // Quotes count only if they changed (compared after the batch): a feed that repeats
         // its BBO with every depth batch doesn't repaint charts.
         let quote = (self.bid, self.ask, self.last_trade);
+        self.frame_counted.clear();
         for e in events {
             chart |= !matches!(
                 e,
@@ -222,6 +255,12 @@ impl ChartData {
                     self.stitch.history(&mut self.series, bars, as_of);
                     if let Some(b) = bars.last() {
                         self.bump_time(b.time);
+                    }
+                    // Trades after the snapshot are counted from here on (the stitch drops
+                    // the rest as already in its bars).
+                    if let Some(a) = as_of {
+                        self.close_run();
+                        self.live_run = Some((a.0 + 1, a.0));
                     }
                 }
                 MarketEvent::HistoryComplete => {
@@ -245,7 +284,11 @@ impl ChartData {
                     qty,
                     aggressor,
                 } => {
-                    if self.stitch.trade(&mut self.series, time, price, qty) {
+                    let counted = self.stitch.trade(&mut self.series, time, price, qty)
+                        // Replayed from the store already (a snapshot older than the store).
+                        && self.stored_through.is_none_or(|s| time.0 > s);
+                    self.frame_counted.push(counted);
+                    if counted {
                         self.tape.push(Print {
                             time,
                             price,
@@ -254,6 +297,10 @@ impl ChartData {
                         });
                         self.vap.add(price, qty);
                         self.profiles.add(time, price, qty, aggressor);
+                        self.live_run = Some(match self.live_run {
+                            Some((a, b)) => (a, b.max(time.0)),
+                            None => (time.0, time.0),
+                        });
                     }
                     self.last_trade = Some(price);
                     self.stats.trades_in += 1;
@@ -269,7 +316,10 @@ impl ChartData {
                     self.ask = Some(p);
                     self.stats.updates_in += 1;
                 }
-                MarketEvent::Gap { missed } => self.stats.gaps += missed,
+                MarketEvent::Gap { missed } => {
+                    self.stats.gaps += missed;
+                    self.close_run();
+                }
                 MarketEvent::BookChecksumOk => self.stats.book_checksums_ok += 1,
                 MarketEvent::BookChecksumMismatch => self.stats.book_checksum_mismatches += 1,
                 MarketEvent::BookResync => self.stats.book_resyncs += 1,
@@ -305,6 +355,134 @@ impl ChartData {
         }
     }
 
+    /// Stored order flow (`disk::orderflow`, feed startup): `trades` add to the tape, VAP and
+    /// profiles exactly as counted live trades do, but never to the bars (the cached bars
+    /// already hold them). `covered`: where `trades` is every trade.
+    pub fn apply_stored(&mut self, trades: &[Print], covered: &[(i64, i64)]) {
+        for p in trades {
+            self.tape.push(*p);
+            self.vap.add(p.price, p.qty);
+            self.profiles.add(p.time, p.price, p.qty, p.aggressor);
+            // The newest replayed trade (exchange time; never the local clock).
+            self.stored_through = Some(self.stored_through.map_or(p.time.0, |s| s.max(p.time.0)));
+        }
+        for &(a, b) in covered {
+            self.counted.add(a, b);
+        }
+        if !trades.is_empty() {
+            self.chart_epoch += 1;
+        }
+    }
+
+    /// Where `vap`, `profiles` and `tape` hold every trade: stored ranges and live runs
+    /// (inclusive ms). A profile or footprint over a span outside these is partial.
+    pub fn counted_ranges(&self) -> crate::disk::Ranges {
+        let mut r = self.counted.clone();
+        if let Some((a, b)) = self.live_run {
+            r.add(a, b);
+        }
+        r
+    }
+
+    /// Where the counted trades leave holes inside `[from, to]` (inclusive ms), without
+    /// allocating (profiles and footprints ask every frame). A hole after the newest counted
+    /// trade is not reported (those trades simply haven't happened or arrived yet). An inner
+    /// hole counts only where the market was open (the product's sessions: a daily break is
+    /// not missing data) and only from [`MIN_GAP_MS`] of open time.
+    pub fn counted_gaps(&self, from: i64, to: i64) -> CountedGaps {
+        let mut g = CountedGaps::default();
+        if from > to {
+            return g;
+        }
+        let stored = self.counted.ranges();
+        let mut live = self.live_run;
+        let mut i = 0;
+        let mut cursor = from;
+        let mut any = false;
+        // The stored ranges are sorted and disjoint; the live run merges in by its start.
+        let mut block: Option<(i64, i64)> = None;
+        loop {
+            let next = match (stored.get(i), live) {
+                (Some(&s), Some(l)) if l.0 < s.0 => {
+                    live = None;
+                    Some(l)
+                }
+                (Some(&s), _) => {
+                    i += 1;
+                    Some(s)
+                }
+                (None, Some(l)) => {
+                    live = None;
+                    Some(l)
+                }
+                (None, None) => None,
+            };
+            // Merge touching ranges into one block before looking for a hole.
+            match (block, next) {
+                (Some((a, b)), Some((c, d))) if c <= b.saturating_add(1) => {
+                    block = Some((a, b.max(d)));
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some((a, b)) = block
+                && b >= from
+            {
+                if a > to {
+                    break;
+                }
+                if a > cursor {
+                    if cursor == from && !any {
+                        g.data_from = Some(a);
+                    } else if let Some(hole) = self.open_part(cursor, a - 1) {
+                        if g.first_gap.is_none() {
+                            g.first_gap = Some(hole);
+                        } else {
+                            g.more_gaps += 1;
+                        }
+                    }
+                }
+                any = true;
+                cursor = cursor.max(b.saturating_add(1));
+            }
+            block = next;
+            if block.is_none() {
+                break;
+            }
+        }
+        g.any = any;
+        g
+    }
+
+    /// The part of the hole `[a, b]` when the market was open, if at least [`MIN_GAP_MS`]
+    /// (the whole hole when the product has no session calendar).
+    fn open_part(&self, a: i64, b: i64) -> Option<(i64, i64)> {
+        let Some(cal) = self.profiles.calendar() else {
+            return (b - a + 1 >= MIN_GAP_MS).then_some((a, b));
+        };
+        let (mut first, mut last, mut open) = (None, None, 0i64);
+        for s in cal.sessions(
+            UtcMillis(a),
+            UtcMillis(b.saturating_add(1)),
+            SessionKind::Eth,
+        ) {
+            let (x, y) = (s.open.0.max(a), (s.close.0 - 1).min(b));
+            if x <= y {
+                first.get_or_insert(x);
+                last = Some(y);
+                open += y - x + 1;
+            }
+        }
+        (open >= MIN_GAP_MS).then_some((first?, last?))
+    }
+
+    /// End the live run of counted trades (a reconnect or gap: trades may be missing).
+    fn close_run(&mut self) {
+        if let Some((a, b)) = self.live_run.take() {
+            self.counted.add(a, b);
+        }
+    }
+
     /// Bars from the local store's cache, shown before the feed connects (decision 0019).
     /// The feed then requests history from where they end and the stitch merges it.
     pub fn load_cached(&mut self, bars: &[lines_core::Bar]) {
@@ -323,6 +501,7 @@ impl ChartData {
 
     /// A (re)connect starts: history, if the provider has it, is loading again.
     pub fn begin_connection(&mut self) {
+        self.close_run();
         let expect = self.capabilities.history;
         self.stitch.begin_connection(expect);
         self.history = if expect {
@@ -358,6 +537,10 @@ impl ChartData {
         self.tape.clear();
         self.vap.clear();
         self.profiles.clear();
+        self.counted = crate::disk::Ranges::default();
+        self.live_run = None;
+        self.stored_through = None;
+        self.orderflow_loading = false;
     }
 
     fn bump_time(&mut self, t: UtcMillis) {
@@ -453,6 +636,11 @@ impl ChartStore {
                 stats: FeedStats::default(),
                 chart_epoch: 0,
                 latency: None,
+                orderflow_loading: false,
+                counted: crate::disk::Ranges::default(),
+                live_run: None,
+                stored_through: None,
+                frame_counted: Vec::new(),
             }),
             revision: AtomicU64::new(0),
             chart_revision: AtomicU64::new(0),
@@ -640,7 +828,160 @@ impl Drop for ChartStore {
 mod tests {
     use super::*;
     use crate::catalog;
-    use lines_core::{Month, Qty, Side};
+    use lines_core::{Aggressor, Month, Qty, Side};
+
+    fn es_store(history: bool) -> ChartStore {
+        let es = catalog::get(catalog::ES).unwrap();
+        let caps = Capabilities {
+            history,
+            ..Capabilities::default()
+        };
+        ChartStore::new(es, None, caps, "test", 60_000, 1000)
+    }
+
+    fn print(t: i64, q: i64) -> Print {
+        Print {
+            time: UtcMillis(t),
+            price: Price(600_000),
+            qty: Qty(q),
+            aggressor: Some(Aggressor::Buy),
+        }
+    }
+
+    fn live(t: i64, q: i64) -> MarketEvent {
+        MarketEvent::Trade {
+            time: UtcMillis(t),
+            price: Price(600_000),
+            qty: Qty(q),
+            aggressor: Some(Aggressor::Buy),
+        }
+    }
+
+    /// The stored → live boundary: a history snapshot older than the newest stored trade
+    /// doesn't count the stored trades again; after it, every live trade counts once.
+    #[test]
+    fn stored_then_live_counts_every_trade_once() {
+        let store = es_store(true);
+        let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+        store.update(|d| {
+            d.apply_stored(
+                &[print(t0 + 1000, 1), print(t0 + 2000, 2)],
+                &[(t0, t0 + 2999)],
+            )
+        });
+        {
+            let d = store.read();
+            assert_eq!(d.vap.total(), Qty(3));
+            assert!(d.series.is_empty(), "stored trades never touch the bars");
+        }
+        store.update(|d| {
+            d.begin_connection();
+            d.apply(&[MarketEvent::History {
+                bars: vec![],
+                as_of: Some(UtcMillis(t0 + 1500)),
+            }]);
+        });
+        // Re-sent after the snapshot (stored already), then new.
+        store.update(|d| d.apply(&[live(t0 + 2000, 2), live(t0 + 5000, 4)]));
+        let d = store.read();
+        assert_eq!(d.vap.total(), Qty(1 + 2 + 4));
+        assert_eq!(d.tape.len(), 3);
+        assert_eq!(
+            d.profiles
+                .footprint()
+                .range(UtcMillis(t0), UtcMillis(t0 + 60_000))
+                .map(|(_, v)| v.total().0)
+                .sum::<i64>(),
+            7
+        );
+        // Stored [t0, t0+2999] and live from the snapshot on: no hole.
+        assert_eq!(
+            d.counted_gaps(t0, t0 + 5000),
+            CountedGaps {
+                any: true,
+                ..CountedGaps::default()
+            }
+        );
+    }
+
+    /// The warm-start floor is the newest replayed trade, never the coverage's end (which can
+    /// follow a fast local clock): a live trade after the last stored one counts.
+    #[test]
+    fn the_stored_floor_is_the_newest_stored_trade() {
+        let store = es_store(true);
+        let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+        // Coverage claimed 90 s past the last stored trade (a clock running ahead).
+        store.update(|d| d.apply_stored(&[print(t0 + 1000, 1)], &[(t0, t0 + 91_000)]));
+        store.update(|d| {
+            d.begin_connection();
+            d.apply(&[MarketEvent::History {
+                bars: vec![],
+                as_of: Some(UtcMillis(t0 + 500)),
+            }]);
+            d.apply(&[live(t0 + 1000, 1), live(t0 + 30_000, 5)]);
+        });
+        let d = store.read();
+        assert_eq!(
+            d.vap.total(),
+            Qty(1 + 5),
+            "the re-sent stored trade once, the new one counts"
+        );
+        assert_eq!(d.frame_counted, vec![false, true]);
+    }
+
+    /// Holes in the counted trades: where the data starts (`partial from`) and the inner
+    /// gaps, but never the market's daily break.
+    #[test]
+    fn counted_gaps_skip_closed_market_time() {
+        let store = es_store(true);
+        let at = |s: &str| UtcMillis::parse_iso(s).unwrap().0;
+        store.update(|d| {
+            // Monday's session to 21:00, a 20-minute hole, then to the 22:00 close; Tuesday's
+            // session from its 23:00 open (the 22:00–23:00 break between is closed).
+            let a = at("2026-11-10T14:00:00Z");
+            d.apply_stored(&[], &[(a, at("2026-11-10T21:00:00Z") - 1)]);
+            d.apply_stored(
+                &[],
+                &[(at("2026-11-10T21:20:00Z"), at("2026-11-10T22:00:00Z") - 1)],
+            );
+            d.apply_stored(
+                &[],
+                &[(at("2026-11-10T23:00:00Z"), at("2026-11-11T01:00:00Z"))],
+            );
+        });
+        let d = store.read();
+        let g = d.counted_gaps(at("2026-11-10T13:00:00Z"), at("2026-11-11T01:00:00Z"));
+        assert!(g.any);
+        assert_eq!(
+            g.data_from,
+            Some(at("2026-11-10T14:00:00Z")),
+            "partial from 14:00"
+        );
+        assert_eq!(
+            g.first_gap,
+            Some((at("2026-11-10T21:00:00Z"), at("2026-11-10T21:20:00Z") - 1))
+        );
+        assert_eq!(g.more_gaps, 0, "the 22:00–23:00 break is no gap");
+        // A hole under a minute of open market isn't reported.
+        drop(d);
+        store.update(|d| {
+            d.apply_stored(
+                &[],
+                &[(
+                    at("2026-11-11T01:00:00Z") + 30_000,
+                    at("2026-11-11T02:00:00Z"),
+                )],
+            )
+        });
+        let d = store.read();
+        let g = d.counted_gaps(at("2026-11-10T21:30:00Z"), at("2026-11-11T02:00:00Z"));
+        assert_eq!((g.data_from, g.first_gap, g.more_gaps), (None, None, 0));
+        // Nothing counted in the span: nothing to say.
+        assert!(
+            !d.counted_gaps(at("2026-11-12T00:00:00Z"), at("2026-11-12T01:00:00Z"))
+                .any
+        );
+    }
 
     /// Exchange → receive per trade on the receive clock; back-fill skipped; the clock
     /// offset bound is the smallest receive − exchange (negative: the local clock is behind).

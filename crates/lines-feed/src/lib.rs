@@ -101,6 +101,10 @@ pub struct FeedConfig {
     pub history_ms: i64,
     /// Keep this feed in the local market-data store (decision 0019); `None` = don't.
     pub store: Option<disk::StoreConfig>,
+    /// At startup, replay the store's trades of this many newest stored trade dates into the
+    /// order-flow consumers (`disk::orderflow`; 0 = off). Default 2: the current and the
+    /// previous session.
+    pub orderflow_sessions: u32,
     /// Override how long a live feed may be silent before panes show it stale
     /// (default per provider, [`stale_after`]).
     pub stale_after: Option<Duration>,
@@ -116,6 +120,7 @@ impl FeedConfig {
             max_bars: 50_000,
             history_ms: 3 * 24 * 60 * UtcMillis::MINUTE,
             store: None,
+            orderflow_sessions: disk::orderflow::DEFAULT_SESSIONS,
             stale_after: None,
         }
     }
@@ -370,6 +375,9 @@ pub async fn run_feed(
         plan.provider.capabilities().history,
         matches!(config.source, Source::Replay { .. }),
     );
+    if let Some(w) = writer.as_ref() {
+        warm_start(&config, w, &store, &mut tap);
+    }
     store.set_stale_after(
         config
             .stale_after
@@ -425,6 +433,9 @@ pub async fn run_feed(
                 drop(writer.take());
                 writer = open_writer(&config, &plan.product, Some(k), &store);
                 tap.reset();
+                if let Some(w) = writer.as_ref() {
+                    warm_start(&config, w, &store, &mut tap);
+                }
                 // Recordings hold exactly one contract: stop rather than mix two.
                 if let Some(r) = recorder.take() {
                     tracing::warn!("recording stopped at the roll (recordings hold one contract)");
@@ -624,6 +635,56 @@ fn open_writer(
             tracing::warn!("local store unavailable: {e}");
             None
         }
+    }
+}
+
+/// Stored trades applied per store update at startup (a few ms under the lock).
+const STORED_SLICE: usize = 20_000;
+
+/// The local store's warm start (decision 0019), on the feed thread before connecting: the
+/// engine gets the cached bars, then the stored trades of the newest stored sessions replay
+/// into everything that counts trades (`disk::orderflow`). Panes show the bars first and
+/// "loading order flow" until this ends. Store problems never stop the feed.
+fn warm_start(
+    config: &FeedConfig,
+    writer: &disk::ContractWriter,
+    store: &Arc<ChartStore>,
+    tap: &mut indicators::EngineTap,
+) {
+    let (bars, newest) = {
+        let d = store.read();
+        (d.series.bars().to_vec(), d.series.last().map(|b| b.time))
+    };
+    tap.cached(bars);
+    let Some(from) = newest
+        .and_then(|t| disk::orderflow::lookback_start(writer.dir(), t, config.orderflow_sessions))
+    else {
+        return;
+    };
+    store.update(|d| d.orderflow_loading = true);
+    let result = disk::orderflow::read(writer.dir(), from, |chunk| {
+        // In slices, so the store's lock is held for milliseconds (panes keep drawing); the
+        // coverage comes with the last one.
+        // The indicator engine gets the same slices (one batch never holds a busy day).
+        for part in chunk.trades.chunks(STORED_SLICE) {
+            store.update(|d| d.apply_stored(part, &[]));
+            tap.stored(part.to_vec(), Vec::new());
+        }
+        store.update(|d| d.apply_stored(&[], &chunk.covered));
+        tap.stored(Vec::new(), chunk.covered);
+    });
+    store.update(|d| d.orderflow_loading = false);
+    match result {
+        Ok(s) => tracing::info!(
+            "stored order flow: {} trades from {} trade dates in {:?} ({} decoded, {} \
+             segments cut)",
+            s.replayed,
+            s.dates,
+            s.elapsed,
+            s.decoded,
+            s.cut
+        ),
+        Err(e) => tracing::warn!("stored order flow unavailable: {e}"),
     }
 }
 
