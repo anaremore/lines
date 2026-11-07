@@ -12,7 +12,16 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GUARD_SH = os.path.join(HERE, "guard.sh")
-BASH = shutil.which("bash")
+def find_bash():
+    """Git Bash on Windows (system32 bash.exe is WSL and can't see this checkout), else PATH."""
+    if os.name == "nt":
+        for c in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"):
+            if os.path.exists(c):
+                return c
+    return shutil.which("bash")
+
+
+BASH = find_bash()
 
 
 def run(tool, tool_input, cwd=None):
@@ -80,7 +89,7 @@ CASES = [
     ("cargo fmt --all --check && git push origin main", "deny"),
     ("gh release create v0.2.0 && git push origin main", "deny"),
     # GitHub.
-    ("gh pr merge 12 --merge", "allow"),
+    ("gh pr merge 999999 --merge", "ask"),  # changed files can't be listed: ask
     ("gh pr merge 12 --merge --admin", "deny"),
     ("gh pr merge 12 --merge --delete-branch", "deny"),
     ("gh release delete v0.1.0", "deny"),
@@ -88,6 +97,13 @@ CASES = [
     ("gh api --method=DELETE repos/a/b/git/refs/heads/x", "deny"),
     ("gh release create v0.2.0 --draft", "ask"),
     ("gh pr create --base main --title x --body-file b.md", "allow"),
+    # Wrappers and quoting don't hide the program.
+    ('LINES_SIERRA_DATA="C:/SierraChart/SierraChart - Apex/Data" cargo test -p lines-official --features sim-once', "deny"),
+    ('& "C:/Users/human/.cargo/bin/cargo.exe" run -p lines-official --features sim-once', "deny"),
+    ("(cargo run -p lines-official --features sim-once)", "deny"),
+    ("& git push origin main", "deny"),
+    ("command git push origin main", "deny"),
+    ('git commit -m "guard: deny disableAllHooks"', "allow"),
     # Searching for rule words is fine.
     ('rg -n -- "--no-verify" CLAUDE.md', "allow"),
     ("grep -rn sim-once crates", "allow"),
@@ -105,6 +121,14 @@ CASES = [
     ("sed -i s/deny/pass/ .claude/hooks/guard.py", "ask"),
     ("git checkout x -- .claude/settings.json", "ask"),
     ("echo x > CLAUDE.md", "ask"),
+    ("sed -i s/x/y/ .github/workflows/ci.yml", "ask"),
+    ("cat > .github/workflows/ci.yml", "ask"),
+    ("Set-Content .github/workflows/ci.yml x", "ask"),
+    ("git checkout origin/x -- .github/workflows/ci.yml", "ask"),
+    ("git apply fix.patch", "ask"),
+    ("sed -i s/Proposed/Accepted/ docs/decisions/0021-settings.md", "ask"),
+    ("cp out.png Z:/Projects/lines/.claude/worktrees/feat/assets/x.png", "allow"),
+    ("cp note.md C:/Users/human/.claude/projects/z--Projects-lines/memory/x.md", "allow"),
     ('echo \'{"disableAllHooks": true}\' > .claude/settings.local.json', "deny"),
     # Everyday commands.
     ("~/.cargo/bin/cargo.exe test --workspace --no-fail-fast", "allow"),
@@ -126,6 +150,10 @@ FILES = [
     (R + ".claude/hooks/guard.py", "x", "ask"),
     (R + ".claude/skills/full-send/SKILL.md", "x", "ask"),
     (R + ".claude/agents/reviewer.md", "x", "ask"),
+    (R + ".claude/commands/x.md", "x", "ask"),
+    (R + "CLAUDE.local.md", "x", "ask"),
+    (R + ".claude/hooks/guard.py", 'if "disableAllHooks" in part:', "ask"),
+    (R + ".claude/worktrees/feat/crates/lines-app/src/lib.rs", "x", "allow"),
     (R + "CLAUDE.md", "x", "ask"),
     (R + ".github/workflows/ci.yml", "x", "ask"),
     (R + "deny.toml", "x", "allow"),
@@ -143,6 +171,8 @@ def main_branch_cases():
             (sh("git push", d), "deny", "bare push on main"),
             (sh("git push origin HEAD", d), "deny", "push HEAD on main"),
             (sh("git push -u origin feature", d), "allow", "named branch from main checkout"),
+            (sh(f"git -C {d} push origin HEAD"), "deny", "git -C into a checkout on main"),
+            (sh(f"cd {d} && git push"), "deny", "cd into a checkout on main"),
         ]
 
 
@@ -157,7 +187,7 @@ def decision_cases():
         with open(proposed, "w", encoding="utf-8") as f:
             f.write("# 0098\n\n**Status:** Proposed\n")
         return [
-            (edit(accepted), "deny", "edit accepted"),
+            (edit(accepted), "ask", "edit accepted (supersede marker only, with the owner's yes)"),
             (edit(proposed), "allow", "edit proposed"),
             (edit(proposed, "**Status:** Accepted"), "ask", "accept a proposal"),
             (edit(os.path.join(dec, "0100-new.md"), "**Status:** Proposed"), "allow", "new proposal"),

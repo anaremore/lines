@@ -2,7 +2,10 @@
   "permissions": {
     "deny": [
       "mcp__computer-use",
-      "mcp__remote-devices__computer"
+      "mcp__remote-devices__computer",
+      "Bash(git push origin main:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
     ]
   },
   "hooks": {

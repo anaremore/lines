@@ -1,9 +1,10 @@
 """PreToolUse guard for Lines (CLAUDE.md "Never" and tier C).
 
 Reads the hook event as JSON on stdin. Exit 2 blocks the call (stderr reaches Claude); a JSON
-"ask" decision pauses for the owner; exit 0 allows. Run through `guard.sh`, which fails closed
-if Python is missing or this script crashes. Pattern-based: a guardrail for honest mistakes,
-not a security boundary. Tested by `test_guard.py` (CLAUDE.md gate step 8, and CI).
+"ask" decision pauses for the owner; exit 0 allows. Every part of a compound command is checked
+and a deny anywhere wins over an ask. Run through `guard.sh`, which fails closed if Python is
+missing or this script crashes. Pattern-based: a guardrail for honest mistakes, not a security
+boundary. Tested by `test_guard.py` (CLAUDE.md gate step 8, and CI).
 """
 
 import json
@@ -13,6 +14,15 @@ import subprocess
 import sys
 
 ASKS = []
+
+TOKEN = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")
+WRAPPERS = {"&", "(", "command", "env", "time", "exec", "nohup", "sudo", "call"}
+WRITE_PROGS = {"rm", "del", "mv", "cp", "remove-item", "move-item", "copy-item", "set-content",
+               "add-content", "out-file", "new-item", "tee", "rename-item", "rmdir", "rd"}
+GUARD_IN_SHELL = re.compile(
+    r"""(^|[\s/\\"'=])(\.claude[/\\](?!worktrees|projects)|\.github[/\\]|CLAUDE(\.local)?\.md)"""
+)
+SECRET = re.compile(r"\b(OPTIONIDEA_API_KEY|LINES_CQG_PASSWORD|RITHMIC_\w*PASS\w*)\s*=")
 
 
 def deny(why):
@@ -30,11 +40,19 @@ def finish():
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "ask",
-                "permissionDecisionReason": "; ".join(ASKS),
+                "permissionDecisionReason": "; ".join(dict.fromkeys(ASKS)),
             }
         }
         print(json.dumps(out))
     sys.exit(0)
+
+
+def guardrail_path(path):
+    """CLAUDE.md, CLAUDE.local.md, .claude/** (not worktrees or memory) and .github/**."""
+    low = path.replace("\\", "/").lower()
+    if re.search(r"(^|/)\.claude/(worktrees|projects)/", low):
+        return False
+    return bool(re.search(r"(^|/)\.claude/|(^|/)\.github/|(^|/)claude(\.local)?\.md$", low))
 
 
 def current_branch(cwd):
@@ -52,33 +70,27 @@ def split_parts(cmd):
     return [p.strip() for p in re.split(r"&&|\|\||[;|\n]", cmd) if p.strip()]
 
 
+def tokens(part):
+    return [t.replace('"', "").replace("'", "") for t in TOKEN.findall(part)]
+
+
+def prog_name(tok):
+    return re.sub(r"\.exe$", "", re.split(r"[\\/]", tok.strip("()"))[-1].lower())
+
+
 def command_of(part):
-    """The program a simple command runs (env assignments skipped, path and .exe dropped)."""
-    toks = part.replace('"', " ").replace("'", " ").split()
+    """The program a simple command runs: env assignments and wrappers (`&`, `command`, `(`) skipped."""
+    toks = tokens(part)
     i = 0
-    while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
+    while i < len(toks) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]) or toks[i].lower() in WRAPPERS):
         i += 1
     if i >= len(toks):
         return "", []
-    prog = re.split(r"[\\/]", toks[i])[-1].lower()
-    prog = re.sub(r"\.exe$", "", prog)
-    return prog, toks[i + 1:]
-
-
-def git_sub(args):
-    """`git -C x -c y status` -> ("status", rest)."""
-    i = 0
-    while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in ("-C", "-c") else 1
-    return (args[i].lower(), args[i + 1:]) if i < len(args) else ("", [])
+    return prog_name(toks[i]), toks[i + 1:]
 
 
 def short_flags(args):
     return "".join(a[1:] for a in args if re.match(r"^-[A-Za-z]+$", a))
-
-
-WRITE_PROGS = {"rm", "del", "mv", "cp", "remove-item", "move-item", "copy-item", "set-content",
-               "add-content", "out-file", "new-item", "tee", "rename-item", "rmdir", "rd"}
 
 
 def check_git(args, cwd, raw):
@@ -86,14 +98,19 @@ def check_git(args, cwd, raw):
         deny("disabling git hooks")
     if re.search(r"commit\.gpgsign=false", raw, re.I):
         deny("disabling commit signing")
-    sub, rest = git_sub(args)
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] == "-C" and i + 1 < len(args):
+            cwd = args[i + 1]
+        i += 2 if args[i] in ("-C", "-c") else 1
+    sub, rest = (args[i].lower(), args[i + 1:]) if i < len(args) else ("", [])
     flags = short_flags(rest)
     joined = " ".join(rest)
     if sub == "push":
         refs = [a for a in rest if not a.startswith("-")]
         if any(re.search(r"(^|:)(refs/heads/)?main$", r) for r in refs[1:]):
             deny("pushing to main (open a PR)")
-        if current_branch(cwd) == "main" and (len(refs) <= 1 or any(r == "HEAD" for r in refs[1:])):
+        if current_branch(cwd) == "main" and (len(refs) <= 1 or "HEAD" in refs[1:]):
             deny("pushing from main (open a PR)")
         if re.search(r"--force(?![-\w])", joined) or "f" in flags or any(r.startswith("+") for r in refs):
             deny("force push (use --force-with-lease to your own branch)")
@@ -108,12 +125,9 @@ def check_git(args, cwd, raw):
             "--delete" in joined and re.search(r"--force|(^|\s)-f(\s|$)", joined)
         ):
             deny("force-deleting a branch")
-    elif sub == "tag":
+    elif sub in ("tag", "update-ref"):
         if "d" in flags or "--delete" in joined:
-            deny("deleting a tag")
-    elif sub == "update-ref":
-        if "d" in flags or "--delete" in joined:
-            deny("deleting a ref")
+            deny("deleting a tag or ref")
     elif sub == "clean":
         if "x" in flags.lower():
             deny("git clean -x deletes gitignored recordings")
@@ -127,8 +141,10 @@ def check_git(args, cwd, raw):
     elif sub == "commit":
         if "n" in flags or "--no-verify" in joined or "--no-gpg-sign" in joined:
             deny("skipping commit hooks or signing")
-    if sub in ("checkout", "restore", "rm", "mv") and re.search(r"(^|[\s/\\])\.claude[/\\]|CLAUDE\.md", joined):
-        ask("changing the agent guardrails (tier C)")
+    elif sub == "apply":
+        ask("applying a patch (tier C if it touches the agent rules)")
+    if sub in ("checkout", "restore", "rm", "mv") and GUARD_IN_SHELL.search(joined):
+        ask("changing the agent rules, guardrails or CI with git (tier C)")
 
 
 def check_gh(args):
@@ -138,35 +154,55 @@ def check_gh(args):
         deny("deleting a repo or release")
     if args[:1] == ["api"] and re.search(r"(-X|--method)[=\s]*DELETE\b", joined, re.I):
         deny("DELETE through the GitHub API")
-    if sub == "pr merge" and re.search(r"--admin\b|--delete-branch\b|(^|\s)-d(\s|$)", joined):
-        deny("merging with --admin or deleting the branch")
+    if sub == "pr merge":
+        if re.search(r"--admin\b|--delete-branch\b|(^|\s)-d(\s|$)", joined):
+            deny("merging with --admin or deleting the branch")
+        num = next((a for a in args[2:] if not a.startswith("-")), "")
+        try:
+            out = subprocess.run(
+                ["gh", "pr", "diff", *([num] if num else []), "--name-only"],
+                capture_output=True, text=True, timeout=30,
+            )
+            files = out.stdout.splitlines() if out.returncode == 0 else None
+        except Exception:
+            files = None
+        if files is None:
+            ask("merging a PR whose changed files couldn't be listed")
+        elif any(guardrail_path(f) for f in files):
+            ask("merging a PR that changes the agent rules, guardrails or CI (tier C)")
     if sub in ("release create", "release edit", "release upload"):
         ask("creating or changing a GitHub release")
 
 
 def check_shell(cmd, cwd):
-    if re.search(r"disableAllHooks", cmd):
-        deny("disabling hooks")
     for part in split_parts(cmd):
         prog, args = command_of(part)
-        if re.search(r"\b(OPTIONIDEA_API_KEY|LINES_CQG_PASSWORD|RITHMIC_\w*PASS\w*)\s*=", part):
+        if prog == "cd" and args:
+            cwd = args[0]
+            continue
+        if SECRET.search(part):
             deny("a secret inline in a command")
+        if "sim-once" in part and any(prog_name(t) == "cargo" for t in tokens(part)):
+            deny("sending a Sierra order (the owner runs Sim tests)")
         if prog == "git":
             check_git(args, cwd, part)
         elif prog == "gh":
             check_gh(args)
-        elif prog == "cargo" and re.search(r"\bsim-once\b", part):
-            deny("sending a Sierra order (the owner runs Sim tests)")
-        # Writes: a write program (or sed -i), or an output redirect that isn't 2>&1.
+        # Writes: a write program (or sed -i), or an output redirect that isn't 2>&1 / >&2.
         writes = prog in WRITE_PROGS or (prog == "sed" and any(a.startswith("-i") for a in args))
         target = " ".join(args) if writes else ""
-        redirect = re.search(r"(?<![0-9&])>>?\s*(?!&)(\S+)", part)
-        if redirect:
-            target += " " + redirect.group(1)
+        for m in re.finditer(r"(?<![0-9&])>>?\s*(?!&)(\"[^\"]*\"|'[^']*'|\S+)", part):
+            target += " " + m.group(1)
+        if not target:
+            continue
         if re.search(r"sierra\s?chart", target, re.I):
             deny("modifying Sierra Chart files")
-        if re.search(r"(^|[\s/\\\"'])\.claude[/\\]|CLAUDE\.md", target):
-            ask("changing the agent guardrails (tier C)")
+        if "disableAllHooks" in part:
+            deny("disabling hooks")
+        if GUARD_IN_SHELL.search(target):
+            ask("changing the agent rules, guardrails or CI (tier C)")
+        if re.search(r"docs[/\\]decisions[/\\]", target):
+            ask("changing a decision record from the shell (the owner accepts decisions)")
 
 
 def check_file(inp):
@@ -174,7 +210,7 @@ def check_file(inp):
     low = path.replace("\\", "/").lower()
     text = inp.get("content") or inp.get("new_string") or ""
     text += "".join(e.get("new_string", "") for e in inp.get("edits") or [])
-    if "disableallhooks" in text.lower():
+    if low.endswith(".json") and "disableallhooks" in text.lower():
         deny("disabling hooks")
     if "/third_party/" in low:
         deny("third_party/ is a vendor submodule")
@@ -188,14 +224,13 @@ def check_file(inp):
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 if re.search(r"\*\*Status:\*\*\s*Accepted", f.read()):
-                    deny("accepted decision records are superseded by a new record, never edited")
+                    ask("editing an accepted decision (only 'Superseded by NNNN', with the owner's yes)")
         if re.search(r"Status:\*\*\s*Accepted", text):
             ask("marking a decision Accepted (the owner accepts decisions)")
     if low.endswith("cargo.toml") and re.search(r"(default|features)\s*=\s*\[[^\]]*vendor-cqg", text):
         deny("vendor-cqg must never be on by default or through a dependency")
-    if re.search(r"/\.claude/(settings[^/]*\.json|hooks/|skills/|agents/)", low) or low.endswith("/claude.md") \
-            or "/.github/" in low:
-        ask("changing the agent guardrails, rules or CI (tier C)")
+    if guardrail_path(low):
+        ask("changing the agent rules, guardrails or CI (tier C)")
 
 
 def main():
