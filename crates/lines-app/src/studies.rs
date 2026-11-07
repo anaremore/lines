@@ -262,26 +262,31 @@ impl Studies {
         theme: &Theme,
         window: &mut Window,
     ) {
-        let hair = 1.0 / window.scale_factor();
+        let dpi = window.scale_factor();
+        let hair = 1.0 / dpi;
         let rect = |x: f32, y: f32, w: f32, h: f32| {
             gpui::Bounds::new(
                 point(px(origin.0 + x), px(origin.1 + y)),
                 gpui::size(px(w), px(h)),
             )
         };
+        // The price candles' geometry (device-pixel snapping, decision in `geometry`): wicks
+        // on device-pixel centres (the crosshair's line runs through them), bodies an odd
+        // number of device pixels wide, edges on device-pixel boundaries.
+        let half = lines_core::geometry::candle_half_width(vp.bar_px, dpi);
+        let snap = |v: f32| lines_core::geometry::snap(f64::from(v), dpi);
         for s in &self.list {
             if !s.config.in_subpane() || s.config.display().hidden {
                 continue;
             }
-            let half = ((vp.bar_px * 0.35) as f32).max(hair * 0.5);
             for c in &s.candles {
-                let x = vp.index_to_x(c.bar as f64) as f32;
+                let x = lines_core::geometry::slot_x(vp, c.bar as f64, dpi);
                 let up = c.close >= c.open;
                 let col = if up { theme.up } else { theme.down };
                 // Approximate (bar-derived) candles are fainter; the legend says so.
                 let col = if c.approx { col.opacity(0.45) } else { col };
-                let (yo, yc) = (scale.y(c.open as f64), scale.y(c.close as f64));
-                let (yh, yl) = (scale.y(c.high as f64), scale.y(c.low as f64));
+                let (yo, yc) = (snap(scale.y(c.open as f64)), snap(scale.y(c.close as f64)));
+                let (yh, yl) = (snap(scale.y(c.high as f64)), snap(scale.y(c.low as f64)));
                 let (top, bot) = (yo.min(yc), yo.max(yc));
                 let (bx, bw, bh) = (x - half, half * 2.0, (bot - top).max(hair));
                 // Direction by shape too (docs/design.md): one direction's bodies are hollow,

@@ -1921,8 +1921,19 @@ impl ChartView {
             (sc.hi - (sc.hi - sc.lo) * 0.08).round() as i64,
             (sc.lo + (sc.hi - sc.lo) * 0.08).round() as i64,
         );
+        // The newest value's tag, and range labels only where it leaves them whole (as the
+        // price axis: a half-covered number reads as another value).
+        let newest = self.studies.subpane_last().map(|last| {
+            let y = (s.sub_top + sc.y(last as f64))
+                .clamp(s.sub_top + TAG_H * 0.5, s.sub_top + s.sub_h - TAG_H * 0.5);
+            (last, y)
+        });
+        let tag = newest.map(|(_, y)| Span::around(y, TAG_H * 0.5));
         for v in [top, bottom] {
             let y = s.sub_top + sc.y(v as f64);
+            if !label_clear_of_tags(Span::around(y, LABEL_PX * 0.65), &[tag]) {
+                continue;
+            }
             let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
             self.paint_label(
                 LabelKind::SubValue,
@@ -1935,9 +1946,7 @@ impl ChartView {
                 value(v),
             );
         }
-        if let Some(last) = self.studies.subpane_last() {
-            let y = (s.sub_top + sc.y(last as f64))
-                .clamp(s.sub_top + TAG_H * 0.5, s.sub_top + s.sub_h - TAG_H * 0.5);
+        if let Some((last, y)) = newest {
             window.paint_quad(fill(
                 rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
                 t.label_bg,

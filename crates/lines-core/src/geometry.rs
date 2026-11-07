@@ -137,21 +137,26 @@ pub fn slot_x(vp: &Viewport, index: f64, scale_factor: f32) -> f32 {
     snap_center(vp.index_to_x(index), scale_factor)
 }
 
+/// Half a candle body's width at `bar_px` per bar: the body is ~70% of the slot (leaving a
+/// gap), an odd number of device pixels wide so it is centred on the one-device-pixel wick;
+/// when bars are packed tighter than 3 device pixels it collapses to the wick's single device
+/// pixel. Shared by every candle drawn on a chart's time axis (price, sub-panes).
+pub fn candle_half_width(bar_px: f64, scale_factor: f32) -> f32 {
+    let s = dpi(scale_factor) as f32;
+    if bar_px as f32 * s < 3.0 {
+        0.5 / s
+    } else {
+        let side = (bar_px as f32 * 0.35 * s - 0.5).round().max(1.0);
+        (side + 0.5) / s
+    }
+}
+
 /// Fill `out` (within capacity) with the visible candles.
 pub fn build_candles(bars: &[Bar], vp: &Viewport, scale_factor: f32, out: &mut Vec<Candle>) {
     out.clear();
     let s = dpi(scale_factor) as f32;
+    let half_width = candle_half_width(vp.bar_px, scale_factor);
     let device_px = 1.0 / s;
-    // Body is ~70% of the slot (leaving a gap), an odd number of device pixels wide so it is
-    // centred on the one-device-pixel wick; when bars are packed tighter than 3 device pixels
-    // the body collapses to the wick's single device pixel.
-    let slot_device_px = vp.bar_px as f32 * s;
-    let half_width = if slot_device_px < 3.0 {
-        device_px * 0.5
-    } else {
-        let side = (vp.bar_px as f32 * 0.35 * s - 0.5).round().max(1.0);
-        (side + 0.5) / s
-    };
     for i in vp.visible_range(bars.len()) {
         if out.len() == out.capacity() {
             break;
@@ -680,6 +685,19 @@ mod tests {
             DisplayStyle::Decimal { digits: 2 },
             25,
         )
+    }
+
+    /// Every candle on a chart's time axis (price, and sub-panes through the same function)
+    /// has a body an odd number of device pixels wide, so the one-device-pixel wick is centred.
+    #[test]
+    fn candle_bodies_are_an_odd_number_of_device_pixels() {
+        for dpi in [1.0f32, 1.25, 1.5, 2.0] {
+            for bar_px in [1.0, 2.0, 3.0, 4.9, 7.0, 12.5, 40.0, 80.0] {
+                let w = candle_half_width(bar_px, dpi) * 2.0 * dpi;
+                assert!((w - w.round()).abs() < 1e-4, "{dpi} {bar_px}: {w}");
+                assert_eq!(w.round() as i64 % 2, 1, "{dpi} {bar_px}: {w}");
+            }
+        }
     }
 
     #[test]
