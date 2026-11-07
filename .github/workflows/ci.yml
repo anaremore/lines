@@ -80,6 +80,28 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  guard:
+    name: agent guard hook tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # .claude/hooks/guard.py blocks force pushes, pushes to main, licensed data and secrets
+      # for agents (CLAUDE.md "Never"). Its tests run here so a broken guard can't merge.
+      - run: python3 .claude/hooks/test_guard.py
+      # The exact command settings.json runs must block a push to main (exit 2), so a broken
+      # launcher can't leave agents unguarded.
+      - name: settings.json hook command blocks a push to main
+        run: |
+          cmd=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' .claude/settings.json)
+          set +e
+          echo '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}'             | CLAUDE_PROJECT_DIR="$PWD" bash -c "$cmd"
+          test $? -eq 2
+      # Agent context budget: CLAUDE.md is loaded into every agent turn. Growing it past 150
+      # lines needs a deliberate change here.
+      - name: CLAUDE.md stays under 150 lines
+        run: test "$(wc -l < CLAUDE.md)" -le 150
+
   deny:
     name: cargo-deny (licences, advisories, bans, sources)
     runs-on: ubuntu-latest

@@ -1,0 +1,2 @@
+# Shell scripts run under bash on every OS (the agent guard hook): never CRLF.
+*.sh text eol=lf
