@@ -273,19 +273,39 @@ fn measure_reads_ticks_points_dollars_bars_and_time() {
             duration_ms: 85 * M,
         }
     );
-    let mut text = crate::FixedStr::<96>::new();
-    write_measure(&m, &es(), &mut text).unwrap();
+    let text = |m: &MeasureStats, parts| {
+        let mut t = crate::FixedStr::<128>::new();
+        write_measure(m, &es(), parts, &mut t).unwrap();
+        t.as_str().to_owned()
+    };
     assert_eq!(
-        text.as_str(),
-        "+12 ticks  +3.00 pts  +$150.00  85 bars  1h 25m"
+        text(&m, MeasureParts::ALL),
+        "+12 ticks \u{b7} +3.00 pts \u{b7} +$150.00/contract \u{b7} 85 bars \u{b7} 1h 25m"
     );
     let down = measure(b, a, &axis, &es(), Ratio::new(50, 1));
-    let mut text = crate::FixedStr::<96>::new();
-    write_measure(&down, &es(), &mut text).unwrap();
     assert_eq!(
-        text.as_str(),
-        "-12 ticks  -3.00 pts  -$150.00  85 bars  1h 25m"
+        text(&down, MeasureParts::ALL),
+        "-12 ticks \u{b7} -3.00 pts \u{b7} -$150.00/contract \u{b7} 85 bars \u{b7} 1h 25m"
     );
+    // P&L display off: no ticks, no money; ticks only; thousands separators.
+    let off = MeasureParts {
+        ticks: false,
+        money: false,
+    };
+    assert_eq!(text(&m, off), "+3.00 pts \u{b7} 85 bars \u{b7} 1h 25m");
+    let ticks = MeasureParts {
+        ticks: true,
+        money: false,
+    };
+    assert_eq!(
+        text(&m, ticks),
+        "+12 ticks \u{b7} +3.00 pts \u{b7} 85 bars \u{b7} 1h 25m"
+    );
+    let big = MeasureStats {
+        cents: -123_456_789,
+        ..m
+    };
+    assert!(text(&big, MeasureParts::ALL).contains("-$1,234,567.89/contract"));
     // MES: $5 a point, one tick = $1.25.
     let tick = Anchor {
         price: Price(600_025),

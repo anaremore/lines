@@ -1789,10 +1789,11 @@ impl ChartView {
             // solid violet).
             if let Some((_, avg, _, _)) = position {
                 let y = self.vp.price_to_y(avg) as f32;
+                let d = crate::theme::POSITION_DASH;
                 let mut x = 0.0;
                 while x < pw {
-                    window.paint_quad(fill(rect(x, y, 6.0_f32.min(pw - x), hair), t.text_dim));
-                    x += 10.0;
+                    window.paint_quad(fill(rect(x, y, d.on.min(pw - x), hair), t.text_dim));
+                    x += d.on + d.off;
                 }
             }
             if self.cross.is_none()
@@ -2370,8 +2371,16 @@ impl ChartView {
             .get(&key)
             .is_none_or(|(s, _)| *s != stats)
         {
-            let mut s = FixedStr::<96>::new();
-            let _ = write_measure(&stats, &self.instrument.price, &mut s);
+            let mode = cx
+                .try_global::<crate::picker_view::AppSettings>()
+                .map(|a| a.settings.pnl_display)
+                .unwrap_or_default();
+            let parts = lines_core::drawings::MeasureParts {
+                ticks: mode.shown(),
+                money: mode.money(),
+            };
+            let mut s = FixedStr::<128>::new();
+            let _ = write_measure(&stats, &self.instrument.price, parts, &mut s);
             let line = self.shape(s.as_str(), t.text_main, window);
             if self.measure_lines.len() > 64 {
                 self.measure_lines.clear();
@@ -2384,8 +2393,8 @@ impl ChartView {
         let box_h = LABEL_PX * 1.3 + NOTE_PAD;
         let w = f32::from(line.width) + 2.0 * NOTE_PAD;
         let pw = f32::from(self.plot.size.width);
-        let x = (m.p1.0 + 8.0).min(pw - w).max(0.0);
-        let y = (m.p1.1 - box_h - 4.0).max(0.0);
+        let ph = f32::from(self.plot.size.height);
+        let (x, y) = measure_label_at(m, (w, box_h), (pw, ph));
         window.paint_quad(fill(
             Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(box_h))),
             t.label_bg,
@@ -3090,6 +3099,26 @@ fn prepare_studies(
     levels.prepare(d, bars, vp, last_y);
 }
 
+/// Where a measure's readout goes (plot-local top-left): on the far side of the measured
+/// range from the live edge (left-aligned at the range's older end), above the box, or below
+/// it when there's no room above; kept inside the plot. So it never covers the newest bars
+/// to the right of the range.
+fn measure_label_at(
+    m: lines_core::drawings::Projected,
+    (w, h): (f32, f32),
+    (pw, ph): (f32, f32),
+) -> (f32, f32) {
+    let left = m.p0.0.min(m.p1.0);
+    let (top, bottom) = (m.p0.1.min(m.p1.1), m.p0.1.max(m.p1.1));
+    let x = left.min(pw - w).max(0.0);
+    let y = if top - h - 4.0 >= 0.0 {
+        top - h - 4.0
+    } else {
+        (bottom + 4.0).min(ph - h).max(0.0)
+    };
+    (x, y)
+}
+
 /// The bars a chart shows: its timeframe's, or the store's 1-minute bars.
 fn bars_view<'a>(derived: &'a Option<Derived>, d: &'a ChartData) -> BarsView<'a> {
     match derived {
@@ -3282,6 +3311,44 @@ mod tests {
         );
         assert!(profile.has_built());
         assert!(studies.reserved_columns() >= 256);
+    }
+
+    /// The measure's readout sits at the measured range's older (left) end, above it, so it
+    /// never covers the newer bars to its right; below when there's no room above.
+    #[test]
+    fn measure_readout_stays_off_the_live_edge() {
+        let m = |p0: (f32, f32), p1: (f32, f32)| lines_core::drawings::Projected {
+            id: 1,
+            tool: lines_core::drawings::Tool::Measure,
+            style: Default::default(),
+            p0,
+            p1,
+            handles: [p0, p1],
+            n_handles: 2,
+        };
+        let plot = (1000.0, 600.0);
+        // Drawn right to left or left to right: the label starts at the left end.
+        for (a, b) in [
+            ((300.0, 400.0), (900.0, 200.0)),
+            ((900.0, 200.0), (300.0, 400.0)),
+        ] {
+            let (x, y) = measure_label_at(m(a, b), (250.0, 20.0), plot);
+            assert_eq!((x, y), (300.0, 176.0));
+            assert!(
+                x + 250.0 <= 900.0,
+                "inside the range, not past its newer end"
+            );
+        }
+        // At the top of the plot: below the box.
+        assert_eq!(
+            measure_label_at(m((300.0, 10.0), (900.0, 300.0)), (250.0, 20.0), plot),
+            (300.0, 304.0)
+        );
+        // Near the right edge: kept inside the plot.
+        assert_eq!(
+            measure_label_at(m((900.0, 400.0), (990.0, 200.0)), (250.0, 20.0), plot).0,
+            750.0
+        );
     }
 
     #[test]

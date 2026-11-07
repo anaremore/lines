@@ -349,3 +349,21 @@ fn hiding_clears_the_selection_and_a_lost_release_drops_the_drag() {
     assert!(!r.up(500.0, y + 60.0), "nothing left to release");
     assert_eq!(r.items()[0], before);
 }
+
+/// Horizontal and vertical drawing lines sit on whole device pixels at DPI 1 and 2, so they
+/// never blur into two faint rows.
+#[test]
+fn axis_aligned_lines_snap_to_device_pixels() {
+    for (hair, width) in [(1.0, 1.0), (1.0, 2.0), (0.5, 1.0), (0.5, 2.0)] {
+        for at in [10.0, 10.3, 10.5, 10.75, 211.49] {
+            let (w, start) = crisp_band(at, width, hair);
+            let dev = |v: f32| (v / hair - (v / hair).round()).abs() < 1e-4;
+            assert!(dev(w) && dev(start), "hair {hair} width {width} at {at}");
+            assert!((w - width).abs() < 1e-4);
+            assert!(
+                (start + w * 0.5 - at).abs() <= hair * 0.5 + 1e-4,
+                "centred on {at}"
+            );
+        }
+    }
+}
