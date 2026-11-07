@@ -1687,8 +1687,13 @@ fn place_exit_protects_during_a_guardrail_lockout() {
     r.book(&[(5999.00, 50)], &[(5999.25, 50)]);
     r.trade(5999.00, 1);
     r.wait(LAT);
-    let entry = r.cmd(spec(Side::Buy, 1, limit(5990.00)));
-    assert!(entry.is_err(), "entries are locked out");
+    let entry = r.cmd(spec(Side::Buy, 1, limit(5990.00))).unwrap_err();
+    assert_eq!(
+        entry.code,
+        RejectCode::Guardrail,
+        "entries are locked out: {}",
+        entry.message
+    );
     assert!(r.cmd(place_exit_cmd(Side::Sell, 2, limit(6010.00))).is_ok());
     let s = r.cmd(place_exit_cmd(
         Side::Sell,
@@ -1721,4 +1726,120 @@ fn place_exit_refused_while_halted() {
         ))
         .unwrap_err();
     assert_eq!(e.code, RejectCode::PropRule, "{}", e.message);
+}
+
+/// Focused review: a reduce-only order never grows (a stop sell 2 on a long 2 grown to 5
+/// would leave a short 3 when it triggers): the core refuses the increase.
+#[test]
+fn reduce_only_orders_cant_grow() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    let s = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5990.00),
+            },
+        ))
+        .unwrap()[0];
+    r.wait(LAT);
+    let e = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order: s,
+            qty: Some(Qty(5)),
+            price: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Invalid);
+    assert!(e.message.contains("can't grow"), "{}", e.message);
+    // Smaller, or a price change, is fine.
+    assert!(
+        r.cmd(Command::ModifyOrder {
+            account: acct(),
+            order: s,
+            qty: None,
+            price: Some(px(5991.00)),
+        })
+        .is_ok()
+    );
+}
+
+/// Focused review: the target partially fills while the stop is on its way: the stop arrives
+/// at the broker shrunk to what is left (1), never the 2 it was sent for.
+#[test]
+fn place_exit_shrinks_when_the_sibling_partly_filled_meanwhile() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 2, OrderKind::Market);
+    r.wait(LAT);
+    r.cmd(place_exit_cmd(Side::Sell, 2, limit(6005.00)))
+        .unwrap();
+    r.wait(LAT);
+    let s = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5995.00),
+            },
+        ))
+        .unwrap()[0];
+    r.book(&[(6005.25, 50)], &[(6005.50, 50)]);
+    r.trade(6005.25, 1); // one lot of the target fills before the stop arrives
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    let so = r.core.order(s).unwrap();
+    assert!(so.is_open(), "{:?}", so.state);
+    assert_eq!(so.remaining(), Qty(1));
+}
+
+/// Focused review: the core's own guard: a broker that leaves a reduce-only order working on a
+/// flat contract gets a Cancel from the core.
+#[test]
+fn core_cancels_reduce_only_orders_left_on_a_flat_contract() {
+    let (mut r, s) = scripted();
+    let id = working(&mut r, &s, 2);
+    let t = at(&r);
+    r.deliver(&s, vec![fill(id, "f1", 6000.00, 2, t)]);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    let exit = r
+        .cmd(place_exit_cmd(
+            Side::Sell,
+            2,
+            OrderKind::Stop {
+                trigger: px(5990.00),
+            },
+        ))
+        .unwrap()[0];
+    let t = at(&r);
+    r.deliver(
+        &s,
+        vec![
+            BrokerEvent::Acked { id: exit, at: t },
+            BrokerEvent::Working { id: exit, at: t },
+        ],
+    );
+    // The position closes elsewhere; the broker leaves the exit working.
+    let close = r.place(Side::Sell, 2, limit(6001.00));
+    let t = at(&r);
+    r.deliver(
+        &s,
+        vec![
+            BrokerEvent::Acked { id: close, at: t },
+            BrokerEvent::Working { id: close, at: t },
+            fill(close, "f2", 6001.00, 2, t),
+        ],
+    );
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    let sent_cancel = s
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .any(|q| matches!(q, BrokerRequest::Cancel { id } if *id == exit));
+    assert!(sent_cancel, "the core cancels the stranded exit");
 }

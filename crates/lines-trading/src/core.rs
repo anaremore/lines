@@ -695,11 +695,21 @@ impl TradingCore {
                         "new quantity is not above the filled quantity",
                     ));
                 }
+                // A reduce-only order never grows: a larger exit could flip the position (a
+                // stop sell 2 on a long 2 grown to 5 leaves a short 3). Place another exit.
+                if let Some(q) = qty
+                    && q.0 > o.qty.0
+                    && o.reduce_only
+                {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "reduce-only orders can't grow; place another exit",
+                    ));
+                }
                 // More quantity is more exposure: the guardrails see the increase as an order
                 // of its own (less quantity, or a price change, always passes).
                 if let Some(q) = qty
                     && q.0 > o.qty.0
-                    && !o.reduce_only
                 {
                     self.check_guardrails(
                         now,

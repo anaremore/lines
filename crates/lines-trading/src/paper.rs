@@ -290,11 +290,7 @@ impl PaperBroker {
         // A reduce-only order meets the position as it is *now* (it may have closed while the
         // order was on its way): shrink it to what is left to close, or cancel it.
         if let Some((account, contract)) = reduce {
-            let position = self
-                .accounts
-                .get(&account)
-                .and_then(|a| a.positions.iter().find(|p| p.contract == contract))
-                .map_or(0, |p| p.position.qty());
+            let position = self.position_of(&account, contract);
             self.shrink_reduce_only(now, &account, contract, position);
             if !self.orders.contains_key(&id) {
                 return;
@@ -625,12 +621,28 @@ impl PaperBroker {
             po.queue_ahead = queue; // a moved order goes to the back of its new queue
         }
         self.out.push(BrokerEvent::Modified { order: o.clone() });
+        // A reduce-only order never closes more than the position, whatever it was changed to.
+        if o.reduce_only {
+            let position = self.position_of(&o.account, o.contract);
+            self.shrink_reduce_only(now, &o.account, o.contract, position);
+            if !self.orders.contains_key(&id) {
+                return;
+            }
+        }
         if let OrderKind::Limit { price } = o.kind
             && !held
             && self.marketable(&o, price)
         {
             self.execute(now, id, Some(price));
         }
+    }
+
+    /// The account's position in `contract` here (signed quantity units).
+    fn position_of(&self, account: &AccountId, contract: ContractKey) -> i64 {
+        self.accounts
+            .get(account)
+            .and_then(|a| a.positions.iter().find(|p| p.contract == contract))
+            .map_or(0, |p| p.position.qty())
     }
 
     fn cancel(&mut self, now: UtcMillis, id: OrderId, reason: &str) {
@@ -870,5 +882,121 @@ impl Broker for PaperBroker {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod reduce_only_tests {
+    use super::*;
+    use crate::broker::{Broker, BrokerEvent, BrokerRequest};
+
+    fn es() -> ContractKey {
+        crate::types::ContractDoc {
+            product: 1,
+            year: Some(2026),
+            month: Some(12),
+        }
+        .to_key()
+        .unwrap()
+    }
+
+    fn acct() -> AccountId {
+        AccountId::new("paper-1")
+    }
+
+    // Tuesday 2026-11-10 15:00 UTC: CME open.
+    fn t0() -> UtcMillis {
+        UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap()
+    }
+
+    fn broker(position: i64) -> PaperBroker {
+        let mut b = PaperBroker::new(PaperConfig::default());
+        b.open_account(acct(), Money::whole(50_000));
+        if position != 0 {
+            let mut p = Position::default();
+            let side = if position > 0 { Side::Buy } else { Side::Sell };
+            p.apply_fill(side, Price(600_000), Qty(position.abs()));
+            b.accounts
+                .get_mut(&acct())
+                .unwrap()
+                .positions
+                .push(PaperPosition {
+                    contract: es(),
+                    position: p,
+                });
+        }
+        b
+    }
+
+    fn stop_sell(id: u64, qty: i64) -> Order {
+        Order {
+            id: OrderId(id),
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(qty),
+            kind: OrderKind::Stop {
+                trigger: Price(599_000),
+            },
+            state: OrderState::Submitted,
+            filled: Qty(0),
+            fill_value: 0,
+            role: Role::Single,
+            parent: None,
+            oco: None,
+            triggered: false,
+            created: t0(),
+            updated: t0(),
+            reduce_only: true,
+            overfill: Qty(0),
+        }
+    }
+
+    fn run(b: &mut PaperBroker, req: BrokerRequest) -> Vec<BrokerEvent> {
+        b.request(t0(), req);
+        let mut out = Vec::new();
+        b.poll(UtcMillis(t0().0 + 1_000), &mut out);
+        out
+    }
+
+    /// Focused review: a reduce-only order placed while flat (the position closed while it was
+    /// on its way) is cancelled on arrival, never left working to open one.
+    #[test]
+    fn reduce_only_placed_while_flat_is_cancelled() {
+        let mut b = broker(0);
+        let out = run(&mut b, BrokerRequest::Place(stop_sell(7, 2)));
+        assert!(
+            out.iter()
+                .any(|e| matches!(e, BrokerEvent::Cancelled { id, reason, .. }
+                if id.0 == 7 && reason.contains("nothing left to close"))),
+            "{out:?}"
+        );
+        assert!(!b.orders.contains_key(&OrderId(7)));
+    }
+
+    /// Focused review: a reduce-only order larger than the position when it arrives shrinks
+    /// to the position.
+    #[test]
+    fn reduce_only_placed_larger_than_the_position_shrinks() {
+        let mut b = broker(1);
+        run(&mut b, BrokerRequest::Place(stop_sell(7, 2)));
+        assert_eq!(b.orders[&OrderId(7)].order.qty, Qty(1));
+    }
+
+    /// Focused review: a modify that grows a reduce-only order past the position is brought
+    /// back to the position by the broker too (the core refuses it first).
+    #[test]
+    fn reduce_only_modify_never_grows_past_the_position() {
+        let mut b = broker(2);
+        run(&mut b, BrokerRequest::Place(stop_sell(7, 2)));
+        run(
+            &mut b,
+            BrokerRequest::Modify {
+                id: OrderId(7),
+                qty: Some(Qty(5)),
+                price: None,
+            },
+        );
+        assert_eq!(b.orders[&OrderId(7)].order.qty, Qty(2));
     }
 }
