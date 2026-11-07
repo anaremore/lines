@@ -173,18 +173,36 @@ pub enum TradeCmd {
     Flatten,
     /// Cancel the contract's working orders.
     CancelAll,
-    /// Arm or disarm one-click trading on the DOM.
+    /// Enable or disable one-click trading on the DOM ("Trading: Enabled / Disabled").
     ToggleArm,
+    /// Enable DOM trading (sticky: it stays on until turned off).
+    Enable,
+    /// Disable DOM trading.
+    Disable,
+    /// Move the position's stop to breakeven (the average price, on the safe side of the
+    /// tick grid), through the order-modify path.
+    Breakeven,
+    /// Show bracket distances in ticks or points (per account).
+    BracketUnits,
+    /// Edit the bracket presets in the DOM's panel.
+    EditBrackets,
     /// Trade on the next account.
     NextAccount,
     QtyUp,
     QtyDown,
     /// Cycle the bracket preset (none, 8/16, 12/24, 20/40 ticks).
     NextBracket,
+    /// The DOM header's order buttons (`dom_trade::QuickOrder`): gated by arming like ladder
+    /// clicks.
+    BuyMarket,
+    SellMarket,
+    JoinBid,
+    JoinAsk,
+    Reverse,
 }
 
 impl TradeCmd {
-    pub const ALL: [TradeCmd; 7] = [
+    pub const ALL: [TradeCmd; 13] = [
         TradeCmd::Flatten,
         TradeCmd::CancelAll,
         TradeCmd::ToggleArm,
@@ -192,7 +210,34 @@ impl TradeCmd {
         TradeCmd::QtyUp,
         TradeCmd::QtyDown,
         TradeCmd::NextBracket,
+        TradeCmd::BuyMarket,
+        TradeCmd::SellMarket,
+        TradeCmd::JoinBid,
+        TradeCmd::JoinAsk,
+        TradeCmd::Reverse,
+        TradeCmd::Breakeven,
     ];
+
+    /// Trading commands with no key of their own (palette and the DOM's panel).
+    pub const PALETTE_ONLY: [TradeCmd; 4] = [
+        TradeCmd::Enable,
+        TradeCmd::Disable,
+        TradeCmd::BracketUnits,
+        TradeCmd::EditBrackets,
+    ];
+
+    /// The order a header button sends, for the order commands.
+    pub fn quick(self) -> Option<crate::dom_trade::QuickOrder> {
+        use crate::dom_trade::QuickOrder as Q;
+        Some(match self {
+            TradeCmd::BuyMarket => Q::BuyMarket,
+            TradeCmd::SellMarket => Q::SellMarket,
+            TradeCmd::JoinBid => Q::JoinBid,
+            TradeCmd::JoinAsk => Q::JoinAsk,
+            TradeCmd::Reverse => Q::Reverse,
+            _ => return None,
+        })
+    }
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -327,6 +372,13 @@ pub const BINDINGS: &[Binding] = &[
         "u",
     ),
     b(Command::CyclePnl, true, false, true, "p"),
+    // Header order buttons: Ctrl+Alt, never a bare or Shift-only key.
+    b(Command::Trade(TradeCmd::BuyMarket), true, false, true, "b"),
+    b(Command::Trade(TradeCmd::SellMarket), true, false, true, "s"),
+    b(Command::Trade(TradeCmd::JoinBid), true, false, true, "j"),
+    b(Command::Trade(TradeCmd::JoinAsk), true, false, true, "k"),
+    b(Command::Trade(TradeCmd::Reverse), true, false, true, "r"),
+    b(Command::Trade(TradeCmd::Breakeven), true, false, true, "e"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
     b(
@@ -350,6 +402,18 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
         return None;
     }
     let key = k.key.as_str();
+    // AltGr arrives as Ctrl+Alt on Windows/Linux: when it types a character other than the
+    // key itself ("ś" from AltGr+S on a Polish layout), it is text, never a command (several
+    // Ctrl+Alt keys send orders).
+    if !mac
+        && m.control
+        && m.alt
+        && k.key_char
+            .as_deref()
+            .is_some_and(|c| !c.is_empty() && !c.eq_ignore_ascii_case(key))
+    {
+        return None;
+    }
     if !ctrl && !m.shift && m.alt {
         let dir = match key {
             "left" => Some(Direction::Left),
@@ -369,6 +433,12 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
         .iter()
         .find(|b| b.ctrl == ctrl && b.shift == m.shift && b.alt == m.alt && b.key == key)
         .map(|b| b.cmd)
+}
+
+/// Whether holding the key down repeats `cmd`. Never for arming or anything that sends or
+/// cancels orders: a held Ctrl+Alt+B must send one order, not one per key repeat.
+pub fn repeats(cmd: Command) -> bool {
+    !matches!(cmd, Command::Trade(_))
 }
 
 /// The hint shown for a command in menus and the palette: its first binding.
@@ -509,11 +579,21 @@ pub fn label(c: Command) -> String {
         Command::Trade(t) => match t {
             TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
             TradeCmd::CancelAll => "Trade: Cancel all orders",
-            TradeCmd::ToggleArm => "Trade: Arm/disarm one-click DOM trading",
+            TradeCmd::ToggleArm => "Trade: toggle (enable/disable one-click DOM trading)",
+            TradeCmd::Enable => "Trade: enable",
+            TradeCmd::Disable => "Trade: disable",
+            TradeCmd::Breakeven => "Trade: move the stop to breakeven",
+            TradeCmd::BracketUnits => "Trade: bracket units (ticks / points)",
+            TradeCmd::EditBrackets => "Trade: edit bracket presets…",
             TradeCmd::NextAccount => "Trade: Next account",
             TradeCmd::QtyUp => "Trade: Quantity up",
             TradeCmd::QtyDown => "Trade: Quantity down",
             TradeCmd::NextBracket => "Trade: Next bracket preset",
+            TradeCmd::BuyMarket => "Trade: Buy market (selected quantity)",
+            TradeCmd::SellMarket => "Trade: Sell market (selected quantity)",
+            TradeCmd::JoinBid => "Trade: Join bid (buy limit at the best bid)",
+            TradeCmd::JoinAsk => "Trade: Join ask (sell limit at the best ask)",
+            TradeCmd::Reverse => "Trade: Reverse position (market, twice the size)",
         }
         .into(),
     }
@@ -589,6 +669,7 @@ pub fn palette() -> Vec<Command> {
     );
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
     v.extend(TradeCmd::ALL.map(Command::Trade));
+    v.extend(TradeCmd::PALETTE_ONLY.map(Command::Trade));
     v.push(Command::CyclePnl);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
@@ -630,6 +711,42 @@ pub fn workspace_hints() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AltGr is Ctrl+Alt on Windows/Linux: a character it types other than the key itself
+    /// ("ś" from AltGr+S, Polish) is text and never sends an order; Ctrl+Alt+S itself (no
+    /// character, or the key's own) is still a market sell.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn altgr_text_never_sends_an_order() {
+        let mut k = Keystroke::parse("ctrl-alt-s").unwrap();
+        assert_eq!(command_for(&k), Some(Command::Trade(TradeCmd::SellMarket)));
+        k.key_char = Some("s".into());
+        assert_eq!(command_for(&k), Some(Command::Trade(TradeCmd::SellMarket)));
+        k.key_char = Some("ś".into());
+        assert_eq!(command_for(&k), None);
+        let mut b = Keystroke::parse("ctrl-alt-b").unwrap();
+        b.key_char = Some("{".into()); // any character other than the key: text
+        assert_eq!(command_for(&b), None);
+    }
+
+    /// Review round 3: key repeat must never repeat an order (or flip arming back and forth).
+    #[test]
+    fn trading_keys_never_repeat() {
+        for tc in [
+            TradeCmd::BuyMarket,
+            TradeCmd::SellMarket,
+            TradeCmd::JoinBid,
+            TradeCmd::JoinAsk,
+            TradeCmd::Reverse,
+            TradeCmd::ToggleArm,
+            TradeCmd::Flatten,
+            TradeCmd::CancelAll,
+            TradeCmd::Breakeven,
+        ] {
+            assert!(!repeats(Command::Trade(tc)), "{tc:?}");
+        }
+        assert!(repeats(Command::Menu), "navigation may repeat");
+    }
 
     fn cmd(s: &str) -> Option<Command> {
         // `parse` wants a `'static` str; leaking a few test strings is fine.
@@ -784,6 +901,28 @@ mod tests {
     }
 
     #[test]
+    fn header_order_buttons_have_ctrl_alt_keys() {
+        let ca = |k: &str| cmd(&format!("{}-alt-{k}", ctrl()));
+        assert_eq!(ca("b"), Some(Command::Trade(TradeCmd::BuyMarket)));
+        assert_eq!(ca("s"), Some(Command::Trade(TradeCmd::SellMarket)));
+        assert_eq!(ca("j"), Some(Command::Trade(TradeCmd::JoinBid)));
+        assert_eq!(ca("k"), Some(Command::Trade(TradeCmd::JoinAsk)));
+        assert_eq!(ca("r"), Some(Command::Trade(TradeCmd::Reverse)));
+        // Their neighbours stay what they were: Ctrl+Shift+B docks, Ctrl+Shift+S saves.
+        assert_eq!(
+            cmd(&format!("{}-shift-b", ctrl())),
+            Some(Command::DockBesideChart)
+        );
+        assert_eq!(cmd(&format!("{}-shift-s", ctrl())), Some(Command::SaveAs));
+        // No order fires from a bare letter, Shift or Alt alone.
+        for k in [
+            "b", "s", "r", "j", "k", "shift-b", "alt-b", "alt-s", "alt-r",
+        ] {
+            assert!(!matches!(cmd(k), Some(Command::Trade(_))), "{k}");
+        }
+    }
+
+    #[test]
     fn every_trading_command_has_a_key_and_a_palette_entry() {
         let p = palette();
         for t in TradeCmd::ALL {
@@ -793,6 +932,20 @@ mod tests {
         assert_eq!(
             filter("flatten", &p),
             vec![Command::Trade(TradeCmd::Flatten)]
+        );
+        // The rest are in the palette, without keys of their own.
+        for t in TradeCmd::PALETTE_ONLY {
+            assert!(p.contains(&Command::Trade(t)), "{t:?} not in the palette");
+            assert!(hint(Command::Trade(t)).is_empty(), "{t:?} has a key");
+        }
+        // US English names: enable, disable, toggle (never "arm").
+        for word in ["enable", "disable", "toggle"] {
+            assert!(!filter(&format!("trade {word}"), &p).is_empty(), "{word}");
+        }
+        assert!(
+            filter("arm", &p)
+                .iter()
+                .all(|c| !label(*c).to_lowercase().contains(" arm"))
         );
     }
 

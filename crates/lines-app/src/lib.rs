@@ -3,6 +3,7 @@
 //! [`Extensions`]; nothing in this crate names them.
 
 mod bench;
+mod brackets;
 mod chart_draw;
 mod chart_view;
 mod commands;
@@ -41,6 +42,7 @@ mod tabstate;
 mod tape_view;
 mod text;
 mod theme;
+mod tooltip;
 mod trade_bar;
 mod trading;
 mod versioned;
@@ -172,6 +174,23 @@ impl SourceChoice {
         SourceKind::from_str(name, true)
             .ok()
             .map(SourceChoice::Builtin)
+    }
+}
+
+/// `--bracket-units`: bracket distances in ticks or points (`crate::brackets::BracketUnits`).
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum BracketUnitsArg {
+    Ticks,
+    Points,
+}
+
+impl BracketUnitsArg {
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    fn units(self) -> brackets::BracketUnits {
+        match self {
+            BracketUnitsArg::Ticks => brackets::BracketUnits::Ticks,
+            BracketUnitsArg::Points => brackets::BracketUnits::Points,
+        }
     }
 }
 
@@ -378,9 +397,16 @@ struct Cli {
     /// `trading::parse_script`.
     #[arg(long, requires = "screenshot")]
     paper: Option<String>,
-    /// Screenshot: DOMs start armed for one-click trading (the app always starts disarmed).
-    #[arg(long, requires = "screenshot")]
+    /// Screenshot: DOMs start with trading enabled ("Trading: Enabled"; in the app the switch
+    /// is saved per pane). `--arm` is the old name.
+    #[arg(long = "enable-trading", alias = "arm", requires = "screenshot")]
     arm: bool,
+    /// Screenshot: DOMs show bracket distances in ticks or points.
+    #[arg(long, value_enum, requires = "screenshot")]
+    bracket_units: Option<BracketUnitsArg>,
+    /// Screenshot: DOMs open their bracket-preset editor.
+    #[arg(long, requires = "screenshot")]
+    bracket_editor: bool,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -965,6 +991,8 @@ where
                 account_menu: cli.account_menu,
                 pnl: cli.pnl.map(PnlArg::mode),
                 drawings,
+                bracket_units: cli.bracket_units.map(BracketUnitsArg::units),
+                bracket_editor: cli.bracket_editor,
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);

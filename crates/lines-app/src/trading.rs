@@ -50,8 +50,6 @@ use lines_trading::{
 };
 use lines_trading::{GuardState, Guardrails, Journal, JournalShared};
 
-use crate::dom_trade::ArmPrefs;
-
 /// How long a rejection stays on screen where it happened.
 pub const FLASH: Duration = Duration::from_secs(4);
 /// Command results kept for drag ghosts (newest last).
@@ -317,7 +315,6 @@ impl TradeState {
     }
 
     /// The account's guardrail lockout, if one is in force (`None`: active).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn guard(&self, account: &AccountId) -> Option<&GuardView> {
         self.guards
             .get(account)
@@ -510,18 +507,27 @@ pub struct Trading {
     notes: Sender<(CommandId, Note)>,
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
     barrier: Sender<Sender<()>>,
-    pub prefs: ArmPrefs,
     /// A problem loading the paper file (shown once in the workspace's status).
     pub report: Option<String>,
-    /// Screenshot fixture (`--arm`): DOMs start armed. Never set in the app.
+    /// Screenshot fixture (`--enable-trading`): DOMs start with trading enabled. Never set in
+    /// the app (there, the switch is saved per pane).
     pub start_armed: bool,
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
+    /// Screenshot fixture (`--bracket-editor`): DOMs open their bracket-preset editor.
+    pub start_editor: bool,
+    /// The paper broker refuses orders while the product's session is closed (the switch's
+    /// "market closed" badge follows it; off for the mock).
+    pub check_sessions: bool,
     /// Screenshot fixture (a `--paper` script's first `account`): the panes' account.
     pub start_account: Option<AccountId>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
     pub journal: Arc<JournalShared>,
+    /// The core's clock kind, so the UI reads time the way the core does (`now`).
+    clock: Clock,
+    /// Manual clock: the newest time a script advanced the core to (ms; `i64::MIN`: none).
+    advanced: std::sync::atomic::AtomicI64,
 }
 
 impl Global for Trading {}
@@ -530,6 +536,7 @@ impl Trading {
     /// Build the paper core (from the setup's file, else the default accounts), start it and
     /// the event pump.
     pub fn start(mut setup: TradingSetup, registry: FeedRegistry, base: FeedConfig) -> Trading {
+        let check_sessions = setup.check_sessions;
         let mut report = None;
         let journal_file = setup.journal.take();
         let (journal, journal_report) = open_journal(journal_file.as_ref());
@@ -641,13 +648,41 @@ impl Trading {
             cache,
             notes,
             barrier,
-            prefs: ArmPrefs::default(),
             report,
             start_armed: false,
             start_account_menu: false,
+            start_editor: false,
+            check_sessions,
             start_account: None,
             journal,
+            clock: setup.clock,
+            advanced: std::sync::atomic::AtomicI64::new(i64::MIN),
         }
+    }
+
+    /// Now, as the core sees it, for time left on screen (a cooldown): the wall clock live;
+    /// in replays the market time plus the silence since (`ChartStore::market_clock`, as the
+    /// core's market clock runs, also after the replay ends); with a manual clock
+    /// (screenshots, tests) the newer of the frozen feed clock and the scripted time.
+    pub fn now(&self, store: &ChartStore) -> Option<lines_core::UtcMillis> {
+        use std::sync::atomic::Ordering;
+        match self.clock {
+            Clock::Wall => Some(lines_feed::now_utc()),
+            Clock::Market => store.market_clock(),
+            Clock::Manual => {
+                let a = self.advanced.load(Ordering::Acquire);
+                let f = store.feed_clock().map_or(i64::MIN, |t| t.0);
+                (a.max(f) != i64::MIN).then(|| lines_core::UtcMillis(a.max(f)))
+            }
+        }
+    }
+
+    /// Advance a manual-clock core (scripts), remembering the time for [`Trading::now`].
+    #[cfg(any(test, feature = "screenshot"))]
+    fn advance_to(&self, t: lines_core::UtcMillis) {
+        self.advanced
+            .fetch_max(t.0, std::sync::atomic::Ordering::AcqRel);
+        self.handle.advance_to(t);
     }
 
     pub fn try_global(cx: &App) -> Option<&Trading> {
@@ -1038,7 +1073,7 @@ impl Trading {
     /// the cache shows the result.
     pub fn run_script(&self, steps: &[Step], start: lines_core::UtcMillis, latency_ms: i64) {
         let mut t = start;
-        self.handle.advance_to(t);
+        self.advance_to(t);
         for s in steps {
             match s {
                 Step::Command(c) => {
@@ -1046,7 +1081,7 @@ impl Trading {
                 }
                 Step::Ack => {
                     t = lines_core::UtcMillis(t.0 + latency_ms + 1);
-                    self.handle.advance_to(t);
+                    self.advance_to(t);
                 }
                 Step::Wait(ms) => {
                     t = lines_core::UtcMillis(t.0 + ms);
@@ -1082,7 +1117,7 @@ mod tests {
     use lines_trading::{Money, OrderSpec, OrderState, RejectCode, RiskLimits, Side};
 
     use super::*;
-    use crate::dom_trade::{self, ArmEvent, Arming, DomColumn, EntryCtx};
+    use crate::dom_trade::{self, ArmEvent, ArmPrefs, Arming, DomColumn, EntryCtx};
 
     fn es() -> ContractKey {
         ContractKey::monthly(catalog::ES, 2026, Month::new(12).unwrap())
@@ -1382,6 +1417,7 @@ mod tests {
             contract: es(),
             qty: Qty(2),
             position,
+            working: 0,
             bracket: None,
             tick: 25,
             best_bid: Some(px(best.0)),
@@ -1392,7 +1428,7 @@ mod tests {
 
     fn armed() -> Arming {
         let mut a = Arming::default();
-        a.apply(ArmEvent::Toggle, ArmPrefs::default(), true);
+        a.apply(ArmEvent::Toggle, ArmPrefs::default());
         a
     }
 
@@ -1585,6 +1621,79 @@ mod tests {
         }
         t.settle();
         t.handle().latency()
+    }
+
+    /// The header's order buttons go the same way as ladder clicks: built by
+    /// `dom_trade::quick`, submitted with the click's `Instant`, timed by the core. Join bid
+    /// rests at the bid; Buy Mkt fills at the ask; Reverse flips long 2 to short 2.
+    #[test]
+    fn header_buttons_are_timed_and_reach_the_core() {
+        use crate::dom_trade::{QuickOrder, quick};
+        let t = trading(vec![AccountConfig::paper("paper", 50_000)]);
+        let account = AccountId::new("paper");
+        let feed = batches("buttons");
+        for b in feed.iter().take(30) {
+            t.handle().market(es(), from_events(b));
+        }
+        t.settle();
+        // Fresh market data after each press, so time moves past the paper ack latency.
+        let next = std::cell::Cell::new(30);
+        let press = |q, pos| {
+            let mut ctx = entry("paper", pos, (5999.75, 6000.00));
+            ctx.qty = Qty(2);
+            let cmd = quick(q, armed(), &ctx).expect("armed: an order");
+            t.submit(Source::Dom, Instant::now(), cmd);
+            t.settle();
+            for b in feed.iter().skip(next.get()).take(2) {
+                t.handle().market(es(), from_events(b));
+            }
+            next.set(next.get() + 2);
+            t.settle();
+        };
+        press(QuickOrder::JoinBid, 0);
+        let resting: Vec<_> = t
+            .cache
+            .read()
+            .open_orders(&account, es())
+            .cloned()
+            .collect();
+        assert_eq!(resting.len(), 1);
+        assert_eq!(
+            resting[0].kind,
+            lines_trading::OrderKind::Limit { price: px(5999.75) }
+        );
+        t.submit(
+            Source::Hotkey,
+            Instant::now(),
+            TradeCommand::CancelAll {
+                account: account.clone(),
+                contract: Some(es()),
+            },
+        );
+        t.settle();
+        press(QuickOrder::BuyMarket, 0);
+        assert_eq!(
+            t.cache.read().position(&account, es()).map(|p| p.qty),
+            Some(2)
+        );
+        press(QuickOrder::Reverse, 2);
+        assert_eq!(
+            t.cache.read().position(&account, es()).map(|p| p.qty),
+            Some(-2),
+            "one market order for twice the position"
+        );
+        // Every order the buttons sent (and the cancel) carried a click time to the core.
+        let (_, _, n) = t.handle().latency();
+        assert_eq!(n, 4);
+        // Disarmed: nothing is built, so nothing is sent.
+        assert!(
+            quick(
+                QuickOrder::BuyMarket,
+                Arming::default(),
+                &entry("paper", 0, (1.0, 2.0))
+            )
+            .is_err()
+        );
     }
 
     /// Every DOM click is timed (behaviour only; the budget is the perf test below).

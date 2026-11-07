@@ -116,7 +116,10 @@ impl PaneWindow {
             return;
         }
         if let Some(cmd) = commands::command_for(&ev.keystroke).and_then(command) {
-            self.run(cmd, window, cx);
+            // A held key repeats only commands that may repeat: never an order or arming.
+            if !ev.is_held || commands::repeats(cmd) {
+                self.run(cmd, window, cx);
+            }
             cx.stop_propagation();
         }
     }

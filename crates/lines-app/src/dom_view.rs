@@ -105,6 +105,8 @@ pub struct DomView {
     trade: PaneTrade,
     /// This frame's own orders, position and rejections; drags and their ghosts.
     orders: OrdersLayer,
+    /// Whether the trading header was last rendered with its narrow labels.
+    header_narrow: Option<bool>,
     /// Where price just traded (`crate::dom_trail`), off by default.
     trail: DomTrail,
 }
@@ -230,18 +232,28 @@ impl DomView {
             cols,
             trade,
             orders: OrdersLayer::default(),
+            header_narrow: None,
             trail,
         }
     }
 
-    /// Restore the pane's trading choices (account, quantity, bracket). Never armed, except
-    /// the screenshot fixture's `--arm`.
+    /// Restore the pane's trading choices (account, quantity, bracket, the trading switch:
+    /// sticky, as saved). The screenshot fixture's `--enable-trading` enables it too.
     pub fn restore_trade(&mut self, doc: Option<&TradeDoc>, cx: &mut Context<Self>) {
         self.trade = PaneTrade::new(doc, cx);
-        if Trading::try_global(cx).is_some_and(|t| t.start_armed) {
-            let ok = trade_bar::cant_trade(self, cx).is_none();
-            self.trade
-                .arm_event(crate::dom_trade::ArmEvent::Toggle, ok, cx);
+        if let Some(t) = Trading::try_global(cx) {
+            let (on, editor) = (t.start_armed, t.start_editor);
+            if on && !self.trade.arming.is_armed() {
+                self.trade.arm_event(crate::dom_trade::ArmEvent::Toggle, cx);
+            }
+            if editor {
+                trade_bar::run(
+                    self,
+                    crate::commands::TradeCmd::EditBrackets,
+                    std::time::Instant::now(),
+                    cx,
+                );
+            }
         }
     }
 
@@ -338,8 +350,12 @@ impl DomView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        // A click that closes a list (the picker, the account list) does only that: never
+        // also an order on the ladder under it.
         if self.picker.close() || std::mem::take(&mut self.trade.account_menu) {
+            cx.stop_propagation();
             cx.notify();
+            return;
         }
         let (x, y) = self.table_xy(ev.position);
         match self.cols.hit(x, y, ev.click_count) {
@@ -386,41 +402,9 @@ impl DomView {
         .map(|(_, d)| d)
     }
 
-    /// What a click needs: account, contract, quantity, position, bracket, the inside market.
+    /// What a click needs (`trade_bar::entry_ctx`, shared with the header's buttons).
     fn entry_ctx(&self, cx: &App) -> Result<EntryCtx, &'static str> {
-        if let Some(why) = trade_bar::cant_trade(self, cx) {
-            return Err(why);
-        }
-        let t = Trading::try_global(cx).ok_or("trading is not running")?;
-        let account = self.trade.account.clone().ok_or("no account")?;
-        let contract = trade_bar::contract_of(&self.store).ok_or("contract unknown")?;
-        let position = t
-            .cache
-            .read()
-            .position(&account, contract)
-            .map_or(0, |p| p.qty);
-        let (best_bid, best_ask, last) = self
-            .store
-            .try_read()
-            .map(|d| {
-                (
-                    d.book.best_bid().map(|b| b.0).or(d.bid),
-                    d.book.best_ask().map(|a| a.0).or(d.ask),
-                    d.last_trade,
-                )
-            })
-            .unwrap_or_default();
-        Ok(EntryCtx {
-            account,
-            contract,
-            qty: trade_bar::qty(&self.trade),
-            position,
-            bracket: self.trade.bracket,
-            tick: self.product.price.tick,
-            best_bid,
-            best_ask,
-            last,
-        })
+        trade_bar::entry_ctx(self, cx)
     }
 
     /// A left press in the ladder: place an order (bid/ask columns, armed), or grab one of
@@ -572,6 +556,10 @@ impl DomView {
             return;
         }
         let k = &ev.keystroke;
+        if trade_bar::editor_key(self, ev, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if trade_bar::qty_key(self, k.key.as_str(), cx) {
             cx.stop_propagation();
             return;
@@ -617,7 +605,14 @@ impl DomView {
 
     // ---- paint ---------------------------------------------------------------------
 
-    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // The header's labels depend on the pane's width, known only after layout: if this
+        // frame's width calls for the other label set, render the header again.
+        let narrow = trade_bar::is_narrow(f(bounds.size.width));
+        if self.header_narrow != Some(narrow) {
+            self.header_narrow = Some(narrow);
+            cx.notify();
+        }
         self.common.paints += 1;
         self.bounds = bounds;
         let rows = self.visible_rows();
@@ -689,7 +684,14 @@ impl DomView {
         let ow = self.glyphs.width("S88+", t.text_main, true, window);
         self.cols
             .need(DomCol::Orders.index(), 2.0 * (ow + 6.0), PAD);
-        self.cols.layout(w);
+        // Narrow: volume, then the trail give way, then the rest narrow to their numbers;
+        // only then working orders (the panel still counts them; Cancel all reaches them):
+        // bid, price and ask stay whole.
+        self.cols.layout_fitting(
+            w,
+            &[DomCol::Volume.index(), DomCol::Trail.index()],
+            &[DomCol::Orders.index()],
+        );
         self.cols
             .paint_header(&mut self.glyphs, &t, bounds, PAD, &[false; 5], window, cx);
         let cell = |c: DomCol| self.cols.cell(c.index(), ox);
@@ -934,7 +936,8 @@ impl DomView {
                                         .child(s),
                                 )
                             })
-                            .child(right),
+                            // Cut with "…" when the pane is narrow, never mid-word.
+                            .child(div().min_w_0().truncate().child(right)),
                     ),
             )
     }
@@ -979,12 +982,11 @@ impl Render for DomView {
         let t = self.theme;
         let focus = self.focus.clone();
         PaneTrade::watch_focus(self, &focus, window, cx);
-        // Armed but no longer able to trade (no contract, feed gone): disarm.
-        if self.trade.arming.is_armed() && trade_bar::cant_trade(self, cx).is_some() {
-            self.trade
-                .arm_event(dom_trade::ArmEvent::Unavailable, false, cx);
-        }
-        let trade = trade_bar::dom_bar(self, &self.product, &t, cx);
+        // The switch is sticky: impossible trading (no contract, feed gone) shows on it as a
+        // badge and denies orders; it never flips the switch.
+        let width = f(self.bounds.size.width);
+        self.header_narrow = Some(trade_bar::is_narrow(width));
+        let trade = trade_bar::dom_bar(self, &self.product, width, &t, cx);
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker

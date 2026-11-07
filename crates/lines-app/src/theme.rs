@@ -775,4 +775,27 @@ mod tests {
             }
         }
     }
+
+    /// Trade panel v2: the position card (on `panel`) writes S1 / T1 in the stop and target
+    /// colors, P&L in up/down, and the warn switch carries `on_warn`; the order buttons put
+    /// `bg` text on up/down fills. All AA in every theme and palette.
+    #[test]
+    fn trade_panel_text_meets_aa() {
+        for t in Theme::all() {
+            for (what, fg, bg) in [
+                ("S1 on the card", t.order_stop, t.panel),
+                ("T1 on the card", t.order_target, t.panel),
+                ("up P&L on the card", t.up, t.panel),
+                ("down P&L on the card", t.down, t.panel),
+                ("dim on the card", t.text_dim, t.panel),
+                ("switch text", t.on_warn, t.warn),
+                ("BUY MKT", t.bg, t.up),
+                ("SELL MKT", t.bg, t.down),
+                ("selected segment", t.on_last, t.accent),
+            ] {
+                let r = contrast(fg, bg);
+                assert!(r >= 4.5, "{}: {what} {r:.2}", t.name);
+            }
+        }
+    }
 }

@@ -167,7 +167,8 @@ pub fn write_day(out: &mut impl Write, mode: PnlDisplay, day: Money) -> Result<b
 /// A message with its amounts removed, for P&L off: parenthesised details with digits
 /// ("daily loss limit reached (-600.00 today, limit 500)") go, and an order's value
 /// ("order value 900000.00 is over the maximum 700000.00") loses its numbers. Other numbers
-/// (prices, quantities, contract counts) stay: they aren't P&L.
+/// (prices, quantities, contract counts) stay: they aren't P&L. A loss limit's amount
+/// ("daily loss limit of 1000 reached", a guardrail) goes too.
 pub fn redact_amounts(message: &str) -> Cow<'_, str> {
     let has_group = message.split('(').skip(1).any(|g| {
         g.split(')')
@@ -175,7 +176,7 @@ pub fn redact_amounts(message: &str) -> Cow<'_, str> {
             .is_some_and(|g| g.bytes().any(|b| b.is_ascii_digit()))
     });
     let value = message.contains("order value");
-    if !has_group && !value && !message.contains('$') {
+    if !has_group && !value && !message.contains('$') && !message.contains("limit of ") {
         return Cow::Borrowed(message);
     }
     let mut out = String::with_capacity(message.len());
@@ -194,14 +195,35 @@ pub fn redact_amounts(message: &str) -> Cow<'_, str> {
     let words: Vec<&str> = out.split(' ').collect();
     let mut kept: Vec<&str> = Vec::with_capacity(words.len());
     let mut in_value = false;
-    for w in words {
+    let number = |w: &str| w.trim_end_matches([';', ',', '.']).parse::<f64>().is_ok();
+    let mut skip = 0;
+    for (i, &w) in words.iter().enumerate() {
+        if skip > 0 {
+            skip -= 1;
+            continue;
+        }
         if w.starts_with('$') || w.starts_with("-$") || w.starts_with("+$") {
+            continue;
+        }
+        // "limit of 1000": the amount and its "of" go; a trailing comma stays.
+        if w == "of"
+            && i > 0
+            && words[i - 1] == "limit"
+            && words.get(i + 1).is_some_and(|n| number(n))
+        {
+            // The number's punctuation moves onto "limit" (the word kept just before).
+            match words[i + 1].chars().last() {
+                Some(',') => *kept.last_mut().expect("limit was kept") = "limit,",
+                Some(';') => *kept.last_mut().expect("limit was kept") = "limit;",
+                _ => {}
+            }
+            skip = 1;
             continue;
         }
         if w == "value" {
             in_value = true;
         }
-        if in_value && w.trim_end_matches([';', ',', '.']).parse::<f64>().is_ok() {
+        if in_value && number(w) {
             continue;
         }
         kept.push(w);
@@ -337,6 +359,19 @@ mod tests {
             "reducing only: DailyLoss limit breached; ..."
         );
         assert_eq!(redact_amounts("loss of $25.00 today"), "loss of today");
+        // Guardrail lockouts name their loss limit.
+        assert_eq!(
+            redact_amounts("Locked: daily loss limit of 1000 reached, until the next trade date"),
+            "Locked: daily loss limit reached, until the next trade date"
+        );
+        assert_eq!(
+            redact_amounts("daily loss limit of 500, today"),
+            "daily loss limit, today"
+        );
+        assert_eq!(
+            redact_amounts("max 5 trades reached"),
+            "max 5 trades reached"
+        );
         // Prices, quantities and contract counts aren't P&L: kept.
         let m = "would hold 60 micro-equivalent contracts, over the 50 allowed";
         assert_eq!(redact_amounts(m), m);

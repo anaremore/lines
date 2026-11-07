@@ -93,6 +93,17 @@ pub struct Settings {
     /// (`crate::pnl`). Optional: absent (and the default, both) isn't written.
     #[serde(default, skip_serializing_if = "crate::pnl::PnlDisplay::is_default")]
     pub pnl_display: crate::pnl::PnlDisplay,
+    /// Bracket presets and their display unit per account and product (`crate::brackets`;
+    /// trade panel v2). Optional: absent means the default presets, in ticks.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bracket_presets: crate::brackets::BracketSettings,
+    /// What turns DOM trading off besides the trader (all off by default: the switch is
+    /// sticky). Optional.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::dom_trade::ArmPrefs::is_default"
+    )]
+    pub trading_prefs: crate::dom_trade::ArmPrefs,
 }
 
 /// Files written before versioning (no `version` field) have exactly version 1's fields.

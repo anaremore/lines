@@ -1258,8 +1258,11 @@ impl WindowView {
                     Some(PaneHandle::Dom(d)) => {
                         d.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
                     }
-                    Some(PaneHandle::Chart(c)) => {
+                    Some(PaneHandle::Chart(c)) if crate::trade_bar::chart_runs(tc) => {
                         c.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
+                    }
+                    Some(PaneHandle::Chart(_)) => {
+                        self.refuse("arming and orders act on a DOM: focus one first", cx);
                     }
                     _ => self.refuse("trading commands act on the focused DOM or chart", cx),
                 }
@@ -1461,8 +1464,10 @@ impl WindowView {
         let Some(h) = self.tab().focused_handle().cloned() else {
             return;
         };
-        // Same kind, symbol, link and view state as the source.
-        let doc = h.doc(cx);
+        // Same kind, symbol, link and view state as the source; the trading switch is not
+        // copied (new panes start disabled).
+        let mut doc = h.doc(cx);
+        doc.trade = doc.trade.take().map(crate::trade_bar::TradeDoc::copied);
         let new_id = PaneId::next();
         let handle = make_pane(&doc, cx);
         let subs = self.subscribe(new_id, &handle, cx);
@@ -2192,7 +2197,10 @@ impl WindowView {
             if typing && !commands::runs_while_typing(&ev.keystroke, cmd) {
                 return;
             }
-            self.run(cmd, window, cx);
+            // A held key repeats only commands that may repeat: never an order or arming.
+            if !ev.is_held || commands::repeats(cmd) {
+                self.run(cmd, window, cx);
+            }
             cx.stop_propagation();
         }
     }
