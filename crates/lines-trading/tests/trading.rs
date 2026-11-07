@@ -786,6 +786,7 @@ impl Broker for Scripted {
             server_brackets: true,
             oco: true,
             fractional_qty: false,
+            external_fills: false,
         }
     }
     fn request(&mut self, _: UtcMillis, req: BrokerRequest) {

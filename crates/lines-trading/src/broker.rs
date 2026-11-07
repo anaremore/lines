@@ -30,6 +30,18 @@ pub struct BrokerCaps {
     pub server_brackets: bool,
     pub oco: bool,
     pub fractional_qty: bool,
+    /// The broker reports executions of orders Lines didn't place as
+    /// [`BrokerEvent::ExternalFill`] (a venue observed, e.g. manual trading there). The core
+    /// then never reconciles fills for orders it adopted from a snapshot: those executions
+    /// already reached the fill stream once.
+    ///
+    /// The contract: every execution from the moment the broker is opened is reported once,
+    /// including those made while it was disconnected (reported after the reconnect, before
+    /// or with the snapshot that holds them), and none from before it was opened. The app's
+    /// journal follows such a broker's accounts from these fills alone (after seeding what was
+    /// open when each account joined), so a missed execution would be missing there.
+    #[serde(default)]
+    pub external_fills: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +95,25 @@ pub enum BrokerEvent {
         fee: Money,
         #[serde(with = "time_serde")]
         at: UtcMillis,
+    },
+    /// An execution on an order Lines didn't place (traded at the venue itself, e.g. by hand in
+    /// its own platform). Recorded as a fill (events, journal) with no order; the account's
+    /// positions and balance stay the broker's snapshot's ([`Broker::snapshot`], `rebuild`),
+    /// which already includes it, so nothing is counted twice. Repeats (same `trade_id`) are
+    /// dropped like any fill.
+    ExternalFill {
+        account: AccountId,
+        #[serde(with = "contract_serde")]
+        contract: ContractKey,
+        side: crate::types::Side,
+        #[serde(with = "price_serde")]
+        price: Price,
+        #[serde(with = "qty_serde")]
+        qty: Qty,
+        fee: Money,
+        #[serde(with = "time_serde")]
+        at: UtcMillis,
+        trade_id: String,
     },
     Cancelled {
         id: OrderId,

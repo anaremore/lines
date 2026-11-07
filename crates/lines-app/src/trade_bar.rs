@@ -5,10 +5,13 @@
 //! account.
 //!
 //! Trust rules this module keeps:
-//! - The account is always named, with a **PAPER** badge (text and an inverted chip, not only
-//!   a colour: decision 0006). Live accounts will carry a different badge.
+//! - The account is always named, with its badge as a word on an inverted chip (not only a
+//!   colour: decision 0006): **PAPER**, **SIM** (a broker's simulation) or **LIVE** (warning
+//!   colours). A broker account also shows its connection (connected / stale / disconnected).
 //! - **Flatten** and **Cancel All** are always visible and always sent: neither is gated by
-//!   arming, risk or prop rules (the core lets them through).
+//!   arming, risk or prop rules (the core lets them through). The one exception: a
+//!   **read-only** account (a broker in observe mode), where every command is refused before
+//!   sending; there both read "off" and refuse with the reason, and the panel says why.
 //! - The trading switch is explicit and shown as words ("Trading: Enabled / Disabled") and by
 //!   shape (a filled knob vs a ring). It is sticky and saved with the pane; when orders would
 //!   be denied anyway (market closed, a lockout) it says so in a badge, without flipping.
@@ -97,7 +100,9 @@ impl PaneTrade {
         let account = saved
             .and_then(|s| s.account.as_ref())
             .map(|a| AccountId::new(a))
-            .filter(|a| trading.is_some_and(|t| t.account(a).is_some()))
+            // A broker account not listed yet (its broker connects after start) is kept; it
+            // shows as waiting, read-only, until it is.
+            .filter(|a| trading.is_some_and(|t| t.keeps_saved_account(a)))
             .or_else(|| trading.and_then(Trading::default_account));
         PaneTrade {
             account,
@@ -248,6 +253,19 @@ pub fn cant_trade<V: TradePane>(v: &V, cx: &App) -> Option<&'static str> {
     }
 }
 
+/// Whether the pane's account is read-only (no copy: for render paths).
+pub fn is_read_only<V: TradePane>(v: &V, cx: &App) -> bool {
+    Trading::try_global(cx)
+        .zip(v.trade_ref().account.as_ref())
+        .is_some_and(|(t, a)| t.is_read_only(a))
+}
+
+/// Why the pane's account can't be traded through Lines (a broker in observe mode), if so.
+pub fn read_only<V: TradePane>(v: &V, cx: &App) -> Option<String> {
+    let t = Trading::try_global(cx)?;
+    t.read_only_reason(v.trade_ref().account.as_ref()?)
+}
+
 /// What an order from this pane needs: account, contract, quantity, position, bracket, the
 /// inside market (ladder clicks, header buttons and their keys all build from this).
 pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &'static str> {
@@ -337,7 +355,22 @@ pub fn run_from<V: TradePane>(
         return;
     }
     let why = cant_trade(v, cx);
+    let locked = if matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll) {
+        read_only(v, cx)
+    } else {
+        None
+    };
     match cmd {
+        TradeCmd::Flatten | TradeCmd::CancelAll if locked.is_some() => {
+            // The read-only exception: never sent (Lines can't act on this account).
+            let what = if cmd == TradeCmd::Flatten {
+                "Flatten"
+            } else {
+                "Cancel all"
+            };
+            v.trade()
+                .flash(format!("{what} off: {}", locked.unwrap_or_default()));
+        }
         TradeCmd::ToggleArm => {
             // Always flips: a reason orders would be denied shows on the switch instead.
             v.trade().arm_event(ArmEvent::Toggle, cx);
@@ -705,7 +738,12 @@ pub fn qty_key<V: TradePane>(v: &mut V, key: &str, cx: &mut Context<V>) -> bool 
 /// What the panel shows, gathered under the cache lock (never waited for).
 struct BarData {
     account_name: String,
-    paper: bool,
+    /// PAPER, SIM or LIVE.
+    badge: &'static str,
+    /// The account can't be traded through Lines: why.
+    read_only: Option<String>,
+    /// A broker account's connection, as words, and whether it needs attention.
+    venue: Option<(String, bool)>,
     /// Signed qty, average price (price units), open P&L in ticks (when the mark is known)
     /// and money.
     position: Option<(i64, Option<f64>, Option<f64>, Money)>,
@@ -730,10 +768,12 @@ struct BarData {
     working: usize,
 }
 
-fn empty_data(name: String, paper: bool) -> BarData {
+fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
     BarData {
-        account_name: name,
-        paper,
+        account_name: info.name.clone(),
+        badge: info.badge,
+        read_only: info.read_only.clone(),
+        venue: info.venue.and_then(|i| venue_words(t, i)),
         position: None,
         stop: None,
         target: None,
@@ -756,7 +796,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
     let info = t.account(account)?;
     let contract = contract_of(v.trade_store());
     let last = v.trade_store().try_read().and_then(|d| d.last_trade);
-    let mut data = empty_data(info.name.clone(), info.paper);
+    let mut data = empty_data(&info, t);
     data.mode = cx
         .try_global::<crate::picker_view::AppSettings>()
         .map(|a| a.settings.pnl_display)
@@ -859,6 +899,9 @@ fn blocker<V: TradePane>(
             "contract unknown: can't trade it" => "contract unknown",
             w => w,
         });
+    }
+    if is_read_only(v, cx) {
+        return Some("read-only");
     }
     if let Some((state, _)) = data.and_then(|d| d.guard.as_ref()) {
         return Some(match state {
@@ -1319,7 +1362,17 @@ pub fn dom_bar<V: TradePane>(
 
     // 3. One status line: a refusal (brief) or the lockout / account state (lasting).
     let status = div().h(px(STATUS_H)).flex().flex_row().items_center();
+    let locked = read_only(v, cx);
+    let flashing = data
+        .as_ref()
+        .is_some_and(|d| flash_line(&d.flashes).is_some());
     let status = match data.as_ref() {
+        _ if locked.is_some() && !flashing => status.child(lock_strip(
+            &format!("Read-only · {}", locked.as_deref().unwrap_or_default()),
+            "",
+            narrow,
+            t,
+        )),
         Some(d) => match (flash_line(&d.flashes), &d.guard, &d.blocked) {
             (Some((label, f)), ..) => status.gap_2().child(
                 div()
@@ -1390,12 +1443,27 @@ pub fn dom_bar<V: TradePane>(
     ];
     let mut row = div().flex().flex_row().items_center().gap_1().h(px(UTIL_H));
     for (i, (cmd, name, label, entry)) in util.into_iter().enumerate() {
-        // BE and Reverse size to their words; Cancel all and Flatten take the rest.
+        // BE and Reverse size to their words; Cancel all and Flatten take the rest. On a
+        // read-only account those two read "off" and refuse with the reason when clicked.
+        let off = !entry && locked.is_some();
+        let label: std::borrow::Cow<'static, str> = if off {
+            format!("{label} off").into()
+        } else {
+            label.into()
+        };
+        let name = if off {
+            "Read-only: Lines can't act on this account"
+        } else {
+            name
+        };
         let mut b = cell(("util", i as u64), t).child(label);
+        if off {
+            b = b.text_color(t.text_dim);
+        }
         if !entry {
             b = b.flex_1();
         }
-        if cmd == TradeCmd::Flatten {
+        if cmd == TradeCmd::Flatten && !off {
             b = b
                 .border_color(t.warn)
                 .border_2()
@@ -2217,8 +2285,20 @@ fn account_chip<V: TradePane>(
     t: &Theme,
     cx: &mut Context<V>,
 ) -> AnyElement {
-    let (name, paper) = data.map_or(("no account".to_owned(), true), |d| {
-        (d.account_name.clone(), d.paper)
+    // An account set but not listed is a broker's, waiting for it: LIVE until the broker
+    // says otherwise (never shown as simulated), read-only.
+    let fallback = if v.trade_ref().account.is_some() {
+        ("broker account (waiting)".to_owned(), "LIVE", true, None)
+    } else {
+        ("no account".to_owned(), "PAPER", false, None)
+    };
+    let (name, badge_word, locked, venue) = data.map_or(fallback, |d| {
+        (
+            d.account_name.clone(),
+            d.badge,
+            d.read_only.is_some(),
+            d.venue.clone(),
+        )
     });
     let accent = t.accent;
     let open = v.trade_ref().account_menu;
@@ -2232,14 +2312,14 @@ fn account_chip<V: TradePane>(
         .when(open, |d| d.border_color(accent))
         .hover(move |s| s.border_color(accent));
     let c = tip(c, "Choose the account", None, t);
-    // PAPER first: at narrow widths the account chip gives way, never the badge.
+    // The badge first: at narrow widths the account chip gives way, never the badge.
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
         .min_w_0()
-        .when(paper, |d| d.child(paper_badge(t)))
+        .child(account_badge(badge_word, t))
         .child(
             crate::dropdown::dropdown(
                 // The chip is recorded from a wrapper: the chip clips its own children.
@@ -2272,30 +2352,69 @@ fn account_chip<V: TradePane>(
                 |v: &mut V, _: &gpui::MouseDownEvent, _, cx| close_account_menu(v, cx),
             ))),
         )
+        .when(locked, |d| {
+            d.child(
+                div()
+                    .px_1()
+                    .flex_shrink_0()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(t.text_dim)
+                    .text_color(t.text_main)
+                    .font_weight(FontWeight::BOLD)
+                    .child("READ-ONLY"),
+            )
+        })
+        .when_some(venue, |d, (words, attention)| {
+            d.child(if attention {
+                div()
+                    .px_1()
+                    .min_w_0()
+                    .truncate()
+                    .bg(t.warn)
+                    .text_color(t.on_warn)
+                    .font_weight(FontWeight::BOLD)
+                    .child(words)
+            } else {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_dim)
+                    .child(words)
+            })
+        })
         .into_any_element()
+}
+
+/// A broker's connection as the chip says it: "Broker · connected", "… · stale 12 s",
+/// "… · disconnected: why"; `true` when it needs attention.
+fn venue_words(t: &Trading, venue: usize) -> Option<(String, bool)> {
+    let (label, status) = t.venue_status(venue)?;
+    let Some(s) = status else {
+        return Some((label, false));
+    };
+    if !s.connected {
+        return Some((format!("{label} · {}", s.detail), true));
+    }
+    let silent_s = s
+        .last_message
+        .map(|m| (lines_feed::now_utc().0 - m.0) / 1000)
+        .unwrap_or(0);
+    if silent_s >= crate::trading::VENUE_STALE_AFTER_S {
+        return Some((format!("{label} · stale {silent_s} s"), true));
+    }
+    Some((format!("{label} · {}", s.detail), false))
 }
 
 /// PAPER: an inverted chip with the word (never colour alone).
 pub fn paper_badge(t: &Theme) -> gpui::Div {
-    badge(t)
-        .relative()
-        .children(crate::layout_rec::text_marker("PAPER"))
+    account_badge("PAPER", t)
 }
 
 /// LIVE: an outlined chip with the word, where a narrow chart header drops a live account's
 /// chip (paper vs live is always visible, docs/design.md; never color alone).
 pub fn live_badge(t: &Theme) -> gpui::Div {
-    div()
-        .flex_shrink_0()
-        .px_1()
-        .rounded_sm()
-        .border_1()
-        .border_color(t.text_main)
-        .text_color(t.text_main)
-        .font_weight(FontWeight::BOLD)
-        .child("LIVE")
-        .relative()
-        .children(crate::layout_rec::text_marker("LIVE"))
+    account_badge("LIVE", t)
 }
 
 /// The chart header's account, for the fit model: its chip text ("Name ▾") and whether it's
@@ -2310,16 +2429,31 @@ pub fn chart_account<V: TradePane>(v: &V, cx: &gpui::App) -> Option<(String, boo
     Some((format!("{} ▾", info.name), info.paper))
 }
 
-/// The PAPER chip itself (in menus: not recorded as header text).
-fn badge(t: &Theme) -> gpui::Div {
-    div()
+/// The account's badge as a recorded header word on a chip (never colour alone): PAPER and
+/// SIM inverted in the paper colours, LIVE outlined.
+pub fn account_badge(word: &'static str, t: &Theme) -> gpui::Div {
+    badge(word, t)
+        .relative()
+        .children(crate::layout_rec::text_marker(word))
+}
+
+/// The badge chip itself (in menus: not recorded as header text).
+fn badge(word: &'static str, t: &Theme) -> gpui::Div {
+    let chip = div()
         .flex_shrink_0()
         .px_1()
         .rounded_sm()
-        .bg(t.paper_badge)
-        .text_color(t.on_paper_badge)
-        .font_weight(FontWeight::BOLD)
-        .child("PAPER")
+        .font_weight(FontWeight::BOLD);
+    if word == "LIVE" {
+        chip.border_1()
+            .border_color(t.text_main)
+            .text_color(t.text_main)
+            .child(word)
+    } else {
+        chip.bg(t.paper_badge)
+            .text_color(t.on_paper_badge)
+            .child(word)
+    }
 }
 
 /// Open or close the account list (the account chip).
@@ -2381,12 +2515,13 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
         .border_color(t.accent)
         .rounded_sm()
         .text_size(px(12.0));
-    for (i, a) in trading.accounts.iter().enumerate() {
+    for (i, a) in trading.accounts().iter().enumerate() {
         let id = a.id.clone();
         let on = current.as_ref() == Some(&a.id);
-        let detail = match &a.rules {
-            Some(r) => format!("rules: {} (approximation)", r.name),
-            None => "no prop rules".into(),
+        let detail = match (&a.read_only, &a.rules) {
+            (Some(why), _) => format!("read-only: {why}"),
+            (None, Some(r)) => format!("rules: {} (approximation)", r.name),
+            (None, None) => "no prop rules".into(),
         };
         list = list.child(
             div()
@@ -2416,7 +2551,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                                     a.name.clone()
                                 }),
                         )
-                        .when(a.paper, |d| d.child(badge(t))),
+                        .child(badge(a.badge, t)),
                 )
                 .child(
                     div()
@@ -2450,14 +2585,12 @@ pub fn chart_chip<V: TradePane>(
     let pt = v.trade_ref();
     let info = pt.account.as_ref().and_then(|a| trading.account(a))?;
     if !fits {
-        let b = if info.paper {
-            paper_badge(t)
-        } else {
-            live_badge(t)
-        };
-        return Some(b.into_any_element());
+        return Some(account_badge(info.badge, t).into_any_element());
     }
-    let data = empty_data(info.name.clone(), info.paper);
+    // Name and badge only: the header's fit model measures exactly these.
+    let mut data = empty_data(&info, trading);
+    data.read_only = None;
+    data.venue = None;
     // Whole or not at all (the header's fit decides): never shrunk and cut.
     Some(
         div()

@@ -759,6 +759,7 @@ impl Broker for PaperBroker {
             server_brackets: true,
             oco: true,
             fractional_qty: true,
+            external_fills: false,
         }
     }
 

@@ -122,6 +122,7 @@ fn caps(on: bool) -> BrokerCaps {
         server_brackets: on,
         oco: on,
         fractional_qty: false,
+        external_fills: false,
     }
 }
 

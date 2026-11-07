@@ -66,6 +66,7 @@ enum Msg {
     Market(ContractKey, Vec<MarketInput>),
     Subscribe(Sender<Event>),
     Rebuild,
+    AddAccounts(Vec<crate::core::AccountConfig>),
     Latency(Sender<(Option<u64>, Option<u64>, usize)>),
     AdvanceTo(UtcMillis),
     Sync(Sender<()>),
@@ -129,6 +130,12 @@ impl TradingHandle {
     /// (orders, positions, accounts): a new subscriber's starting point.
     pub fn rebuild(&self) {
         let _ = self.tx.send(Msg::Rebuild);
+    }
+
+    /// Add accounts the broker discovered after connecting (known ones are ignored); the core
+    /// rebuilds so they show the broker's state.
+    pub fn add_accounts(&self, accounts: Vec<crate::core::AccountConfig>) {
+        let _ = self.tx.send(Msg::AddAccounts(accounts));
     }
 
     /// [`Clock::Manual`]: move time forward (never back).
@@ -344,6 +351,7 @@ fn run(
                 }
                 Ok(Msg::Subscribe(tx)) => subscribers.push(tx),
                 Ok(Msg::Rebuild) => core.rebuild(clock.now()),
+                Ok(Msg::AddAccounts(accounts)) => core.add_accounts(clock.now(), accounts),
                 Ok(Msg::Latency(tx)) => {
                     let l = core.latency();
                     let _ = tx.send((l.percentile(50.0), l.percentile(99.0), l.count()));

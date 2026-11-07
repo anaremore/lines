@@ -35,6 +35,8 @@ use crate::rules::{RulePreset, RuleTracker, TradingState};
 use crate::strategy::{Instance, StrategyId};
 use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind, Side};
 
+/// The order id a fill made outside Lines carries ([`BrokerEvent::ExternalFill`]): no order.
+pub const EXTERNAL_ORDER: OrderId = OrderId(0);
 mod strategy_gate;
 
 /// An account as configured (saved with the trading state).
@@ -183,6 +185,12 @@ pub struct TradingCore {
     /// Execution ids already applied, and their order (to forget the oldest).
     fill_ids: HashSet<String>,
     fill_order: VecDeque<String>,
+    /// Orders first seen in a broker snapshot, not placed through this core (tracked only for
+    /// brokers that report external fills; see `BrokerCaps::external_fills`).
+    adopted: HashSet<OrderId>,
+    /// External fills for accounts not added yet (a broker can report executions before its
+    /// accounts join): applied when they do. Oldest dropped past `KEEP_HELD`.
+    held: VecDeque<BrokerEvent>,
     /// Strategy instances (decision 0025), and which instance placed each order.
     strategies: BTreeMap<StrategyId, Instance>,
     strategy_orders: HashMap<OrderId, StrategyId>,
@@ -191,6 +199,8 @@ pub struct TradingCore {
 const KEEP_FINISHED: usize = 2000;
 /// Execution ids remembered for de-duplication (oldest forgotten first).
 const KEEP_FILL_IDS: usize = 100_000;
+/// External fills held for accounts not added yet.
+const KEEP_HELD: usize = 10_000;
 
 /// What to do with a fill for more than an order had left (it should never happen; when it
 /// does it is reported, never clamped).
@@ -223,6 +233,8 @@ impl TradingCore {
             overfill: OverfillPolicy::default(),
             fill_ids: HashSet::new(),
             fill_order: VecDeque::new(),
+            adopted: HashSet::new(),
+            held: VecDeque::new(),
             strategies: BTreeMap::new(),
             strategy_orders: HashMap::new(),
         }
@@ -259,6 +271,26 @@ impl TradingCore {
             self.fill_ids.remove(&old);
         }
         true
+    }
+
+    /// Add accounts the core doesn't know yet (a broker that discovers its accounts after
+    /// connecting), then rebuild from the broker so they show its state.
+    pub fn add_accounts(&mut self, now: UtcMillis, accounts: Vec<AccountConfig>) {
+        let mut added = false;
+        for cfg in accounts {
+            if !self.accounts.contains_key(&cfg.id) {
+                self.add_account(cfg, None);
+                added = true;
+            }
+        }
+        if added {
+            // Fills reported before their account joined, then the snapshot.
+            let held: Vec<BrokerEvent> = self.held.drain(..).collect();
+            for e in held {
+                self.apply(e);
+            }
+            self.rebuild(now);
+        }
     }
 
     pub fn add_account(&mut self, cfg: AccountConfig, tracker: Option<RuleTracker>) {
@@ -1127,6 +1159,7 @@ impl TradingCore {
         while self.finished.len() > KEEP_FINISHED {
             if let Some(old) = self.finished.pop_front() {
                 self.orders.remove(&old);
+                self.adopted.remove(&old);
                 self.strategy_forget(old);
             }
         }
@@ -1152,6 +1185,51 @@ impl TradingCore {
                 self.transition(id, OrderState::Rejected { reason }, at)
             }
             BrokerEvent::Cancelled { id, at, .. } => self.transition(id, OrderState::Cancelled, at),
+            BrokerEvent::ExternalFill {
+                account,
+                contract,
+                side,
+                price,
+                qty,
+                fee,
+                at,
+                trade_id,
+            } => {
+                if !self.accounts.contains_key(&account) {
+                    if self.held.len() >= KEEP_HELD {
+                        self.held.pop_front();
+                    }
+                    self.held.push_back(BrokerEvent::ExternalFill {
+                        account,
+                        contract,
+                        side,
+                        price,
+                        qty,
+                        fee,
+                        at,
+                        trade_id,
+                    });
+                    return None;
+                }
+                if !self.first_fill(&trade_id) {
+                    return None;
+                }
+                // No order and no position change: the broker's snapshot holds both.
+                self.events.push(Event::Fill(FillEvent {
+                    account: account.clone(),
+                    order: EXTERNAL_ORDER,
+                    contract,
+                    side,
+                    price,
+                    qty,
+                    fee,
+                    realised: Money::ZERO,
+                    at,
+                    trade_id,
+                    reconciled: false,
+                }));
+                Some(account)
+            }
             BrokerEvent::Modified { order } => {
                 let o = self.orders.get_mut(&order.id)?;
                 o.qty = order.qty;
@@ -1402,7 +1480,20 @@ impl TradingCore {
     /// Replace the cache with the broker's state (after a (re)connect or restart). Orders the
     /// broker doesn't know any more are cancelled in the cache; local state never wins.
     pub fn rebuild(&mut self, now: UtcMillis) {
+        // A broker reporting external fills: what it already has queued first (fills before
+        // the positions they made), so a fill is never both in a rebuilt position and applied
+        // after it.
+        let external = self.broker.capabilities().external_fills;
+        if external {
+            self.poll(now);
+        }
         let snap = self.broker.snapshot();
+        // Contracts held before: one the snapshot no longer lists is reported flat.
+        let before: Vec<(AccountId, ContractKey)> = self
+            .accounts
+            .iter()
+            .flat_map(|(a, c)| c.positions.keys().map(move |k| (a.clone(), *k)))
+            .collect();
         let mut open = 0;
         let mut seen: Vec<OrderId> = Vec::new();
         for ba in &snap.accounts {
@@ -1420,13 +1511,18 @@ impl TradingCore {
                 open += 1;
                 self.next_order = self.next_order.max(o.id.0 + 1);
                 let known = self.orders.get(&o.id).map(|c| (c.filled.0, c.fill_value));
+                if external && known.is_none() {
+                    self.adopted.insert(o.id);
+                }
                 self.orders.insert(o.id, o.clone());
                 self.events.push(Event::Order(o.clone()));
                 // The broker filled more than the cache knew (executions missed while
                 // disconnected): report them as one fill with a deterministic id, so a repeat
                 // reconciliation (another reconnect, a restart) never counts them twice.
+                // A broker reporting external fills already sent those of adopted orders.
                 if let Some((filled, value)) = known
                     && o.filled.0 > filled
+                    && !self.adopted.contains(&o.id)
                 {
                     let qty = o.filled.0 - filled;
                     let trade_id = format!("recon-{}-{}", o.id.0, o.filled.0);
@@ -1478,7 +1574,13 @@ impl TradingCore {
         });
         let ids: Vec<AccountId> = self.accounts.keys().cloned().collect();
         for a in ids {
-            let contracts: Vec<ContractKey> = self.accounts[&a].positions.keys().copied().collect();
+            let mut contracts: Vec<ContractKey> =
+                self.accounts[&a].positions.keys().copied().collect();
+            for (b, k) in &before {
+                if *b == a && !contracts.contains(k) {
+                    contracts.push(*k);
+                }
+            }
             for k in contracts {
                 self.spec(k);
                 self.position_event(&a, k);
