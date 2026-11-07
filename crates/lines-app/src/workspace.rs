@@ -258,7 +258,7 @@ impl PaneHandle {
     }
 
     /// Taking typed text now (symbol search, a note, a timeframe being typed).
-    fn takes_text(&self, cx: &App) -> bool {
+    pub(crate) fn takes_text(&self, cx: &App) -> bool {
         each!(self, e => e.read(cx).takes_text())
     }
 
@@ -1880,6 +1880,13 @@ impl WindowView {
                 on,
             ));
             if let PaneHandle::Chart(chart) = &h {
+                if chart.read(cx).drawing_selected() {
+                    let mut row =
+                        MenuItem::named("Drawing style…", Command::Draw(DrawCmd::Style), false);
+                    row.hint = commands::hint(Command::Draw(DrawCmd::Style));
+                    items.insert(0, row);
+                    items.insert(1, MenuItem::sep());
+                }
                 let v = chart.read(cx).visibility();
                 let hints_hidden = cx.global::<Workspace>().hide_hints;
                 let tf = chart.read(cx).timeframe();

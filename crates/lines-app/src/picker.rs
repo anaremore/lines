@@ -117,6 +117,12 @@ pub struct Settings {
         skip_serializing_if = "crate::settings_schema::NewPanes::is_default"
     )]
     pub new_panes: crate::settings_schema::NewPanes,
+    /// Drawing styles for new drawings per tool ("Save as default for ..." in the style
+    /// editor; decision 0026), keyed by the tool's file name (`trend`, `hline`, ...).
+    /// Optional: absent means the default style. Entries keep fields a newer build wrote
+    /// (and tools this build doesn't have).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub drawing_styles: std::collections::BTreeMap<String, crate::style_doc::SavedStyle>,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]

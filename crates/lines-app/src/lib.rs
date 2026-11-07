@@ -46,6 +46,9 @@ mod settings_view;
 mod studies;
 mod study_menu;
 mod study_menu_view;
+mod style_doc;
+mod style_editor;
+mod style_editor_view;
 mod subpane;
 mod tabstate;
 mod tape_view;
@@ -535,6 +538,29 @@ struct Cli {
     /// With `--gallery`: every scene (themes, palettes, widths, states, menus).
     #[arg(long, requires = "gallery")]
     gallery_full: bool,
+    /// Screenshot: the first chart with the style editor open on drawing ID of --drawings,
+    /// optionally on tab TAB (0 = first) with the keyboard focus on control COL of row ROW
+    /// (default 0, the first): `--style-editor 3`, `4:1`, `3:0:1` or `3:0:1:4`.
+    #[arg(long, requires = "drawings", value_parser = parse_style_editor)]
+    style_editor: Option<chart_view::StyleEditorAt>,
+}
+
+/// `ID`, `ID:TAB`, `ID:TAB:COL` or `ID:TAB:COL:ROW` (`--style-editor`); the focus is (row, col).
+fn parse_style_editor(s: &str) -> Result<chart_view::StyleEditorAt, String> {
+    let mut it = s.splitn(4, ':');
+    let id = it.next().unwrap_or_default();
+    let tab = it.next().unwrap_or("0");
+    let id = id.parse().map_err(|_| format!("bad drawing id {id:?}"))?;
+    let tab = tab.parse().map_err(|_| format!("bad tab {tab:?}"))?;
+    let col = match it.next() {
+        Some(c) => Some(c.parse().map_err(|_| format!("bad focus column {c:?}"))?),
+        None => None,
+    };
+    let row = match it.next() {
+        Some(r) => r.parse().map_err(|_| format!("bad focus row {r:?}"))?,
+        None => 0,
+    };
+    Ok((id, tab, col.map(|c| (row, c))))
 }
 
 /// The CLI with every registered source as a `--source` value, with its help.
@@ -1002,6 +1028,7 @@ where
             magnet: cli.magnet,
             timeframe: cli.timeframe.unwrap_or_default(),
             timeframe_menu: cli.timeframe_menu,
+            style_editor: cli.style_editor,
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),

@@ -146,10 +146,12 @@ pub enum DrawCmd {
     ToggleDashed,
     /// Keep the temporary measure as a drawing.
     PinMeasure,
+    /// Open the style editor on the selected drawing (decision 0026).
+    Style,
 }
 
 impl DrawCmd {
-    pub const ALL: [DrawCmd; 17] = [
+    pub const ALL: [DrawCmd; 18] = [
         DrawCmd::Tool(Tool::HLine),
         DrawCmd::Tool(Tool::HRay),
         DrawCmd::Tool(Tool::Trend),
@@ -167,6 +169,7 @@ impl DrawCmd {
         DrawCmd::NextColor,
         DrawCmd::ToggleWidth,
         DrawCmd::ToggleDashed,
+        DrawCmd::Style,
     ];
 }
 
@@ -357,6 +360,8 @@ pub const BINDINGS: &[Binding] = &[
         true,
         "u",
     ),
+    // Alt+S: the selected drawing's style editor.
+    b(Command::Draw(DrawCmd::Style), false, false, true, "s"),
     b(Command::Draw(DrawCmd::Undo), true, false, false, "z"),
     b(Command::Draw(DrawCmd::Redo), true, false, false, "y"),
     b(Command::Draw(DrawCmd::Redo), true, true, false, "z"),
@@ -580,8 +585,9 @@ pub fn label(c: Command) -> String {
             DrawCmd::ToggleVisible => "Drawings: show/hide on this chart".into(),
             DrawCmd::DeleteAll => "Drawings: delete all for this chart's product…".into(),
             DrawCmd::NextColor => "Drawings: next color".into(),
-            DrawCmd::ToggleWidth => "Drawings: line weight 1/2".into(),
+            DrawCmd::ToggleWidth => "Drawings: line width (next, 1-4 px)".into(),
             DrawCmd::ToggleDashed => "Drawings: dashed on/off".into(),
+            DrawCmd::Style => "Drawings: style of the selected drawing…".into(),
             DrawCmd::PinMeasure => "Drawings: pin measure".into(),
         },
         Command::Trade(t) => match t {
@@ -819,6 +825,7 @@ mod tests {
             Some(Command::Draw(DrawCmd::Tool(Tool::VLine)))
         );
         assert_eq!(cmd("alt-n"), Some(Command::Draw(DrawCmd::Tool(Tool::Note))));
+        assert_eq!(cmd("alt-s"), Some(Command::Draw(DrawCmd::Style)));
         assert_eq!(
             cmd("alt-u"),
             Some(Command::Draw(DrawCmd::Tool(Tool::Measure)))

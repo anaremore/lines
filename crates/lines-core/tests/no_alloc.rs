@@ -515,8 +515,9 @@ fn timeframe_updates_do_not_allocate() {
     assert_eq!(n, 0, "timeframe updates allocated {n} times");
 }
 
-/// Drawings (roadmap 11): projecting a product's drawings for a frame, hit-testing the
-/// pointer, snapping an anchor and writing a measure's text never allocate.
+/// Drawings (roadmap 11): projecting a product's drawings for a frame (styled: extended
+/// lines and zones, decision 0026), hit-testing the pointer, snapping an anchor, walking a
+/// line's dash pattern and writing a measure's text never allocate.
 #[test]
 fn drawings_do_not_allocate() {
     use lines_core::drawings::{
@@ -551,12 +552,20 @@ fn drawings_do_not_allocate() {
                 time: UtcMillis(i * 600_000 + 3_600_000),
                 price: Price(600_500 - i * 25),
             };
+            let mut style = Style::DEFAULT;
+            style.extend_left = i % 3 == 0;
+            style.extend_right = i % 2 == 0;
+            style.axis_tag = i % 5 == 0;
             Drawing {
                 id: i as u64 + 1,
-                ..Drawing::new(tool, a, b, Style::DEFAULT)
+                ..Drawing::new(tool, a, b, style)
             }
         })
         .collect();
+    let dash = lines_core::style::DashPattern {
+        seg: [12.0, 4.0, 2.0, 4.0],
+        n: 4,
+    };
     let mut vp = Viewport::default();
     vp.set_size(1200.0, 700.0);
     vp.price_lo = 599_000.0;
@@ -575,6 +584,12 @@ fn drawings_do_not_allocate() {
                     drawn.push(p);
                 }
             }
+            let mut pieces = 0;
+            for p in &drawn {
+                let len = (p.p1.0 - p.p0.0).hypot(p.p1.1 - p.p0.1);
+                dash.segments(len, |_, _| pieces += 1);
+            }
+            std::hint::black_box(pieces);
             let (x, y) = ((frame * 4) as f32, (frame * 2) as f32);
             let _ = pick(&drawn, Some(3), x, y, 4.0, 5.0);
             let a = snap_anchor(&axis, &vp, 25, frame % 3 == 0, x as f64, y as f64);

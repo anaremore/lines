@@ -1,5 +1,7 @@
 use super::*;
 use crate::versioned::{Decoded, decode};
+use lines_core::drawings::Style;
+use lines_core::style::{Color, FillStyle, LineStyle, LineType, Rgb, TextSize, TextStyle};
 use lines_feed::catalog;
 
 fn es() -> Product {
@@ -24,9 +26,18 @@ fn sample() -> Vec<Drawing> {
         a,
         b,
         Style {
-            color: 1,
-            width: 2,
-            dashed: true,
+            line: LineStyle {
+                color: Color::Palette(1),
+                width: 2,
+                line: LineType::Dashed,
+                ..LineStyle::DEFAULT
+            },
+            // A zone's legacy fill follows its line (unused on a trend line, but saved alike).
+            fill: FillStyle {
+                color: Color::Palette(1),
+                ..FillStyle::DEFAULT
+            },
+            ..Style::DEFAULT
         },
     );
     trend.id = 1;
@@ -80,8 +91,10 @@ fn version_1_is_pinned() {
     assert!(skipped.is_empty(), "{skipped:?}");
     assert_eq!(items, sample());
     // And it is written back as the same document.
-    let again: serde_json::Value =
-        serde_json::from_slice(&DrawingsFile::from_drawings(&es(), &items).encode()).unwrap();
+    let again: serde_json::Value = serde_json::from_slice(
+        &DrawingsFile::from_drawings(&es(), &items, &HashMap::new()).encode(),
+    )
+    .unwrap();
     let pinned: serde_json::Value = serde_json::from_str(V1).unwrap();
     assert_eq!(again, pinned);
 }
@@ -213,5 +226,86 @@ fn a_seed_file_names_its_product() {
     assert_eq!(items.len(), 3);
     std::fs::write(&f, V1.replace("\"ES\"", "\"XX\"")).unwrap();
     assert!(read_seed(&f).unwrap_err().contains("unknown product"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every style field survives a save and a restart; a file written before styles loads with
+/// the defaults (above: `version_1_is_pinned`).
+#[test]
+fn styles_round_trip_through_the_file() {
+    let mut d = sample();
+    d[0].style = Style {
+        line: LineStyle {
+            color: Color::Custom(Rgb::hex(0xe5484d)),
+            line: LineType::Dotted,
+            width: 4,
+            opacity: 50,
+        },
+        fill: FillStyle {
+            color: Color::Palette(3),
+            opacity: 40,
+        },
+        extend_left: true,
+        extend_right: true,
+        ..Style::DEFAULT
+    };
+    d[1].style.text = TextStyle {
+        size: TextSize::Large,
+        color: Color::Palette(1),
+        background: false,
+    };
+    d[2].style.axis_tag = true;
+    let bytes = DrawingsFile::from_drawings(&es(), &d, &HashMap::new()).encode();
+    let Decoded::Ok { value, .. } = decode::<DrawingsFile>(&FORMAT, &bytes) else {
+        panic!("must load");
+    };
+    let (items, skipped) = value.to_drawings(25);
+    assert!(skipped.is_empty());
+    assert_eq!(items, d);
+    // Older builds still read a dashed line in palette color 0.
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let first = &raw["drawings"][0];
+    assert_eq!(first["dashed"], true);
+    assert_eq!(first["line"], "dotted");
+    assert_eq!(first["line_color"], "#e5484d");
+    assert!(first.get("color").is_none());
+}
+
+/// A newer build's fields, on a drawing and on the file, survive this build's saves even when
+/// the drawing is edited here.
+#[test]
+fn a_newer_files_unknown_fields_survive() {
+    let dir = std::env::temp_dir().join(format!("lines-drawings-newer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut v: serde_json::Value = serde_json::from_str(V1).unwrap();
+    v["drawings"][0]["glow"] = serde_json::json!({"radius": 3});
+    v["drawings"][0]["label_font"] = "serif".into();
+    v["layers"] = serde_json::json!(["a", "b"]);
+    let file = path(&dir, &es());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
+    let writer = Writer::spawn();
+    let mut g = Drawings::new(Some(dir.clone()), Some(writer.clone()));
+    let (p, report) = g.product(&es());
+    assert!(report.is_none(), "{report:?}");
+    // Edit the drawing that carries them: restyled here, its unknown fields stay.
+    p.change(|s| {
+        let mut d = s.get(1).unwrap().clone();
+        d.style.line.width = 3;
+        (s.edit(d), ())
+    });
+    assert!(writer.flush(std::time::Duration::from_secs(5)));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let first = &saved["drawings"][0];
+    assert_eq!(first["id"], 1);
+    assert_eq!(first["width"], 3);
+    assert_eq!(first["glow"], serde_json::json!({"radius": 3}));
+    assert_eq!(first["label_font"], "serif");
+    assert_eq!(saved["layers"], serde_json::json!(["a", "b"]));
+    assert_eq!(saved["version"], 1);
+    // Fields this build knows are never duplicated into the unknown ones.
+    let doc: DrawingsFile = serde_json::from_value(saved).unwrap();
+    assert!(!doc.drawings[0].extra.contains_key("width"));
+    assert!(!doc.drawings[0].extra.contains_key("tool"));
     let _ = std::fs::remove_dir_all(&dir);
 }

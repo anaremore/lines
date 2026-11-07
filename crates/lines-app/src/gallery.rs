@@ -34,6 +34,9 @@ fn args(s: &str) -> Vec<String> {
     s.split_whitespace().map(str::to_owned).collect()
 }
 
+/// The replay's last price at [`lines_feed::synth::END`] (6019.50), in hundredths.
+const LAST_TICKS: i64 = 601_950;
+
 /// Paper orders around the replay's last price (6019.50): working, held bracket exits,
 /// pending (after the last `ack`).
 const ORDERS: &str =
@@ -227,6 +230,74 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     let mut d = args("--layout chart --size 1400x800 --theme dark --timeframe 5m --drawings");
     d.push(ws("drawings.json"));
     v.push(s("drawings", false, end, d));
+    // User styles (decision 0026): styled drawings in three theme/palette combinations, and
+    // the style editor open on a trend line (dark) and a note (light).
+    let styled = |name, theme: &str, extra: &str| {
+        let mut a = args(&format!(
+            "--layout chart --size 1400x800 --theme {theme} --timeframe 5m{extra} --drawings"
+        ));
+        a.push(ws("styled-drawings.json"));
+        s(name, false, end, a)
+    };
+    v.push(styled("styled-drawings-dark", "dark", ""));
+    v.push(styled("styled-drawings-light-cb", "light", " --palette cb"));
+    let mut e = styled("style-editor-trend-dark", "dark", "");
+    e.args.extend(["--style-editor".into(), "3".into()]);
+    v.push(e);
+    let mut e = styled("style-editor-note-light", "light", "");
+    e.args.extend(["--style-editor".into(), "7".into()]);
+    v.push(e);
+    // Keyboard focus on a swatch that isn't the selected one: both are named.
+    let mut e = styled("style-editor-focus-light", "light", "");
+    e.args.extend(["--style-editor".into(), "3:0:1".into()]);
+    v.push(e);
+    // The editor kept inside the plot: a line near the bottom edge (warnings and all), a
+    // narrow short pane, and a chart tiled above a DOM.
+    let edge = |name, size: &str, theme: &str, id: &str| {
+        let mut a = args(&format!(
+            "--layout chart --size {size} --theme {theme} --timeframe 5m --drawings"
+        ));
+        a.push(ws("editor-edge.json"));
+        a.extend(["--style-editor".into(), id.into()]);
+        s(name, false, end, a)
+    };
+    v.push(edge("style-editor-bottom-dark", "1400x800", "dark", "1"));
+    v.push(edge(
+        "style-editor-warnings-light-cb",
+        "1400x800",
+        "light --palette cb",
+        "1",
+    ));
+    v.push(edge("style-editor-short", "420x300", "dark", "1"));
+    // Keyboard focus on a row below the fold: the body scrolled to show it.
+    v.push(edge(
+        "style-editor-short-focus",
+        "420x300",
+        "dark",
+        "1:0:0:4",
+    ));
+    v.push(edge("style-editor-narrow", "300x700", "dark", "1"));
+    let mut t = vec![
+        "--workspace".into(),
+        ws("chart-over-dom.json"),
+        "--size".into(),
+        "1400x900".into(),
+        "--drawings".into(),
+        ws("editor-edge.json"),
+    ];
+    t.extend(["--style-editor".into(), "1".into()]);
+    v.push(s("style-editor-tiled", false, end, t));
+    // Trading lines and a styled horizontal line a few ticks apart: a pending, a working and
+    // a held order, a position, and the drawing with its axis tag.
+    let mut o = args("--layout trading --size 1600x900 --theme dark --arm --drawings");
+    o.push(ws("orders-drawings.json"));
+    o.push("--paper".into());
+    o.push(ORDERS.into());
+    v.push(s("styled-line-near-orders", false, end, o));
+    // Axis tags crowding the last price: stepped off it, and past each other.
+    let mut c = args("--layout chart --size 1200x700 --theme dark --timeframe 5m --drawings");
+    c.push(ws("tags-near-last.json"));
+    v.push(s("drawing-tags-near-last", false, end, c));
     v
 }
 
@@ -283,7 +354,75 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         anchor("21:00", 602_000),
     );
     std::fs::write(dir.join("drawings.json"), drawings).context("drawings.json")?;
+    // Styled: custom colors, line types and widths, extensions, axis tags, a zone's own fill,
+    // a large note without its box (in a yellow that needs one on light).
+    let styled = format!(
+        r##"{{ "version": 1, "product": "ES", "drawings": [
+  {{ "id": 1, "tool": "hline", "a": {}, "color": 1, "axis_tag": true }},
+  {{ "id": 2, "tool": "hray", "a": {}, "line_color": "#f719cb", "width": 2, "axis_tag": true }},
+  {{ "id": 3, "tool": "trend", "a": {}, "b": {}, "line_color": "#9c8756", "width": 3,
+     "dashed": true, "line": "dash-dot", "extend_right": true }},
+  {{ "id": 4, "tool": "ray", "a": {}, "b": {}, "color": 3, "dashed": true, "line": "dotted" }},
+  {{ "id": 5, "tool": "rect", "a": {}, "b": {}, "line_color": "#f719cb",
+     "fill_color": "#9c8756", "fill_opacity": 25, "axis_tag": true }},
+  {{ "id": 6, "tool": "vline", "a": {}, "color": 2, "width": 2 }},
+  {{ "id": 7, "tool": "note", "a": {}, "text": "Yellow note, no box",
+     "text_color": "#e0b000", "text_bg": false, "text_size": "l" }} ] }}"##,
+        anchor("14:00", 601_600),
+        anchor("15:45", 599_000),
+        anchor("14:30", 603_400),
+        anchor("15:45", 599_000),
+        anchor("15:45", 599_000),
+        anchor("17:30", 600_400),
+        anchor("18:00", 600_700),
+        anchor("20:40", 600_300),
+        anchor("14:30", 603_500),
+        anchor("15:50", 598_900),
+    );
+    std::fs::write(dir.join("styled-drawings.json"), styled).context("styled-drawings.json")?;
+    // A horizontal line low on the chart in a color that looks like up (every warning the
+    // editor has for it), with its price tag; a zone under it.
+    let edge = format!(
+        r##"{{ "version": 1, "product": "ES", "drawings": [
+  {{ "id": 1, "tool": "hline", "a": {}, "line_color": "#3fcf9a", "axis_tag": true }},
+  {{ "id": 2, "tool": "rect", "a": {}, "b": {}, "color": 2 }} ] }}"##,
+        anchor("19:00", 599_000),
+        anchor("15:00", 599_250),
+        anchor("17:00", 599_500),
+    );
+    std::fs::write(dir.join("editor-edge.json"), edge).context("editor-edge.json")?;
+    let near = format!(
+        r##"{{ "version": 1, "product": "ES", "drawings": [
+  {{ "id": 1, "tool": "hline", "a": {}, "line_color": "#f719cb", "width": 2, "dashed": true,
+     "axis_tag": true }},
+  {{ "id": 2, "tool": "hline", "a": {}, "color": 1, "line": "dotted", "dashed": true,
+     "axis_tag": true }} ] }}"##,
+        anchor("19:00", 601_525),
+        anchor("19:00", 601_925),
+    );
+    std::fs::write(dir.join("orders-drawings.json"), near).context("orders-drawings.json")?;
+    let crowd = format!(
+        r##"{{ "version": 1, "product": "ES", "drawings": [
+  {{ "id": 1, "tool": "hline", "a": {}, "line_color": "#f719cb", "axis_tag": true }},
+  {{ "id": 2, "tool": "hline", "a": {}, "color": 1, "axis_tag": true }},
+  {{ "id": 3, "tool": "hline", "a": {}, "color": 3, "axis_tag": true }},
+  {{ "id": 4, "tool": "hline", "a": {}, "line_color": "#9c8756", "axis_tag": true }} ] }}"##,
+        anchor("19:00", LAST_TICKS - 25),
+        anchor("19:00", LAST_TICKS),
+        anchor("19:00", LAST_TICKS + 25),
+        anchor("19:00", LAST_TICKS + 50),
+    );
+    std::fs::write(dir.join("tags-near-last.json"), crowd).context("tags-near-last.json")?;
+    let chart_over_dom = format!(
+        r#"{{ "split": {{ "axis": "column", "ratio": 0.5, "first": {}, "second": {} }} }}"#,
+        pane(
+            "chart",
+            r#", "chart": { "bar_px": 8.0, "timeframe": "5m" }"#
+        ),
+        pane("dom", "")
+    );
     for (f, layout) in [
+        ("chart-over-dom.json", chart_over_dom),
         ("popout.json", popout),
         ("footprint.json", footprint),
         ("journal.json", journal),

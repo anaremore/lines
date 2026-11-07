@@ -13,6 +13,7 @@
 #[cfg(test)]
 use gpui::Rgba;
 use gpui::{Hsla, rgb};
+use lines_core::style::{Color, DashPattern, LineType, Rgb};
 
 /// Brand palette.
 pub mod brand {
@@ -60,6 +61,9 @@ pub struct Theme {
     pub panel: Hsla,
     pub grid: Hsla,
     pub axis_line: Hsla,
+    /// A control's edge where the edge is what shows it (unselected chips, checkboxes,
+    /// swatch rims, the style editor's warning box): 3:1 on `panel` and `bg` (WCAG 1.4.11).
+    pub control_edge: Hsla,
     pub text_dim: Hsla,
     pub text_main: Hsla,
     pub up: Hsla,
@@ -98,6 +102,9 @@ pub struct Theme {
     /// color with a meaning (up/down in both palettes, accent/last, warn, bracket target and
     /// stop) and at least 3:1 against the chart background (WCAG 1.4.11): tested.
     pub drawing: [Hsla; 4],
+    /// The drawing colors' names in the style editor (shown beside the color row's label, so a
+    /// swatch never needs its color to be told apart).
+    pub drawing_names: [&'static str; 4],
     /// Behind text drawn over the plot (study legends, the volume profile's tag): a slightly
     /// translucent panel box, so lines and profile rows never run through the text. Its text
     /// meets AA over any chart content below it (`label_box_text_meets_aa_over_chart_content`).
@@ -142,6 +149,141 @@ pub const HELD_DASH: Dash = Dash { on: 3.0, off: 3.0 };
 /// position or an order (tested against the two above).
 pub const DRAWING_DASH: Dash = Dash { on: 12.0, off: 4.0 };
 
+/// A drawing's (or a styled study line's) dash pattern for its line type and width (logical
+/// px). Dashed is [`DRAWING_DASH`]; dotted dots are as long as the line is wide (at least 2
+/// px) with twice the width plus 4 px between; dash-dot is a long dash, a dot, and gaps. None of
+/// them matches [`POSITION_DASH`] or [`HELD_DASH`] (tested). No allocation.
+pub fn drawing_dash(line: LineType, width: f32) -> DashPattern {
+    let w = width.max(1.0);
+    match line {
+        LineType::Solid => DashPattern::SOLID,
+        LineType::Dashed => DashPattern {
+            seg: [DRAWING_DASH.on, DRAWING_DASH.off, 0.0, 0.0],
+            n: 2,
+        },
+        // Dots at least 2 px long, so a thin dotted line still reads (on dark especially),
+        // with wide gaps: never the even rhythm of a held order (3/3).
+        LineType::Dotted => DashPattern {
+            seg: [w.max(2.0), 2.0 * w + 4.0, 0.0, 0.0],
+            n: 2,
+        },
+        LineType::DashDot => DashPattern {
+            seg: [12.0, 3.0 + w, w, 3.0 + w],
+            n: 4,
+        },
+    }
+}
+
+/// Starting points for a custom color in the style editor (decision 0026), with their names.
+/// These are *user data presets*, not theme tokens: once chosen, a color is saved with the
+/// drawing as the user's own. Picked to read as a line (3:1) on both themes' charts and to stay
+/// clear (CIEDE2000 >= 20) of every color with a meaning in all four theme/palette combinations
+/// (tested): no market up/down colors among them; any color is still one "Custom…" away.
+pub const CUSTOM_SWATCHES: [(u32, &str); 2] = [(0xf719cb, "Magenta"), (0x9c8756, "Khaki")];
+
+/// A user-chosen color (decision 0026: user data saved with a drawing or study, never a
+/// literal in a view), at `opacity` percent.
+pub fn user_color(c: Rgb, opacity: u8) -> Hsla {
+    gpui::Rgba {
+        r: f32::from(c.r) / 255.0,
+        g: f32::from(c.g) / 255.0,
+        b: f32::from(c.b) / 255.0,
+        a: f32::from(opacity.min(100)) / 100.0,
+    }
+    .into()
+}
+
+/// A token's sRGB (opaque; its own alpha is ignored), for the readability guard.
+pub fn rgb_of(c: Hsla) -> Rgb {
+    let c = c.to_rgb();
+    Rgb::from_f32(c.r, c.g, c.b)
+}
+
+impl Theme {
+    /// A style color in this theme: palette indices from `palette` (drawings:
+    /// [`Theme::drawing`]), `Text` the main text color, custom colors as saved.
+    pub fn style_color(&self, c: Color, palette: &[Hsla], opacity: u8) -> Hsla {
+        let a = f32::from(opacity.min(100)) / 100.0;
+        match c {
+            Color::Palette(i) if !palette.is_empty() => {
+                // `opacity` scales the token's own alpha.
+                palette[usize::from(i) % palette.len()].opacity(a)
+            }
+            Color::Palette(_) | Color::Text => self.text_main.opacity(a),
+            Color::Custom(rgb) => user_color(rgb, opacity),
+        }
+    }
+
+    /// Colors with a meaning, which a user color shouldn't resemble (decision 0026): this
+    /// theme and palette's up and down, the violet last price / accent, the bracket target and
+    /// stop, and warn. Names as the style editor words them ("the {name} color").
+    pub fn meanings(&self) -> [(&'static str, Rgb); 6] {
+        [
+            ("up", rgb_of(self.up)),
+            ("down", rgb_of(self.down)),
+            ("last-price", rgb_of(self.last)),
+            ("order target", rgb_of(self.order_target)),
+            ("order stop", rgb_of(self.order_stop)),
+            ("warning", rgb_of(self.warn)),
+        ]
+    }
+
+    pub fn is_dark(&self) -> bool {
+        self.name.starts_with("dark")
+    }
+
+    /// This theme as the style editor's guard sees it (`crate::style_editor::ThemeCtx`).
+    pub fn style_ctx(&self) -> crate::style_editor::ThemeCtx {
+        crate::style_editor::ThemeCtx {
+            dark: self.is_dark(),
+            colorblind: self.name.ends_with("colorblind"),
+            palette: self.drawing.map(rgb_of),
+            text: rgb_of(self.text_main),
+            chart: rgb_of(self.bg),
+            panel: rgb_of(self.panel),
+            meanings: self.meanings(),
+        }
+    }
+
+    /// Text on a swatch filled with `fill` (the editor's "current" dot): the theme's ink or
+    /// paper, whichever reads better.
+    pub fn on_fill(&self, fill: Hsla) -> Hsla {
+        let f = rgb_of(fill);
+        let (a, b) = (self.text_main, self.bg);
+        let k = |x: Hsla| lines_core::style::contrast(f, rgb_of(x));
+        if k(a) >= k(b) { a } else { b }
+    }
+
+    /// A drawing's price tag on the axis (decision 0026): outlined, never filled (filled tags
+    /// are the last price's and orders'). Its border is the drawing's color, opaque; its text
+    /// the same color where that is AA (4.5:1) on the axis background, else the theme's text
+    /// color. Returns (border, text).
+    pub fn drawing_tag(&self, color: Hsla) -> (Hsla, Hsla) {
+        let mut solid = color;
+        solid.a = 1.0;
+        let reads = lines_core::style::contrast(rgb_of(solid), rgb_of(self.bg)) >= 4.5;
+        (solid, if reads { solid } else { self.text_main })
+    }
+
+    /// A note's text drawn in `color` (opaque), its box asked for or not: (draw the box, text
+    /// color). Text below AA on the chart gets its box anyway (the saved style is unchanged);
+    /// text below AA on the box is drawn in the theme's text color.
+    pub fn note_text(&self, color: Hsla, boxed: bool) -> (bool, Hsla) {
+        let k = |bg: Hsla| lines_core::style::contrast(rgb_of(color), rgb_of(bg));
+        if !boxed && k(self.bg) >= 4.5 {
+            return (false, color);
+        }
+        (
+            true,
+            if k(self.panel) >= 4.5 {
+                color
+            } else {
+                self.text_main
+            },
+        )
+    }
+}
+
 fn c(hex: u32) -> Hsla {
     rgb(hex).into()
 }
@@ -162,6 +304,7 @@ impl Theme {
             panel: c(0x171b24),
             grid: c(0x20242f),
             axis_line: c(0x2a3040),
+            control_edge: c(0x6e7489),
             text_dim: c(0x9a9fb2),
             text_main: c(brand::PAPER),
             up: c(up),
@@ -185,6 +328,7 @@ impl Theme {
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
             // paper, lime, olive, slate
             drawing: [c(brand::PAPER), c(0xd4ff3a), c(0x78871e), c(0x788787)],
+            drawing_names: ["White", "Lime", "Olive", "Slate"],
             label_bg: c(0x171b24).opacity(0.9),
             profile_va: c(0x9a9fb2).opacity(0.30),
             profile_poc: c(brand::PAPER).opacity(0.70),
@@ -216,6 +360,7 @@ impl Theme {
             panel: c(brand::PAPER),
             grid: c(0xe4e2ec),
             axis_line: c(0xcdcad9),
+            control_edge: c(0x7d7a8c),
             text_dim: c(0x565b6e),
             text_main: c(brand::INK),
             up: c(up),
@@ -237,6 +382,7 @@ impl Theme {
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
             // ink, warm gray, olive, slate: none in the red or green families
             drawing: [c(brand::INK), c(0x695a5a), c(0x707000), c(0x3a3a50)],
+            drawing_names: ["Black", "Warm gray", "Olive", "Slate"],
             label_bg: c(brand::PAPER).opacity(0.9),
             profile_va: c(0x565b6e).opacity(0.24),
             profile_poc: c(brand::INK).opacity(0.65),
@@ -252,8 +398,7 @@ impl Theme {
         }
     }
 
-    /// Every built-in theme/preset combination.
-    #[cfg(test)]
+    /// Every built-in theme/preset combination (the style editor checks user colors in all).
     pub fn all() -> [Theme; 4] {
         [
             Theme::dark(Palette::Standard),
@@ -596,6 +741,9 @@ mod tests {
             ("trade_bar.rs", include_str!("trade_bar.rs")),
             ("trading.rs", include_str!("trading.rs")),
             ("dom_trade.rs", include_str!("dom_trade.rs")),
+            ("chart_draw.rs", include_str!("chart_draw.rs")),
+            ("style_editor.rs", include_str!("style_editor.rs")),
+            ("style_editor_view.rs", include_str!("style_editor_view.rs")),
         ] {
             for needle in ["rgb(", "rgba(", "hsla(", "Hsla {"] {
                 assert!(
@@ -671,75 +819,166 @@ mod tests {
         assert_ne!(POSITION_DASH, HELD_DASH);
     }
 
-    /// CIEDE2000 color difference (sRGB, D65): the perceptual gap the drawing test uses.
-    fn delta_e_2000(a: Hsla, b: Hsla) -> f64 {
-        fn lab(c: Hsla) -> (f64, f64, f64) {
-            let c = c.to_rgb();
-            let lin = |v: f32| {
-                let v = f64::from(v);
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            let (r, g, b) = (lin(c.r), lin(c.g), lin(c.b));
-            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
-            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
-            let f = |t: f64| {
-                if t > 0.008856 {
-                    t.cbrt()
-                } else {
-                    7.787 * t + 16.0 / 116.0
-                }
-            };
-            let (fx, fy, fz) = (f(x), f(y), f(z));
-            (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+    /// Control edges read (WCAG 1.4.11) on the panels they sit on, in every theme.
+    #[test]
+    fn control_edges_read_on_panels() {
+        for t in Theme::all() {
+            for bg in [t.panel, t.bg] {
+                let r = contrast(t.control_edge, bg);
+                assert!(r >= 3.0, "{}: control edge {r:.2}:1", t.name);
+            }
         }
-        let ((l1, a1, b1), (l2, a2, b2)) = (lab(a), lab(b));
-        let (c1, c2) = (a1.hypot(b1), a2.hypot(b2));
-        let cb7 = ((c1 + c2) / 2.0).powi(7);
-        let g = 0.5 * (1.0 - (cb7 / (cb7 + 25f64.powi(7))).sqrt());
-        let (a1p, a2p) = ((1.0 + g) * a1, (1.0 + g) * a2);
-        let (c1p, c2p) = (a1p.hypot(b1), a2p.hypot(b2));
-        let hue = |b: f64, a: f64| b.atan2(a).to_degrees().rem_euclid(360.0);
-        let (h1, h2) = (hue(b1, a1p), hue(b2, a2p));
-        let dl = l2 - l1;
-        let dc = c2p - c1p;
-        let dh = if c1p * c2p == 0.0 {
-            0.0
-        } else if (h2 - h1).abs() <= 180.0 {
-            h2 - h1
-        } else if h2 > h1 {
-            h2 - h1 - 360.0
-        } else {
-            h2 - h1 + 360.0
+    }
+
+    /// Every line type's pattern is its own: none looks like the position line or a held
+    /// order at any width (decision 0026), and only solid is solid. "Looks like": two
+    /// segments whose period is within a third and whose duty (the drawn share) is within
+    /// 0.2 of a trading pattern's, so a thin dotted line (2/6) never reads as a held order
+    /// (3/3) nor a dotted 2 px one (2/8) as the position line (6/4).
+    #[test]
+    fn drawing_line_types_never_look_like_trading_lines() {
+        let looks_alike = |d: DashPattern, t: Dash| {
+            let period = d.seg[0] + d.seg[1];
+            let tp = t.on + t.off;
+            d.n == 2
+                && (period - tp).abs() <= tp / 3.0
+                && (d.seg[0] / period - t.on / tp).abs() <= 0.2
         };
-        let dhh = 2.0 * (c1p * c2p).sqrt() * (dh.to_radians() / 2.0).sin();
-        let lb = (l1 + l2) / 2.0;
-        let cbp = (c1p + c2p) / 2.0;
-        let hb = if c1p * c2p == 0.0 {
-            h1 + h2
-        } else if (h1 - h2).abs() <= 180.0 {
-            (h1 + h2) / 2.0
-        } else if h1 + h2 < 360.0 {
-            (h1 + h2 + 360.0) / 2.0
-        } else {
-            (h1 + h2 - 360.0) / 2.0
+        for w in 1..=4 {
+            let w = f32::from(w as u8);
+            for lt in LineType::ALL {
+                let d = drawing_dash(lt, w);
+                assert_eq!(d.is_solid(), lt == LineType::Solid, "{lt:?}");
+                if d.is_solid() {
+                    continue;
+                }
+                for trading in [POSITION_DASH, HELD_DASH] {
+                    assert!(
+                        !looks_alike(d, trading),
+                        "{lt:?} at {w} px ({:?}) looks like {trading:?}",
+                        &d.seg[..d.n]
+                    );
+                }
+            }
+        }
+        // The check itself catches the near misses it is for.
+        let p = |on, off| DashPattern {
+            seg: [on, off, 0.0, 0.0],
+            n: 2,
         };
-        let cos = |d: f64| d.to_radians().cos();
-        let t = 1.0 - 0.17 * cos(hb - 30.0) + 0.24 * cos(2.0 * hb) + 0.32 * cos(3.0 * hb + 6.0)
-            - 0.20 * cos(4.0 * hb - 63.0);
-        let dth = 30.0 * (-((hb - 275.0) / 25.0).powi(2)).exp();
-        let cbp7 = cbp.powi(7);
-        let rc = 2.0 * (cbp7 / (cbp7 + 25f64.powi(7))).sqrt();
-        let sl = 1.0 + 0.015 * (lb - 50.0).powi(2) / (20.0 + (lb - 50.0).powi(2)).sqrt();
-        let sc = 1.0 + 0.045 * cbp;
-        let sh = 1.0 + 0.015 * cbp * t;
-        let rt = -(2.0 * dth).to_radians().sin() * rc;
-        ((dl / sl).powi(2) + (dc / sc).powi(2) + (dhh / sh).powi(2) + rt * (dc / sc) * (dhh / sh))
-            .sqrt()
+        assert!(looks_alike(p(2.0, 4.0), HELD_DASH));
+        assert!(looks_alike(p(6.0, 5.0), POSITION_DASH));
+    }
+
+    /// A style's opacity scales a token's own alpha exactly once.
+    #[test]
+    fn style_color_applies_opacity_once() {
+        let t = Theme::dark(Palette::Standard);
+        let half = [t.text_main.opacity(0.5)];
+        let c = t.style_color(Color::Palette(0), &half, 50);
+        assert!((c.a - 0.25).abs() < 1e-6, "{}", c.a);
+        let c = t.style_color(Color::Palette(5), &t.drawing, 100);
+        assert_eq!(c, t.drawing[1]);
+        assert!((t.style_color(Color::Text, &t.drawing, 25).a - 0.25).abs() < 1e-6);
+    }
+
+    /// Any color a user can pick, coarsely: every 0x33 step per channel (216 colors).
+    fn any_user_color() -> impl Iterator<Item = Hsla> {
+        (0..216u32).map(|i| {
+            let ch = |k: u32| (k % 6) * 0x33;
+            let rgb = ch(i / 36) << 16 | ch(i / 6) << 8 | ch(i);
+            user_color(Rgb::hex(rgb), 100)
+        })
+    }
+
+    /// A drawing's axis tag is outlined in the drawing's color and its text reads: AA on the
+    /// axis background for every theme drawing color, starting swatch and any custom color
+    /// (216 sampled, with half opacity too), in every theme and palette.
+    #[test]
+    fn drawing_tag_text_meets_aa_for_any_color() {
+        for t in Theme::all() {
+            let colors = t
+                .drawing
+                .iter()
+                .copied()
+                .chain(
+                    CUSTOM_SWATCHES
+                        .iter()
+                        .map(|&(h, _)| user_color(Rgb::hex(h), 100)),
+                )
+                .chain(any_user_color())
+                .chain(any_user_color().map(|c| c.opacity(0.5)));
+            for c in colors {
+                let (border, text) = t.drawing_tag(c);
+                assert_eq!(border.a, 1.0, "the outline is opaque");
+                let r = contrast(text, t.bg);
+                assert!(r >= 4.5, "{}: tag text for {:?}: {r:.2}", t.name, rgb_of(c));
+            }
+        }
+    }
+
+    /// A note's text reads in any color: on the chart, or on its box (drawn when needed).
+    #[test]
+    fn note_text_meets_aa_for_any_color() {
+        for t in Theme::all() {
+            for c in any_user_color() {
+                for boxed in [false, true] {
+                    let (draw_box, text) = t.note_text(c, boxed);
+                    assert!(draw_box || !boxed, "a box asked for is drawn");
+                    let bg = if draw_box { t.panel } else { t.bg };
+                    let r = contrast(text, bg);
+                    assert!(r >= 4.5, "{}: note in {:?}: {r:.2}", t.name, rgb_of(c));
+                }
+            }
+        }
+    }
+
+    /// The quick custom swatches carry no warning anywhere: 3:1 as a line on both charts and
+    /// clear of every color with a meaning (no market up/down) in all four combinations; and
+    /// they are clear of each other and of the theme's drawing colors (no near-duplicates).
+    #[test]
+    fn quick_swatches_are_clear_everywhere() {
+        use lines_core::style::{NEAR_MEANING, readability};
+        for t in Theme::all() {
+            for (h, name) in CUSTOM_SWATCHES {
+                let c = Rgb::hex(h);
+                let r = readability(c, 100, rgb_of(t.bg), &t.meanings(), false);
+                assert!(r.ok(), "{}: {name}: {r:?}", t.name);
+                for d in t.drawing {
+                    let de = lines_core::style::delta_e_2000(c, rgb_of(d));
+                    assert!(de >= 10.0, "{}: {name} next to a drawing color", t.name);
+                }
+            }
+        }
+        let (a, b) = (
+            Rgb::hex(CUSTOM_SWATCHES[0].0),
+            Rgb::hex(CUSTOM_SWATCHES[1].0),
+        );
+        assert!(lines_core::style::delta_e_2000(a, b) >= NEAR_MEANING);
+    }
+
+    /// The default style reads: a note's text color on its box and on the chart, and every
+    /// theme drawing color passes the editor's guard as a line (no warning by default).
+    #[test]
+    fn default_styles_pass_the_readability_guard() {
+        use lines_core::style::readability;
+        for t in Theme::all() {
+            let m = t.meanings();
+            let text = t.style_color(Color::Text, &t.drawing, 100);
+            assert!(readability(rgb_of(text), 100, rgb_of(t.panel), &m, true).ok());
+            assert!(readability(rgb_of(text), 100, rgb_of(t.bg), &m, true).ok());
+            for i in 0..4 {
+                let c = t.style_color(Color::Palette(i), &t.drawing, 100);
+                let r = readability(rgb_of(c), 100, rgb_of(t.bg), &m, false);
+                assert!(r.ok(), "{}: drawing color {i}: {r:?}", t.name);
+            }
+        }
+    }
+
+    /// CIEDE2000 color difference (sRGB, D65): the perceptual gap the drawing test uses
+    /// (`lines_core::style::delta_e_2000`, which the style editor's guard uses too).
+    fn delta_e_2000(a: Hsla, b: Hsla) -> f64 {
+        lines_core::style::delta_e_2000(rgb_of(a), rgb_of(b))
     }
 
     #[test]

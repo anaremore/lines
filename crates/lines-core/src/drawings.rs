@@ -19,6 +19,7 @@ use crate::bars::Bar;
 use crate::geometry::magnet_price;
 use crate::instrument::Ratio;
 use crate::price::{Price, PriceFormat};
+use crate::style::{Color, FillStyle, LineStyle, TextStyle};
 use crate::time::UtcMillis;
 use crate::timeframe::BarsView;
 use crate::viewport::Viewport;
@@ -105,32 +106,71 @@ impl Tool {
     }
 }
 
-/// How a drawing is drawn: one of the theme's drawing colors, 1 or 2 px, solid or dashed.
+/// How a drawing is drawn (decision 0026): its line, a zone's fill, a note's text, and the
+/// drawing-only options. Which parts and options apply depends on the tool
+/// ([`Tool::has_fill`], [`Tool::has_text`], [`Tool::extends`], [`Tool::has_axis_tag`]); the
+/// others are kept but unused.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Style {
-    /// Index into the theme's drawing colors (`COLORS` of them).
-    pub color: u8,
-    /// Line weight, 1 or 2 logical px.
-    pub width: u8,
-    pub dashed: bool,
+    pub line: LineStyle,
+    /// Zones and measures.
+    pub fill: FillStyle,
+    /// Notes.
+    pub text: TextStyle,
+    /// Continue the line past its first anchor to the plot's edge (trend lines, rays,
+    /// horizontal rays, zones).
+    pub extend_left: bool,
+    /// Continue past the second anchor (trend lines, zones; rays always do).
+    pub extend_right: bool,
+    /// The drawing's price on the price axis (horizontal lines and rays, a zone's two edges).
+    pub axis_tag: bool,
 }
 
 impl Style {
-    /// Drawing colors the theme offers.
+    /// Drawing colors the theme offers (`Color::Palette` indices).
     pub const COLORS: u8 = 4;
 
     pub const DEFAULT: Style = Style {
-        color: 0,
-        width: 1,
-        dashed: false,
+        line: LineStyle::DEFAULT,
+        fill: FillStyle::DEFAULT,
+        text: TextStyle::DEFAULT,
+        extend_left: false,
+        extend_right: false,
+        axis_tag: false,
     };
 
-    /// In range (a file may hold anything).
+    /// In range (a file may hold anything): widths 1–4, opacities 10–100 %, palette indices
+    /// wrapped.
     pub fn normalised(self) -> Style {
-        Style {
-            color: self.color % Self::COLORS,
-            width: self.width.clamp(1, 2),
-            dashed: self.dashed,
+        let wrap = |c: Color| match c {
+            Color::Palette(i) => Color::Palette(i % Self::COLORS),
+            c => c,
+        };
+        let mut s = self;
+        s.line = s.line.normalised();
+        s.line.color = wrap(s.line.color);
+        s.fill = s.fill.normalised();
+        s.fill.color = wrap(s.fill.color);
+        s.text.color = wrap(s.text.color);
+        s
+    }
+
+    /// The line in color `c`; a fill that matched the old line color follows it (a zone's or
+    /// a measure's fill stays its line's color unless it was set apart).
+    pub fn with_line_color(self, c: Color) -> Style {
+        let mut s = self;
+        if s.fill.color == s.line.color {
+            s.fill.color = c;
+        }
+        s.line.color = c;
+        s
+    }
+
+    /// The line's color as a palette index, if it is one (the legacy single color).
+    pub fn palette_index(&self) -> Option<u8> {
+        match self.line.color {
+            Color::Palette(i) => Some(i),
+            _ => None,
         }
     }
 }
@@ -138,6 +178,39 @@ impl Style {
 impl Default for Style {
     fn default() -> Self {
         Style::DEFAULT
+    }
+}
+
+impl Tool {
+    /// Zones and measures have a fill.
+    pub fn has_fill(self) -> bool {
+        matches!(self, Tool::Rect | Tool::Measure)
+    }
+
+    /// Notes have text.
+    pub fn has_text(self) -> bool {
+        self == Tool::Note
+    }
+
+    /// Which extensions apply: (left, right). A ray always extends right, so only left is
+    /// offered; a horizontal ray likewise.
+    pub fn extends(self) -> (bool, bool) {
+        match self {
+            Tool::Trend | Tool::Rect => (true, true),
+            Tool::Ray | Tool::HRay => (true, false),
+            _ => (false, false),
+        }
+    }
+
+    /// Whether the drawing can tag its price on the axis (an exact price: horizontal lines and
+    /// rays, a zone's top and bottom).
+    pub fn has_axis_tag(self) -> bool {
+        matches!(self, Tool::HLine | Tool::HRay | Tool::Rect)
+    }
+
+    /// Whether its line has a type and width (a note's line is only its edge marker).
+    pub fn has_stroke(self) -> bool {
+        self != Tool::Note
     }
 }
 
@@ -291,6 +364,8 @@ pub struct Projected {
     pub p1: (f32, f32),
     pub handles: [(f32, f32); 2],
     pub n_handles: u8,
+    /// The anchors' prices (for axis tags): `a`, `b`.
+    pub prices: [Price; 2],
 }
 
 /// Default size of a note's box before the chart measures its text (logical px).
@@ -312,6 +387,11 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
         p1: (0.0, 0.0),
         handles: [(0.0, 0.0); 2],
         n_handles: 1,
+        prices: [d.a.price, d.b.price],
+    };
+    let (ext_l, ext_r) = {
+        let (l, r) = d.tool.extends();
+        (l && d.style.extend_left, r && d.style.extend_right)
     };
     match d.tool {
         Tool::HLine => {
@@ -327,7 +407,7 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
             if !(0.0..=h).contains(&ya) || x > w {
                 return None;
             }
-            out.p0 = (x, ya);
+            out.p0 = (if ext_l { 0.0 } else { x }, ya);
             out.p1 = (w, ya);
             out.handles[0] = (x, ya);
         }
@@ -349,24 +429,41 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
                 return None;
             }
         }
-        Tool::Trend | Tool::Rect | Tool::Measure => {
+        Tool::Rect | Tool::Measure => {
             let (x0, x1) = (xa?, xb?);
-            out.p0 = (x0, ya);
-            out.p1 = (x1, yb);
+            // An extended zone runs to the plot's edge on that side (its handles stay put).
+            let (lo, hi) = (x0.min(x1), x0.max(x1));
+            let (lo, hi) = (
+                if ext_l { lo.min(0.0) } else { lo },
+                if ext_r { hi.max(w) } else { hi },
+            );
+            let (l, r) = if x0 <= x1 { (lo, hi) } else { (hi, lo) };
+            out.p0 = (l, ya);
+            out.p1 = (r, yb);
             out.handles = [(x0, ya), (x1, yb)];
             out.n_handles = 2;
-            if x0.max(x1) < 0.0 || x0.min(x1) > w || ya.max(yb) < 0.0 || ya.min(yb) > h {
+            if lo.max(hi) < 0.0 || lo.min(hi) > w || ya.max(yb) < 0.0 || ya.min(yb) > h {
                 return None;
             }
         }
-        Tool::Ray => {
+        Tool::Trend | Tool::Ray => {
             let (x0, x1) = (xa?, xb?);
             out.handles = [(x0, ya), (x1, yb)];
             out.n_handles = 2;
-            out.p0 = (x0, ya);
-            out.p1 = extend_to_edge((x0, ya), (x1, yb), w, h);
+            let right = ext_r || d.tool == Tool::Ray;
+            out.p0 = if ext_l {
+                extend_to_edge((x1, yb), (x0, ya), w, h)
+            } else {
+                (x0, ya)
+            };
+            out.p1 = if right {
+                extend_to_edge((x0, ya), (x1, yb), w, h)
+            } else {
+                (x1, yb)
+            };
             let (lo, hi) = (out.p0.0.min(out.p1.0), out.p0.0.max(out.p1.0));
-            if hi < 0.0 || lo > w {
+            let (top, bottom) = (out.p0.1.min(out.p1.1), out.p0.1.max(out.p1.1));
+            if hi < 0.0 || lo > w || bottom < 0.0 || top > h {
                 return None;
             }
         }

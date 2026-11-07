@@ -23,6 +23,7 @@ pub mod qty;
 pub mod roll;
 pub mod sessions;
 pub mod stitch;
+pub mod style;
 pub mod tape;
 pub mod time;
 pub mod timeframe;

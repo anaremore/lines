@@ -1,0 +1,976 @@
+//! Rendering of the style editor (`crate::style_editor` is the model): a popover over the
+//! chart (`crate::popover::layer`: a press outside closes it and does nothing else), render
+//! time only. Every control is clickable and maps to the same model calls as the keys.
+//!
+//! State never relies on color alone (WCAG 1.4.1, 1.4.11): a selected choice has a check mark,
+//! a 1 px accent border and a stronger fill; a selected swatch a 2 px ring and a dot; on/off
+//! options are checkboxes; a color row names its focused (else selected) swatch beside its
+//! label. Keyboard focus is a separate 2 px accent ring around the control.
+//!
+//! Placement ([`place`]): beside the edited drawing (right, left, below, above, in that order),
+//! never over it when there is room; always inside the chart's plot area (above the time axis)
+//! and, when the pane is wide enough to spare it, clear of the price axis (the last-price tag
+//! stays visible); its body scrolling with a visible (display-only) scrollbar when the area is
+//! short, the tabs pinned above it and "Save as default" pinned in the footer. Keyboard focus
+//! scrolls its row into view ([`body_child`]). The box is never taller than the height it was
+//! placed with ([`content_height`], an upper bound of what it draws at that width: the lines
+//! that could wrap are counted, the rest don't wrap), so it can't spill.
+
+use gpui::{
+    AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, ScrollHandle, StatefulInteractiveElement, Styled, div,
+    prelude::*, px,
+};
+
+use crate::chart_view::{AXIS_W, ChartView};
+use crate::style_editor::{
+    Control, Row, StyleEditor, Warning, color_name, control_label, is_toggle,
+};
+use crate::theme::{Theme, user_color};
+
+/// Widest the editor gets (logical px).
+pub const W: f32 = 440.0;
+/// Kept clear of the pane's edges and of the drawing (logical px).
+pub const MARGIN: f32 = 8.0;
+const GAP: f32 = 12.0;
+/// The label column.
+const LABEL_W: f32 = 64.0;
+/// Every control is at least this tall and wide (hit target).
+const HIT: f32 = 20.0;
+/// The narrowest the editor gets for the price axis's sake: a pane that can't spare the axis
+/// and still give the editor this much lets it cover the axis.
+const MIN_BESIDE_AXIS: f32 = 280.0;
+/// The custom color entry's hint.
+const HEX_HINT: &str = "Type 6 hex digits · Enter applies · Esc cancels";
+
+/// Where the editor goes, chart-local: its box is at most `h` tall.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Place {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// The right edge the editor keeps to in an `area` this wide: left of the price axis (so the
+/// last-price tag stays visible) when that leaves it [`MIN_BESIDE_AXIS`], else the pane's.
+fn right_edge(area_w: f32) -> f32 {
+    if area_w - AXIS_W - 2.0 * MARGIN >= MIN_BESIDE_AXIS {
+        area_w - AXIS_W - MARGIN
+    } else {
+        area_w - MARGIN
+    }
+}
+
+/// The editor's width in an `area` this wide.
+pub fn width(area_w: f32) -> f32 {
+    W.min((right_edge(area_w) - MARGIN).max(0.0))
+}
+
+/// The editor's spot in an `area` (w, h: the chart's width and the height above its time
+/// axis) for content `h` tall, beside `target` (the drawing's extent, x0, y0, x1, y1) when
+/// there is room: right of it, left, below, above; else the top right (clear of the price
+/// axis). Never past any edge of the area: narrower, shorter and scrolling when it must be.
+pub fn place(area: (f32, f32), target: Option<(f32, f32, f32, f32)>, h: f32) -> Place {
+    let (pw, ph) = area;
+    let right = right_edge(pw);
+    let w = width(pw);
+    let h = h.min((ph - 2.0 * MARGIN).max(0.0));
+    let clamp_x = |x: f32| x.min(right - w).max(MARGIN);
+    let clamp_y = |y: f32| y.min(ph - h - MARGIN).max(MARGIN);
+    let at = |x: f32, y: f32| Place { x, y, w, h };
+    if let Some((x0, y0, x1, y1)) = target {
+        if x1 + GAP + w <= right {
+            return at(x1 + GAP, clamp_y(y0));
+        }
+        if x0 - GAP - w >= MARGIN {
+            return at(x0 - GAP - w, clamp_y(y0));
+        }
+        if y1 + GAP + h <= ph - MARGIN {
+            return at(clamp_x(x0), y1 + GAP);
+        }
+        if y0 - GAP - h >= MARGIN {
+            return at(clamp_x(x0), y0 - GAP - h);
+        }
+    }
+    at(clamp_x(right - w), clamp_y(MARGIN + 16.0))
+}
+
+/// GPUI's default line height for text `size` px (1.618 em).
+fn line_h(size: f32) -> f32 {
+    (size * 1.618).ceil()
+}
+
+/// Lines a text of `chars` characters at `size` px wraps to in `w` px (an upper bound: wide
+/// average glyphs).
+fn text_lines(chars: usize, size: f32, w: f32) -> f32 {
+    let per_line = (w / (size * 0.62)).floor().max(1.0);
+    (chars as f32 / per_line).ceil().max(1.0)
+}
+
+/// Lines a flex-wrapped row of items `widths` (px, gap 4) takes in `w` px.
+fn wrapped_lines(widths: impl Iterator<Item = f32>, w: f32) -> f32 {
+    let mut lines = 0.0;
+    let mut used = f32::INFINITY;
+    for iw in widths {
+        if used + 4.0 + iw > w {
+            lines += 1.0;
+            used = iw;
+        } else {
+            used += 4.0 + iw;
+        }
+    }
+    f32::max(lines, 1.0)
+}
+
+/// A control's drawn width (its focus ring included).
+fn control_w(c: Control, on: bool, names: &[&'static str]) -> f32 {
+    let label = |s: String| s.chars().count() as f32 * 12.0 * 0.62;
+    4.0 + match c {
+        Control::Color(_) => HIT,
+        c if is_toggle(c) => 8.0 + 14.0 + 8.0 + label(control_label(c, names)),
+        c => (16.0 + label(control_label(c, names)) + if on { 16.0 } else { 0.0 }).max(HIT),
+    }
+}
+
+/// The pinned tab strip (none for one part).
+fn tabs_height(e: &StyleEditor) -> f32 {
+    if e.parts.len() > 1 {
+        4.0 + 24.0 + 4.0 + 1.0
+    } else {
+        0.0
+    }
+}
+
+/// What doesn't scroll: header, tabs and footer (title, "Save as default", the key hint, full
+/// or short) and the borders.
+fn chrome_height(e: &StyleEditor) -> f32 {
+    let title = 16.0 + line_h(13.0) + 1.0;
+    let save = if e.default_label.is_some() {
+        4.0 + 28.0
+    } else {
+        0.0
+    };
+    let hint = 8.0 + line_h(11.0);
+    2.0 + title + tabs_height(e) + 1.0 + save + hint
+}
+
+/// The scroll body's child holding model row `r` (rows are direct children so focus can
+/// scroll them into view; "Save as default" is in the footer: `None`).
+pub fn body_child(rows: &[Row], r: usize) -> Option<usize> {
+    let footer = |row: &Row| matches!(row.controls.as_slice(), [(Control::SaveDefault, _)]);
+    if footer(rows.get(r)?) {
+        return None;
+    }
+    Some(rows[..r].iter().filter(|row| !footer(row)).count())
+}
+
+/// How tall the editor draws at width `w` (logical px), as an upper bound: rows that wrap,
+/// warnings that wrap, the hex entry, header and footer. [`place`] places this height and the
+/// box never grows past it; when the area is shorter the body scrolls.
+pub fn content_height(
+    e: &StyleEditor,
+    warnings: &[Warning],
+    w: f32,
+    names: &[&'static str],
+) -> f32 {
+    let inner = (w - 2.0 - 24.0).max(1.0);
+    let controls_w = (inner - LABEL_W).max(1.0);
+    let mut h = chrome_height(e) + 8.0; // the body's padding
+    for r in e.rows() {
+        if let [(Control::SaveDefault, _)] = r.controls.as_slice() {
+            continue; // in the footer
+        }
+        let widths = r.controls.iter().map(|&(c, on)| control_w(c, on, names));
+        if r.label == "Color" {
+            let lines = wrapped_lines(widths, controls_w);
+            h += 4.0 + line_h(12.0) + lines * 24.0 + (lines - 1.0) * 4.0 + 2.0;
+            if e.hex.is_some() {
+                // The entry, then its hint beside it or below, wrapping on its own when it
+                // is wider than the row.
+                let hint_w = HEX_HINT.chars().count() as f32 * 12.0 * 0.62;
+                h += 8.0
+                    + if 80.0 + 8.0 + hint_w <= controls_w {
+                        line_h(12.0)
+                    } else {
+                        line_h(12.0)
+                            + 8.0
+                            + text_lines(HEX_HINT.chars().count(), 12.0, controls_w) * line_h(12.0)
+                    };
+            }
+            if !warnings.is_empty() {
+                // Inside the box: margins, border, padding, the bar and the marker.
+                let text_w = (inner - 2.0 - 16.0 - 3.0 - 8.0 - 16.0 - 8.0).max(1.0);
+                h += 8.0 + 2.0 + 8.0 + 4.0 * (warnings.len() as f32 - 1.0);
+                for wn in warnings {
+                    h += text_lines(wn.text.chars().count(), 12.0, text_w) * line_h(12.0);
+                }
+            }
+        } else {
+            let lines = wrapped_lines(widths, controls_w);
+            h += 4.0 + lines * 24.0 + (lines - 1.0) * 4.0;
+        }
+    }
+    h.ceil()
+}
+
+/// The focus ring around a control: 2 px accent when focused, else the same space clear (so
+/// focus never moves anything).
+fn ring(t: &Theme, focused: bool) -> gpui::Div {
+    div()
+        .flex_none()
+        .rounded_md()
+        .border_2()
+        .border_color(if focused {
+            t.accent
+        } else {
+            gpui::transparent_black()
+        })
+}
+
+fn swatch(t: &Theme, fill: Hsla, on: bool) -> gpui::Div {
+    // Selected: a 2 px ring in the text color and a dot inside (never color alone).
+    div()
+        .size(px(HIT))
+        .p(px(2.0))
+        .rounded_sm()
+        .border_2()
+        .border_color(if on {
+            t.text_main
+        } else {
+            gpui::transparent_black()
+        })
+        .child(
+            div()
+                .size_full()
+                .rounded_sm()
+                .bg(fill)
+                .border_1()
+                .border_color(t.control_edge)
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(on, |d| {
+                    d.child(div().size(px(4.0)).rounded_full().bg(t.on_fill(fill)))
+                }),
+        )
+}
+
+fn checkbox(t: &Theme, on: bool, label: String) -> gpui::Div {
+    div()
+        .h(px(HIT))
+        .px(px(4.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .text_color(t.text_main)
+        .child(
+            div()
+                .size(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(if on { t.accent } else { t.control_edge })
+                .when(on, |d| {
+                    d.bg(t.accent)
+                        .text_color(t.on_last)
+                        .text_size(px(11.0))
+                        .child("✓")
+                }),
+        )
+        .child(label)
+}
+
+fn choice(t: &Theme, on: bool, label: String) -> gpui::Div {
+    // Selected: a check, a 1 px accent border and a stronger fill (WCAG 1.4.11).
+    div()
+        .h(px(HIT))
+        .min_w(px(HIT))
+        .px(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .rounded_sm()
+        .border_1()
+        .border_color(if on { t.accent } else { t.control_edge })
+        .text_size(px(12.0))
+        .text_color(t.text_main)
+        .when(on, |d| {
+            d.bg(t.accent.opacity(0.28))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("✓")
+        })
+        .child(label)
+}
+
+/// A warning's marker on a neutral chip (the chart's background, an edge that reads): the
+/// color with a meaning it looks like, else (low contrast) half text, half background.
+fn marker(t: &Theme, swatch: Option<Hsla>) -> gpui::Div {
+    let chip = div()
+        .mt(px(3.0))
+        .size(px(16.0))
+        .flex_none()
+        .p(px(2.0))
+        .rounded_sm()
+        .bg(t.bg)
+        .border_1()
+        .border_color(t.control_edge);
+    match swatch {
+        Some(c) => chip.child(div().size_full().rounded_sm().bg(c)),
+        None => chip.child(
+            div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .rounded_sm()
+                .border_1()
+                .border_color(t.text_main)
+                .child(div().w_1_2().h_full().bg(t.text_main)),
+        ),
+    }
+}
+
+/// The readability warnings: a neutral surface with a warn-colored bar on the left (never
+/// text on the warn color, so the markers keep their contrast).
+fn warning_box(t: &Theme, warnings: &[Warning]) -> gpui::Div {
+    let mut list = div()
+        .flex_1()
+        .min_w(px(0.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .text_size(px(12.0))
+        .text_color(t.text_main);
+    for w in warnings {
+        list = list.child(
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.0))
+                .child(marker(t, w.swatch.map(|rgb| user_color(rgb, 100))))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .whitespace_normal()
+                        .child(w.text.clone()),
+                ),
+        );
+    }
+    div()
+        .mx(px(12.0))
+        .my(px(4.0))
+        .flex()
+        .flex_row()
+        .rounded_sm()
+        .bg(t.bg)
+        .border_1()
+        .border_color(t.control_edge)
+        .child(div().w(px(3.0)).flex_none().bg(t.warn))
+        .child(list)
+}
+
+/// How far down a body `view` px tall must be scrolled (from `scrolled`) to show the row at
+/// `top` (content px, from the body's top) `h` tall: the least move that shows all of it, or
+/// its top when it is taller than the body (a color row's name line stays with its swatches).
+pub fn keep_visible(view: f32, top: f32, h: f32, scrolled: f32) -> f32 {
+    if h > view || top < scrolled {
+        top
+    } else if top + h > scrolled + view {
+        top + h - view
+    } else {
+        scrolled
+    }
+}
+
+/// The scrollbar's thumb (top, height) in a body `view` px tall showing `content` px, scrolled
+/// `scrolled` px down; `None` when everything fits.
+pub fn thumb(view: f32, content: f32, scrolled: f32) -> Option<(f32, f32)> {
+    if content <= view + 0.5 || view <= 0.0 {
+        return None;
+    }
+    let h = (view * view / content).max(16.0_f32.min(view));
+    let max = content - view;
+    let top = (scrolled.clamp(0.0, max) / max) * (view - h);
+    Some((top, h))
+}
+
+/// The editor at `at`. `content_h`: [`content_height`] at this width; `scroll`: the body's
+/// scroll state (its scrollbar shows whenever the body doesn't fit); `follow`: the focus just
+/// moved, so its row scrolls into view.
+#[allow(clippy::too_many_arguments)]
+pub fn render(
+    e: &StyleEditor,
+    t: &Theme,
+    warnings: &[Warning],
+    at: Place,
+    content_h: f32,
+    scroll: &ScrollHandle,
+    follow: bool,
+    cx: &mut Context<ChartView>,
+) -> AnyElement {
+    // Short of room: the key hint shortens (the keys still work) and the body scrolls.
+    let full_hint = content_h <= at.h;
+    let rows = e.rows();
+    let focus = (e.row, e.col);
+    let names = &t.drawing_names;
+    if follow && let Some(ix) = body_child(&rows, e.row) {
+        // From the last frame's layout (a focus move doesn't move rows), so the scrollbar
+        // below is drawn at the new offset; before the first layout GPUI does it in prepaint.
+        let view = scroll.bounds();
+        match scroll.bounds_for_item(ix) {
+            Some(b) if view.size.height > gpui::px(0.0) => {
+                let to = keep_visible(
+                    f32::from(view.size.height),
+                    f32::from(b.top() - view.top()),
+                    f32::from(b.size.height),
+                    -f32::from(scroll.offset().y),
+                )
+                .clamp(0.0, f32::from(scroll.max_offset().y));
+                scroll.set_offset(gpui::point(scroll.offset().x, px(-to)));
+            }
+            _ => scroll.scroll_to_item(ix),
+        }
+    }
+    // Each row (a color row with its name line, hex entry and warnings) is one direct child of
+    // the scroll container, keeping its own height (flex_none).
+    let mut groups: Vec<gpui::Div> = Vec::with_capacity(rows.len());
+    let mut tabs_strip = None;
+    if e.parts.len() > 1 {
+        let mut tabs = div()
+            .flex_none()
+            .px(px(12.0))
+            .pt(px(4.0))
+            .pb(px(4.0))
+            .flex()
+            .flex_row()
+            .gap(px(4.0))
+            .border_b_1()
+            .border_color(t.axis_line);
+        for (i, p) in e.parts.iter().enumerate() {
+            let on = i == e.tab;
+            tabs = tabs.child(
+                div()
+                    .id(("style-tab", i))
+                    .h(px(24.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.0))
+                    .text_color(if on { t.text_main } else { t.text_dim })
+                    .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .border_b_2()
+                    .border_color(if on {
+                        t.accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .hover(|s| s.text_color(t.text_main))
+                    .child(p.title)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view: &mut ChartView, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            view.style_tab(i, cx);
+                        }),
+                    ),
+            );
+        }
+        tabs_strip = Some(tabs);
+    }
+    let mut footer_save = None;
+    for (r, row) in rows.iter().enumerate() {
+        let click = |k: usize| {
+            cx.listener(move |view: &mut ChartView, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                view.style_click(r, k, cx);
+            })
+        };
+        if let [(Control::SaveDefault, saved)] = row.controls.as_slice() {
+            let focused = focus == (r, 0);
+            let label = if *saved {
+                "Saved as the default".to_owned()
+            } else {
+                e.default_label
+                    .clone()
+                    .unwrap_or_else(|| control_label(Control::SaveDefault, names))
+            };
+            footer_save = Some(
+                ring(t, focused).child(
+                    div()
+                        .id(("style-ctl", r * 64))
+                        .h(px(24.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(t.control_edge)
+                        .text_size(px(12.0))
+                        .text_color(if *saved { t.text_dim } else { t.text_main })
+                        .hover(|s| s.bg(t.accent.opacity(0.12)))
+                        .child(label)
+                        .on_mouse_down(MouseButton::Left, click(0)),
+                ),
+            );
+            continue;
+        }
+        let is_color = row.label == "Color";
+        let mut group = div().flex_none().flex().flex_col();
+        let mut controls = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.0));
+        for (k, &(c, on)) in row.controls.iter().enumerate() {
+            let focused = focus == (r, k);
+            let inner = match c {
+                Control::Color(color) => swatch(t, t.style_color(color, &t.drawing, 100), on),
+                c if is_toggle(c) => checkbox(t, on, control_label(c, names)),
+                c => choice(t, on, control_label(c, names)),
+            };
+            controls = controls.child(
+                ring(t, focused).child(
+                    inner
+                        .id(("style-ctl", r * 64 + k))
+                        .on_mouse_down(MouseButton::Left, click(k)),
+                ),
+            );
+        }
+        let label = div()
+            .w(px(LABEL_W))
+            .flex_none()
+            .text_size(px(11.0))
+            .text_color(t.text_dim)
+            .child(row.label);
+        if is_color {
+            // The swatch's name beside the label: the focused one while the focus is on this
+            // row, with the selected one after it when they differ; else the selected one.
+            let name = |c: &Control| match c {
+                Control::Color(c) => color_name(*c, names),
+                c => control_label(*c, names),
+            };
+            let selected = row.controls.iter().find(|(_, on)| *on);
+            let named = match row.controls.get(e.col).filter(|_| e.row == r) {
+                Some((c, false)) => Some(match selected {
+                    Some((s, _)) => format!("{} · selected: {}", name(c), name(s)),
+                    None => name(c),
+                }),
+                Some((c, true)) => Some(name(c)),
+                None => selected.map(|(c, _)| name(c)),
+            };
+            group = group.child(
+                div()
+                    .px(px(12.0))
+                    .pt(px(4.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(label)
+                    .when_some(named, |d, n| {
+                        // One line: a long name truncates (the height estimate counts one).
+                        d.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .whitespace_nowrap()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(t.text_main)
+                                .child(n),
+                        )
+                    }),
+            );
+            group = group.child(
+                div()
+                    .pl(px(12.0 + LABEL_W))
+                    .pr(px(12.0))
+                    .pb(px(2.0))
+                    .child(controls),
+            );
+        } else {
+            group = group.child(
+                div()
+                    .px(px(12.0))
+                    .py(px(2.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(label)
+                    .child(controls),
+            );
+        }
+        if is_color {
+            // The custom color entry, then the readability warnings, right under the colors.
+            if let Some(hex) = &e.hex {
+                group = group.child(
+                    div()
+                        .pl(px(12.0 + LABEL_W))
+                        .pr(px(12.0))
+                        .py(px(4.0))
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(8.0))
+                        .items_center()
+                        .text_size(px(12.0))
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .border_1()
+                                .border_color(t.accent)
+                                .rounded_sm()
+                                .text_color(t.text_main)
+                                .child(format!("#{hex}▏")),
+                        )
+                        .child(div().min_w(px(0.0)).text_color(t.text_dim).child(HEX_HINT)),
+                );
+            }
+            if !warnings.is_empty() {
+                group = group.child(warning_box(t, warnings));
+            }
+        }
+        groups.push(group);
+    }
+    let hint = match (full_hint, e.parts.len() > 1) {
+        (true, true) => "↑↓←→ move · Enter pick · Tab next part · Esc close",
+        (true, false) => "↑↓←→ move · Enter pick · Esc close",
+        (false, true) => "Tab next part · Esc close",
+        (false, false) => "Esc close",
+    };
+    let footer = div()
+        .flex_none()
+        .border_t_1()
+        .border_color(t.axis_line)
+        .when_some(footer_save, |d, s| {
+            d.child(div().px(px(12.0)).pt(px(4.0)).flex().flex_row().child(s))
+        })
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(4.0))
+                .text_size(px(11.0))
+                .text_color(t.text_dim)
+                .whitespace_nowrap()
+                .truncate()
+                .child(hint),
+        );
+    // The scrollbar: from the body's last layout, else (first frame) from the estimate.
+    let view_h = f32::from(scroll.bounds().size.height);
+    let (view_h, body_h) = if view_h > 0.0 {
+        (view_h, view_h + f32::from(scroll.max_offset().y))
+    } else {
+        let view = (at.h - chrome_height(e)).max(0.0);
+        (view, (content_h - chrome_height(e)).max(0.0))
+    };
+    let bar = thumb(view_h, body_h, -f32::from(scroll.offset().y)).map(|(top, h)| {
+        div()
+            .absolute()
+            .top(px(top))
+            .right(px(2.0))
+            .w(px(4.0))
+            .h(px(h))
+            .rounded_full()
+            .bg(t.text_dim)
+    });
+    let body = div()
+        .relative()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .child(
+            div()
+                .id("style-editor-body")
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .py(px(4.0))
+                .children(groups),
+        )
+        .when_some(bar, |d, b| d.child(b));
+    div()
+        .absolute()
+        .left(px(at.x))
+        .top(px(at.y))
+        .child(
+            div()
+                .id("style-editor")
+                .occlude()
+                .w(px(at.w))
+                .max_h(px(at.h))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .bg(t.panel)
+                .border_1()
+                .border_color(t.axis_line)
+                .rounded_md()
+                .text_size(px(13.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(t.axis_line)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(t.text_main)
+                        .child(e.title.clone()),
+                )
+                .children(tabs_strip)
+                .child(body)
+                .child(footer),
+        )
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inside(p: Place, pane: (f32, f32)) {
+        assert!(p.x >= MARGIN - 0.01 && p.y >= MARGIN - 0.01, "{p:?}");
+        assert!(p.x + p.w <= pane.0 - MARGIN + 0.01, "{p:?} in {pane:?}");
+        assert!(p.h <= pane.1 - 2.0 * MARGIN + 0.01, "{p:?}");
+        assert!(p.y + p.h <= pane.1 - MARGIN + 0.01, "{p:?} in {pane:?}");
+    }
+
+    fn overlaps(p: Place, h: f32, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> bool {
+        let h = h.min(p.h);
+        p.x < x1 && p.x + p.w > x0 && p.y < y1 && p.y + h > y0
+    }
+
+    /// Beside the drawing when there's room (right, then left, below, above), never over it.
+    #[test]
+    fn the_editor_sits_beside_its_drawing() {
+        let pane = (1600.0, 900.0);
+        let h = 300.0;
+        // A note on the left: to its right.
+        let note = (100.0, 200.0, 220.0, 224.0);
+        let p = place(pane, Some(note), h);
+        assert!(p.x >= 220.0 && !overlaps(p, h, note));
+        // A note near the right edge: to its left.
+        let note = (1300.0, 200.0, 1420.0, 224.0);
+        let p = place(pane, Some(note), h);
+        assert!(p.x + p.w <= 1300.0 && !overlaps(p, h, note));
+        // A horizontal line across the chart: below it, or above when it is low.
+        let line = (0.0, 300.0, 1528.0, 300.0);
+        let p = place(pane, Some(line), h);
+        assert!(p.y > 300.0 && !overlaps(p, h, line));
+        let line = (0.0, 800.0, 1528.0, 800.0);
+        let p = place(pane, Some(line), h);
+        assert!(p.y + h < 800.0 && !overlaps(p, h, line));
+        for p in [
+            place(pane, Some(note), h),
+            place(pane, Some(line), h),
+            place(pane, None, h),
+        ] {
+            inside(p, pane);
+        }
+    }
+
+    /// A narrow or short pane: never past the left edge, narrower, and its body scrolls.
+    #[test]
+    fn the_editor_fits_narrow_and_short_panes() {
+        for pane in [
+            (300.0, 900.0),
+            (500.0, 200.0),
+            (220.0, 160.0),
+            (1600.0, 240.0),
+        ] {
+            for target in [None, Some((10.0, 10.0, 200.0, 40.0))] {
+                let p = place(pane, target, 520.0);
+                inside(p, pane);
+                assert!(p.w <= W);
+            }
+        }
+        assert_eq!(place((300.0, 900.0), None, 400.0).w, 300.0 - 2.0 * MARGIN);
+    }
+
+    /// A pane that can spare it keeps the price axis clear (the last-price tag stays
+    /// visible), beside any drawing; a narrower one lets the editor cover it.
+    #[test]
+    fn the_editor_keeps_the_price_axis_clear() {
+        for pane in [(1600.0, 900.0), (700.0, 400.0), (420.0, 300.0)] {
+            for target in [
+                None,
+                Some((10.0, 10.0, 60.0, 40.0)),
+                Some((pane.0 - AXIS_W - 40.0, 100.0, pane.0 - AXIS_W - 10.0, 120.0)),
+                Some((0.0, 200.0, pane.0 - AXIS_W, 200.0)),
+            ] {
+                let p = place(pane, target, 300.0);
+                inside(p, pane);
+                assert!(
+                    p.x + p.w <= pane.0 - AXIS_W - MARGIN + 0.01,
+                    "{p:?} in {pane:?}"
+                );
+                assert!(p.w >= MIN_BESIDE_AXIS.min(W) - 0.01, "{p:?}");
+            }
+        }
+        // Too narrow to spare it: the whole pane's width.
+        assert_eq!(width(330.0), 330.0 - 2.0 * MARGIN);
+    }
+
+    /// Every row the keys reach is its own child of the scroll body (so focus can scroll it
+    /// into view), in order; "Save as default" is in the footer, outside it.
+    #[test]
+    fn each_focusable_row_is_a_child_of_the_scroll_body() {
+        use lines_core::drawings::{Style, Tool};
+        for tool in [Tool::Rect, Tool::Note, Tool::Trend, Tool::HLine] {
+            let mut e = StyleEditor::for_drawing(tool, &Style::DEFAULT);
+            e.default_label = Some("Save as default".into());
+            for tab in 0..e.parts.len() {
+                e.select_tab(tab);
+                let rows = e.rows();
+                let mut next = 0;
+                for (r, row) in rows.iter().enumerate() {
+                    let footer = matches!(row.controls.as_slice(), [(Control::SaveDefault, _)]);
+                    match body_child(&rows, r) {
+                        None => assert!(footer, "{tool:?} {tab} row {r}"),
+                        Some(ix) => {
+                            assert!(!footer);
+                            assert_eq!(ix, next, "{tool:?} {tab} row {r}");
+                            next += 1;
+                        }
+                    }
+                }
+                assert_eq!(body_child(&rows, rows.len()), None);
+            }
+        }
+    }
+
+    /// The tallest editor: a zone's line tab with the hex entry open and every warning the
+    /// guard can give (each meaning, named in the longest way, and low contrast).
+    fn tallest() -> (StyleEditor, Vec<Warning>) {
+        use lines_core::drawings::{Style, Tool};
+        let mut e = StyleEditor::for_drawing(Tool::Rect, &Style::DEFAULT);
+        let rows = e.rows();
+        let custom = rows[0].controls.len() - 1;
+        e.click(0, custom); // the hex entry
+        assert!(e.hex.is_some());
+        let long = " in the dark theme, colorblind palette; the light theme, standard palette; and the light theme, colorblind palette";
+        let mut w: Vec<Warning> = [
+            "up",
+            "down",
+            "last-price",
+            "warning",
+            "order target",
+            "order stop",
+        ]
+        .iter()
+        .map(|n| Warning {
+            text: format!("Looks like the {n} color{long}; may be misread as {n}."),
+            swatch: Some(lines_core::style::Rgb::hex(0x3fcf9a)),
+        })
+        .collect();
+        w.push(Warning {
+            text: "Low contrast in the dark theme (1.2:1) and the light theme (1.4:1); lines need 3:1."
+                .into(),
+            swatch: None,
+        });
+        (e, w)
+    }
+
+    /// The placed box (at most the height it was placed with) stays inside the chart's plot
+    /// area for the tallest content, in wide, narrow, short and tiled panes, beside any
+    /// drawing; when the content fits, it isn't cut.
+    #[test]
+    fn the_tallest_editor_stays_inside_the_plot_area() {
+        let names = crate::theme::Theme::dark(crate::theme::Palette::Standard).drawing_names;
+        let (e, warnings) = tallest();
+        for area in [
+            (1600.0, 876.0),
+            (1400.0, 360.0),
+            (420.0, 276.0),
+            (300.0, 900.0),
+            (900.0, 200.0),
+            (220.0, 160.0),
+            (800.0, 400.0),
+        ] {
+            let w = width(area.0);
+            let h = content_height(&e, &warnings, w, &names);
+            for target in [
+                None,
+                Some((10.0, 10.0, 200.0, 40.0)),
+                Some((0.0, area.1 - 12.0, area.0 - 72.0, area.1 - 12.0)),
+                Some((area.0 * 0.4, area.1 - 30.0, area.0 * 0.5, area.1 - 10.0)),
+            ] {
+                let p = place(area, target, h);
+                inside(p, area);
+                if h <= area.1 - 2.0 * MARGIN {
+                    assert_eq!(p.h, h, "fits: not cut ({area:?})");
+                }
+            }
+        }
+        // Narrower: the rows and warnings wrap, so it's taller.
+        let wide = content_height(&e, &warnings, W, &names);
+        let narrow = content_height(&e, &warnings, 260.0, &names);
+        assert!(narrow > wide, "{narrow} > {wide}");
+        assert!(wide > content_height(&e, &[], W, &names) + 7.0 * 19.0);
+    }
+
+    /// Focus moved to a row out of view scrolls the least that shows it; a row taller than
+    /// the body shows from its top; a row in view doesn't scroll.
+    #[test]
+    fn the_focused_row_scrolls_into_view() {
+        // Body 100 px tall, scrolled 50.
+        assert_eq!(keep_visible(100.0, 80.0, 24.0, 50.0), 50.0, "in view");
+        assert_eq!(
+            keep_visible(100.0, 140.0, 24.0, 50.0),
+            64.0,
+            "below: to its bottom"
+        );
+        assert_eq!(
+            keep_visible(100.0, 20.0, 24.0, 50.0),
+            20.0,
+            "above: to its top"
+        );
+        assert_eq!(keep_visible(100.0, 130.0, 24.0, 50.0), 54.0, "partly below");
+        assert_eq!(
+            keep_visible(100.0, 200.0, 180.0, 0.0),
+            200.0,
+            "taller: its top"
+        );
+        assert_eq!(
+            keep_visible(100.0, 0.0, 180.0, 60.0),
+            0.0,
+            "taller, partly above"
+        );
+        for (top, h, scrolled) in [(0.0, 24.0, 300.0), (500.0, 24.0, 0.0), (90.0, 30.0, 0.0)] {
+            let to = keep_visible(100.0, top, h, scrolled);
+            assert!(
+                top >= to && top + h <= to + 100.0,
+                "{top} {h} {scrolled}: {to}"
+            );
+        }
+    }
+
+    /// The scrollbar shows exactly when the body doesn't fit, its thumb inside the track and
+    /// at the bottom when scrolled to the end.
+    #[test]
+    fn the_scrollbar_shows_when_the_body_scrolls() {
+        assert_eq!(thumb(200.0, 180.0, 0.0), None);
+        let (top, h) = thumb(100.0, 400.0, 0.0).unwrap();
+        assert_eq!((top, h), (0.0, 25.0));
+        let (top, h) = thumb(100.0, 400.0, 300.0).unwrap();
+        assert!((top + h - 100.0).abs() < 0.01);
+        let (top, _) = thumb(100.0, 400.0, 9999.0).unwrap();
+        assert!(top <= 75.0 + 0.01);
+    }
+}
