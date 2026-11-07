@@ -102,6 +102,8 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # External levels (decision 0022): --record-levels DIR / --replay-levels DIR (with --replay); a synthetic source
 # for screenshots: build with --features screenshot,demo-levels and pass --demo-levels (ES/MES):
 #   lines --replay recordings/synth-es-2026-11-05.lfr --at 2026-11-05T19:00:00Z --layout chart --price-zoom 0.3 --demo-levels --screenshot out.png
+# Header dropdowns open (screenshots): --timeframe-menu (the first chart's timeframe list), --account-menu (every
+#   chart's and DOM's account list; needs an account chip, i.e. trading running, as in screenshot mode).
 # Studies menu (screenshots): --studies-menu open | edit:vwap:N | edit:profile | edit:levels:ID; --study-set FILE (a StudySet JSON).
 # Paper trading evidence (in-memory core, manual clock): --paper "account paper-eval; buy 2 mkt; ack; buy 1 @ 5807.00;
 #   buy 1 @ 5808.00 bracket 4/8; ack; buy 1 @ 5806.50" (orders after the last `ack` stay pending), --arm (DOMs start armed). --pnl off|ticks|currency|both.

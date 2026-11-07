@@ -513,6 +513,9 @@ pub struct Trading {
     pub report: Option<String>,
     /// Screenshot fixture (`--arm`): DOMs start armed. Never set in the app.
     pub start_armed: bool,
+    /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
+    /// open. Never set in the app.
+    pub start_account_menu: bool,
     /// Screenshot fixture (a `--paper` script's first `account`): the panes' account.
     pub start_account: Option<AccountId>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
@@ -639,6 +642,7 @@ impl Trading {
             prefs: ArmPrefs::default(),
             report,
             start_armed: false,
+            start_account_menu: false,
             start_account: None,
             journal,
         }
