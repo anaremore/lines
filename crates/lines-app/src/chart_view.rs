@@ -1768,8 +1768,10 @@ impl ChartView {
             let el = if dim { el.opacity(0.4) } else { el };
             strip = strip.child(el.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |v, _, _, cx| {
+                cx.listener(move |v, _, window, cx| {
                     cx.stop_propagation();
+                    // The chart takes focus, so Esc reaches an armed pick.
+                    v.focus.focus(window, cx);
                     v.strip_pressed(o, cx);
                 }),
             ));
@@ -2067,8 +2069,15 @@ impl ChartView {
         if popover::dismissing() {
             return;
         }
-        if let Some((_, at)) = self.pick_press.take() {
-            // A click while a strip limit's pick was armed (a drag became a pan on the way).
+        if let Some((from, at)) = self.pick_press.take() {
+            // A click while a strip limit's pick was armed. A press that left the chart before a
+            // move reached it (released anywhere, through `on_mouse_up_out`) is measured here
+            // too: past the click rule it was a drag, and nothing is sent (the pick stays).
+            let d = ev.position - from;
+            if !crate::chart_trade::is_click(f32::from(d.x), f32::from(d.y)) {
+                cx.notify();
+                return;
+            }
             match (self.ct.strip_pick, at) {
                 (Some(o), Ok(at)) => {
                     self.ct.strip_pick = None;
