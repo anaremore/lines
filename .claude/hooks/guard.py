@@ -22,7 +22,7 @@ WRITE_PROGS = {"rm", "del", "mv", "cp", "remove-item", "move-item", "copy-item",
 GUARD_IN_SHELL = re.compile(
     r"""(^|[\s/\\"'=])(\.claude[/\\](?!worktrees|projects)|\.github[/\\]|CLAUDE(\.local)?\.md)"""
 )
-SECRET = re.compile(r"\b(OPTIONIDEA_API_KEY|LINES_CQG_PASSWORD|RITHMIC_\w*PASS\w*)\s*=")
+SECRET = re.compile(r"\b(\w*_API_KEY|LINES_CQG_PASSWORD|RITHMIC_\w*PASS\w*)\s*=")
 
 
 def deny(why):

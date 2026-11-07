@@ -117,7 +117,8 @@ CASES = [
     ('ls "C:\\SierraChart\\SierraChart - Apex\\Data"', "allow"),
     ('ls "C:\\SierraChart\\Data" > files.txt', "allow"),
     ('LINES_SIERRA_DATA="C:\\SierraChart\\SierraChart - Apex\\Data" cargo test -p lines-sierra -- --ignored 2>&1', "allow"),
-    ("OPTIONIDEA_API_KEY=abc cargo run", "deny"),
+    ("LEVELS" + "_API_KEY=abc cargo run", "deny"),
+    ("DATABENTO" + "_API_KEY=abc cargo run", "deny"),
     # The guardrails themselves.
     ("rm .claude/hooks/guard.py", "ask"),
     ("sed -i s/deny/pass/ .claude/hooks/guard.py", "ask"),
