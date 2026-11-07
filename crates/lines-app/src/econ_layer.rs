@@ -21,6 +21,8 @@ use crate::theme::Theme;
 const TAG_PX: f32 = 11.0;
 /// Marks kept per frame (a chart never shows more releases than this).
 const MAX_MARKS: usize = 64;
+/// Rows of tags stacked at the foot of the plot when they'd overlap.
+const TAG_ROWS: usize = 3;
 
 pub struct EconLayer {
     schedule: Arc<EconSchedule>,
@@ -121,19 +123,16 @@ impl ChartLayer for EconLayer {
             ));
         };
         let box_h = TAG_PX * 1.5;
-        let tag_y = snap(f64::from((ph - box_h - 2.0).max(0.0)), scale);
+        let base_y = snap(f64::from((ph - box_h - 2.0).max(0.0)), scale);
+        // Tags never overlap: one that would is stacked a row up (releases at the same time,
+        // GDP and PCE; or close together on a coarse timeframe); past the rows, the dashed
+        // line alone marks it.
+        let mut row_right = [f32::NEG_INFINITY; TAG_ROWS];
         for &(x, release, high) in &self.marks {
             if !(0.0..pw).contains(&x) {
                 continue;
             }
             let x = snap(f64::from(x), scale);
-            // Dashed vertical over the plot, down to the tag.
-            let (dash, gap): (f32, f32) = (4.0, 3.0);
-            let mut y = 0.0;
-            while y < tag_y {
-                quad(window, x, y, hair, dash.min(tag_y - y), t.control_edge);
-                y += dash + gap;
-            }
             let line = self.shaped.entry((release, high)).or_insert_with(|| {
                 let text = self.schedule.releases[release].name.clone();
                 let run = TextRun {
@@ -153,6 +152,24 @@ impl ChartLayer for EconLayer {
                 f64::from((x - w * 0.5).clamp(0.0, (pw - w).max(0.0))),
                 scale,
             );
+            let row = row_right.iter().position(|r| left >= r + 2.0);
+            let tag_y = match row {
+                Some(k) => {
+                    row_right[k] = left + w;
+                    snap(f64::from(base_y - k as f32 * (box_h + 2.0)), scale)
+                }
+                None => base_y,
+            };
+            // Dashed vertical over the plot, down to its tag (or the foot, without one).
+            let (dash, gap): (f32, f32) = (4.0, 3.0);
+            let mut y = 0.0;
+            while y < tag_y {
+                quad(window, x, y, hair, dash.min(tag_y - y), t.control_edge);
+                y += dash + gap;
+            }
+            if row.is_none() {
+                continue;
+            }
             if high {
                 quad(window, left, tag_y, w, box_h, t.warn);
             } else {

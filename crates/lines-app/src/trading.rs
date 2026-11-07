@@ -1011,9 +1011,10 @@ impl Trading {
         } else {
             TradingCore::BEFORE_DATA
         };
+        // News blackouts read the calendar the UI shows.
+        core.set_econ_schedule(Some(crate::econ_ui::schedule()));
         // Orders the broker still holds (brackets survive restarts) come back through rebuild,
         // with the account's real balance: only then are settings applied.
-        core.set_econ_schedule(Some(crate::econ_ui::schedule()));
         core.rebuild(at);
         // What settings asked for and the core refused (wrong size, already past a limit):
         // reported at start, like a setting that doesn't resolve.

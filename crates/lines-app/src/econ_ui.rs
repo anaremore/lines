@@ -124,8 +124,8 @@ pub fn chip_text(c: &Chip, now: UtcMillis) -> String {
 pub fn blocker(c: &Chip) -> Option<&'static str> {
     match c {
         Chip::Blackout { refusing: true, .. } => Some("news blackout"),
-        Chip::Unknown { reason } if reason.contains("stale") => Some("calendar out of date"),
-        Chip::Unknown { .. } => Some("no calendar for this date"),
+        Chip::Unknown { reason } if reason.contains("stale") => Some("calendar stale"),
+        Chip::Unknown { .. } => Some("no calendar"),
         _ => None,
     }
 }
@@ -241,12 +241,12 @@ source https://www.bls.gov/schedule/news_release/ppi.htm
             chip_text(&c, now),
             "No economic calendar loaded: entries refused"
         );
-        assert_eq!(blocker(&c), Some("no calendar for this date"));
+        assert_eq!(blocker(&c), Some("no calendar"));
         let s = schedule();
         let later = at("2027-03-10T15:00:00Z");
         let c = chip(Some(&s), Some(&block), "ES", later).unwrap();
         assert!(matches!(c, Chip::Unknown { .. }), "stale: {c:?}");
-        assert_eq!(blocker(&c), Some("calendar out of date"));
+        assert_eq!(blocker(&c), Some("calendar stale"));
         let warn = NewsBlackout::new(NewsAction::Warn);
         assert_eq!(chip(None, Some(&warn), "ES", now), None);
     }
