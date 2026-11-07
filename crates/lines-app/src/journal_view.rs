@@ -13,9 +13,11 @@
 //! - **Editing**: click a row (or Up/Down) to select it, Enter to edit its tags and note
 //!   inline (Tab switches field, Enter saves, Esc cancels). Edits are saved as journal records.
 //!
-//! The pane is fed by the trading thread through `lines_trading::JournalShared`: it polls the
-//! journal's lock-free revision (like a store's) and re-formats its rows only when it moved,
-//! so a frame paints cached strings. It has a feed like every pane (link groups, plumbing) but
+//! The pane reads `lines_trading::JournalShared`'s published snapshots (the journal runs on its
+//! own thread): it polls the journal's lock-free revision (like a store's), takes the newest
+//! snapshot (a pointer clone, never waiting) and re-formats its rows only when the revision,
+//! the P&L display or the trade date moved, so a frame paints cached strings and no lock is
+//! held while formatting. It has a feed like every pane (link groups, plumbing) but
 //! shows every account's trades whatever its market.
 
 use std::sync::Arc;
@@ -323,8 +325,11 @@ pub struct JournalView {
     frozen: bool,
     journal: Option<Arc<JournalShared>>,
     seen_revision: u64,
-    /// The journal revision and P&L display epoch `rows` and the stats were built from.
-    built: Option<(u64, u64)>,
+    /// The journal revision, P&L display epoch and trade date the rows and stats were built
+    /// from.
+    built: Option<(u64, u64, CivilDate)>,
+    /// The current trade date as last known (kept while the store is busy).
+    today: Option<CivilDate>,
     /// The P&L display setting (read at render).
     mode: PnlDisplay,
     rows: Vec<Row>,
@@ -338,8 +343,6 @@ pub struct JournalView {
     glyphs: Glyphs,
     cols: Columns,
     bounds: Bounds<Pixels>,
-    /// Where the stats strip is (a click toggles all dates).
-    strip: Bounds<Pixels>,
 }
 
 impl EventEmitter<FeedChanged> for JournalView {}
@@ -405,6 +408,7 @@ impl JournalView {
             journal: Trading::try_global(cx).map(|t| t.journal.clone()),
             seen_revision: u64::MAX,
             built: None,
+            today: None,
             mode: PnlDisplay::default(),
             rows: Vec::new(),
             stats_today: String::new(),
@@ -416,7 +420,6 @@ impl JournalView {
             glyphs: Glyphs::new(TEXT_PX),
             cols: Columns::new(Table::Journal),
             bounds: Bounds::default(),
-            strip: Bounds::default(),
         }
     }
 
@@ -470,19 +473,20 @@ impl JournalView {
 
     /// The current trade date of the pane's market: on a replay's (or a screenshot's)
     /// market time, else the wall clock.
-    fn today(&self) -> CivilDate {
+    ///
+    /// Read each render (so a new session shows without waiting for a trade); if the store is
+    /// busy this instant, the last known date stands (never a UTC guess).
+    fn today(&mut self) -> Option<CivilDate> {
         let replay =
             self.frozen || matches!(self.feed.config.source, lines_feed::Source::Replay { .. });
-        let d = self.store.try_read();
-        let now = d
-            .as_ref()
-            .and_then(|d| d.market_time)
-            .filter(|_| replay)
-            .unwrap_or_else(lines_feed::now_utc);
-        match d {
-            Some(d) => lines_feed::disk::partition::trade_date(&d.product, now),
-            None => CivilDate::from_utc(now),
+        if let Some(d) = self.store.try_read() {
+            let now = d
+                .market_time
+                .filter(|_| replay)
+                .unwrap_or_else(lines_feed::now_utc);
+            self.today = Some(lines_feed::disk::partition::trade_date(&d.product, now));
         }
+        self.today
     }
 
     /// Rebuild rows and stats if the journal moved. Returns false if the journal was busy
@@ -491,30 +495,26 @@ impl JournalView {
         let Some(j) = self.journal.clone() else {
             return true;
         };
-        let rev = (j.revision(), pnl::display_epoch());
+        let Some(today) = self.today() else {
+            return false; // the store hasn't been readable yet
+        };
+        let rev = (j.revision(), pnl::display_epoch(), today);
         if self.built == Some(rev) {
             return true;
         }
-        let Some(journal) = j.try_read() else {
+        // A pointer clone; everything below runs without any lock.
+        let Some(snap) = j.snapshot() else {
             return false;
         };
         let mode = self.mode;
-        self.rows = journal
-            .trades()
-            .iter()
-            .rev()
-            .map(|t| row(t, mode))
-            .collect();
-        let today = self.today();
-        let open = journal.open_trades().count();
+        self.rows = snap.trades.iter().rev().map(|t| row(t, mode)).collect();
         self.stats_today = stats_text(
             &format!("Today {today}"),
-            &journal.stats(|t| t.trade_date == today),
-            open,
+            &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
+            snap.open,
             mode,
         );
-        self.stats_all = stats_text("All dates", &journal.stats(|_| true), open, mode);
-        drop(journal);
+        self.stats_all = stats_text("All dates", &Stats::of(&snap.trades), snap.open, mode);
         self.built = Some(rev);
         true
     }
@@ -525,10 +525,6 @@ impl JournalView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
-        if self.strip.contains(&ev.position) {
-            self.toggle_all_dates(cx);
-            return;
-        }
         let (x, y) = self.table_xy(ev.position);
         match self.cols.hit(x, y, ev.click_count) {
             HeaderHit::Divider(d) => {
@@ -799,9 +795,8 @@ impl JournalView {
         } else {
             self.stats_today.clone()
         };
-        let entity = cx.entity();
         div()
-            .relative()
+            .id("journal-stats")
             .px_2()
             .py_1()
             .bg(t.panel)
@@ -811,14 +806,15 @@ impl JournalView {
             .text_color(t.text_main)
             .whitespace_nowrap()
             .overflow_hidden()
+            .cursor_pointer()
             .child(text)
-            .child(
-                canvas(
-                    move |bounds, _, cx| entity.update(cx, |v, _| v.strip = bounds),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
+            // A click switches between the current trade date and all dates.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_all_dates(cx);
+                }),
             )
     }
 

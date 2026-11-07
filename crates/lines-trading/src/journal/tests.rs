@@ -109,7 +109,11 @@ fn partials_adds_and_scale_outs_are_one_trade_with_exact_money() {
             Some(Source::Hotkey)
         ]
     );
-    assert_eq!(t.id, "f1");
+    assert_eq!(
+        t.id,
+        format!("f1@{}", at(0).0),
+        "first fill id @ entry time"
+    );
     assert_eq!(j.trades().len(), 1);
     assert!(j.open_trades().next().is_none());
 }
@@ -177,10 +181,74 @@ fn reconciled_and_repeated_fills_count_once() {
     assert_eq!(closed[0].realized, dollars(100.0));
     assert!(closed[0].fills[1].reconciled);
     assert_eq!(j.trades().len(), 1);
-    // Saved and loaded: its fills count as seen, so they never count again.
-    let mut k = Journal::from_records([Record::Trade(Box::new(closed[0].clone()))]);
-    assert!(feed(&mut k, &[fill("x1", 1, Side::Sell, 6000.00, 1, 0.31, 0)]).is_empty());
-    assert!(k.open_trades().next().is_none());
+}
+
+/// Broker fill ids repeat across runs (paper order ids restart when the paper file is reset,
+/// or lag after a crash): a new run's fill with an id an earlier run used is a new fill, never
+/// "already counted", and its trade never replaces the earlier one.
+#[test]
+fn fill_ids_from_an_earlier_run_never_block_new_fills() {
+    let mut first = Journal::new();
+    feed(
+        &mut first,
+        &[fill("paper-1-1", 1, Side::Buy, 6000.00, 1, 0.0, 0)],
+    );
+    let old = feed(
+        &mut first,
+        &[fill("paper-2-1", 2, Side::Sell, 6001.00, 1, 0.0, 10)],
+    );
+    // The next run loads the file, and the same ids come again for new orders.
+    let mut next = Journal::from_records([Record::Trade(Box::new(old[0].clone()))]);
+    feed(
+        &mut next,
+        &[fill("paper-1-1", 1, Side::Buy, 6000.00, 1, 0.0, 600)],
+    );
+    let new = feed(
+        &mut next,
+        &[fill("paper-2-1", 2, Side::Sell, 5999.00, 1, 0.0, 610)],
+    );
+    assert_eq!(new.len(), 1, "counted");
+    assert_eq!(next.trades().len(), 2, "both kept");
+    assert_ne!(next.trades()[0].id, next.trades()[1].id);
+    assert_eq!(next.trades()[0].realized, dollars(50.0));
+    assert_eq!(next.trades()[1].realized, dollars(-50.0));
+}
+
+/// Two trades saved with one id (they can't be written that way now, but a file is data):
+/// both are kept, the second as `#2`, and an edit of the id goes to the first.
+#[test]
+fn colliding_ids_on_load_are_kept_apart() {
+    let a = closed(10.0, 5, &[]);
+    let b = closed(-5.0, 5, &[]);
+    let j = Journal::from_records([
+        Record::Trade(Box::new(a)),
+        Record::Trade(Box::new(b)),
+        Record::Edit(Edit {
+            id: "t5".into(),
+            tags: vec!["first".into()],
+            note: String::new(),
+        }),
+    ]);
+    assert_eq!(j.trades().len(), 2);
+    assert_eq!(j.trade("t5").unwrap().tags, ["first"]);
+    assert_eq!(j.trade("t5#2").unwrap().realized, dollars(-5.0));
+    // Seeded trades after restarts on different days get distinct ids too.
+    let mut k = Journal::new();
+    for day in [0, 86_400] {
+        k.on_event(&Event::Position(PositionView {
+            account: acct(),
+            contract: es(),
+            qty: 1,
+            avg_price: Some(600_000.0),
+            unrealised: Money::ZERO,
+        }));
+        feed(
+            &mut k,
+            &[fill(&format!("s{day}"), 9, Side::Sell, 6000.0, 1, 0.0, day)],
+        );
+    }
+    assert_eq!(k.trades().len(), 2);
+    assert_ne!(k.trades()[0].id, k.trades()[1].id);
 }
 
 #[test]
@@ -482,13 +550,18 @@ fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The journal on its own thread: the trading thread only sends messages, the UI reads
+/// snapshots. Market data moves MAE/MFE without publishing (open trades aren't shown); a
+/// close publishes; an edit is applied there and published.
 #[test]
-fn shared_journal_follows_the_service_order_and_saves_closed_trades() {
-    let shared = JournalShared::new(Journal::new(), None);
-    let mut obs = JournalObserver(shared.clone());
+fn shared_journal_runs_on_its_own_thread() {
+    let shared = JournalShared::start(Journal::new(), None);
+    let mut obs = shared.observer();
     let r0 = shared.revision();
     obs.events(&[fill("o1", 1, Side::Buy, 6000.0, 1, 0.0, 0)]);
-    assert!(shared.revision() > r0);
+    shared.sync();
+    assert!(shared.revision() > r0, "a fill publishes");
+    assert_eq!(shared.snapshot().unwrap().open, 1);
     let r1 = shared.revision();
     obs.market(
         es(),
@@ -498,14 +571,24 @@ fn shared_journal_follows_the_service_order_and_saves_closed_trades() {
             qty: Qty(1),
         }],
     );
-    assert!(shared.revision() > r1, "MAE moved");
+    shared.sync();
+    assert_eq!(
+        shared.revision(),
+        r1,
+        "market data doesn't repaint the journal"
+    );
     obs.events(&[fill("o2", 2, Side::Sell, 6001.0, 1, 0.0, 2)]);
-    assert_eq!(shared.read().trades().len(), 1);
-    assert_eq!(shared.read().trades()[0].mae, dollars(-500.0));
-    assert!(shared.edit(Edit {
-        id: "o1".into(),
+    shared.sync();
+    let snap = shared.snapshot().unwrap();
+    assert_eq!((snap.trades.len(), snap.open), (1, 0));
+    assert_eq!(snap.trades[0].mae, dollars(-500.0));
+    shared.edit(Edit {
+        id: snap.trades[0].id.clone(),
         tags: vec!["t".into()],
-        note: String::new()
-    }));
+        note: String::new(),
+    });
+    shared.sync();
+    assert_eq!(shared.snapshot().unwrap().trades[0].tags, ["t"]);
     assert!(!shared.persistent());
+    assert!(shared.flush(std::time::Duration::from_secs(5)));
 }

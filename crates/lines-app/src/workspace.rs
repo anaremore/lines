@@ -3197,15 +3197,14 @@ fn notify_windows(cx: &mut App) {
 }
 
 /// Write the journal's closed trades as CSV to `<config dir>/journal/export-<time>.csv` (on
-/// the writer thread) and say where.
+/// the journal's thread; a failure is logged) and say where.
 fn export_journal(cx: &mut App) {
     let Some(t) = crate::trading::Trading::try_global(cx) else {
         notice("trading isn't running: no journal to export".into(), cx);
         return;
     };
-    let csv = lines_trading::journal::csv(t.journal.read().trades());
-    let ws = cx.global::<Workspace>();
-    let (Some(dir), Some(w)) = (ws.config_dir.clone(), ws.writer.clone()) else {
+    let journal = t.journal.clone();
+    let Some(dir) = cx.global::<Workspace>().config_dir.clone() else {
         notice(
             "no config directory: the journal can't be exported here".into(),
             cx,
@@ -3216,16 +3215,17 @@ fn export_journal(cx: &mut App) {
     let d = lines_core::CivilDate::from_utc(now);
     let s = now.0.rem_euclid(86_400_000) / 1000;
     let path = dir.join("journal").join(format!(
-        "export-{}{:02}{:02}-{:02}{:02}{:02}.csv",
+        "export-{}{:02}{:02}-{:02}{:02}{:02}-{:03}.csv",
         d.year,
         d.month,
         d.day,
         s / 3600,
         s / 60 % 60,
-        s % 60
+        s % 60,
+        now.0.rem_euclid(1000)
     ));
-    w.write(path.clone(), csv.into_bytes());
-    notice(format!("journal exported to {}", path.display()), cx);
+    journal.export(path.clone());
+    notice(format!("exporting the journal to {}", path.display()), cx);
 }
 
 /// Show or hide the chart headers' performance stats (a workspace preference, saved with it).

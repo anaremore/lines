@@ -95,7 +95,13 @@ pub fn read(path: &Path) -> Result<Option<Loaded>> {
 /// syncs and stops the thread.
 #[derive(Clone)]
 pub struct JournalWriter {
-    tx: Sender<Record>,
+    tx: Sender<Job>,
+}
+
+enum Job {
+    Write(Record),
+    /// Sync, then reply.
+    Flush(Sender<()>),
 }
 
 impl JournalWriter {
@@ -145,16 +151,27 @@ impl JournalWriter {
 
     /// Queue a record (returns at once).
     pub fn append(&self, r: Record) {
-        let _ = self.tx.send(r);
+        let _ = self.tx.send(Job::Write(r));
+    }
+
+    /// Wait (up to `timeout`) until everything queued so far is written and synced.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Job::Flush(tx)).is_ok() && rx.recv_timeout(timeout).is_ok()
     }
 }
 
-fn write_loop(mut file: File, path: PathBuf, rx: Receiver<Record>) {
+fn write_loop(mut file: File, path: PathBuf, rx: Receiver<Job>) {
     let mut last_sync = Instant::now();
     let mut unsynced = false;
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(r) => match serde_json::to_vec(&r) {
+            Ok(Job::Flush(tx)) => {
+                let _ = file.sync_data();
+                unsynced = false;
+                let _ = tx.send(());
+            }
+            Ok(Job::Write(r)) => match serde_json::to_vec(&r) {
                 Ok(mut line) => {
                     line.push(b'\n');
                     if let Err(e) = file.write_all(&line).and_then(|_| file.flush()) {
