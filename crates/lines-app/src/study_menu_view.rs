@@ -285,6 +285,11 @@ pub fn render(
 
 /// The anchoring prompt over the plot (a click on a bar anchors; Esc cancels).
 pub fn anchor_banner(t: &Theme) -> AnyElement {
+    pick_banner(t, "Click a bar to anchor the VWAP · Esc cancels")
+}
+
+/// A banner over the plot while a click is awaited (anchoring a VWAP, a chart limit's price).
+pub fn pick_banner(t: &Theme, text: &'static str) -> AnyElement {
     div()
         .absolute()
         .top(px(30.0))
@@ -303,7 +308,7 @@ pub fn anchor_banner(t: &Theme) -> AnyElement {
                 .rounded_md()
                 .text_size(px(12.0))
                 .text_color(t.text_main)
-                .child("Click a bar to anchor the VWAP · Esc cancels"),
+                .child(text),
         )
         .into_any_element()
 }

@@ -269,9 +269,9 @@ pub struct ChartTradeState {
     /// the pointer has moved from it (px): under [`DRAG_PX`] it was a click.
     pub press_y: f32,
     pub moved: f32,
-    /// The order strip's limit price: the crosshair's price the last time the pointer was on
-    /// the plot (off the strip), kept while the pointer goes to the strip.
-    pub strip_price: Option<Price>,
+    /// A strip limit button pressed: the next click on the plot is its price (the crosshair's
+    /// there). Esc, the same button again, or another symbol drops it.
+    pub strip_pick: Option<StripOrder>,
 }
 
 /// An add drag shorter than this (px) is a click and places nothing.
@@ -318,14 +318,14 @@ pub fn release_action(
 pub enum StripOrder {
     BuyMarket,
     SellMarket,
-    /// A buy limit at the strip's price (the crosshair's).
+    /// A buy limit at the price clicked next (the crosshair's).
     BuyLimit,
-    /// A sell limit at the strip's price.
+    /// A sell limit at the price clicked next.
     SellLimit,
 }
 
-/// A strip limit with no crosshair price yet.
-pub const PICK_A_PRICE: &str = "Point at a price on the chart first: limits go at the crosshair";
+/// A strip limit picked where the chart has no price (no bars).
+pub const PICK_A_PRICE: &str = "No price there: click a price on the chart's plot";
 /// A strip order from a chart in no link group (no DOM's switch can send it).
 pub const LINK_TO_TRADE: &str = "Link this chart to a DOM to place orders from it";
 /// A strip order with no linked DOM enabled.
@@ -426,7 +426,7 @@ impl Default for ChartTradeState {
             pos_drag: false,
             press_y: 0.0,
             moved: 0.0,
-            strip_price: None,
+            strip_pick: None,
         }
     }
 }
@@ -471,6 +471,17 @@ impl ChartTradeState {
             },
         );
         refused
+    }
+
+    /// A strip limit button pressed: arm its price pick, or disarm it if it was armed.
+    pub fn arm_pick(&mut self, o: StripOrder) {
+        self.strip_pick = (self.strip_pick != Some(o)).then_some(o);
+    }
+
+    /// The chart shows another symbol or contract: a pick armed on the old one is dropped, so
+    /// its click never sends at a price read on another product's scale.
+    pub fn feed_changed(&mut self) {
+        self.strip_pick = None;
     }
 
     /// The order behind a tag id (open, as of this frame).
@@ -787,6 +798,24 @@ mod tests {
             strip_command(StripOrder::BuyMarket, at, &c).is_err(),
             "no quantity"
         );
+    }
+
+    #[test]
+    fn a_limit_pick_arms_toggles_switches_and_drops_on_a_new_symbol() {
+        let mut s = ChartTradeState::default();
+        s.arm_pick(StripOrder::BuyLimit);
+        assert_eq!(s.strip_pick, Some(StripOrder::BuyLimit));
+        s.arm_pick(StripOrder::SellLimit);
+        assert_eq!(
+            s.strip_pick,
+            Some(StripOrder::SellLimit),
+            "the other side replaces it"
+        );
+        s.arm_pick(StripOrder::SellLimit);
+        assert_eq!(s.strip_pick, None, "the same button again disarms");
+        s.arm_pick(StripOrder::BuyLimit);
+        s.feed_changed();
+        assert_eq!(s.strip_pick, None, "another symbol drops it");
     }
 
     #[test]
