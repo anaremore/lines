@@ -1,4 +1,5 @@
 use super::*;
+use lines_core::style::{Color, LineStyle, LineType};
 use lines_core::{Bar, BarsView, Price, Qty, UtcMillis};
 use lines_feed::catalog;
 
@@ -221,26 +222,112 @@ fn notes_measures_delete_and_clear() {
 #[test]
 fn restyling_applies_to_the_selection_or_new_drawings() {
     let mut r = Rig::new();
-    r.d.restyle(|s| Style { dashed: true, ..s });
+    let dashed = |s: Style| Style {
+        line: LineStyle {
+            line: LineType::Dashed,
+            ..s.line
+        },
+        ..s
+    };
+    r.d.restyle(dashed);
     r.d.set_tool(Tool::HLine);
     r.down(100.0, 100.0);
     let d = r.items()[0].clone();
-    assert!(d.style.dashed);
+    assert_eq!(d.style.line.line, LineType::Dashed);
     r.d.restyle(|s| Style {
-        color: s.color + 1,
-        width: 2,
+        line: LineStyle {
+            color: Color::Palette(1),
+            width: 2,
+            ..s.line
+        },
         ..s
     });
-    assert_eq!(
-        r.items()[0].style,
-        Style {
-            color: 1,
-            width: 2,
-            dashed: true
-        }
-    );
+    let now = r.items()[0].style;
+    assert_eq!(now.line.color, Color::Palette(1));
+    assert_eq!((now.line.width, now.line.line), (2, LineType::Dashed));
     assert!(r.d.undo());
     assert_eq!(r.items()[0].style, d.style);
+}
+
+/// The style editor: opened on a drawing under the pointer, each change one undo step,
+/// "save as default" applies to the tool's next drawings, and it closes when its drawing goes.
+#[test]
+fn the_style_editor_edits_one_drawing() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    r.frame(400.0, 100.0);
+    let id = r.d.hit_at(400.0, 100.0).expect("on the line");
+    assert_eq!(r.d.hit_at(400.0, 300.0), None);
+    assert!(r.d.open_editor(id));
+    assert!(r.d.editing());
+    let (out, _) = r.d.edit_style(|e| {
+        let (row, col) = (1, 2); // Line: Dotted
+        e.click(row, col)
+    });
+    assert_eq!(out, Outcome::Changed);
+    assert_eq!(r.items()[0].style.line.line, LineType::Dotted);
+    // Undo underneath: the editor follows.
+    assert!(r.d.undo());
+    assert_eq!(r.items()[0].style, Style::DEFAULT);
+    let e = r.d.editor().unwrap();
+    assert_eq!(e.drawing_style(&Style::DEFAULT), Style::DEFAULT);
+    // Width 3, then save as default for horizontal lines.
+    r.d.edit_style(|e| e.click(2, 2));
+    let (out, saved) = r.d.edit_style(|e| {
+        let last = e.rows().len() - 1;
+        e.click(last, 0)
+    });
+    assert_eq!(out, Outcome::SaveDefault);
+    let (tool, style) = saved.unwrap();
+    assert_eq!((tool, style.line.width), (Tool::HLine, 3));
+    // Esc closes it.
+    assert_eq!(
+        r.d.edit_style(|e| e.key("escape", false, None)).0,
+        Outcome::Close
+    );
+    assert!(!r.d.editing());
+    // The next horizontal line is 3 px; a trend line keeps its own default.
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 200.0);
+    assert_eq!(r.items()[1].style.line.width, 3);
+    r.d.set_tool(Tool::Trend);
+    r.down(100.0, 300.0);
+    r.down(200.0, 320.0);
+    assert_eq!(r.items()[2].style.line.width, 1);
+    // Deleted (here, from another chart of the product): the editor closes.
+    assert!(r.d.open_editor(id));
+    r.d.data().change(|s| (s.remove(id), ()));
+    assert!(r.d.editor().is_none());
+    // Hidden: it closes too, and it can't open on hidden drawings.
+    let other = r.items()[0].id;
+    assert!(r.d.open_editor(other));
+    r.d.set_hidden(true);
+    assert!(!r.d.editing());
+    assert!(!r.d.open_editor(other));
+}
+
+/// Axis tags: horizontal lines and rays tag their price, a zone its top and bottom; only with
+/// the option on.
+#[test]
+fn axis_tags_follow_the_option() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    r.d.set_tool(Tool::Rect);
+    r.down(200.0, 150.0);
+    r.down(300.0, 250.0);
+    r.frame(0.0, 0.0);
+    assert_eq!(r.d.axis_tags().count(), 0);
+    for d in r.items() {
+        let mut d = d.clone();
+        d.style.axis_tag = true;
+        r.d.data().change(|s| (s.edit(d), ()));
+    }
+    r.frame(0.0, 0.0);
+    let tags: Vec<_> = r.d.axis_tags().map(|(p, _, _)| p).collect();
+    let items = r.items();
+    assert_eq!(tags, [items[0].a.price, items[1].a.price, items[1].b.price]);
 }
 
 /// Every chart of a product shares its drawings: a change on one is seen by the other.

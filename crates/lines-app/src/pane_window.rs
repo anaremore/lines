@@ -44,6 +44,8 @@ fn command(cmd: Command) -> Option<Command> {
     match cmd {
         Command::PopOut | Command::Reattach => Some(Command::Reattach),
         Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
+        // A chart's drawing style editor (the rest of the drawing keys: main windows).
+        Command::Draw(crate::commands::DrawCmd::Style) => Some(cmd),
         _ => None,
     }
 }
@@ -96,6 +98,11 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
+            Some(Command::Draw(d)) => {
+                if let PaneHandle::Chart(chart) = &self.handle {
+                    chart.update(cx, |c, cx| c.drawing_command(d, cx));
+                }
+            }
             _ => {}
         }
         cx.notify();
@@ -108,14 +115,24 @@ impl PaneWindow {
                 cx.notify();
             }
         });
-        self.menu = Some(Menu::new(
-            at,
-            vec![
-                MenuItem::named("Re-attach to its previous spot", Command::Reattach, false),
-                MenuItem::of(Command::DockBesideChart, false),
-                MenuItem::named("Settings…", Command::Settings, false),
-            ],
+        let mut items = Vec::with_capacity(5);
+        if let PaneHandle::Chart(chart) = &self.handle
+            && chart.read(cx).drawing_selected()
+        {
+            let style = Command::Draw(crate::commands::DrawCmd::Style);
+            let mut row = MenuItem::named("Drawing style…", style, false);
+            row.hint = commands::hint(style);
+            items.push(row);
+            items.push(MenuItem::sep());
+        }
+        items.push(MenuItem::named(
+            "Re-attach to its previous spot",
+            Command::Reattach,
+            false,
         ));
+        items.push(MenuItem::of(Command::DockBesideChart, false));
+        items.push(MenuItem::named("Settings…", Command::Settings, false));
+        self.menu = Some(Menu::new(at, items));
         cx.notify();
     }
 

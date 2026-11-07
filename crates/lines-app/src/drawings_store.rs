@@ -11,7 +11,10 @@
 //! The file holds anchors as ISO times and prices as integer units of the product's price
 //! scale (exact). A drawing that can't be used (unknown tool, bad time, a price off the tick
 //! grid: never rounded) is skipped and reported, and kept: every save writes it back exactly
-//! as it was read, so a newer Lines (or a hand fix) can still use it.
+//! as it was read, so a newer Lines (or a hand fix) can still use it. Fields this version
+//! doesn't know (a newer build's), on a drawing or on the file, are kept the same way and
+//! written back with it. Styles (decision 0026) are optional fields (`crate::style_doc`): no
+//! version bump.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,11 +22,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpui::{App, Global};
-use lines_core::drawings::{Anchor, Drawing, DrawingSet, Style, Tool};
+use lines_core::drawings::{Anchor, Drawing, DrawingId, DrawingSet, Tool};
 use lines_core::{Price, Product, ProductId, UtcMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::persist::Writer;
+use crate::style_doc::StyleDoc;
 use crate::versioned::{self, Format};
 
 /// Longest note kept (characters).
@@ -40,6 +44,9 @@ pub const FORMAT: Format = Format {
     migrations: &[drawings_v0_to_v1],
 };
 
+/// Fields this version doesn't know, kept to be written back unchanged.
+pub type Extra = serde_json::Map<String, serde_json::Value>;
+
 /// A drawings file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DrawingsFile {
@@ -48,6 +55,9 @@ pub struct DrawingsFile {
     pub product: String,
     #[serde(default)]
     pub drawings: Vec<DrawingDoc>,
+    /// A newer build's file-level fields (`version` is the format's, not kept here).
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,24 +77,14 @@ pub struct DrawingDoc {
     /// The second anchor (two-anchor tools only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub b: Option<AnchorDoc>,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub color: u8,
-    #[serde(default = "one", skip_serializing_if = "is_one")]
-    pub width: u8,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub dashed: bool,
+    /// Color, line, fill, text and options (all optional).
+    #[serde(flatten)]
+    pub style: StyleDoc,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
-}
-
-fn is_zero(v: &u8) -> bool {
-    *v == 0
-}
-fn one() -> u8 {
-    1
-}
-fn is_one(v: &u8) -> bool {
-    *v == 1
+    /// A newer build's fields on this drawing (after `style`, which takes its own first).
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 fn anchor_doc(a: Anchor) -> AnchorDoc {
@@ -106,7 +106,12 @@ fn anchor(d: &AnchorDoc, tick: i64) -> Result<Anchor, String> {
 }
 
 impl DrawingsFile {
-    pub fn from_drawings(product: &Product, items: &[Drawing]) -> DrawingsFile {
+    /// The file for `items`, with each drawing's unknown fields from `extras` (by id).
+    pub fn from_drawings(
+        product: &Product,
+        items: &[Drawing],
+        extras: &HashMap<DrawingId, Extra>,
+    ) -> DrawingsFile {
         DrawingsFile {
             product: product.symbol.to_owned(),
             drawings: items
@@ -116,13 +121,29 @@ impl DrawingsFile {
                     tool: d.tool.key().to_owned(),
                     a: anchor_doc(d.a),
                     b: (d.tool.anchors() == 2).then(|| anchor_doc(d.b)),
-                    color: d.style.color,
-                    width: d.style.width,
-                    dashed: d.style.dashed,
+                    style: StyleDoc::from_style(&d.style),
                     text: d.text.clone(),
+                    extra: extras.get(&d.id).cloned().unwrap_or_default(),
                 })
                 .collect(),
+            extra: Extra::new(),
         }
+    }
+
+    /// Unknown fields of the usable drawings, by id (written back with them on every save).
+    pub fn extras(&self, usable: &[Drawing]) -> HashMap<DrawingId, Extra> {
+        self.drawings
+            .iter()
+            .filter(|d| !d.extra.is_empty() && usable.iter().any(|u| u.id == d.id))
+            .map(|d| (d.id, d.extra.clone()))
+            .collect()
+    }
+
+    /// File-level unknown fields (without the format's `version`).
+    pub fn file_extra(&self) -> Extra {
+        let mut e = self.extra.clone();
+        e.remove("version");
+        e
     }
 
     /// The drawings this file holds for a product with tick `tick`, and why any were skipped.
@@ -139,12 +160,7 @@ impl DrawingsFile {
                     (None, 2) => return Err("second anchor missing".to_owned()),
                     _ => a,
                 };
-                let style = Style {
-                    color: doc.color,
-                    width: doc.width,
-                    dashed: doc.dashed,
-                }
-                .normalised();
+                let style = doc.style.to_style();
                 let mut d = Drawing::new(tool, a, b, style);
                 d.id = doc.id;
                 if tool == Tool::Note {
@@ -209,6 +225,9 @@ pub struct ProductDrawings {
     writer: Option<Writer>,
     /// Entries of the file this version couldn't use: written back unchanged on every save.
     kept: Vec<DrawingDoc>,
+    /// Usable drawings' fields this version doesn't know, by id, and the file's.
+    extras: HashMap<DrawingId, Extra>,
+    file_extra: Extra,
 }
 
 impl ProductDrawings {
@@ -225,6 +244,8 @@ impl ProductDrawings {
             path,
             writer,
             kept: Vec::new(),
+            extras: HashMap::new(),
+            file_extra: Extra::new(),
         }
     }
 
@@ -255,8 +276,10 @@ impl ProductDrawings {
         if changed {
             self.revision.fetch_add(1, Ordering::AcqRel);
             if let (Some(p), Some(w)) = (&self.path, &self.writer) {
-                let mut file = DrawingsFile::from_drawings(&self.product, set.items());
+                let mut file =
+                    DrawingsFile::from_drawings(&self.product, set.items(), &self.extras);
                 file.drawings.extend(self.kept.iter().cloned());
+                file.extra = self.file_extra.clone();
                 w.write(p.clone(), file.encode());
             }
         }
@@ -299,14 +322,23 @@ impl Drawings {
         if let Some(p) = self.products.get(&product.id) {
             return (p.clone(), None);
         }
-        let (set, path, report, kept) = match &self.dir {
-            None => (DrawingSet::default(), None, None, Vec::new()),
+        let (set, path, report, kept, extras, file_extra) = match &self.dir {
+            None => (
+                DrawingSet::default(),
+                None,
+                None,
+                Vec::new(),
+                HashMap::new(),
+                Extra::new(),
+            ),
             Some(dir) => {
                 let file = path(dir, product);
                 let l = versioned::load::<DrawingsFile>(&FORMAT, &file);
                 let doc = l.value.unwrap_or_default();
                 let (items, skipped) = doc.to_drawings(product.price.tick);
                 let kept = doc.unusable(&items);
+                let extras = doc.extras(&items);
+                let file_extra = doc.file_extra();
                 let mut report = l.report;
                 if !skipped.is_empty() {
                     let s = format!(
@@ -324,11 +356,20 @@ impl Drawings {
                 if let Some(max) = kept.iter().map(|d| d.id).max() {
                     set.reserve_ids_through(max);
                 }
-                (set, l.writable.then_some(file), report, kept)
+                (
+                    set,
+                    l.writable.then_some(file),
+                    report,
+                    kept,
+                    extras,
+                    file_extra,
+                )
             }
         };
         let mut p = ProductDrawings::new(product.clone(), set, path, self.writer.clone());
         p.kept = kept;
+        p.extras = extras;
+        p.file_extra = file_extra;
         let p = Arc::new(p);
         self.products.insert(product.id, p.clone());
         (p, report)

@@ -113,7 +113,14 @@ enum LabelKind {
     SubCross,
     CrossTime,
     Indicator,
+    /// A drawing's price tag on the axis, its text in the theme's text color or its
+    /// background color (whichever reads on the tag: `Theme::on_fill`).
+    DrawingTagMain,
+    DrawingTagBg,
 }
+
+/// Drawing price tags on the axis considered per frame (labels they cover aren't drawn).
+const MAX_DRAWING_TAGS: usize = 8;
 
 /// Behind a drawing's note text: the box's padding (logical px).
 const NOTE_PAD: f32 = 6.0;
@@ -181,6 +188,9 @@ pub struct Fixture {
     pub timeframe: Timeframe,
     /// Start with the timeframe list open (screenshots: `--timeframe-menu`).
     pub timeframe_menu: bool,
+    /// Open the style editor on this drawing (screenshots: `--style-editor ID[:TAB]`), on
+    /// tab `TAB` (0 = first).
+    pub style_editor: Option<(u64, usize)>,
 }
 
 /// Which part of a studies-menu row a click hit.
@@ -354,11 +364,14 @@ pub struct ChartView {
     /// The product's drawings on this chart (roadmap 11).
     drawings: ChartDrawings,
     /// Note texts shaped (by drawing id; re-shaped only when the text changes).
-    note_lines: HashMap<u64, (String, ShapedLine)>,
+    note_lines: HashMap<u64, (String, lines_core::style::TextStyle, ShapedLine)>,
     /// The note being typed, shaped once per key.
     note_entry_line: Option<(String, ShapedLine)>,
     /// Measure readouts (`None`: the temporary one; else a pinned measure's id), shaped once
     /// per distinct reading.
+    /// The per-tool drawing styles last read from the settings (new defaults saved on any
+    /// chart are picked up when a tool is next chosen).
+    saved_styles: crate::chart_draw::ToolStyles,
     measure_lines: HashMap<
         Option<u64>,
         (
@@ -426,7 +439,10 @@ impl ChartView {
         }
         let trade = crate::trade_bar::PaneTrade::new(None, cx);
         let timeframe = fixture.timeframe;
-        let drawings = ChartDrawings::new(crate::drawings_store::for_product(&instrument, cx));
+        let mut drawings = ChartDrawings::new(crate::drawings_store::for_product(&instrument, cx));
+        let saved_styles = saved_tool_styles(cx);
+        drawings.defaults = saved_styles;
+        let fixture_style_editor = fixture.style_editor;
 
         let mut view = ChartView {
             study_menu: None,
@@ -509,6 +525,7 @@ impl ChartView {
             tf_entry: None,
             cross_partial: false,
             drawings,
+            saved_styles,
             note_lines: HashMap::new(),
             note_entry_line: None,
             measure_lines: HashMap::new(),
@@ -519,6 +536,14 @@ impl ChartView {
         }
         if let Some(spec) = fixture_menu {
             view.open_menu_at(&spec, cx);
+        }
+        if let Some((id, tab)) = fixture_style_editor
+            && view.drawings.open_editor(id)
+        {
+            view.drawings.edit_style(|e| {
+                e.select_tab(tab);
+                crate::style_editor::Outcome::Nothing
+            });
         }
         view
     }
@@ -937,6 +962,11 @@ impl ChartView {
             cx.notify();
             return;
         }
+        if self.drawings.close_editor() {
+            // Clicking the chart dismisses the style editor (its controls handle their own).
+            cx.notify();
+            return;
+        }
         self.end_drag();
         let (x, y) = self.local(ev.position);
         if let Some(index) = self.anchoring {
@@ -958,6 +988,16 @@ impl ChartView {
         // Drawings take a press only in drawing mode or on a drawing, never with Ctrl (chart
         // trading's); otherwise the chart pans and scales as usual.
         if region == Region::Plot {
+            // A double click on a drawing opens its style editor.
+            if ev.click_count >= 2
+                && self.drawings.tool().is_none()
+                && let Some(id) = self.drawings.hit_at(x as f32, y as f32)
+                && self.drawings.open_editor(id)
+            {
+                self.study_menu = None;
+                cx.notify();
+                return;
+            }
             let anchor = self.drawing_anchor(x, y);
             let ctrl = ev.modifiers.control || ev.modifiers.platform;
             if self.drawings.on_down(x as f32, y as f32, ctrl, anchor) {
@@ -1022,6 +1062,14 @@ impl ChartView {
         if (self.tf_menu || self.trade.account_menu) && popover::closes_on_key(&k.key) {
             self.close_popover(Kind::Timeframe, cx);
             self.close_popover(Kind::Account, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.drawings.editing() && !m.control && !m.platform {
+            // The style editor takes its keys (Ctrl/Cmd shortcuts such as undo still work).
+            let text = k.key_char.as_deref().filter(|_| !m.alt);
+            let (key, shift) = (k.key.clone(), m.shift);
+            self.style_edit(|e| e.key(&key, shift, text), cx);
             cx.stop_propagation();
             return;
         }
@@ -2051,6 +2099,13 @@ impl ChartView {
         let sync_price = self
             .sync_price
             .filter(|_| self.cross.is_none() && self.sync_marker.is_some());
+        // Drawings' price tags too (up to a few per frame, allocation-free).
+        let mut drawing_tags = [None; MAX_DRAWING_TAGS];
+        if !self.drawings.hidden {
+            for (slot, (_, y, _)) in drawing_tags.iter_mut().zip(self.drawings.axis_tags()) {
+                *slot = Some(Span::around(cross_tag_y(y, ph), TAG_H * 0.5));
+            }
+        }
         let tags = [
             last_y.map(|y| Span::around(y, TAG_H * 0.5)),
             self.cross
@@ -2082,7 +2137,8 @@ impl ChartView {
             if l.y < 0.0 || l.y > ph {
                 continue;
             }
-            if !label_clear_of_tags(Span::around(l.y, LABEL_PX * 0.65), &tags) {
+            let span = Span::around(l.y, LABEL_PX * 0.65);
+            if !label_clear_of_tags(span, &tags) || !label_clear_of_tags(span, &drawing_tags) {
                 continue;
             }
             let origin = point(px(ox + pw + 8.0), px(oy + l.y - LABEL_PX * 0.65));
@@ -2133,6 +2189,7 @@ impl ChartView {
             let origin = point(px(ox + l.x + 4.0), px(oy + self.above_axis + 4.0));
             self.paint_label(kind, l.time.0, origin, line_h, t.text_dim, window, cx, text);
         }
+        self.draw_drawing_tags(bounds, window, cx);
         if let (Some(p), Some(y)) = (self.last_trade, last_y) {
             window.paint_quad(fill(
                 rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
@@ -2415,6 +2472,64 @@ impl ChartView {
         }
     }
 
+    /// Drawings' price tags (decision 0026: horizontal lines and rays, a zone's edges, with
+    /// the option on): the last-price tag's box in the drawing's color (opaque), its text in
+    /// whichever theme color reads on it. Under the last-price and crosshair tags.
+    fn draw_drawing_tags(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        if self.drawings.hidden {
+            return;
+        }
+        let t = self.theme;
+        let scale = window.scale_factor();
+        let hair = 1.0 / scale;
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let (pw, ph) = (
+            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.height),
+        );
+        let line_h = px(LABEL_PX * 1.3);
+        let fmt = self.instrument.price;
+        let mut tags = [(Price(0), 0.0f32, lines_core::drawings::Style::DEFAULT); MAX_DRAWING_TAGS];
+        let mut n = 0;
+        for (slot, tag) in tags.iter_mut().zip(self.drawings.axis_tags()) {
+            *slot = tag;
+            n += 1;
+        }
+        for &(price, y, style) in &tags[..n] {
+            if !(0.0..=ph).contains(&y) {
+                continue;
+            }
+            let bg = t.style_color(style.line.color, &t.drawing, 100);
+            let on = t.on_fill(bg);
+            let kind = if on == t.text_main {
+                LabelKind::DrawingTagMain
+            } else {
+                LabelKind::DrawingTagBg
+            };
+            let y = cross_tag_y(y, ph);
+            let top = snap(f64::from(y - TAG_H * 0.5), scale);
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(ox + pw + hair), px(oy + top)),
+                    size(px(AXIS_W), px(TAG_H)),
+                ),
+                bg,
+            ));
+            self.paint_label(
+                kind,
+                price.0,
+                point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65)),
+                line_h,
+                on,
+                window,
+                cx,
+                |s| {
+                    let _ = fmt.write(price, s);
+                },
+            );
+        }
+    }
+
     /// A crosshair price tag on the price axis at plot-local `y`: same box as the last-price
     /// tag, kept fully inside the plot's height.
     fn draw_price_tag(
@@ -2510,21 +2625,34 @@ impl ChartView {
             let Some(text) = self.drawings.note_text(d.id) else {
                 continue;
             };
-            if self.note_lines.get(&d.id).is_none_or(|(s, _)| s != text) {
+            // A note's text style (decision 0026): size, color, its box on or off. Re-shaped
+            // only when the text or its style changes.
+            let ts = d.style.text;
+            if self
+                .note_lines
+                .get(&d.id)
+                .is_none_or(|(s, k, _)| s != text || *k != ts)
+            {
                 let text = text.to_owned();
-                let line = self.shape(&text, t.text_main, window);
-                self.note_lines.insert(d.id, (text, line));
+                let color = t.style_color(ts.color, &t.drawing, 100);
+                let line = self.shape_sized(&text, color, ts.size.px(), window);
+                self.note_lines.insert(d.id, (text, ts, line));
             }
-            let Some((_, line)) = self.note_lines.get(&d.id) else {
+            let Some((_, _, line)) = self.note_lines.get(&d.id) else {
                 continue;
             };
+            let size_px = ts.size.px();
+            let box_h = size_px * 1.3 + NOTE_PAD;
             let w = f32::from(line.width) + 2.0 * NOTE_PAD;
             let (x, y) = d.p0;
-            window.paint_quad(fill(
-                Bounds::new(point(px(ox + x + 2.0), px(oy + y)), size(px(w), px(box_h))),
-                t.panel,
-            ));
+            if ts.background {
+                window.paint_quad(fill(
+                    Bounds::new(point(px(ox + x + 2.0), px(oy + y)), size(px(w), px(box_h))),
+                    t.panel,
+                ));
+            }
             let at = point(px(ox + x + 2.0 + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5));
+            let line_h = px(size_px * 1.3);
             let _ = line.paint(at, line_h, TextAlign::Left, None, window, cx);
             crate::layout_rec::line(window, line, at, line_h, "");
             self.drawings.set_note_box(i, (w + 2.0, box_h));
@@ -2633,18 +2761,96 @@ impl ChartView {
             || self.tf_entry.is_some()
             || self.drawings.typing()
             || self.study_menu.is_some()
+            || self.drawings.editing()
+    }
+
+    // ---- the drawing style editor (crate::style_editor) ------------------------------------
+
+    /// Apply a style-editor input; "save as default" writes the tool's default to settings.
+    fn style_edit(
+        &mut self,
+        f: impl FnOnce(&mut crate::style_editor::StyleEditor) -> crate::style_editor::Outcome,
+        cx: &mut Context<Self>,
+    ) {
+        let (_, saved) = self.drawings.edit_style(f);
+        if let Some((tool, style)) = saved {
+            self.saved_styles[crate::chart_draw::tool_index(tool)] = style;
+            let doc = crate::style_doc::StyleDoc::from_style(&style);
+            crate::picker_view::update_settings(cx, |s| {
+                if style == lines_core::drawings::Style::DEFAULT {
+                    s.drawing_styles.remove(tool.key());
+                } else {
+                    s.drawing_styles.insert(tool.key().to_owned(), doc);
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// A click on a style-editor control.
+    pub fn style_click(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.style_edit(|e| e.click(row, col), cx);
+    }
+
+    /// A click on a style-editor tab.
+    pub fn style_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        self.style_edit(
+            |e| {
+                e.select_tab(i);
+                crate::style_editor::Outcome::Nothing
+            },
+            cx,
+        );
+    }
+
+    /// A right click on the plot: the drawing under it is selected, so the pane menu (opened
+    /// by the workspace on the same click) offers its style.
+    fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.region(ev.position) != Some(Region::Plot) {
+            return;
+        }
+        let (x, y) = self.local(ev.position);
+        if let Some(id) = self.drawings.hit_at(x as f32, y as f32) {
+            self.drawings.selected = Some(id);
+            cx.notify();
+        }
+    }
+
+    /// Whether a drawing is selected (the pane menu's "Drawing style...").
+    pub fn drawing_selected(&self) -> bool {
+        self.drawings.selected.is_some() && !self.drawings.hidden
+    }
+
+    /// Pick up per-tool defaults saved since this chart last looked (on any chart).
+    fn refresh_tool_styles(&mut self, cx: &App) {
+        let saved = saved_tool_styles(cx);
+        if saved != self.saved_styles {
+            self.saved_styles = saved;
+            self.drawings.defaults = saved;
+        }
     }
 
     /// A drawing command (`Command::Draw`) on this chart.
     pub fn drawing_command(&mut self, cmd: DrawCmd, cx: &mut Context<Self>) {
         use lines_core::drawings::Style;
+        use lines_core::style::{Color, LineType};
         let d = &mut self.drawings;
         match cmd {
             DrawCmd::Tool(tool) => {
                 self.picker.close();
                 self.tf_menu = false;
                 self.tf_entry = None;
+                self.drawings.close_editor();
+                self.refresh_tool_styles(cx);
                 self.drawings.set_tool(tool);
+            }
+            DrawCmd::Style => {
+                if let Some(id) = d.selected
+                    && d.open_editor(id)
+                {
+                    self.study_menu = None;
+                    self.picker.close();
+                }
             }
             DrawCmd::Undo => {
                 d.undo();
@@ -2660,17 +2866,21 @@ impl ChartView {
                 d.set_hidden(hide);
             }
             DrawCmd::DeleteAll => d.confirm_clear = d.count() > 0,
-            DrawCmd::NextColor => d.restyle(|s| Style {
-                color: (s.color + 1) % Style::COLORS,
-                ..s
+            DrawCmd::NextColor => d.restyle(|mut s| {
+                s.line.color =
+                    Color::Palette(s.palette_index().map_or(0, |i| i + 1) % Style::COLORS);
+                s
             }),
-            DrawCmd::ToggleWidth => d.restyle(|s| Style {
-                width: 3 - s.width,
-                ..s
+            DrawCmd::ToggleWidth => d.restyle(|mut s| {
+                s.line.width = s.line.width % lines_core::style::MAX_WIDTH + 1;
+                s
             }),
-            DrawCmd::ToggleDashed => d.restyle(|s| Style {
-                dashed: !s.dashed,
-                ..s
+            DrawCmd::ToggleDashed => d.restyle(|mut s| {
+                s.line.line = match s.line.line {
+                    LineType::Solid => LineType::Dashed,
+                    _ => LineType::Solid,
+                };
+                s
             }),
             DrawCmd::PinMeasure => {
                 d.pin_measure();
@@ -2866,6 +3076,16 @@ impl ChartView {
     }
 
     fn shape(&self, text: &str, color: Hsla, window: &mut Window) -> ShapedLine {
+        self.shape_sized(text, color, LABEL_PX, window)
+    }
+
+    fn shape_sized(
+        &self,
+        text: &str,
+        color: Hsla,
+        size_px: f32,
+        window: &mut Window,
+    ) -> ShapedLine {
         let run = TextRun {
             len: text.len(),
             font: self
@@ -2879,7 +3099,7 @@ impl ChartView {
         };
         window.text_system().shape_line(
             SharedString::from(text.to_owned()),
-            px(LABEL_PX),
+            px(size_px),
             &[run],
             None,
         )
@@ -3502,6 +3722,21 @@ fn last_tag_y(vp: &Viewport, p: Price, plot_h: f32) -> f32 {
 }
 
 /// Centre of the crosshair's price tag, kept fully inside the plot's height.
+/// Each tool's style for new drawings from the settings ("Save as default for ..."; tools
+/// without one: the default style). No settings global (tests): all defaults.
+fn saved_tool_styles(cx: &App) -> crate::chart_draw::ToolStyles {
+    let mut out = [lines_core::drawings::Style::DEFAULT; Tool::ALL.len()];
+    if cx.has_global::<crate::picker_view::AppSettings>() {
+        let saved = &crate::picker_view::settings(cx).drawing_styles;
+        for (i, tool) in Tool::ALL.iter().enumerate() {
+            if let Some(doc) = saved.get(tool.key()) {
+                out[i] = doc.to_style();
+            }
+        }
+    }
+    out
+}
+
 fn cross_tag_y(y: f32, plot_h: f32) -> f32 {
     y.min(plot_h - TAG_H * 0.5).max(TAG_H * 0.5)
 }
@@ -3671,6 +3906,7 @@ impl Render for ChartView {
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -3707,6 +3943,13 @@ impl Render for ChartView {
                     .when(self.anchoring.is_some(), |d| {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
+                    .when_some(
+                        self.drawings
+                            .editor()
+                            .cloned()
+                            .map(|e| crate::style_editor_view::render(&e, &t, cx)),
+                        |d, e| d.child(e),
+                    )
                     .when_some(overlay, |d, overlay| d.child(overlay))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
                     .when_some(self.drawing_banner(&t), |d, b| d.child(b)),
@@ -3803,6 +4046,7 @@ mod tests {
             p1,
             handles: [p0, p1],
             n_handles: 2,
+            prices: [Price(0); 2],
         };
         let plot = (1000.0, 600.0);
         // Drawn right to left or left to right: the label starts at the left end.

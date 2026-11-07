@@ -13,6 +13,7 @@
 #[cfg(test)]
 use gpui::Rgba;
 use gpui::{Hsla, rgb};
+use lines_core::style::{Color, DashPattern, LineType, Rgb};
 
 /// Brand palette.
 pub mod brand {
@@ -141,6 +142,93 @@ pub const HELD_DASH: Dash = Dash { on: 3.0, off: 3.0 };
 /// Dashed drawings: a long dash no trading state uses, so a drawn level never reads as a
 /// position or an order (tested against the two above).
 pub const DRAWING_DASH: Dash = Dash { on: 12.0, off: 4.0 };
+
+/// A drawing's (or a styled study line's) dash pattern for its line type and width (logical
+/// px). Dashed is [`DRAWING_DASH`]; dotted dots are as long as the line is wide with twice
+/// that between (round dots at every width); dash-dot is a long dash, a dot, and gaps. None of
+/// them matches [`POSITION_DASH`] or [`HELD_DASH`] (tested). No allocation.
+pub fn drawing_dash(line: LineType, width: f32) -> DashPattern {
+    let w = width.max(1.0);
+    match line {
+        LineType::Solid => DashPattern::SOLID,
+        LineType::Dashed => DashPattern {
+            seg: [DRAWING_DASH.on, DRAWING_DASH.off, 0.0, 0.0],
+            n: 2,
+        },
+        LineType::Dotted => DashPattern {
+            seg: [w, 2.0 * w + 1.0, 0.0, 0.0],
+            n: 2,
+        },
+        LineType::DashDot => DashPattern {
+            seg: [12.0, 3.0 + w, w, 3.0 + w],
+            n: 4,
+        },
+    }
+}
+
+/// Starting points for a custom color in the style editor (decision 0026). These are *user
+/// data presets*, not theme tokens: once chosen, a color is saved with the drawing as the
+/// user's own. Several deliberately sit near colors with a meaning (a red, a green), which the
+/// editor's readability guard warns about.
+pub const CUSTOM_SWATCHES: [u32; 8] = [
+    0xe5484d, 0xf5a524, 0xf2e05a, 0x46c35a, 0x34c6d9, 0x3d7bf5, 0xa461f0, 0x8a8f98,
+];
+
+/// A user-chosen color (decision 0026: user data saved with a drawing or study, never a
+/// literal in a view), at `opacity` percent.
+pub fn user_color(c: Rgb, opacity: u8) -> Hsla {
+    gpui::Rgba {
+        r: f32::from(c.r) / 255.0,
+        g: f32::from(c.g) / 255.0,
+        b: f32::from(c.b) / 255.0,
+        a: f32::from(opacity.min(100)) / 100.0,
+    }
+    .into()
+}
+
+/// A token's sRGB (opaque; its own alpha is ignored), for the readability guard.
+pub fn rgb_of(c: Hsla) -> Rgb {
+    let c = c.to_rgb();
+    Rgb::from_f32(c.r, c.g, c.b)
+}
+
+impl Theme {
+    /// A style color in this theme: palette indices from `palette` (drawings:
+    /// [`Theme::drawing`]), `Text` the main text color, custom colors as saved.
+    pub fn style_color(&self, c: Color, palette: &[Hsla], opacity: u8) -> Hsla {
+        let a = f32::from(opacity.min(100)) / 100.0;
+        match c {
+            Color::Palette(i) if !palette.is_empty() => {
+                // `opacity` scales the token's own alpha.
+                palette[usize::from(i) % palette.len()].opacity(a)
+            }
+            Color::Palette(_) | Color::Text => self.text_main.opacity(a),
+            Color::Custom(rgb) => user_color(rgb, opacity),
+        }
+    }
+
+    /// Colors with a meaning, which a user color shouldn't resemble (decision 0026): this
+    /// theme and palette's up and down, the violet last price / accent, the bracket target and
+    /// stop, and warn.
+    pub fn meanings(&self) -> [(&'static str, Rgb); 6] {
+        [
+            ("the up color", rgb_of(self.up)),
+            ("the down color", rgb_of(self.down)),
+            ("the last-price violet", rgb_of(self.last)),
+            ("the order target color", rgb_of(self.order_target)),
+            ("the order stop color", rgb_of(self.order_stop)),
+            ("the warning color", rgb_of(self.warn)),
+        ]
+    }
+
+    /// Text on a tag filled with `fill`: the theme's ink or paper, whichever reads better.
+    pub fn on_fill(&self, fill: Hsla) -> Hsla {
+        let f = rgb_of(fill);
+        let (a, b) = (self.text_main, self.bg);
+        let k = |x: Hsla| lines_core::style::contrast(f, rgb_of(x));
+        if k(a) >= k(b) { a } else { b }
+    }
+}
 
 fn c(hex: u32) -> Hsla {
     rgb(hex).into()
@@ -596,6 +684,9 @@ mod tests {
             ("trade_bar.rs", include_str!("trade_bar.rs")),
             ("trading.rs", include_str!("trading.rs")),
             ("dom_trade.rs", include_str!("dom_trade.rs")),
+            ("chart_draw.rs", include_str!("chart_draw.rs")),
+            ("style_editor.rs", include_str!("style_editor.rs")),
+            ("style_editor_view.rs", include_str!("style_editor_view.rs")),
         ] {
             for needle in ["rgb(", "rgba(", "hsla(", "Hsla {"] {
                 assert!(
@@ -671,75 +762,79 @@ mod tests {
         assert_ne!(POSITION_DASH, HELD_DASH);
     }
 
-    /// CIEDE2000 color difference (sRGB, D65): the perceptual gap the drawing test uses.
-    fn delta_e_2000(a: Hsla, b: Hsla) -> f64 {
-        fn lab(c: Hsla) -> (f64, f64, f64) {
-            let c = c.to_rgb();
-            let lin = |v: f32| {
-                let v = f64::from(v);
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
+    /// Every line type's pattern is its own: none matches the position line or a held order
+    /// at any width (decision 0026), and only solid is solid.
+    #[test]
+    fn drawing_line_types_never_look_like_trading_lines() {
+        for w in 1..=4 {
+            let w = f32::from(w as u8);
+            for lt in LineType::ALL {
+                let d = drawing_dash(lt, w);
+                assert_eq!(d.is_solid(), lt == LineType::Solid, "{lt:?}");
+                if d.is_solid() {
+                    continue;
                 }
-            };
-            let (r, g, b) = (lin(c.r), lin(c.g), lin(c.b));
-            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
-            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
-            let f = |t: f64| {
-                if t > 0.008856 {
-                    t.cbrt()
-                } else {
-                    7.787 * t + 16.0 / 116.0
+                for trading in [POSITION_DASH, HELD_DASH] {
+                    let same = d.n == 2
+                        && (d.seg[0] - trading.on).abs() < 0.5
+                        && (d.seg[1] - trading.off).abs() < 0.5;
+                    assert!(!same, "{lt:?} at {w} px looks like {trading:?}");
                 }
-            };
-            let (fx, fy, fz) = (f(x), f(y), f(z));
-            (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+            }
         }
-        let ((l1, a1, b1), (l2, a2, b2)) = (lab(a), lab(b));
-        let (c1, c2) = (a1.hypot(b1), a2.hypot(b2));
-        let cb7 = ((c1 + c2) / 2.0).powi(7);
-        let g = 0.5 * (1.0 - (cb7 / (cb7 + 25f64.powi(7))).sqrt());
-        let (a1p, a2p) = ((1.0 + g) * a1, (1.0 + g) * a2);
-        let (c1p, c2p) = (a1p.hypot(b1), a2p.hypot(b2));
-        let hue = |b: f64, a: f64| b.atan2(a).to_degrees().rem_euclid(360.0);
-        let (h1, h2) = (hue(b1, a1p), hue(b2, a2p));
-        let dl = l2 - l1;
-        let dc = c2p - c1p;
-        let dh = if c1p * c2p == 0.0 {
-            0.0
-        } else if (h2 - h1).abs() <= 180.0 {
-            h2 - h1
-        } else if h2 > h1 {
-            h2 - h1 - 360.0
-        } else {
-            h2 - h1 + 360.0
-        };
-        let dhh = 2.0 * (c1p * c2p).sqrt() * (dh.to_radians() / 2.0).sin();
-        let lb = (l1 + l2) / 2.0;
-        let cbp = (c1p + c2p) / 2.0;
-        let hb = if c1p * c2p == 0.0 {
-            h1 + h2
-        } else if (h1 - h2).abs() <= 180.0 {
-            (h1 + h2) / 2.0
-        } else if h1 + h2 < 360.0 {
-            (h1 + h2 + 360.0) / 2.0
-        } else {
-            (h1 + h2 - 360.0) / 2.0
-        };
-        let cos = |d: f64| d.to_radians().cos();
-        let t = 1.0 - 0.17 * cos(hb - 30.0) + 0.24 * cos(2.0 * hb) + 0.32 * cos(3.0 * hb + 6.0)
-            - 0.20 * cos(4.0 * hb - 63.0);
-        let dth = 30.0 * (-((hb - 275.0) / 25.0).powi(2)).exp();
-        let cbp7 = cbp.powi(7);
-        let rc = 2.0 * (cbp7 / (cbp7 + 25f64.powi(7))).sqrt();
-        let sl = 1.0 + 0.015 * (lb - 50.0).powi(2) / (20.0 + (lb - 50.0).powi(2)).sqrt();
-        let sc = 1.0 + 0.045 * cbp;
-        let sh = 1.0 + 0.015 * cbp * t;
-        let rt = -(2.0 * dth).to_radians().sin() * rc;
-        ((dl / sl).powi(2) + (dc / sc).powi(2) + (dhh / sh).powi(2) + rt * (dc / sc) * (dhh / sh))
-            .sqrt()
+    }
+
+    /// A style's opacity scales a token's own alpha exactly once.
+    #[test]
+    fn style_color_applies_opacity_once() {
+        let t = Theme::dark(Palette::Standard);
+        let half = [t.text_main.opacity(0.5)];
+        let c = t.style_color(Color::Palette(0), &half, 50);
+        assert!((c.a - 0.25).abs() < 1e-6, "{}", c.a);
+        let c = t.style_color(Color::Palette(5), &t.drawing, 100);
+        assert_eq!(c, t.drawing[1]);
+        assert!((t.style_color(Color::Text, &t.drawing, 25).a - 0.25).abs() < 1e-6);
+    }
+
+    /// Drawing price tags put `on_fill` text on the drawing's color: AA on every theme
+    /// drawing color and every custom starting swatch, in every theme and palette.
+    #[test]
+    fn drawing_tag_text_meets_aa() {
+        for t in Theme::all() {
+            let fills = t.drawing.iter().copied().chain(
+                CUSTOM_SWATCHES
+                    .iter()
+                    .map(|&h| user_color(Rgb::hex(h), 100)),
+            );
+            for f in fills {
+                let r = contrast(t.on_fill(f), f);
+                assert!(r >= 4.5, "{}: tag text on {:?}: {r:.2}", t.name, rgb_of(f));
+            }
+        }
+    }
+
+    /// The default style reads: a note's text color on its box and on the chart, and every
+    /// theme drawing color passes the editor's guard as a line (no warning by default).
+    #[test]
+    fn default_styles_pass_the_readability_guard() {
+        use lines_core::style::readability;
+        for t in Theme::all() {
+            let m = t.meanings();
+            let text = t.style_color(Color::Text, &t.drawing, 100);
+            assert!(readability(rgb_of(text), 100, rgb_of(t.panel), &m, true).ok());
+            assert!(readability(rgb_of(text), 100, rgb_of(t.bg), &m, true).ok());
+            for i in 0..4 {
+                let c = t.style_color(Color::Palette(i), &t.drawing, 100);
+                let r = readability(rgb_of(c), 100, rgb_of(t.bg), &m, false);
+                assert!(r.ok(), "{}: drawing color {i}: {r:?}", t.name);
+            }
+        }
+    }
+
+    /// CIEDE2000 color difference (sRGB, D65): the perceptual gap the drawing test uses
+    /// (`lines_core::style::delta_e_2000`, which the style editor's guard uses too).
+    fn delta_e_2000(a: Hsla, b: Hsla) -> f64 {
+        lines_core::style::delta_e_2000(rgb_of(a), rgb_of(b))
     }
 
     #[test]

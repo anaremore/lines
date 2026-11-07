@@ -46,6 +46,9 @@ mod settings_view;
 mod studies;
 mod study_menu;
 mod study_menu_view;
+mod style_doc;
+mod style_editor;
+mod style_editor_view;
 mod subpane;
 mod tabstate;
 mod tape_view;
@@ -535,6 +538,18 @@ struct Cli {
     /// With `--gallery`: every scene (themes, palettes, widths, states, menus).
     #[arg(long, requires = "gallery")]
     gallery_full: bool,
+    /// Screenshot: the first chart with the style editor open on drawing ID of --drawings,
+    /// optionally on tab TAB (0 = first): `--style-editor 3` or `--style-editor 4:1`.
+    #[arg(long, requires = "drawings", value_parser = parse_style_editor)]
+    style_editor: Option<(u64, usize)>,
+}
+
+/// `ID` or `ID:TAB` (`--style-editor`).
+fn parse_style_editor(s: &str) -> Result<(u64, usize), String> {
+    let (id, tab) = s.split_once(':').unwrap_or((s, "0"));
+    let id = id.parse().map_err(|_| format!("bad drawing id {id:?}"))?;
+    let tab = tab.parse().map_err(|_| format!("bad tab {tab:?}"))?;
+    Ok((id, tab))
 }
 
 /// The CLI with every registered source as a `--source` value, with its help.
@@ -1002,6 +1017,7 @@ where
             magnet: cli.magnet,
             timeframe: cli.timeframe.unwrap_or_default(),
             timeframe_menu: cli.timeframe_menu,
+            style_editor: cli.style_editor,
             cursor: cli.cursor,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),

@@ -7,6 +7,12 @@
 //! handle), and never a Ctrl+click (reserved for chart trading). Handlers record what was
 //! pressed; the frame's `prepare` snaps the pointer (as the crosshair does), so previews and
 //! drags always match what is drawn.
+//!
+//! Styles (decision 0026): each drawing paints its own [`Style`] (color, line type, width,
+//! opacity, a zone's fill, extensions, the axis price tag; a note's text is the chart's). New
+//! drawings take their tool's default (settings, "Save as default for ..."). The style editor
+//! (`crate::style_editor`) is opened on one drawing at a time; every change it makes is one
+//! undo step.
 
 use std::sync::Arc;
 
@@ -16,10 +22,20 @@ use lines_core::drawings::{
     project, snap_anchor,
 };
 use lines_core::instrument::Ratio;
+use lines_core::style::DashPattern;
 use lines_core::{PriceFormat, UtcMillis, Viewport};
 
 use crate::drawings_store::{MAX_NOTE, ProductDrawings};
-use crate::theme::Theme;
+use crate::style_editor::{Outcome, StyleEditor};
+use crate::theme::{Theme, drawing_dash};
+
+/// Each tool's style for new drawings, in `Tool::ALL` order.
+pub type ToolStyles = [Style; Tool::ALL.len()];
+
+/// `tool`'s place in `Tool::ALL` (and in [`ToolStyles`]).
+pub fn tool_index(tool: Tool) -> usize {
+    Tool::ALL.iter().position(|t| *t == tool).unwrap_or(0)
+}
 
 /// Pointer tolerance for a line (logical px).
 pub const HIT_TOL: f32 = 5.0;
@@ -65,8 +81,11 @@ pub struct ChartDrawings {
     measure: Option<(Anchor, Anchor)>,
     /// A note being typed at an anchor.
     note: Option<(Anchor, String)>,
-    /// Style for new drawings.
-    pub style: Style,
+    /// Each tool's style for new drawings (the saved defaults; the restyle keys change them
+    /// for this session when nothing is selected).
+    pub defaults: ToolStyles,
+    /// The style editor, open on a drawing.
+    editor: Option<(DrawingId, StyleEditor)>,
     /// "Delete all for <product>" waiting for Enter.
     pub confirm_clear: bool,
     /// The pointer, plot-local (for previews and drags; set by the chart each frame).
@@ -95,7 +114,8 @@ impl ChartDrawings {
             dragged: None,
             measure: None,
             note: None,
-            style: Style::DEFAULT,
+            defaults: [Style::DEFAULT; Tool::ALL.len()],
+            editor: None,
             confirm_clear: false,
             pointer: None,
             drawn: Vec::with_capacity(64),
@@ -112,7 +132,7 @@ impl ChartDrawings {
         if !Arc::ptr_eq(&data, &self.data) {
             *self = ChartDrawings {
                 hidden: self.hidden,
-                style: self.style,
+                defaults: self.defaults,
                 ..ChartDrawings::new(data)
             };
         }
@@ -164,8 +184,104 @@ impl ChartDrawings {
             self.drag = None;
             self.dragged = None;
             self.confirm_clear = false;
+            self.editor = None;
         }
         self.hidden = hidden;
+    }
+
+    /// The style for a new `tool` drawing.
+    pub fn default_style(&self, tool: Tool) -> Style {
+        self.defaults[tool_index(tool)]
+    }
+
+    /// The drawing under plot-local (`x`, `y`), if any (top-most).
+    pub fn hit_at(&self, x: f32, y: f32) -> Option<DrawingId> {
+        if self.hidden {
+            return None;
+        }
+        pick(&self.drawn, self.selected, x, y, HIT_TOL, HANDLE_R).map(|(id, _)| id)
+    }
+
+    // ---- the style editor ---------------------------------------------------------------
+
+    /// Open the style editor on drawing `id` (selected). False if it isn't there.
+    pub fn open_editor(&mut self, id: DrawingId) -> bool {
+        let Some(d) = self.data.lock().get(id).cloned() else {
+            return false;
+        };
+        if self.hidden {
+            return false;
+        }
+        self.tool = None;
+        self.pending = None;
+        self.drag = None;
+        self.dragged = None;
+        self.selected = Some(id);
+        self.editor = Some((id, StyleEditor::for_drawing(d.tool, &d.style)));
+        true
+    }
+
+    pub fn close_editor(&mut self) -> bool {
+        self.editor.take().is_some()
+    }
+
+    /// The open editor, kept in step with its drawing (an undo or another chart may change
+    /// it; deleted or hidden, the editor closes).
+    pub fn editor(&mut self) -> Option<&StyleEditor> {
+        let (id, _) = self.editor.as_ref()?;
+        let d = self.data.lock().get(*id).cloned();
+        match d {
+            Some(d) if !self.hidden => {
+                let (_, e) = self.editor.as_mut()?;
+                if e.drawing_style(&d.style) != d.style {
+                    e.sync_drawing(&d.style);
+                }
+                Some(&*e)
+            }
+            _ => {
+                self.editor = None;
+                None
+            }
+        }
+    }
+
+    pub fn editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    /// Feed the editor a key, click or tab change and apply what it changed (one undo step).
+    /// With "save as default", also the drawing's tool and style to save.
+    pub fn edit_style(
+        &mut self,
+        f: impl FnOnce(&mut StyleEditor) -> Outcome,
+    ) -> (Outcome, Option<(Tool, Style)>) {
+        let Some((id, e)) = self.editor.as_mut() else {
+            return (Outcome::Nothing, None);
+        };
+        let id = *id;
+        let out = f(e);
+        let Some(mut d) = self.data.lock().get(id).cloned() else {
+            self.editor = None;
+            return (Outcome::Close, None);
+        };
+        match out {
+            Outcome::Changed => {
+                if let Some((_, e)) = &self.editor {
+                    d.style = e.drawing_style(&d.style);
+                }
+                self.data.change(|s| (s.edit(d), ()));
+                (Outcome::Changed, None)
+            }
+            Outcome::SaveDefault => {
+                self.defaults[tool_index(d.tool)] = d.style;
+                (Outcome::SaveDefault, Some((d.tool, d.style)))
+            }
+            Outcome::Close => {
+                self.editor = None;
+                (Outcome::Close, None)
+            }
+            Outcome::Nothing => (Outcome::Nothing, None),
+        }
     }
 
     /// The button was released where the chart didn't see it (another window took the
@@ -220,7 +336,7 @@ impl ChartDrawings {
                     self.tool = None;
                 }
                 (1, _) => {
-                    self.add(Drawing::new(tool, at, at, self.style));
+                    self.add(Drawing::new(tool, at, at, self.default_style(tool)));
                     self.tool = None;
                 }
                 (_, None) => self.pending = Some((at, (x, y))),
@@ -284,7 +400,7 @@ impl ChartDrawings {
         if tool == Tool::Measure {
             self.measure = Some((a, b));
         } else {
-            self.add(Drawing::new(tool, a, b, self.style));
+            self.add(Drawing::new(tool, a, b, self.default_style(tool)));
         }
     }
 
@@ -297,7 +413,7 @@ impl ChartDrawings {
         if let Some((at, text)) = self.note.take() {
             let text = text.trim();
             if !text.is_empty() {
-                let mut d = Drawing::new(Tool::Note, at, at, self.style);
+                let mut d = Drawing::new(Tool::Note, at, at, self.default_style(Tool::Note));
                 d.text = text.chars().take(MAX_NOTE).collect();
                 self.add(d);
             }
@@ -349,7 +465,12 @@ impl ChartDrawings {
         let Some((a, b)) = self.measure.take() else {
             return false;
         };
-        self.add(Drawing::new(Tool::Measure, a, b, self.style));
+        self.add(Drawing::new(
+            Tool::Measure,
+            a,
+            b,
+            self.default_style(Tool::Measure),
+        ));
         true
     }
 
@@ -357,6 +478,7 @@ impl ChartDrawings {
         let Some(id) = self.selected.take() else {
             return false;
         };
+        self.editor = None;
         self.drag = None;
         self.dragged = None;
         self.data.change(|s| {
@@ -383,7 +505,8 @@ impl ChartDrawings {
         })
     }
 
-    /// Restyle the selected drawing (one undo step), or the style for new drawings.
+    /// Restyle the selected drawing (one undo step), or every tool's style for new drawings
+    /// this session (the saved defaults are "Save as default for ..." in the style editor).
     pub fn restyle(&mut self, f: impl Fn(Style) -> Style) {
         match self
             .selected
@@ -391,10 +514,13 @@ impl ChartDrawings {
         {
             Some(mut d) => {
                 d.style = f(d.style).normalised();
-                self.style = d.style;
                 self.data.change(|s| (s.edit(d), ()));
             }
-            None => self.style = f(self.style).normalised(),
+            None => {
+                for s in &mut self.defaults {
+                    *s = f(*s).normalised();
+                }
+            }
         }
     }
 
@@ -482,7 +608,7 @@ impl ChartDrawings {
         }
         drop(set);
         if let (Some(tool), Some((first, _)), Some(at)) = (self.tool, self.pending, pointer) {
-            let d = Drawing::new(tool, first, at, self.style);
+            let d = Drawing::new(tool, first, at, self.default_style(tool));
             self.preview = project(&d, axis, vp);
             if tool == Tool::Measure {
                 self.measure_drawn = self
@@ -492,12 +618,13 @@ impl ChartDrawings {
             }
         }
         if let Some((a, b)) = self.measure {
-            let d = Drawing::new(Tool::Measure, a, b, self.style);
+            let d = Drawing::new(Tool::Measure, a, b, self.default_style(Tool::Measure));
             self.measure_drawn =
                 project(&d, axis, vp).map(|p| (p, measure(a, b, axis, fmt, point_value)));
         }
         if let Some((at, _)) = &self.note {
-            self.note_drawn = project(&Drawing::new(Tool::Note, *at, *at, self.style), axis, vp);
+            let style = self.default_style(Tool::Note);
+            self.note_drawn = project(&Drawing::new(Tool::Note, *at, *at, style), axis, vp);
         }
     }
 
@@ -535,21 +662,22 @@ impl ChartDrawings {
         self.measure_drawn
     }
 
-    /// Lines, zones and handles (inside the plot's content mask, after the studies). Text
-    /// (notes, the measure's readout) is the chart's: it owns the shaped-text cache.
+    /// Lines, zones and handles (inside the plot's content mask, after the studies), each in
+    /// its own style. Text (notes, the measure's readout) and axis tags are the chart's: it
+    /// owns the shaped-text cache and the axis.
     pub fn paint(&self, origin: (f32, f32), hair: f32, t: &Theme, window: &mut Window) {
         for d in self.drawn.iter().chain(self.preview.as_ref()) {
-            let color = t.drawing[usize::from(d.style.color) % t.drawing.len()];
-            paint_shape(d, color, origin, hair, window);
+            paint_shape(d, None, t, origin, hair, window);
         }
         if let Some((m, stats)) = self.measure_drawn {
             let color = if stats.units >= 0 { t.up } else { t.down };
-            paint_shape(&m, color, origin, hair, window);
+            paint_shape(&m, Some(color), t, origin, hair, window);
         }
         if let Some(id) = self.selected
             && let Some(d) = self.drawn.iter().find(|d| d.id == id)
         {
-            let color = t.drawing[usize::from(d.style.color) % t.drawing.len()];
+            // Handles are opaque in the line's color, whatever its opacity.
+            let color = t.style_color(d.style.line.color, &t.drawing, 100);
             for &(x, y) in &d.handles[..usize::from(d.n_handles)] {
                 let r = HANDLE_R - 1.0;
                 let b = rect(origin, x - r, y - r, 2.0 * r, 2.0 * r);
@@ -557,6 +685,23 @@ impl ChartDrawings {
                 outline(window, b, color, hair.max(1.0));
             }
         }
+    }
+
+    /// Axis price tags this frame: each drawing with its tag on, its price and plot-local y
+    /// (a zone has two, top and bottom). Allocation-free.
+    pub fn axis_tags(&self) -> impl Iterator<Item = (lines_core::Price, f32, Style)> + '_ {
+        self.drawn
+            .iter()
+            .filter(|d| d.style.axis_tag && d.tool.has_axis_tag())
+            .flat_map(|d| {
+                let n = if d.tool == Tool::Rect && d.prices[0] != d.prices[1] {
+                    2
+                } else {
+                    1
+                };
+                let ys = [d.p0.1, d.p1.1];
+                (0..n).map(move |i| (d.prices[i], ys[i], d.style))
+            })
     }
 }
 
@@ -611,23 +756,6 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, color: Hsla, w: f32) {
     window.paint_quad(fill(q(x + bw - w, y, w, bh), color));
 }
 
-/// A line from `a` to `b` (plot-local), solid or dashed: axis-aligned ones as quads (crisp),
-/// others as a stroked path.
-/// Calls `f(start, end)` for each dash along a line `len` long (or once, solid). Generic, so
-/// nothing is boxed per line per frame.
-fn dash_segments(len: f32, dashed: bool, mut f: impl FnMut(f32, f32)) {
-    if dashed {
-        let d = crate::theme::DRAWING_DASH;
-        let mut s = 0.0;
-        while s < len {
-            f(s, (s + d.on).min(len));
-            s += d.on + d.off;
-        }
-    } else {
-        f(0.0, len);
-    }
-}
-
 /// A horizontal or vertical line's band across its length: (thickness, start), both on the
 /// device-pixel grid (`hair` = one device pixel), centred on `at` as nearly as the grid allows.
 pub fn crisp_band(at: f32, width: f32, hair: f32) -> (f32, f32) {
@@ -637,12 +765,14 @@ pub fn crisp_band(at: f32, width: f32, hair: f32) -> (f32, f32) {
     (w, start)
 }
 
+/// A line from `a` to `b` (plot-local) in `dash`: axis-aligned ones as quads (crisp at every
+/// DPI), others as a stroked path. No allocation of ours (GPUI tessellates the path).
 #[allow(clippy::too_many_arguments)]
 fn paint_line(
     a: (f32, f32),
     b: (f32, f32),
     width: f32,
-    dashed: bool,
+    dash: &DashPattern,
     color: Hsla,
     origin: (f32, f32),
     hair: f32,
@@ -658,7 +788,7 @@ fn paint_line(
         // Crisp at every DPI: a whole number of device pixels wide, on device-pixel edges.
         let horizontal = dy.abs() < 0.01;
         let (w, cross) = crisp_band(if horizontal { a.1 } else { a.0 }, width, hair);
-        dash_segments(len, dashed, |s, e| {
+        dash.segments(len, |s, e| {
             let (x0, y0) = (a.0 + ux * s, a.1 + uy * s);
             let (x1, y1) = (a.0 + ux * e, a.1 + uy * e);
             let b = if horizontal {
@@ -671,7 +801,7 @@ fn paint_line(
         return;
     }
     let mut path = PathBuilder::stroke(px(width));
-    dash_segments(len, dashed, |s, e| {
+    dash.segments(len, |s, e| {
         path.move_to(point(
             px(origin.0 + a.0 + ux * s),
             px(origin.1 + a.1 + uy * s),
@@ -686,41 +816,45 @@ fn paint_line(
     }
 }
 
-fn paint_shape(d: &Projected, color: Hsla, origin: (f32, f32), hair: f32, window: &mut Window) {
-    let width = f32::from(d.style.width).max(hair);
+/// One drawing in its style (`color`: a fixed line color instead: the temporary measure's
+/// direction color).
+fn paint_shape(
+    d: &Projected,
+    color: Option<Hsla>,
+    t: &Theme,
+    origin: (f32, f32),
+    hair: f32,
+    window: &mut Window,
+) {
+    let s = &d.style;
+    let line = color.unwrap_or_else(|| t.style_color(s.line.color, &t.drawing, s.line.opacity));
+    let width = f32::from(s.line.width).max(hair);
+    let dash = drawing_dash(s.line.line, width);
     match d.tool {
         Tool::HLine | Tool::HRay | Tool::VLine | Tool::Trend | Tool::Ray => {
-            paint_line(
-                d.p0,
-                d.p1,
-                width,
-                d.style.dashed,
-                color,
-                origin,
-                hair,
-                window,
-            );
+            paint_line(d.p0, d.p1, width, &dash, line, origin, hair, window);
         }
         Tool::Rect | Tool::Measure => {
             let (x0, x1) = (d.p0.0.min(d.p1.0), d.p0.0.max(d.p1.0));
             let (y0, y1) = (d.p0.1.min(d.p1.1), d.p0.1.max(d.p1.1));
-            window.paint_quad(fill(
-                rect(origin, x0, y0, x1 - x0, y1 - y0),
-                color.opacity(0.12),
-            ));
+            let fill_color = match color {
+                Some(c) => c.opacity(0.12),
+                None => t.style_color(s.fill.color, &t.drawing, s.fill.opacity),
+            };
+            window.paint_quad(fill(rect(origin, x0, y0, x1 - x0, y1 - y0), fill_color));
             for (a, b) in [
                 ((x0, y0), (x1, y0)),
                 ((x0, y1), (x1, y1)),
                 ((x0, y0), (x0, y1)),
                 ((x1, y0), (x1, y1)),
             ] {
-                paint_line(a, b, width, d.style.dashed, color, origin, hair, window);
+                paint_line(a, b, width, &dash, line, origin, hair, window);
             }
         }
         Tool::Note => {
-            // The chart draws the note's box and text; the drawing color marks its edge.
+            // The chart draws the note's box and text; the line color marks its edge.
             let (x, y) = d.p0;
-            window.paint_quad(fill(rect(origin, x, y, 2.0, d.p1.1 - y), color));
+            window.paint_quad(fill(rect(origin, x, y, 2.0, d.p1.1 - y), line));
         }
     }
 }

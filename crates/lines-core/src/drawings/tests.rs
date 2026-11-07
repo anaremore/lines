@@ -2,6 +2,7 @@ use super::*;
 use crate::bars::BarSeries;
 use crate::price::{DisplayStyle, PriceScale};
 use crate::qty::Qty;
+use crate::style::LineType;
 use crate::timeframe::{Derived, Timeframe};
 
 const M: i64 = 60_000;
@@ -404,20 +405,102 @@ fn handles_reshape_one_anchor() {
         )
         .on_grid(25)
     );
-    assert_eq!(
-        Style {
-            color: 9,
+    let wild = Style {
+        line: LineStyle {
+            color: Color::Palette(9),
             width: 7,
-            dashed: true
-        }
-        .normalised(),
-        Style {
-            color: 1,
-            width: 2,
-            dashed: true
-        }
+            opacity: 0,
+            line: LineType::Dotted,
+        },
+        fill: FillStyle {
+            color: Color::Palette(6),
+            opacity: 200,
+        },
+        ..Style::DEFAULT
+    }
+    .normalised();
+    assert_eq!(wild.line.color, Color::Palette(1));
+    assert_eq!((wild.line.width, wild.line.opacity), (4, 10));
+    assert_eq!(wild.line.line, LineType::Dotted);
+    assert_eq!(
+        (wild.fill.color, wild.fill.opacity),
+        (Color::Palette(2), 100)
     );
     for tool in Tool::ALL {
         assert_eq!(Tool::from_key(tool.key()), Some(tool));
     }
+}
+
+fn projected(d: &Drawing) -> Option<Projected> {
+    let s = series();
+    let axis = TimeAxis::new(BarsView::fixed(s.bars(), M));
+    project(d, &axis, &vp())
+}
+
+/// Extensions run the line to the plot's edges; the anchors (handles) stay where they are.
+#[test]
+fn extend_left_and_right_reach_the_plot_edges() {
+    let base = trend(
+        ("2026-11-05T15:00:00Z", 600_100),
+        ("2026-11-05T15:20:00Z", 600_300),
+    );
+    let plain = projected(&base).unwrap();
+    let both = projected(&Drawing {
+        style: Style {
+            extend_left: true,
+            extend_right: true,
+            ..Style::DEFAULT
+        },
+        ..base.clone()
+    })
+    .unwrap();
+    assert_eq!(both.handles, plain.handles);
+    assert!(
+        both.p0.0 <= 0.5 || both.p0.1 <= 0.5 || both.p0.1 >= 399.5,
+        "{both:?}"
+    );
+    assert!(
+        both.p1.0 >= 799.5 || both.p1.1 <= 0.5 || both.p1.1 >= 399.5,
+        "{both:?}"
+    );
+    // Same slope as the segment.
+    let slope = |p: &Projected| (p.p1.1 - p.p0.1) / (p.p1.0 - p.p0.0);
+    assert!((slope(&both) - slope(&plain)).abs() < 1e-3);
+    // Only left: the right end stays at the second anchor.
+    let left = projected(&Drawing {
+        style: Style {
+            extend_left: true,
+            ..Style::DEFAULT
+        },
+        ..base.clone()
+    })
+    .unwrap();
+    assert_eq!(left.p1, plain.p1);
+    assert!(left.p0.0 < plain.p0.0);
+    // A vertical line ignores extension flags (not offered for it).
+    let mut v = base.clone();
+    v.tool = Tool::VLine;
+    v.style.extend_left = true;
+    assert_eq!(projected(&v).unwrap().p0.1, 0.0);
+    // A zone extended right reaches the right edge; a horizontal ray extended left the left.
+    let mut z = base.clone();
+    z.tool = Tool::Rect;
+    z.style.extend_right = true;
+    let pz = projected(&z).unwrap();
+    assert_eq!(pz.p0.0.max(pz.p1.0), 800.0);
+    assert_eq!(pz.handles, plain.handles);
+    let mut r = Drawing::new(Tool::HRay, base.a, base.a, Style::DEFAULT);
+    r.style.extend_left = true;
+    assert_eq!(projected(&r).unwrap().p0.0, 0.0);
+    // Prices for the axis tag are the anchors' exact prices.
+    assert_eq!(pz.prices, [Price(600_100), Price(600_300)]);
+}
+
+#[test]
+fn tool_capabilities() {
+    assert!(Tool::Rect.has_fill() && Tool::Measure.has_fill() && !Tool::Trend.has_fill());
+    assert!(Tool::Note.has_text() && !Tool::Note.has_stroke());
+    assert_eq!(Tool::Ray.extends(), (true, false));
+    assert_eq!(Tool::VLine.extends(), (false, false));
+    assert!(Tool::HLine.has_axis_tag() && !Tool::Trend.has_axis_tag());
 }
