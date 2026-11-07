@@ -123,10 +123,17 @@ pub enum TradeCmd {
     QtyDown,
     /// Cycle the bracket preset (none, 8/16, 12/24, 20/40 ticks).
     NextBracket,
+    /// The DOM header's order buttons (`dom_trade::QuickOrder`): gated by arming like ladder
+    /// clicks.
+    BuyMarket,
+    SellMarket,
+    JoinBid,
+    JoinAsk,
+    Reverse,
 }
 
 impl TradeCmd {
-    pub const ALL: [TradeCmd; 7] = [
+    pub const ALL: [TradeCmd; 12] = [
         TradeCmd::Flatten,
         TradeCmd::CancelAll,
         TradeCmd::ToggleArm,
@@ -134,7 +141,25 @@ impl TradeCmd {
         TradeCmd::QtyUp,
         TradeCmd::QtyDown,
         TradeCmd::NextBracket,
+        TradeCmd::BuyMarket,
+        TradeCmd::SellMarket,
+        TradeCmd::JoinBid,
+        TradeCmd::JoinAsk,
+        TradeCmd::Reverse,
     ];
+
+    /// The order a header button sends, for the order commands.
+    pub fn quick(self) -> Option<crate::dom_trade::QuickOrder> {
+        use crate::dom_trade::QuickOrder as Q;
+        Some(match self {
+            TradeCmd::BuyMarket => Q::BuyMarket,
+            TradeCmd::SellMarket => Q::SellMarket,
+            TradeCmd::JoinBid => Q::JoinBid,
+            TradeCmd::JoinAsk => Q::JoinAsk,
+            TradeCmd::Reverse => Q::Reverse,
+            _ => return None,
+        })
+    }
 }
 
 /// A key binding: modifiers plus GPUI's key name.
@@ -208,6 +233,12 @@ pub const BINDINGS: &[Binding] = &[
         "u",
     ),
     b(Command::CyclePnl, true, false, true, "p"),
+    // Header order buttons: Ctrl+Alt, never a bare or Shift-only key.
+    b(Command::Trade(TradeCmd::BuyMarket), true, false, true, "b"),
+    b(Command::Trade(TradeCmd::SellMarket), true, false, true, "s"),
+    b(Command::Trade(TradeCmd::JoinBid), true, false, true, "j"),
+    b(Command::Trade(TradeCmd::JoinAsk), true, false, true, "k"),
+    b(Command::Trade(TradeCmd::Reverse), true, false, true, "r"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
     b(
@@ -374,6 +405,11 @@ pub fn label(c: Command) -> String {
             TradeCmd::QtyUp => "Trade: Quantity up",
             TradeCmd::QtyDown => "Trade: Quantity down",
             TradeCmd::NextBracket => "Trade: Next bracket preset",
+            TradeCmd::BuyMarket => "Trade: Buy market (selected quantity)",
+            TradeCmd::SellMarket => "Trade: Sell market (selected quantity)",
+            TradeCmd::JoinBid => "Trade: Join bid (buy limit at the best bid)",
+            TradeCmd::JoinAsk => "Trade: Join ask (sell limit at the best ask)",
+            TradeCmd::Reverse => "Trade: Reverse position (market, twice the size)",
         }
         .into(),
     }
@@ -564,6 +600,28 @@ mod tests {
         assert!(
             filter("p&l display off", &p).contains(&Command::SetPnl(crate::pnl::PnlDisplay::Off))
         );
+    }
+
+    #[test]
+    fn header_order_buttons_have_ctrl_alt_keys() {
+        let ca = |k: &str| cmd(&format!("{}-alt-{k}", ctrl()));
+        assert_eq!(ca("b"), Some(Command::Trade(TradeCmd::BuyMarket)));
+        assert_eq!(ca("s"), Some(Command::Trade(TradeCmd::SellMarket)));
+        assert_eq!(ca("j"), Some(Command::Trade(TradeCmd::JoinBid)));
+        assert_eq!(ca("k"), Some(Command::Trade(TradeCmd::JoinAsk)));
+        assert_eq!(ca("r"), Some(Command::Trade(TradeCmd::Reverse)));
+        // Their neighbours stay what they were: Ctrl+Shift+B docks, Ctrl+Shift+S saves.
+        assert_eq!(
+            cmd(&format!("{}-shift-b", ctrl())),
+            Some(Command::DockBesideChart)
+        );
+        assert_eq!(cmd(&format!("{}-shift-s", ctrl())), Some(Command::SaveAs));
+        // No order fires from a bare letter, Shift or Alt alone.
+        for k in [
+            "b", "s", "r", "j", "k", "shift-b", "alt-b", "alt-s", "alt-r",
+        ] {
+            assert!(!matches!(cmd(k), Some(Command::Trade(_))), "{k}");
+        }
     }
 
     #[test]

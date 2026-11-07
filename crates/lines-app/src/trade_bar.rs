@@ -205,8 +205,75 @@ pub fn cant_trade<V: TradePane>(v: &V, cx: &App) -> Option<&'static str> {
     }
 }
 
-/// Run a trading command on a pane (header click, hotkey, palette). `issued`: the input time.
+/// What an order from this pane needs: account, contract, quantity, position, bracket, the
+/// inside market (ladder clicks, header buttons and their keys all build from this).
+pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &'static str> {
+    if let Some(why) = cant_trade(v, cx) {
+        return Err(why);
+    }
+    let t = Trading::try_global(cx).ok_or("trading is not running")?;
+    let pt = v.trade_ref();
+    let account = pt.account.clone().ok_or("no account")?;
+    let contract = contract_of(v.trade_store()).ok_or("contract unknown")?;
+    let position = t
+        .cache
+        .read()
+        .position(&account, contract)
+        .map_or(0, |p| p.qty);
+    let (best_bid, best_ask, last, tick) = v
+        .trade_store()
+        .try_read()
+        .map(|d| {
+            (
+                d.book.best_bid().map(|b| b.0).or(d.bid),
+                d.book.best_ask().map(|a| a.0).or(d.ask),
+                d.last_trade,
+                d.product.price.tick,
+            )
+        })
+        .ok_or("market data busy; try again")?;
+    Ok(dom_trade::EntryCtx {
+        account,
+        contract,
+        qty: qty(pt),
+        position,
+        bracket: pt.bracket,
+        tick,
+        best_bid,
+        best_ask,
+        last,
+    })
+}
+
+/// Run a trading command from a hotkey or the palette. `issued`: the input time.
 pub fn run<V: TradePane>(v: &mut V, cmd: TradeCmd, issued: Instant, cx: &mut Context<V>) {
+    run_from(v, cmd, issued, Source::Hotkey, cx);
+}
+
+/// Run a trading command; `source`: where it came from (header buttons: `Source::Dom`).
+pub fn run_from<V: TradePane>(
+    v: &mut V,
+    cmd: TradeCmd,
+    issued: Instant,
+    source: Source,
+    cx: &mut Context<V>,
+) {
+    if let Some(q) = cmd.quick() {
+        // Header order buttons and their keys: gated by arming exactly like ladder clicks.
+        let built = entry_ctx(v, cx)
+            .map_err(dom_trade::Refusal)
+            .and_then(|ctx| dom_trade::quick(q, v.trade_ref().arming, &ctx));
+        match built {
+            Ok(c) => {
+                if let Some(t) = Trading::try_global(cx) {
+                    t.submit(source, issued, c);
+                }
+            }
+            Err(dom_trade::Refusal(why)) => v.trade().flash(why),
+        }
+        cx.notify();
+        return;
+    }
     let why = cant_trade(v, cx);
     match cmd {
         TradeCmd::ToggleArm => {
@@ -237,7 +304,7 @@ pub fn run<V: TradePane>(v: &mut V, cmd: TradeCmd, issued: Instant, cx: &mut Con
                         contract: Some(contract),
                     }
                 };
-                t.submit(Source::Hotkey, issued, c);
+                t.submit(source, issued, c);
             }
         }
         TradeCmd::NextAccount => {
@@ -254,6 +321,11 @@ pub fn run<V: TradePane>(v: &mut V, cmd: TradeCmd, issued: Instant, cx: &mut Con
             let b = v.trade_ref().bracket;
             v.trade().bracket = next_bracket(b);
         }
+        TradeCmd::BuyMarket
+        | TradeCmd::SellMarket
+        | TradeCmd::JoinBid
+        | TradeCmd::JoinAsk
+        | TradeCmd::Reverse => {} // handled above
     }
     cx.notify();
 }
@@ -467,6 +539,7 @@ fn button<V: TradePane>(
 pub fn dom_bar<V: TradePane>(
     v: &V,
     product: &Product,
+    width: f32,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> Option<AnyElement> {
@@ -541,7 +614,7 @@ pub fn dom_bar<V: TradePane>(
                 .bg(t.warn)
                 .text_color(t.on_warn)
                 .font_weight(FontWeight::BOLD)
-                .child(format!("{n} UNRESOLVED · check the broker")),
+                .child(unresolved_label(n, width)),
         );
     }
     r1 = r1.child(div().flex_1());
@@ -629,6 +702,44 @@ pub fn dom_bar<V: TradePane>(
     r2 = r2
         .child(div().w(px(6.0)))
         .child(button("bracket", bracket, t, TradeCmd::NextBracket, cx));
+    // Order buttons: market buy/sell (up/down colours, each with its word), join bid/ask,
+    // reverse. Dimmed while disarmed; a click then says "Arm to trade" and sends nothing.
+    let labels = order_button_labels(width);
+    for (i, (cmd, tone)) in [
+        (TradeCmd::BuyMarket, Some(t.up)),
+        (TradeCmd::SellMarket, Some(t.down)),
+        (TradeCmd::JoinBid, None),
+        (TradeCmd::JoinAsk, None),
+        (TradeCmd::Reverse, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut b = div()
+            .id(("order-button", i))
+            .px_1()
+            .rounded_sm()
+            .border_1()
+            .cursor_pointer()
+            .font_weight(FontWeight::BOLD)
+            .child(labels[i]);
+        b = match (tone, armed) {
+            // Armed market buttons: filled in the side's colour.
+            (Some(c), true) => b.bg(c).border_color(c).text_color(t.bg),
+            (Some(c), false) => b.border_color(c).text_color(c),
+            (None, _) => b.border_color(t.axis_line).text_color(t.text_main),
+        };
+        if !armed {
+            b = b.opacity(0.45);
+        }
+        r2 = r2.child(b.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v: &mut V, _, _, cx| {
+                cx.stop_propagation();
+                run_from(v, cmd, Instant::now(), Source::Dom, cx);
+            }),
+        ));
+    }
     r2 = r2.child(div().flex_1());
     let mut arm = div()
         .id("arm")
@@ -742,6 +853,37 @@ fn rule_strip(d: &BarData, t: &Theme, mode: crate::pnl::PnlDisplay) -> gpui::Div
 fn money_abs(m: Money) -> String {
     let s = m.to_string();
     s.trim_start_matches('-').to_owned()
+}
+
+/// Below this header width the order buttons use short labels.
+pub const SHORT_LABELS_BELOW: f32 = 360.0;
+
+/// The narrowest DOM the trading header is designed for: every header item fits on a line of
+/// its own (rows wrap), so nothing overlaps (layout test below).
+#[cfg_attr(not(test), allow(dead_code))]
+pub const MIN_DOM_WIDTH: f32 = 240.0;
+
+/// Whether a header `width` calls for the short labels (0: not laid out yet, full labels).
+pub fn is_narrow(width: f32) -> bool {
+    width > 0.0 && width < SHORT_LABELS_BELOW
+}
+
+/// The order buttons' labels at a header `width` (0: not laid out yet, the full labels).
+pub fn order_button_labels(width: f32) -> [&'static str; 5] {
+    if is_narrow(width) {
+        ["B MKT", "S MKT", "J BID", "J ASK", "REV"]
+    } else {
+        ["Buy Mkt", "Sell Mkt", "Join Bid", "Join Ask", "Reverse"]
+    }
+}
+
+/// The unresolved-orders notice: with its advice where there is room, short in a narrow DOM.
+pub fn unresolved_label(n: usize, width: f32) -> String {
+    if is_narrow(width) {
+        format!("{n} UNRESOLVED")
+    } else {
+        format!("{n} UNRESOLVED · check the broker")
+    }
 }
 
 /// The account name (click: choose another) and the PAPER badge.
@@ -933,6 +1075,53 @@ mod tests {
                 "5998.00: bracket entry rejected: ES market is closed ×3".to_owned()
             ))
         );
+    }
+
+    /// The header at its narrowest (MIN_DOM_WIDTH): its rows wrap, so it never overlaps as
+    /// long as every item fits a line of its own. Widths at a wide 12 px glyph (7.5 px a
+    /// character, bold), plus each item's padding and border; worst-case dynamic text.
+    #[test]
+    fn header_fits_the_narrowest_dom() {
+        const CHAR: f32 = 7.5;
+        const ITEM_PAD: f32 = 2.0 * 8.0 + 2.0; // px_2 (the widest) + border
+        const ROW_PAD: f32 = 2.0 * 8.0; // px_2
+        let w = |s: &str| s.chars().count() as f32 * CHAR + ITEM_PAD;
+        let room = MIN_DOM_WIDTH - ROW_PAD;
+        let mut items: Vec<String> = vec![
+            "Paper 50K eval ▾".into(),
+            "PAPER".into(),
+            "SHORT 9999 @ 99999.125".into(),
+            "+999.9 t  -$99999.99".into(),
+            "Qty".into(),
+            "…".into(),
+            "9999_".into(),
+            "Bracket 20/40 t".into(),
+            "No bracket".into(),
+            "ARMED · click trades".into(),
+            "DISARMED".into(),
+        ];
+        items.push(unresolved_label(9, MIN_DOM_WIDTH));
+        items.extend(order_button_labels(MIN_DOM_WIDTH).map(String::from));
+        for i in &items {
+            assert!(w(i) <= room, "{i:?} ({} px) doesn't fit {room} px", w(i));
+        }
+        // Flatten and Cancel all stay together (one group that never wraps apart).
+        let group = w("Flatten") + 4.0 + w("Cancel all");
+        assert!(group <= room, "Flatten + Cancel all: {group} > {room}");
+        // Narrow DOMs use the short labels, wide ones the words.
+        assert_eq!(order_button_labels(MIN_DOM_WIDTH)[0], "B MKT");
+        assert_eq!(order_button_labels(SHORT_LABELS_BELOW - 1.0)[1], "S MKT");
+        assert_eq!(order_button_labels(SHORT_LABELS_BELOW)[0], "Buy Mkt");
+        assert_eq!(
+            order_button_labels(0.0)[4],
+            "Reverse",
+            "before the first layout"
+        );
+        // Both label sets keep the side's word, never colour alone.
+        for ws in [MIN_DOM_WIDTH, 800.0] {
+            let l = order_button_labels(ws);
+            assert!(l[0].to_lowercase().starts_with('b') && l[1].to_lowercase().starts_with('s'));
+        }
     }
 
     #[test]

@@ -256,6 +256,104 @@ pub fn click(
     })
 }
 
+// ---- header order buttons ----------------------------------------------------------------
+
+/// The header's order buttons (and their hotkeys): market buy/sell, join the best bid/ask,
+/// reverse. Gated by arming exactly like ladder clicks; the risk layer and prop rules apply
+/// in the core as for any order. Flatten and Cancel All are separate and never gated.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum QuickOrder {
+    BuyMarket,
+    SellMarket,
+    /// A buy limit at the best bid.
+    JoinBid,
+    /// A sell limit at the best ask.
+    JoinAsk,
+    /// One market order for twice the position, on the other side: long 2 becomes short 2.
+    Reverse,
+}
+
+/// What a disarmed DOM says when a header order button (or its key) is used.
+pub const ARM_TO_TRADE: &str = "Arm to trade";
+
+/// The command for a header order button. Brackets attach as for clicks (only to orders that
+/// open or add): a market order's exits are placed from the price it is expected to fill at
+/// (the best ask for a buy, the best bid for a sell, else the last trade). Reverse never
+/// carries a bracket: it closes the position before it opens the other side.
+pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeCommand, Refusal> {
+    if !arming.is_armed() {
+        return Err(Refusal(ARM_TO_TRADE));
+    }
+    let (side, qty, kind, bracket_at) = match q {
+        QuickOrder::BuyMarket => (
+            Side::Buy,
+            ctx.qty,
+            OrderKind::Market,
+            ctx.best_ask.or(ctx.last),
+        ),
+        QuickOrder::SellMarket => (
+            Side::Sell,
+            ctx.qty,
+            OrderKind::Market,
+            ctx.best_bid.or(ctx.last),
+        ),
+        QuickOrder::JoinBid => {
+            let p = ctx.best_bid.ok_or(Refusal("no bid to join"))?;
+            (Side::Buy, ctx.qty, OrderKind::Limit { price: p }, Some(p))
+        }
+        QuickOrder::JoinAsk => {
+            let p = ctx.best_ask.ok_or(Refusal("no ask to join"))?;
+            (Side::Sell, ctx.qty, OrderKind::Limit { price: p }, Some(p))
+        }
+        QuickOrder::Reverse => {
+            if ctx.position == 0 {
+                return Err(Refusal("no position to reverse"));
+            }
+            let side = if ctx.position > 0 {
+                Side::Sell
+            } else {
+                Side::Buy
+            };
+            let entry = OrderSpec {
+                account: ctx.account.clone(),
+                contract: ctx.contract,
+                side,
+                qty: Qty(ctx.position.abs() * 2),
+                kind: OrderKind::Market,
+            };
+            return Ok(TradeCommand::PlaceOrder(entry));
+        }
+    };
+    if qty.0 <= 0 {
+        return Err(Refusal("set a quantity first"));
+    }
+    let entry = OrderSpec {
+        account: ctx.account.clone(),
+        contract: ctx.contract,
+        side,
+        qty,
+        kind,
+    };
+    Ok(match (ctx.bracket, bracket_at) {
+        (Some(b), Some(at)) if opens_or_adds(side, ctx.position) => {
+            let s = side.sign();
+            let (stop, target) = (
+                b.stop_ticks as i64 * ctx.tick,
+                b.target_ticks as i64 * ctx.tick,
+            );
+            TradeCommand::PlaceBracket(BracketSpec {
+                entry,
+                take_profit: Some(Price(at.0 + s * target)),
+                stop_loss: Some(Price(at.0 - s * stop)),
+            })
+        }
+        (Some(_), None) if opens_or_adds(side, ctx.position) => {
+            return Err(Refusal("no market price yet to place the bracket from"));
+        }
+        _ => TradeCommand::PlaceOrder(entry),
+    })
+}
+
 // ---- working orders ----------------------------------------------------------------------
 
 /// How an order is drawn in the orders column (docs/design.md §3: distinct by shape, never
@@ -659,6 +757,121 @@ mod tests {
         let mut zero = c;
         zero.qty = Qty(0);
         assert!(click(DomColumn::Bid, Price(599_950), false, armed(), &zero).is_err());
+    }
+
+    #[test]
+    fn header_order_buttons() {
+        let c = ctx(); // bid 6000.00, ask 6000.25, qty 2, flat
+        let k = |q| quick(q, armed(), &c).unwrap();
+        // Market buy/sell at the selected quantity.
+        assert_eq!(
+            (
+                spec(&k(QuickOrder::BuyMarket)).side,
+                spec(&k(QuickOrder::BuyMarket)).kind
+            ),
+            (Side::Buy, OrderKind::Market)
+        );
+        assert_eq!(spec(&k(QuickOrder::SellMarket)).side, Side::Sell);
+        assert_eq!(spec(&k(QuickOrder::SellMarket)).qty, Qty(2));
+        // Join: a limit at the best bid (buy) / best ask (sell).
+        assert_eq!(
+            spec(&k(QuickOrder::JoinBid)).kind,
+            OrderKind::Limit {
+                price: Price(600_000)
+            }
+        );
+        assert_eq!(spec(&k(QuickOrder::JoinBid)).side, Side::Buy);
+        assert_eq!(
+            spec(&k(QuickOrder::JoinAsk)).kind,
+            OrderKind::Limit {
+                price: Price(600_025)
+            }
+        );
+        let mut no_book = c.clone();
+        (no_book.best_bid, no_book.best_ask) = (None, None);
+        assert_eq!(
+            quick(QuickOrder::JoinBid, armed(), &no_book),
+            Err(Refusal("no bid to join"))
+        );
+        // Disarmed: nothing is built, and the DOM says why.
+        for q in [
+            QuickOrder::BuyMarket,
+            QuickOrder::SellMarket,
+            QuickOrder::JoinBid,
+            QuickOrder::JoinAsk,
+            QuickOrder::Reverse,
+        ] {
+            assert_eq!(
+                quick(q, Arming::default(), &c),
+                Err(Refusal(ARM_TO_TRADE)),
+                "{q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_flips_with_one_market_order_for_twice_the_position() {
+        let mut c = ctx();
+        assert_eq!(
+            quick(QuickOrder::Reverse, armed(), &c),
+            Err(Refusal("no position to reverse"))
+        );
+        c.position = 2;
+        c.bracket = Some(BracketPreset {
+            stop_ticks: 8,
+            target_ticks: 16,
+        });
+        let r = quick(QuickOrder::Reverse, armed(), &c).unwrap();
+        assert!(
+            matches!(r, TradeCommand::PlaceOrder(_)),
+            "no bracket on a reverse"
+        );
+        let s = spec(&r);
+        assert_eq!(
+            (s.side, s.qty, s.kind),
+            (Side::Sell, Qty(4), OrderKind::Market)
+        );
+        c.position = -3;
+        let s2 = quick(QuickOrder::Reverse, armed(), &c).unwrap();
+        assert_eq!((spec(&s2).side, spec(&s2).qty), (Side::Buy, Qty(6)));
+    }
+
+    #[test]
+    fn header_buttons_attach_brackets_like_clicks() {
+        let mut c = ctx();
+        c.bracket = Some(BracketPreset {
+            stop_ticks: 8,
+            target_ticks: 16,
+        });
+        // Flat: a market buy is bracketed from the best ask it should fill at.
+        let TradeCommand::PlaceBracket(b) = quick(QuickOrder::BuyMarket, armed(), &c).unwrap()
+        else {
+            panic!("expected a bracket")
+        };
+        assert_eq!(b.take_profit, Some(Price(600_025 + 16 * ES)));
+        assert_eq!(b.stop_loss, Some(Price(600_025 - 8 * ES)));
+        // A market sell from the best bid.
+        let TradeCommand::PlaceBracket(b) = quick(QuickOrder::SellMarket, armed(), &c).unwrap()
+        else {
+            panic!("expected a bracket")
+        };
+        assert_eq!(b.take_profit, Some(Price(600_000 - 16 * ES)));
+        // Join bid: from the bid.
+        let TradeCommand::PlaceBracket(b) = quick(QuickOrder::JoinBid, armed(), &c).unwrap() else {
+            panic!("expected a bracket")
+        };
+        assert_eq!(b.stop_loss, Some(Price(600_000 - 8 * ES)));
+        // Long: a sell is an exit, never bracketed.
+        c.position = 2;
+        assert!(matches!(
+            quick(QuickOrder::SellMarket, armed(), &c).unwrap(),
+            TradeCommand::PlaceOrder(_)
+        ));
+        // No price at all: a bracketed market order is refused rather than sent unprotected.
+        let mut blind = ctx();
+        blind.bracket = c.bracket;
+        (blind.best_bid, blind.best_ask, blind.last) = (None, None, None);
+        assert!(quick(QuickOrder::BuyMarket, armed(), &blind).is_err());
     }
 
     #[test]
