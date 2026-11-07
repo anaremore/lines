@@ -128,6 +128,34 @@ pub enum Command {
     TickBarsContinuous,
     /// Drawings on the focused chart (roadmap 11; `crate::chart_draw`).
     Draw(DrawCmd),
+    /// Strategies (decision 0025; `crate::strategy_view`).
+    Strategy(StrategyCmd),
+}
+
+/// Strategy controls. Stop all acts on every instance from anywhere and is never gated;
+/// Start and Stop act on the strategy panel's selected instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrategyCmd {
+    /// Stop every strategy and flatten their positions (decision 0025's default).
+    StopAll,
+    /// Stop every strategy; protective exits stay and the positions become the trader's.
+    StopAllKeep,
+    /// Show the strategy panel: focus it, else open one in a new tab.
+    Open,
+    /// Start (arm) the selected strategy. Never from a key: starting is always deliberate.
+    Start,
+    /// Stop the selected strategy and flatten its position.
+    Stop,
+}
+
+impl StrategyCmd {
+    pub const ALL: [StrategyCmd; 5] = [
+        StrategyCmd::StopAll,
+        StrategyCmd::StopAllKeep,
+        StrategyCmd::Open,
+        StrategyCmd::Start,
+        StrategyCmd::Stop,
+    ];
 }
 
 /// Drawing actions on the focused chart. The drawings belong to its product: every chart of
@@ -386,6 +414,14 @@ pub const BINDINGS: &[Binding] = &[
         "u",
     ),
     b(Command::CyclePnl, true, false, true, "p"),
+    // Strategies (decision 0025): Stop all, from any pane.
+    b(
+        Command::Strategy(StrategyCmd::StopAll),
+        true,
+        true,
+        false,
+        "r",
+    ),
     // Header order buttons: Ctrl+Alt, never a bare or Shift-only key.
     b(Command::Trade(TradeCmd::BuyMarket), true, false, true, "b"),
     b(Command::Trade(TradeCmd::SellMarket), true, false, true, "s"),
@@ -452,7 +488,7 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
 /// Whether holding the key down repeats `cmd`. Never for arming or anything that sends or
 /// cancels orders: a held Ctrl+Alt+B must send one order, not one per key repeat.
 pub fn repeats(cmd: Command) -> bool {
-    !matches!(cmd, Command::Trade(_))
+    !matches!(cmd, Command::Trade(_) | Command::Strategy(_))
 }
 
 /// The hint shown for a command in menus and the palette: its first binding.
@@ -526,6 +562,7 @@ pub fn label(c: Command) -> String {
         Command::Toggle(PaneKind::Tape) => "Hide/show time & sales".into(),
         Command::Toggle(PaneKind::Chart) => "Hide/show chart".into(),
         Command::Toggle(PaneKind::Journal) => "Hide/show journal".into(),
+        Command::Toggle(PaneKind::Strategies) => "Hide/show strategies".into(),
         Command::ChartOnly => "Chart only (hide/restore linked DOM and T&S)".into(),
         Command::ShowHidden => "Show hidden panes".into(),
         Command::PopOut => "Pop out pane into its own window".into(),
@@ -601,6 +638,14 @@ pub fn label(c: Command) -> String {
             DrawCmd::Style => "Drawings: style of the selected drawing…".into(),
             DrawCmd::PinMeasure => "Drawings: pin measure".into(),
         },
+        Command::Strategy(c) => match c {
+            StrategyCmd::StopAll => "Strategies: Stop all (flatten their positions)",
+            StrategyCmd::StopAllKeep => "Strategies: Stop all, keep positions",
+            StrategyCmd::Open => "Open strategies",
+            StrategyCmd::Start => "Strategies: start the selected strategy (paper)",
+            StrategyCmd::Stop => "Strategies: stop the selected strategy (flatten)",
+        }
+        .into(),
         Command::Trade(t) => match t {
             TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
             TradeCmd::CancelAll => "Trade: Cancel all orders",
@@ -652,6 +697,7 @@ pub fn palette() -> Vec<Command> {
             PaneKind::Dom,
             PaneKind::Tape,
             PaneKind::Journal,
+            PaneKind::Strategies,
         ]
         .map(Command::SetKind),
     );
@@ -695,6 +741,7 @@ pub fn palette() -> Vec<Command> {
     );
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
     v.extend(TradeCmd::ALL.map(Command::Trade));
+    v.extend(StrategyCmd::ALL.map(Command::Strategy));
     v.extend(TradeCmd::PALETTE_ONLY.map(Command::Trade));
     v.push(Command::CyclePnl);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
@@ -963,14 +1010,33 @@ mod tests {
             assert!(!hint(Command::Trade(t)).is_empty(), "{t:?} has no key");
             assert!(p.contains(&Command::Trade(t)), "{t:?} not in the palette");
         }
+        // Flatten first; the strategies' stops (which flatten) are the only other matches.
         assert_eq!(
             filter("flatten", &p),
-            vec![Command::Trade(TradeCmd::Flatten)]
+            vec![
+                Command::Trade(TradeCmd::Flatten),
+                Command::Strategy(StrategyCmd::StopAll),
+                Command::Strategy(StrategyCmd::Stop)
+            ]
         );
         // The rest are in the palette, without keys of their own.
         for t in TradeCmd::PALETTE_ONLY {
             assert!(p.contains(&Command::Trade(t)), "{t:?} not in the palette");
             assert!(hint(Command::Trade(t)).is_empty(), "{t:?} has a key");
+        }
+        // Stop all strategies has a key (from any pane); starting one never does.
+        assert!(!hint(Command::Strategy(StrategyCmd::StopAll)).is_empty());
+        assert_eq!(
+            cmd(&format!("{}-shift-r", ctrl())),
+            Some(Command::Strategy(StrategyCmd::StopAll))
+        );
+        assert!(hint(Command::Strategy(StrategyCmd::Start)).is_empty());
+        assert!(!repeats(Command::Strategy(StrategyCmd::StopAll)));
+        for c in StrategyCmd::ALL {
+            assert!(
+                p.contains(&Command::Strategy(c)),
+                "{c:?} not in the palette"
+            );
         }
         // US English names: enable, disable, toggle (never "arm").
         for word in ["enable", "disable", "toggle"] {

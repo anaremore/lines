@@ -74,11 +74,17 @@ fn v2_to_v3(v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
-const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2, v2_to_v3];
+/// Version 4 added the `strategies` pane kind: every version 3 file is a valid version 4 file
+/// (an older build reports a file with a Strategies pane as newer instead of failing on it).
+fn v3_to_v4(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
+const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2, v2_to_v3, v3_to_v4];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 3,
+    current: 4,
     migrations: MIGRATIONS,
 };
 
@@ -1001,7 +1007,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 3"#), "{text}");
+        assert!(text.contains(r#""version": 4"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1332,7 +1338,7 @@ mod tests {
         }"#;
         let Decoded::Ok {
             value,
-            migrated_from: None,
+            migrated_from: Some(3),
         } = decode::<WorkspaceDoc>(&FORMAT, v3)
         else {
             panic!("v3 no longer reads")
@@ -1419,14 +1425,40 @@ mod tests {
     }
 
     #[test]
+    fn a_version_4_file_as_written_today_still_reads() {
+        // Pinned, as version 3 above: version 4 added the `strategies` pane kind.
+        let v4 = br#"{
+          "version": 4,
+          "name": "desk",
+          "windows": [{
+            "tabs": [{
+              "focused": 0,
+              "layout": {"split": {"axis": "row", "ratio": 0.6,
+                "first": {"pane": {"kind": "dom", "link": 0, "state": "shown"}},
+                "second": {"pane": {"kind": "strategies", "state": "shown"}}}}
+            }]
+          }]
+        }"#;
+        let Decoded::Ok {
+            value,
+            migrated_from: None,
+        } = decode::<WorkspaceDoc>(&FORMAT, v4)
+        else {
+            panic!("v4 no longer reads")
+        };
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        assert_eq!(leaves[1].kind, PaneKind::Strategies);
+    }
+
+    #[test]
     fn unversioned_and_newer_files_are_not_guessed_at() {
         assert!(matches!(
             decode::<WorkspaceDoc>(&FORMAT, br#"{"windows": []}"#),
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 4, "windows": 7}"#),
-            Decoded::Newer { found: 4 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 5, "windows": 7}"#),
+            Decoded::Newer { found: 5 }
         );
     }
 

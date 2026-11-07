@@ -53,6 +53,7 @@ use lines_trading::order::Order;
 use lines_trading::persist;
 use lines_trading::rules;
 use lines_trading::service::{Clock, Observer};
+use lines_trading::strategy::{StrategyId, StrategyState};
 use lines_trading::{
     AccountConfig, AccountId, AccountView, Command as TradeCommand, CommandId, Event, FeedBridge,
     MarketInput, OrderId, OrderKind, PaperBroker, PaperConfig, PositionView, Reject, RulePreset,
@@ -166,6 +167,9 @@ pub struct TradeState {
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
     guards: HashMap<AccountId, GuardView>,
+    /// Each strategy instance's state and reason, from `Event::Strategy` (decision 0025):
+    /// the core enforces it, so the strategy panel shows this over the host's view.
+    strategies: HashMap<StrategyId, (StrategyState, Option<String>)>,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -238,8 +242,19 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
-            // Strategies (decision 0025) have no pane yet: the strategy panel comes later.
-            Event::Strategy { .. } => None,
+            Event::Strategy {
+                id,
+                state,
+                reason,
+                removed,
+            } => {
+                if removed {
+                    self.strategies.remove(&id);
+                } else {
+                    self.strategies.insert(id, (state, reason));
+                }
+                None
+            }
             Event::Guardrail {
                 account,
                 state,
@@ -369,6 +384,23 @@ impl TradeState {
 
     pub fn account(&self, account: &AccountId) -> Option<&AccountView> {
         self.accounts.get(account)
+    }
+
+    /// Instances the core last reported Armed or Paused: they own their contract's position.
+    pub fn owning_strategies(&self) -> Vec<StrategyId> {
+        let mut v: Vec<StrategyId> = self
+            .strategies
+            .iter()
+            .filter(|(_, (s, _))| matches!(s, StrategyState::Armed | StrategyState::Paused))
+            .map(|(id, _)| *id)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A strategy instance's state and reason as the core last reported them.
+    pub fn strategy(&self, id: StrategyId) -> Option<(StrategyState, Option<&str>)> {
+        self.strategies.get(&id).map(|(s, r)| (*s, r.as_deref()))
     }
 
     /// The account's guardrail lockout, if one is in force (`None`: active).
@@ -1209,7 +1241,7 @@ impl Trading {
         self.handle.order_latency()
     }
 
-    #[cfg(test)]
+    /// The paper core's handle (the strategy host submits through it).
     pub fn handle(&self) -> &TradingHandle {
         &self.handle
     }
@@ -1266,6 +1298,11 @@ impl Trading {
         let v = self.venues.get(venue)?;
         let status = v.status.read().unwrap_or_else(|e| e.into_inner()).clone();
         Some((v.label.clone(), status))
+    }
+
+    /// How the paper core reads time (a replay's market clock, the wall clock live).
+    pub fn clock(&self) -> Clock {
+        self.clock
     }
 
     /// The account a new pane trades on.
@@ -1576,6 +1613,9 @@ pub enum Step {
     Ack,
     /// Use this account from here on.
     Account(AccountId),
+    /// Send the following commands from this source (`strategy N`: as that instance;
+    /// `manual`: as a person, the default).
+    Source(Source),
     /// Market time moves on (ms).
     Wait(i64),
     /// A synthetic market trade the trading core sees (paper fills, the journal's MAE/MFE);
@@ -1594,7 +1634,9 @@ pub enum Step {
 ///   guardrail for the account (roadmap 8b; the others unchanged);
 /// - `wait SECONDS` (market time moves on), `print PRICE [QTY]`: a synthetic market trade
 ///   only the trading core sees (resting orders fill, the journal's MAE/MFE move), for
-///   round trips in a screenshot of a finished replay.
+///   round trips in a screenshot of a finished replay;
+/// - `strategy N` (add instance N on the account and contract, arm it, send what follows as
+///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss).
 pub fn parse_script(
     s: &str,
     product: &lines_core::Product,
@@ -1638,6 +1680,48 @@ pub fn parse_script(
             ["account", id] => {
                 account = AccountId::new(id);
                 out.push(Step::Account(account.clone()));
+            }
+            // Strategies (decision 0025): add instance N on this account and contract (any
+            // hours, max 10, daily loss 100), arm it, and send what follows as it; `halt N`
+            // pauses it at its daily loss (the core's exact reason), as a person.
+            ["strategy", n] => {
+                let id = lines_trading::StrategyId(
+                    n.parse()
+                        .map_err(|_| anyhow!("strategy {n:?}: an instance number"))?,
+                );
+                let limits = lines_trading::StrategyLimits {
+                    max_position: 10,
+                    max_daily_loss: 100,
+                    max_orders_per_min: 60,
+                    hours: lines_trading::strategy::TradingHours {
+                        tz: "UTC".into(),
+                        windows: vec![lines_trading::strategy::HoursWindow::new("00:00", "23:59")],
+                    },
+                };
+                out.push(Step::Source(Source::Test));
+                out.push(Step::Command(TradeCommand::AddStrategy(
+                    lines_trading::StrategyConfig {
+                        id,
+                        label: format!("strategy #{}", id.0),
+                        account: account.clone(),
+                        contract,
+                        limits,
+                    },
+                )));
+                out.push(Step::Command(TradeCommand::ArmStrategy { id }));
+                out.push(Step::Source(Source::Strategy(id)));
+            }
+            ["manual"] => out.push(Step::Source(Source::Test)),
+            ["halt", n] => {
+                let id = lines_trading::StrategyId(
+                    n.parse()
+                        .map_err(|_| anyhow!("halt {n:?}: an instance number"))?,
+                );
+                out.push(Step::Source(Source::Test));
+                out.push(Step::Command(TradeCommand::PauseStrategy {
+                    id,
+                    reason: lines_trading::strategy::DAILY_LOSS.into(),
+                }));
             }
             ["flatten"] => out.push(Step::Command(TradeCommand::Flatten {
                 account: account.clone(),
@@ -1731,12 +1815,14 @@ impl Trading {
     /// the cache shows the result.
     pub fn run_script(&self, steps: &[Step], start: lines_core::UtcMillis, latency_ms: i64) {
         let mut t = start;
+        let mut source = Source::Test;
         self.advance_to(t);
         for s in steps {
             match s {
                 Step::Command(c) => {
-                    self.submit(Source::Test, Instant::now(), c.clone());
+                    self.submit(source, Instant::now(), c.clone());
                 }
+                Step::Source(s) => source = *s,
                 Step::Ack => {
                     t = lines_core::UtcMillis(t.0 + latency_ms + 1);
                     self.advance_to(t);
@@ -2639,6 +2725,28 @@ mod tests {
         ] {
             assert!(parse_script(bad, &es_product, es(), &a).is_err(), "{bad}");
         }
+        // `strategy N` adds a valid instance, arms it and sends what follows as it.
+        let steps = parse_script(
+            "strategy 3; buy 1 mkt; manual; halt 3",
+            &es_product,
+            es(),
+            &a,
+        )
+        .unwrap();
+        let Step::Command(TradeCommand::AddStrategy(cfg)) = &steps[1] else {
+            panic!("{:?}", steps[1])
+        };
+        assert_eq!(cfg.limits.validate(), Ok(()));
+        assert_eq!(cfg.contract, es());
+        assert_eq!(
+            steps[3],
+            Step::Source(Source::Strategy(lines_trading::StrategyId(3)))
+        );
+        assert!(matches!(
+            steps.last(),
+            Some(Step::Command(TradeCommand::PauseStrategy { reason, .. }))
+                if reason == lines_trading::strategy::DAILY_LOSS
+        ));
     }
 }
 

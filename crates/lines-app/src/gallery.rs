@@ -233,6 +233,21 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     j.push("--paper".into());
     j.push("buy 2 mkt; ack; print 6011.50; wait 20; sell 2 mkt; ack".into());
     v.push(s("journal", false, end, j));
+    // The strategy panel (decision 0025) on the synthetic instances, beside a DOM.
+    let mut st = vec![
+        "--workspace".into(),
+        ws("strategies.json"),
+        "--size".into(),
+        "1400x800".into(),
+        "--strategies-demo".into(),
+    ];
+    st.push("--paper".into());
+    // #3 trades a losing round trip as itself (its stop is hit), and the core halts it at
+    // its daily loss.
+    st.push(
+        "strategy 3; buy 10 mkt; ack; sell 10 stop 6018.00; ack; print 6018.00; ack; manual".into(),
+    );
+    v.push(s("strategies", true, end, st));
     if let Some(p) = v.iter_mut().find(|s| s.name == "popout") {
         p.windows = 2;
     }
@@ -425,6 +440,11 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         pane("dom", ""),
         pane("journal", "")
     );
+    let strategies = format!(
+        r#"{{ "split": {{ "axis": "row", "ratio": 0.35, "first": {}, "second": {} }} }}"#,
+        pane("dom", ""),
+        pane("strategies", "")
+    );
     let anchor =
         |t: &str, p: i64| format!(r#"{{ "time": "2026-11-05T{t}:00.000Z", "price": {p} }}"#);
     let drawings = format!(
@@ -524,6 +544,7 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ("footprint.json", footprint),
         ("footprint-500t.json", footprint_500t),
         ("journal.json", journal),
+        ("strategies.json", strategies),
     ] {
         std::fs::write(dir.join(f), doc(layout)).with_context(|| f.to_owned())?;
     }

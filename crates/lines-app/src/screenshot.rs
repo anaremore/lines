@@ -51,6 +51,8 @@ pub struct Shot {
     pub arm: bool,
     /// A synthetic read-only broker; the panes trade its SIM account (`--demo-broker`).
     pub demo_broker: bool,
+    /// Synthetic strategy instances for the strategy panel (`--strategies-demo`).
+    pub strategies_demo: bool,
     /// Charts and DOMs start with the account list open (`--account-menu`).
     pub account_menu: bool,
     /// The P&L display (`--pnl`; default: the app's default).
@@ -128,6 +130,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         paper,
         arm,
         demo_broker,
+        strategies_demo,
         account_menu,
         pnl,
         drawings: seed,
@@ -166,6 +169,23 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     }
     trading.start_account_menu = account_menu;
     trading.start_editor = bracket_editor;
+    let strategies = if strategies_demo {
+        let d = feeds
+            .iter()
+            .map(|f| f.store().read())
+            .find(|d| d.contract.is_some())
+            .ok_or_else(|| anyhow!("--strategies-demo: the recording has no contract"))?;
+        let account = trading
+            .default_account()
+            .ok_or_else(|| anyhow!("--strategies-demo: no paper account"))?;
+        Some(crate::strategy_panel::DemoStrategies::sample(
+            &account,
+            d.contract.expect("checked"),
+            d.market_time.unwrap_or(lines_core::UtcMillis(0)),
+        ))
+    } else {
+        None
+    };
     let account_ids: Vec<String> = trading.accounts().iter().map(|a| a.id.0.clone()).collect();
     let script = match &paper {
         Some(s) => {
@@ -201,6 +221,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         let _keep = &feeds;
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
+        if let Some(s) = strategies {
+            cx.set_global(crate::strategy_panel::Strategies(std::sync::Arc::new(s)));
+        }
         let mut settings = AppSettings::ephemeral();
         if let Some(m) = pnl {
             settings.settings.pnl_display = m;

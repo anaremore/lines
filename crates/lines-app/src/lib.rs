@@ -44,6 +44,9 @@ mod redact;
 mod screenshot;
 mod settings_schema;
 mod settings_view;
+mod strategy_host;
+mod strategy_panel;
+mod strategy_view;
 mod studies;
 mod study_menu;
 mod study_menu_view;
@@ -457,6 +460,11 @@ struct Cli {
     /// the panes trade its SIM account, long 2 with a working order on the recording's contract.
     #[arg(long, requires = "screenshot")]
     demo_broker: bool,
+    /// Screenshot: a fixed set of synthetic strategy instances (armed, paused, halted at the
+    /// daily loss limit, not started) on the paper account and the recording's contract, for
+    /// the strategy panel until the strategy host runs in the app.
+    #[arg(long, requires = "screenshot")]
+    strategies_demo: bool,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -508,6 +516,16 @@ struct Cli {
     /// only: nothing reaches a live broker.
     #[arg(long, requires_all = ["backtest_config", "headless"], conflicts_with = "backtest")]
     run_strategy: Option<String>,
+    /// Run a strategy (decision 0025) in the app, on the paper broker, on this run's feed (the
+    /// source's default contract, or --instrument). It starts stopped: Start in the strategy
+    /// panel (palette: "Open strategies") arms it; Stop all (Ctrl+Shift+R) stops it and
+    /// flattens. Its settings come from --backtest-config. Paper only.
+    #[arg(
+        long,
+        requires = "backtest_config",
+        conflicts_with_all = ["backtest", "run_strategy", "headless", "screenshot"]
+    )]
+    strategy: Option<String>,
     /// Write the backtest's full report here (JSON: inputs with hashes, trades, every decision
     /// with its reason and result); with --run-strategy, the run's fills, final state and
     /// decisions. Without it only the summary is printed.
@@ -1204,11 +1222,15 @@ where
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
     }
 
-    if (cli.backtest_config.is_some() || cli.report.is_some())
+    if cli.backtest_config.is_some()
         && cli.backtest.is_none()
         && cli.run_strategy.is_none()
+        && cli.strategy.is_none()
     {
-        bail!("--backtest-config and --report go with --backtest or --run-strategy");
+        bail!("--backtest-config goes with --backtest, --run-strategy or --strategy");
+    }
+    if cli.report.is_some() && cli.backtest.is_none() && cli.run_strategy.is_none() {
+        bail!("--report goes with --backtest or --run-strategy");
     }
     if let Some(name) = &cli.backtest {
         return run_backtest(&cli, &ext, name);
@@ -1376,6 +1398,7 @@ where
                 paper: cli.paper.clone(),
                 arm: cli.arm,
                 demo_broker: cli.demo_broker,
+                strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
                 pnl: cli.pnl.map(PnlArg::mode),
                 drawings,
@@ -1469,6 +1492,21 @@ where
     // Broker extensions (decision 0020): each runs beside the paper core.
     setup.brokers = ext.brokers().to_vec();
     let trading = trading::Trading::start(setup, registry.clone(), config.clone());
+    // `--strategy`: the strategy host on the paper core (decision 0025).
+    let strategies = match &cli.strategy {
+        Some(name) => {
+            let strategy = find_strategy(&ext, name)?;
+            let settings = strategy_settings(&cli)?;
+            Some(strategy_host::start(
+                strategy,
+                settings,
+                &registry,
+                config.clone(),
+                &trading,
+            )?)
+        }
+        None => None,
+    };
     // Kept to flush the journal's last records on quit.
     let journal = trading.journal.clone();
     if let Some(r) = &trading.report {
@@ -1488,6 +1526,9 @@ where
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
+        if let Some(s) = strategies {
+            cx.set_global(strategy_panel::Strategies(Arc::new(s)));
+        }
         cx.set_global(settings);
         cx.set_global(drawings);
         cx.set_global(ws);
