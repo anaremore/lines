@@ -26,8 +26,10 @@ pub struct EconLayer {
     schedule: Arc<EconSchedule>,
     /// This frame's marks: plot-local x, the event's release, high importance.
     marks: Vec<(f32, usize, bool)>,
-    /// Shaped tags by release (built once each).
+    /// Shaped tags by release (built once each), and the colors they were shaped in: a
+    /// theme or palette change shapes them again.
     shaped: HashMap<(usize, bool), ShapedLine>,
+    shaped_in: Option<(gpui::Hsla, gpui::Hsla)>,
 }
 
 impl EconLayer {
@@ -36,6 +38,7 @@ impl EconLayer {
             schedule: crate::econ_ui::schedule(),
             marks: Vec::with_capacity(MAX_MARKS),
             shaped: HashMap::new(),
+            shaped_in: None,
         }
     }
 }
@@ -73,8 +76,14 @@ impl ChartLayer for EconLayer {
         if r.is_empty() {
             return;
         }
-        let (from, to) = (bars.bars[r.start].time, bars.end(r.end - 1));
         let axis = lines_core::drawings::TimeAxis::new(bars);
+        // To the plot's right edge: a release ahead of the last bar shows in the margin.
+        let from = bars.bars[r.start].time;
+        let right_slot = vp.x_to_index(vp.width).ceil() as i64;
+        let to = axis
+            .slot_time(right_slot + 1)
+            .unwrap_or_else(|| bars.end(r.end - 1))
+            .max(bars.end(r.end - 1));
         for (at, release, high) in marks_in(&self.schedule, data.product.symbol, from, to) {
             if self.marks.len() == MAX_MARKS {
                 break;
@@ -97,6 +106,10 @@ impl ChartLayer for EconLayer {
             return;
         }
         let t = theme;
+        if self.shaped_in != Some((t.on_warn, t.text_main)) {
+            self.shaped.clear();
+            self.shaped_in = Some((t.on_warn, t.text_main));
+        }
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));

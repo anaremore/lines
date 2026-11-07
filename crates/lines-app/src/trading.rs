@@ -2749,6 +2749,24 @@ mod tests {
         );
     }
 
+    /// `guard news warn|block|flatten` sets the account's news blackout (screenshots).
+    #[test]
+    fn scripts_set_a_news_blackout() {
+        let es_product = catalog::get(catalog::ES).unwrap();
+        let a = AccountId::new("paper");
+        let steps = parse_script("guard news block", &es_product, es(), &a).unwrap();
+        assert!(
+            steps.iter().any(|s| matches!(
+                s,
+                Step::Command(TradeCommand::SetGuardrails { guardrails, .. })
+                    if guardrails.news.map(|n| n.action)
+                        == Some(lines_trading::news::NewsAction::Block)
+            )),
+            "{steps:?}"
+        );
+        assert!(parse_script("guard news loud", &es_product, es(), &a).is_err());
+    }
+
     #[test]
     fn scripts_parse_into_commands() {
         let es_product = catalog::get(catalog::ES).unwrap();

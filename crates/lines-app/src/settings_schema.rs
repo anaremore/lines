@@ -1187,7 +1187,7 @@ fn table() -> Vec<Setting> {
         s(
             "guard.news_before",
             Sec::Risk,
-            "News: minutes before",
+            "News blackout: minutes before",
             "The blackout starts this many minutes before the release.",
             Scope::Account,
             Trading,
@@ -1203,7 +1203,7 @@ fn table() -> Vec<Setting> {
         s(
             "guard.news_after",
             Sec::Risk,
-            "News: minutes after",
+            "News blackout: minutes after",
             "The blackout ends this many minutes after the release.",
             Scope::Account,
             Trading,
@@ -1219,8 +1219,8 @@ fn table() -> Vec<Setting> {
         s(
             "guard.news_medium",
             Sec::Risk,
-            "News: medium releases too",
-            "Also PPI, GDP and PCE.",
+            "News blackout: medium releases too",
+            "The blackout also covers PPI, GDP and PCE (charts mark them either way).",
             Scope::Account,
             Trading,
             Toggle,
@@ -2364,6 +2364,44 @@ mod tests {
         let mut p = Prefs::default();
         daily.apply(&mut p, &t, Value::Number(Some(1_000))).unwrap();
         assert_eq!(status(daily, &p, &t, &f), None);
+    }
+
+    /// The news blackout rows: minutes need the rule on; changing the action keeps the
+    /// minutes; Warn and Off loosen (asked, next session), Flatten tightens; Off drops an
+    /// entry left empty.
+    #[test]
+    fn the_news_blackout_is_a_guardrail() {
+        let t = risk_target();
+        let mut p = Prefs::default();
+        let news = by_key("guard.news").unwrap();
+        let before = by_key("guard.news_before").unwrap();
+        assert_eq!(
+            before.apply(&mut p, &t, Value::Number(Some(5))),
+            Err("turn the news blackout on first")
+        );
+        news.apply(&mut p, &t, Value::Choice(2)).unwrap();
+        before.apply(&mut p, &t, Value::Number(Some(5))).unwrap();
+        by_key("guard.news_medium")
+            .unwrap()
+            .apply(&mut p, &t, Value::Bool(true))
+            .unwrap();
+        let g0 = t.guardrails(&p);
+        assert_eq!(
+            g0.news.map(|n| (n.action, n.before_min, n.include_medium)),
+            Some((lines_trading::news::NewsAction::Block, 5, true))
+        );
+        let with = |k: usize| {
+            let mut q = p.clone();
+            news.apply(&mut q, &t, Value::Choice(k)).unwrap();
+            q
+        };
+        let warn = with(1);
+        assert_eq!(t.guardrails(&warn).news.map(|n| n.before_min), Some(5));
+        assert!(loosens(&g0, &t.guardrails(&warn)));
+        assert!(!loosens(&g0, &t.guardrails(&with(3))), "flatten is tighter");
+        let off = with(0);
+        assert!(loosens(&g0, &t.guardrails(&off)));
+        assert!(off.app.guardrails.is_empty(), "an empty entry is dropped");
     }
 
     #[test]

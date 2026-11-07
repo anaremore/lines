@@ -1547,8 +1547,13 @@ pub fn dom_bar<V: TradePane>(
                 t,
             )),
             // The calendar: a blackout (or a calendar that can't answer) as a strip; a
-            // release coming as a quiet line.
-            (None, None, None) if d.news.is_some() => {
+            // release coming as a quiet line, unless a narrow panel needs the line for why
+            // orders are denied.
+            (None, None, None)
+                if d.news.as_ref().is_some_and(|(warns, _)| {
+                    *warns || !(narrow && enabled && blocker.is_some())
+                }) =>
+            {
                 let (warns, text) = d.news.as_ref().expect("checked");
                 if *warns {
                     let tail = if d.news_block.is_some() {
@@ -1558,12 +1563,13 @@ pub fn dom_bar<V: TradePane>(
                     };
                     status.child(lock_strip(text, tail, narrow, t))
                 } else {
-                    status.child(
-                        div()
-                            .min_w_0()
-                            .text_color(t.text_dim)
-                            .child(format!("Scheduled release: {text}")),
-                    )
+                    // Whole words only: a countdown is never cut.
+                    let line = if narrow {
+                        text.clone()
+                    } else {
+                        format!("Scheduled release: {text}")
+                    };
+                    status.child(whole_items(&line, t.text_dim, false))
                 }
             }
             // Narrow: the switch shows only "!", the reason is here.

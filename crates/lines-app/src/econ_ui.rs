@@ -106,7 +106,7 @@ pub fn chip_text(c: &Chip, now: UtcMillis) -> String {
             until,
             refusing,
         } => format!(
-            "News blackout{} · {title} · {} left",
+            "News blackout{} · {title} · ends in {}",
             if *refusing { "" } else { " (warn)" },
             countdown(now, *until)
         ),
@@ -124,7 +124,8 @@ pub fn chip_text(c: &Chip, now: UtcMillis) -> String {
 pub fn blocker(c: &Chip) -> Option<&'static str> {
     match c {
         Chip::Blackout { refusing: true, .. } => Some("news blackout"),
-        Chip::Unknown { .. } => Some("calendar out of date"),
+        Chip::Unknown { reason } if reason.contains("stale") => Some("calendar out of date"),
+        Chip::Unknown { .. } => Some("no calendar for this date"),
         _ => None,
     }
 }
@@ -217,7 +218,7 @@ source https://www.bls.gov/schedule/news_release/ppi.htm
         let c = chip(Some(&s), Some(&block), "ES", now).unwrap();
         assert_eq!(
             chip_text(&c, now),
-            "News blackout · CPI, October 2026 · 2:30 left"
+            "News blackout · CPI, October 2026 · ends in 2:30"
         );
         assert_eq!(blocker(&c), Some("news blackout"));
         assert!(warns(&c));
@@ -240,11 +241,12 @@ source https://www.bls.gov/schedule/news_release/ppi.htm
             chip_text(&c, now),
             "No economic calendar loaded: entries refused"
         );
-        assert_eq!(blocker(&c), Some("calendar out of date"));
+        assert_eq!(blocker(&c), Some("no calendar for this date"));
         let s = schedule();
         let later = at("2027-03-10T15:00:00Z");
         let c = chip(Some(&s), Some(&block), "ES", later).unwrap();
         assert!(matches!(c, Chip::Unknown { .. }), "stale: {c:?}");
+        assert_eq!(blocker(&c), Some("calendar out of date"));
         let warn = NewsBlackout::new(NewsAction::Warn);
         assert_eq!(chip(None, Some(&warn), "ES", now), None);
     }
