@@ -46,3 +46,10 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 
 ## Checking a UI change
 Every UI PR (template checklist) confirms: tokens only, no paint-path allocation, both themes, readable at DPI 1.0 and 2.0, states unambiguous, and before/after screenshots (decision 0009).
+
+Three layers check every UI change, cheapest first:
+1. **Layout checks in tests** (deterministic): no overlapping or clipped text, minimum hit targets, spacing on the scale, AA contrast, across the scene set.
+2. **Screenshot evidence** from the gallery scenes the change touches, before and after.
+3. **Visual review** (`review-loop`): three fresh `ui-reviewer` agents (scalper, prop evaluator, accessibility) score the screenshots against this document and must point at a region for every finding.
+
+The owner's live check stays the final word on feel: hover, drag, latency and anything a still image can't show.
