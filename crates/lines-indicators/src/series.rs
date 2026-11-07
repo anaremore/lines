@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use lines_core::{Aggressor, Bar, BarSeries, Price, Qty, Stitcher, UtcMillis};
+use lines_core::{Aggressor, Bar, BarSeries, Price, Print, Qty, Stitcher, UtcMillis};
 
 /// Exact integer sums for a volume-weighted average, scaled so trades and bar typical prices
 /// share one form: a trade at `p` × `v` adds `3pv` and `9p²v`; a bar adds `(H+L+C)·v` and
@@ -179,6 +179,16 @@ pub enum Input {
     Gap,
     /// The feed moved to another contract (a roll): start over.
     Reset,
+    /// Bars from the local store's cache, before the feed connects (decision 0019): the
+    /// chart's bars from the start, bar-derived until stored trades say otherwise.
+    Cached(Vec<Bar>),
+    /// Stored trades replayed at startup (`lines_feed::disk::orderflow`): they add to the
+    /// trade sums but never to the bars (the cached bars hold them), and `covered` (inclusive
+    /// ms) is complete. A live trade at or before the newest covered time is already counted.
+    Stored {
+        trades: Vec<Print>,
+        covered: Vec<(i64, i64)>,
+    },
 }
 
 /// Inclusive `[from, to]` ms ranges where the trade stream was complete.
@@ -226,6 +236,8 @@ pub struct MarketSeries {
     /// After a gap: the next trade starts a new run.
     restart_on_trade: bool,
     newest_trade: Option<i64>,
+    /// Newest stored trade time replayed (`Input::Stored`).
+    stored_through: Option<i64>,
     complete: Complete,
     buckets: Vec<Bucket>,
     /// Evaluations (inputs batches applied), for tests and stats.
@@ -244,6 +256,7 @@ impl MarketSeries {
             awaiting_history: false,
             restart_on_trade: false,
             newest_trade: None,
+            stored_through: None,
             complete: Complete::default(),
             buckets: Vec::with_capacity(max_buckets.min(1 << 16)),
             batches: 0,
@@ -301,7 +314,9 @@ impl MarketSeries {
                         self.restart_on_trade = false;
                         self.run_start = Some(time.0);
                     }
-                    if self.stitch.trade(&mut self.bars, *time, *price, *qty) {
+                    if self.stitch.trade(&mut self.bars, *time, *price, *qty)
+                        && self.stored_through.is_none_or(|s| time.0 > s)
+                    {
                         let b = time.0.div_euclid(p) * p;
                         let t = self.trades.entry(b).or_default();
                         t.sums.add(&Sums::trade(*price, *qty));
@@ -349,6 +364,28 @@ impl MarketSeries {
                 Input::Reset => {
                     *self = MarketSeries::new(self.period_ms, self.bars.max_len());
                     dirty = Some(i64::MIN);
+                }
+                Input::Cached(bars) => {
+                    for b in bars {
+                        self.bars.upsert(*b);
+                    }
+                    if let Some(b) = bars.first() {
+                        mark(b.time.0, &mut dirty);
+                    }
+                }
+                Input::Stored { trades, covered } => {
+                    for t in trades {
+                        let b = t.time.0.div_euclid(p) * p;
+                        let s = self.trades.entry(b).or_default();
+                        s.sums.add(&Sums::trade(t.price, t.qty));
+                        s.delta.trade(t.qty, t.aggressor);
+                        mark(t.time.0, &mut dirty);
+                    }
+                    for &(a, b) in covered {
+                        self.complete.add(a, b);
+                        self.stored_through = Some(self.stored_through.map_or(b, |s| s.max(b)));
+                        mark(a, &mut dirty);
+                    }
                 }
             }
         }

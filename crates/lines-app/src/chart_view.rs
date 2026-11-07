@@ -3014,6 +3014,10 @@ impl ChartView {
             let _ = write!(right, "  ·  {}", d.status.label());
         }
         // History back-fill is shown as state, not a spinner (docs/design.md).
+        if d.orderflow_loading {
+            // Stored trades are replaying into the profile, footprint and delta (bars first).
+            right.push_str("  ·  loading order flow…");
+        }
         if let Some(h) = d.history.label() {
             let _ = write!(right, "  ·  {h}");
         }

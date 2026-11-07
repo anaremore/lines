@@ -18,6 +18,8 @@
 //!   size budget, and the trade-date partition key.
 //! - [`replay`]: a stored contract (or one day of it) replays like a recording, through the
 //!   `lines` provider.
+//! - [`orderflow`]: at feed startup, the stored trades of the covered ranges replay into the
+//!   order-flow consumers (profile, footprint, VAP, tape, the indicator engine).
 //!
 //! Stored data may be licensed (decision 0010): it stays in the local data directory, is never
 //! synced or uploaded, and must never be committed.
@@ -25,6 +27,7 @@
 pub mod bars;
 pub mod coverage;
 mod crc;
+pub mod orderflow;
 pub mod partition;
 pub mod replay;
 pub mod retention;
