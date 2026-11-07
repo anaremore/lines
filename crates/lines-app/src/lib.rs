@@ -16,6 +16,7 @@ mod drawings_store;
 mod dropdown;
 mod feeds;
 mod footprint;
+mod icons;
 mod journal_view;
 mod latency_hud;
 mod layout;
@@ -407,6 +408,10 @@ struct Cli {
     /// Screenshot: DOMs open their bracket-preset editor.
     #[arg(long, requires = "screenshot")]
     bracket_editor: bool,
+    /// Screenshot: draw the focused pane's header controls as if the pointer were over the
+    /// pane (no OS pointer involved).
+    #[arg(long, requires = "screenshot")]
+    hover_header: bool,
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
@@ -993,6 +998,7 @@ where
                 drawings,
                 bracket_units: cli.bracket_units.map(BracketUnitsArg::units),
                 bracket_editor: cli.bracket_editor,
+                hover_header: cli.hover_header,
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);

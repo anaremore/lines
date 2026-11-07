@@ -131,14 +131,11 @@ impl Render for PaneWindow {
         // Controls only while the pointer is over this window (no permanent chrome).
         let controls = window.is_window_hovered().then(|| {
             let kind = self.handle.kind();
-            let labels = crate::pane::control_labels(kind, true);
             header_controls(
                 &t,
                 kind,
-                vec![
-                    (labels[0], Command::DockBesideChart, false),
-                    (labels[1], Command::Reattach, false),
-                ],
+                true,
+                false,
                 |this: &mut Self, cmd, _, window, cx| this.run(cmd, window, cx),
                 self.id,
                 cx,
@@ -254,4 +251,25 @@ pub fn all(cx: &App) -> Vec<(WindowHandle<PaneWindow>, (f32, f32))> {
         .iter()
         .filter_map(|w| w.read(cx).ok().map(|pw| (*w, pw.opened)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::PaneKind;
+
+    /// Every control a pane window's header shows is a command the window runs.
+    #[test]
+    fn detached_controls_all_run_here() {
+        for kind in [
+            PaneKind::Chart,
+            PaneKind::Dom,
+            PaneKind::Tape,
+            PaneKind::Journal,
+        ] {
+            for c in crate::pane::controls(kind, true) {
+                assert_eq!(command(c.cmd), Some(c.cmd), "{kind:?} {}", c.name);
+            }
+        }
+    }
 }

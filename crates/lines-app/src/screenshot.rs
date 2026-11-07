@@ -59,6 +59,8 @@ pub struct Shot {
     pub bracket_units: Option<crate::brackets::BracketUnits>,
     /// DOMs open their bracket-preset editor (`--bracket-editor`).
     pub bracket_editor: bool,
+    /// The focused pane's header controls show (`--hover-header`).
+    pub hover_header: bool,
 }
 
 pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
@@ -113,6 +115,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         drawings: seed,
         bracket_units,
         bracket_editor,
+        hover_header,
     } = shot;
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut trading = Trading::start(
@@ -178,7 +181,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         ));
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);
-        if let Err(e) = capture(cx, window, out, size, scale, script) {
+        if let Err(e) = capture(cx, window, out, size, scale, script, hover_header) {
             fail(&e);
         }
     });
@@ -205,12 +208,16 @@ fn capture(
     (w, h): (f32, f32),
     scale: Option<f32>,
     script: Option<(Vec<crate::trading::Step>, lines_core::UtcMillis)>,
+    hover_header: bool,
 ) -> Result<()> {
     let handle = workspace::open_doc_window(
         &window,
         Some(workspace::hidden_window("Lines (screenshot)", (w, h))),
         cx,
     )?;
+    if hover_header {
+        handle.update(cx, |v, _, cx| v.hover_focused_pane(cx))?;
+    }
     // The panes now follow their feeds (the core has the book): run the script and wait for
     // its events to reach the panes.
     let t = cx.global::<Trading>();

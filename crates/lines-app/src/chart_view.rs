@@ -2959,16 +2959,39 @@ impl ChartView {
                         .child(div().text_color(t.text_main).child(left))
                         .child(timeframe)
                         .children(account)
-                        .children(quotes)
                         .children(pane::stale_badge(&self.store, &t))
                         .children(self.clock_warning(&t)),
                 )
+                // Last, bid, ask: whole or not at all. One wrapping line, clipped to its
+                // height: a quote that doesn't fit moves to the hidden second line, so a
+                // narrow chart never shows half a price.
                 .child(
                     div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
                         .min_w_0()
-                        .truncate()
-                        .text_color(t.text_dim)
-                        .child(right),
+                        .h(px(QUOTE_ROW_H))
+                        .line_height(px(QUOTE_ROW_H))
+                        .overflow_hidden()
+                        .children(quotes),
+                )
+                // Status text takes only what the quotes leave (it gives way first), at the
+                // right end, cut with "…".
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(t.text_dim)
+                                .child(right),
+                        ),
                 ),
         )
     }
@@ -3238,6 +3261,9 @@ fn last_tag_y(vp: &Viewport, p: Price, plot_h: f32) -> f32 {
 fn cross_tag_y(y: f32, plot_h: f32) -> f32 {
     y.min(plot_h - TAG_H * 0.5).max(TAG_H * 0.5)
 }
+
+/// The header's quote row: one line, its line height set to this (`text_sm` fits).
+const QUOTE_ROW_H: f32 = 20.0;
 
 /// A header quote: `bid 6005.25`, or `bid —` (and `true`: show it dimmed) without a value.
 fn quote_text(label: &str, p: Option<Price>, f: &lines_core::PriceFormat) -> (String, bool) {
