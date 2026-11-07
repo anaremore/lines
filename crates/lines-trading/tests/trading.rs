@@ -2062,6 +2062,7 @@ fn growing_an_order_meets_risk_limits_and_the_contract_cap() {
         consistency: None,
         liquidate_on_breach: false,
         on_breach: Default::default(),
+        news: None,
     };
     let mut cfg = prop_account(preset);
     cfg.limits = RiskLimits {
