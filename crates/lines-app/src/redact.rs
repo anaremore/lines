@@ -48,7 +48,7 @@ const SENSITIVE_EXACT: &[&str] = &["key", "sig", "signature", "nonce"];
 /// Endings that mark a signing or API-key name (`access_key`, `X-Amz-Signature`,
 /// `API-Sign`), and the ordinary words that share them.
 const SENSITIVE_ENDINGS: &[&str] = &["key", "sig", "sign", "signature"];
-const NOT_SECRET: &[&str] = &["hotkey", "design", "monkey", "assign"];
+const NOT_SECRET: &[&str] = &["hotkey", "design", "monkey", "turnkey", "assign"];
 
 /// Authorization schemes: the word after one is a credential wherever it appears.
 const AUTH_SCHEMES: &[&str] = &["bearer", "basic", "digest"];
@@ -68,7 +68,8 @@ pub fn is_sensitive_key(key: &str) -> bool {
     let k = normalise(key);
     SENSITIVE.iter().any(|s| k.contains(s))
         || SENSITIVE_EXACT.contains(&k.as_str())
-        || (SENSITIVE_ENDINGS.iter().any(|e| k.ends_with(e)) && !NOT_SECRET.contains(&k.as_str()))
+        || (SENSITIVE_ENDINGS.iter().any(|e| k.ends_with(e))
+            && !NOT_SECRET.iter().any(|w| k.ends_with(w)))
 }
 
 /// A JSON document with every sensitive key's value replaced and every e-mail-looking or
@@ -197,7 +198,7 @@ pub fn text(s: &str) -> String {
             k += 1;
         }
         let quoted = k < chars.len() && matches!(chars[k], '"' | '\'');
-        if normalise(&word) == "authorization" && !quoted {
+        if normalise(&word).contains("authorization") && !quoted {
             while k < chars.len() && !matches!(chars[k], '\n' | '\r') {
                 k += 1;
             }
@@ -274,6 +275,11 @@ mod tests {
     #[test]
     fn sensitive_keys() {
         for k in [
+            "access_key",
+            "X-Amz-Signature",
+            "API-Sign",
+            "nonce",
+            "sig",
             "password",
             "LINES_CQG_PASSWORD",
             "apiKey",
@@ -296,6 +302,12 @@ mod tests {
             "name",
             "symbol",
             "product",
+            "hotkey",
+            "global_hotkey",
+            "design",
+            "redesign",
+            "assign",
+            "monkey",
         ] {
             assert!(!is_sensitive_key(k), "{k}");
         }
@@ -350,6 +362,7 @@ mod tests {
                 "Proxy-Authorization: Bearer prx-cred then X-Auth: Basic dXNlcjpwYXNz",
                 &["prx-cred", "dXNlcjpwYXNz"],
             ),
+            ("Proxy-Authorization:Basic cHJveHk6cHc=", &["cHJveHk6cHc="]),
             (
                 r#"body="{\"authorization\":\"Bearer esc-cred\",\"password\":\"hunter2\"}""#,
                 &["esc-cred", "hunter2"],
@@ -381,7 +394,7 @@ mod tests {
             "feed ESZ26 live: 5000 updates/s, gaps 0, reconnects 2 (wss://example.invalid/ws)";
         assert_eq!(text(plain), plain);
         // Other folders and ordinary words are kept.
-        let kept = "store /data/lines/users.idx, monkey hotkey design";
+        let kept = "store /data/lines/users.idx, monkey hotkey design global_hotkey=ctrl-k redesign: x assign=1";
         assert_eq!(text(kept), kept);
     }
 
