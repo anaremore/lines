@@ -190,6 +190,8 @@ const FOLLOW_TRIES: u8 = 3;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Follow {
     done: Option<FocusKey>,
+    /// The focus the tries count for: a new focus starts them again.
+    trying: Option<FocusKey>,
     tries: u8,
 }
 
@@ -203,6 +205,10 @@ impl Follow {
     /// again next frame, [`FOLLOW_TRIES`] times at most, then settles. Returns whether another
     /// frame is needed.
     pub fn step(&mut self, key: FocusKey, exact: bool) -> bool {
+        if self.trying != Some(key) {
+            self.trying = Some(key);
+            self.tries = 0;
+        }
         if self.done != Some(key) && !exact && self.tries < FOLLOW_TRIES {
             self.tries += 1;
             return true;
@@ -245,8 +251,8 @@ impl EditorScroll {
     /// Scroll the editor's focus into view if a key moved it (row or column) since the last
     /// follow. The offset comes from the last frame's layout (a focus move doesn't move rows),
     /// so the scrollbar drawn at render shows it; a row that fits is also asked of GPUI
-    /// (`scroll_to_item`, in prepaint, from this frame's layout), so a hex entry or warnings
-    /// that open or close on the same key don't leave it off by their height. Returns whether
+    /// (`scroll_to_item`, in prepaint, from this frame's layout), so a hex entry that closes on
+    /// the same click (or warnings that change with it) can't leave the row hidden. Returns whether
     /// it scrolled (or is still waiting for the layout it needs: the body's, the focused
     /// row's controls), so the pane renders once more and its scrollbar shows the offset.
     pub fn follow(&mut self, e: &StyleEditor) -> bool {
@@ -1039,9 +1045,19 @@ mod tests {
             f,
             Follow {
                 done: Some(b),
+                trying: Some(b),
                 tries: 0
             }
         );
+        // A focus that moves while another still waits gets fresh tries of its own.
+        let mut f = Follow::default();
+        assert!(f.step(a, false));
+        assert!(f.step(a, false));
+        let c = (0, 4, 1);
+        for _ in 0..FOLLOW_TRIES {
+            assert!(f.step(c, false), "fresh tries for the new focus");
+        }
+        assert!(!f.step(c, false), "then settles");
     }
 
     /// A row that fits shows whole; a taller one shows its focused control, with the row's
