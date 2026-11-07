@@ -102,6 +102,18 @@ pub fn all() -> Vec<Seed> {
     let nat = native_frames();
     v.push(seed("native_session", "events", session_input(0, &nat)));
     v.push(seed("native_session", "events-btc", session_input(3, &nat)));
+    // Decision 0028: option quotes, on SPY (its chain) and on ES (rejected: no options).
+    let chain = chain_frames();
+    v.push(seed(
+        "native_session",
+        "chain-spy",
+        session_input(4, &chain),
+    ));
+    v.push(seed(
+        "native_session",
+        "chain-on-es",
+        session_input(1, &chain),
+    ));
 
     v.push(seed(
         "recording",
@@ -551,6 +563,57 @@ fn coinbase_script() -> Vec<ScriptOp> {
 }
 
 /// `lines-events-1` frames: book snapshot, updates, BBO and trades.
+/// A few SPY trades and option quotes (`lines-events-1` tag 5).
+fn chain_frames() -> Vec<Frame> {
+    let t0 = BASE_MS * 1000;
+    let mut b = Vec::new();
+    native::encode(
+        &NativeEvent::Trade {
+            time_us: t0,
+            price: Price(68_412),
+            qty: Qty(100),
+            aggressor: Aggressor::Buy,
+        },
+        &mut b,
+    );
+    for (i, (strike, right)) in [
+        (68_300, lines_core::Right::Call),
+        (68_400, lines_core::Right::Call),
+        (68_400, lines_core::Right::Put),
+        (68_500, lines_core::Right::Put),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        native::encode(
+            &NativeEvent::OptionQuote {
+                time_us: t0 + i as i64,
+                key: lines_core::OptionKey {
+                    expiry: lines_core::CivilDate::new(2026, 11, 9).unwrap(),
+                    strike: Price(strike),
+                    right,
+                },
+                quote: lines_core::OptionQuote {
+                    bid: Some(Price(100 + i as i64)),
+                    ask: Some(Price(103 + i as i64)),
+                    last: (i % 2 == 0).then_some(Price(101)),
+                    volume: Qty(1_000),
+                    open_interest: 20_000,
+                    iv_bp: Some(1_200),
+                    delta_e4: Some(if right == lines_core::Right::Call {
+                        5_000
+                    } else {
+                        -5_000
+                    }),
+                    time: UtcMillis(BASE_MS),
+                },
+            },
+            &mut b,
+        );
+    }
+    vec![Frame::binary(b)]
+}
+
 fn native_frames() -> Vec<Frame> {
     let t0 = BASE_MS * 1000;
     let enc = |evs: &[NativeEvent]| {

@@ -141,6 +141,12 @@ pub enum MarketEvent {
     CorrectionsIgnored {
         count: u64,
     },
+    /// One listed option's quote on this feed's underlying (decision 0028): the store keeps
+    /// it in its option chains, by expiry and strike.
+    OptionQuote {
+        key: lines_core::OptionKey,
+        quote: lines_core::OptionQuote,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

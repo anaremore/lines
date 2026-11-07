@@ -182,6 +182,9 @@ pub struct ChartData {
     pub book: OrderBook,
     /// Time & sales: the newest live prints (bounded ring).
     pub tape: Tape,
+    /// The underlying's option chains (decision 0028), from `MarketEvent::OptionQuote`.
+    /// Their own revision tells panes what changed; they never move `chart_epoch`.
+    pub chains: lines_core::OptionChains,
     /// Traded volume per price since data start for this contract (trading sessions are not
     /// modelled yet). Only trades the stitch counts as new, so a re-delivered trade is never
     /// counted twice.
@@ -253,6 +256,7 @@ impl ChartData {
             ask: None,
             book: OrderBook::default(),
             tape: Tape::new(TAPE_PRINTS),
+            chains: lines_core::OptionChains::default(),
             vap: VolumeAtPrice::default(),
             profiles: SessionProfiles::new(calendar, period_ms, max_bars),
             // Journal cap: ~ one busy hour of trades while history is outstanding.
@@ -407,6 +411,10 @@ impl ChartData {
                 MarketEvent::Rejected { count } => self.stats.rejected += count,
                 MarketEvent::CorrectionsIgnored { count } => {
                     self.stats.corrections_ignored += count
+                }
+                MarketEvent::OptionQuote { key, quote } => {
+                    self.chains.apply(key, quote);
+                    self.stats.updates_in += 1;
                 }
                 MarketEvent::BookClear => {
                     self.book.clear();

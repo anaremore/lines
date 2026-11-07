@@ -25,6 +25,7 @@ pub mod recording;
 pub mod registry;
 pub mod store;
 pub mod synth;
+pub mod synth_chain;
 pub mod ticks;
 pub mod transport;
 
