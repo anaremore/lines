@@ -272,8 +272,12 @@ impl StrategyView {
         let trading = Trading::try_global(cx).ok_or("trading isn't running")?;
         let issued = Instant::now();
         let (id, c) = match cmd {
-            StrategyCmd::StopAll => (None, model::stop_all(true)),
-            StrategyCmd::StopAllKeep => (None, model::stop_all(false)),
+            StrategyCmd::StopAll | StrategyCmd::StopAllKeep => {
+                model::submit_stop_all(trading, cmd == StrategyCmd::StopAll, source);
+                self.built = None;
+                cx.notify();
+                return Ok(());
+            }
             StrategyCmd::Start | StrategyCmd::Stop => {
                 let row = self
                     .selected
@@ -302,6 +306,7 @@ impl StrategyView {
         if let Err(e) = self.run(cmd, Source::Palette, cx) {
             self.denied.retain(|(d, _, _)| *d != id);
             self.denied.push((id, e.to_owned(), None));
+            self.built = None;
         }
         cx.notify();
     }
@@ -337,6 +342,7 @@ impl StrategyView {
                 .justify_center()
                 .min_w(px(MIN_HIT))
                 .h(px(MIN_HIT))
+                .flex_shrink_0()
                 .px_2()
                 .rounded_sm()
                 .border_2()
@@ -375,20 +381,34 @@ impl StrategyView {
             .text_size(px(12.0))
             .child(
                 pane::header_content()
+                    // The left group gives way (its note truncates) so Stop all always fits.
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .gap_2()
                             .items_center()
+                            .min_w_0()
+                            .overflow_hidden()
                             .children(pane::link_chip(self.common.link, &t))
-                            .child(div().text_color(t.text_main).child("Strategies"))
-                            .child(crate::trade_bar::paper_badge(&t))
-                            // Strategies don't use a DOM's trading switch: say so here.
                             .child(
                                 div()
-                                    .text_color(t.text_dim)
-                                    .child("paper only · not gated by the DOM's trading switch"),
+                                    .flex_shrink_0()
+                                    .text_color(t.text_main)
+                                    .child("Strategies"),
+                            )
+                            .child(crate::trade_bar::paper_badge(&t).flex_shrink_0())
+                            // Strategies don't use a DOM's trading switch: a chip of its own.
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(t.control_edge)
+                                    .text_color(t.text_main)
+                                    .child("Not gated by the DOM's trading switch"),
                             ),
                     )
                     // Always visible while any instance exists (decision 0025).

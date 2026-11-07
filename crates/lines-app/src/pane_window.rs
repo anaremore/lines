@@ -104,11 +104,10 @@ impl PaneWindow {
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
             Some(Command::Strategy(c)) => {
                 if let Some(t) = crate::trading::Trading::try_global(cx) {
-                    let flatten = c == crate::commands::StrategyCmd::StopAll;
-                    t.submit(
+                    crate::strategy_panel::submit_stop_all(
+                        t,
+                        c == crate::commands::StrategyCmd::StopAll,
                         lines_trading::Source::Hotkey,
-                        std::time::Instant::now(),
-                        crate::strategy_panel::stop_all(flatten),
                     );
                 }
             }

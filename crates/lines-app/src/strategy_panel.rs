@@ -299,6 +299,29 @@ pub fn stop_all(flatten: bool) -> Command {
     Command::StopStrategies { id: None, flatten }
 }
 
+/// Stop all as commands: stop every instance (entries cancelled) at once, then, with
+/// `flatten`, flatten only the instances in `owning` (Armed or Paused before the stop): a
+/// never-started or already stopped instance's contract holds the trader's position, which
+/// Stop all must not close.
+pub fn stop_all_commands(flatten: bool, owning: &[StrategyId]) -> Vec<Command> {
+    let mut v = vec![stop_all(false)];
+    if flatten {
+        v.extend(owning.iter().map(|&id| stop(id)));
+    }
+    v
+}
+
+/// Send Stop all from the UI (panel button, key, palette, pane windows). Which instances own
+/// their positions comes from the UI's copy of the core's states (a short lock on the UI's
+/// cache, never one the core takes).
+pub fn submit_stop_all(trading: &crate::trading::Trading, flatten: bool, source: Source) {
+    let owning = trading.cache.read().owning_strategies();
+    let issued = std::time::Instant::now();
+    for c in stop_all_commands(flatten, &owning) {
+        trading.submit(source, issued, c);
+    }
+}
+
 /// A fixed set of instances (tests and `--strategies-demo` screenshots).
 #[cfg(any(test, feature = "screenshot"))]
 pub struct DemoStrategies {
@@ -592,6 +615,18 @@ mod tests {
             ..ctx(&[], Some(&pos), PnlDisplay::Both)
         };
         assert!(!row(&i, &c).can_stop);
+    }
+
+    /// Stop all stops everything first, then flattens only what strategies owned.
+    #[test]
+    fn stop_all_flattens_only_owned_positions() {
+        let (a, b) = (StrategyId(1), StrategyId(4));
+        assert_eq!(
+            stop_all_commands(true, &[a, b]),
+            vec![stop_all(false), stop(a), stop(b)]
+        );
+        assert_eq!(stop_all_commands(true, &[]), vec![stop_all(false)]);
+        assert_eq!(stop_all_commands(false, &[a]), vec![stop_all(false)]);
     }
 
     #[test]

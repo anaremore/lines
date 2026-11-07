@@ -1483,11 +1483,10 @@ impl WindowView {
             (_, Some(p), _) => p.update(cx, |v, cx| v.run(c, lines_trading::Source::Hotkey, cx)),
             (_, None, _) => match crate::trading::Trading::try_global(cx) {
                 Some(t) => {
-                    let flatten = c == StrategyCmd::StopAll;
-                    t.submit(
+                    crate::strategy_panel::submit_stop_all(
+                        t,
+                        c == StrategyCmd::StopAll,
                         lines_trading::Source::Hotkey,
-                        std::time::Instant::now(),
-                        crate::strategy_panel::stop_all(flatten),
                     );
                     Ok(())
                 }

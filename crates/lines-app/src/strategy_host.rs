@@ -56,12 +56,32 @@ impl StrategySource for StrategyHost {
 pub struct AppStrategies {
     host: Arc<StrategyHost>,
     _feed: Subscription,
-    problem: Arc<Mutex<Option<String>>>,
+    problem: Arc<Problem>,
+}
+
+/// Why adding the instance failed, with a generation the panel's revision includes, so the
+/// panel redraws when it is set (the host's own revision doesn't move on a refused add).
+#[derive(Default)]
+struct Problem {
+    text: Mutex<Option<String>>,
+    generation: std::sync::atomic::AtomicU64,
+}
+
+impl Problem {
+    fn set(&self, why: String) {
+        *self.text.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl StrategySource for AppStrategies {
     fn revision(&self) -> u64 {
-        self.host.revision()
+        let problems = self
+            .problem
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.host.revision().wrapping_add(problems << 48)
     }
 
     fn snapshot(&self) -> Vec<StrategyInfo> {
@@ -70,6 +90,7 @@ impl StrategySource for AppStrategies {
 
     fn problem(&self) -> Option<String> {
         self.problem
+            .text
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -100,7 +121,7 @@ pub fn start(
         trading.handle().clone(),
         trading.clock(),
     ));
-    let problem = Arc::new(Mutex::new(None));
+    let problem = Arc::new(Problem::default());
     let (h, p) = (host.clone(), problem.clone());
     std::thread::Builder::new()
         .name("strategy-add".into())
@@ -116,8 +137,7 @@ pub fn start(
                     break found;
                 }
                 if Instant::now() > deadline {
-                    *p.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some("the feed never said which contract it carries".into());
+                    p.set("the feed never said which contract it carries".into());
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -125,7 +145,7 @@ pub fn start(
             let mut levels: Vec<Box<dyn LevelFeed>> = Vec::new();
             for id in strategy.level_sources() {
                 let Some(source) = lines_feed::levels::by_id(id) else {
-                    *p.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!(
+                    p.set(format!(
                         "level source {id:?} is not registered in this build"
                     ));
                     return;
@@ -157,8 +177,7 @@ pub fn start(
             });
             if let Err(e) = r {
                 tracing::error!("strategy {}: {e}", strategy.name());
-                *p.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(format!("{}: {e}", strategy.label()));
+                p.set(format!("{}: {e}", strategy.label()));
             }
         })?;
     Ok(AppStrategies {
@@ -187,7 +206,8 @@ mod tests {
         fn on_input(&mut self, _: &Ctx<'_>, _: Input<'_>, _: &mut Vec<Decision>) {}
     }
 
-    struct IdleExt;
+    /// `true`: refuses to create the strategy (bad parameters).
+    struct IdleExt(bool);
 
     impl StrategyExtension for IdleExt {
         fn name(&self) -> &str {
@@ -203,6 +223,9 @@ mod tests {
             true
         }
         fn create(&self, _: &serde_json::Value) -> Result<Box<dyn Strategy>, String> {
+            if self.0 {
+                return Err("bad parameters".into());
+            }
             Ok(Box::new(Idle))
         }
     }
@@ -214,6 +237,42 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn settings() -> Settings {
+        serde_json::from_value(serde_json::json!({
+            "params": {},
+            "limits": {"max_position": 1, "max_daily_loss": 500, "max_orders_per_min": 5,
+                       "hours": {"tz": "UTC", "windows": [{"start": "00:00", "end": "23:59"}]}}
+        }))
+        .unwrap()
+    }
+
+    /// A strategy the host refuses to add shows why in the panel, and the panel's revision
+    /// moves so it redraws (the host's own doesn't on a refused add).
+    #[test]
+    fn a_refused_strategy_shows_why() {
+        let source = FeedSource::CqgMock(lines_feed::cqg::mock::MockConfig::default());
+        let config = FeedConfig::new(source.clone());
+        let registry = FeedRegistry::new();
+        let trading = Trading::start(
+            TradingSetup::for_live(None, &source),
+            registry.clone(),
+            config.clone(),
+        );
+        let s = start(
+            Arc::new(IdleExt(true)),
+            settings(),
+            &registry,
+            config,
+            &trading,
+        )
+        .unwrap();
+        until("the refusal", || s.problem().is_some());
+        assert!(s.problem().unwrap().contains("bad parameters"));
+        // The refusal is part of the revision (its generation, in the top bits).
+        assert_eq!(s.revision() >> 48, 1);
+        assert!(s.snapshot().is_empty());
     }
 
     /// The panel's path end to end on the mock source: the host adds the instance Disarmed,
@@ -235,7 +294,14 @@ mod tests {
                        "hours": {"tz": "UTC", "windows": [{"start": "00:00", "end": "23:59"}]}}
         }))
         .unwrap();
-        let s = start(Arc::new(IdleExt), settings, &registry, config, &trading).unwrap();
+        let s = start(
+            Arc::new(IdleExt(false)),
+            settings,
+            &registry,
+            config,
+            &trading,
+        )
+        .unwrap();
         until("the instance", || {
             assert_eq!(s.problem(), None);
             s.snapshot().len() == 1
@@ -257,11 +323,7 @@ mod tests {
         until("armed", || {
             core_state(&trading) == Some(StrategyState::Armed)
         });
-        trading.submit(
-            Source::Hotkey,
-            Instant::now(),
-            strategy_panel::stop_all(true),
-        );
+        strategy_panel::submit_stop_all(&trading, true, Source::Hotkey);
         until("stopped", || {
             core_state(&trading) == Some(StrategyState::Stopped)
         });

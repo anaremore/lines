@@ -386,6 +386,18 @@ impl TradeState {
         self.accounts.get(account)
     }
 
+    /// Instances the core last reported Armed or Paused: they own their contract's position.
+    pub fn owning_strategies(&self) -> Vec<StrategyId> {
+        let mut v: Vec<StrategyId> = self
+            .strategies
+            .iter()
+            .filter(|(_, (s, _))| matches!(s, StrategyState::Armed | StrategyState::Paused))
+            .map(|(id, _)| *id)
+            .collect();
+        v.sort();
+        v
+    }
+
     /// A strategy instance's state and reason as the core last reported them.
     pub fn strategy(&self, id: StrategyId) -> Option<(StrategyState, Option<&str>)> {
         self.strategies.get(&id).map(|(s, r)| (*s, r.as_deref()))
