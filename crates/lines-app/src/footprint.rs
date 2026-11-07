@@ -114,7 +114,8 @@ pub const MIN_ROW_PX: f64 = 9.0;
 const MAX_CELLS: usize = 40_000;
 /// Most rows in one bar.
 const MAX_ROWS: usize = 2_048;
-const TEXT_PX: f32 = 10.0;
+/// The type scale's smallest size (docs/design.md §5).
+const TEXT_PX: f32 = 11.0;
 
 pub struct FootprintLayer {
     config: FootprintConfig,
@@ -259,25 +260,35 @@ impl ChartLayer for FootprintLayer {
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
+        // Device-pixel snapping as the candles: cell edges on device-pixel boundaries (the
+        // POC outline is one device pixel), cells centred on the bar's wick position.
+        let snap = |v: f64| lines_core::geometry::snap(v, scale);
         let rect = |x: f32, y: f32, w: f32, h: f32| {
             Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
         };
         let u = self.frame.row_units;
-        let row_h = (u as f64 * vp.height / (vp.price_hi - vp.price_lo).abs().max(1e-9)) as f32;
+        // A whole number of device pixels per row, so every cell edge lands on one.
+        let row_h = {
+            let r = u as f64 * vp.height / (vp.price_hi - vp.price_lo).abs().max(1e-9);
+            ((r * f64::from(scale)).round().max(1.0) / f64::from(scale)) as f32
+        };
         let max = self.frame.max_cell.0.max(1) as f32;
         let mode = self.config.mode;
         let text = row_h >= TEXT_PX + 1.0;
         let mut s = FixedStr::<32>::new();
         for bi in 0..self.frame.bars.len() {
             let b: BarCells = self.frame.bars[bi];
-            let cx_bar = vp.index_to_x(b.bar as f64) as f32;
-            let half = (vp.bar_px as f32 * 0.46).max(2.0);
+            let cx_bar = lines_core::geometry::slot_x(vp, b.bar as f64, scale);
+            let half = snap((vp.bar_px * 0.46).max(2.0));
             let (left, w) = (cx_bar - half, half * 2.0);
             for k in 0..b.len {
                 let c = self.frame.cells[b.first + k];
                 // Row `r` holds prices [r·u, (r+1)·u); centred on its lowest price's tick.
                 let mid = (c.row * u) as f64 + (u - self.tick) as f64 * 0.5;
-                let top = vp.price_to_y(mid) as f32 - row_h * 0.5;
+                let top = snap(vp.price_to_y(mid) - f64::from(row_h) * 0.5);
+                if top + row_h < 0.0 || f64::from(top) > vp.height {
+                    continue; // off the plot: nothing to draw
+                }
                 let shade = (c.total.0 as f32 / max).clamp(0.08, 1.0);
                 let bg = match mode {
                     FootprintMode::Delta if c.delta() > 0 => t.up.opacity(0.12 + 0.4 * shade),
