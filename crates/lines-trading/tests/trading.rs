@@ -1479,9 +1479,5 @@ fn place_exit_is_reduce_only_and_never_outlives_the_position() {
     r.wait(LAT);
     assert_eq!(r.core.position(&acct(), es()), 0);
     assert_eq!(r.state(t), OrderState::Filled);
-    assert!(
-        matches!(r.state(s), OrderState::Cancelled { .. }),
-        "{:?}",
-        r.state(s)
-    );
+    assert_eq!(r.state(s), OrderState::Cancelled);
 }

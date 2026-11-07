@@ -28,8 +28,8 @@ pub const CLOSE_W: f32 = 16.0;
 /// Gap between stacked tags and between a tag and the plot's right edge.
 pub const TAG_GAP: f32 = 2.0;
 /// A handle's size (logical px).
-pub const HANDLE_W: f32 = 18.0;
-pub const HANDLE_H: f32 = 12.0;
+pub const HANDLE_W: f32 = 26.0;
+pub const HANDLE_H: f32 = 16.0;
 
 /// One line to tag: an id the caller chooses (order id; the position uses its own), its
 /// price, and the tag's text width (measured by the caller, logical px).

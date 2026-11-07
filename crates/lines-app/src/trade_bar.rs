@@ -315,14 +315,7 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
 /// chart.
 pub fn chart_runs(cmd: TradeCmd) -> bool {
     cmd.quick().is_none()
-        && !matches!(
-            cmd,
-            TradeCmd::ToggleArm
-                | TradeCmd::Enable
-                | TradeCmd::Disable
-                | TradeCmd::Breakeven
-                | TradeCmd::EditBrackets
-        )
+        && !matches!(cmd, TradeCmd::Breakeven | TradeCmd::EditBrackets)
 }
 
 /// Run a trading command from a hotkey or the palette. `issued`: the input time.

@@ -403,6 +403,9 @@ pub struct OrderMark {
     pub filled: Qty,
     pub stop: bool,
     pub role: Role,
+    /// A reduce-only order (an exit added for the position, or placed while the account may
+    /// only reduce): shown by its kind as a stop or target.
+    pub exit: bool,
 }
 
 /// What an order is for, as the orders column shows it (docs/design.md §3: by text, colour
@@ -422,6 +425,9 @@ impl MarkRole {
         match m.role {
             Role::TakeProfit => MarkRole::Target,
             Role::StopLoss => MarkRole::Stop,
+            // A reduce-only exit (added on the chart): a stop or a target by its kind.
+            Role::Single if m.exit && m.stop => MarkRole::Stop,
+            Role::Single if m.exit => MarkRole::Target,
             _ => MarkRole::Entry,
         }
     }
@@ -485,6 +491,7 @@ pub fn order_mark(o: &Order) -> Option<OrderMark> {
         filled: o.filled,
         stop: matches!(o.kind, OrderKind::Stop { .. } | OrderKind::StopLimit { .. }),
         role: o.role,
+        exit: o.reduce_only,
     })
 }
 
