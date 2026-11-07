@@ -1542,7 +1542,12 @@ pub fn parse_script(
                 };
                 out.push(Step::Print(contract, price(p)?, lines_core::Qty(q)));
             }
-            ["tag", tags] => out.push(Step::Tag(tags.split(',').map(str::to_owned).collect())),
+            ["tag", tags @ ..] if !tags.is_empty() => out.push(Step::Tag(
+                tags.join(" ")
+                    .split(',')
+                    .map(|t| t.trim().to_owned())
+                    .collect(),
+            )),
             ["account", id] => {
                 account = AccountId::new(id);
                 out.push(Step::Account(account.clone()));

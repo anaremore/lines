@@ -318,8 +318,9 @@ pub fn group_headers(g: JournalGroup) -> [&'static str; GROUP_COLS] {
     ]
 }
 
-/// P&L per account (by name) or per tag (best net first, untagged last). Money only when
-/// `mode` shows currency, like the strip.
+/// P&L per account or per tag: best net first (then by name), untagged last; by name alone
+/// when `mode` shows no money (the order would tell the P&L). Money only when `mode` shows
+/// currency, like the strip.
 pub fn group_rows<'a>(
     trades: impl IntoIterator<Item = &'a Trade>,
     g: JournalGroup,
@@ -366,11 +367,20 @@ pub fn group_rows<'a>(
             (untagged, s.net, row)
         })
         .collect();
-    if g == JournalGroup::Tags {
-        rows.sort_by_key(|a| (a.0, std::cmp::Reverse(a.1)));
-    } else {
-        rows.sort_by(|a, b| a.2.cells[0].cmp(&b.2.cells[0]));
-    }
+    let by_net = mode.money();
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(if by_net {
+                b.1.cmp(&a.1)
+            } else {
+                std::cmp::Ordering::Equal
+            })
+            .then_with(|| {
+                a.2.cells[0]
+                    .to_lowercase()
+                    .cmp(&b.2.cells[0].to_lowercase())
+            })
+    });
     rows.into_iter().map(|(_, _, r)| r).collect()
 }
 
@@ -479,6 +489,8 @@ pub struct JournalView {
     /// What the table lists, and the group lines when not the trades.
     group: JournalGroup,
     groups: Vec<GroupRow>,
+    /// First group line shown.
+    group_scroll: usize,
     stats_today: Vec<StatItem>,
     stats_all: Vec<StatItem>,
     /// Account names by id (the trading core's accounts).
@@ -584,6 +596,7 @@ impl JournalView {
             rows: Vec::new(),
             group: JournalGroup::Trades,
             groups: Vec::new(),
+            group_scroll: 0,
             stats_today: Vec::new(),
             stats_all: Vec::new(),
             names: Trading::try_global(cx)
@@ -619,6 +632,7 @@ impl JournalView {
     pub fn set_group(&mut self, g: JournalGroup, cx: &mut Context<Self>) {
         if self.group != g {
             self.group = g;
+            self.group_scroll = 0;
             self.editor = None;
             self.built = None;
             cx.notify();
@@ -872,8 +886,13 @@ impl JournalView {
         let dy = f(ev.delta.pixel_delta(window.line_height()).y);
         let rows = (dy / ROW_H).round() as i64;
         if rows != 0 {
-            let max = self.rows.len().saturating_sub(1) as i64;
-            self.scroll = (self.scroll as i64 - rows).clamp(0, max) as usize;
+            let (scroll, n) = if self.group.is_trades() {
+                (&mut self.scroll, self.rows.len())
+            } else {
+                (&mut self.group_scroll, self.groups.len())
+            };
+            let max = n.saturating_sub(1) as i64;
+            *scroll = (*scroll as i64 - rows).clamp(0, max) as usize;
             cx.notify();
         }
     }
@@ -1015,14 +1034,20 @@ impl JournalView {
                 *wc = wc.max(self.glyphs.width(cell, t.text_main, c == 3, window));
             }
         }
-        let mut shown = 0;
-        let mut used = 0.0;
         for wc in &mut widths {
             *wc += PAD * 4.0;
-            if used + *wc > w {
+        }
+        // The name column always shows (cut to fit if it must, at least 80 px); number
+        // columns that don't fit whole are left out from the right.
+        let numbers: f32 = widths[1..].iter().sum();
+        widths[0] = widths[0].min((w - numbers).max(80.0)).min(w);
+        let mut shown = 1;
+        let mut used = widths[0];
+        for wc in &widths[1..] {
+            if used + wc > w {
                 break;
             }
-            used += *wc;
+            used += wc;
             shown += 1;
         }
         window.paint_quad(fill(
@@ -1075,11 +1100,14 @@ impl JournalView {
             );
             return;
         }
-        for (n, r) in self.groups.iter().enumerate() {
+        let start = self.group_scroll.min(self.groups.len() - 1);
+        let mut end_y = oy;
+        for (n, r) in self.groups[start..].iter().enumerate() {
             let y = oy + n as f32 * ROW_H;
             if y + ROW_H > top + h + 0.5 {
                 break;
             }
+            end_y = y + ROW_H;
             let mut x = ox;
             for (c, (cell, &cw)) in r.cells.iter().zip(&widths).enumerate().take(shown) {
                 let color = match c {
@@ -1088,8 +1116,15 @@ impl JournalView {
                     _ => t.text_main,
                 };
                 if c == 0 {
-                    self.glyphs
-                        .paint(cell, x + PAD, y, ROW_H, color, false, window, cx);
+                    // A long name is cut at its column, never over the numbers.
+                    let cell_b = Bounds::new(point(px(x), px(y)), size(px(cw), px(ROW_H)));
+                    window.with_content_mask(
+                        Some(gpui::ContentMask { bounds: cell_b }),
+                        |window| {
+                            self.glyphs
+                                .paint(cell, x + PAD, y, ROW_H, color, false, window, cx);
+                        },
+                    );
                 } else {
                     self.glyphs.paint_right(
                         cell,
@@ -1108,6 +1143,19 @@ impl JournalView {
                 Bounds::new(point(px(ox), px(y + ROW_H - hair)), size(px(w), px(hair))),
                 t.grid,
             ));
+        }
+        // By tag: say why the lines can add up to more than the strip.
+        if self.group == JournalGroup::Tags && end_y + ROW_H <= top + h + 0.5 {
+            self.glyphs.paint(
+                "A trade with several tags counts under each of them.",
+                ox + PAD,
+                end_y + 2.0,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
         }
     }
 
@@ -1461,7 +1509,7 @@ mod tests {
         );
     }
 
-    /// P&L by account (by name) and by tag (best net first, untagged last; a trade with two
+    /// P&L by account and by tag (best net first, untagged last; a trade with two
     /// tags counts in each); money only in a currency mode.
     #[test]
     fn groups_by_account_and_tag() {
@@ -1480,7 +1528,7 @@ mod tests {
         let by_account = group_rows(&all, JournalGroup::Accounts, &names, PnlDisplay::Both);
         let cells = |r: &GroupRow| r.cells.clone();
         assert_eq!(
-            cells(&by_account[0]),
+            cells(&by_account[1]),
             [
                 "Paper 50K eval",
                 "2",
@@ -1492,9 +1540,9 @@ mod tests {
             ]
             .map(String::from)
         );
-        assert_eq!(by_account[0].sign, -1);
+        assert_eq!(by_account[1].sign, -1);
         assert_eq!(
-            cells(&by_account[1]),
+            cells(&by_account[0]),
             ["paper", "1", "100%", "+$310.02", "+$310.02", "—", "$0.00"].map(String::from),
             "an account without a name shows its id"
         );
@@ -1509,6 +1557,10 @@ mod tests {
             "no money"
         );
         assert_eq!(off[0].cells[1..3], ["1".to_owned(), "100%".to_owned()]);
+        // With money hidden the order is by name, so it doesn't tell the P&L either.
+        let off_accounts = group_rows(&all, JournalGroup::Accounts, &names, PnlDisplay::Off);
+        let order: Vec<&str> = off_accounts.iter().map(|r| r.cells[0].as_str()).collect();
+        assert_eq!(order, ["paper", "Paper 50K eval"]);
         assert!(group_rows(&all, JournalGroup::Trades, &names, PnlDisplay::Both).is_empty());
         assert_eq!(group_headers(JournalGroup::Tags)[0], "Tag");
     }

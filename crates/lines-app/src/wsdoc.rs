@@ -394,12 +394,12 @@ pub struct JournalState {
 
 /// What a journal pane lists.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(from = "String", into = "String")]
+#[serde(from = "serde_json::Value", into = "String")]
 pub enum JournalGroup {
     /// Every closed trade.
     #[default]
     Trades,
-    /// P&L per account, with each prop account's consistency.
+    /// P&L per account.
     Accounts,
     /// P&L per tag (setup).
     Tags,
@@ -426,11 +426,12 @@ impl JournalGroup {
     }
 }
 
-impl From<String> for JournalGroup {
-    fn from(s: String) -> JournalGroup {
-        match s.as_str() {
-            "accounts" => JournalGroup::Accounts,
-            "tags" => JournalGroup::Tags,
+/// Anything else (a newer build's value, `null`, a number) is the trade list.
+impl From<serde_json::Value> for JournalGroup {
+    fn from(v: serde_json::Value) -> JournalGroup {
+        match v.as_str() {
+            Some("accounts") => JournalGroup::Accounts,
+            Some("tags") => JournalGroup::Tags,
             _ => JournalGroup::Trades,
         }
     }
@@ -1418,10 +1419,12 @@ mod tests {
             assert_eq!(json.contains("group"), !g.is_trades(), "{json}");
             assert_eq!(serde_json::from_str::<JournalState>(&json).unwrap(), s);
         }
-        let newer: JournalState =
-            serde_json::from_str(r#"{"group": "hours", "all_dates": true}"#).unwrap();
-        assert_eq!(newer.group, JournalGroup::Trades);
-        assert!(newer.all_dates);
+        for odd in [r#""hours""#, "null", "7", "{}"] {
+            let newer: JournalState =
+                serde_json::from_str(&format!(r#"{{"group": {odd}, "all_dates": true}}"#)).unwrap();
+            assert_eq!(newer.group, JournalGroup::Trades, "{odd}");
+            assert!(newer.all_dates);
+        }
     }
 
     #[test]

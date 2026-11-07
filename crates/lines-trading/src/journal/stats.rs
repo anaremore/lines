@@ -108,8 +108,9 @@ pub enum GroupBy {
     Tag,
 }
 
-/// The group key of trades without tags.
-pub const UNTAGGED: &str = "(none)";
+/// The group key of trades without tags: empty, which no tag can be (tags are trimmed and
+/// empty ones dropped), so it never merges with a user's tag.
+pub const UNTAGGED: &str = "";
 
 /// The group keys of a trade (one, except by tag).
 pub fn keys(t: &Trade, by: GroupBy) -> Vec<String> {

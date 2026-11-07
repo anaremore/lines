@@ -399,7 +399,7 @@ fn stats_math() {
     let by_tag = grouped(&trades, GroupBy::Tag);
     assert_eq!(by_tag["breakout"].count, 3);
     assert_eq!(by_tag["breakout"].net, dollars(275.0));
-    assert_eq!(by_tag["(none)"].count, 3);
+    assert_eq!(by_tag[super::stats::UNTAGGED].count, 3);
     assert_eq!(by_tag["fade"].losses, 1);
     let by_date = grouped(&trades, GroupBy::TradeDate);
     assert_eq!(
