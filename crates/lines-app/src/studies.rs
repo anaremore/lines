@@ -232,9 +232,20 @@ impl Studies {
             .iter()
             .filter(|s| {
                 let d = s.config.display();
-                !d.hidden && d.label
+                !d.hidden && d.label && !s.config.in_subpane()
             })
             .count()
+    }
+
+    /// The sub-pane's title (its study's reset), and whether its values are approximate; the
+    /// title sits in the sub-pane, beside what it names, not in the price plot's legend.
+    pub fn subpane_title(&self) -> Option<(lines_indicators::DeltaReset, bool)> {
+        self.list.iter().find_map(|s| match &s.config {
+            IndicatorConfig::CumDelta { spec, display } if !display.hidden && display.label => {
+                Some((spec.reset, s.approx))
+            }
+            _ => None,
+        })
     }
 
     /// A shown study needs the sub-pane (cumulative delta).
@@ -330,9 +341,10 @@ impl Studies {
     /// The legend under the readout: one row per study (render time, not paint), on a
     /// `label_bg` box so lines and profile rows never run through the text.
     pub fn legend(&self, theme: &Theme, product: &Product) -> Option<AnyElement> {
+        // Sub-pane studies are titled in their sub-pane.
         let shown = |s: &&Study| {
             let d = s.config.display();
-            !d.hidden && d.label
+            !d.hidden && d.label && !s.config.in_subpane()
         };
         if !self.list.iter().any(|s| shown(&s)) {
             return None;
@@ -347,25 +359,6 @@ impl Studies {
             .bg(theme.label_bg)
             .text_size(px(12.0));
         for s in self.list.iter().filter(shown) {
-            if let IndicatorConfig::CumDelta { spec, .. } = &s.config {
-                let mut row = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    // Neutral: the series goes both ways (market colors mean direction only).
-                    .child(div().w(px(12.0)).h(px(3.0)).bg(theme.text_dim))
-                    .child(
-                        div()
-                            .text_color(theme.text_main)
-                            .child(format!("Cumulative delta · {}", spec.reset.label())),
-                    );
-                if s.approx {
-                    row = row.child(div().text_color(theme.text_dim).child("≈ from bars"));
-                }
-                col = col.child(row);
-                continue;
-            }
             let IndicatorConfig::Vwap { spec, color, .. } = &s.config else {
                 continue;
             };
