@@ -7,7 +7,12 @@
 //! `paint` draws quads and numbers from the cached-glyph painter (`crate::text::Glyphs`) with
 //! `FixedStr` formatting: nothing allocates per frame once the glyphs are shaped.
 //!
-//! - **Modes:** bid × ask volume (sell left, buy right), delta per row, total volume.
+//! - **Modes:** sell × buy volume (aggressors: sellers who hit the bid left, buyers who took
+//!   the offer right), delta per row, total volume.
+//! - **Whole numbers only:** a bar is drawn as cells only when its whole cell column is
+//!   inside the plot (a bar cut by an edge is a candle: a cut number, e.g. a lost minus sign,
+//!   would read as another value), and no cell number is drawn under the legend and readout
+//!   block at the plot's top-left (`set_text_exclusion`, measured at render time).
 //! - **Imbalances** are marked by a bar on the cell's side (buy: right edge, sell: left
 //!   edge) as well as the number's colour, so they read without colour.
 //! - **POC** per bar: the cell is outlined.
@@ -44,7 +49,7 @@ impl FootprintMode {
     pub fn label(self) -> &'static str {
         match self {
             FootprintMode::Off => "off",
-            FootprintMode::BidAsk => "bid × ask",
+            FootprintMode::BidAsk => "sell × buy",
             FootprintMode::Delta => "delta",
             FootprintMode::Volume => "volume",
         }
@@ -128,6 +133,8 @@ pub struct FootprintLayer {
     glyphs: Glyphs,
     /// The visible range's first bar (candles are indexed from it).
     first_bar: usize,
+    /// No cell numbers at x < .0 and y < .1 (plot-local): the legend and readout block.
+    text_exclusion: (f32, f32),
 }
 
 impl FootprintLayer {
@@ -142,7 +149,14 @@ impl FootprintLayer {
             qty: lines_core::QtyFormat::WHOLE,
             glyphs: Glyphs::new(TEXT_PX),
             first_bar: 0,
+            text_exclusion: (0.0, 0.0),
         }
+    }
+
+    /// The legend and readout block at the plot's top-left (plot-local width and bottom):
+    /// cell numbers are never drawn under it (set each frame at render time, before paint).
+    pub fn set_text_exclusion(&mut self, width: f32, bottom: f32) {
+        self.text_exclusion = (width, bottom);
     }
 
     pub fn config(&self) -> FootprintConfig {
@@ -228,6 +242,20 @@ impl ChartLayer for FootprintLayer {
         }
         self.tick = data.product.price.tick.max(1);
         self.qty = data.product.qty;
+        // Only bars whose whole cell column is on the plot: one cut by an edge is a candle.
+        let half = (vp.bar_px * 0.46).max(2.0);
+        let whole = |i: usize| {
+            let x = vp.index_to_x(i as f64);
+            x - half >= 0.0 && x + half <= vp.width
+        };
+        let (mut a, mut b) = (range.start, range.end);
+        while a < b && !whole(a) {
+            a += 1;
+        }
+        while b > a && !whole(b - 1) {
+            b -= 1;
+        }
+        let range = a..b;
         let px_per_unit = vp.height / (vp.price_hi - vp.price_lo).abs().max(1e-9);
         let g = fit_grouping(
             self.config.grouping.unwrap_or(1),
@@ -316,8 +344,9 @@ impl ChartLayer for FootprintLayer {
                         window.paint_quad(fill(q, t.text_main));
                     }
                 }
-                if !text {
-                    continue;
+                let (ex_w, ex_h) = self.text_exclusion;
+                if !text || (left < ex_w && top < ex_h) {
+                    continue; // too small to read, or under the legend block
                 }
                 let y = oy + top;
                 let qty = self.qty;
@@ -458,9 +487,10 @@ mod tests {
         let vp = view(80.0);
         fp.prepare(&d, bars, &vp);
         assert!(fp.is_active());
-        assert!(!fp.covers(0) && fp.covers(1) && fp.covers(3));
+        // Bar 3 is centred on the plot's right edge: cut, so a candle (no half numbers).
+        assert!(!fp.covers(0) && fp.covers(1) && fp.covers(2) && !fp.covers(3));
         let f = fp.frame();
-        assert_eq!(f.bars.len(), 3);
+        assert_eq!(f.bars.len(), 2);
         let b = f.bars[0];
         assert_eq!(
             f.cells_of(&b)
@@ -473,7 +503,7 @@ mod tests {
         let (label, note) = fp
             .legend(vp.bar_px, first, d.profiles.data_start())
             .unwrap();
-        assert_eq!(label, "Footprint · bid × ask");
+        assert_eq!(label, "Footprint · sell × buy");
         assert_eq!(note, Some("footprint from live/replay trades only"));
         // Narrow bars: no cells at all; the legend asks to zoom in.
         let narrow = view(20.0);

@@ -102,6 +102,8 @@ enum LabelKind {
     /// (its own kind: the label cache keys by kind and value, and the colors differ).
     SubValue,
     SubLast,
+    /// The crosshair's value tag on the sub-pane's axis.
+    SubCross,
     CrossTime,
     Indicator,
 }
@@ -248,6 +250,9 @@ pub struct ChartView {
     /// The pointer is in the sub-pane, this far below its top: the crosshair's vertical line
     /// and time follow it; the horizontal line is in the sub-pane, with no price.
     cross_in_sub: Option<f32>,
+    /// The legend and readout block at the plot's top-left (width, bottom; plot-local), as
+    /// the last render built it: the footprint draws no cell number under it.
+    legend_band: std::cell::Cell<(f32, f32)>,
     /// The footprint legend's inputs as last read (first visible bar, first counted trade).
     fp_legend_inputs: std::cell::Cell<(Option<UtcMillis>, Option<UtcMillis>)>,
     /// Study legends/tags or all studies hidden (saved with the pane). Hidden studies keep
@@ -392,6 +397,7 @@ impl ChartView {
             above_axis: 0.0,
             cross_in_sub: None,
             fp_legend_inputs: std::cell::Cell::new((None, None)),
+            legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, READOUT_BOTTOM)),
             visibility: fixture.visibility,
             picker,
             store,
@@ -1048,6 +1054,7 @@ impl ChartView {
     /// chart hides its study labels (render time).
     fn legend(&self, t: &Theme) -> Option<gpui::AnyElement> {
         if !self.visibility.draws_labels() {
+            self.legend_band.set((0.0, 0.0));
             return None;
         }
         let studies = self.studies.legend(t, &self.instrument);
@@ -1080,7 +1087,21 @@ impl ChartView {
         } else {
             self.levels.legend()
         };
+        // The block this legend takes at the plot's top-left (with the readout above it), for
+        // the footprint to keep its numbers out of (the same frame: render runs before paint).
+        // Rows of 12 px text in boxes padded 4 px, boxes 4 px apart; a margin of one gap.
+        let (boxes, text_rows) = (
+            usize::from(studies.is_some())
+                + usize::from(fp.is_some())
+                + usize::from(!rows.is_empty()),
+            self.studies.legend_rows() + usize::from(fp.is_some()) + rows.len(),
+        );
+        let row_h = 12.0 * 1.3 + 4.0;
+        let bottom = 30.0 + text_rows as f32 * row_h + boxes as f32 * 12.0 + 4.0;
+        self.legend_band
+            .set((8.0 + LEGEND_MAX_W, bottom.max(READOUT_BOTTOM)));
         if studies.is_none() && rows.is_empty() && fp.is_none() {
+            self.legend_band.set((8.0 + LEGEND_MAX_W, READOUT_BOTTOM));
             return None;
         }
         // Level rows: the source's name, then its state; a long reason ends in an ellipsis at
@@ -1641,6 +1662,8 @@ impl ChartView {
                 }
             }
             if studies {
+                let (w, h) = self.legend_band.get();
+                self.footprint.set_text_exclusion(w, h);
                 self.footprint.paint(plot, &self.vp, &t, window, cx);
                 for l in &mut self.layers {
                     l.paint(plot, &self.vp, &t, window, cx);
@@ -1949,9 +1972,10 @@ impl ChartView {
             );
         }
         if let Some((last, y)) = newest {
+            // A filled chip (inverted text colors), so it never reads as a range label.
             window.paint_quad(fill(
                 rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
-                t.label_bg,
+                t.text_main,
             ));
             let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
             self.paint_label(
@@ -1959,10 +1983,31 @@ impl ChartView {
                 last,
                 origin,
                 line_h,
-                t.text_main,
+                t.bg,
                 window,
                 cx,
                 value(last),
+            );
+        }
+        // The pointer in the sub-pane: its value on the axis, in the crosshair tag's style.
+        if let Some(cy) = self.cross_in_sub {
+            let v = sc.value(cy).round() as i64;
+            let y =
+                (s.sub_top + cy).clamp(s.sub_top + TAG_H * 0.5, s.sub_top + s.sub_h - TAG_H * 0.5);
+            window.paint_quad(fill(
+                rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
+                t.cross_tag,
+            ));
+            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            self.paint_label(
+                LabelKind::SubCross,
+                v,
+                origin,
+                line_h,
+                t.on_cross_tag,
+                window,
+                cx,
+                value(v),
             );
         }
     }
@@ -2638,6 +2683,10 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
         max_bars: d.series.max_len(),
     }
 }
+
+/// The OHLCV readout box's bottom (it sits 6 px from the top, `LABEL_PX × 1.6` tall), plus
+/// a gap: the footprint keeps its numbers below it.
+const READOUT_BOTTOM: f32 = 6.0 + LABEL_PX * 1.6 + 4.0;
 
 /// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
 const LEGEND_MAX_W: f32 = 360.0;

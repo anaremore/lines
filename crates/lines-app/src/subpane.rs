@@ -127,6 +127,11 @@ impl Scale {
         ((self.hi - v) / (self.hi - self.lo) * self.height as f64) as f32
     }
 
+    /// The value at sub-pane-local `y` (the inverse of [`Scale::y`]).
+    pub fn value(&self, y: f32) -> f64 {
+        self.hi - f64::from(y) / f64::from(self.height.max(1.0)) * (self.hi - self.lo)
+    }
+
     pub fn contains(&self, v: f64) -> bool {
         (self.lo..=self.hi).contains(&v)
     }
@@ -205,6 +210,10 @@ mod tests {
         assert!(
             (s.y(-4_800.0) - (100.0 - s.y(-5_200.0))).abs() < 1e-3,
             "centred"
+        );
+        assert!(
+            (s.value(s.y(-5_000.0)) + 5_000.0).abs() < 1e-6,
+            "value inverts y"
         );
         let flat = Scale::fit(7, 7, 100.0);
         assert!(flat.hi > flat.lo && flat.contains(7.0));
