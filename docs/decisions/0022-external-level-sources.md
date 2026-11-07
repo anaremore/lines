@@ -2,7 +2,7 @@
 
 **Status:** Accepted (implements 0007 and 0020)
 
-**Context:** The owner wants levels from external services on charts: RocketScooter levels and VARIS zones via the local RS Levels API (`127.0.0.1:8765`, display-only plugin contract), and OptionIdea's SPY/QQQ option-structure levels via its authenticated v2 platform API (translated onto ES/MES and NQ/MNQ by its documented anchor rule). Both adapters are private; the display machinery should be reusable for any future level source.
+**Context:** The owner wants levels from external services on charts: levels and zones from a private, locally running level service (localhost, display-only plugin contract), and OptionIdea's SPY/QQQ option-structure levels via its authenticated v2 platform API (translated onto ES/MES and NQ/MNQ by its documented anchor rule). Both adapters are private; the display machinery should be reusable for any future level source.
 
 **Decision:**
 
@@ -17,7 +17,7 @@
 - A **price-at-time helper** returns the chart's price at a given instant from the store or history (open of a start-stamped bar, within a tolerance), so adapters can do anchor translations. If history doesn't cover that instant, translation is withheld.
 
 *Private adapters (one repo each)*
-- **`anaremore/lines-rs-levels`:** follows the RS Levels display-plugin contract (`/status`, `/levels/:symbol/rows`, `/stats/:symbol/rows`, plus SSE if suitable). It covers ES/MES and NQ/MNQ, VARIS zones from the `RI` stat, and the contract's required settings: service URL, symbol, refresh interval, stale threshold, line kinds and labels. Localhost only by default.
+- **A private local-levels adapter (its own private repo):** follows that service's display-plugin contract (status, level and stat endpoints, plus SSE if suitable). It covers ES/MES and NQ/MNQ, the service's zones, and the contract's required settings: service URL, symbol, refresh interval, stale threshold, line kinds and labels. Localhost only by default.
 - **`anaremore/lines-optionidea`:** follows OptionIdea platform contract v2 (`POST /api/v2/levels/query`; rejects unknown versions, malformed rows, more than 16 levels; no silent historical fallback). It applies the futures translation rule with `referencePrice` / `referencePriceAsOf` against the chart's own price and rounds to tick. The API key comes from the OS keychain (or `OPTIONIDEA_API_KEY`), sent only as `Authorization: Bearer`, never logged or displayed. HTTPS only.
 - Both are display-only: no order entry, account or broker access.
 - The official/personal build (`lines-connectors`) includes them as optional git dependencies, which is fine because all three repos are private.
