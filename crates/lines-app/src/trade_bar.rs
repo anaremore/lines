@@ -535,9 +535,24 @@ pub fn protective<'a>(
         (true, _) => 2,
     };
     cands.sort_by_key(|o| (reached(o), role(o), o.id.0));
+    // Every other live order on the exit side (a plain limit or scale-out, a triggered
+    // stop-limit resting as a limit, an oversized stop, a target that isn't a kept stop's
+    // one-cancels-other partner) also closes the position when it fills, without shrinking
+    // the stops: it uses the budget first.
+    let exit = |o: &lines_trading::Order| match position.signum() {
+        1 => o.side == lines_trading::Side::Sell,
+        -1 => o.side == lines_trading::Side::Buy,
+        _ => false,
+    };
+    let others: i64 = open
+        .iter()
+        .filter(|o| live(o) && exit(o) && !cands.iter().any(|c| c.id == o.id))
+        .filter(|o| !o.oco.is_some_and(|x| cands.iter().any(|c| c.id == x)))
+        .map(|o| o.remaining().0)
+        .sum();
     // In that order, up to the first that doesn't fit: nothing BE moves is reached after a
     // stop it leaves behind.
-    let mut total = 0;
+    let mut total = others;
     let kept: Vec<_> = cands
         .iter()
         .copied()
@@ -547,7 +562,11 @@ pub fn protective<'a>(
         })
         .collect();
     if kept.is_empty() && !cands.is_empty() {
-        return Err("stops exceed the position: drag the stop instead");
+        return Err(if others > 0 {
+            "other exit orders already cover the position: drag the stop instead"
+        } else {
+            "stops exceed the position: drag the stop instead"
+        });
     }
     Ok(kept)
 }
@@ -2711,6 +2730,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![s1.id]
         );
+        // A stop and a separate (non-bracket) sell limit for long 1: the limit already closes
+        // the position, so moving the stop to BE could flip it after the limit fills.
+        let mut tp = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        tp.id = OrderId(40);
+        tp.kind = OrderKind::Limit {
+            price: Price(600_500),
+        };
+        let mut st = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        st.id = OrderId(41);
+        assert_eq!(
+            protective([&tp, &st], 1).map(|v| v.len()),
+            Err("other exit orders already cover the position: drag the stop instead")
+        );
+        // A bracket's own target (one-cancels-other with its stop) doesn't: it shrinks the stop.
+        let mut bt = tp.clone();
+        bt.role = Role::TakeProfit;
+        let mut bs = st.clone();
+        bs.role = Role::StopLoss;
+        bt.oco = Some(bs.id);
+        bs.oco = Some(bt.id);
+        assert_eq!(protective([&bt, &bs], 1).unwrap().len(), 1);
+        // An oversized stop counts too.
+        let mut x = stop(Side::Sell, 2, Role::Single, OrderState::Working);
+        x.id = OrderId(42);
+        assert!(protective([&x, &st], 1).is_err());
         // A short: the lowest buy stop is reached first.
         let mut lo = stop(Side::Buy, 1, Role::StopLoss, OrderState::Working);
         lo.id = OrderId(8);
