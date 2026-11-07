@@ -219,7 +219,8 @@ impl OrdersLayer {
                         let share = (m.filled.0 as f32 / m.qty.0.max(1) as f32).clamp(0.0, 1.0);
                         window.paint_quad(fill(rect(x, yy, (w - 1.0) * share, h), c));
                         outline(window, rect(x, yy, w - 1.0, h), c, hair, false);
-                        t.text_main
+                        // The label goes on its own opaque pill (below).
+                        t.mark_label().0
                     }
                     MarkStyle::Pending => {
                         outline(window, rect(x, yy, w - 1.0, h), c, hair, false);
@@ -252,6 +253,12 @@ impl OrdersLayer {
                 let _ = mark_text(m, &mut buf);
                 if more && k == 1 {
                     let _ = std::fmt::Write::write_str(&mut buf, "+");
+                }
+                // A partial fill's label on an opaque pill: readable over the fill (AA).
+                if m.style == MarkStyle::Partial {
+                    let tw = glyphs.width(buf.as_str(), text_colour, true, window);
+                    let (l, top, pw, ph) = label_pill(x, yy, w, h, tw, hair, role);
+                    window.paint_quad(fill(rect(l, top, pw, ph), t.mark_label().1));
                 }
                 // Inset past the outline (dashed when held) so the label never sits on it.
                 glyphs.paint_right(
@@ -422,6 +429,39 @@ impl OrdersLayer {
     }
 }
 
+/// A partial mark's label pill (left, top, width, height) in the mark at (`x`, `yy`, `w`,
+/// `h`) for a label `tw` wide, right-aligned like the label: inside the outline, and clear of
+/// a target's top notch or a stop's bottom notch, so the role's shape stays whole.
+#[allow(clippy::too_many_arguments)]
+fn label_pill(
+    x: f32,
+    yy: f32,
+    w: f32,
+    h: f32,
+    tw: f32,
+    hair: f32,
+    role: MarkRole,
+) -> (f32, f32, f32, f32) {
+    let lw = hair.max(0.5) * 1.5;
+    let notch = 2.0 * hair.max(0.5);
+    let top = yy
+        + if role == MarkRole::Target {
+            notch.max(lw)
+        } else {
+            lw
+        };
+    let bottom = yy + h
+        - if role == MarkRole::Stop {
+            notch.max(lw)
+        } else {
+            lw
+        };
+    // The mark's inner right edge is `x + w - 1 - lw`; the label ends at `x + w - 5`.
+    let right = x + w - 1.0 - lw;
+    let left = (x + w - 7.0 - tw).max(x + lw);
+    (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+}
+
 /// A rectangle's outline, solid or dashed.
 fn outline(window: &mut Window, b: Bounds<Pixels>, c: Hsla, hair: f32, dashed: bool) {
     let (x, y) = (f32::from(b.origin.x), f32::from(b.origin.y));
@@ -449,5 +489,45 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, c: Hsla, hair: f32, dashed: b
         window.paint_quad(fill(r(x, y + dy, lw, seg), c));
         window.paint_quad(fill(r(x + w - lw, y + dy, lw, seg), c));
         dy += d.on + d.off;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pill stays inside the outline and off the role's notch, at DPI 1 and 2, with a
+    /// label wider than the mark too.
+    #[test]
+    fn the_label_pill_leaves_the_outline_and_notch_whole() {
+        for hair in [1.0f32, 0.5] {
+            let (lw, notch) = (hair.max(0.5) * 1.5, 2.0 * hair.max(0.5));
+            for role in [MarkRole::Entry, MarkRole::Target, MarkRole::Stop] {
+                for tw in [10.0, 28.0, 200.0] {
+                    let (x, yy, w, h) = (100.0, 50.0, 38.0, 14.0);
+                    let (l, t, pw, ph) = label_pill(x, yy, w, h, tw, hair, role);
+                    assert!(
+                        l >= x + lw && l + pw <= x + w - 1.0 - lw + 1e-3,
+                        "{role:?} {tw}"
+                    );
+                    let (top_clear, bottom_clear) = match role {
+                        MarkRole::Target => (notch.max(lw), lw),
+                        MarkRole::Stop => (lw, notch.max(lw)),
+                        MarkRole::Entry => (lw, lw),
+                    };
+                    assert!(t >= yy + top_clear - 1e-3, "{role:?}");
+                    assert!(t + ph <= yy + h - bottom_clear + 1e-3, "{role:?}");
+                    // It covers the label (right-aligned to x + w - 5) when the label fits,
+                    // and is tall enough for a line of digits.
+                    assert!(pw > 0.0 && ph >= 9.0, "{role:?} {tw}");
+                    if tw <= w - 7.0 - lw {
+                        assert!(
+                            l <= x + w - 5.0 - tw && l + pw >= x + w - 5.0,
+                            "{role:?} {tw}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
