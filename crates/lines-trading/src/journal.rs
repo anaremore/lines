@@ -822,8 +822,16 @@ pub struct JournalObserver {
 }
 
 impl Observer for JournalObserver {
+    /// Only trade and last prices (all MAE/MFE uses): a depth batch costs nothing here.
     fn market(&mut self, contract: ContractKey, inputs: &[MarketInput]) {
-        let _ = self.tx.send(Msg::Market(contract, inputs.to_vec()));
+        let prices: Vec<MarketInput> = inputs
+            .iter()
+            .filter(|i| matches!(i, MarketInput::Trade { .. } | MarketInput::Last(_)))
+            .copied()
+            .collect();
+        if !prices.is_empty() {
+            let _ = self.tx.send(Msg::Market(contract, prices));
+        }
     }
 
     fn events(&mut self, events: &[Event]) {

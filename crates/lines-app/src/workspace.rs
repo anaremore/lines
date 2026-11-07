@@ -3437,9 +3437,14 @@ pub fn install(cx: &mut App) {
             autosave_write(&doc, cx);
         }
         let writer = cx.global::<Workspace>().writer.clone();
+        // The journal's last trades too (macOS exits here, before `run` returns).
+        let journal = crate::trading::Trading::try_global(cx).map(|t| t.journal.clone());
         async move {
             if let Some(w) = writer {
                 w.flush(Duration::from_secs(3));
+            }
+            if let Some(j) = journal {
+                j.flush(Duration::from_secs(3));
             }
         }
     })

@@ -152,6 +152,8 @@ pub const TAPE_FILL: usize = 0;
 pub enum JournalCol {
     /// Entry time.
     Time,
+    /// The account's name (every journal pane shows every account's trades).
+    Account,
     Contract,
     Side,
     /// Largest size.
@@ -170,8 +172,9 @@ pub enum JournalCol {
 }
 
 impl JournalCol {
-    pub const ALL: [JournalCol; 11] = [
+    pub const ALL: [JournalCol; 12] = [
         JournalCol::Time,
+        JournalCol::Account,
         JournalCol::Contract,
         JournalCol::Side,
         JournalCol::Qty,
@@ -195,6 +198,7 @@ impl JournalCol {
     pub fn label(self) -> &'static str {
         match self {
             JournalCol::Time => "Time",
+            JournalCol::Account => "Account",
             JournalCol::Contract => "Contract",
             JournalCol::Side => "Side",
             JournalCol::Qty => "Qty",
@@ -216,13 +220,18 @@ impl JournalCol {
     pub fn left_aligned(self) -> bool {
         matches!(
             self,
-            JournalCol::Time | JournalCol::Contract | JournalCol::Side | JournalCol::Tags
+            JournalCol::Time
+                | JournalCol::Account
+                | JournalCol::Contract
+                | JournalCol::Side
+                | JournalCol::Tags
         )
     }
 }
 
-pub const JOURNAL_SPECS: [ColumnSpec; 11] = [
+pub const JOURNAL_SPECS: [ColumnSpec; 12] = [
     spec(48.0, 96.0, false, true),
+    spec(40.0, 72.0, true, true),
     spec(40.0, 64.0, true, true),
     spec(32.0, 44.0, true, true),
     spec(24.0, 36.0, true, true),
@@ -235,7 +244,7 @@ pub const JOURNAL_SPECS: [ColumnSpec; 11] = [
     spec(40.0, 96.0, true, true),
 ];
 /// The tags column takes the journal's leftover width.
-pub const JOURNAL_FILL: usize = 10;
+pub const JOURNAL_FILL: usize = 11;
 
 /// A column of any table, for commands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -749,13 +758,19 @@ mod tests {
     }
 
     /// The owner's bug: dragging time & sales dividers moved them against the pointer. Every
-    /// divider of both real tables, both ways, through the same path the panes use (hit,
+    /// divider of every real table (DOM, time & sales, journal), both ways, through the same path the panes use (hit,
     /// start_drag, drag_to, apply, layout): it ends under the pointer, or at a limit, and
     /// never on the wrong side of where it started.
     #[test]
     fn real_tables_dividers_follow_the_pointer() {
-        for table in [Table::Dom, Table::Tape] {
-            for width in [420.0, 700.0] {
+        for table in [Table::Dom, Table::Tape, Table::Journal] {
+            // Widths that hold the table's defaults (a narrower journal leaves columns out
+            // per frame: `drop_overflow`, tested on its own).
+            let widths: [f32; 2] = match table {
+                Table::Journal => [1000.0, 1400.0],
+                _ => [420.0, 700.0],
+            };
+            for width in widths {
                 let mut fresh = Columns::new(table);
                 fresh.layout(width);
                 let last = (0..fresh.set.len())
