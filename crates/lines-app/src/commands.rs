@@ -7,6 +7,7 @@
 
 use gpui::Keystroke;
 use lines_core::Timeframe;
+use lines_core::drawings::Tool;
 
 use crate::layout::{Axis, Direction, LinkGroup, PaneKind, Preset, link_letter};
 use crate::pane_columns::{Column, ColumnCmd, DomCol, JournalCol, TapeCol};
@@ -113,6 +114,51 @@ pub enum Command {
     Timeframe(Timeframe),
     /// The focused chart's timeframe list.
     TimeframeMenu,
+    /// Drawings on the focused chart (roadmap 11; `crate::chart_draw`).
+    Draw(DrawCmd),
+}
+
+/// Drawing actions on the focused chart. The drawings belong to its product: every chart of
+/// it shows them, and undo/redo act on the product's drawings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawCmd {
+    /// Enter drawing mode with this tool (again: leave it).
+    Tool(Tool),
+    Undo,
+    Redo,
+    DeleteSelected,
+    /// Show or hide drawings on this chart (saved with the pane).
+    ToggleVisible,
+    /// Delete every drawing of the chart's product (asks first; undo brings them back).
+    DeleteAll,
+    /// The selected drawing's (or new drawings') color, weight, dash.
+    NextColor,
+    ToggleWidth,
+    ToggleDashed,
+    /// Keep the temporary measure as a drawing.
+    PinMeasure,
+}
+
+impl DrawCmd {
+    pub const ALL: [DrawCmd; 17] = [
+        DrawCmd::Tool(Tool::HLine),
+        DrawCmd::Tool(Tool::HRay),
+        DrawCmd::Tool(Tool::Trend),
+        DrawCmd::Tool(Tool::Ray),
+        DrawCmd::Tool(Tool::Rect),
+        DrawCmd::Tool(Tool::VLine),
+        DrawCmd::Tool(Tool::Note),
+        DrawCmd::Tool(Tool::Measure),
+        DrawCmd::PinMeasure,
+        DrawCmd::Undo,
+        DrawCmd::Redo,
+        DrawCmd::DeleteSelected,
+        DrawCmd::ToggleVisible,
+        DrawCmd::DeleteAll,
+        DrawCmd::NextColor,
+        DrawCmd::ToggleWidth,
+        DrawCmd::ToggleDashed,
+    ];
 }
 
 /// Trading actions of the focused pane (`crate::trade_bar::run`). Flatten and Cancel All act
@@ -198,6 +244,67 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::CleanChart, true, true, false, "m"),
     b(Command::ToggleHints, false, false, false, "f1"),
     b(Command::Studies, true, false, false, "i"),
+    // Drawings (roadmap 11). Alt+letter on charts; Alt+V/R/B/G stay the volume profile's.
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::HLine)),
+        false,
+        false,
+        true,
+        "h",
+    ),
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::HRay)),
+        false,
+        true,
+        true,
+        "h",
+    ),
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::Trend)),
+        false,
+        false,
+        true,
+        "t",
+    ),
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::Ray)),
+        false,
+        true,
+        true,
+        "t",
+    ),
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::Rect)),
+        false,
+        false,
+        true,
+        "z",
+    ),
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::VLine)),
+        false,
+        false,
+        true,
+        "l",
+    ),
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::Note)),
+        false,
+        false,
+        true,
+        "n",
+    ),
+    // Alt+U (ruler): Alt+M stays the symbol picker's micro/mini toggle.
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::Measure)),
+        false,
+        false,
+        true,
+        "u",
+    ),
+    b(Command::Draw(DrawCmd::Undo), true, false, false, "z"),
+    b(Command::Draw(DrawCmd::Redo), true, false, false, "y"),
+    b(Command::Draw(DrawCmd::Redo), true, true, false, "z"),
     // Trading (roadmap 7): always Ctrl+Shift or Ctrl+Alt, so no stray key can trade.
     b(Command::Trade(TradeCmd::Flatten), true, true, false, "f"),
     b(Command::Trade(TradeCmd::CancelAll), true, true, false, "a"),
@@ -240,13 +347,16 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
     }
     let key = k.key.as_str();
     if !ctrl && !m.shift && m.alt {
-        return Some(Command::Focus(match key {
-            "left" => Direction::Left,
-            "right" => Direction::Right,
-            "up" => Direction::Up,
-            "down" => Direction::Down,
-            _ => return None,
-        }));
+        let dir = match key {
+            "left" => Some(Direction::Left),
+            "right" => Some(Direction::Right),
+            "up" => Some(Direction::Up),
+            "down" => Some(Direction::Down),
+            _ => None,
+        };
+        if let Some(d) = dir {
+            return Some(Command::Focus(d));
+        }
     }
     if ctrl && !m.shift && !m.alt && key.len() == 1 && (b'1'..=b'9').contains(&key.as_bytes()[0]) {
         return Some(Command::SelectTab((key.as_bytes()[0] - b'1') as usize));
@@ -379,6 +489,18 @@ pub fn label(c: Command) -> String {
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
         Command::Timeframe(tf) => format!("Timeframe: {tf}"),
         Command::TimeframeMenu => "Chart: timeframe…".into(),
+        Command::Draw(d) => match d {
+            DrawCmd::Tool(t) => format!("Drawings: {}", t.label()),
+            DrawCmd::Undo => "Drawings: undo".into(),
+            DrawCmd::Redo => "Drawings: redo".into(),
+            DrawCmd::DeleteSelected => "Drawings: delete selected".into(),
+            DrawCmd::ToggleVisible => "Drawings: show/hide on this chart".into(),
+            DrawCmd::DeleteAll => "Drawings: delete all for this chart's product…".into(),
+            DrawCmd::NextColor => "Drawings: next color".into(),
+            DrawCmd::ToggleWidth => "Drawings: line weight 1/2".into(),
+            DrawCmd::ToggleDashed => "Drawings: dashed on/off".into(),
+            DrawCmd::PinMeasure => "Drawings: pin measure".into(),
+        },
         Command::Trade(t) => match t {
             TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
             TradeCmd::CancelAll => "Trade: Cancel all orders",
@@ -465,7 +587,21 @@ pub fn palette() -> Vec<Command> {
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
     v.extend(Timeframe::ALL.map(Command::Timeframe));
+    v.extend(DrawCmd::ALL.map(Command::Draw));
     v
+}
+
+/// While the focused pane takes typed text (a symbol search, a note, a timeframe), only
+/// Ctrl/Cmd keys reach the workspace, and not undo/redo: plain and Alt keys are the text's
+/// (on macOS Option types characters, e.g. in a note).
+pub fn runs_while_typing(k: &Keystroke, cmd: Command) -> bool {
+    let m = k.modifiers;
+    let ctrl = if cfg!(target_os = "macos") {
+        m.platform
+    } else {
+        m.control
+    };
+    ctrl && !matches!(cmd, Command::Draw(DrawCmd::Undo | DrawCmd::Redo))
 }
 
 /// Palette entries matching `query`: every word of it appears in the label (any order, any
@@ -528,6 +664,55 @@ mod tests {
         assert_eq!(c("l"), Some(Command::CycleLink));
         assert_eq!(c("shift-x"), Some(Command::ToggleCrosshairSync));
         assert_eq!(c("shift-g"), Some(Command::ToggleMagnet));
+        // Drawings: Alt+letters that aren't the volume profile's (V, R, B, G).
+        assert_eq!(
+            cmd("alt-h"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::HLine)))
+        );
+        assert_eq!(
+            cmd("alt-shift-h"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::HRay)))
+        );
+        assert_eq!(
+            cmd("alt-t"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::Trend)))
+        );
+        assert_eq!(
+            cmd("alt-shift-t"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::Ray)))
+        );
+        assert_eq!(cmd("alt-z"), Some(Command::Draw(DrawCmd::Tool(Tool::Rect))));
+        assert_eq!(
+            cmd("alt-l"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::VLine)))
+        );
+        assert_eq!(cmd("alt-n"), Some(Command::Draw(DrawCmd::Tool(Tool::Note))));
+        assert_eq!(
+            cmd("alt-u"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::Measure)))
+        );
+        for profile_key in ["v", "r", "b", "g"] {
+            assert_eq!(
+                cmd(&format!("alt-{profile_key}")),
+                None,
+                "Alt+{profile_key}"
+            );
+        }
+        assert_eq!(c("z"), Some(Command::Draw(DrawCmd::Undo)));
+        assert_eq!(c("y"), Some(Command::Draw(DrawCmd::Redo)));
+        assert_eq!(c("shift-z"), Some(Command::Draw(DrawCmd::Redo)));
+        // While typing (a note, the symbol picker): plain and Alt keys are the text's.
+        let k = |s: &str| Keystroke::parse(Box::leak(s.to_owned().into_boxed_str())).unwrap();
+        let alt_h = Command::Draw(DrawCmd::Tool(Tool::HLine));
+        assert!(!runs_while_typing(&k("alt-h"), alt_h));
+        assert!(!runs_while_typing(
+            &k(&format!("{}-z", ctrl())),
+            Command::Draw(DrawCmd::Undo)
+        ));
+        assert!(runs_while_typing(
+            &k(&format!("{}-shift-p", ctrl())),
+            Command::Palette
+        ));
         assert_eq!(cmd("shift-f10"), Some(Command::Menu));
         assert_eq!(c("shift-s"), Some(Command::SaveAs));
         assert_eq!(c("o"), Some(Command::Open));

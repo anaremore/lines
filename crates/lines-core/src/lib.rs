@@ -8,6 +8,7 @@ pub mod book;
 pub mod calendar;
 pub mod columns;
 pub mod continuous;
+pub mod drawings;
 pub mod fixed_str;
 pub mod footprint;
 pub mod geometry;

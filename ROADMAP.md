@@ -34,7 +34,7 @@ Status: `done` · `current` · `next` · `later`
 | 9 | Chart timeframes | done | Minute/hour/day/week candles derived exactly from 1-minute bars, aligned to sessions; per-chart, saved; VWAP/profile/crosshair sync follow |
 | 9b | Tick, volume, range and seconds charts | later | Bars built from counted trades (live, replay, local store); span covered only by history is labelled; same chart layers and trading as time charts |
 | 10e | Footprint + cumulative delta | done | Footprint chart mode (bid × ask / delta / volume cells per bar, diagonal imbalances, POC) from counted trades, exact on every timeframe; cumulative delta as an engine indicator (ETH/RTH/no reset) drawn as candles in the first chart sub-pane |
-| 11 | Drawing tools (workspaces moved to 5b) | later | Data-space drawings, persisted layouts |
+| 11 | Drawing tools (workspaces moved to 5b) | done | Data-space drawings, persisted layouts |
 | 12a | Rithmic Test market data (private connector) | current | Provider extension point in public app (decision 0020); private `lines-connectors` repo builds the official binary; ticker + history plants against Rithmic Test; protos read locally, never committed |
 | 12b | Sierra Chart DTC execution (private) | next | Observe mode → Sierra Sim → owner-enabled Live per decision 0023 safety rules; restart reconciliation; audit log |
 | 12 | First live connection (likely Rithmic; CQG WebAPI is enterprise-priced) | later | Vendor conformance passed; live routing gated behind a Cargo feature until then |

@@ -93,6 +93,10 @@ pub struct Theme {
     pub link: [Hsla; 4],
     /// Study lines (VWAP, …), picked per instance. Never up/down or the accent.
     pub study: [Hsla; 4],
+    /// Drawings (roadmap 11: lines, zones, notes, measures), picked per drawing
+    /// (`lines_core::drawings::Style::color`). Never up/down or the accent; each at least
+    /// 3:1 against the chart background (WCAG 1.4.11, graphical objects).
+    pub drawing: [Hsla; 4],
     /// Behind text drawn over the plot (study legends, the volume profile's tag): a slightly
     /// translucent panel box, so lines and profile rows never run through the text. Its text
     /// meets AA over any chart content below it (`label_box_text_meets_aa_over_chart_content`).
@@ -163,6 +167,8 @@ impl Theme {
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
             // sand, teal, silver, orchid
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
+            // sky, gold, paper, pink
+            drawing: [c(0x7cc4ff), c(0xf2c14e), c(brand::PAPER), c(0xf08bd6)],
             label_bg: c(0x171b24).opacity(0.9),
             profile_va: c(0x9a9fb2).opacity(0.30),
             profile_poc: c(brand::PAPER).opacity(0.70),
@@ -213,6 +219,8 @@ impl Theme {
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
+            // navy, ochre, ink, magenta
+            drawing: [c(0x1d4f91), c(0x8a6100), c(brand::INK), c(0x9c2a7c)],
             label_bg: c(brand::PAPER).opacity(0.9),
             profile_va: c(0x565b6e).opacity(0.24),
             profile_poc: c(brand::INK).opacity(0.65),
@@ -587,6 +595,21 @@ mod tests {
     /// `bg`, or on the last-price tag). The chevron drawn on the trail is a graphical mark
     /// (WCAG 1.4.11: 3:1): it stays legible on the strongest fill of either side or neutral,
     /// in every theme and palette.
+    /// Drawing colors read against the chart (3:1, graphical objects) and never borrow a
+    /// meaning: not up, down or the accent, in every theme and palette.
+    #[test]
+    fn drawing_colors_contrast_and_stay_distinct() {
+        for t in Theme::all() {
+            for (i, d) in t.drawing.iter().enumerate() {
+                let r = contrast(*d, t.bg);
+                assert!(r >= 3.0, "{}: drawing color {i}: {r:.2}", t.name);
+                for (what, other) in [("up", t.up), ("down", t.down), ("accent", t.accent)] {
+                    assert_ne!(*d, other, "{}: drawing color {i} is {what}", t.name);
+                }
+            }
+        }
+    }
+
     #[test]
     fn dom_trail_keeps_contrast() {
         use lines_core::trail::MAX_ALPHA;

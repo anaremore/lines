@@ -3,6 +3,7 @@
 //! [`Extensions`]; nothing in this crate names them.
 
 mod bench;
+mod chart_draw;
 mod chart_view;
 mod commands;
 mod diagnostics;
@@ -11,6 +12,7 @@ mod dom_trade;
 mod dom_trail;
 mod dom_view;
 mod dropdown;
+mod drawings_store;
 mod feeds;
 mod footprint;
 mod journal_view;
@@ -417,6 +419,11 @@ struct Cli {
     /// Screenshot: charts and DOMs with their account list open (the header's account chip).
     #[arg(long, requires = "screenshot")]
     account_menu: bool,
+    /// Screenshot: draw these drawings (a drawings file, as saved in
+    /// `<config dir>/drawings/<PRODUCT>.json`; it names its product). Screenshots never read
+    /// the saved drawings.
+    #[arg(long, requires = "screenshot")]
+    drawings: Option<PathBuf>,
 }
 
 /// The CLI with every registered source as a `--source` value, with its help.
@@ -844,6 +851,12 @@ where
         let out = cli.screenshot.clone().expect("screenshot mode");
         #[cfg(feature = "screenshot")]
         {
+            let drawings = match &cli.drawings {
+                Some(f) => {
+                    Some(drawings_store::read_seed(f).map_err(|e| anyhow!("--drawings: {e}"))?)
+                }
+                None => None,
+            };
             let shot = screenshot::Shot {
                 out,
                 size,
@@ -853,6 +866,7 @@ where
                 arm: cli.arm,
                 account_menu: cli.account_menu,
                 pnl: cli.pnl.map(PnlArg::mode),
+                drawings,
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);
@@ -920,7 +934,7 @@ where
     if let Some(r) = &trading.report {
         reports.push(r.clone());
     }
-    if let Some(d) = dir {
+    if let Some(d) = dir.clone() {
         ws = ws.with_files(d, writer.clone(), autosave);
     }
     for r in reports {
@@ -930,10 +944,12 @@ where
         tracing::info!("--instrument/--layout: this run's layout is not autosaved");
     }
 
+    let drawings = drawings_store::Drawings::new(dir.clone(), Some(writer.clone()));
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
         cx.set_global(settings);
+        cx.set_global(drawings);
         cx.set_global(ws);
         workspace::install(cx);
         if let Err(e) = workspace::open_workspace(&doc, cx) {
