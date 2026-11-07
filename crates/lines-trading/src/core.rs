@@ -475,11 +475,11 @@ impl TradingCore {
 
     // ---- commands -------------------------------------------------------------------
 
-    /// The time for settings sent before the core has seen any (a replay's start, whose
-    /// market time comes with its first data): the trade date isn't rolled for them, so
-    /// the first data's date is never taken for a new one (which would bring in looser
-    /// rules early).
-    pub const BEFORE_DATA: UtcMillis = UtcMillis(i64::MIN);
+    /// No time yet: a replay's start (market or manual clock) before its first data, which
+    /// is also what the service's market clock reads then. Nothing at or before it rolls the
+    /// trade date (startup's rebuilds and settings), so the first data's date is never taken
+    /// for a new one, which would bring in looser rules waiting for the next session early.
+    pub const BEFORE_DATA: UtcMillis = UtcMillis(0);
 
     /// The single entry point (decision 0018). Returns the command's id; its result is an
     /// [`Event::Command`] in the stream.
@@ -580,9 +580,7 @@ impl TradingCore {
                 format!("no account {account}"),
             ));
         }
-        if now != Self::BEFORE_DATA {
-            self.roll_day(now, &account);
-        }
+        self.roll_day(now, &account);
         // Strategies (decision 0025): their commands pass the strategy gate first; a person's
         // order action pauses the strategies trading the same account and contract.
         if let Source::Strategy(s) = env.source {
@@ -833,7 +831,7 @@ impl TradingCore {
             }
             Command::SetGuardrails { guardrails, .. } => {
                 let unrealised = self.unrealised(&account);
-                let day = (now != Self::BEFORE_DATA)
+                let day = (now > Self::BEFORE_DATA)
                     .then(|| self.trade_day(&account, now))
                     .flatten();
                 let a = self.accounts.get_mut(&account).expect("checked");
@@ -1709,6 +1707,9 @@ impl TradingCore {
 
     /// A new trade date for the account's day calendar closes the previous day.
     fn roll_day(&mut self, now: UtcMillis, account: &AccountId) {
+        if now <= Self::BEFORE_DATA {
+            return;
+        }
         let Some(a) = self.accounts.get(account) else {
             return;
         };
@@ -1815,7 +1816,8 @@ impl TradingCore {
     ) {
         // Guardrails: the day's loss (realised + unrealised, fees included).
         let day_pnl = equity - self.accounts[account].tracker.day_open_balance;
-        if let Some((_, end)) = self.trade_day(account, now)
+        if now > Self::BEFORE_DATA
+            && let Some((_, end)) = self.trade_day(account, now)
             && let Some(a) = self.accounts.get_mut(account)
         {
             a.guard.on_day_pnl(day_pnl, end);

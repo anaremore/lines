@@ -941,16 +941,17 @@ impl Trading {
                 (core, setup.paper)
             }
         };
-        // Orders the broker still holds (brackets survive restarts) come back through rebuild,
-        // with the account's real balance: only then are settings applied.
-        core.rebuild(lines_feed::now_utc());
-        // Settings are stamped with the wall time live; a replay (market or manual clock) has
-        // no time until its first data, so its trade date isn't rolled for them.
+        // The wall time live; a replay (market or manual clock) has no time until its first
+        // data, so nothing at startup rolls its trade date (the service's first rebuild reads
+        // the same `BEFORE_DATA` from its clock).
         let at = if setup.clock == Clock::Wall {
             lines_feed::now_utc()
         } else {
             TradingCore::BEFORE_DATA
         };
+        // Orders the broker still holds (brackets survive restarts) come back through rebuild,
+        // with the account's real balance: only then are settings applied.
+        core.rebuild(at);
         // What settings asked for and the core refused (wrong size, already past a limit):
         // reported at start, like a setting that doesn't resolve.
         let mut sent: Vec<(lines_trading::CommandId, String)> = Vec::new();
@@ -2023,6 +2024,65 @@ mod tests {
 
     /// Roadmap 8b: guardrails from settings reach the core at start, a guardrail denial reaches
     /// the DOM header as a short reason, and a lockout reaches the cache.
+    #[test]
+    /// A replay's start (manual or market clock) rolls no trade date: looser prop rules from
+    /// settings wait through startup's rebuilds and the first data, for the next session.
+    fn looser_settings_wait_through_a_replay_start() {
+        let mut cfg = AccountConfig::paper("paper", 50_000);
+        let eod = lines_trading::rules::presets()
+            .into_iter()
+            .find(|p| p.daily_loss_limit == Some(1_000))
+            .unwrap();
+        cfg.rules = Some(lines_trading::rules::RulePreset {
+            max_micro_contracts: Some(10),
+            ..eod.clone()
+        });
+        let mut setup = paper_setup(vec![cfg]);
+        assert_eq!(setup.clock, Clock::Manual);
+        setup.prop_rules.insert("paper".into(), Some(eod));
+        let base = FeedConfig::new(FeedSource::Replay {
+            path: "unused.lfr".into(),
+            speed: 0.0,
+            stop_at: None,
+        });
+        let t = Trading::start(setup, FeedRegistry::new(), base);
+        let account = AccountId::new("paper");
+        t.settle();
+        let waiting = |t: &Trading| {
+            let s = t.cache.read();
+            let v = s.account(&account).expect("the account's view");
+            (
+                v.limits.rules_pending.is_some(),
+                v.limits
+                    .rules_in_force
+                    .as_ref()
+                    .and_then(|r| r.max_micro_contracts),
+            )
+        };
+        assert_eq!(waiting(&t), (true, Some(10)), "after startup");
+        // The first data's time: still today's rules.
+        t.advance_to(lines_core::UtcMillis::parse_iso("2026-11-05T15:00:00Z").unwrap());
+        let id = t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::PlaceOrder(OrderSpec {
+                account: account.clone(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(2),
+                kind: OrderKind::Limit { price: px(5990.00) },
+            }),
+        );
+        t.settle();
+        let s = t.cache.read();
+        let Some(Err(r)) = s.result(id) else {
+            panic!("20 of 10 micros allowed: {:?}", s.result(id))
+        };
+        assert_eq!(r.code, RejectCode::PropRule, "{r:?}");
+        drop(s);
+        assert_eq!(waiting(&t), (true, Some(10)), "after the first data");
+    }
+
     #[test]
     fn guardrails_from_settings_deny_and_report() {
         let mut setup = paper_setup(vec![AccountConfig::paper("paper", 50_000)]);

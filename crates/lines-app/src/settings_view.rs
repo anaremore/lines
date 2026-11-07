@@ -842,6 +842,7 @@ impl SettingsWindow {
         if p.undo.is_some() {
             // An undo's yes: it was undone, not a new change to undo.
             self.undo.truncate(n);
+            self.no_undo_entry(n);
         }
         self.target = keep;
     }
@@ -877,10 +878,20 @@ impl SettingsWindow {
         // An undo that loosens asks like any other change.
         self.set(i, entry.value.clone(), false, cx);
         self.undo.truncate(n);
+        self.no_undo_entry(n);
         if let Some(p) = &mut self.pending {
             p.undo = Some(entry);
         } else if let Some(n) = &mut self.note {
             n.1 = format!("Undone · {}", n.1);
+        }
+    }
+
+    /// The change just sent (an undo's) made no undo entry: a refusal removes none.
+    fn no_undo_entry(&mut self, at: usize) {
+        if let Some(w) = self.awaiting.last_mut()
+            && w.undo_at == Some(at)
+        {
+            w.undo_at = None;
         }
     }
 
