@@ -158,7 +158,8 @@ pub struct NamedValue {
     /// Stable name: 1-32 lowercase letters, digits, `-`, `_` or `.`, unique in the map.
     pub name: String,
     pub value: f64,
-    /// When the source computed it, if it says (else the map's as-of).
+    /// When the source computed it, if it says ([`LevelMap::value_as_of`] falls back to the
+    /// map's as-of).
     pub as_of: Option<UtcMillis>,
 }
 
@@ -202,6 +203,11 @@ impl LevelMap {
     /// A named value by name.
     pub fn value(&self, name: &str) -> Option<&NamedValue> {
         self.values.iter().find(|v| v.name == name)
+    }
+
+    /// When a named value was computed: its own as-of, else the map's.
+    pub fn value_as_of(&self, name: &str) -> Option<UtcMillis> {
+        self.value(name).map(|v| v.as_of.unwrap_or(self.as_of))
     }
 
     /// Index of a kind slug.
@@ -400,17 +406,23 @@ impl LevelMapBuilder {
         if self.map.values.len() > MAX_VALUES {
             self.fail(LevelError::TooMany("values"));
         }
-        let bad = self.map.values.iter().enumerate().find_map(|(i, v)| {
-            if !value_name_ok(&v.name) {
-                Some(LevelError::BadValueName(v.name.clone()))
-            } else if self.map.values[..i].iter().any(|o| o.name == v.name) {
-                Some(LevelError::DuplicateValue(v.name.clone()))
-            } else if !v.value.is_finite() {
-                Some(LevelError::ValueNotFinite(v.name.clone()))
-            } else {
-                None
-            }
-        });
+        // Too many is already the error: don't spend time (quadratic name checks) on a map
+        // that is refused anyway.
+        let bad = (self.map.values.len() <= MAX_VALUES)
+            .then(|| {
+                self.map.values.iter().enumerate().find_map(|(i, v)| {
+                    if !value_name_ok(&v.name) {
+                        Some(LevelError::BadValueName(v.name.clone()))
+                    } else if self.map.values[..i].iter().any(|o| o.name == v.name) {
+                        Some(LevelError::DuplicateValue(v.name.clone()))
+                    } else if !v.value.is_finite() {
+                        Some(LevelError::ValueNotFinite(v.name.clone()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten();
         if let Some(e) = bad {
             self.fail(e);
         }

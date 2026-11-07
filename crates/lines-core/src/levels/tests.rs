@@ -347,6 +347,25 @@ fn named_values_are_checked() {
         many = many.value(&format!("v{i}"), 0.0, None);
     }
     assert_eq!(many.build(TICK).unwrap_err(), LevelError::TooMany("values"));
+    // Too many duplicates: refused as too many, without checking every pair.
+    let mut dup = b();
+    for _ in 0..=MAX_VALUES {
+        dup = dup.value("same", 0.0, None);
+    }
+    assert_eq!(dup.build(TICK).unwrap_err(), LevelError::TooMany("values"));
+}
+
+#[test]
+fn a_values_as_of_falls_back_to_the_maps() {
+    let own = t("2026-11-05T14:31:00");
+    let m = b()
+        .value("a", 1.0, Some(own))
+        .value("b", 2.0, None)
+        .build(TICK)
+        .unwrap();
+    assert_eq!(m.value_as_of("a"), Some(own));
+    assert_eq!(m.value_as_of("b"), Some(t("2026-11-05T14:00:00")));
+    assert_eq!(m.value_as_of("c"), None);
 }
 
 fn b() -> LevelMapBuilder {
