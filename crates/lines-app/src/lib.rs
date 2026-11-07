@@ -1222,12 +1222,15 @@ where
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
     }
 
-    if (cli.backtest_config.is_some() || cli.report.is_some())
+    if cli.backtest_config.is_some()
         && cli.backtest.is_none()
         && cli.run_strategy.is_none()
         && cli.strategy.is_none()
     {
-        bail!("--backtest-config and --report go with --backtest or --run-strategy");
+        bail!("--backtest-config goes with --backtest, --run-strategy or --strategy");
+    }
+    if cli.report.is_some() && cli.backtest.is_none() && cli.run_strategy.is_none() {
+        bail!("--report goes with --backtest or --run-strategy");
     }
     if let Some(name) = &cli.backtest {
         return run_backtest(&cli, &ext, name);

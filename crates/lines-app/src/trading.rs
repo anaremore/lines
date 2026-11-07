@@ -1288,12 +1288,12 @@ impl Trading {
         Some((v.label.clone(), status))
     }
 
-    /// The account a new pane trades on.
     /// How the paper core reads time (a replay's market clock, the wall clock live).
     pub fn clock(&self) -> Clock {
         self.clock
     }
 
+    /// The account a new pane trades on.
     pub fn default_account(&self) -> Option<AccountId> {
         let all = self.accounts();
         self.start_account

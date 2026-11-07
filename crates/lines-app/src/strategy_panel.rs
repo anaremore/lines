@@ -12,10 +12,13 @@
 //!   - "keep positions" (palette only) stops without flattening.
 
 use std::sync::Arc;
+#[cfg(any(test, feature = "screenshot"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::Global;
-use lines_core::{CivilDate, ContractKey, UtcMillis};
+#[cfg(any(test, feature = "screenshot"))]
+use lines_core::UtcMillis;
+use lines_core::{CivilDate, ContractKey};
 use lines_strategy::backtest::DecisionRecord;
 use lines_trading::journal::Trade;
 use lines_trading::strategy::{StrategyId, StrategyLimits, StrategyState};
@@ -154,6 +157,15 @@ pub struct RowCtx<'a> {
     pub mode: PnlDisplay,
 }
 
+/// First letter upper case (the core's reasons start lower case).
+fn sentence(s: String) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => s,
+    }
+}
+
 /// Whether the trade is the instance's: on its account and contract, with a fill from it.
 pub fn is_its_trade(t: &Trade, info: &StrategyInfo) -> bool {
     t.account == info.account
@@ -166,23 +178,30 @@ pub fn is_its_trade(t: &Trade, info: &StrategyInfo) -> bool {
 pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
     let (state, reason) = c.core.unwrap_or((info.state, info.reason.as_deref()));
     let failed = info.fault.is_some() || info.rolled.is_some();
-    let active = c.position.is_some() || c.working;
+    // The account's position on the contract is the instance's only while it trades it (armed
+    // or paused); once stopped or before it starts, a position there is the trader's (0025).
+    let owned = matches!(state, StrategyState::Armed | StrategyState::Paused);
+    let held = c.position.filter(|_| owned);
+    let active = held.is_some() || c.working;
     let phase = phase(state, reason, failed, active);
     let why = match phase {
         Phase::Faulted => info.fault.clone().or_else(|| info.rolled.clone()),
-        Phase::Paused | Phase::Halted => reason.map(str::to_owned),
-        Phase::Stopped if state == StrategyState::Disarmed => Some("not started".to_owned()),
-        Phase::Stopped => Some(reason.unwrap_or("stopped by the trader").to_owned()),
+        Phase::Halted => Some("Daily loss limit reached; its trade was closed".to_owned()),
+        Phase::Paused => reason.map(str::to_owned),
+        Phase::Stopped if state == StrategyState::Disarmed => Some("Not started".to_owned()),
+        Phase::Stopped => Some(reason.unwrap_or("Stopped by the trader").to_owned()),
         Phase::Armed | Phase::Running => None,
-    };
+    }
+    .map(sentence);
     let product = lines_feed::catalog::get(info.contract.product);
     let contract = product.as_ref().map_or_else(
         || format!("{:?}", info.contract.product),
         |p| info.contract.label(p).as_str().to_owned(),
     );
-    let position = match c.position {
+    let position = match held {
         Some(p) => {
-            let side = if p.qty > 0 { "Long" } else { "Short" };
+            // Direction by shape too, as the DOM shows it.
+            let side = if p.qty > 0 { "▲ Long" } else { "▼ Short" };
             let avg = match (p.avg_price, &product) {
                 (Some(a), Some(pr)) => {
                     // `avg_price` is in price units: shown in the product's notation.
@@ -202,12 +221,13 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         .filter(|t| Some(t.trade_date) == c.today && is_its_trade(t, info))
         .collect();
     let n = mine.len();
-    let trades = format!("{n} trade{} today", if n == 1 { "" } else { "s" });
+    let trades = format!("{n} closed today");
     // Today's net: closed trades (fees included) plus the open position's P&L. Money only:
     // ticks of trades with different sizes don't add up (as the journal's stats).
     let net = mine.iter().fold(Money::ZERO, |m, t| Money(m.0 + t.net().0))
-        + c.position.map_or(Money::ZERO, |p| p.unrealised);
-    let (pnl, pnl_sign) = if c.mode.money() && (n > 0 || c.position.is_some()) {
+        + held.map_or(Money::ZERO, |p| p.unrealised);
+    // Always shown in money modes ($0.00 with nothing traded), never left out.
+    let (pnl, pnl_sign) = if c.mode.money() {
         let mut s = String::new();
         let _ = pnl::write_money(&mut s, net);
         (Some(s), net.0.signum() as i8)
@@ -225,8 +245,11 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
     });
     let l = &info.limits;
     let mut limits = format!("max {}", l.max_position);
+    // P&L display off shows no money: the limit is still named.
     if c.mode.money() {
-        limits.push_str(&format!(" · loss ${}", l.max_daily_loss));
+        limits.push_str(&format!(" · daily loss ${}", l.max_daily_loss));
+    } else {
+        limits.push_str(" · daily loss limit set");
     }
     limits.push_str(&format!(" · {} entries/min", l.max_orders_per_min));
     let hours: Vec<String> = l
@@ -252,8 +275,8 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         pnl_sign,
         last,
         can_start: matches!(phase, Phase::Stopped | Phase::Paused),
-        can_stop: matches!(state, StrategyState::Armed | StrategyState::Paused)
-            || c.position.is_some(),
+        // Stop flattens: never offered for a position that is the trader's.
+        can_stop: owned,
     }
 }
 
@@ -276,12 +299,14 @@ pub fn stop_all(flatten: bool) -> Command {
     Command::StopStrategies { id: None, flatten }
 }
 
-/// A fixed set of instances (tests, screenshots and the app until the host is wired in).
+/// A fixed set of instances (tests and `--strategies-demo` screenshots).
+#[cfg(any(test, feature = "screenshot"))]
 pub struct DemoStrategies {
     infos: Vec<StrategyInfo>,
     revision: AtomicU64,
 }
 
+#[cfg(any(test, feature = "screenshot"))]
 impl DemoStrategies {
     pub fn new(infos: Vec<StrategyInfo>) -> DemoStrategies {
         DemoStrategies {
@@ -367,6 +392,7 @@ impl DemoStrategies {
     }
 }
 
+#[cfg(any(test, feature = "screenshot"))]
 impl StrategySource for DemoStrategies {
     fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
@@ -459,9 +485,9 @@ mod tests {
         assert_eq!(words, ["ARMED", "PAUSED", "HALTED", "STOPPED"]);
         assert_eq!(
             rows[1].why.as_deref(),
-            Some("manual order activity on MESZ26")
+            Some("Manual order activity on MESZ26")
         );
-        assert_eq!(rows[3].why.as_deref(), Some("not started"));
+        assert_eq!(rows[3].why.as_deref(), Some("Not started"));
         // Starting is explicit and only from a stopped or paused instance; a halted one waits
         // for the next trade date.
         let starts: Vec<bool> = rows.iter().map(|r| r.can_start).collect();
@@ -471,10 +497,21 @@ mod tests {
         assert_eq!(rows[0].scope, "Paper 1 · ESZ26");
         assert_eq!(
             rows[0].limits,
-            "max 2 · loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
+            "max 2 · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
         );
         let off = row(&i[0], &ctx(&[], None, PnlDisplay::Off));
         assert!(!off.limits.contains('$'), "{}", off.limits);
+        assert!(
+            off.limits.contains("daily loss limit set"),
+            "{}",
+            off.limits
+        );
+        assert_eq!(
+            rows[2].why.as_deref(),
+            Some("Daily loss limit reached; its trade was closed")
+        );
+        // Money modes always show today's P&L, $0.00 with nothing traded.
+        assert_eq!(rows[3].pnl.as_deref(), Some("$0.00"));
         assert!(
             rows[0]
                 .last
@@ -493,11 +530,11 @@ mod tests {
         };
         let r = row(&i, &c);
         assert_eq!(r.phase, Phase::Stopped);
-        assert_eq!(r.why.as_deref(), Some("stopped by the trader"));
+        assert_eq!(r.why.as_deref(), Some("Stopped by the trader"));
         i.fault = Some("the strategy panicked".into());
         let r = row(&i, &ctx(&[], None, PnlDisplay::Both));
         assert_eq!((r.phase, r.can_start), (Phase::Faulted, false));
-        assert_eq!(r.why.as_deref(), Some("the strategy panicked"));
+        assert_eq!(r.why.as_deref(), Some("The strategy panicked"));
     }
 
     #[test]
@@ -517,13 +554,37 @@ mod tests {
         ];
         let r = row(&i, &ctx(&trades, Some(&pos), PnlDisplay::Both));
         assert_eq!(r.phase, Phase::Running);
-        assert_eq!(r.position, "Short 2 @ 6012.25");
-        assert_eq!(r.trades, "1 trade today");
+        assert_eq!(r.position, "▼ Short 2 @ 6012.25");
+        assert_eq!(r.trades, "1 closed today");
         assert_eq!((r.pnl.as_deref(), r.pnl_sign), (Some("+$75.00"), 1));
         // P&L display off: no money anywhere; ticks only: no money either.
         for m in [PnlDisplay::Off, PnlDisplay::Ticks] {
             assert_eq!(row(&i, &ctx(&trades, Some(&pos), m)).pnl, None);
         }
+    }
+
+    /// A stopped or never-started instance doesn't own the account's position on its
+    /// contract: no position, open P&L or Stop (which flattens) on its row.
+    #[test]
+    fn a_traders_position_is_never_the_stopped_strategys() {
+        let i = infos().remove(3);
+        assert_eq!(i.state, StrategyState::Disarmed);
+        let pos = PositionView {
+            account: i.account.clone(),
+            contract: i.contract,
+            qty: 2,
+            avg_price: Some(601_225.0),
+            unrealised: Money::whole(-25),
+        };
+        let r = row(&i, &ctx(&[], Some(&pos), PnlDisplay::Both));
+        assert_eq!((r.phase, r.position.as_str()), (Phase::Stopped, "Flat"));
+        assert_eq!(r.pnl.as_deref(), Some("$0.00"));
+        assert!(!r.can_stop);
+        let c = RowCtx {
+            core: Some((StrategyState::Stopped, None)),
+            ..ctx(&[], Some(&pos), PnlDisplay::Both)
+        };
+        assert!(!row(&i, &c).can_stop);
     }
 
     #[test]

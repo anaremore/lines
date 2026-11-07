@@ -260,8 +260,7 @@ impl StrategyView {
                 let row = self
                     .selected
                     .and_then(|s| self.rows.iter().find(|r| r.id == s))
-                    .or(self.rows.first())
-                    .ok_or("no strategies")?;
+                    .ok_or("select a strategy first (click its row)")?;
                 match cmd {
                     StrategyCmd::Start if row.can_start => (Some(row.id), model::start(row.id)),
                     StrategyCmd::Start => return Err("this strategy can't be started now"),
@@ -332,6 +331,8 @@ impl StrategyView {
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
+                        // One press even over a popover, which it closes (as Flatten does).
+                        crate::popover::close_any(cx);
                         let _ = this.run(StrategyCmd::StopAll, cx);
                     }),
                 ),
@@ -375,6 +376,19 @@ impl StrategyView {
     fn chip(&self, phase: Phase) -> gpui::Div {
         let t = self.theme;
         let loud = matches!(phase, Phase::Halted | Phase::Faulted | Phase::Paused);
+        // A lockout (halted, faulted) is a filled chip; a pause is outlined: never the same look.
+        if matches!(phase, Phase::Halted | Phase::Faulted) {
+            return div()
+                .flex_shrink_0()
+                .px_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(t.warn)
+                .bg(t.warn)
+                .text_color(t.on_warn)
+                .font_weight(FontWeight::BOLD)
+                .child(phase.word());
+        }
         div()
             .flex_shrink_0()
             .px_1()
@@ -402,31 +416,39 @@ impl StrategyView {
         cmd: StrategyCmd,
         label: &'static str,
         name: &'static str,
+        enabled: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let t = self.theme;
+        // Each action keeps its slot on every row (nothing moves under the pointer); one that
+        // doesn't apply is drawn dim and does nothing. Stop has Flatten's warning outline.
+        let b = div()
+            .id((label, u64::from(id.0)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .min_w(px(MIN_HIT * 2.5))
+            .h(px(MIN_HIT + 2.0))
+            .px_2()
+            .rounded_sm()
+            .border_1()
+            .child(label);
+        if !enabled {
+            return b.border_color(t.axis_line).text_color(t.text_dim);
+        }
+        let b = if cmd == StrategyCmd::Stop {
+            b.border_color(t.warn).font_weight(FontWeight::SEMIBOLD)
+        } else {
+            b.border_color(t.control_edge)
+        };
         crate::tooltip::tip_div(
-            div()
-                .id((label, u64::from(id.0)))
-                .flex()
-                .items_center()
-                .justify_center()
-                .min_w(px(MIN_HIT * 2.5))
-                .h(px(MIN_HIT + 2.0))
-                .px_2()
-                .rounded_sm()
-                .border_1()
-                .border_color(t.control_edge)
-                .text_color(t.text_main)
-                .cursor_pointer()
-                .child(label)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.click(id, cmd, cx);
-                    }),
-                ),
+            b.text_color(t.text_main).cursor_pointer().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.click(id, cmd, cx);
+                }),
+            ),
             name,
             None,
             &t,
@@ -476,50 +498,61 @@ impl StrategyView {
             .text_color(t.text_dim)
             .child(r.limits.clone());
         if let Some(p) = &r.pnl {
+            // Labeled by scope: this instance's P&L today (closed trades plus open).
             line2 = line2.child(
                 div()
-                    .text_color(pnl_color)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(p.clone()),
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(div().text_color(t.text_dim).child("strategy today"))
+                    .child(
+                        div()
+                            .text_color(pnl_color)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(p.clone()),
+                    ),
             );
         }
+        // Every row has the same lines (blank when empty), so rows never change height and
+        // nothing below moves.
+        const BLANK: &str = "\u{a0}";
         let notes = div()
             .flex()
             .flex_col()
             .min_w_0()
-            .when_some(r.why.clone(), |d, w| {
-                d.child(
-                    div()
-                        .truncate()
-                        .text_color(t.text_main)
-                        .child(format!("{}: {w}", r.phase.word().to_lowercase())),
-                )
-            })
-            .when_some(denied, |d, m| {
-                d.child(div().truncate().text_color(t.text_main).child(m))
-            })
-            .when_some(r.last.clone(), |d, l| {
-                d.child(div().truncate().text_color(t.text_dim).child(l))
-            });
-        let mut buttons = div().flex().flex_row().gap_1().flex_shrink_0();
-        if r.can_start {
-            buttons = buttons.child(self.button(
+            .child(
+                div()
+                    .truncate()
+                    .text_color(t.text_main)
+                    .child(denied.or(r.why.clone()).unwrap_or_else(|| BLANK.into())),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_color(t.text_dim)
+                    .child(r.last.clone().unwrap_or_else(|| BLANK.into())),
+            );
+        let buttons = div()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .flex_shrink_0()
+            .child(self.button(
                 id,
                 StrategyCmd::Start,
                 "Start",
                 "Start this strategy (paper)",
+                r.can_start,
                 cx,
-            ));
-        }
-        if r.can_stop {
-            buttons = buttons.child(self.button(
+            ))
+            .child(self.button(
                 id,
                 StrategyCmd::Stop,
                 "Stop",
                 "Stop this strategy and flatten its position",
+                r.can_stop,
                 cx,
             ));
-        }
         div()
             .id(("strategy-row", u64::from(id.0)))
             .flex()
@@ -584,7 +617,7 @@ impl Render for StrategyView {
             let msg = match &problem {
                 Some(p) => format!("The strategy couldn't start: {p}"),
                 None if self.source.is_some() => "Starting the strategy…".to_owned(),
-                None => "No strategies. Run Lines with --strategy NAME --backtest-config FILE;                          strategies trade paper only."
+                None => "No strategies. Run Lines with --strategy NAME --backtest-config FILE; strategies trade paper only."
                     .to_owned(),
             };
             Some(div().px_2().py_2().text_color(t.text_dim).child(msg))
