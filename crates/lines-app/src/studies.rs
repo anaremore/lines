@@ -304,21 +304,37 @@ impl Studies {
             for c in &s.candles {
                 let x = lines_core::geometry::slot_x(vp, c.bar as f64, dpi);
                 let up = c.close >= c.open;
-                let col = if up { theme.up } else { theme.down };
+                // No change at all is neutral (dashed, below): neither direction's color.
+                let col = if c.close == c.open {
+                    theme.text_dim
+                } else if up {
+                    theme.up
+                } else {
+                    theme.down
+                };
                 // Approximate (bar-derived) candles are fainter; the legend says so.
                 let col = if c.approx { col.opacity(0.45) } else { col };
                 let (yo, yc) = (snap(scale.y(c.open as f64)), snap(scale.y(c.close as f64)));
                 let (yh, yl) = (snap(scale.y(c.high as f64)), snap(scale.y(c.low as f64)));
                 let (top, bot) = (yo.min(yc), yo.max(yc));
-                // A change is at least 4 px tall, so its hollow or filled body still reads
-                // (direction never by color alone); no change at all is drawn dashed below.
+                // A change is at least 6 px tall, so its hollow body shows a clear gap (direction
+                // never by color alone), grown evenly about the real body; no change at all is
+                // drawn dashed below.
                 let flat = c.close == c.open;
                 let min_body = if flat {
                     hair
                 } else {
-                    snap(4.0).max(4.0 * hair)
+                    snap(6.0).max(6.0 * hair)
                 };
-                let (bx, bw, bh) = (x - half, half * 2.0, (bot - top).max(min_body));
+                let (top, bot) = if bot - top < min_body {
+                    let t = snap((top + bot) * 0.5 - min_body * 0.5);
+                    (t, t + min_body)
+                } else {
+                    (top, bot)
+                };
+                // The wick reaches at least the (grown) body, never a negative stub.
+                let (yh, yl) = (yh.min(top), yl.max(bot));
+                let (bx, bw, bh) = (x - half, half * 2.0, (bot - top).max(hair));
                 if flat {
                     window.paint_quad(gpui::fill(rect(x - hair * 0.5, yh, hair, yl - yh), col));
                     // Dashes 2 px on, 2 px off across the body's width: no change, by shape.

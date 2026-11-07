@@ -597,10 +597,19 @@ fn tick_bar_updates_do_not_allocate() {
         bars.iter().all(|b| b.trimmed() > 0),
         "the test covers trims"
     );
-    assert!(
-        bars.iter().any(|b| (0..b.len()).any(|i| b.is_partial(i))),
-        "and resets"
-    );
+    // Session resets close bars short, per kind (a tick and a volume builder; range bars
+    // this narrow complete before a reset can catch one: the unit tests cover theirs).
+    for kind in [
+        lines_core::BarKind::Ticks(TICK_PRESETS[0]),
+        lines_core::BarKind::Volume(500),
+    ] {
+        assert!(
+            bars.iter()
+                .filter(|b| b.kind() == kind && b.reset() == TickReset::Session)
+                .any(|b| (0..b.len()).any(|i| b.is_partial(i))),
+            "{kind:?}: the test covers resets"
+        );
+    }
     assert_eq!(n, 0, "tick bar updates allocated {n} times");
 }
 

@@ -23,7 +23,7 @@
 //! trade of a new ETH session (the product's calendar; trades between sessions belong to the
 //! next one, as the local store partitions them; without a calendar, the UTC day), or the first
 //! after a holiday halt inside a session, closes the forming bar, which is then *partial*
-//! (fewer than `n` trades). Sessions never go backwards: a late trade stamped in an earlier
+//! (short of its size). Sessions never go backwards: a late trade stamped in an earlier
 //! session than the forming bar's (a feed delivering out of order across the break) joins the
 //! forming bar instead of opening one. Early closes and DST changes come from the calendar.
 //! A session's last bar can't take another trade once the market clock passes its close (or a
@@ -32,10 +32,11 @@
 //! [`TickReset::Continuous`] counts across sessions. Either way each bar knows whether it took
 //! its session's first trade ([`TickBars::starts_session`]: the chart's session divider).
 //!
-//! **Time.** A bar starts at its first trade. For the chart's time mapping
-//! ([`BarsView::end`]), a bar's span runs to the next bar's start within a session (so any time
-//! maps to the bar holding it), and to just after its last trade at a reset or at the newest
-//! bar. Bars are evenly spaced on screen whatever they span.
+//! **Time.** A bar starts at its first trade (a seconds bar: at its slot's start). For the
+//! chart's time mapping ([`BarsView::end`]), a bar's span runs to the next bar's start within a
+//! session (so any time maps to the bar holding it), and to just after its last trade at a
+//! reset or at the newest bar; a seconds bar spans exactly its slot, so a time in a slot
+//! without trades maps to no bar. Bars are evenly spaced on screen whatever they span.
 //!
 //! **Cost.** A trade costs O(log prices in the bar). Buffers are reserved for `capacity`, and
 //! a dropped bar's price list is reused by the next new bar, so steady-state updates don't
@@ -136,7 +137,7 @@ impl BarScale {
 
 const DAY: i64 = 86_400_000;
 
-/// Where tick bars restart their count.
+/// Where trade-built bars restart (tick, volume, range and seconds bars alike).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TickReset {
     /// At each session open (the default): a session's last bar may be partial.
@@ -153,7 +154,7 @@ type Levels = Vec<(i64, SideVolume)>;
 /// it, off the paint path).
 const LEVELS_RESERVE: usize = 32;
 
-/// Tick bars of one count, built incrementally from counted trades.
+/// Trade-built bars of one kind and size, built incrementally from counted trades.
 #[derive(Clone, Debug)]
 pub struct TickBars {
     kind: BarKind,
@@ -167,7 +168,7 @@ pub struct TickBars {
     /// Each bar's last trade time.
     last: Vec<UtcMillis>,
     counts: Vec<u32>,
-    /// Closed by a session reset before reaching `n` trades.
+    /// Closed by a session reset short of its size.
     partial: Vec<bool>,
     /// Took its session's first trade.
     first: Vec<bool>,
@@ -277,7 +278,7 @@ impl TickBars {
         self.last.get(i).copied()
     }
 
-    /// Whether bar `i` was closed by a session reset before reaching `n` trades.
+    /// Whether bar `i` was closed by a session reset short of its size.
     pub fn is_partial(&self, i: usize) -> bool {
         self.partial.get(i).copied().unwrap_or(false)
     }
