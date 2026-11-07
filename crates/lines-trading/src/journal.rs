@@ -525,6 +525,11 @@ fn new_trade(
 fn add_fill(o: &mut Open, f: TradeFill) {
     let realized = o.pos.apply_fill(f.side, f.price, f.qty);
     let t = &mut o.trade;
+    if t.incomplete && t.fills.is_empty() {
+        // Seeded after a restart (entry time unknown): it dates from the first fill seen.
+        t.entry_time = f.at;
+        t.trade_date = lines_feed::disk::partition::trade_date(&o.spec.product, f.at);
+    }
     if f.side == t.side {
         t.entry_qty += f.qty.0;
         t.entry_value += f.price.0 as i128 * f.qty.0 as i128;

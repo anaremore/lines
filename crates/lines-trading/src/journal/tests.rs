@@ -259,6 +259,9 @@ fn a_position_from_before_the_journal_is_seeded_and_marked() {
     let t = feed(&mut j, &[fill("s1", 4, Side::Buy, 6000.00, 2, 0.0, 0)]);
     assert_eq!(t.len(), 1);
     assert!(t[0].incomplete);
+    // Its entry time is unknown: it dates from the first fill the journal saw.
+    assert_eq!((t[0].entry_time, t[0].exit_time), (at(0), at(0)));
+    assert_eq!(t[0].trade_date.to_string(), "2026-11-05");
     assert_eq!(t[0].realized, dollars(50.0));
     // A position the journal already tracks is left alone.
     feed(&mut j, &[fill("s2", 5, Side::Buy, 6000.00, 1, 0.0, 1)]);
