@@ -237,14 +237,23 @@ impl DomView {
         }
     }
 
-    /// Restore the pane's trading choices (account, quantity, bracket). Never armed, except
-    /// the screenshot fixture's `--arm`.
+    /// Restore the pane's trading choices (account, quantity, bracket, the trading switch:
+    /// sticky, as saved). The screenshot fixture's `--enable-trading` enables it too.
     pub fn restore_trade(&mut self, doc: Option<&TradeDoc>, cx: &mut Context<Self>) {
         self.trade = PaneTrade::new(doc, cx);
-        if Trading::try_global(cx).is_some_and(|t| t.start_armed) {
-            let ok = trade_bar::cant_trade(self, cx).is_none();
-            self.trade
-                .arm_event(crate::dom_trade::ArmEvent::Toggle, ok, cx);
+        if let Some(t) = Trading::try_global(cx) {
+            let (on, editor) = (t.start_armed, t.start_editor);
+            if on && !self.trade.arming.is_armed() {
+                self.trade.arm_event(crate::dom_trade::ArmEvent::Toggle, cx);
+            }
+            if editor {
+                trade_bar::run(
+                    self,
+                    crate::commands::TradeCmd::EditBrackets,
+                    std::time::Instant::now(),
+                    cx,
+                );
+            }
         }
     }
 
@@ -543,6 +552,10 @@ impl DomView {
             return;
         }
         let k = &ev.keystroke;
+        if trade_bar::editor_key(self, ev, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if trade_bar::qty_key(self, k.key.as_str(), cx) {
             cx.stop_propagation();
             return;
@@ -957,11 +970,8 @@ impl Render for DomView {
         let t = self.theme;
         let focus = self.focus.clone();
         PaneTrade::watch_focus(self, &focus, window, cx);
-        // Armed but no longer able to trade (no contract, feed gone): disarm.
-        if self.trade.arming.is_armed() && trade_bar::cant_trade(self, cx).is_some() {
-            self.trade
-                .arm_event(dom_trade::ArmEvent::Unavailable, false, cx);
-        }
+        // The switch is sticky: impossible trading (no contract, feed gone) shows on it as a
+        // badge and denies orders; it never flips the switch.
         let width = f(self.bounds.size.width);
         self.header_narrow = Some(trade_bar::is_narrow(width));
         let trade = trade_bar::dom_bar(self, &self.product, width, &t, cx);

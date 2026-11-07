@@ -50,8 +50,6 @@ use lines_trading::{
 };
 use lines_trading::{GuardState, Guardrails, Journal, JournalShared};
 
-use crate::dom_trade::ArmPrefs;
-
 /// How long a rejection stays on screen where it happened.
 pub const FLASH: Duration = Duration::from_secs(4);
 /// Command results kept for drag ghosts (newest last).
@@ -509,14 +507,19 @@ pub struct Trading {
     notes: Sender<(CommandId, Note)>,
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
     barrier: Sender<Sender<()>>,
-    pub prefs: ArmPrefs,
     /// A problem loading the paper file (shown once in the workspace's status).
     pub report: Option<String>,
-    /// Screenshot fixture (`--arm`): DOMs start armed. Never set in the app.
+    /// Screenshot fixture (`--enable-trading`): DOMs start with trading enabled. Never set in
+    /// the app (there, the switch is saved per pane).
     pub start_armed: bool,
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
+    /// Screenshot fixture (`--bracket-editor`): DOMs open their bracket-preset editor.
+    pub start_editor: bool,
+    /// The paper broker refuses orders while the product's session is closed (the switch's
+    /// "market closed" badge follows it; off for the mock).
+    pub check_sessions: bool,
     /// Screenshot fixture (a `--paper` script's first `account`): the panes' account.
     pub start_account: Option<AccountId>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
@@ -533,6 +536,7 @@ impl Trading {
     /// Build the paper core (from the setup's file, else the default accounts), start it and
     /// the event pump.
     pub fn start(mut setup: TradingSetup, registry: FeedRegistry, base: FeedConfig) -> Trading {
+        let check_sessions = setup.check_sessions;
         let mut report = None;
         let journal_file = setup.journal.take();
         let (journal, journal_report) = open_journal(journal_file.as_ref());
@@ -644,10 +648,11 @@ impl Trading {
             cache,
             notes,
             barrier,
-            prefs: ArmPrefs::default(),
             report,
             start_armed: false,
             start_account_menu: false,
+            start_editor: false,
+            check_sessions,
             start_account: None,
             journal,
             clock: setup.clock,
@@ -1112,7 +1117,7 @@ mod tests {
     use lines_trading::{Money, OrderSpec, OrderState, RejectCode, RiskLimits, Side};
 
     use super::*;
-    use crate::dom_trade::{self, ArmEvent, Arming, DomColumn, EntryCtx};
+    use crate::dom_trade::{self, ArmEvent, ArmPrefs, Arming, DomColumn, EntryCtx};
 
     fn es() -> ContractKey {
         ContractKey::monthly(catalog::ES, 2026, Month::new(12).unwrap())
@@ -1423,7 +1428,7 @@ mod tests {
 
     fn armed() -> Arming {
         let mut a = Arming::default();
-        a.apply(ArmEvent::Toggle, ArmPrefs::default(), true);
+        a.apply(ArmEvent::Toggle, ArmPrefs::default());
         a
     }
 

@@ -173,8 +173,19 @@ pub enum TradeCmd {
     Flatten,
     /// Cancel the contract's working orders.
     CancelAll,
-    /// Arm or disarm one-click trading on the DOM.
+    /// Enable or disable one-click trading on the DOM ("Trading: Enabled / Disabled").
     ToggleArm,
+    /// Enable DOM trading (sticky: it stays on until turned off).
+    Enable,
+    /// Disable DOM trading.
+    Disable,
+    /// Move the position's stop to breakeven (the average price, on the safe side of the
+    /// tick grid), through the order-modify path.
+    Breakeven,
+    /// Show bracket distances in ticks or points (per account).
+    BracketUnits,
+    /// Edit the bracket presets in the DOM's panel.
+    EditBrackets,
     /// Trade on the next account.
     NextAccount,
     QtyUp,
@@ -191,7 +202,7 @@ pub enum TradeCmd {
 }
 
 impl TradeCmd {
-    pub const ALL: [TradeCmd; 12] = [
+    pub const ALL: [TradeCmd; 13] = [
         TradeCmd::Flatten,
         TradeCmd::CancelAll,
         TradeCmd::ToggleArm,
@@ -204,6 +215,15 @@ impl TradeCmd {
         TradeCmd::JoinBid,
         TradeCmd::JoinAsk,
         TradeCmd::Reverse,
+        TradeCmd::Breakeven,
+    ];
+
+    /// Trading commands with no key of their own (palette and the DOM's panel).
+    pub const PALETTE_ONLY: [TradeCmd; 4] = [
+        TradeCmd::Enable,
+        TradeCmd::Disable,
+        TradeCmd::BracketUnits,
+        TradeCmd::EditBrackets,
     ];
 
     /// The order a header button sends, for the order commands.
@@ -358,6 +378,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Trade(TradeCmd::JoinBid), true, false, true, "j"),
     b(Command::Trade(TradeCmd::JoinAsk), true, false, true, "k"),
     b(Command::Trade(TradeCmd::Reverse), true, false, true, "r"),
+    b(Command::Trade(TradeCmd::Breakeven), true, false, true, "e"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
     b(
@@ -558,7 +579,12 @@ pub fn label(c: Command) -> String {
         Command::Trade(t) => match t {
             TradeCmd::Flatten => "Trade: Flatten (cancel orders, close position)",
             TradeCmd::CancelAll => "Trade: Cancel all orders",
-            TradeCmd::ToggleArm => "Trade: Arm/disarm one-click DOM trading",
+            TradeCmd::ToggleArm => "Trade: toggle (enable/disable one-click DOM trading)",
+            TradeCmd::Enable => "Trade: enable",
+            TradeCmd::Disable => "Trade: disable",
+            TradeCmd::Breakeven => "Trade: move the stop to breakeven",
+            TradeCmd::BracketUnits => "Trade: bracket units (ticks / points)",
+            TradeCmd::EditBrackets => "Trade: edit bracket presets…",
             TradeCmd::NextAccount => "Trade: Next account",
             TradeCmd::QtyUp => "Trade: Quantity up",
             TradeCmd::QtyDown => "Trade: Quantity down",
@@ -643,6 +669,7 @@ pub fn palette() -> Vec<Command> {
     );
     v.extend([Command::ShowSourceHere, Command::ShowSourceInTab]);
     v.extend(TradeCmd::ALL.map(Command::Trade));
+    v.extend(TradeCmd::PALETTE_ONLY.map(Command::Trade));
     v.push(Command::CyclePnl);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
@@ -714,6 +741,7 @@ mod tests {
             TradeCmd::ToggleArm,
             TradeCmd::Flatten,
             TradeCmd::CancelAll,
+            TradeCmd::Breakeven,
         ] {
             assert!(!repeats(Command::Trade(tc)), "{tc:?}");
         }
@@ -904,6 +932,20 @@ mod tests {
         assert_eq!(
             filter("flatten", &p),
             vec![Command::Trade(TradeCmd::Flatten)]
+        );
+        // The rest are in the palette, without keys of their own.
+        for t in TradeCmd::PALETTE_ONLY {
+            assert!(p.contains(&Command::Trade(t)), "{t:?} not in the palette");
+            assert!(hint(Command::Trade(t)).is_empty(), "{t:?} has a key");
+        }
+        // US English names: enable, disable, toggle (never "arm").
+        for word in ["enable", "disable", "toggle"] {
+            assert!(!filter(&format!("trade {word}"), &p).is_empty(), "{word}");
+        }
+        assert!(
+            filter("arm", &p)
+                .iter()
+                .all(|c| !label(*c).to_lowercase().contains(" arm"))
         );
     }
 

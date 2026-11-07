@@ -47,7 +47,7 @@ pub struct Shot {
     pub doc: WorkspaceDoc,
     /// A scripted paper session run before the frame (`--paper`).
     pub paper: Option<String>,
-    /// DOMs start armed (`--arm`).
+    /// DOMs start with trading enabled (`--enable-trading`, alias `--arm`).
     pub arm: bool,
     /// Charts and DOMs start with the account list open (`--account-menu`).
     pub account_menu: bool,
@@ -55,6 +55,10 @@ pub struct Shot {
     pub pnl: Option<crate::pnl::PnlDisplay>,
     /// Drawings to show (`--drawings FILE`), in memory only.
     pub drawings: Option<(lines_core::Product, Vec<lines_core::drawings::Drawing>)>,
+    /// Bracket distances in ticks or points (`--bracket-units`), for every account.
+    pub bracket_units: Option<crate::brackets::BracketUnits>,
+    /// DOMs open their bracket-preset editor (`--bracket-editor`).
+    pub bracket_editor: bool,
 }
 
 pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
@@ -107,6 +111,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         account_menu,
         pnl,
         drawings: seed,
+        bracket_units,
+        bracket_editor,
     } = shot;
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut trading = Trading::start(
@@ -116,6 +122,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     );
     trading.start_armed = arm;
     trading.start_account_menu = account_menu;
+    trading.start_editor = bracket_editor;
+    let account_ids: Vec<String> = trading.accounts.iter().map(|a| a.id.0.clone()).collect();
     let script = match &paper {
         Some(s) => {
             let f = feeds
@@ -153,6 +161,16 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         let mut settings = AppSettings::ephemeral();
         if let Some(m) = pnl {
             settings.settings.pnl_display = m;
+        }
+        if let Some(u) = bracket_units {
+            for a in &account_ids {
+                settings
+                    .settings
+                    .bracket_presets
+                    .entry(a.clone())
+                    .or_default()
+                    .units = u;
+            }
         }
         cx.set_global(settings);
         cx.set_global(crate::drawings_store::Drawings::ephemeral(

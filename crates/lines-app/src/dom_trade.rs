@@ -18,10 +18,11 @@
 //! position is an exit and never gets exits of its own. The paper broker holds the exits
 //! server-side and activates them as the entry fills (OCO).
 //!
-//! **Arming** ([`Arming`]): a DOM starts disarmed; clicks on a disarmed DOM never trade. Only an
-//! explicit toggle (header or hotkey) arms it. It disarms on a symbol or contract change and
-//! when trading becomes unavailable, always; on focus loss (including the window going
-//! inactive) and on an account change, if configured (both on by default).
+//! **Trading switch** ([`Arming`], shown as "Trading: Enabled / Disabled"): clicks on a DOM
+//! with trading disabled never trade; only the trader enables it (header switch or hotkey).
+//! It is sticky and saved with the pane: focus, account and contract changes leave it as it
+//! is unless the trader opted in ([`ArmPrefs`]), and impossible trading (no feed, market
+//! closed, a lockout) denies orders without flipping it.
 
 use lines_core::{ContractKey, Price, Qty};
 use lines_trading::order::{Order, OrderState, Role};
@@ -44,54 +45,61 @@ pub enum DomColumn {
 
 // ---- arming ------------------------------------------------------------------------------
 
-/// What disarms a DOM besides the trader (Settings → Trading, decision 0021).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// What turns DOM trading off besides the trader (Settings → Trading, decision 0021). All off
+/// by default: the switch is sticky (owner decision, trade panel v2); these are opt-in.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArmPrefs {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disarm_on_focus_loss: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disarm_on_account_change: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disarm_on_contract_change: bool,
 }
 
-impl Default for ArmPrefs {
-    fn default() -> Self {
-        ArmPrefs {
-            disarm_on_focus_loss: true,
-            disarm_on_account_change: true,
-        }
+impl ArmPrefs {
+    pub fn is_default(&self) -> bool {
+        *self == ArmPrefs::default()
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ArmEvent {
-    /// The header toggle or its hotkey.
+    /// The header switch or its hotkey.
     Toggle,
     /// The DOM lost keyboard focus, or its window went inactive.
     FocusLost,
     AccountChanged,
     /// Another symbol or contract (a roll, a picker switch, a linked pane).
     ContractChanged,
-    /// No account, no contract, or the feed is unavailable.
-    Unavailable,
 }
 
-/// One-click trading's safety catch. Never saved: every DOM starts disarmed.
+/// One-click trading's switch ("Trading: Enabled / Disabled"). Sticky: it changes only when
+/// the trader flips it (or an opt-in [`ArmPrefs`] event), never because trading is impossible
+/// right now (no feed, market closed, a lockout, a risk denial): those deny the order with
+/// their reason and leave the switch as it is. Saved per pane; new panes start disabled.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Arming {
     armed: bool,
 }
 
 impl Arming {
+    /// Enabled (restored from a saved pane) or disabled.
+    pub fn new(enabled: bool) -> Arming {
+        Arming { armed: enabled }
+    }
+
     pub fn is_armed(self) -> bool {
         self.armed
     }
 
-    /// Apply an event; `can_trade`: an account and a contract are there (arming is refused
-    /// otherwise). Returns whether the state changed.
-    pub fn apply(&mut self, ev: ArmEvent, prefs: ArmPrefs, can_trade: bool) -> bool {
+    /// Apply an event. Returns whether the state changed.
+    pub fn apply(&mut self, ev: ArmEvent, prefs: ArmPrefs) -> bool {
         let next = match ev {
-            ArmEvent::Toggle => !self.armed && can_trade,
-            ArmEvent::ContractChanged | ArmEvent::Unavailable => false,
+            ArmEvent::Toggle => !self.armed,
             ArmEvent::FocusLost => self.armed && !prefs.disarm_on_focus_loss,
             ArmEvent::AccountChanged => self.armed && !prefs.disarm_on_account_change,
+            ArmEvent::ContractChanged => self.armed && !prefs.disarm_on_contract_change,
         };
         let changed = next != self.armed;
         self.armed = next;
@@ -214,7 +222,7 @@ pub fn click(
         }
     };
     if !arming.is_armed() {
-        return Err(Refusal("DOM disarmed: arm it to trade with one click"));
+        return Err(Refusal(ENABLE_TO_TRADE));
     }
     if ctx.qty.0 <= 0 {
         return Err(Refusal("set a quantity first"));
@@ -279,8 +287,8 @@ pub enum QuickOrder {
     Reverse,
 }
 
-/// What a disarmed DOM says when a header order button (or its key) is used.
-pub const ARM_TO_TRADE: &str = "Arm to trade";
+/// What a DOM with trading disabled says when an entry is tried (click, button or key).
+pub const ENABLE_TO_TRADE: &str = "Entries locked: enable trading (Ctrl+Shift+Space)";
 
 /// The command for a header order button. Brackets attach as for clicks (only to orders that
 /// open or add): a market order's exits are placed from the price it is expected to fill at
@@ -288,7 +296,7 @@ pub const ARM_TO_TRADE: &str = "Arm to trade";
 /// carries a bracket: it closes the position before it opens the other side.
 pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeCommand, Refusal> {
     if !arming.is_armed() {
-        return Err(Refusal(ARM_TO_TRADE));
+        return Err(Refusal(ENABLE_TO_TRADE));
     }
     let (side, qty, kind, bracket_at) = match q {
         QuickOrder::BuyMarket => (
@@ -571,7 +579,7 @@ pub fn short_reason(message: &str) -> &str {
         ("in a second", "rate"),
         ("no market price", "no price"),
         ("liquidity", "no liq"),
-        ("disarmed", "disarmed"),
+        ("entries locked", "disabled"),
         ("filled", "filled"),
     ];
     let lower = message.to_ascii_lowercase();
@@ -645,7 +653,7 @@ mod tests {
 
     fn armed() -> Arming {
         let mut a = Arming::default();
-        assert!(a.apply(ArmEvent::Toggle, ArmPrefs::default(), true));
+        assert!(a.apply(ArmEvent::Toggle, ArmPrefs::default()));
         a
     }
 
@@ -764,7 +772,7 @@ mod tests {
         let c = ctx();
         assert_eq!(
             click(DomColumn::Bid, Price(599_950), false, Arming::default(), &c),
-            Err(Refusal("DOM disarmed: arm it to trade with one click"))
+            Err(Refusal(ENABLE_TO_TRADE))
         );
         let mut zero = c;
         zero.qty = Qty(0);
@@ -815,7 +823,7 @@ mod tests {
         ] {
             assert_eq!(
                 quick(q, Arming::default(), &c),
-                Err(Refusal(ARM_TO_TRADE)),
+                Err(Refusal(ENABLE_TO_TRADE)),
                 "{q:?}"
             );
         }
@@ -902,45 +910,42 @@ mod tests {
         assert!(quick(QuickOrder::BuyMarket, armed(), &blind).is_err());
     }
 
+    /// The switch is sticky: only the trader flips it. Focus, account and contract changes
+    /// leave it enabled unless opted in.
     #[test]
-    fn arming_state_machine() {
+    fn trading_switch_is_sticky() {
         let p = ArmPrefs::default();
         let mut a = Arming::default();
-        assert!(!a.is_armed(), "starts disarmed");
-        // Can't arm without an account and a contract.
-        assert!(!a.apply(ArmEvent::Toggle, p, false));
-        assert!(!a.is_armed());
-        assert!(a.apply(ArmEvent::Toggle, p, true) && a.is_armed());
-        assert!(
-            a.apply(ArmEvent::Toggle, p, true) && !a.is_armed(),
-            "toggle disarms"
-        );
+        assert!(!a.is_armed(), "new panes start disabled");
+        assert!(a.apply(ArmEvent::Toggle, p) && a.is_armed());
         for ev in [
             ArmEvent::FocusLost,
             ArmEvent::AccountChanged,
             ArmEvent::ContractChanged,
-            ArmEvent::Unavailable,
+        ] {
+            assert!(!a.apply(ev, p) && a.is_armed(), "{ev:?} keeps it enabled");
+        }
+        assert!(
+            a.apply(ArmEvent::Toggle, p) && !a.is_armed(),
+            "toggle disables"
+        );
+        // Restored from a saved pane.
+        assert!(Arming::new(true).is_armed());
+        // Opt-in: each event disables when configured.
+        let all = ArmPrefs {
+            disarm_on_focus_loss: true,
+            disarm_on_account_change: true,
+            disarm_on_contract_change: true,
+        };
+        for ev in [
+            ArmEvent::FocusLost,
+            ArmEvent::AccountChanged,
+            ArmEvent::ContractChanged,
         ] {
             let mut a = armed();
-            assert!(a.apply(ev, p, true), "{ev:?} disarms by default");
-            assert!(!a.is_armed());
-            // Disarmed stays disarmed.
-            assert!(!a.apply(ev, p, true));
+            assert!(a.apply(ev, all) && !a.is_armed(), "{ev:?}");
         }
-        // Configured off: focus loss and account change keep it armed; a contract change
-        // and unavailability always disarm.
-        let keep = ArmPrefs {
-            disarm_on_focus_loss: false,
-            disarm_on_account_change: false,
-        };
-        for ev in [ArmEvent::FocusLost, ArmEvent::AccountChanged] {
-            let mut a = armed();
-            assert!(!a.apply(ev, keep, true) && a.is_armed(), "{ev:?}");
-        }
-        for ev in [ArmEvent::ContractChanged, ArmEvent::Unavailable] {
-            let mut a = armed();
-            assert!(a.apply(ev, keep, true) && !a.is_armed(), "{ev:?}");
-        }
+        assert_eq!(serde_json::to_string(&ArmPrefs::default()).unwrap(), "{}");
     }
 
     #[test]
@@ -1213,6 +1218,7 @@ mod tests {
             "reduce"
         );
         // Unknown: the first word, at most 9 characters.
+        assert_eq!(short_reason(ENABLE_TO_TRADE), "disabled");
         assert_eq!(short_reason("insufficient margin"), "insuffici");
         assert_eq!(short_reason(""), "");
         for m in [
