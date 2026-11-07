@@ -202,7 +202,16 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         ));
         cx.set_global(ws);
         workspace::set_meta(&doc, cx);
-        if let Err(e) = capture(cx, window, out, size, scale, script, hover_header, settings_shot) {
+        if let Err(e) = capture(
+            cx,
+            window,
+            out,
+            size,
+            scale,
+            script,
+            hover_header,
+            settings_shot,
+        ) {
             fail(&e);
         }
     });
@@ -222,6 +231,8 @@ fn exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
+// One parameter per screenshot fixture: each is optional and independent.
+#[allow(clippy::too_many_arguments)]
 fn capture(
     cx: &mut App,
     window: WindowDoc,
