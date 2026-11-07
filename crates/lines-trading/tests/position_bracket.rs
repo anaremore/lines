@@ -69,6 +69,7 @@ impl Broker for Wrapped {
     fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
         if let BrokerRequest::Place(o) = &req
             && o.reduce_only
+            && !matches!(o.kind, OrderKind::Market)
         {
             self.exits_seen.fetch_add(1, Ordering::Relaxed);
             if self.reject_exits.load(Ordering::Relaxed) {
@@ -926,4 +927,101 @@ fn a_broker_refusing_the_legs_gets_three_tries_each() {
         "three per leg, no more"
     );
     assert!(r.exits().is_empty());
+}
+
+/// Flatten with the pair working: the legs go with the position and nothing is put back while
+/// the Flatten is on its way (no extra exits, none paired with the Flatten's order).
+#[test]
+fn flatten_takes_the_pair_and_places_nothing_meanwhile() {
+    let mut r = Rig::new();
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 2);
+    r.wait(LAT);
+    assert_eq!(r.exits_seen.load(Ordering::Relaxed), 2);
+    r.cmd(Command::Flatten {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    for _ in 0..5 {
+        r.wait(LAT);
+    }
+    assert_eq!(r.pos(), 0);
+    assert!(r.exits().is_empty());
+    assert_eq!(
+        r.exits_seen.load(Ordering::Relaxed),
+        2,
+        "no legs placed during the Flatten"
+    );
+}
+
+/// A person's x on one leg: that leg stays off while the other keeps following the position.
+#[test]
+fn a_leg_a_person_cancels_stays_off() {
+    let mut r = Rig::new();
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 1);
+    r.wait(LAT);
+    let target = r
+        .exit_ids()
+        .into_iter()
+        .find(|i| matches!(r.core.order(*i).unwrap().kind, OrderKind::Limit { .. }))
+        .unwrap();
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: target,
+    })
+    .unwrap();
+    r.wait(LAT);
+    r.market_order(Side::Buy, 1);
+    r.wait(LAT);
+    r.wait(2_000);
+    assert_eq!(r.exits(), [(Side::Sell, 2, stop(5998.25))]);
+}
+
+/// Switching on with only a stop for the whole position: it is kept, and a target is placed.
+#[test]
+fn a_lone_whole_position_stop_is_kept_and_gets_a_target() {
+    let mut r = Rig::new();
+    r.market_order(Side::Buy, 2);
+    r.cmd(Command::PlaceExit(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(2),
+        kind: stop(5995.00),
+    }))
+    .unwrap();
+    r.wait(LAT);
+    assert_eq!(r.core.exits_replaced_by_position_bracket(&acct(), es()), 0);
+    r.mode(MODE, false).unwrap();
+    r.wait(LAT);
+    r.wait(LAT);
+    assert_eq!(
+        r.exits(),
+        [
+            (Side::Sell, 2, stop(5995.00)),
+            (Side::Sell, 2, limit(6004.25))
+        ]
+    );
+}
+
+/// A short's prices round toward the entry too: an average of 6000.125 (sold 6000.00 and
+/// 6000.25) puts the stop at 6002.00 (not 6002.25) and the target at 5996.25 (not 5996.00).
+#[test]
+fn a_shorts_off_grid_average_rounds_toward_the_entry() {
+    let mut r = Rig::new();
+    r.market_order(Side::Sell, 1); // at the bid, 6000.00
+    r.book(&[(6000.25, 50)], &[(6000.50, 50)]);
+    r.market_order(Side::Sell, 1); // 6000.25
+    r.mode(MODE, false).unwrap();
+    r.wait(LAT);
+    assert_eq!(r.pos(), -2);
+    assert_eq!(
+        r.exits(),
+        [
+            (Side::Buy, 2, stop(6002.00)),
+            (Side::Buy, 2, limit(5996.25))
+        ]
+    );
 }

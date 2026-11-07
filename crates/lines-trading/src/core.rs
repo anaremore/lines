@@ -767,6 +767,7 @@ impl TradingCore {
                         o.is_open()
                             && !cancelling.contains(&o.id)
                             && o.reduce_only
+                            && o.role != Role::Flatten
                             && !open(o.oco, &self.orders)
                             && o.account == spec.account
                             && o.contract == spec.contract

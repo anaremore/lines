@@ -44,8 +44,13 @@ struct Leg {
     tries: u32,
     /// Place it (again) from this time on.
     retry_at: Option<UtcMillis>,
-    /// A person cancelled it: it stays cancelled until the position is flat.
+    /// A person cancelled it, or placed an exit of its kind while it was down: it is theirs
+    /// until the position is flat.
     person_cancelled: bool,
+    /// Its last price (a person may have moved it): used again when it is placed again.
+    price: Option<Price>,
+    /// Out of tries, and that was said.
+    gave_up: bool,
     /// A resize sent and not seen yet: the quantity asked for, when, and how many times.
     asked: Option<(i64, UtcMillis, u32)>,
 }
@@ -346,50 +351,73 @@ impl TradingCore {
         }
     }
 
-    /// A person's cancel (× or Cancel All) of a leg: it stays cancelled while the position is
-    /// open (called by `handle` with the command's result).
+    /// A person's cancel (× or Cancel All) of a leg, or their own exit of a leg's kind while it
+    /// is down: that leg is theirs while the position is open (called by `handle` with the
+    /// command's result).
     pub(super) fn bracket_note_cancel(
         &mut self,
         env: &Envelope,
         result: &Result<Vec<OrderId>, Reject>,
     ) {
-        if Origin::of(env.source) != Origin::Manual
-            || !matches!(
-                env.command,
-                Command::CancelOrder { .. } | Command::CancelAll { .. }
-            )
-        {
+        if Origin::of(env.source) != Origin::Manual {
             return;
         }
         let Ok(ids) = result else {
             return;
         };
-        for b in self.position_brackets.values_mut() {
-            for leg in [&mut b.stop, &mut b.target] {
-                if leg.id.is_some_and(|i| ids.contains(&i)) {
-                    leg.person_cancelled = true;
+        match &env.command {
+            Command::CancelOrder { .. } | Command::CancelAll { .. } => {
+                for b in self.position_brackets.values_mut() {
+                    for leg in [&mut b.stop, &mut b.target] {
+                        if leg.id.is_some_and(|i| ids.contains(&i)) {
+                            leg.person_cancelled = true;
+                        }
+                    }
                 }
             }
+            Command::PlaceExit(spec) => {
+                if let Some(b) = self
+                    .position_brackets
+                    .get_mut(&(spec.account.clone(), spec.contract))
+                {
+                    let leg = if is_stop_kind(&spec.kind) {
+                        &mut b.stop
+                    } else {
+                        &mut b.target
+                    };
+                    if leg.id.is_none() {
+                        leg.person_cancelled = true;
+                        leg.retry_at = None;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
     /// What became of a leg's order: still working; cancelled by a person (it stays so); or
     /// ended otherwise (filled, refused or ended by the broker), so it is placed again for what
     /// is still open (a fill starts the count of tries again; a refusal waits a second).
-    fn leg_refresh(&self, now: UtcMillis, leg: &mut Leg) {
+    /// Whether the leg filled (then the position it protected is over: a new price applies).
+    fn leg_refresh(&self, now: UtcMillis, leg: &mut Leg) -> bool {
         let Some(id) = leg.id else {
-            return;
+            return false;
         };
         if self.live_order(Some(id)).is_some() {
-            return;
+            return false;
         }
         let state = self.orders.get(&id).map(|o| o.state.clone());
+        // Sent with no known outcome (a reconnect): never assumed gone, never placed again.
+        if matches!(state, Some(OrderState::Unresolved)) && !self.cancelling.contains(&id) {
+            return false;
+        }
         leg.id = None;
         leg.asked = None;
         if leg.person_cancelled {
             leg.retry_at = None;
-            return;
+            return false;
         }
+        let filled = matches!(state, Some(OrderState::Filled));
         match state {
             Some(OrderState::Filled) => {
                 leg.tries = 0;
@@ -400,6 +428,7 @@ impl TradingCore {
             }
             _ => leg.retry_at = (leg.tries < MAX_TRIES).then_some(now),
         }
+        filled
     }
 
     fn position_bracket_sync(
@@ -412,8 +441,14 @@ impl TradingCore {
         let Some(mut b) = self.position_brackets.get(&key).cloned() else {
             return;
         };
-        self.leg_refresh(now, &mut b.stop);
-        self.leg_refresh(now, &mut b.target);
+        let a = self.leg_refresh(now, &mut b.stop);
+        let c = self.leg_refresh(now, &mut b.target);
+        if a || c {
+            // A leg filled: what is open now is a new position (flat and reopened, or an add
+            // left over), so its legs go at the offsets from its own average.
+            b.stop.price = None;
+            b.target.price = None;
+        }
         let pos = self.position(account, contract);
         let side = if pos > 0 { Side::Buy } else { Side::Sell };
         if pos == 0 || b.placed_for.is_some_and(|s| s != side) {
@@ -438,6 +473,18 @@ impl TradingCore {
         }
         let size = pos.abs();
         let closing = side.opposite();
+        // A Flatten on its way closes the position: nothing is placed meanwhile (what it
+        // leaves open, if it only partly fills, gets its legs after).
+        let flattening = self.orders.values().any(|o| {
+            o.is_open()
+                && o.role == Role::Flatten
+                && &o.account == account
+                && o.contract == contract
+        });
+        if flattening {
+            self.position_brackets.insert(key, b);
+            return;
+        }
         if b.placed_for.is_none() {
             // Wait for any exit still working here (one being replaced or cancelled) to go, so
             // exits never add up to more than the position.
@@ -494,6 +541,25 @@ impl TradingCore {
             } else {
                 b.target.clone()
             };
+            if leg.id.is_none() && !leg.person_cancelled && leg.tries >= MAX_TRIES && !leg.gave_up {
+                leg.gave_up = true;
+                let env = self.bracket_envelope(Command::CancelAll {
+                    account: account.clone(),
+                    contract: Some(contract),
+                });
+                self.events.push(Event::Command {
+                    id: env.id,
+                    source: env.source,
+                    at: now,
+                    result: Err(Reject::new(
+                        RejectCode::Broker,
+                        format!(
+                            "the position's {} could not be placed again after {MAX_TRIES} tries: place it by hand",
+                            if is_stop_leg { "stop" } else { "target" }
+                        ),
+                    )),
+                });
+            }
             if leg.id.is_none()
                 && !leg.person_cancelled
                 && leg.tries < MAX_TRIES
@@ -510,7 +576,10 @@ impl TradingCore {
                     &mut leg,
                 );
             }
-            if let Some(id) = leg.id {
+            if let Some(id) = leg.id
+                && self.orders[&id].state != OrderState::Unresolved
+            {
+                leg.price = self.orders[&id].kind.prices().next();
                 // The leg to the position, prices kept. Straight to the broker (no guardrail,
                 // rate or growth checks: this is protection, and it never exceeds the
                 // position); one unanswered is sent again a second later, three times in all,
@@ -577,10 +646,19 @@ impl TradingCore {
     ) {
         leg.tries += 1;
         let (stop, target) = self.bracket_prices(account, contract, b.stop_ticks, b.target_ticks);
-        let kind = if is_stop_leg {
-            OrderKind::Stop { trigger: stop }
-        } else {
-            OrderKind::Limit { price: target }
+        let at = |p: Price| {
+            if is_stop_leg {
+                OrderKind::Stop { trigger: p }
+            } else {
+                OrderKind::Limit { price: p }
+            }
+        };
+        let offset = at(if is_stop_leg { stop } else { target });
+        // A leg placed again keeps the price it had (a person may have moved it), unless the
+        // market is past it now.
+        let kind = match leg.price.map(at) {
+            Some(k) if self.bracket_crosses(contract, closing, &k).is_none() => k,
+            _ => offset,
         };
         let command = Command::PlaceExit(OrderSpec {
             account: account.clone(),
