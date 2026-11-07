@@ -729,8 +729,6 @@ mod tests {
         }
     }
 
-    /// The ladder accounts for every refusal the header counts: ones off the visible rows are
-    /// counted (and warnings are not refusals).
     /// Focused review: at the orders column's default width (~84 px, sized for two marks) the
     /// count didn't fit beside "Ord" and never showed. It takes the title's place instead.
     #[test]
@@ -744,6 +742,8 @@ mod tests {
         assert_eq!(hidden_placement(50.0, 20.0, 56.0), HiddenPlacement::None);
     }
 
+    /// The ladder accounts for every refusal the header counts: ones off the visible rows are
+    /// counted (and warnings are not refusals).
     #[test]
     fn offscreen_refusals_are_counted_at_their_edge() {
         let at = |row: i64| Price(row * 25);

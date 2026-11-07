@@ -301,7 +301,9 @@ impl OrdersLayer {
         // Refused prices off the visible rows: counted in the orders column's title cell
         // ("2 hidden"), never in a price row (it would read as a refusal at that row's price),
         // never a bare number (it would read as an order count): beside the "Ord" title when
-        // there is room, else in its place while they last (`dom_trade::hidden_placement`).
+        // there is room, else in its place while they last (`dom_trade::hidden_placement`);
+        // when the words don't fit even there, nothing here (the panel's status line still
+        // counts them as "+N more").
         if let (Some(top), Some(bottom)) = (rows.first(), rows.last()) {
             let edges = crate::dom_trade::offscreen_refusals(
                 self.flashes.iter().map(|f| (f.price, f.label)),
