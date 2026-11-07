@@ -20,7 +20,7 @@ pub const DEMO_URL: &str = "wss://demoapi.cqg.com:443";
 pub(crate) fn contract_symbol(root: &str, key: ContractKey) -> Option<String> {
     match key.delivery {
         Delivery::Monthly { year, month } => Some(format!("{root}{}{}", month.code(), year % 10)),
-        Delivery::Spot => None,
+        Delivery::Spot | Delivery::Equity | Delivery::Option(_) => None,
     }
 }
 

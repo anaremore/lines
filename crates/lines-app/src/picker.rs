@@ -518,7 +518,11 @@ mod tests {
         let nas = symbols(&e, "nas", &none);
         assert!(nas.contains(&"NQ") && nas.contains(&"MNQ"), "{nas:?}");
         assert!(!nas.contains(&"ES"));
-        assert_eq!(symbols(&e, "100", &none), ["NQ", "MNQ"], "Nasdaq-100");
+        assert_eq!(
+            symbols(&e, "100", &none),
+            ["NQ", "MNQ", "QQQ"],
+            "Nasdaq-100 (the futures, then the ETF)"
+        );
         assert_eq!(symbols(&e, "mnq", &none)[0], "MNQ");
         assert_eq!(symbols(&e, "MNQ", &none)[0], "MNQ", "case-insensitive");
         assert_eq!(

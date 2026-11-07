@@ -495,8 +495,47 @@ fn reading_tolerates_a_torn_tail_and_refuses_newer_versions() {
     assert_eq!(store::parse(b"").unwrap().records.len(), 0);
     assert!(store::parse(b"{\"journ").unwrap().torn);
     // Newer: refused.
-    let newer = "{\"journal\":2,\"source\":\"mock\"}\n";
+    let newer = "{\"journal\":3,\"source\":\"mock\"}\n";
     assert!(store::parse(newer.as_bytes()).is_err());
+}
+
+/// Decision 0028: a v1 journal reads as it is; opening it for writing keeps a copy
+/// (`mock.v1.jsonl`, the bytes as they were), then the same records continue under a v2
+/// header, so an older build refuses the file instead of reading an option trade as spot.
+#[test]
+fn a_v1_journal_migrates_to_v2_when_written() {
+    let dir = std::env::temp_dir().join(format!("lines-journal-v1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mock.jsonl");
+    let trade = serde_json::to_string(&Record::Trade(Box::new(closed(10.0, 5, &["a"])))).unwrap();
+    let v1 = format!("{{\"journal\":1,\"source\":\"mock\"}}\n{trade}\n");
+    std::fs::write(&path, &v1).unwrap();
+    let read = store::read(&path).unwrap().unwrap();
+    assert_eq!((read.version, read.records.len()), (1, 1));
+    {
+        let w = JournalWriter::open(path.clone(), "mock", Some(&read)).unwrap();
+        w.append(Record::Trade(Box::new(closed(-5.0, 20, &[]))));
+        assert!(w.flush(std::time::Duration::from_secs(5)));
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("mock.v1.jsonl")).unwrap(),
+        v1,
+        "the original, kept"
+    );
+    let now = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        now.starts_with("{\"journal\":2,\"source\":\"mock\"}\n"),
+        "{now}"
+    );
+    let l = store::read(&path).unwrap().unwrap();
+    assert_eq!(l.version, 2);
+    assert_eq!(l.records.len(), 2);
+    assert_eq!(l.records[0], read.records[0], "the v1 record, unchanged");
+    // Opening again: already current, nothing moves.
+    drop(JournalWriter::open(path.clone(), "mock", Some(&l)).unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), now);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

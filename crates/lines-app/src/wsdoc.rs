@@ -5,11 +5,14 @@
 //! source's default) and its view state. The market data *source* is not part of a workspace:
 //! it belongs to the run (`--source`), so one workspace works on mock, replay or live data.
 //!
-//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 3).
+//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 5).
 //! Version 2 adds each pane's `state` (shown, hidden, hidden by "chart only", detached) and a
 //! detached pane's `window` placement; version 1 files migrate (every pane shown). Version 3
 //! adds the `journal` pane kind (roadmap 8c); version 2 files read unchanged, and an older
-//! build meeting a version 3 file reports it as newer instead of failing on the kind.
+//! build meeting a version 3 file reports it as newer instead of failing on the kind. Version 4
+//! adds the `strategies` pane kind. Version 5 (decision 0028) lets a pane's contract be an
+//! equity or a listed option; every version 4 file reads unchanged, and an older build
+//! reports a version 5 file as newer instead of misreading an option.
 //! Product ids are the catalog's permanent ids; `symbol` is written beside them for people
 //! reading the file and ignored on load. A pane whose product this build doesn't know is kept
 //! as written and shown as unavailable, never dropped.
@@ -80,11 +83,17 @@ fn v3_to_v4(v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
-const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2, v2_to_v3, v3_to_v4];
+/// Version 5 added equity and option contracts (decision 0028): every version 4 file is a valid
+/// version 5 file, its futures and spot contracts read back as the same keys.
+fn v4_to_v5(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
+const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 4,
+    current: 5,
     migrations: MIGRATIONS,
 };
 
@@ -198,8 +207,20 @@ pub struct TargetDoc {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractDoc {
-    Monthly { year: u16, month: u8 },
+    Monthly {
+        year: u16,
+        month: u8,
+    },
     Spot,
+    /// An equity's shares (version 5).
+    Equity,
+    /// A listed option (version 5): expiry `YYYYMMDD`, the exact strike in the underlying's
+    /// price units, the right.
+    Option {
+        expiry: u32,
+        strike: i64,
+        right: lines_trading::types::RightDoc,
+    },
 }
 
 impl TargetDoc {
@@ -214,6 +235,18 @@ impl TargetDoc {
                         month: month.number(),
                     },
                     Delivery::Spot => ContractDoc::Spot,
+                    Delivery::Equity => ContractDoc::Equity,
+                    // One saved shape for options across files (lines-trading's).
+                    Delivery::Option(_) => {
+                        let o = lines_trading::types::ContractDoc::from_key(*k)
+                            .option
+                            .expect("an option key saves an option");
+                        ContractDoc::Option {
+                            expiry: o.expiry,
+                            strike: o.strike,
+                            right: o.right,
+                        }
+                    }
                 }),
             ),
         };
@@ -234,9 +267,35 @@ impl TargetDoc {
         Ok(match self.contract {
             None => Target::Product(id),
             Some(ContractDoc::Spot) if product.is_spot() => Target::Contract(ContractKey::spot(id)),
-            Some(ContractDoc::Monthly { year, month }) if !product.is_spot() => {
+            Some(ContractDoc::Monthly { year, month })
+                if !product.is_spot() && !product.is_equity() =>
+            {
                 let m = Month::new(month).ok_or_else(|| format!("bad contract month {month}"))?;
                 Target::Contract(ContractKey::monthly(id, year, m))
+            }
+            Some(ContractDoc::Equity) if product.is_equity() => {
+                Target::Contract(ContractKey::equity(id))
+            }
+            Some(ContractDoc::Option {
+                expiry,
+                strike,
+                right,
+            }) => {
+                let doc = lines_trading::types::ContractDoc {
+                    product: self.product,
+                    year: None,
+                    month: None,
+                    equity: false,
+                    option: Some(lines_trading::types::OptionDoc {
+                        expiry,
+                        strike,
+                        right,
+                    }),
+                };
+                match doc.to_key() {
+                    Some(k) if product.lists(&k) => Target::Contract(k),
+                    _ => return Err(format!("bad option contract for {}", product.symbol)),
+                }
             }
             Some(_) => return Err(format!("bad contract for {}", product.symbol)),
         })
@@ -1007,7 +1066,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 4"#), "{text}");
+        assert!(text.contains(r#""version": 5"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1441,13 +1500,82 @@ mod tests {
         }"#;
         let Decoded::Ok {
             value,
-            migrated_from: None,
+            migrated_from: Some(4),
         } = decode::<WorkspaceDoc>(&FORMAT, v4)
         else {
             panic!("v4 no longer reads")
         };
         let leaves = value.windows[0].tabs[0].layout.leaves();
         assert_eq!(leaves[1].kind, PaneKind::Strategies);
+    }
+
+    /// Version 5 (decision 0028): a version 4 file's futures and spot contracts read back as
+    /// the same keys; equity and option contracts round-trip; the written file says 5.
+    #[test]
+    fn version_5_keeps_futures_and_adds_equities_and_options() {
+        let v4 = br#"{
+          "version": 4,
+          "name": "desk",
+          "windows": [{
+            "tabs": [{
+              "focused": 0,
+              "layout": {"split": {"axis": "row", "ratio": 0.5,
+                "first": {"pane": {"kind": "chart", "link": 0, "state": "shown",
+                  "target": {"product": 1, "symbol": "ES", "contract": {"monthly": {"year": 2026, "month": 12}}}}},
+                "second": {"pane": {"kind": "dom", "link": 0, "state": "shown",
+                  "target": {"product": 1001, "symbol": "BTC/USD", "contract": "spot"}}}}}
+            }]
+          }]
+        }"#;
+        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, v4) else {
+            panic!("v4 no longer reads")
+        };
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        let target = |i: usize| leaves[i].target.as_ref().unwrap().to_target().unwrap();
+        assert_eq!(
+            target(0),
+            Target::Contract(ContractKey::monthly(
+                catalog::ES,
+                2026,
+                Month::new(12).unwrap()
+            ))
+        );
+        assert_eq!(
+            target(1),
+            Target::Contract(ContractKey::spot(catalog::BTC_USD))
+        );
+        let text = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
+        assert!(text.contains(r#""version": 5"#), "{text}");
+        assert!(
+            text.contains(r#""monthly""#),
+            "the futures shape is unchanged"
+        );
+        // Equities and options round-trip (exact strike, expiry, right).
+        let spy = catalog::SPY;
+        let opt = ContractKey::option(
+            spy,
+            lines_core::CivilDate::new(2026, 12, 18).unwrap(),
+            lines_core::Price(45_050),
+            lines_core::Right::Put,
+        );
+        for k in [ContractKey::equity(spy), opt] {
+            let doc = TargetDoc::from_target(&Target::Contract(k));
+            let json = serde_json::to_string(&doc).unwrap();
+            let back: TargetDoc = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.to_target().unwrap(), Target::Contract(k), "{json}");
+        }
+        let json = serde_json::to_string(&TargetDoc::from_target(&Target::Contract(opt))).unwrap();
+        assert!(
+            json.contains(r#""option":{"expiry":20261218,"strike":45050,"right":"put"}"#),
+            "{json}"
+        );
+        // A kind the product doesn't list is refused (kept, shown unavailable).
+        let bad = TargetDoc {
+            product: catalog::ES.0,
+            symbol: None,
+            contract: Some(ContractDoc::Equity),
+        };
+        assert!(bad.to_target().is_err());
     }
 
     #[test]
@@ -1457,8 +1585,8 @@ mod tests {
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 5, "windows": 7}"#),
-            Decoded::Newer { found: 5 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 6, "windows": 7}"#),
+            Decoded::Newer { found: 6 }
         );
     }
 
