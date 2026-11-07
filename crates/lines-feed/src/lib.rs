@@ -665,22 +665,23 @@ fn warm_start(
     let result = disk::orderflow::read(writer.dir(), from, |chunk| {
         // In slices, so the store's lock is held for milliseconds (panes keep drawing); the
         // coverage comes with the last one.
+        // The indicator engine gets the same slices (one batch never holds a busy day).
         for part in chunk.trades.chunks(STORED_SLICE) {
             store.update(|d| d.apply_stored(part, &[]));
+            tap.stored(part.to_vec(), Vec::new());
         }
         store.update(|d| d.apply_stored(&[], &chunk.covered));
-        tap.stored(chunk.trades, chunk.covered);
+        tap.stored(Vec::new(), chunk.covered);
     });
     store.update(|d| d.orderflow_loading = false);
     match result {
         Ok(s) => tracing::info!(
             "stored order flow: {} trades from {} trade dates in {:?} ({} decoded, {} \
-             re-delivered left out, {} segments cut)",
+             segments cut)",
             s.replayed,
             s.dates,
             s.elapsed,
             s.decoded,
-            s.redelivered,
             s.cut
         ),
         Err(e) => tracing::warn!("stored order flow unavailable: {e}"),

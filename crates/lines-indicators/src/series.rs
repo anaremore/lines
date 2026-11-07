@@ -397,7 +397,13 @@ impl MarketSeries {
 
     fn exact(&self, b: i64) -> bool {
         let end = b + self.period_ms - 1;
-        self.run_start.is_some_and(|r| r <= b) || self.complete.covers(b, end)
+        match self.run_start {
+            Some(r) if r <= b => true,
+            // The run covers the bucket's end; complete ranges must cover the rest (a stored
+            // span that reaches into a snapshot's minute).
+            Some(r) if r <= end => self.complete.covers(b, r - 1),
+            _ => self.complete.covers(b, end),
+        }
     }
 
     /// Re-derive buckets from `from` onwards (positions before it are unchanged).
@@ -749,5 +755,41 @@ mod tests {
         assert_eq!(total(&m), total(&live), "every trade once");
         assert_eq!(m.buckets()[4].sums, live.buckets()[4].sums);
         assert!(m.buckets()[4].exact && m.buckets()[9].exact);
+    }
+
+    /// Stored trades cover a minute's start, a snapshot's run its end (the snapshot is older
+    /// than the store, inside that minute): together they cover it, so it is exact.
+    #[test]
+    fn stored_and_live_together_cover_a_bucket() {
+        let trades = session();
+        let mut live = MarketSeries::new(60_000, 100);
+        live.apply(&live_inputs(&trades));
+        let bars: Vec<Bar> = live.buckets().iter().map(|b| b.bar).collect();
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Cached(bars[..5].to_vec()),
+            Input::Stored {
+                trades: trades[..9].to_vec(), // to 4:00.005
+                covered: vec![(t(0, 0).0, t(4, 20_000).0)],
+            },
+            Input::Connect {
+                expect_history: true,
+            },
+            Input::History {
+                bars: bars[4..5].to_vec(),
+                as_of: Some(t(4, 10_000)),
+            },
+        ]);
+        m.apply(&[Input::Trade {
+            time: trades[9].time, // 4:30.005, live
+            price: trades[9].price,
+            qty: trades[9].qty,
+            aggressor: trades[9].aggressor,
+        }]);
+        assert!(
+            m.buckets()[4].exact,
+            "stored [4:00, 4:20] + live from 4:10.001"
+        );
+        assert_eq!(m.buckets()[4].sums, live.buckets()[4].sums);
     }
 }

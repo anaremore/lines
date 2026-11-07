@@ -311,7 +311,8 @@ struct Cli {
     store_budget_gb: f64,
     /// Use the local store under DIR (its `store-v1/`) for any source, the mock, replays and
     /// screenshots included (evidence and tests with a synthetic stored session). Without it
-    /// those never store.
+    /// those never store. The run writes into DIR as a live feed would: give a screenshot a
+    /// fresh copy each time for repeatable images.
     #[arg(long, value_name = "DIR")]
     store_dir: Option<PathBuf>,
     /// At startup, replay the local store's trades of the newest N stored sessions into the

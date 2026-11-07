@@ -11,9 +11,10 @@
 //!   also hold trades outside it (re-delivered overlap, REST back-fill), which were never
 //!   counted live and are not complete there;
 //! - only from the **lookback** start (`from_ms`);
-//! - a **re-delivery** is left out: segments are in arrival order, and when a trade's time
-//!   goes back below the newest counted one (a reconnect re-sending trades already stored),
-//!   trades are skipped until time passes that mark again;
+//! - every stored trade once: the writer never stores a trade an earlier connection stored
+//!   (`ContractWriter`'s stored mark), so a reconnect's re-sent trades aren't in the segments,
+//!   while a connection's own late trades (a REST fill after newer streamed ones) are, as
+//!   live counted them;
 //! - a segment that ends **corrupt or torn** stops there: its coverage after the last good
 //!   block is withdrawn, so consumers stay approximate for the rest of that day.
 
@@ -46,10 +47,8 @@ pub struct ReadStats {
     pub blocks: u64,
     /// Trades decoded from the segments read.
     pub decoded: u64,
-    /// Trades replayed (covered, inside the lookback, not re-delivered).
+    /// Trades replayed (covered, inside the lookback).
     pub replayed: u64,
-    /// Trades left out as re-delivered.
-    pub redelivered: u64,
     /// Segments that ended corrupt or torn (coverage withdrawn after them).
     pub cut: usize,
     pub elapsed: Duration,
@@ -77,9 +76,6 @@ pub fn read(dir: &ContractDir, from_ms: i64, mut each: impl FnMut(Chunk)) -> io:
     if coverage.is_empty() {
         return Ok(stats);
     }
-    // Newest counted trade time, and whether a re-delivery is being skipped.
-    let mut mark: Option<i64> = None;
-    let mut redelivery = false;
     let mut events = Vec::new();
     for date in dir.dates() {
         let (open, close) = partition::trade_date_span(&dir.product, date);
@@ -96,7 +92,12 @@ pub fn read(dir: &ContractDir, from_ms: i64, mut each: impl FnMut(Chunk)) -> io:
             date: Some(date),
             ..Chunk::default()
         };
-        let mut r = SegmentReader::open(&dir.segment_path(date))?;
+        let mut r = match SegmentReader::open(&dir.segment_path(date)) {
+            Ok(r) => r,
+            // Evicted meanwhile (retention runs on the writer's thread): nothing to replay.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
         // The newest time of a block read in full: a cut withdraws coverage after it.
         let mut good_to = open - 1;
         loop {
@@ -134,21 +135,6 @@ pub fn read(dir: &ContractDir, from_ms: i64, mut each: impl FnMut(Chunk)) -> io:
                 if !day.contains(t) {
                     continue;
                 }
-                if let Some(m) = mark {
-                    if t < m {
-                        redelivery = true;
-                        stats.redelivered += 1;
-                        continue;
-                    }
-                    if redelivery {
-                        if t == m {
-                            stats.redelivered += 1;
-                            continue;
-                        }
-                        redelivery = false;
-                    }
-                }
-                mark = Some(mark.map_or(t, |m| m.max(t)));
                 chunk.trades.push(Print {
                     time: UtcMillis(t),
                     price,
@@ -228,32 +214,22 @@ mod tests {
         c.save(&dir.coverage_path()).unwrap();
     }
 
-    /// A reconnect re-sends trades already stored: they are left out until time passes the
-    /// newest counted trade; trades of the same millisecond in one run all count.
+    /// Every covered stored trade replays, in arrival order, late ones included (a REST fill
+    /// of trades older than newer streamed ones, as live counted them).
     #[test]
-    fn a_redelivery_is_left_out() {
-        let d = dir("redelivery");
+    fn late_trades_inside_the_coverage_replay() {
+        let d = dir("late");
         let (date, open) = monday();
         let t = |s: i64| open + s * 1000;
-        write_day(
-            &d,
-            date,
-            &[
-                &[t(1), t(2), t(3)],
-                &[t(3), t(4)], // the same millisecond again in the live run: counts
-                &[t(2), t(3), t(4)], // re-delivered after a reconnect
-                &[t(4), t(5)], // still re-delivered (4), then new (5)
-            ],
-        );
+        write_day(&d, date, &[&[t(3), t(4)], &[t(1), t(2)], &[t(4), t(5)]]);
         cover(&d, open, open + 3_600_000);
         let mut got = Vec::new();
         let s = read(&d, i64::MIN, |c| {
             got.extend(c.trades.iter().map(|p| p.time.0))
         })
         .unwrap();
-        assert_eq!(got, vec![t(1), t(2), t(3), t(3), t(4), t(5)]);
-        assert_eq!(s.redelivered, 4);
-        assert_eq!((s.decoded, s.replayed, s.cut), (10, 6, 0));
+        assert_eq!(got, vec![t(3), t(4), t(1), t(2), t(4), t(5)]);
+        assert_eq!((s.decoded, s.replayed, s.cut), (6, 6, 0));
     }
 
     /// Only covered trades replay: outside the claims (and before the lookback) they were

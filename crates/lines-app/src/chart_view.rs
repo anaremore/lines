@@ -1913,9 +1913,10 @@ impl ChartView {
             for l in &self.scene.time_lines {
                 window.paint_quad(fill(rect(l.x, 0.0, hair, ph), t.grid));
             }
-            // Paint order inside the plot: grid, volume profile (behind the candles), candles,
-            // `layers`, indicator studies (VWAP lines above), the profile's label, last-price
-            // line, crosshair.
+            // Paint order inside the plot: grid, volume profile and the levels' back zones
+            // (behind the candles), candles, `layers`, indicator studies (VWAP lines), opaque
+            // footprint cells over them, the levels' front lines, the profile's label,
+            // last-price line, crosshair.
             let (studies, labels) = (
                 self.visibility.draws_studies(),
                 self.visibility.draws_labels(),

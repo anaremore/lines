@@ -78,6 +78,14 @@ pub struct ContractWriter {
     io: Option<thread::JoinHandle<()>>,
     coverage: Coverage,
     run: Run,
+    /// The newest trade time stored by an earlier connection (or claimed complete when the
+    /// store opened). A later connection's trade at or before it is a re-delivery of one
+    /// already stored (a reconnect re-sending, or a history snapshot older than the store):
+    /// it is not stored again, so the segments hold every trade once. Late trades inside one
+    /// connection (a REST fill of missing trades) are newer than this mark's run and kept.
+    stored_mark: Option<i64>,
+    /// The newest trade time stored by this connection.
+    run_newest: Option<i64>,
     buf: Vec<u8>,
     last_save: Instant,
     _lock: File,
@@ -177,8 +185,10 @@ impl ContractWriter {
                 store,
                 tx: Some(tx),
                 io: Some(io),
+                stored_mark: coverage.trades.ranges().last().map(|r| r.1),
                 coverage,
                 run: Run::default(),
+                run_newest: None,
                 buf: Vec::with_capacity(4096),
                 last_save: Instant::now(),
                 dir,
@@ -224,6 +234,13 @@ impl ContractWriter {
         self.send(Io::Coverage(self.coverage.clone()));
     }
 
+    /// A connection ended: its trades are now "stored by an earlier connection".
+    fn close_run_mark(&mut self) {
+        if let Some(n) = self.run_newest.take() {
+            self.stored_mark = Some(self.stored_mark.map_or(n, |m| m.max(n)));
+        }
+    }
+
     fn save_bars(&self) {
         let bars = self.store.read().series.bars().to_vec();
         self.send(Io::Bars(bars));
@@ -247,6 +264,7 @@ impl EventSink for ContractWriter {
         newest_bar: Option<UtcMillis>,
         window_start: UtcMillis,
     ) -> Option<UtcMillis> {
+        self.close_run_mark();
         let from = newest_bar.map(|newest| {
             // The earliest hole in the bar coverage inside the window, else the newest bar.
             let hole = self
@@ -274,12 +292,18 @@ impl EventSink for ContractWriter {
         let mut block_us = None::<i64>;
         for e in events {
             let ne = match *e {
+                MarketEvent::Trade { time, .. }
+                    if self.stored_mark.is_some_and(|m| time.0 <= m) =>
+                {
+                    None // stored already, by an earlier connection
+                }
                 MarketEvent::Trade {
                     time,
                     price,
                     qty,
                     aggressor,
                 } => {
+                    self.run_newest = Some(self.run_newest.map_or(time.0, |n| n.max(time.0)));
                     let t = time.0.saturating_mul(1000);
                     block_us = Some(block_us.map_or(t, |b| b.max(t)));
                     Some(NativeEvent::Trade {
@@ -375,6 +399,7 @@ impl EventSink for ContractWriter {
         self.commit();
         self.save_bars();
         self.run = Run::default();
+        self.close_run_mark();
     }
 }
 

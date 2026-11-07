@@ -19,8 +19,9 @@
 //! - With the price axis auto-fitted, the range's top is raised (`clear_top`) so cells start
 //!   below that block; only a manual price zoom can push bars under it.
 //! - Each column has an open → close strip on its left (a candle body: hollow/filled as the
-//!   candles) with the open as a tick on the strip's left (as an OHLC bar marks it), so a
-//!   bar's direction shows by shape and position, never by color alone.
+//!   candles) with the open as a small wedge on the strip's left pointing at it (where an
+//!   OHLC bar marks its open), so a bar's direction shows by shape and position, never by
+//!   color alone; a bar with cells cut by the plot's edge is a candle and the legend says so.
 //! - Cells are opaque: the volume profile and study lines (VWAP) are drawn first and pass
 //!   under them, never through a number.
 //! - Price and crosshair lines break where they cross cells (`hline_segments`).
@@ -583,7 +584,16 @@ impl ChartLayer for FootprintLayer {
         // the rest are candles (never a cut number, a spilled one or a box without one).
         let (mode, qty, m, tick) = (self.config.mode, self.qty, self.metrics, self.tick);
         let (ex_w, ex_h) = self.legend_block;
-        let (mut too_wide, mut under, mut at_edge) = (false, false, false);
+        // A bar with cells cut by the plot's left or right edge is a candle too: say so (a
+        // covered bar must never read as one without trades).
+        let edge_cut = (range.start..a).chain(b..range.end).any(|i| {
+            data.profiles
+                .footprint()
+                .range(bars.bars[i].time, bars.end(i))
+                .next()
+                .is_some()
+        });
+        let (mut too_wide, mut under, mut at_edge) = (false, false, edge_cut);
         let cells = &self.frame.cells;
         self.frame.bars.retain(|bc| {
             let col = Column::of(vp, bc.bar, scale);
@@ -704,12 +714,20 @@ impl ChartLayer for FootprintLayer {
                 } else {
                     window.paint_quad(fill(rect(col.strip_x, top, sw, h), color));
                 }
-                // The open as a tick left of the strip: which end the bar opened at.
-                let (tw, th) = (snap(3.0), snap(2.0).max(2.0 / scale));
-                window.paint_quad(fill(
-                    rect(col.strip_x - tw, snap(f64::from(yo - th * 0.5)), tw, th),
-                    color,
-                ));
+                // The open as a wedge left of the strip, pointing at it: which end the bar
+                // opened at, by position and by a shape no study line has (a line crossing
+                // the gap is uniform; the wedge tapers).
+                let step = snap(1.0).max(1.0 / scale);
+                // The gap to the previous column, less a pixel: the wedge never touches it.
+                let room = vp.bar_px as f32 - (col.cell_left + col.cell_w - col.strip_x) - step;
+                let cols = (room / step).floor().clamp(0.0, 3.0) as usize;
+                for &(k, half) in [(1.0f32, 3.0f64), (2.0, 2.0), (3.0, 1.0)].iter().take(cols) {
+                    let hh = snap(half).max(step * 0.5);
+                    window.paint_quad(fill(
+                        rect(col.strip_x - step * k, yo - hh, step, hh * 2.0),
+                        color,
+                    ));
+                }
             }
             for k in 0..b.len {
                 let c = self.frame.cells[b.first + k];
@@ -945,9 +963,13 @@ mod tests {
         );
         let (label, note) = fp.legend().unwrap();
         assert_eq!(label, "Footprint · sell × buy");
+        // Bar 3 has trades but is cut by the plot's edge: the legend says why it's a candle.
         assert_eq!(
             note.as_deref(),
-            Some("footprint from counted trades only · underline = imbalance")
+            Some(
+                "bars cut by the plot's edge shown as candles · footprint from counted trades \
+                 only · underline = imbalance"
+            )
         );
         fp.check_drawable(&vp).unwrap();
         // Narrow bars: no cells at all; the legend asks to zoom in.
