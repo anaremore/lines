@@ -1216,12 +1216,12 @@ mod tests {
     #[test]
     fn panes_without_column_fields_load_with_default_columns() {
         // Version 2 as written before column settings existed: no `columns` anywhere.
-        let v2 = br#"{"version": 3, "windows": [{"tabs": [{"layout": {"split": {"axis": "row", "ratio": 0.5,
+        let v2 = br#"{"version": 2, "windows": [{"tabs": [{"layout": {"split": {"axis": "row", "ratio": 0.5,
             "first": {"pane": {"kind": "dom", "state": "shown", "dom": {"grouping": 2}}},
             "second": {"pane": {"kind": "tape", "state": "shown", "tape": {"large_print": 20}}}}}}]}]}"#;
         let Decoded::Ok {
             value,
-            migrated_from: None,
+            migrated_from: Some(2),
         } = decode::<WorkspaceDoc>(&FORMAT, v2)
         else {
             panic!("reads")

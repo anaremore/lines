@@ -48,7 +48,7 @@ use lines_trading::{
     OrderId, OrderKind, PaperBroker, PaperConfig, PositionView, Reject, RulePreset, Source,
     TradingCore, TradingHandle, TradingService,
 };
-use lines_trading::{GuardState, Guardrails, Journal, JournalObserver, JournalShared};
+use lines_trading::{GuardState, Guardrails, Journal, JournalShared};
 
 use crate::dom_trade::ArmPrefs;
 
@@ -614,7 +614,7 @@ impl Trading {
             core,
             setup.file.map(|p| (p, paper)),
             setup.clock,
-            vec![Box::new(JournalObserver(journal.clone()))],
+            vec![Box::new(journal.observer())],
         )
         .expect("spawn the trading thread");
         let report = match (report, journal_report) {
@@ -686,6 +686,8 @@ impl Trading {
         if self.barrier.send(tx).is_ok() {
             let _ = rx.recv_timeout(Duration::from_secs(10));
         }
+        // The journal applied every event the core sent before the sync above.
+        self.journal.sync();
     }
 
     /// Send a command; returns at once. `issued`: the input event's time (the click).
@@ -730,7 +732,7 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option<String>) {
     use lines_trading::journal::store::{self, JournalWriter};
     let Some((path, source)) = file else {
-        return (JournalShared::new(Journal::new(), None), None);
+        return (JournalShared::start(Journal::new(), None), None);
     };
     match store::read(path) {
         Ok(loaded) => {
@@ -749,10 +751,10 @@ fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option
                 }
             };
             let journal = Journal::from_records(loaded.map(|l| l.records).unwrap_or_default());
-            (JournalShared::new(journal, writer), report)
+            (JournalShared::start(journal, writer), report)
         }
         Err(e) => (
-            JournalShared::new(Journal::new(), None),
+            JournalShared::start(Journal::new(), None),
             Some(format!(
                 "journal {} not read ({e:#}); left as it is, not saved this run",
                 path.display()
@@ -1620,8 +1622,8 @@ mod tests {
         )
         .unwrap();
         t.run_script(&steps, start, 25);
-        let j = t.journal.read();
-        let trades = j.trades();
+        let snap = t.journal.snapshot().unwrap();
+        let trades = &snap.trades;
         assert_eq!(trades.len(), 2, "{trades:#?}");
         let first = &trades[0];
         // Bought 2 at 6000.00 (the ask); sold 1 at 6002.00 (resting, filled by the 6002.25
@@ -1636,7 +1638,7 @@ mod tests {
         // Short 1 at the bid, back at the ask: −0.25 points.
         assert_eq!(trades[1].side, lines_trading::Side::Sell);
         assert_eq!(trades[1].realized, lines_trading::Money::cents(-1250));
-        assert!(j.open_trades().next().is_none());
+        assert_eq!(snap.open, 0);
     }
 
     #[test]

@@ -11,8 +11,10 @@
 //! - **Exact money.** Realized P&L comes from the journal's own FIFO lots ([`Position`], the
 //!   core's algorithm), so it is exact and also right for fills the core learned of by
 //!   reconciliation (which carry no P&L of their own). Fees are the fills' fees.
-//! - **Never double-counted.** Fills are keyed by their `trade_id`; a fill seen again (a
-//!   reconciled fill re-reported, a replayed stream after a restart) is ignored.
+//! - **Never double-counted.** Fills are keyed by their `trade_id`; a fill seen again in this
+//!   run (a reconciled fill re-reported, the same execution delivered twice) is ignored. Only
+//!   within a run: broker fill ids aren't unique across runs (paper order ids restart when the
+//!   paper file is reset), and the core never re-emits an earlier run's fills.
 //! - **MAE/MFE** (maximum adverse/favorable excursion): the worst and best the open trade's
 //!   P&L (realized so far plus open, before fees) got while it was open, from the same market
 //!   batches the paper broker sees (trade and last prices) and the fills themselves; plus the
@@ -23,13 +25,19 @@
 //! - **Open trades** live only in memory. After a restart a position the journal didn't see
 //!   open is seeded from the core's position report and its trade is marked `incomplete`.
 //!
-//! Pure: no I/O, no clock. The service feeds it ([`JournalObserver`]); the app reads it.
+//! [`Journal`] is pure: no I/O, no clock. It runs on its own thread ([`JournalShared`]): the
+//! trading thread only sends it messages ([`JournalObserver`]), and the UI reads a published
+//! snapshot (an `Arc` swapped in; no lock is held while formatting), so the journal never
+//! shares a lock with the trading core or holds one the UI waits on.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use lines_core::{CivilDate, ContractKey, Price, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
@@ -71,7 +79,9 @@ pub struct TradeFill {
 /// A round trip.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Trade {
-    /// Stable: the first fill's `trade_id` (a reversal's second trade adds `/r`).
+    /// Unique in the journal: the first fill's `trade_id` (a reversal's second trade adds
+    /// `/r`; a trade seeded after a restart starts `seed-`), `@` the entry time in ms, and
+    /// `#n` if that still collides. Edits refer to it.
     pub id: String,
     pub account: AccountId,
     #[serde(with = "contract_serde")]
@@ -217,12 +227,15 @@ impl Open {
     }
 }
 
+/// Order sources remembered (cleared when exceeded; a fill follows its command quickly).
+const MAX_SOURCES: usize = 16_384;
+
 #[derive(Default)]
 pub struct Journal {
     open: BTreeMap<(AccountId, ContractKey), Open>,
     closed: Vec<Trade>,
     by_id: HashMap<String, usize>,
-    /// Fill ids already counted.
+    /// Fill ids already counted in this run.
     seen: HashSet<String>,
     /// Each order's command source (from the command results).
     sources: HashMap<OrderId, Source>,
@@ -243,7 +256,7 @@ impl Journal {
         j
     }
 
-    /// A saved record: a closed trade (its fills count as seen) or an edit.
+    /// A saved record: a closed trade or an edit.
     pub fn apply(&mut self, r: Record) {
         match r {
             Record::Trade(t) => self.push_closed(*t),
@@ -284,20 +297,26 @@ impl Journal {
         Some(e)
     }
 
-    fn push_closed(&mut self, t: Trade) {
-        for f in &t.fills {
-            if !f.trade_id.is_empty() {
-                self.seen.insert(f.trade_id.clone());
+    /// Keep a closed trade. Ids are unique: a colliding one (two trades saved with one id)
+    /// gets `#2`, `#3`… in file order, so edits keep applying to the first.
+    fn push_closed(&mut self, mut t: Trade) {
+        if self.by_id.contains_key(&t.id) {
+            let base = t.id.clone();
+            let mut n = 2;
+            while self.by_id.contains_key(&format!("{base}#{n}")) {
+                n += 1;
             }
+            t.id = format!("{base}#{n}");
         }
-        match self.by_id.get(&t.id) {
-            // The same trade saved twice: the later copy wins (keeps its edits' place).
-            Some(&i) => self.closed[i] = t,
-            None => {
-                self.by_id.insert(t.id.clone(), self.closed.len());
-                self.closed.push(t);
-            }
-        }
+        self.by_id.insert(t.id.clone(), self.closed.len());
+        self.closed.push(t);
+    }
+
+    /// A trade that just closed: its final id (`@` entry time), kept; returns the kept copy.
+    fn close(&mut self, mut t: Trade) -> Trade {
+        t.id = format!("{}@{}", t.id, t.entry_time.0);
+        self.push_closed(t);
+        self.closed.last().cloned().expect("just pushed")
     }
 
     fn spec(&mut self, contract: ContractKey) -> Option<ContractSpec> {
@@ -336,6 +355,10 @@ impl Journal {
                 result: Ok(orders),
                 ..
             } => {
+                // Bounded: sources of the newest orders only (fills come soon after).
+                if self.sources.len() > MAX_SOURCES {
+                    self.sources.clear();
+                }
                 for o in orders {
                     self.sources.entry(*o).or_insert(*source);
                 }
@@ -448,10 +471,7 @@ impl Journal {
                 self.open_with(key, &spec, opening, "/r");
             }
         }
-        for t in &closed {
-            self.push_closed(t.clone());
-        }
-        closed
+        closed.into_iter().map(|t| self.close(t)).collect()
     }
 
     fn open_with(
@@ -620,91 +640,183 @@ fn quote(s: &str) -> String {
     }
 }
 
-/// The journal as the service and the UI share it: the model behind a mutex the trading
-/// thread holds only briefly, a lock-free revision the UI polls, and the file writer.
+/// What the UI reads: the closed trades and the open count, as of the journal's revision.
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    pub trades: Vec<Trade>,
+    pub open: usize,
+}
+
+enum Msg {
+    Market(ContractKey, Vec<MarketInput>),
+    Events(Vec<Event>),
+    Edit(Edit),
+    /// Write the closed trades as CSV to this path.
+    Export(PathBuf),
+    /// Reply once everything sent before is applied and published.
+    Sync(Sender<()>),
+    /// Reply once everything sent before is on disk (quitting).
+    Flush(Sender<()>),
+}
+
+/// The journal on its own thread (`lines-journal`). The trading thread sends it the core's
+/// market batches and events ([`JournalObserver`]); the UI sends edits and exports and reads
+/// [`Snapshot`]s. The only lock is the snapshot pointer, held for a swap or a clone.
 pub struct JournalShared {
-    journal: Mutex<Journal>,
+    tx: Sender<Msg>,
+    published: Mutex<Arc<Snapshot>>,
     revision: AtomicU64,
-    writer: Option<store::JournalWriter>,
+    persistent: bool,
 }
 
 impl JournalShared {
-    pub fn new(journal: Journal, writer: Option<store::JournalWriter>) -> Arc<JournalShared> {
-        Arc::new(JournalShared {
-            journal: Mutex::new(journal),
+    /// Start the journal thread with `journal` (loaded from its file) and its writer (`None`:
+    /// in memory only).
+    pub fn start(journal: Journal, writer: Option<store::JournalWriter>) -> Arc<JournalShared> {
+        let (tx, rx) = mpsc::channel();
+        let shared = Arc::new(JournalShared {
+            tx,
+            published: Mutex::new(Arc::new(Snapshot::default())),
             revision: AtomicU64::new(0),
-            writer,
-        })
+            persistent: writer.is_some(),
+        });
+        shared.publish(&journal);
+        let s = shared.clone();
+        let spawned = thread::Builder::new()
+            .name("lines-journal".into())
+            .spawn(move || run(journal, writer, rx, &s));
+        if let Err(e) = spawned {
+            tracing::error!("journal thread failed to start: {e}");
+        }
+        shared
     }
 
-    /// Moves whenever a trade opens, closes, changes or is edited.
+    /// The trading service's view of it.
+    pub fn observer(&self) -> JournalObserver {
+        JournalObserver {
+            tx: self.tx.clone(),
+        }
+    }
+
+    /// Moves whenever a trade opens, closes or is edited (lock-free).
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 
-    /// Never waits: `None` if the trading thread holds it this instant.
-    pub fn try_read(&self) -> Option<MutexGuard<'_, Journal>> {
-        self.journal.try_lock().ok()
+    /// The latest snapshot. Never waits: `None` if it is being swapped this instant.
+    pub fn snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.published.try_lock().ok().map(|s| s.clone())
     }
 
-    pub fn read(&self) -> MutexGuard<'_, Journal> {
-        self.journal.lock().unwrap_or_else(|e| e.into_inner())
+    /// Edit a trade's tags and note (applied and saved on the journal thread).
+    pub fn edit(&self, e: Edit) {
+        let _ = self.tx.send(Msg::Edit(e));
     }
 
-    /// Edit a trade's tags and note; saved as a record. `false` if there is no such trade.
-    pub fn edit(&self, e: Edit) -> bool {
-        let saved = self.read().edit(e);
-        match saved {
-            Some(e) => {
-                if let Some(w) = &self.writer {
-                    w.append(Record::Edit(e));
-                }
-                self.bump();
-                true
-            }
-            None => false,
+    /// Write the closed trades as CSV to `path` (on the journal thread; errors are logged).
+    pub fn export(&self, path: PathBuf) {
+        let _ = self.tx.send(Msg::Export(path));
+    }
+
+    /// Wait until everything sent so far is applied and published. Blocks: tests and
+    /// screenshots only, never the UI's trading path.
+    pub fn sync(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.tx.send(Msg::Sync(tx)).is_ok() {
+            let _ = rx.recv_timeout(Duration::from_secs(10));
         }
     }
 
-    pub fn persistent(&self) -> bool {
-        self.writer.is_some()
+    /// Wait (up to `timeout`) until everything sent so far is on disk. For quitting.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Msg::Flush(tx)).is_ok() && rx.recv_timeout(timeout).is_ok()
     }
 
-    fn bump(&self) {
+    /// Saved to a file (else this run only).
+    pub fn persistent(&self) -> bool {
+        self.persistent
+    }
+
+    fn publish(&self, j: &Journal) {
+        let snap = Arc::new(Snapshot {
+            trades: j.trades().to_vec(),
+            open: j.open_trades().count(),
+        });
+        *self.published.lock().unwrap_or_else(|e| e.into_inner()) = snap;
         self.revision.fetch_add(1, Ordering::Release);
     }
 }
 
-/// Feeds a [`JournalShared`] from the trading service (same thread, same order as the core).
-pub struct JournalObserver(pub Arc<JournalShared>);
+fn run(
+    mut j: Journal,
+    writer: Option<store::JournalWriter>,
+    rx: Receiver<Msg>,
+    shared: &JournalShared,
+) {
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Msg::Market(k, inputs) => j.on_market(k, &inputs),
+            Msg::Events(events) => {
+                let mut changed = false;
+                for e in &events {
+                    changed |= matches!(e, Event::Fill(_) | Event::Position(_));
+                    for t in j.on_event(e) {
+                        if let Some(w) = &writer {
+                            w.append(Record::Trade(Box::new(t)));
+                        }
+                    }
+                }
+                if changed {
+                    shared.publish(&j);
+                }
+            }
+            Msg::Edit(e) => {
+                if let Some(e) = j.edit(e) {
+                    if let Some(w) = &writer {
+                        w.append(Record::Edit(e));
+                    }
+                    shared.publish(&j);
+                }
+            }
+            Msg::Export(path) => {
+                let out = csv(j.trades());
+                let written = path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|_| std::fs::write(&path, out));
+                match written {
+                    Ok(()) => tracing::info!("journal exported to {}", path.display()),
+                    Err(e) => tracing::error!("journal export to {} failed: {e}", path.display()),
+                }
+            }
+            Msg::Sync(tx) => {
+                let _ = tx.send(());
+            }
+            Msg::Flush(tx) => {
+                if let Some(w) = &writer {
+                    w.flush(Duration::from_secs(5));
+                }
+                let _ = tx.send(());
+            }
+        }
+    }
+}
+
+/// Feeds a [`JournalShared`] from the trading service: messages only, so the trading thread
+/// never takes a lock the journal or the UI holds.
+pub struct JournalObserver {
+    tx: Sender<Msg>,
+}
 
 impl Observer for JournalObserver {
     fn market(&mut self, contract: ContractKey, inputs: &[MarketInput]) {
-        let mut j = self.0.read();
-        if j.open.keys().any(|(_, k)| *k == contract) {
-            j.on_market(contract, inputs);
-            drop(j);
-            self.0.bump();
-        }
+        let _ = self.tx.send(Msg::Market(contract, inputs.to_vec()));
     }
 
     fn events(&mut self, events: &[Event]) {
-        let mut changed = false;
-        let mut closed = Vec::new();
-        {
-            let mut j = self.0.read();
-            for e in events {
-                changed |= matches!(e, Event::Fill(_) | Event::Position(_));
-                closed.extend(j.on_event(e));
-            }
-        }
-        if let Some(w) = &self.0.writer {
-            for t in closed {
-                w.append(Record::Trade(Box::new(t)));
-            }
-        }
-        if changed {
-            self.0.bump();
+        if !events.is_empty() {
+            let _ = self.tx.send(Msg::Events(events.to_vec()));
         }
     }
 }
