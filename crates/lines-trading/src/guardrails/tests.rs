@@ -369,3 +369,18 @@ fn tracker_round_trips_through_json() {
         serde_json::from_str(&serde_json::to_string(&none).unwrap()).unwrap();
     assert_eq!(back, none);
 }
+
+/// The one definition of a trade (shared with the journal): flat → position → flat; a
+/// reversal ends one and starts the next.
+#[test]
+fn round_trip_steps() {
+    use crate::guardrails::RoundTrip;
+    assert_eq!(RoundTrip::of(0, 0), RoundTrip::None);
+    assert_eq!(RoundTrip::of(0, 2), RoundTrip::Opens);
+    assert_eq!(RoundTrip::of(0, -1), RoundTrip::Opens);
+    assert_eq!(RoundTrip::of(2, 3), RoundTrip::Continues, "add");
+    assert_eq!(RoundTrip::of(3, 1), RoundTrip::Continues, "scale out");
+    assert_eq!(RoundTrip::of(-2, 0), RoundTrip::Closes);
+    assert_eq!(RoundTrip::of(2, -3), RoundTrip::Reverses);
+    assert_eq!(RoundTrip::of(-1, 1), RoundTrip::Reverses);
+}

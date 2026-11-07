@@ -5,9 +5,11 @@
 //! source's default) and its view state. The market data *source* is not part of a workspace:
 //! it belongs to the run (`--source`), so one workspace works on mock, replay or live data.
 //!
-//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 2).
+//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 3).
 //! Version 2 adds each pane's `state` (shown, hidden, hidden by "chart only", detached) and a
-//! detached pane's `window` placement; version 1 files migrate (every pane shown).
+//! detached pane's `window` placement; version 1 files migrate (every pane shown). Version 3
+//! adds the `journal` pane kind (roadmap 8c); version 2 files read unchanged, and an older
+//! build meeting a version 3 file reports it as newer instead of failing on the kind.
 //! Product ids are the catalog's permanent ids; `symbol` is written beside them for people
 //! reading the file and ignored on load. A pane whose product this build doesn't know is kept
 //! as written and shown as unavailable, never dropped.
@@ -22,7 +24,7 @@ use lines_feed::catalog::{self, Target};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{Axis, Layout, LinkGroup, PaneKind, Preset, Rect, trading_group};
-use crate::pane_columns::{ColumnDoc, DomCol, TapeCol};
+use crate::pane_columns::{ColumnDoc, DomCol, JournalCol, TapeCol};
 use crate::profile::ProfileConfig;
 use crate::tabstate::PaneState;
 use crate::versioned::{Format, Migration};
@@ -67,11 +69,16 @@ fn v1_to_v2(mut v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
-const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2];
+/// Version 3 added the `journal` pane kind: every version 2 file is a valid version 3 file.
+fn v2_to_v3(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
+const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2, v2_to_v3];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 2,
+    current: 3,
     migrations: MIGRATIONS,
 };
 
@@ -134,6 +141,9 @@ pub struct PaneDoc {
     pub dom: Option<DomState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tape: Option<TapeState>,
+    /// A journal pane's view (version 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<JournalState>,
     /// Shown, hidden, hidden by its chart's "chart only", or detached (version 2).
     #[serde(default)]
     pub state: PaneState,
@@ -155,6 +165,7 @@ impl PaneDoc {
             chart: None,
             dom: None,
             tape: None,
+            journal: None,
             state: PaneState::Shown,
             window: None,
             trade: None,
@@ -343,6 +354,16 @@ pub struct DomState {
     /// The price trail (optional: written only when on or at a non-default half-life).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<crate::dom_trail::TrailDoc>,
+}
+
+/// A journal pane's view (roadmap 8c).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct JournalState {
+    /// Stats over every trade date (else the current one).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_dates: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub columns: BTreeMap<JournalCol, ColumnDoc>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -864,7 +885,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 2"#), "{text}");
+        assert!(text.contains(r#""version": 3"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1068,6 +1089,7 @@ mod tests {
         };
         assert_eq!(migrated_from, Some(1));
         assert_eq!(value.name, "desk");
+        // (and on through version 3, unchanged)
         assert!(
             value.windows[0].tabs[0]
                 .layout
@@ -1100,9 +1122,8 @@ mod tests {
     }
 
     #[test]
-    fn a_version_2_file_as_written_today_still_reads() {
-        // Pinned: if this stops parsing, the format changed and needs a version bump plus a
-        // migration (crate::versioned), not an edit here.
+    fn a_version_2_file_still_reads() {
+        // Pinned: exactly what version 2 wrote. It migrates to version 3 unchanged.
         let v2 = br#"{
           "version": 2,
           "name": "desk",
@@ -1122,7 +1143,7 @@ mod tests {
         }"#;
         let Decoded::Ok {
             value,
-            migrated_from: None,
+            migrated_from: Some(2),
         } = decode::<WorkspaceDoc>(&FORMAT, v2)
         else {
             panic!("v2 no longer reads")
@@ -1147,6 +1168,37 @@ mod tests {
     }
 
     #[test]
+    fn a_version_3_file_as_written_today_still_reads() {
+        // Pinned: if this stops parsing, the format changed and needs a version bump plus a
+        // migration (crate::versioned), not an edit here.
+        let v3 = br#"{
+          "version": 3,
+          "name": "desk",
+          "windows": [{
+            "tabs": [{
+              "focused": 0,
+              "layout": {"split": {"axis": "row", "ratio": 0.6,
+                "first": {"pane": {"kind": "chart", "link": 0, "state": "shown"}},
+                "second": {"pane": {"kind": "journal", "state": "shown",
+                  "journal": {"all_dates": true, "columns": {"tags": {"shown": false}}}}}}}
+            }]
+          }]
+        }"#;
+        let Decoded::Ok {
+            value,
+            migrated_from: None,
+        } = decode::<WorkspaceDoc>(&FORMAT, v3)
+        else {
+            panic!("v3 no longer reads")
+        };
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        assert_eq!(leaves[1].kind, PaneKind::Journal);
+        let j = leaves[1].journal.as_ref().unwrap();
+        assert!(j.all_dates);
+        assert_eq!(j.columns[&JournalCol::Tags].shown, Some(false));
+    }
+
+    #[test]
     fn the_migration_rejects_shapes_it_cannot_follow() {
         for bad in [
             &br#"{"version": 1}"#[..],
@@ -1164,7 +1216,7 @@ mod tests {
     #[test]
     fn panes_without_column_fields_load_with_default_columns() {
         // Version 2 as written before column settings existed: no `columns` anywhere.
-        let v2 = br#"{"version": 2, "windows": [{"tabs": [{"layout": {"split": {"axis": "row", "ratio": 0.5,
+        let v2 = br#"{"version": 3, "windows": [{"tabs": [{"layout": {"split": {"axis": "row", "ratio": 0.5,
             "first": {"pane": {"kind": "dom", "state": "shown", "dom": {"grouping": 2}}},
             "second": {"pane": {"kind": "tape", "state": "shown", "tape": {"large_print": 20}}}}}}]}]}"#;
         let Decoded::Ok {
@@ -1227,8 +1279,8 @@ mod tests {
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 3, "windows": 7}"#),
-            Decoded::Newer { found: 3 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 4, "windows": 7}"#),
+            Decoded::Newer { found: 4 }
         );
     }
 

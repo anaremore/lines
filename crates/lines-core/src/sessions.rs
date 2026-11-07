@@ -370,8 +370,8 @@ impl SessionCalendar {
         Timestamp::from_millisecond(t.0.clamp(self.min_ms, self.max_ms)).expect("clamped")
     }
 
-    /// Local date and time of an instant (allocation-free).
-    fn local(&self, t: UtcMillis) -> (CivilDate, LocalTime) {
+    /// Local date and time of an instant in the exchange's zone (allocation-free).
+    pub fn local(&self, t: UtcMillis) -> (CivilDate, LocalTime) {
         let dt = self.tz.to_datetime(self.clamp(t));
         (
             CivilDate {

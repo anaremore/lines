@@ -41,6 +41,7 @@ use crate::chart_view::{self, ChartView, CrosshairTime, Fixture};
 use crate::commands::{self, Command};
 use crate::dom_view::{DomOptions, DomView};
 use crate::feeds::{Feeds, PaneFeed};
+use crate::journal_view::JournalView;
 use crate::layout::{
     Axis, Direction, Layout, LinkGroup, PaneKind, Preset, Rect, link_letter, next_link,
     trading_group,
@@ -207,6 +208,7 @@ pub enum PaneHandle {
     Chart(Entity<ChartView>),
     Dom(Entity<DomView>),
     Tape(Entity<TapeView>),
+    Journal(Entity<JournalView>),
 }
 
 macro_rules! each {
@@ -215,6 +217,7 @@ macro_rules! each {
             PaneHandle::Chart($e) => $body,
             PaneHandle::Dom($e) => $body,
             PaneHandle::Tape($e) => $body,
+            PaneHandle::Journal($e) => $body,
         }
     };
 }
@@ -229,6 +232,7 @@ impl PaneHandle {
             PaneHandle::Chart(_) => PaneKind::Chart,
             PaneHandle::Dom(_) => PaneKind::Dom,
             PaneHandle::Tape(_) => PaneKind::Tape,
+            PaneHandle::Journal(_) => PaneKind::Journal,
         }
     }
 
@@ -307,7 +311,8 @@ impl PaneHandle {
         match self {
             PaneHandle::Dom(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Tape(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
-            PaneHandle::Chart(_) => Err("columns belong to a DOM or time & sales"),
+            PaneHandle::Journal(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
+            PaneHandle::Chart(_) => Err("columns belong to a DOM, time & sales or the journal"),
         }
     }
 
@@ -316,6 +321,7 @@ impl PaneHandle {
         match self {
             PaneHandle::Dom(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Tape(e) => Some(e.read(cx).columns().clone()),
+            PaneHandle::Journal(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Chart(_) => None,
         }
     }
@@ -519,6 +525,16 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             PaneHandle::Tape(cx.new(|cx| {
                 let mut v = TapeView::new(feed, theme, frozen, opts, cx);
                 if let Some(s) = &doc.tape {
+                    v.restore(s);
+                }
+                v
+            }))
+        }
+        PaneKind::Journal => {
+            let frozen = env.frozen;
+            PaneHandle::Journal(cx.new(|cx| {
+                let mut v = JournalView::new(feed, theme, frozen, cx);
+                if let Some(s) = &doc.journal {
                     v.restore(s);
                 }
                 v
@@ -748,6 +764,14 @@ impl WindowView {
                     this.open_column_menu(id, ev.0, cx)
                 }),
             ],
+            PaneHandle::Journal(e) => vec![
+                cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
+                    feed_changed(this, ev, cx)
+                }),
+                cx.subscribe(e, move |this, _, ev: &ColumnMenu, cx| {
+                    this.open_column_menu(id, ev.0, cx)
+                }),
+            ],
         }
     }
 
@@ -968,6 +992,19 @@ impl WindowView {
                 self.adopt(tab, cx);
                 let i = self.tabs.len() - 1;
                 self.activate_tab(i, window, cx);
+            }
+            Command::OpenJournal => self.open_journal(window, cx),
+            Command::ExportJournal => export_journal(cx),
+            Command::JournalEdit | Command::JournalAllDates => {
+                let Some(PaneHandle::Journal(j)) = self.tab().focused_handle().cloned() else {
+                    self.refuse("focus the journal first (Open journal)", cx);
+                    return;
+                };
+                if cmd == Command::JournalAllDates {
+                    j.update(cx, |v, cx| v.toggle_all_dates(cx));
+                } else if let Err(e) = j.update(cx, |v, cx| v.start_edit(cx)) {
+                    self.refuse(e, cx);
+                }
             }
             Command::CloseTab => self.close_tab(self.active, window, cx),
             Command::ReopenTab => self.reopen_tab(window, cx),
@@ -1256,6 +1293,32 @@ impl WindowView {
     }
 
     /// A fresh trading tab on the focused pane's market, in its link group.
+    /// Show the journal: focus a journal pane of this window if there is one, else open one
+    /// in a new tab.
+    fn open_journal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.tabs.iter().enumerate().find_map(|(i, t)| {
+            t.panes
+                .iter()
+                .find(|(id, s)| s.handle.kind() == PaneKind::Journal && t.is_shown(id))
+                .map(|(id, _)| (i, *id))
+        });
+        if let Some((i, id)) = found {
+            self.activate_tab(i, window, cx);
+            self.focus_pane(id, window, cx);
+            return;
+        }
+        let tab = Self::build_tab(
+            &TabDoc {
+                focused: 0,
+                layout: Layout::Pane(PaneDoc::new(PaneKind::Journal, None, None)),
+            },
+            cx,
+        );
+        self.adopt(tab, cx);
+        let i = self.tabs.len() - 1;
+        self.activate_tab(i, window, cx);
+    }
+
     fn fresh_tab(&self, cx: &mut App) -> Tab {
         let (target, link) = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
             Some(h) => (h.feed(cx).target_doc, h.link(cx)),
@@ -1817,6 +1880,20 @@ impl WindowView {
                     false,
                 ));
             }
+            if let PaneHandle::Journal(j) = &h {
+                let all = j.read(cx).all_dates();
+                items.push(MenuItem::named(
+                    "Edit tags and note",
+                    Command::JournalEdit,
+                    false,
+                ));
+                items.push(MenuItem::named(
+                    "Stats: all dates",
+                    Command::JournalAllDates,
+                    all,
+                ));
+                items.push(MenuItem::of(Command::ExportJournal, false));
+            }
         }
         if kind == PaneKind::Dom {
             // P&L display (app-wide): each mode, the current one checked.
@@ -2303,6 +2380,7 @@ impl WindowView {
                                 PaneKind::Chart => "chart",
                                 PaneKind::Dom => "DOM",
                                 PaneKind::Tape => "T&S",
+                                PaneKind::Journal => "journal",
                             };
                             if !v.contains(&l) {
                                 v.push(l);
@@ -2820,6 +2898,9 @@ impl Render for WindowView {
                 "DOM: wheel scroll, C center, G / Shift+G grouping, Ctrl+K symbol"
             }
             Some(PaneHandle::Tape(_)) => "Time & sales: type a symbol or Ctrl+K: switch",
+            Some(PaneHandle::Journal(_)) => {
+                "Journal: click or Up/Down to select, Enter: tags and note, click the stats: today / all dates"
+            }
             _ => chart_view::HINTS_SHORT,
         };
         let content = if self.tabs.is_empty() {
@@ -3113,6 +3194,38 @@ fn notify_windows(cx: &mut App) {
     for w in cx.global::<Workspace>().windows.clone() {
         let _ = w.update(cx, |_, _, cx| cx.notify());
     }
+}
+
+/// Write the journal's closed trades as CSV to `<config dir>/journal/export-<time>.csv` (on
+/// the writer thread) and say where.
+fn export_journal(cx: &mut App) {
+    let Some(t) = crate::trading::Trading::try_global(cx) else {
+        notice("trading isn't running: no journal to export".into(), cx);
+        return;
+    };
+    let csv = lines_trading::journal::csv(t.journal.read().trades());
+    let ws = cx.global::<Workspace>();
+    let (Some(dir), Some(w)) = (ws.config_dir.clone(), ws.writer.clone()) else {
+        notice(
+            "no config directory: the journal can't be exported here".into(),
+            cx,
+        );
+        return;
+    };
+    let now = lines_feed::now_utc();
+    let d = lines_core::CivilDate::from_utc(now);
+    let s = now.0.rem_euclid(86_400_000) / 1000;
+    let path = dir.join("journal").join(format!(
+        "export-{}{:02}{:02}-{:02}{:02}{:02}.csv",
+        d.year,
+        d.month,
+        d.day,
+        s / 3600,
+        s / 60 % 60,
+        s % 60
+    ));
+    w.write(path.clone(), csv.into_bytes());
+    notice(format!("journal exported to {}", path.display()), cx);
 }
 
 /// Show or hide the chart headers' performance stats (a workspace preference, saved with it).

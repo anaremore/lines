@@ -11,6 +11,7 @@ mod dom_trade;
 mod dom_trail;
 mod dom_view;
 mod feeds;
+mod journal_view;
 mod layout;
 mod levels_layer;
 mod logs;

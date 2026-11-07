@@ -53,6 +53,14 @@ pub enum Clock {
     Manual,
 }
 
+/// Something that follows the core on its thread, in its order: every market batch the core
+/// sees (after the core) and every event it emits (after each drain). Must be quick: it runs
+/// on the trading thread (the journal, `crate::journal::JournalObserver`).
+pub trait Observer: Send {
+    fn market(&mut self, contract: ContractKey, inputs: &[MarketInput]);
+    fn events(&mut self, events: &[Event]);
+}
+
 enum Msg {
     Command(Envelope),
     Market(ContractKey, Vec<MarketInput>),
@@ -164,6 +172,16 @@ impl TradingService {
         file: Option<(PathBuf, PaperConfig)>,
         clock: Clock,
     ) -> Result<TradingService> {
+        TradingService::start_observed(core, file, clock, Vec::new())
+    }
+
+    /// [`TradingService::start_with`], with observers that follow the core on its thread.
+    pub fn start_observed(
+        core: TradingCore,
+        file: Option<(PathBuf, PaperConfig)>,
+        clock: Clock,
+        observers: Vec<Box<dyn Observer>>,
+    ) -> Result<TradingService> {
         let (tx, rx) = mpsc::channel();
         let handle = TradingHandle {
             tx,
@@ -171,7 +189,7 @@ impl TradingService {
         };
         let thread = thread::Builder::new()
             .name("lines-trading".into())
-            .spawn(move || run(core, rx, file, clock))?;
+            .spawn(move || run(core, rx, file, clock, observers))?;
         Ok(TradingService {
             handle,
             thread: Some(thread),
@@ -273,6 +291,7 @@ fn run(
     rx: Receiver<Msg>,
     file: Option<(PathBuf, PaperConfig)>,
     clock: Clock,
+    mut observers: Vec<Box<dyn Observer>>,
 ) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     let mut dirty = false;
@@ -283,6 +302,9 @@ fn run(
         last: UtcMillis(0),
     };
     let mut syncs: Vec<Sender<()>> = Vec::new();
+    // Events of this batch so far: observers get them before each market batch (so a trade
+    // the batch opened sees the prices that follow), subscribers all of them at the end.
+    let mut events: Vec<Event> = Vec::new();
     loop {
         let wait = clock.wait(core.next_wake());
         // Handle the first message, then everything already queued, before the broker tick
@@ -301,7 +323,17 @@ fn run(
                     let now = clock.now();
                     // Acks due before this data happen first.
                     core.tick(now);
+                    if !observers.is_empty() {
+                        let before = core.drain();
+                        for o in &mut observers {
+                            o.events(&before);
+                        }
+                        events.extend(before);
+                    }
                     core.market(now, k, &inputs);
+                    for o in &mut observers {
+                        o.market(k, &inputs);
+                    }
                 }
                 Ok(Msg::Subscribe(tx)) => subscribers.push(tx),
                 Ok(Msg::Rebuild) => core.rebuild(clock.now()),
@@ -330,7 +362,12 @@ fn run(
             break;
         }
         core.tick(clock.now());
-        let events = core.drain();
+        let rest = core.drain();
+        for o in &mut observers {
+            o.events(&rest);
+        }
+        events.extend(rest);
+        let events = std::mem::take(&mut events);
         if !events.is_empty() {
             dirty = true;
             subscribers.retain(|s| events.iter().all(|e| s.send(e.clone()).is_ok()));
