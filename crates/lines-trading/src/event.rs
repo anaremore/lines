@@ -8,6 +8,7 @@ use crate::command::{Reject, Source};
 use crate::guardrails::GuardState;
 use crate::order::Order;
 use crate::rules::{Breach, RuleStatus, TradingState};
+use crate::strategy::{StrategyId, StrategyState};
 use crate::types::{
     AccountId, CommandId, Money, OrderId, Side, contract_serde, price_serde, qty_serde, time_serde,
 };
@@ -41,6 +42,16 @@ pub enum Event {
         reason: Option<String>,
         #[serde(default, with = "crate::types::opt_time_serde")]
         until: Option<UtcMillis>,
+    },
+    /// A strategy instance was added, removed (`removed`), armed, paused or stopped (decision
+    /// 0025). `reason`: why it paused or stopped, in plain words.
+    Strategy {
+        id: StrategyId,
+        state: StrategyState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        removed: bool,
     },
     /// The cache was rebuilt from the broker (after a (re)connect or restart).
     Rebuilt {

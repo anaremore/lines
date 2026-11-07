@@ -127,10 +127,11 @@ pub enum Origin {
 }
 
 impl Origin {
-    /// `Rule` (prop-rule liquidation) and `Api` are automated; everything else is a person.
+    /// `Rule` (prop-rule liquidation), `Api` and strategies are automated; everything else is
+    /// a person.
     pub fn of(source: Source) -> Origin {
         match source {
-            Source::Rule | Source::Api => Origin::Automated,
+            Source::Rule | Source::Api | Source::Strategy(_) => Origin::Automated,
             Source::Dom | Source::Chart | Source::Hotkey | Source::Palette | Source::Test => {
                 Origin::Manual
             }
@@ -221,6 +222,12 @@ pub trait Broker: Send {
     /// Whether the broker is reachable (paper: always).
     fn connected(&self) -> bool {
         true
+    }
+    /// A simulation in this process (the paper broker): no order reaches a venue. Strategy
+    /// orders go only to simulated brokers until Live automation is enabled (decision 0025).
+    /// Live brokers keep the default, `false`; so does a venue's own Sim account.
+    fn simulated(&self) -> bool {
+        false
     }
     /// State to save locally (paper: its accounts and open orders; live brokers hold their
     /// own and return `None`).

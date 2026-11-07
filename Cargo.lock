@@ -2890,6 +2890,7 @@ dependencies = [
  "lines-core",
  "lines-feed",
  "lines-indicators",
+ "lines-strategy",
  "lines-trading",
  "nucleo-matcher",
  "serde",
@@ -2965,10 +2966,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "lines-strategy"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "lines-core",
+ "lines-feed",
+ "lines-trading",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lines-trading"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "jiff",
  "lines-core",
  "lines-feed",
  "serde",

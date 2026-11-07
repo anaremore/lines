@@ -98,6 +98,7 @@ pub struct Extensions {
     sources: Vec<Arc<dyn SourceExtension>>,
     level_sources: Vec<Arc<dyn LevelSource>>,
     brokers: Vec<Arc<dyn BrokerExtension>>,
+    strategies: Vec<Arc<dyn lines_strategy::StrategyExtension>>,
 }
 
 impl Extensions {
@@ -137,9 +138,21 @@ impl Extensions {
         &self.brokers
     }
 
-    /// Check the registrations (broker names) before anything runs.
+    /// Add a strategy (decision 0025, pending acceptance): `--backtest <name>` runs it over a
+    /// replay. Names must be unique.
+    pub fn with_strategy(mut self, strategy: Arc<dyn lines_strategy::StrategyExtension>) -> Self {
+        self.strategies.push(strategy);
+        self
+    }
+
+    pub fn strategies(&self) -> &[Arc<dyn lines_strategy::StrategyExtension>] {
+        &self.strategies
+    }
+
+    /// Check the registrations (broker and strategy names) before anything runs.
     pub fn validate(&self) -> Result<()> {
-        lines_trading::extension::validate(&self.brokers)
+        lines_trading::extension::validate(&self.brokers)?;
+        lines_strategy::extension::validate(&self.strategies)
     }
 }
 
@@ -399,6 +412,23 @@ struct Cli {
     /// clock instead of fetching (use with --replay).
     #[arg(long)]
     replay_levels: Option<PathBuf>,
+    /// Backtest a strategy (decision 0025) over --replay (a .lfr recording or a stored
+    /// contract or day) with the levels recorded in --replay-levels, on the paper broker, and
+    /// exit. Needs --backtest-config. The public build has only the example, `level-touch`
+    /// (synthetic, no edge): it reads the `demo` level source, so it needs a build with
+    /// `demo-levels` run with --demo-levels, and a `demo-ES.lfr` levels recording.
+    #[arg(long, requires_all = ["replay", "backtest_config"])]
+    backtest: Option<String>,
+    /// Backtest settings (JSON): {"params": {...}, "limits": {"max_position": 1,
+    /// "max_daily_loss": 500, "max_orders_per_min": 10, "hours": {"tz": "America/New_York",
+    /// "windows": [{"start": "09:30", "end": "16:00"}]}}}, optionally "starting_balance",
+    /// "paper" (fill model, latency, fees) and "timer_ms".
+    #[arg(long, requires = "backtest")]
+    backtest_config: Option<PathBuf>,
+    /// Write the backtest's full report here (JSON: inputs with hashes, trades, every decision
+    /// with its reason and result). Without it only the summary is printed.
+    #[arg(long, requires = "backtest")]
+    report: Option<PathBuf>,
     /// Show the synthetic demo level source on ES/MES charts (builds with `demo-levels`).
     #[cfg(feature = "demo-levels")]
     #[arg(long)]
@@ -665,6 +695,67 @@ fn store_config(cli: &Cli, choice: &SourceChoice) -> Option<lines_feed::disk::St
     Some(cfg)
 }
 
+/// The level source the public example strategy reads (the synthetic `demo` source, which
+/// builds with `demo-levels` register).
+const EXAMPLE_LEVELS: &str = "demo";
+
+/// `--backtest`: one strategy over a replay, headless (decision 0025). Prints the summary;
+/// writes the report with `--report`.
+fn run_backtest(cli: &Cli, ext: &Extensions, name: &str) -> Result<()> {
+    let example: Arc<dyn lines_strategy::StrategyExtension> =
+        Arc::new(lines_strategy::example::LevelTouchExt::new(EXAMPLE_LEVELS));
+    let mut all: Vec<Arc<dyn lines_strategy::StrategyExtension>> = ext.strategies.clone();
+    if !all.iter().any(|s| s.name() == example.name()) {
+        all.push(example);
+    }
+    let strategy = all
+        .iter()
+        .find(|s| s.name() == name)
+        .cloned()
+        .ok_or_else(|| {
+            let names: Vec<&str> = all.iter().map(|s| s.name()).collect();
+            anyhow!(
+                "no strategy {name:?} in this build (available: {})",
+                names.join(", ")
+            )
+        })?;
+    let path = cli.backtest_config.as_ref().expect("clap requires it");
+    let settings: lines_strategy::backtest::Settings = serde_json::from_slice(
+        &std::fs::read(path).with_context(|| format!("--backtest-config {}", path.display()))?,
+    )
+    .with_context(|| format!("--backtest-config {}", path.display()))?;
+    let market = cli.replay.clone().expect("clap requires it");
+    let bt = lines_strategy::backtest::Backtest::from_settings(
+        strategy,
+        settings,
+        market,
+        cli.replay_levels.clone(),
+    );
+    let report = lines_strategy::backtest::run(&bt)?;
+    println!(
+        "backtest {} v{} on {}: {}",
+        report.strategy,
+        report.version,
+        report.contract,
+        report.summary.line()
+    );
+    for w in &report.warnings {
+        println!("warning: {w}");
+    }
+    if let Some(open) = &report.open_at_end {
+        println!(
+            "open at the end: {} (unrealized {})",
+            open.qty, open.unrealised
+        );
+    }
+    if let Some(out) = &cli.report {
+        std::fs::write(out, report.to_json())
+            .with_context(|| format!("--report {}", out.display()))?;
+        println!("report: {}", out.display());
+    }
+    Ok(())
+}
+
 /// Run Lines with the process's command line. The public `lines` binary passes
 /// `Extensions::new()`; official builds pass their own sources (decision 0020).
 pub fn run(ext: Extensions) -> Result<()> {
@@ -682,7 +773,10 @@ where
     // Logs (roadmap U1): stderr always; rotating files only for the interactive app, never
     // for headless, screenshot or benchmark runs (tests run those). A second call in one
     // process (tests) keeps the first setup.
-    let interactive = cli.headless.is_none() && cli.screenshot.is_none() && cli.bench.is_none();
+    let interactive = cli.headless.is_none()
+        && cli.screenshot.is_none()
+        && cli.bench.is_none()
+        && cli.backtest.is_none();
     logs::init(interactive.then(logs::LogConfig::from_env).flatten());
     for e in &ext.sources {
         lines_feed::extension::register(e.clone())?;
@@ -720,6 +814,9 @@ where
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoLevels))?;
     }
 
+    if let Some(name) = &cli.backtest {
+        return run_backtest(&cli, &ext, name);
+    }
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));
     }

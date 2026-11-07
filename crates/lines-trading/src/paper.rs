@@ -747,6 +747,10 @@ impl Broker for PaperBroker {
         "Paper"
     }
 
+    fn simulated(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> BrokerCaps {
         BrokerCaps {
             market_orders: true,
