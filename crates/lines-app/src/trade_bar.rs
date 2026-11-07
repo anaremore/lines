@@ -747,9 +747,10 @@ struct BarData {
     /// Signed qty, average price (price units), open P&L in ticks (when the mark is known)
     /// and money.
     position: Option<(i64, Option<f64>, Option<f64>, Money)>,
-    /// The nearest working stop and target of the position (bracket exits), prices.
-    stop: Option<Price>,
-    target: Option<Price>,
+    /// The nearest working stop and target of the position (bracket exits and exits added on
+    /// the chart): price and quantity left.
+    stop: Option<(Price, i64)>,
+    target: Option<(Price, i64)>,
     /// Realised + open P&L for the session trade date (the account's).
     day_pnl: Option<Money>,
     /// How P&L shows (app setting); off: no amounts anywhere in the panel.
@@ -824,14 +825,16 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
                 data.position = Some((p.qty, p.avg_price, ticks, p.unrealised));
                 // The position's bracket exits: the nearest of each role.
                 // Live ones only: a held exit (its entry not filled) protects nothing yet.
-                let near = |role: lines_trading::Role| {
+                let near = |role: dom_trade::MarkRole| {
                     s.open_orders(account, k)
-                        .filter(|o| o.role == role && live(o))
-                        .filter_map(dom_trade::order_price)
-                        .min_by_key(|pr| (pr.0 - last.map_or(pr.0, |l| l.0)).abs())
+                        .filter(|o| live(o))
+                        .filter_map(dom_trade::order_mark)
+                        .filter(|m| dom_trade::MarkRole::of(m) == role)
+                        .map(|m| (m.price, m.qty.0 - m.filled.0))
+                        .min_by_key(|(pr, _)| (pr.0 - last.map_or(pr.0, |l| l.0)).abs())
                 };
-                data.stop = near(lines_trading::Role::StopLoss);
-                data.target = near(lines_trading::Role::TakeProfit);
+                data.stop = near(dom_trade::MarkRole::Stop);
+                data.target = near(dom_trade::MarkRole::Target);
             }
         }
         if let Some(a) = s.account(account) {
@@ -1576,8 +1579,15 @@ fn lock_strip(text: &str, after: &str, narrow: bool, t: &Theme) -> gpui::Div {
         })
 }
 
+/// A position exit as the panel and the chart's tags both write it: the role in words, the
+/// quantity apart from it, the price ("Stop 2 @ 5812.25"), never a bare "S1" (an index on one
+/// pane, a quantity on another, a short position on the ladder).
+pub fn exit_label(role: &str, qty: i64, price: &str) -> String {
+    format!("{role} {qty} @ {price}")
+}
+
 /// The position card: side by shape and word, size and average, open P&L large; the bracket
-/// exits (S1 / T1 in their role colors) and ticks; working orders and today's P&L. Flat:
+/// exits ("Stop 2 @ …" / "Target 2 @ …" in their role colors) and ticks; working orders and today's P&L. Flat:
 /// "Flat" and today's P&L. P&L off: no amounts at all.
 fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) -> gpui::Div {
     let mode = d.map(|d| d.mode).unwrap_or_default();
@@ -1668,20 +1678,25 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                     .text_color(c)
                     .child(s)
             })));
-            // S1 / T1 in their role colors (also by letter), and the ticks when both show.
+            // Stop / Target in their role colors and in words, with the quantity apart from the
+            // role ("Stop 2 @ 5812.25", as the chart's tags read), and the ticks when both show.
             let exits = div()
                 .flex()
                 .flex_row()
                 .gap_2()
-                .children(d.and_then(|d| d.stop).map(|p| {
-                    div()
-                        .text_color(t.order_stop)
-                        .child(format!("S1 {}", fmt.format::<32>(p).as_str()))
+                .children(d.and_then(|d| d.stop).map(|(p, q)| {
+                    div().text_color(t.order_stop).child(exit_label(
+                        "Stop",
+                        q,
+                        fmt.format::<32>(p).as_str(),
+                    ))
                 }))
-                .children(d.and_then(|d| d.target).map(|p| {
-                    div()
-                        .text_color(t.order_target)
-                        .child(format!("T1 {}", fmt.format::<32>(p).as_str()))
+                .children(d.and_then(|d| d.target).map(|(p, q)| {
+                    div().text_color(t.order_target).child(exit_label(
+                        "Target",
+                        q,
+                        fmt.format::<32>(p).as_str(),
+                    ))
                 }));
             let tick_text = ticks.filter(|_| mode.money() && mode.ticks()).map(|tk| {
                 let mut s = String::new();
@@ -3202,6 +3217,14 @@ mod tests {
         let c = doc.clone().copied();
         assert!(!c.enabled);
         assert_eq!((c.account, c.qty), (doc.account, doc.qty));
+    }
+
+    /// Review: the panel said "S1" for a stop the chart tag called "Stop 2": one grammar for
+    /// both, the role in words and the quantity apart from it.
+    #[test]
+    fn exit_labels_match_the_chart_tags() {
+        assert_eq!(exit_label("Stop", 2, "5812.25"), "Stop 2 @ 5812.25");
+        assert_eq!(exit_label("Target", 1, "5820.00"), "Target 1 @ 5820.00");
     }
 
     #[test]
