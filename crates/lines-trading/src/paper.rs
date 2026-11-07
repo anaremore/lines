@@ -529,6 +529,10 @@ impl PaperBroker {
     fn after_fill(&mut self, now: UtcMillis, o: &Order, qty: Qty) {
         match o.role {
             Role::Entry => {
+                // The entry done: its exits only ever close what it opened. Reduce-only from
+                // now on, so they shrink and cancel with the position (a manual close, a
+                // Flatten of part) like any exit, never outliving it.
+                let done = !o.is_open();
                 let exits: Vec<OrderId> = self
                     .orders
                     .values()
@@ -546,6 +550,7 @@ impl PaperBroker {
                     } else {
                         Qty(po.order.qty.0 + qty.0)
                     };
+                    po.order.reduce_only |= done;
                     let order = po.order.clone();
                     self.out.push(BrokerEvent::Modified { order });
                     if po.held {

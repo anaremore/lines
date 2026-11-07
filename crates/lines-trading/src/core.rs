@@ -765,12 +765,14 @@ impl TradingCore {
                         "reduce-only orders can't grow; place another exit",
                     ));
                 }
-                // More quantity is more exposure: the guardrails see the increase as an order
-                // of its own (less quantity, or a price change, always passes).
+                // More quantity is more exposure: the increase is checked as a new order of
+                // its own (guardrails, prop state and the contract cap, risk, the submit rate),
+                // and the whole order against the order-size limit. Less quantity, or a price
+                // change alone, needs none of that.
                 if let Some(q) = qty
                     && q.0 > o.qty.0
                 {
-                    self.check_guardrails(
+                    self.check_new(
                         now,
                         &OrderSpec {
                             account: account.clone(),
@@ -780,6 +782,14 @@ impl TradingCore {
                             kind: o.kind,
                         },
                     )?;
+                    if let Some(max) = self.accounts[&account].cfg.limits.max_order_qty
+                        && q.0 > max
+                    {
+                        return Err(Reject::new(
+                            RejectCode::Risk,
+                            format!("order quantity {} is over the maximum {max}", q.0),
+                        ));
+                    }
                 }
                 let spec = self.spec(o.contract).expect("known");
                 if let Some(p) = price {
@@ -789,11 +799,19 @@ impl TradingCore {
                             "price is off the tick grid",
                         ));
                     }
-                    // A changed price is a new price: fat-finger band again.
-                    let mut kind = o.kind;
-                    if let OrderKind::Limit { price: lp } = &mut kind {
-                        *lp = p;
-                    }
+                    // A changed price is a new price: fat-finger band again (a stop's trigger
+                    // too; a triggered stop-limit moves its limit, as the broker does).
+                    let kind = match o.kind {
+                        OrderKind::Limit { .. } => OrderKind::Limit { price: p },
+                        OrderKind::Stop { .. } => OrderKind::Stop { trigger: p },
+                        OrderKind::StopLimit { trigger, .. } if o.triggered => {
+                            OrderKind::StopLimit { trigger, limit: p }
+                        }
+                        OrderKind::StopLimit { limit, .. } => {
+                            OrderKind::StopLimit { trigger: p, limit }
+                        }
+                        k => k,
+                    };
                     let limits = self.accounts[&account].cfg.limits.clone();
                     let ctx = RiskContext {
                         reference: self.marks.get(&o.contract).and_then(Mark::price),
@@ -1252,17 +1270,37 @@ impl TradingCore {
         Ok(())
     }
 
+    /// A bracket exit still held for its entry (the entry is working): it closes only what the
+    /// entry will open, so it is not exposure yet. Once the entry is done it is a live order.
+    fn exit_held(&self, o: &Order) -> bool {
+        matches!(o.role, Role::TakeProfit | Role::StopLoss)
+            && o.parent
+                .and_then(|p| self.orders.get(&p))
+                .is_some_and(Order::is_open)
+    }
+
+    /// Open quantity on each side: every working order (live bracket exits included), an OCO
+    /// pair once (only one of it can fill: its larger remainder). Held bracket exits are left
+    /// out.
     fn open_qty(&self, account: &AccountId, contract: ContractKey) -> (i64, i64) {
         let mut b = 0;
         let mut s = 0;
         for o in self.open_orders(account).filter(|o| o.contract == contract) {
-            // Held bracket exits are not exposure (they only ever close the entry).
-            if matches!(o.role, Role::TakeProfit | Role::StopLoss) {
+            if self.exit_held(o) {
                 continue;
             }
+            let sibling = o
+                .oco
+                .and_then(|i| self.orders.get(&i))
+                .filter(|x| x.is_open() && x.side == o.side && !self.exit_held(x));
+            let q = match sibling {
+                Some(x) if x.id < o.id => continue, // counted with the pair's first
+                Some(x) => o.remaining().0.max(x.remaining().0),
+                None => o.remaining().0,
+            };
             match o.side {
-                Side::Buy => b += o.remaining().0,
-                Side::Sell => s += o.remaining().0,
+                Side::Buy => b += q,
+                Side::Sell => s += q,
             }
         }
         (b, s)
@@ -1414,18 +1452,23 @@ impl TradingCore {
         }
     }
 
-    /// Reduce-only orders left open on a contract the account is flat in can only open a
-    /// position: cancel them (the broker should already have; this is the core's own guard).
+    /// Exits left open with nothing to close can only open or add to a position: reduce-only
+    /// orders, and bracket exits whose entry is done, on a contract the account is flat in or
+    /// on the position's own side. Cancel them (the broker should already have; this is the
+    /// core's own guard).
     fn cancel_stranded_exits(&mut self, now: UtcMillis, account: &AccountId) {
         let stranded: Vec<OrderId> = self
             .orders
             .values()
             .filter(|o| {
+                let exit = o.reduce_only
+                    || (matches!(o.role, Role::TakeProfit | Role::StopLoss) && !self.exit_held(o));
+                let position = self.position(account, o.contract);
                 &o.account == account
                     && o.is_open()
-                    && o.reduce_only
+                    && exit
                     && !self.cancelling.contains(&o.id)
-                    && self.position(account, o.contract) == 0
+                    && (position == 0 || o.side.sign() == position.signum())
             })
             .map(|o| o.id)
             .collect();
@@ -1542,6 +1585,8 @@ impl TradingCore {
                 o.qty = order.qty;
                 o.kind = order.kind;
                 o.updated = order.updated;
+                // A bracket's exits become reduce-only when the entry is done; never undone.
+                o.reduce_only |= order.reduce_only;
                 let o = o.clone();
                 let a = o.account.clone();
                 self.events.push(Event::Order(o));
