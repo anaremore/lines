@@ -619,9 +619,14 @@ impl CoinbaseSession {
             events.push(MarketEvent::Rejected { count: rejected });
         }
         let oldest = trades.last();
-        if !reached_cutoff && full && page + 1 < MAX_TRADE_PAGES {
-            let after = oldest.map(|t| t.trade_id);
-            self.queue.push_back(Request::Trades { after });
+        if !reached_cutoff
+            && full
+            && page + 1 < MAX_TRADE_PAGES
+            && let Some(o) = oldest
+        {
+            self.queue.push_back(Request::Trades {
+                after: Some(o.trade_id),
+            });
             return Ok(());
         }
         if !reached_cutoff && full {

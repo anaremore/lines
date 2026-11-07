@@ -157,9 +157,10 @@ impl Transport for WsTransport {
 }
 
 // ---------------------------------------------------------------------------------------
-// Recording wrapper: tees every inbound frame (incl. HTTP bodies) to a `.lfr` file. Outbound
-// frames are never recorded: they can carry credentials (a CQG logon's user name and
-// password), and replay never reads them (decision 0020: no credentials in recordings).
+// Recording wrapper: tees every inbound frame (incl. HTTP bodies) to a `.lfr` file. An
+// outbound frame is recorded as its time only (empty data): its bytes can carry credentials
+// (a CQG logon's user name and password; decision 0020: no credentials in recordings), and
+// replay needs only when it was sent (the clock `start()` sees, below).
 
 pub struct Recording<'r, T> {
     inner: T,
@@ -174,6 +175,13 @@ impl<'r, T: Transport> Recording<'r, T> {
 
 impl<T: Transport> Transport for Recording<'_, T> {
     async fn send(&mut self, frame: Frame) -> Result<()> {
+        self.recorder.record(
+            Direction::ToServer,
+            &Frame {
+                kind: frame.kind,
+                data: Default::default(),
+            },
+        );
         self.inner.send(frame).await
     }
 
@@ -215,7 +223,8 @@ impl ReplayTransport {
             Reader::open(path).with_context(|| format!("open recording {}", path.display()))?;
         let mut reader = reader;
         // Before any frame is delivered, the clock reads the time of the first recorded frame
-        // (normally the session's own logon/subscribe, i.e. when start() ran live), so
+        // (normally the session's own logon/subscribe, recorded as its time only: when
+        // start() ran live), so
         // sessions computing time windows in start() behave exactly as they did live.
         let mut clock = Some(UtcMillis(reader.header.start_wall_ms));
         let mut pending = None;
@@ -312,7 +321,7 @@ mod recording_tests {
     }
 
     /// Audit finding 5: a logon sent through a recording connection never reaches the file
-    /// (outbound frames aren't recorded); inbound frames still are.
+    /// (outbound frames are recorded as their time only); inbound frames still are.
     #[test]
     fn outbound_frames_such_as_a_logon_are_never_recorded() {
         let dir = std::env::temp_dir().join(format!("lines-rec-out-{}", std::process::id()));
@@ -338,12 +347,20 @@ mod recording_tests {
             "no credentials in the file"
         );
         let mut r = Reader::new(&bytes[..]).unwrap();
-        let mut n = 0;
-        while let Some(rec) = r.next_record().unwrap() {
-            assert_eq!(rec.direction, Direction::FromServer);
-            n += 1;
-        }
-        assert_eq!(n, 1, "the inbound frame is recorded");
+        let first = r.next_record().unwrap().unwrap();
+        assert_eq!(first.direction, Direction::ToServer);
+        assert!(
+            first.frame.data.is_empty(),
+            "the logon's time only, so replay's start clock is the live one"
+        );
+        let second = r.next_record().unwrap().unwrap();
+        assert_eq!(second.direction, Direction::FromServer);
+        assert_eq!(&second.frame.data[..], b"market data");
+        assert!(r.next_record().unwrap().is_none());
+        // Replay's clock before any delivery is the logon's time (when start() ran live).
+        let header = r.header.clone();
+        let replay = ReplayTransport::open(&path, 1.0, None).unwrap();
+        assert_eq!(replay.clock(), Some(UtcMillis(first.wall_ms(&header))));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -1,6 +1,7 @@
 //! Raw feed recording (`.lfr`): every inbound frame (HTTP bodies included), *before* decoding,
-//! with a monotonic timestamp. Outbound frames are not recorded (they can carry credentials:
-//! decision 0020); files from older builds may hold some, and replay skips them. Replaying a file therefore exercises the exact same session code as
+//! with a monotonic timestamp. Outbound frames are recorded as their time only, with no data
+//! (they can carry credentials: decision 0020); files from older builds hold their bytes, and
+//! replay skips them either way. Replaying a file therefore exercises the exact same session code as
 //! a live connection, for any provider (the header says which one).
 //!
 //! Providers so far: `cqg` (raw protobuf frames), `coinbase` (JSON text + HTTP bodies), and
