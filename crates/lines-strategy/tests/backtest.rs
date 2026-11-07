@@ -247,3 +247,16 @@ fn bad_parameters_refuse_the_run() {
     assert!(backtest::run(&bt).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bad_limits_refuse_the_run() {
+    let dir = scratch("limits");
+    let mut bt = backtest(&dir, true, ("09:30", "16:00"));
+    bt.limits.hours.tz = "America/NewYork".into();
+    let e = backtest::run(&bt).unwrap_err().to_string();
+    assert!(e.contains("unknown time zone"), "{e}");
+    bt.limits.hours.tz = "America/New_York".into();
+    bt.limits.max_orders_per_min = 0;
+    assert!(backtest::run(&bt).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

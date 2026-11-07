@@ -46,6 +46,7 @@ impl std::fmt::Display for StrategyId {
 /// One allowed window, in local time of [`TradingHours::tz`]: `start` inclusive, `end`
 /// exclusive. A window whose end is not after its start runs past midnight.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HoursWindow {
     /// `HH:MM`.
     pub start: String,
@@ -55,6 +56,7 @@ pub struct HoursWindow {
 
 /// When an instance may enter (exits are never limited by time, size, loss or rate).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradingHours {
     /// IANA time zone (bundled database: identical on every machine), e.g. `America/New_York`.
     pub tz: String,
@@ -64,19 +66,22 @@ pub struct TradingHours {
 /// An instance's own limits, on top of the account's risk, prop rules and guardrails (the
 /// tightest wins). All required: there is no "unlimited".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StrategyLimits {
     /// Worst case with its open orders, in quantity units (> 0).
     pub max_position: i64,
     /// Realised (fees included) + unrealised on its own fills per trade date, whole currency
     /// units (> 0). Reaching it pauses the instance.
     pub max_daily_loss: i64,
-    /// New orders and modifies in any 60 s (> 0). Cancels and Flatten are never limited.
+    /// Entries in any 60 s (> 0), counted when the core accepts them. Exits (cancels, Flatten,
+    /// modifies that add nothing, closing orders) are never counted or limited.
     pub max_orders_per_min: u32,
     pub hours: TradingHours,
 }
 
 /// An instance as the core knows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StrategyConfig {
     pub id: StrategyId,
     /// Shown in events and denials, e.g. `level-touch #2`.

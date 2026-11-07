@@ -418,7 +418,7 @@ impl TradingCore {
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
             if let Ok(ids) = &result {
-                self.strategy_owns(s, ids);
+                self.strategy_owns(s, &env.command, ids);
             }
         }
         self.events.push(Event::Command {

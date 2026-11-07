@@ -740,3 +740,74 @@ fn removing_forgets_its_orders() {
     r.manual(Command::ArmStrategy { id: ID })
         .expect("flat books");
 }
+
+#[test]
+fn a_person_closing_the_position_doesnt_count_as_its_loss() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // A person closes with a plain order (not Flatten): paused.
+    r.manual(sell(2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    // The market falls 20 points: its stale books would read -$2,000.
+    r.book(&[(5980.0, 10)], &[(5980.25, 10)]);
+    r.trade(5980.0, 1);
+    r.manual(Command::ArmStrategy { id: ID })
+        .expect("the books adopt flat before the loss check");
+}
+
+#[test]
+fn a_person_moving_its_entry_moves_it() {
+    let mut r = Rig::armed();
+    let entry = r.bot(buy(es(), 1, limit(5985.0))).unwrap()[0];
+    r.wait(30);
+    r.manual(Command::ModifyOrder {
+        account: acct(),
+        order: entry,
+        qty: None,
+        price: Some(px(5986.0)),
+    })
+    .unwrap();
+    r.wait(30);
+    assert_eq!(r.state(), StrategyState::Paused);
+    let o = r.core.order(entry).unwrap();
+    assert!(o.is_open(), "{:?}", o.state);
+    assert_eq!(o.kind, limit(5986.0));
+}
+
+#[test]
+fn its_flatten_never_takes_a_persons_orders() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 1, OrderKind::Market)).unwrap();
+    r.wait(30);
+    // A person's resting buy (pauses the instance), then the instance flattens its contract.
+    let theirs = r.manual(buy(es(), 1, limit(5950.0))).unwrap()[0];
+    r.bot(Command::Flatten {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    // Had it taken the person's order, a later fill of it would land on its books: here
+    // the books are flat and arming works.
+    let _ = theirs;
+    r.manual(Command::ArmStrategy { id: ID })
+        .expect("flat books");
+    assert!(
+        denied(r.bot(Command::CancelOrder {
+            account: acct(),
+            order: theirs,
+        }))
+        .contains("only its own orders")
+    );
+}
+
+#[test]
+fn limits_reject_unknown_fields() {
+    let json = r#"{"max_position":1,"max_daily_loss":500,"max_orders_per_min":5,
+        "hours":{"tz":"America/New_York","windows":[{"start":"09:30","end":"16:00"}],
+        "weekdays":["mon"]}}"#;
+    assert!(serde_json::from_str::<StrategyLimits>(json).is_err());
+}
