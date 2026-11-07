@@ -514,6 +514,40 @@ pub fn drag_command(o: &Order, to: Price) -> Option<TradeCommand> {
     })
 }
 
+/// Why moving stop `o` to `to` is refused: a stop must stay on the far side of the market
+/// (a buy stop above the ask, a sell stop below the bid; the last trade without a book), or it
+/// triggers at once, as for a shift-click. `None` for other orders and allowed moves.
+pub fn stop_move_refusal(
+    o: &Order,
+    to: Price,
+    bid: Option<Price>,
+    ask: Option<Price>,
+    last: Option<Price>,
+) -> Option<&'static str> {
+    let stop = match o.kind {
+        OrderKind::Stop { .. } => true,
+        OrderKind::StopLimit { .. } => !o.triggered,
+        _ => false,
+    };
+    // A bracket exit held for its entry isn't in the market yet: it can't trigger, and it
+    // moves anywhere (a breakout's stop above the market until the entry fills).
+    let held = matches!(o.role, Role::TakeProfit | Role::StopLoss)
+        && matches!(o.state, OrderState::Submitted | OrderState::Acked);
+    if !stop || held {
+        return None;
+    }
+    let market = match o.side {
+        Side::Buy => ask.or(last),
+        Side::Sell => bid.or(last),
+    };
+    match (o.side, market) {
+        (_, None) => Some("no market price yet to move the stop against"),
+        (Side::Buy, Some(m)) if to.0 <= m.0 => Some("a buy stop must stay above the market"),
+        (Side::Sell, Some(m)) if to.0 >= m.0 => Some("a sell stop must stay below the market"),
+        _ => None,
+    }
+}
+
 /// A dragged order's new price, drawn as a ghost until the broker confirms it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ghost {
@@ -1280,6 +1314,83 @@ mod tests {
             order_mark(&order(OrderState::Working, OrderKind::Market)),
             None
         );
+    }
+
+    #[test]
+    fn a_stop_is_never_dragged_across_the_market() {
+        let (bid, ask) = (Some(Price(600_000)), Some(Price(600_025)));
+        let mut sell = order(
+            OrderState::Working,
+            OrderKind::Stop {
+                trigger: Price(599_500),
+            },
+        );
+        sell.side = Side::Sell;
+        assert_eq!(
+            stop_move_refusal(&sell, Price(599_975), bid, ask, None),
+            None
+        );
+        assert!(
+            stop_move_refusal(&sell, Price(600_000), bid, ask, None).is_some(),
+            "at the bid"
+        );
+        assert!(stop_move_refusal(&sell, Price(601_000), bid, ask, None).is_some());
+        let buy = order(
+            OrderState::Working,
+            OrderKind::Stop {
+                trigger: Price(601_000),
+            },
+        );
+        assert_eq!(
+            stop_move_refusal(&buy, Price(600_050), bid, ask, None),
+            None
+        );
+        assert!(
+            stop_move_refusal(&buy, Price(600_025), bid, ask, None).is_some(),
+            "at the ask"
+        );
+        // No book: the last trade; nothing at all: refused.
+        assert!(
+            stop_move_refusal(&buy, Price(599_000), None, None, Some(Price(600_000))).is_some()
+        );
+        assert!(stop_move_refusal(&buy, Price(602_000), None, None, None).is_some());
+        // Limits move anywhere (a marketable limit is the trader's choice, as on a click); a
+        // triggered stop-limit is a resting limit.
+        let lim = order(
+            OrderState::Working,
+            OrderKind::Limit {
+                price: Price(599_950),
+            },
+        );
+        assert_eq!(
+            stop_move_refusal(&lim, Price(601_000), bid, ask, None),
+            None
+        );
+        let mut sl = order(
+            OrderState::Working,
+            OrderKind::StopLimit {
+                trigger: Price(601_000),
+                limit: Price(601_025),
+            },
+        );
+        sl.triggered = true;
+        assert_eq!(stop_move_refusal(&sl, Price(599_000), bid, ask, None), None);
+        // A bracket's stop held for its entry (not in the market) moves anywhere; live, it
+        // follows the rule.
+        let mut held = order(
+            OrderState::Acked,
+            OrderKind::Stop {
+                trigger: Price(600_800),
+            },
+        );
+        held.side = Side::Sell;
+        held.role = Role::StopLoss;
+        assert_eq!(
+            stop_move_refusal(&held, Price(600_900), bid, ask, None),
+            None
+        );
+        held.state = OrderState::Working;
+        assert!(stop_move_refusal(&held, Price(600_900), bid, ask, None).is_some());
     }
 
     #[test]

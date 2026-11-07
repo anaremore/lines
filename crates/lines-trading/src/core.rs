@@ -927,6 +927,46 @@ impl TradingCore {
                         }
                         k => k,
                     };
+                    // A stop never moves across the market: it would trigger at once (a buy
+                    // stop at or under the ask, a sell stop at or over the bid; the last trade
+                    // without a book). Unknown market: the app's own check is all there is.
+                    let stop = match o.kind {
+                        OrderKind::Stop { .. } => true,
+                        OrderKind::StopLimit { .. } => !o.triggered,
+                        _ => false,
+                    };
+                    // A bracket exit not activated yet (its entry hasn't filled) isn't in the
+                    // market: it can't trigger. An exit held after a fill (Working) is checked:
+                    // the entry's next fill makes it live again.
+                    let held = matches!(o.role, Role::TakeProfit | Role::StopLoss)
+                        && matches!(o.state, OrderState::Submitted | OrderState::Acked)
+                        && o.parent
+                            .and_then(|e| self.orders.get(&e))
+                            .is_some_and(Order::is_open);
+                    if stop
+                        && !held
+                        && let Some(m) = self.marks.get(&o.contract)
+                    {
+                        let market = match o.side {
+                            Side::Buy => m.ask.or(m.last),
+                            Side::Sell => m.bid.or(m.last),
+                        };
+                        match (o.side, market) {
+                            (Side::Buy, Some(x)) if p.0 <= x.0 => {
+                                return Err(Reject::new(
+                                    RejectCode::Invalid,
+                                    "a buy stop must stay above the market",
+                                ));
+                            }
+                            (Side::Sell, Some(x)) if p.0 >= x.0 => {
+                                return Err(Reject::new(
+                                    RejectCode::Invalid,
+                                    "a sell stop must stay below the market",
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
                     let limits = self.accounts[&account].cfg.limits.clone();
                     let ctx = RiskContext {
                         reference: self.marks.get(&o.contract).and_then(Mark::price),
