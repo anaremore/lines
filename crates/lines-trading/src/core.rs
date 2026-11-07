@@ -827,6 +827,8 @@ impl TradingCore {
                 let a = self.accounts.get_mut(&account).expect("checked");
                 a.guard.request(guardrails);
                 self.guard_report(&account);
+                // The account's view says what is in force now and what waits.
+                self.account_changed(now, &account);
                 Ok(Vec::new())
             }
             Command::SetRules { rules, .. } => {
@@ -1700,6 +1702,12 @@ impl TradingCore {
                 .rules
                 .as_ref()
                 .map_or(TradingState::Active, |r| a.tracker.trading_state(r)),
+            limits: Box::new(crate::event::AccountLimits {
+                rules_in_force: a.cfg.rules.clone(),
+                rules_pending: a.pending_rules.clone(),
+                guardrails_in_force: a.guard.active.clone(),
+                guardrails_pending: a.guard.pending.clone(),
+            }),
         };
         self.events.push(Event::Account(view));
         // Guardrails: the day's loss (realised + unrealised, fees included).

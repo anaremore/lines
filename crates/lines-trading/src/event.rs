@@ -124,4 +124,27 @@ pub struct AccountView {
     /// What the account may do: active, reducing only, or halted.
     #[serde(default)]
     pub trading: TradingState,
+    /// The prop rules and guardrails in force now, and looser ones waiting for the next
+    /// trade date. Optional.
+    #[serde(default)]
+    pub limits: Box<AccountLimits>,
+}
+
+/// An account's limits as the core holds them: in force now, and looser ones asked for that
+/// take over with the next trade date.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccountLimits {
+    /// The prop rules in force now (`None`: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_in_force: Option<crate::rules::RulePreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_pending: Option<crate::rules::PendingRules>,
+    /// The trader's guardrails in force now.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::guardrails::Guardrails::is_default"
+    )]
+    pub guardrails_in_force: crate::guardrails::Guardrails,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardrails_pending: Option<crate::guardrails::Guardrails>,
 }

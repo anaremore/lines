@@ -466,6 +466,10 @@ pub struct TradingSetup {
     /// `settings.json` (roadmap 8b). Asked for at every start: tighter ones apply at once,
     /// looser ones with the next trade date; a saved lockout stays.
     pub guardrails: BTreeMap<String, Guardrails>,
+    /// The trader's prop rules per account, keyed by account name (else id), from
+    /// `settings.json` (resolved; `None`: no prop rules). Sent at start like guardrails:
+    /// tighter now, looser from the next trade date.
+    pub prop_rules: BTreeMap<String, Option<lines_trading::rules::RulePreset>>,
     /// The trade journal's file and the source label in its header (`None`: in memory).
     pub journal: Option<(PathBuf, String)>,
     /// Broker extensions (decision 0020): each runs its own core beside the paper one.
@@ -489,6 +493,7 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            prop_rules: BTreeMap::new(),
             brokers: Vec::new(),
             venue_marks_always: false,
             journal: (!replay)
@@ -545,6 +550,7 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            prop_rules: BTreeMap::new(),
             journal: None,
             brokers: Vec::new(),
             venue_marks_always: false,
@@ -956,6 +962,25 @@ impl Trading {
                     account,
                     guardrails,
                 },
+            );
+        }
+        // The trader's prop rules from settings, the same way.
+        let wanted: Vec<(AccountId, Option<lines_trading::rules::RulePreset>)> = core
+            .accounts()
+            .filter_map(|(c, _)| {
+                setup
+                    .prop_rules
+                    .get(&c.name)
+                    .or_else(|| setup.prop_rules.get(c.id.0.as_str()))
+                    .map(|r| (c.id.clone(), r.clone()))
+            })
+            .collect();
+        for (account, rules) in wanted {
+            core.submit(
+                lines_feed::now_utc(),
+                Source::Api,
+                Instant::now(),
+                TradeCommand::SetRules { account, rules },
             );
         }
         // Orders the broker still holds (brackets survive restarts) come back through rebuild.
@@ -1820,6 +1845,7 @@ mod tests {
             accounts: Some(accounts),
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            prop_rules: BTreeMap::new(),
             journal: None,
             brokers: Vec::new(),
             venue_marks_always: false,
@@ -1915,6 +1941,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Prop rules from settings reach the core at start: a tighter contract cap denies the
+    /// next order, and the account's view reports the rules in force.
+    #[test]
+    fn prop_rules_from_settings_reach_the_core() {
+        let mut cfg = AccountConfig::paper("paper", 50_000);
+        let eod = lines_trading::rules::presets()
+            .into_iter()
+            .find(|p| p.daily_loss_limit == Some(1_000))
+            .unwrap();
+        cfg.rules = Some(eod.clone());
+        let mut setup = paper_setup(vec![cfg]);
+        setup.prop_rules.insert(
+            "paper".into(),
+            Some(lines_trading::rules::RulePreset {
+                max_micro_contracts: Some(10),
+                ..eod
+            }),
+        );
+        let base = FeedConfig::new(FeedSource::Replay {
+            path: "unused.lfr".into(),
+            speed: 0.0,
+            stop_at: None,
+        });
+        let t = Trading::start(setup, FeedRegistry::new(), base);
+        let account = AccountId::new("paper");
+        let id = t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::PlaceOrder(OrderSpec {
+                account: account.clone(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(2),
+                kind: OrderKind::Limit { price: px(5990.00) },
+            }),
+        );
+        t.settle();
+        let s = t.cache.read();
+        let Some(Err(r)) = s.result(id) else {
+            panic!("not denied: {:?}", s.result(id))
+        };
+        assert_eq!(r.code, RejectCode::PropRule, "{r:?}");
+        assert_eq!(
+            s.account(&account)
+                .and_then(|v| v.limits.rules_in_force.as_ref())
+                .and_then(|r| r.max_micro_contracts),
+            Some(10)
+        );
     }
 
     /// Roadmap 8b: guardrails from settings reach the core at start, a guardrail denial reaches

@@ -131,10 +131,12 @@ fn section_named(name: &str) -> Option<Section> {
 
 /// `KEY=VALUE` for `--settings-set`: the setting and its value.
 #[cfg(feature = "screenshot")]
-fn parse_set(s: &str) -> Result<(usize, Value), String> {
+fn parse_set(s: &str) -> Result<(usize, Value, bool), String> {
     let (k, v) = s
         .split_once('=')
         .ok_or_else(|| format!("--settings-set {s:?}: expected KEY=VALUE"))?;
+    // `KEY=VALUE!`: a loosening confirmed, as with Y.
+    let (v, sure) = v.strip_suffix('!').map_or((v, false), |v| (v, true));
     let i = schema::all()
         .iter()
         .position(|st| st.key == k)
@@ -151,7 +153,7 @@ fn parse_set(s: &str) -> Result<(usize, Value), String> {
         }
         _ => return Err(format!("--settings-set {s:?}: not settable this way")),
     };
-    Ok((i, value))
+    Ok((i, value, sure))
 }
 
 /// Screenshot flags, checked before anything runs.
@@ -180,13 +182,13 @@ pub fn open_for_screenshot(
     open(None, cx);
     let h = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0)?;
     let section = section_named(section)?;
-    let changes: Vec<(usize, Value)> = set.iter().filter_map(|s| parse_set(s).ok()).collect();
+    let changes: Vec<(usize, Value, bool)> = set.iter().filter_map(|s| parse_set(s).ok()).collect();
     let search = search.map(str::to_owned);
     let _ = h.update(cx, |v, _, cx| {
         v.section = section;
-        for (i, value) in changes {
+        for (i, value, sure) in changes {
             v.select(i);
-            v.set(i, value, false, cx);
+            v.set(i, value, sure, cx);
         }
         if let Some(q) = search {
             v.query = q;
@@ -353,6 +355,23 @@ fn commit(before: &Prefs, after: &Prefs, target: &Target, cx: &mut App) {
     if after.ws.latency_hud != before.ws.latency_hud {
         crate::workspace::set_show_latency_hud(after.ws.latency_hud, cx);
     }
+    if after.app.prop_rules != before.app.prop_rules
+        && let (Some(id), Some(t)) = (&target.account, crate::trading::Trading::try_global(cx))
+        && let Some(doc) = [&target.account_name, &target.account]
+            .into_iter()
+            .flatten()
+            .find_map(|k| after.app.prop_rules.get(k))
+        && let Ok(rules) = doc.resolve()
+    {
+        t.submit(
+            lines_trading::Source::Api,
+            Instant::now(),
+            lines_trading::Command::SetRules {
+                account: lines_trading::AccountId::new(id),
+                rules,
+            },
+        );
+    }
     if after.app.guardrails != before.app.guardrails
         && let (Some(id), Some(t)) = (&target.account, crate::trading::Trading::try_global(cx))
     {
@@ -394,8 +413,36 @@ fn gather_facts(cx: &App) -> Facts {
                 paper: a.paper,
                 kind: a.badge,
                 rules: a.rules.as_ref().map(|r| r.name.clone()),
+                ..Default::default()
             })
             .collect();
+        // What the core reports now: rules and guardrails in force, what waits, lockouts.
+        let cache = t.cache.read();
+        for fa in &mut f.accounts {
+            let id = lines_trading::AccountId::new(&fa.id);
+            if let Some(v) = cache.account(&id) {
+                fa.rules_in_force = v.limits.rules_in_force.clone();
+                fa.rules_pending = v.limits.rules_pending.clone();
+                fa.guard_in_force = v.limits.guardrails_in_force.clone();
+                fa.guard_pending = v.limits.guardrails_pending.clone();
+                fa.breach = v.blocked.map(|b| {
+                    match b {
+                        lines_trading::rules::Breach::TrailingDrawdown => {
+                            "the trailing drawdown was reached; the account may only close positions"
+                        }
+                        lines_trading::rules::Breach::DailyLoss => {
+                            "the daily loss limit was reached"
+                        }
+                    }
+                    .to_owned()
+                });
+            }
+            fa.lock = cache.guard(&id).map(|g| {
+                g.reason
+                    .clone()
+                    .unwrap_or_else(|| "a guardrail is in force".to_owned())
+            });
+        }
     }
     f
 }
@@ -493,14 +540,16 @@ impl SettingsWindow {
             self.target.guardrails(&before),
             self.target.guardrails(&after),
         );
-        let loosens = schema::loosening(st, &old, &v, &g0, &g1);
+        let prop = st.key.starts_with("prop.");
+        let loosens = schema::loosening(st, &old, &v, &g0, &g1)
+            || (prop && schema::prop_loosens(&before, &after, &self.target, &self.facts));
         if loosens && !sure {
             let (from, to) = (st.value_text(&old), st.value_text(&v));
             self.pending = Some(Pending {
                 index: i,
                 value: v.clone(),
                 target: self.target.clone(),
-                text: if guard {
+                text: if guard || prop {
                     format!(
                         "Loosening {} for {} ({from} → {to}) takes effect tomorrow, at the next trade date.",
                         st.name.to_lowercase(),
@@ -513,7 +562,7 @@ impl SettingsWindow {
                     format!("This loosens a trading safeguard ({from} → {to}): it applies now.")
                 },
                 undo: None,
-                tomorrow: guard,
+                tomorrow: guard || prop,
             });
             self.note = None;
             cx.notify();
@@ -1060,7 +1109,18 @@ impl SettingsWindow {
                     .child(st.description),
             );
         if let (Kind::Info, Value::Text(s)) = (st.kind, &value) {
-            left = left.child(div().text_color(t.text_main).child(s.clone()));
+            // A lockout or breach is the row's warning (by its words and the lock, not color
+            // alone).
+            let warn = s.starts_with('🔒');
+            left = left.child(
+                div()
+                    .text_color(if warn { t.warn } else { t.text_main })
+                    .child(s.clone()),
+            );
+        }
+        // What is in force now, when the core holds a looser value back.
+        if let Some(line) = schema::status(st, &self.target, &self.facts) {
+            left = left.child(div().text_size(px(11.5)).text_color(t.warn).child(line));
         }
         if let (Kind::Editor, Value::Text(s)) = (st.kind, &value) {
             left = left.child(
@@ -1330,6 +1390,8 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        // What the trading core reports (in force, waiting, lockouts) as of this frame.
+        self.facts = gather_facts(cx);
         let prefs = current_prefs(cx);
         let rows = self.rows();
         if self.row >= rows.len() {

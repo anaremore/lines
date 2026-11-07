@@ -123,6 +123,10 @@ pub struct Settings {
     /// (and tools this build doesn't have).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub drawing_styles: std::collections::BTreeMap<String, crate::style_doc::SavedStyle>,
+    /// Prop rules per trading account, keyed by the account's name (the Settings window's
+    /// Risk section). Optional: an account without an entry keeps its rules.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prop_rules: std::collections::BTreeMap<String, crate::settings_schema::PropRulesDoc>,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]

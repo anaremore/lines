@@ -18,6 +18,7 @@ pub enum Section {
     Charts,
     Dom,
     Trading,
+    Risk,
     Accounts,
     Data,
     Keys,
@@ -25,11 +26,12 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Charts,
         Section::Dom,
         Section::Trading,
+        Section::Risk,
         Section::Accounts,
         Section::Data,
         Section::Keys,
@@ -42,6 +44,7 @@ impl Section {
             Section::Charts => "Charts",
             Section::Dom => "DOM",
             Section::Trading => "Trading",
+            Section::Risk => "Risk",
             Section::Accounts => "Accounts",
             Section::Data => "Data",
             Section::Keys => "Keys",
@@ -140,6 +143,16 @@ pub struct AccountFact {
     /// PAPER, SIM or LIVE (a broker's accounts carry their own kind).
     pub kind: &'static str,
     pub rules: Option<String>,
+    /// The prop rules in force now, and looser ones waiting for the next trade date.
+    pub rules_in_force: Option<lines_trading::rules::RulePreset>,
+    pub rules_pending: Option<lines_trading::rules::PendingRules>,
+    /// The guardrails in force now, and looser ones waiting for the next trade date.
+    pub guard_in_force: lines_trading::Guardrails,
+    pub guard_pending: Option<lines_trading::Guardrails>,
+    /// A guardrail lockout in force: why ("6 of 6 trades today").
+    pub lock: Option<String>,
+    /// A prop-rule breach restricting the account: what ("drawdown reached").
+    pub breach: Option<String>,
 }
 
 /// Everything settings read and write: the app's `settings.json` and this workspace's own.
@@ -346,6 +359,57 @@ pub fn theme_for(a: &Appearance) -> crate::theme::Theme {
     t
 }
 
+/// An account's prop rules in `settings.json`: a preset (by its name, as
+/// `lines_trading::rules::presets` names it; absent: no prop rules) and optional overrides
+/// of single values (absent: the preset's). Optional per account: an account without an
+/// entry keeps the rules it has.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropRulesDoc {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Whole dollars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_loss_limit: Option<i64>,
+    /// Whole dollars (the preset's mode and lock stay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_drawdown: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_micro_contracts: Option<u32>,
+    /// Whole dollars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profit_target: Option<i64>,
+}
+
+/// The presets the Risk section offers, in `lines_trading::rules::presets` order, by a short
+/// name ("None" first).
+pub const PRESET_CHOICES: &[&str] = &["None", "50K intraday", "50K EOD", "100K funded"];
+
+impl PropRulesDoc {
+    /// The rules this asks for: the preset with its overrides (`Ok(None)`: no prop rules).
+    pub fn resolve(&self) -> Result<Option<lines_trading::rules::RulePreset>, String> {
+        let Some(name) = &self.preset else {
+            return Ok(None);
+        };
+        let mut p = lines_trading::rules::presets()
+            .into_iter()
+            .find(|p| &p.name == name)
+            .ok_or_else(|| format!("no prop-rule preset named {name:?}"))?;
+        if let Some(v) = self.daily_loss_limit {
+            p.daily_loss_limit = Some(v);
+        }
+        if let (Some(v), Some(dd)) = (self.trailing_drawdown, p.trailing_drawdown.as_mut()) {
+            dd.amount = v;
+        }
+        if let Some(v) = self.max_micro_contracts {
+            p.max_micro_contracts = Some(v);
+        }
+        if let Some(v) = self.profit_target {
+            p.profit_target = Some(v);
+        }
+        Ok(Some(p))
+    }
+}
+
 /// Defaults for panes created from now on (optional fields).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewPanes {
@@ -514,6 +578,32 @@ fn s_cool(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
         (Some(s), Some(m)) => s.cooldown_min = m as u32,
         (None, Some(_)) => return Err("set the losing streak first"),
         (_, None) => return Err("a cooldown is needed while a streak is set"),
+    }
+    Ok(())
+}
+
+/// Set one prop-rule override for the account (empty: the preset's value).
+fn set_prop(p: &mut Prefs, t: &Target, key: &str, v: Value) -> Result<(), &'static str> {
+    let Value::Number(n) = v else {
+        return Err("expected a number");
+    };
+    let k = [&t.account_name, &t.account]
+        .into_iter()
+        .flatten()
+        .find(|k| p.app.prop_rules.contains_key(*k))
+        .or(t.account_name.as_ref().or(t.account.as_ref()))
+        .cloned()
+        .ok_or("choose an account first")?;
+    let doc = p.app.prop_rules.entry(k).or_default();
+    if doc.preset.is_none() {
+        return Err("choose a preset first");
+    }
+    match key {
+        "prop.daily_loss" => doc.daily_loss_limit = n,
+        "prop.drawdown" => doc.trailing_drawdown = n,
+        "prop.max_micros" => doc.max_micro_contracts = n.map(|n| n as u32),
+        "prop.profit_target" => doc.profit_target = n,
+        _ => return Err("no such prop rule"),
     }
     Ok(())
 }
@@ -910,7 +1000,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.max_daily_loss",
-            Sec::Trading,
+            Sec::Risk,
             "Daily loss limit",
             "Your own limit per trade date, in whole dollars (realized and open, fees included). Empty: none.",
             Scope::Account,
@@ -926,7 +1016,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.max_position",
-            Sec::Trading,
+            Sec::Risk,
             "Max position",
             "Contracts per product, worst case (position plus open orders on one side). Empty: none.",
             Scope::Account,
@@ -942,7 +1032,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.max_trades",
-            Sec::Trading,
+            Sec::Risk,
             "Max trades per day",
             "Round trips per trade date. Empty: none.",
             Scope::Account,
@@ -958,7 +1048,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.losing_streak",
-            Sec::Trading,
+            Sec::Risk,
             "Cooldown after losses",
             "Losing trades in a row that start a cooldown. Empty: none.",
             Scope::Account,
@@ -974,7 +1064,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.cooldown",
-            Sec::Trading,
+            Sec::Risk,
             "Cooldown length",
             "How long entries wait after the losing streak, in minutes.",
             Scope::Account,
@@ -990,7 +1080,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.no_entries_before_close",
-            Sec::Trading,
+            Sec::Risk,
             "No entries before the close",
             "No new entries this many minutes before the session closes. Empty: none.",
             Scope::Account,
@@ -1003,6 +1093,159 @@ fn table() -> Vec<Setting> {
             },
             g_close,
             Some(s_close),
+        ),
+        // Risk: lockouts and breaches, as the core reports them.
+        s(
+            "guard.status",
+            Sec::Risk,
+            "Guardrail lockout",
+            "While locked out you can tighten your guardrails; loosening waits until the session resets.",
+            Scope::Account,
+            Trading,
+            Info,
+            |_, t, f| {
+                Value::Text(match fact(f, t).and_then(|a| a.lock.clone()) {
+                    Some(why) => format!("🔒 Locked out: {why}"),
+                    None => "Not locked out".to_owned(),
+                })
+            },
+            None,
+        ),
+        s(
+            "prop.status",
+            Sec::Risk,
+            "Prop rules",
+            "Approximations, not a firm's official rules. During a breach rules can be tightened, not loosened, until the session resets.",
+            Scope::Account,
+            Trading,
+            Info,
+            |_, t, f| {
+                Value::Text(match fact(f, t).and_then(|a| a.breach.clone()) {
+                    Some(why) => format!("🔒 Breached: {why}"),
+                    None => "No breach".to_owned(),
+                })
+            },
+            None,
+        ),
+        s(
+            "prop.preset",
+            Sec::Risk,
+            "Prop preset",
+            "The preset's rules for this account; the rows below override single values. The account size is fixed.",
+            Scope::Account,
+            Trading,
+            Choice(PRESET_CHOICES),
+            |p, t, f| {
+                let name = match prop_doc(p, t) {
+                    Some(d) => d.preset.clone(),
+                    None => {
+                        fact(f, t).and_then(|a| a.rules_in_force.as_ref().map(|r| r.name.clone()))
+                    }
+                };
+                let presets = lines_trading::rules::presets();
+                Value::Choice(
+                    name.and_then(|n| presets.iter().position(|p| p.name == n))
+                        .map_or(0, |k| k + 1),
+                )
+            },
+            Some(|p, t, v| {
+                let i = want_choice(v, PRESET_CHOICES.len())?;
+                let key = t
+                    .account_name
+                    .clone()
+                    .or(t.account.clone())
+                    .ok_or("choose an account first")?;
+                let preset = (i > 0).then(|| lines_trading::rules::presets()[i - 1].name.clone());
+                // A new preset starts from its own values (overrides belong to the old one).
+                p.app.prop_rules.insert(
+                    key,
+                    PropRulesDoc {
+                        preset,
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            }),
+        ),
+        s(
+            "prop.daily_loss",
+            Sec::Risk,
+            "Prop daily loss limit",
+            "Whole dollars per trade date. Empty: the preset's.",
+            Scope::Account,
+            Trading,
+            Number {
+                min: 1,
+                max: 1_000_000,
+                optional: true,
+                unit: "$",
+            },
+            |p, t, f| {
+                Value::Number(
+                    prop_field("prop.daily_loss", prop_rules_shown(p, t, f).as_ref()).flatten(),
+                )
+            },
+            Some(|p, t, v| set_prop(p, t, "prop.daily_loss", v)),
+        ),
+        s(
+            "prop.drawdown",
+            Sec::Risk,
+            "Prop trailing drawdown",
+            "Whole dollars (the preset's mode stays). Empty: the preset's.",
+            Scope::Account,
+            Trading,
+            Number {
+                min: 1,
+                max: 1_000_000,
+                optional: true,
+                unit: "$",
+            },
+            |p, t, f| {
+                Value::Number(
+                    prop_field("prop.drawdown", prop_rules_shown(p, t, f).as_ref()).flatten(),
+                )
+            },
+            Some(|p, t, v| set_prop(p, t, "prop.drawdown", v)),
+        ),
+        s(
+            "prop.max_micros",
+            Sec::Risk,
+            "Prop max micro contracts",
+            "One standard contract counts as 10. Empty: the preset's.",
+            Scope::Account,
+            Trading,
+            Number {
+                min: 1,
+                max: 100_000,
+                optional: true,
+                unit: "micros",
+            },
+            |p, t, f| {
+                Value::Number(
+                    prop_field("prop.max_micros", prop_rules_shown(p, t, f).as_ref()).flatten(),
+                )
+            },
+            Some(|p, t, v| set_prop(p, t, "prop.max_micros", v)),
+        ),
+        s(
+            "prop.profit_target",
+            Sec::Risk,
+            "Prop profit target",
+            "Whole dollars; shown in the DOM's rule meters, doesn't restrict orders. Empty: the preset's.",
+            Scope::Account,
+            Normal,
+            Number {
+                min: 1,
+                max: 10_000_000,
+                optional: true,
+                unit: "$",
+            },
+            |p, t, f| {
+                Value::Number(
+                    prop_field("prop.profit_target", prop_rules_shown(p, t, f).as_ref()).flatten(),
+                )
+            },
+            Some(|p, t, v| set_prop(p, t, "prop.profit_target", v)),
         ),
         // Accounts.
         s(
@@ -1192,6 +1435,8 @@ pub fn loosening(
 ) -> bool {
     match st.key {
         k if k.starts_with("guard.") => loosens(g0, g1),
+        // Prop rows: the caller compares the resolved rules (`prop_loosens`).
+        k if k.starts_with("prop.") => false,
         k if k.starts_with("trading.disable_") => {
             matches!((old, new), (Value::Bool(true), Value::Bool(false)))
         }
@@ -1201,6 +1446,93 @@ pub fn loosening(
         ),
         _ => false,
     }
+}
+
+/// This account's prop-rule entry in settings (by name, else id), if any.
+fn prop_doc<'a>(p: &'a Prefs, t: &Target) -> Option<&'a PropRulesDoc> {
+    [&t.account_name, &t.account]
+        .into_iter()
+        .flatten()
+        .find_map(|k| p.app.prop_rules.get(k))
+}
+
+/// The account's facts (what the trading core reports).
+fn fact<'a>(f: &'a Facts, t: &Target) -> Option<&'a AccountFact> {
+    f.accounts
+        .iter()
+        .find(|a| Some(&a.id) == t.account.as_ref())
+}
+
+/// The prop rules the Risk rows show for this account: its settings entry resolved, else the
+/// rules in force.
+pub fn prop_rules_shown(
+    p: &Prefs,
+    t: &Target,
+    f: &Facts,
+) -> Option<lines_trading::rules::RulePreset> {
+    match prop_doc(p, t) {
+        Some(d) => d.resolve().ok().flatten(),
+        None => fact(f, t).and_then(|a| a.rules_in_force.clone()),
+    }
+}
+
+/// Whether the prop rules asked for in `after` loosen those in `before` for this account (a
+/// loosening asks first and waits for the next trade date).
+pub fn prop_loosens(before: &Prefs, after: &Prefs, t: &Target, f: &Facts) -> bool {
+    let (a, b) = (
+        prop_rules_shown(before, t, f),
+        prop_rules_shown(after, t, f),
+    );
+    lines_trading::rules::tightest_rules(a.as_ref(), b.as_ref()) != b
+}
+
+/// A guardrail or prop-rule field, as the core reports it, for the status line.
+fn guard_field(key: &str, g: &lines_trading::Guardrails) -> Option<Option<i64>> {
+    Some(match key {
+        "guard.max_daily_loss" => g.max_daily_loss,
+        "guard.max_position" => g.max_position,
+        "guard.max_trades" => g.max_trades_per_day.map(i64::from),
+        "guard.losing_streak" => g.losing_streak.map(|s| i64::from(s.losses)),
+        "guard.cooldown" => g.losing_streak.map(|s| i64::from(s.cooldown_min)),
+        "guard.no_entries_before_close" => g.no_entries_before_close_min.map(i64::from),
+        _ => return None,
+    })
+}
+
+fn prop_field(key: &str, r: Option<&lines_trading::rules::RulePreset>) -> Option<Option<i64>> {
+    Some(match key {
+        "prop.daily_loss" => r.and_then(|r| r.daily_loss_limit),
+        "prop.drawdown" => r.and_then(|r| r.trailing_drawdown.as_ref().map(|d| d.amount)),
+        "prop.max_micros" => r.and_then(|r| r.max_micro_contracts.map(i64::from)),
+        "prop.profit_target" => r.and_then(|r| r.profit_target),
+        _ => return None,
+    })
+}
+
+/// The row's line about what is in force: "In force $1,000 now · $1,500 from the next
+/// session" when the core holds a looser value back, else nothing.
+pub fn status(st: &Setting, t: &Target, f: &Facts) -> Option<String> {
+    let a = fact(f, t)?;
+    let (now, next) = if st.key.starts_with("guard.") {
+        (
+            guard_field(st.key, &a.guard_in_force)?,
+            guard_field(st.key, a.guard_pending.as_ref()?)?,
+        )
+    } else if st.key.starts_with("prop.") {
+        (
+            prop_field(st.key, a.rules_in_force.as_ref())?,
+            prop_field(st.key, a.rules_pending.as_ref()?.rules.as_ref())?,
+        )
+    } else {
+        return None;
+    };
+    (now != next).then(|| {
+        format!(
+            "In force {} now · {} from the next session",
+            st.value_text(&Value::Number(now)),
+            st.value_text(&Value::Number(next))
+        )
+    })
 }
 
 /// Thousands separators: 1500 → "1,500".
@@ -1663,6 +1995,137 @@ mod tests {
         );
     }
 
+    /// The preset choices follow `lines_trading::rules::presets`, in order.
+    #[test]
+    fn preset_choices_match_the_presets() {
+        let presets = lines_trading::rules::presets();
+        assert_eq!(PRESET_CHOICES.len(), presets.len() + 1);
+        assert_eq!(PRESET_CHOICES[0], "None");
+        for (short, p) in PRESET_CHOICES[1..].iter().zip(&presets) {
+            let size = &short[..short.find(' ').unwrap()];
+            assert!(p.name.starts_with(size), "{short} vs {}", p.name);
+        }
+        assert!(presets[0].name.contains("intraday") && PRESET_CHOICES[1].contains("intraday"));
+        assert!(presets[1].name.contains("end-of-day") && PRESET_CHOICES[2].contains("EOD"));
+    }
+
+    fn risk_target() -> Target {
+        Target {
+            account: Some("paper-eval".into()),
+            account_name: Some("Paper 50K eval".into()),
+            product: None,
+        }
+    }
+
+    /// A preset plus single overrides, saved by account name and resolved exactly; a row
+    /// shows the override, else the preset's value; an override needs a preset.
+    #[test]
+    fn prop_rules_are_a_preset_and_overrides() {
+        let mut p = Prefs::default();
+        let (t, f) = (risk_target(), Facts::default());
+        let loss = by_key("prop.daily_loss").unwrap();
+        assert_eq!(
+            loss.apply(&mut p, &t, Value::Number(Some(800))),
+            Err("choose a preset first")
+        );
+        by_key("prop.preset")
+            .unwrap()
+            .apply(&mut p, &t, Value::Choice(2))
+            .unwrap();
+        assert_eq!(
+            (loss.get)(&p, &t, &f),
+            Value::Number(Some(1_000)),
+            "the preset's"
+        );
+        loss.apply(&mut p, &t, Value::Number(Some(800))).unwrap();
+        assert_eq!((loss.get)(&p, &t, &f), Value::Number(Some(800)));
+        let doc = &p.app.prop_rules["Paper 50K eval"];
+        let r = doc.resolve().unwrap().unwrap();
+        assert_eq!(r.daily_loss_limit, Some(800));
+        assert_eq!(r.max_micro_contracts, Some(50), "the rest is the preset's");
+        // Back to the preset's value.
+        loss.apply(&mut p, &t, Value::Number(None)).unwrap();
+        assert_eq!((loss.get)(&p, &t, &f), Value::Number(Some(1_000)));
+        // None: no prop rules.
+        by_key("prop.preset")
+            .unwrap()
+            .apply(&mut p, &t, Value::Choice(0))
+            .unwrap();
+        assert_eq!(p.app.prop_rules["Paper 50K eval"].resolve(), Ok(None));
+        // An unknown preset name (another version's) doesn't resolve.
+        let odd = PropRulesDoc {
+            preset: Some("200K whatever".into()),
+            ..Default::default()
+        };
+        assert!(odd.resolve().is_err());
+    }
+
+    /// Raising a prop limit or removing the rules loosens (asks, waits); lowering doesn't.
+    #[test]
+    fn prop_loosening_is_told_apart() {
+        let (t, f) = (risk_target(), Facts::default());
+        let mut a = Prefs::default();
+        by_key("prop.preset")
+            .unwrap()
+            .apply(&mut a, &t, Value::Choice(2))
+            .unwrap();
+        let loss = by_key("prop.daily_loss").unwrap();
+        let mut lower = a.clone();
+        loss.apply(&mut lower, &t, Value::Number(Some(500)))
+            .unwrap();
+        assert!(!prop_loosens(&a, &lower, &t, &f));
+        let mut higher = a.clone();
+        loss.apply(&mut higher, &t, Value::Number(Some(1_500)))
+            .unwrap();
+        assert!(prop_loosens(&a, &higher, &t, &f));
+        let mut none = a.clone();
+        by_key("prop.preset")
+            .unwrap()
+            .apply(&mut none, &t, Value::Choice(0))
+            .unwrap();
+        assert!(
+            prop_loosens(&a, &none, &t, &f),
+            "removing the rules loosens"
+        );
+    }
+
+    /// The row's line says what is in force when the core holds a looser value back.
+    #[test]
+    fn rows_say_what_is_in_force_and_what_waits() {
+        let t = risk_target();
+        let mut f = Facts::default();
+        f.accounts.push(AccountFact {
+            id: "paper-eval".into(),
+            name: "Paper 50K eval".into(),
+            guard_in_force: lines_trading::Guardrails {
+                max_daily_loss: Some(1_000),
+                ..Default::default()
+            },
+            guard_pending: Some(lines_trading::Guardrails {
+                max_daily_loss: Some(1_500),
+                ..Default::default()
+            }),
+            lock: Some("6 of 6 trades today".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            status(by_key("guard.max_daily_loss").unwrap(), &t, &f).as_deref(),
+            Some("In force $1,000 now · $1,500 from the next session")
+        );
+        assert_eq!(status(by_key("guard.max_position").unwrap(), &t, &f), None);
+        let lock = by_key("guard.status").unwrap();
+        assert_eq!(
+            (lock.get)(&Prefs::default(), &t, &f),
+            Value::Text("🔒 Locked out: 6 of 6 trades today".into())
+        );
+        // Nothing waiting: no line.
+        f.accounts[0].guard_pending = None;
+        assert_eq!(
+            status(by_key("guard.max_daily_loss").unwrap(), &t, &f),
+            None
+        );
+    }
+
     #[test]
     fn trading_loosenings_need_a_yes() {
         let g = lines_trading::Guardrails::default();
@@ -1769,6 +2232,14 @@ mod tests {
             );
         s.appearance.theme = Some(ThemeName::Light);
         s.new_panes.dom_grouping = Some(5);
+        s.prop_rules.insert(
+            "Paper".into(),
+            PropRulesDoc {
+                preset: Some(lines_trading::rules::presets()[1].name.clone()),
+                daily_loss_limit: Some(800),
+                ..Default::default()
+            },
+        );
         s.unknown.insert("later".into(), serde_json::json!([1, 2]));
         let bytes = s.encode();
         let dir = std::env::temp_dir().join(format!("lines-settings-rt-{}", std::process::id()));

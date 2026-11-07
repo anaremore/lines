@@ -839,7 +839,12 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         }
         if let Some(a) = s.account(account) {
             data.day_pnl = Some(a.day_pnl);
-            if let (Some(r), Some(preset)) = (&a.rules, &info.rules) {
+            // The limits in force (they change from the Settings window), else the account's
+            // starting preset.
+            if let (Some(r), Some(preset)) = (
+                &a.rules,
+                a.limits.rules_in_force.as_ref().or(info.rules.as_ref()),
+            ) {
                 if let (Some(left), Some(limit)) = (r.daily_loss_left, preset.daily_loss_limit) {
                     data.rules.push(("Daily loss", left, Money::whole(limit)));
                 }
