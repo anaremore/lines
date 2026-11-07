@@ -102,6 +102,9 @@ enum LabelKind {
     /// (its own kind: the label cache keys by kind and value, and the colors differ).
     SubValue,
     SubLast,
+    /// The sub-pane's title (keyed by its reset) and its "≈ from bars" note.
+    SubTitle,
+    SubNote,
     /// The crosshair's value tag on the sub-pane's axis.
     SubCross,
     CrossTime,
@@ -253,8 +256,8 @@ pub struct ChartView {
     /// The legend and readout block at the plot's top-left (width, bottom; plot-local), as
     /// the last render built it: the footprint draws no cell number under it.
     legend_band: std::cell::Cell<(f32, f32)>,
-    /// The footprint legend's inputs as last read (first visible bar, first counted trade).
-    fp_legend_inputs: std::cell::Cell<(Option<UtcMillis>, Option<UtcMillis>)>,
+    /// The footprint's reasons for candles as last rendered in the legend.
+    fp_seen: crate::footprint::Fallbacks,
     /// Study legends/tags or all studies hidden (saved with the pane). Hidden studies keep
     /// their configuration and engine nodes, so showing them again is exact and immediate,
     /// but cost no prepare or paint work while hidden.
@@ -396,7 +399,7 @@ impl ChartView {
             split: None,
             above_axis: 0.0,
             cross_in_sub: None,
-            fp_legend_inputs: std::cell::Cell::new((None, None)),
+            fp_seen: Default::default(),
             legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, READOUT_BOTTOM)),
             visibility: fixture.visibility,
             picker,
@@ -1054,22 +1057,14 @@ impl ChartView {
     /// chart hides its study labels (render time).
     fn legend(&self, t: &Theme) -> Option<gpui::AnyElement> {
         if !self.visibility.draws_labels() {
-            self.legend_band.set((0.0, 0.0));
+            // The readout still shows over the plot's top-left.
+            self.legend_band.set((8.0 + LEGEND_MAX_W, READOUT_BOTTOM));
             return None;
         }
         let studies = self.studies.legend(t, &self.instrument);
-        // The footprint's line, from this frame's view and data (as paint will see them); if
-        // the feed holds the lock this instant, from the last inputs read (never dropped).
-        if let Some(d) = self.store.try_read() {
-            let view = bars_view(&self.derived, &d);
-            let first = view
-                .bars
-                .get(self.vp.visible_range(view.len()).start)
-                .map(|b| b.time);
-            self.fp_legend_inputs.set((first, d.profiles.data_start()));
-        }
-        let (first, data_start) = self.fp_legend_inputs.get();
-        let fp = self.footprint.legend(self.vp.bar_px, first, data_start);
+        // The footprint's line: its mode and why bars are candles (as of the last frame;
+        // paint re-renders when that changes).
+        let fp = self.footprint.legend();
         let fp = fp.map(|(label, note)| {
             div()
                 .flex()
@@ -1383,6 +1378,14 @@ impl ChartView {
                 }
             }
             self.vp.on_data(bars, fmt.tick);
+            if self.visibility.draws_studies()
+                && self.footprint.config().shown()
+                && self.vp.auto_price
+            {
+                // Auto-fit leaves the readout and legend block (plus a row) clear of cells.
+                let top = f64::from(self.legend_band.get().1) + crate::footprint::MIN_ROW_PX;
+                crate::footprint::clear_top(&mut self.vp, top);
+            }
             self.period_ms = view.period_ms;
             // Only once bars are visible, i.e. auto-scale has fitted a real range (the first
             // layout pass can paint at a placeholder size with nothing on screen).
@@ -1429,6 +1432,8 @@ impl ChartView {
                 (y >= 0.0 && f64::from(y) < self.vp.height).then_some((y, p))
             });
             let max_columns = crate::studies::Studies::max_columns(self.plot.size.width);
+            let (bw, bb) = self.legend_band.get();
+            self.footprint.set_legend_block(bw, bb);
             prepare_studies(
                 self.visibility,
                 &mut self.profile,
@@ -1441,6 +1446,12 @@ impl ChartView {
                 &self.vp,
                 max_columns,
             );
+            // The legend says why footprint bars are candles: re-render when that changes.
+            let fb = self.footprint.fallbacks();
+            if fb != self.fp_seen {
+                self.fp_seen = fb;
+                cx.notify();
+            }
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -1662,8 +1673,6 @@ impl ChartView {
                 }
             }
             if studies {
-                let (w, h) = self.legend_band.get();
-                self.footprint.set_text_exclusion(w, h);
                 self.footprint.paint(plot, &self.vp, &t, window, cx);
                 for l in &mut self.layers {
                     l.paint(plot, &self.vp, &t, window, cx);
@@ -1675,9 +1684,16 @@ impl ChartView {
                 self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
             }
+            // Horizontal lines break where they cross footprint cells (never through numbers).
+            let fp = &self.footprint;
+            let hline = |window: &mut Window, y: f32, x0: f32, x1: f32, color| {
+                fp.hline_segments(y, x0, x1, |a, b| {
+                    window.paint_quad(fill(rect(a, y, b - a, hair), color));
+                });
+            };
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
-                window.paint_quad(fill(rect(0.0, y, pw, hair), t.last.opacity(0.6)));
+                hline(window, y, 0.0, pw, t.last.opacity(0.6));
             }
             // The open position: a dashed line at its average price (never the last price's
             // solid violet).
@@ -1694,7 +1710,7 @@ impl ChartView {
             {
                 window.paint_quad(fill(rect(x - hair * 0.5, 0.0, hair, ph), t.crosshair));
                 if let Some((y, _)) = self.sync_price {
-                    window.paint_quad(fill(rect(0.0, y, pw, hair), t.crosshair));
+                    hline(window, y, 0.0, pw, t.crosshair);
                 }
             }
             if let Some(c) = self.cross {
@@ -1703,8 +1719,8 @@ impl ChartView {
                 let (left, right) = (c.x - hair * 0.5, c.x + hair * 0.5);
                 window.paint_quad(fill(rect(left, 0.0, hair, ph), t.crosshair));
                 if self.cross_in_sub.is_none() {
-                    window.paint_quad(fill(rect(0.0, c.y, left.max(0.0), hair), t.crosshair));
-                    window.paint_quad(fill(rect(right, c.y, pw - right, hair), t.crosshair));
+                    hline(window, c.y, 0.0, left.max(0.0), t.crosshair);
+                    hline(window, c.y, right, pw, t.crosshair);
                 }
             }
         });
@@ -1929,6 +1945,56 @@ impl ChartView {
                 window.paint_quad(fill(rect(0.0, s.sub_top + y, pw, hair), t.crosshair));
             }
         });
+        // Its title at its own top-left, on the legend box (as the price plot's legends).
+        if self.visibility.draws_labels()
+            && let Some((reset, approx)) = self.studies.subpane_title()
+        {
+            let key = reset as i64;
+            let title = move |b: &mut FixedStr<32>| {
+                let _ = write!(b, "Cumulative delta · {}", reset.label());
+            };
+            let note = |b: &mut FixedStr<32>| {
+                let _ = b.write_str("≈ from bars");
+            };
+            let tw = f32::from(
+                self.label(LabelKind::SubTitle, key, t.text_main, window, title)
+                    .width,
+            );
+            let nw = if approx {
+                f32::from(
+                    self.label(LabelKind::SubNote, 0, t.text_dim, window, note)
+                        .width,
+                ) + 8.0
+            } else {
+                0.0
+            };
+            let (bx, by, bh) = (8.0, s.sub_top + 4.0, LABEL_PX * 1.6);
+            window.paint_quad(fill(rect(bx, by, tw + nw + 16.0, bh), t.label_bg));
+            let line_h = px(LABEL_PX * 1.3);
+            let ty = oy + by + bh * 0.5 - LABEL_PX * 0.65;
+            self.paint_label(
+                LabelKind::SubTitle,
+                key,
+                point(px(ox + bx + 8.0), px(ty)),
+                line_h,
+                t.text_main,
+                window,
+                cx,
+                title,
+            );
+            if approx {
+                self.paint_label(
+                    LabelKind::SubNote,
+                    0,
+                    point(px(ox + bx + 16.0 + tw), px(ty)),
+                    line_h,
+                    t.text_dim,
+                    window,
+                    cx,
+                    note,
+                );
+            }
+        }
         // The axis beside it and the time axis below: borders; the visible range's ends and the
         // newest value.
         window.paint_quad(fill(rect(pw, s.sub_top, hair, s.sub_h), t.axis_line));

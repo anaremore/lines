@@ -9,20 +9,25 @@
 //!
 //! - **Modes:** sell × buy volume (aggressors: sellers who hit the bid left, buyers who took
 //!   the offer right), delta per row, total volume.
-//! - **Whole numbers only:** a bar is drawn as cells only when its whole cell column is
-//!   inside the plot (a bar cut by an edge is a candle: a cut number, e.g. a lost minus sign,
-//!   would read as another value), and no cell number is drawn under the legend and readout
-//!   block at the plot's top-left (`set_text_exclusion`, measured at render time).
+//! - **Every drawn cell carries its numbers, whole.** A bar is drawn as cells only when its
+//!   whole column is on the plot, every number fits its room (measured from the font's
+//!   tabular digit widths, `TextMetrics`; crypto quantities have decimals), rows are tall
+//!   enough for the text, and no cell lies under the readout and legend block at the plot's
+//!   top-left (`set_legend_block`, measured at render time). Otherwise the bar is a candle and
+//!   the legend says why (`Fallbacks`): a cut number (a lost minus sign), a spilled one or a
+//!   shaded box without one would read as another value, or as nothing traded.
+//! - With the price axis auto-fitted, the range's top is raised (`clear_top`) so cells start
+//!   below that block; only a manual price zoom can push bars under it.
+//! - Each column has an open → close strip on its left (a candle body: hollow/filled as the
+//!   candles), so a bar's direction stays visible by shape.
+//! - Price and crosshair lines break where they cross cells (`hline_segments`).
 //! - **Imbalances** are marked by a bar on the cell's side (buy: right edge, sell: left
 //!   edge) as well as the number's colour, so they read without colour.
 //! - **POC** per bar: the cell is outlined.
-//! - **Rows** use the DOM grid and grouping, coarsened until a row is at least 9 px tall.
-//! - **Fallbacks:** bars without trade data (history) keep their candle, and the legend says
-//!   the footprint comes from live/replay trades only; when bars are too narrow to read cells,
-//!   every bar is a candle and the legend asks to zoom in.
+//! - **Rows** use the DOM grid and grouping, coarsened until a row is at least 15 px tall.
 
 use gpui::{App, Bounds, Pixels, Window, fill, point, px, size};
-use lines_core::footprint::{BarCells, FootprintFrame, ImbalanceRule, fit_grouping};
+use lines_core::footprint::{BarCells, Cell, FootprintFrame, ImbalanceRule, fit_grouping};
 use lines_core::{BarsView, FixedStr, Qty, Viewport};
 use lines_feed::ChartData;
 use serde::{Deserialize, Serialize};
@@ -113,14 +118,150 @@ impl FootprintConfig {
     }
 }
 
-/// Rows shorter than this are coarsened (logical px).
-pub const MIN_ROW_PX: f64 = 9.0;
+/// Rows shorter than this are coarsened (logical px): the 11 px numbers need ~14.3 px.
+pub const MIN_ROW_PX: f64 = 15.0;
+/// Shorter rows (after device-pixel rounding) draw no cells at all.
+const MIN_TEXT_ROW_PX: f32 = TEXT_PX * 1.3;
 /// Most cells drawn in one frame (bounded work; a bar beyond it shows as a candle).
 const MAX_CELLS: usize = 40_000;
 /// Most rows in one bar.
 const MAX_ROWS: usize = 2_048;
 /// The type scale's smallest size (docs/design.md §5).
 const TEXT_PX: f32 = 11.0;
+/// Sell × buy: each number keeps this far from the divider in the cell's middle.
+const GUTTER: f32 = 4.0;
+/// Each number keeps this far from the cell's side (beyond the imbalance marker).
+const PAD: f32 = 2.0;
+/// The open/close strip on a column's left (logical px; snapped to device pixels).
+const STRIP_W: f32 = 3.0;
+
+/// Widths of the characters cell numbers use (tabular digits), measured from the font.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TextMetrics {
+    pub digit: f32,
+    pub minus: f32,
+    pub dot: f32,
+}
+
+impl TextMetrics {
+    /// Until the font is measured: wider than an 11 px UI font's digits (~6.5 px).
+    pub const ESTIMATE: TextMetrics = TextMetrics {
+        digit: 7.0,
+        minus: 7.0,
+        dot: 4.0,
+    };
+
+    /// Width of `v` printed in `qty`'s format. No allocation.
+    pub fn width(&self, qty: lines_core::QtyFormat, v: i64) -> f32 {
+        let mut s = FixedStr::<32>::new();
+        let _ = qty.write(Qty(v), &mut s);
+        s.as_str()
+            .chars()
+            .map(|c| match c {
+                '-' => self.minus,
+                '.' => self.dot,
+                _ => self.digit,
+            })
+            .sum()
+    }
+}
+
+/// A bar's column: the open/close strip on the left, then the cells.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Column {
+    pub strip_x: f32,
+    pub strip_w: f32,
+    pub cell_left: f32,
+    pub cell_w: f32,
+}
+
+impl Column {
+    /// Plot-local, device-pixel snapped, centred on the bar's wick position.
+    pub fn of(vp: &Viewport, bar: usize, scale: f32) -> Column {
+        let snap = |v: f64| lines_core::geometry::snap(v, scale);
+        let x = lines_core::geometry::slot_x(vp, bar as f64, scale);
+        let half = snap((vp.bar_px * 0.46).max(2.0));
+        let strip_w = snap(f64::from(STRIP_W)).max(1.0 / scale);
+        let gap = snap(1.0).max(1.0 / scale);
+        let left = x - half;
+        Column {
+            strip_x: left,
+            strip_w,
+            cell_left: left + strip_w + gap,
+            cell_w: (half * 2.0 - strip_w - gap).max(0.0),
+        }
+    }
+
+    /// The imbalance marker's width.
+    fn mark(&self) -> f32 {
+        (self.cell_w * 0.08).clamp(2.0, 4.0)
+    }
+
+    /// Room for one number: each half in sell × buy, the whole cell otherwise.
+    pub fn text_room(&self, mode: FootprintMode) -> f32 {
+        let inner = self.cell_w - 2.0 * (self.mark() + PAD);
+        match mode {
+            FootprintMode::BidAsk => (inner * 0.5 - GUTTER).max(0.0),
+            _ => inner.max(0.0),
+        }
+    }
+}
+
+/// Every number of a bar fits its room (a bar where one doesn't is a candle, never a number
+/// spilling into its neighbor or cut).
+pub fn numbers_fit(
+    cells: &[Cell],
+    mode: FootprintMode,
+    qty: lines_core::QtyFormat,
+    m: &TextMetrics,
+    room: f32,
+) -> bool {
+    cells.iter().all(|c| match mode {
+        FootprintMode::BidAsk => m.width(qty, c.sell.0) <= room && m.width(qty, c.buy.0) <= room,
+        FootprintMode::Delta => m.width(qty, c.delta()) <= room,
+        FootprintMode::Volume => m.width(qty, c.total.0) <= room,
+        FootprintMode::Off => true,
+    })
+}
+
+/// A whole number of device pixels per row of `u` price units.
+fn row_height(vp: &Viewport, u: i64, scale: f32) -> f32 {
+    let r = u as f64 * vp.height / (vp.price_hi - vp.price_lo).abs().max(1e-9);
+    ((r * f64::from(scale)).round().max(1.0) / f64::from(scale)) as f32
+}
+
+/// The top of row `row`'s cell (rows are centred on their lowest price's tick).
+fn cell_top(vp: &Viewport, row: i64, u: i64, tick: i64, row_h: f32, scale: f32) -> f32 {
+    let mid = (row * u) as f64 + (u - tick) as f64 * 0.5;
+    lines_core::geometry::snap(vp.price_to_y(mid) - f64::from(row_h) * 0.5, scale)
+}
+
+/// With the footprint on and the price axis auto-fitted: raise the range's top so the
+/// highest visible prices sit at least `px` below the plot's top (where the readout and the
+/// legends are), so no cell starts under them.
+pub fn clear_top(vp: &mut Viewport, px: f64) {
+    let h = vp.height;
+    if !(px > 0.0 && px < h * 0.5) {
+        return;
+    }
+    let (lo, hi) = (vp.price_lo, vp.price_hi);
+    vp.price_hi = (hi - px * lo / h) / (1.0 - px / h);
+}
+
+/// Why bars show as candles in footprint mode this frame (the legend says so).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Fallbacks {
+    /// Bars narrower than the mode needs: every bar.
+    pub narrow: bool,
+    /// Rows too short for numbers: every bar.
+    pub rows_short: bool,
+    /// A number wider than its cell.
+    pub too_wide: bool,
+    /// Cells under the readout and legends (a manual price zoom).
+    pub under_legend: bool,
+    /// No counted trades (history).
+    pub no_trades: bool,
+}
 
 pub struct FootprintLayer {
     config: FootprintConfig,
@@ -131,10 +272,19 @@ pub struct FootprintLayer {
     /// The product's quantity format (cells print through it).
     qty: lines_core::QtyFormat,
     glyphs: Glyphs,
+    /// Character widths of the cell font (measured on the first paint).
+    metrics: TextMetrics,
+    /// The window's scale, as of the last paint (prepare snaps as paint does).
+    scale: f32,
     /// The visible range's first bar (candles are indexed from it).
     first_bar: usize,
-    /// No cell numbers at x < .0 and y < .1 (plot-local): the legend and readout block.
-    text_exclusion: (f32, f32),
+    /// The readout and legend block at the plot's top-left: (width, bottom), plot-local.
+    legend_block: (f32, f32),
+    fallbacks: Fallbacks,
+    /// Each drawn bar's open and close (its strip), aligned with `frame.bars`.
+    open_close: Vec<(lines_core::Price, lines_core::Price)>,
+    /// The cells drawn this frame (x0, x1, y0, y1; plot-local): horizontal lines break there.
+    drawn: Vec<[f32; 4]>,
 }
 
 impl FootprintLayer {
@@ -148,15 +298,20 @@ impl FootprintLayer {
             tick: 1,
             qty: lines_core::QtyFormat::WHOLE,
             glyphs: Glyphs::new(TEXT_PX),
+            metrics: TextMetrics::ESTIMATE,
+            scale: 1.0,
             first_bar: 0,
-            text_exclusion: (0.0, 0.0),
+            legend_block: (0.0, 0.0),
+            fallbacks: Fallbacks::default(),
+            open_close: Vec::new(),
+            drawn: Vec::new(),
         }
     }
 
-    /// The legend and readout block at the plot's top-left (plot-local width and bottom):
-    /// cell numbers are never drawn under it (set each frame at render time, before paint).
-    pub fn set_text_exclusion(&mut self, width: f32, bottom: f32) {
-        self.text_exclusion = (width, bottom);
+    /// The readout and legend block at the plot's top-left (plot-local width and bottom),
+    /// measured at render time: cells never sit under it (set before `prepare`).
+    pub fn set_legend_block(&mut self, width: f32, bottom: f32) {
+        self.legend_block = (width, bottom);
     }
 
     pub fn config(&self) -> FootprintConfig {
@@ -167,26 +322,32 @@ impl FootprintLayer {
         self.config = c;
     }
 
-    /// The legend line, if the footprint is on: its mode, and why bars are candles. Decided
-    /// at render time from the same inputs paint uses (the bar width, and whether the oldest
-    /// visible bar is older than the first counted trade), so a single frame never disagrees
-    /// with what it draws.
-    pub fn legend(
-        &self,
-        bar_px: f64,
-        first_visible: Option<lines_core::UtcMillis>,
-        data_start: Option<lines_core::UtcMillis>,
-    ) -> Option<(String, Option<&'static str>)> {
+    /// Why bars are candles this frame (the chart repaints its legend when this changes).
+    pub fn fallbacks(&self) -> Fallbacks {
+        self.fallbacks
+    }
+
+    /// The legend line, if the footprint is on: its mode, and every reason bars show as
+    /// candles this frame.
+    pub fn legend(&self) -> Option<(String, Option<String>)> {
         if !self.config.shown() {
             return None;
         }
-        let note = if bar_px < self.config.mode.min_bar_px() {
-            Some("zoom in to see cells")
-        } else if first_visible.is_some_and(|t| data_start.is_none_or(|d| t < d)) {
-            Some("footprint from live/replay trades only")
-        } else {
-            None
-        };
+        let f = self.fallbacks;
+        let mut notes: Vec<&str> = Vec::new();
+        if f.narrow || f.rows_short {
+            notes.push("zoom in to see cells");
+        }
+        if f.too_wide {
+            notes.push("some bars: numbers too wide, zoom in");
+        }
+        if f.under_legend {
+            notes.push("bars under the legend shown as candles");
+        }
+        if f.no_trades {
+            notes.push("footprint from live/replay trades only");
+        }
+        let note = (!notes.is_empty()).then(|| notes.join(" · "));
         Some((format!("Footprint · {}", self.config.mode.label()), note))
     }
 
@@ -221,32 +382,92 @@ impl FootprintLayer {
         }
         if self.frame.cells.capacity() == 0 {
             self.frame = FootprintFrame::with_capacity(64, MAX_CELLS, MAX_ROWS);
+            self.drawn = Vec::with_capacity(MAX_CELLS);
         }
         let need = (width as f64 / 30.0) as usize + 4;
         if self.frame.bars.capacity() < need {
             self.frame.bars.reserve_exact(need - self.frame.bars.len());
         }
+        if self.open_close.capacity() < self.frame.bars.capacity() {
+            self.open_close
+                .reserve_exact(self.frame.bars.capacity() - self.open_close.len());
+        }
+    }
+
+    /// Horizontal line segments across `[x0, x1)` at plot-local `y` that don't cross a drawn
+    /// cell (price and crosshair lines break where they would strike through numbers).
+    pub fn hline_segments(&self, y: f32, x0: f32, x1: f32, mut f: impl FnMut(f32, f32)) {
+        let mut cur = x0;
+        if self.active {
+            for r in &self.drawn {
+                if !(r[2] <= y && y < r[3]) || r[1] <= cur {
+                    continue;
+                }
+                if r[0] > cur {
+                    f(cur, r[0].min(x1));
+                }
+                cur = cur.max(r[1]);
+                if cur >= x1 {
+                    return;
+                }
+            }
+        }
+        if cur < x1 {
+            f(cur, x1);
+        }
+    }
+
+    /// The decisions paint follows, checked (tests): every drawn cell's numbers fit its room,
+    /// rows are tall enough for text, and no drawn cell lies under the legend block.
+    #[cfg(test)]
+    pub fn check_drawable(&self, vp: &Viewport) -> Result<(), String> {
+        if !self.active {
+            return Ok(());
+        }
+        let u = self.frame.row_units;
+        let row_h = row_height(vp, u, self.scale);
+        if row_h < MIN_TEXT_ROW_PX {
+            return Err(format!("rows {row_h} px"));
+        }
+        for b in &self.frame.bars {
+            let col = Column::of(vp, b.bar, self.scale);
+            let cells = self.frame.cells_of(b);
+            let room = col.text_room(self.config.mode);
+            if !numbers_fit(cells, self.config.mode, self.qty, &self.metrics, room) {
+                return Err(format!("bar {}: a number is wider than {room} px", b.bar));
+            }
+            let (ex_w, ex_h) = self.legend_block;
+            for c in cells {
+                let top = cell_top(vp, c.row, u, self.tick, row_h, self.scale);
+                if col.strip_x < ex_w && top < ex_h && top + row_h > 0.0 {
+                    return Err(format!("bar {}: a cell under the legend", b.bar));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 impl ChartLayer for FootprintLayer {
     fn prepare(&mut self, data: &ChartData, bars: BarsView<'_>, vp: &Viewport) {
         self.active = false;
+        self.fallbacks = Fallbacks::default();
         let range = vp.visible_range(bars.len());
         self.first_bar = range.start;
         if !self.config.shown() {
             return;
         }
         if vp.bar_px < self.config.mode.min_bar_px() {
+            self.fallbacks.narrow = true;
             return; // too narrow to read: candles (the legend asks to zoom in)
         }
         self.tick = data.product.price.tick.max(1);
         self.qty = data.product.qty;
-        // Only bars whose whole cell column is on the plot: one cut by an edge is a candle.
-        let half = (vp.bar_px * 0.46).max(2.0);
+        let scale = self.scale;
+        // Only bars whose whole column is on the plot: one cut by an edge is a candle.
         let whole = |i: usize| {
-            let x = vp.index_to_x(i as f64);
-            x - half >= 0.0 && x + half <= vp.width
+            let c = Column::of(vp, i, scale);
+            c.strip_x >= 0.0 && f64::from(c.cell_left + c.cell_w) <= vp.width
         };
         let (mut a, mut b) = (range.start, range.end);
         while a < b && !whole(a) {
@@ -255,7 +476,6 @@ impl ChartLayer for FootprintLayer {
         while b > a && !whole(b - 1) {
             b -= 1;
         }
-        let range = a..b;
         let px_per_unit = vp.height / (vp.price_hi - vp.price_lo).abs().max(1e-9);
         let g = fit_grouping(
             self.config.grouping.unwrap_or(1),
@@ -263,14 +483,54 @@ impl ChartLayer for FootprintLayer {
             px_per_unit,
             MIN_ROW_PX,
         );
-        let units = (g as i64).saturating_mul(self.tick);
+        let u = (g as i64).saturating_mul(self.tick);
+        let row_h = row_height(vp, u, scale);
+        if row_h < MIN_TEXT_ROW_PX {
+            self.fallbacks.rows_short = true;
+            return;
+        }
         self.frame.build(
             data.profiles.footprint(),
             bars,
-            range,
-            units,
+            a..b,
+            u,
             self.config.rule(self.qty.decimals),
         );
+        self.fallbacks.no_trades = self.frame.with_data < b - a;
+        // Keep only bars whose every number fits and no cell lies under the legend block;
+        // the rest are candles (never a cut number, a spilled one or a box without one).
+        let (mode, qty, m, tick) = (self.config.mode, self.qty, self.metrics, self.tick);
+        let (ex_w, ex_h) = self.legend_block;
+        let (mut too_wide, mut under) = (false, false);
+        let cells = &self.frame.cells;
+        self.frame.bars.retain(|bc| {
+            let col = Column::of(vp, bc.bar, scale);
+            let cs = &cells[bc.first..bc.first + bc.len];
+            if !numbers_fit(cs, mode, qty, &m, col.text_room(mode)) {
+                too_wide = true;
+                return false;
+            }
+            if col.strip_x < ex_w
+                && cs.iter().any(|c| {
+                    let top = cell_top(vp, c.row, u, tick, row_h, scale);
+                    top < ex_h && top + row_h > 0.0
+                })
+            {
+                under = true;
+                return false;
+            }
+            true
+        });
+        self.fallbacks.too_wide = too_wide;
+        self.fallbacks.under_legend = under;
+        self.open_close.clear();
+        for bc in &self.frame.bars {
+            if self.open_close.len() == self.open_close.capacity() {
+                break;
+            }
+            let bar = bars.bars[bc.bar];
+            self.open_close.push((bar.open, bar.close));
+        }
         self.active = true;
     }
 
@@ -282,40 +542,68 @@ impl ChartLayer for FootprintLayer {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let scale = window.scale_factor();
+        if self.scale != scale || self.metrics == TextMetrics::ESTIMATE {
+            // Measured once (and on a scale change): glyph widths are cached by `Glyphs`.
+            self.scale = scale;
+            let c = t.text_main;
+            self.metrics = TextMetrics {
+                digit: self.glyphs.width("0", c, false, window),
+                minus: self.glyphs.width("-", c, false, window),
+                dot: self.glyphs.width(".", c, false, window),
+            };
+        }
+        self.drawn.clear();
         if !self.active {
             return;
         }
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
-        let scale = window.scale_factor();
         let hair = 1.0 / scale;
-        // Device-pixel snapping as the candles: cell edges on device-pixel boundaries (the
-        // POC outline is one device pixel), cells centred on the bar's wick position.
         let snap = |v: f64| lines_core::geometry::snap(v, scale);
         let rect = |x: f32, y: f32, w: f32, h: f32| {
             Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
         };
         let u = self.frame.row_units;
-        // A whole number of device pixels per row, so every cell edge lands on one.
-        let row_h = {
-            let r = u as f64 * vp.height / (vp.price_hi - vp.price_lo).abs().max(1e-9);
-            ((r * f64::from(scale)).round().max(1.0) / f64::from(scale)) as f32
-        };
+        let row_h = row_height(vp, u, scale);
         let max = self.frame.max_cell.0.max(1) as f32;
         let mode = self.config.mode;
-        let text = row_h >= TEXT_PX + 1.0;
         let mut s = FixedStr::<32>::new();
         for bi in 0..self.frame.bars.len() {
             let b: BarCells = self.frame.bars[bi];
-            let cx_bar = lines_core::geometry::slot_x(vp, b.bar as f64, scale);
-            let half = snap((vp.bar_px * 0.46).max(2.0));
-            let (left, w) = (cx_bar - half, half * 2.0);
+            let col = Column::of(vp, b.bar, scale);
+            let (left, w) = (col.cell_left, col.cell_w);
+            // The bar's open → close, as a candle body: its direction by shape too.
+            if let Some(&(open, close)) = self.open_close.get(bi) {
+                let up = close >= open;
+                let color = if up { t.up } else { t.down };
+                let (yo, yc) = (
+                    snap(vp.price_to_y(open.0 as f64)),
+                    snap(vp.price_to_y(close.0 as f64)),
+                );
+                let (top, h) = (yo.min(yc), (yo - yc).abs().max(hair));
+                let sw = col.strip_w;
+                if t.hollow.is_hollow(up) && sw >= 3.0 * hair && h >= 3.0 * hair {
+                    for q in [
+                        rect(col.strip_x, top, sw, hair),
+                        rect(col.strip_x, top + h - hair, sw, hair),
+                        rect(col.strip_x, top, hair, h),
+                        rect(col.strip_x + sw - hair, top, hair, h),
+                    ] {
+                        window.paint_quad(fill(q, color));
+                    }
+                } else {
+                    window.paint_quad(fill(rect(col.strip_x, top, sw, h), color));
+                }
+            }
+            let mark = col.mark();
             for k in 0..b.len {
                 let c = self.frame.cells[b.first + k];
-                // Row `r` holds prices [r·u, (r+1)·u); centred on its lowest price's tick.
-                let mid = (c.row * u) as f64 + (u - self.tick) as f64 * 0.5;
-                let top = snap(vp.price_to_y(mid) - f64::from(row_h) * 0.5);
-                if top + row_h < 0.0 || f64::from(top) > vp.height {
-                    continue; // off the plot: nothing to draw
+                let top = cell_top(vp, c.row, u, self.tick, row_h, scale);
+                if top + row_h <= 0.0 || f64::from(top) >= vp.height {
+                    continue; // wholly off the plot: nothing of it is drawn
+                }
+                if self.drawn.len() < self.drawn.capacity() {
+                    self.drawn.push([left, left + w, top, top + row_h]);
                 }
                 let shade = (c.total.0 as f32 / max).clamp(0.08, 1.0);
                 let bg = match mode {
@@ -324,8 +612,7 @@ impl ChartLayer for FootprintLayer {
                     _ => t.text_dim.opacity(0.06 + 0.22 * shade),
                 };
                 window.paint_quad(fill(rect(left, top, w, (row_h - hair).max(hair)), bg));
-                // Imbalance markers: a bar on the imbalanced side (shape, not only colour).
-                let mark = (w * 0.08).clamp(2.0, 4.0);
+                // Imbalance markers: a bar on the imbalanced side (shape, not only color).
                 if c.imbalance.sell {
                     window.paint_quad(fill(rect(left, top, mark, row_h - hair), t.down));
                 }
@@ -344,10 +631,8 @@ impl ChartLayer for FootprintLayer {
                         window.paint_quad(fill(q, t.text_main));
                     }
                 }
-                let (ex_w, ex_h) = self.text_exclusion;
-                if !text || (left < ex_w && top < ex_h) {
-                    continue; // too small to read, or under the legend block
-                }
+                // Every drawn cell carries its numbers: `prepare` kept only bars whose
+                // numbers fit and rows tall enough for them.
                 let y = oy + top;
                 let qty = self.qty;
                 let num = |s: &mut FixedStr<32>, v: i64| {
@@ -356,8 +641,12 @@ impl ChartLayer for FootprintLayer {
                 };
                 match mode {
                     FootprintMode::BidAsk => {
-                        let gap = 3.0;
-                        let mid_x = ox + left + w * 0.5;
+                        // Two columns: sell right-aligned to the divider, buy left-aligned.
+                        let mid_x = snap(f64::from(left + w * 0.5));
+                        window.paint_quad(fill(
+                            rect(mid_x, top + 2.0, hair, (row_h - 4.0).max(hair)),
+                            t.text_dim.opacity(0.35),
+                        ));
                         let sell = if c.imbalance.sell {
                             t.down
                         } else {
@@ -367,7 +656,7 @@ impl ChartLayer for FootprintLayer {
                         num(&mut s, c.sell.0);
                         self.glyphs.paint_right(
                             s.as_str(),
-                            mid_x - gap,
+                            ox + mid_x - GUTTER,
                             y,
                             row_h,
                             sell,
@@ -378,7 +667,7 @@ impl ChartLayer for FootprintLayer {
                         num(&mut s, c.buy.0);
                         self.glyphs.paint(
                             s.as_str(),
-                            mid_x + gap,
+                            ox + mid_x + GUTTER,
                             y,
                             row_h,
                             buy,
@@ -499,27 +788,192 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(2, 0), (0, 3), (4, 0)]
         );
-        let first = Some(bars.bars[vp.visible_range(4).start].time);
-        let (label, note) = fp
-            .legend(vp.bar_px, first, d.profiles.data_start())
-            .unwrap();
+        let (label, note) = fp.legend().unwrap();
         assert_eq!(label, "Footprint · sell × buy");
-        assert_eq!(note, Some("footprint from live/replay trades only"));
+        assert_eq!(
+            note.as_deref(),
+            Some("footprint from live/replay trades only")
+        );
+        fp.check_drawable(&vp).unwrap();
         // Narrow bars: no cells at all; the legend asks to zoom in.
         let narrow = view(20.0);
         fp.prepare(&d, bars, &narrow);
         assert!(!fp.is_active() && !fp.covers(1));
         assert_eq!(
-            fp.legend(narrow.bar_px, first, d.profiles.data_start())
-                .unwrap()
-                .1,
+            fp.legend().unwrap().1.as_deref(),
             Some("zoom in to see cells")
         );
         // Off: nothing, and no legend line.
         fp.set_config(FootprintConfig::default());
         fp.prepare(&d, bars, &vp);
         assert!(!fp.is_active());
-        assert!(fp.legend(80.0, first, None).is_none());
+        assert!(fp.legend().is_none());
+    }
+
+    /// A store of `product` with `qty` traded per trade, three sides at three prices, every
+    /// minute for `minutes` minutes from 2026-11-10 15:00Z.
+    fn traded(product: lines_core::ProductId, qty: i64, minutes: i64) -> (ChartStore, i64) {
+        let p = catalog::get(product).unwrap();
+        let tick = p.price.tick;
+        let s = ChartStore::new(p, None, Capabilities::default(), "test", MIN, 10_000);
+        let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+        let base = 600_000 / tick * tick;
+        s.update(|d| {
+            for m in 0..minutes {
+                for (k, side) in [Aggressor::Buy, Aggressor::Sell, Aggressor::Buy]
+                    .into_iter()
+                    .enumerate()
+                {
+                    d.apply(&[MarketEvent::Trade {
+                        time: UtcMillis(t0 + m * MIN + k as i64 * 1_000),
+                        price: Price(base + tick * k as i64),
+                        qty: Qty(qty),
+                        aggressor: Some(side),
+                    }]);
+                }
+            }
+        });
+        (s, base)
+    }
+
+    fn around(base: i64, tick: i64, bar_px: f64, right_index: f64) -> Viewport {
+        let mut vp = Viewport::default();
+        vp.set_size(800.0, 400.0);
+        vp.bar_px = bar_px;
+        vp.right_index = right_index;
+        vp.price_lo = (base - 8 * tick) as f64;
+        vp.price_hi = (base + 12 * tick) as f64;
+        vp.auto_price = false;
+        vp
+    }
+
+    /// The owner's rule: a cell with volume is never drawn without its numbers, and no number
+    /// is wider than its room. Crypto quantities have 8 decimals ("0.01234567" is ~67 px);
+    /// ES hour and day bars sum to 5-6 digits. Too narrow: the bar is a candle, with a reason.
+    #[test]
+    fn no_number_is_wider_than_its_cell() {
+        // Kraken BTC: 0.01234567 per trade.
+        let (s, base) = traded(catalog::BTC_USD_KR, 1_234_567, 3);
+        let d = s.read();
+        let tick = d.product.price.tick;
+        let bars = BarsView::fixed(d.series.bars(), MIN);
+        for (mode, bar_px, cells) in [
+            (FootprintMode::BidAsk, 80.0, false),
+            (FootprintMode::Volume, 80.0, false),
+            (FootprintMode::BidAsk, 200.0, true),
+            (FootprintMode::Delta, 120.0, true),
+        ] {
+            let mut fp = FootprintLayer::new(FootprintConfig {
+                mode,
+                ..Default::default()
+            });
+            fp.ensure_capacity(800.0);
+            let vp = around(base, tick, bar_px, 3.0);
+            fp.prepare(&d, bars, &vp);
+            fp.check_drawable(&vp).unwrap();
+            assert_eq!(fp.covers(1), cells, "{mode:?} at {bar_px} px");
+            assert_eq!(fp.fallbacks().too_wide, !cells, "{mode:?} at {bar_px} px");
+            if !cells {
+                let note = fp.legend().unwrap().1.unwrap();
+                assert!(note.contains("numbers too wide"), "{note}");
+            }
+        }
+        drop(d);
+        // ES: 4000 lots a trade, every minute for two days: hour and day bars.
+        let (s, base) = traded(catalog::ES, 4_000, 2 * 24 * 60);
+        let d = s.read();
+        for tf in [lines_core::Timeframe::Hours(1), lines_core::Timeframe::Day] {
+            let mut dv = lines_core::Derived::new(tf, 10_000);
+            dv.update(&d.series, None);
+            let view = dv.view();
+            for (bar_px, cells) in [(80.0, false), (240.0, true)] {
+                let mut fp = FootprintLayer::new(FootprintConfig {
+                    mode: FootprintMode::BidAsk,
+                    ..Default::default()
+                });
+                fp.ensure_capacity(800.0);
+                let vp = around(base, 25, bar_px, 1.0);
+                fp.prepare(&d, view, &vp);
+                fp.check_drawable(&vp).unwrap();
+                assert_eq!(fp.covers(0), cells, "{tf} at {bar_px} px");
+            }
+        }
+    }
+
+    /// Cells never sit under the readout and legend block: auto-fit raises the range's top,
+    /// and bars a manual zoom pushes under it are candles (never shaded boxes without numbers).
+    #[test]
+    fn nothing_under_the_legend() {
+        let (s, base) = traded(catalog::ES, 3, 3);
+        let d = s.read();
+        let bars = BarsView::fixed(d.series.bars(), MIN);
+        let mut fp = FootprintLayer::new(FootprintConfig {
+            mode: FootprintMode::BidAsk,
+            ..Default::default()
+        });
+        fp.ensure_capacity(800.0);
+        // The rows reach the top of the plot; the block covers its top-left.
+        // Bars 0..=2 at x 120, 200, 280: under the block's 400 px width.
+        let mut vp = around(base, 25, 80.0, 8.5);
+        vp.price_hi = (base + 3 * 25) as f64;
+        fp.set_legend_block(400.0, 120.0);
+        fp.prepare(&d, bars, &vp);
+        fp.check_drawable(&vp).unwrap();
+        assert!(!fp.covers(0) && !fp.covers(1), "under the block: candles");
+        assert!(fp.fallbacks().under_legend);
+        // Auto-fit: the top is raised clear of the block.
+        clear_top(&mut vp, 120.0 + MIN_ROW_PX);
+        fp.prepare(&d, bars, &vp);
+        fp.check_drawable(&vp).unwrap();
+        assert!(fp.covers(1) && !fp.fallbacks().under_legend);
+    }
+
+    #[test]
+    fn clear_top_puts_the_old_top_below_the_block() {
+        let mut vp = Viewport::default();
+        vp.set_size(800.0, 600.0);
+        (vp.price_lo, vp.price_hi) = (1_000.0, 2_000.0);
+        clear_top(&mut vp, 60.0);
+        assert!((vp.price_to_y(2_000.0) - 60.0).abs() < 1e-9);
+        assert!(
+            (vp.price_to_y(1_000.0) - 600.0).abs() < 1e-9,
+            "the bottom stays"
+        );
+        let before = vp;
+        clear_top(&mut vp, 400.0); // more than half the plot: no
+        assert_eq!(vp, before);
+    }
+
+    #[test]
+    fn lines_break_across_cells() {
+        let mut fp = FootprintLayer::new(FootprintConfig {
+            mode: FootprintMode::BidAsk,
+            ..Default::default()
+        });
+        fp.drawn = vec![
+            [100.0, 160.0, 10.0, 30.0],
+            [200.0, 260.0, 10.0, 30.0],
+            [300.0, 360.0, 40.0, 60.0],
+        ];
+        let segs = |fp: &FootprintLayer, y: f32, x0: f32, x1: f32| {
+            let mut v = Vec::new();
+            fp.hline_segments(y, x0, x1, |a, b| v.push((a, b)));
+            v
+        };
+        // Inactive: the whole line.
+        assert_eq!(segs(&fp, 20.0, 0.0, 500.0), [(0.0, 500.0)]);
+        fp.active = true;
+        assert_eq!(
+            segs(&fp, 20.0, 0.0, 500.0),
+            [(0.0, 100.0), (160.0, 200.0), (260.0, 500.0)]
+        );
+        assert_eq!(segs(&fp, 50.0, 0.0, 500.0), [(0.0, 300.0), (360.0, 500.0)]);
+        assert_eq!(
+            segs(&fp, 20.0, 120.0, 230.0),
+            [(160.0, 200.0)],
+            "starts inside a cell"
+        );
+        assert_eq!(segs(&fp, 35.0, 0.0, 500.0), [(0.0, 500.0)], "between rows");
     }
 
     /// The minimum is in whole units of the product's quantity: 5 contracts on ES, 5 BTC on a
