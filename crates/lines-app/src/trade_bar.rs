@@ -982,7 +982,7 @@ fn blocker<V: TradePane>(
         return Some(b.into());
     }
     if let Some(b) = data.and_then(|d| d.news_block) {
-        return Some(b);
+        return Some(b.into());
     }
     let t = Trading::try_global(cx)?;
     if t.check_sessions
