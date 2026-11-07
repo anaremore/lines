@@ -103,7 +103,8 @@ pub fn units_for(s: &BracketSettings, account: &str) -> BracketUnits {
 /// The presets for `account` on `product` (its own, else the defaults), in order.
 pub fn presets_for(s: &BracketSettings, account: &str, product: &str) -> Vec<NamedBracket> {
     match s.get(account).and_then(|a| a.products.get(product)) {
-        Some(v) if !v.is_empty() => v.clone(),
+        // Saved, even empty (the trader deleted them all): theirs.
+        Some(v) => v.clone(),
         _ => DEFAULT_PRESETS
             .iter()
             .map(|&(s, t)| NamedBracket {
@@ -324,6 +325,19 @@ impl Editor {
     }
 
     /// Show the rows in the other unit (valid cells convert exactly; invalid ones stay).
+    /// Why the units can't switch now: a stop or target cell that doesn't read in the
+    /// current units would be reinterpreted in the new ones (never silently).
+    pub fn units_blocked(&self) -> Option<String> {
+        self.rows.iter().enumerate().find_map(|(i, r)| {
+            [(&r.stop, "stop"), (&r.target, "target")]
+                .into_iter()
+                .find(|(c, _)| parse_amount(c, &self.product, self.units).is_err())
+                .map(|(_, f)| format!("fix row {}'s {f} before switching units", i + 1))
+        })
+    }
+
+    /// Switch the units, converting every cell exactly. Callers check [`Self::units_blocked`]
+    /// first; a cell that doesn't read is left as typed.
     pub fn set_units(&mut self, units: BracketUnits) {
         if units == self.units {
             return;
@@ -666,6 +680,12 @@ mod tests {
             "per product"
         );
         assert_eq!(units_for(&s, "paper"), BracketUnits::Ticks);
+        // Deleting them all sticks: no defaults come back.
+        s.entry("paper".into())
+            .or_default()
+            .products
+            .insert("MES".into(), Vec::new());
+        assert!(presets_for(&s, "paper", "MES").is_empty());
         // Off first, then each preset, then back to Off.
         let nq = presets_for(&s, "paper", "NQ");
         let first = next_choice(&nq, None);
@@ -729,10 +749,16 @@ mod tests {
         assert!(
             matches!(e.key("enter", None, false, false), EditorKey::Refused(m) if m.contains("nearest 5"))
         );
+        // The units can't switch under an off-grid cell (it would read differently).
+        assert_eq!(
+            e.units_blocked().as_deref(),
+            Some("fix row 1's stop before switching units")
+        );
         e.key("backspace", None, false, false);
         e.key("2", Some("2"), false, false);
         e.key("5", Some("5"), false, false);
         assert_eq!(e.rows[0].stop, "5.25");
+        assert_eq!(e.units_blocked(), None);
         // Letters never go into a number; the name takes them.
         assert_eq!(e.key("x", Some("x"), false, false), EditorKey::Ignored);
         e.key("tab", None, false, false);

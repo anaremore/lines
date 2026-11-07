@@ -399,6 +399,28 @@ impl Columns {
         self.set.layout(specs, &self.needed, total, &mut self.cells);
     }
 
+    /// Lay out in `total` px; while the columns overflow, leave out (this frame only) the
+    /// next column of `order`, least needed first, then any that still don't fit whole. A
+    /// narrow pane drops whole columns, never half a number. Saved choices are untouched.
+    pub fn layout_fitting(&mut self, total: f32, order: &[usize]) {
+        let specs = self.specs();
+        let mut set = self.set;
+        set.layout(specs, &self.needed, total, &mut self.cells);
+        for &i in order {
+            if !self
+                .cells
+                .iter()
+                .any(|c| c.shown && c.right() > total + 0.5)
+            {
+                break;
+            }
+            if set.set_shown(specs, i, false) {
+                set.layout(specs, &self.needed, total, &mut self.cells);
+            }
+        }
+        self.drop_overflow(total);
+    }
+
     /// This frame only: leave out columns that don't fit entirely in `total` px (header and
     /// rows alike), so a narrow pane never shows half a number. Saved choices are untouched.
     pub fn drop_overflow(&mut self, total: f32) {
@@ -819,6 +841,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A narrow DOM gives up volume, the trail, then orders; bid, price and ask stay whole.
+    #[test]
+    fn a_narrow_dom_keeps_the_book_whole() {
+        let mut c = Columns::new(Table::Dom);
+        for col in DomCol::ALL {
+            c.need(col.index(), 60.0, 0.0);
+        }
+        let order = [
+            DomCol::Volume.index(),
+            DomCol::Trail.index(),
+            DomCol::Orders.index(),
+        ];
+        // The narrowest DOM the trading panel is laid out for (`trade_bar::MIN_DOM_WIDTH`).
+        c.layout_fitting(240.0, &order);
+        for col in [DomCol::Bid, DomCol::Price, DomCol::Ask] {
+            let cell = c.cells[col.index()];
+            assert!(cell.shown && cell.right() <= 240.5, "{col:?} {:?}", c.cells);
+        }
+        assert!(!c.cells[DomCol::Volume.index()].shown);
+        assert!(
+            c.set.is_shown(DomCol::Volume.index()),
+            "saved choice untouched"
+        );
+        // Wide: nothing given up.
+        c.layout_fitting(2000.0, &order);
+        assert!(c.cells[DomCol::Volume.index()].shown);
     }
 
     #[test]

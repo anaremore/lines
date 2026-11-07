@@ -80,6 +80,17 @@ pub struct PaneTrade {
     pub editor_msg: Option<String>,
 }
 
+impl TradeDoc {
+    /// The choices for a new pane made from this one (a split): everything but the trading
+    /// switch, which starts disabled in every new pane.
+    pub fn copied(self) -> TradeDoc {
+        TradeDoc {
+            enabled: false,
+            ..self
+        }
+    }
+}
+
 impl PaneTrade {
     pub fn new(saved: Option<&TradeDoc>, cx: &App) -> PaneTrade {
         let trading = Trading::try_global(cx);
@@ -343,7 +354,14 @@ pub fn run_from<V: TradePane>(
         }
         TradeCmd::BracketUnits => {
             let account = v.trade_ref().account.as_ref().map(|a| a.0.clone());
-            if let Some(a) = account {
+            if let Some(why) = v
+                .trade_ref()
+                .editor
+                .as_ref()
+                .and_then(|e| e.units_blocked())
+            {
+                v.trade().editor_msg = Some(why);
+            } else if let Some(a) = account {
                 let mut next = crate::brackets::BracketUnits::Ticks;
                 crate::picker_view::update_settings(cx, |s| {
                     let e = s.bracket_presets.entry(a).or_default();
@@ -448,10 +466,8 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
 }
 
 /// The commands that move the position's stop(s) to breakeven, from the cache.
+/// BE only moves an existing protective stop, like dragging it: it needs no switch.
 fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'static str> {
-    if !v.trade_ref().arming.is_armed() {
-        return Err(dom_trade::ENABLE_TO_TRADE);
-    }
     if let Some(why) = cant_trade(v, cx) {
         return Err(why);
     }
@@ -475,11 +491,11 @@ fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'s
     let (qty, avg) = pos.map_or((0, None), |p| (p.qty, p.avg_price));
     let stops: Vec<_> = s
         .open_orders(&account, contract)
-        .filter(|o| {
-            matches!(
-                o.kind,
-                lines_trading::OrderKind::Stop { .. } | lines_trading::OrderKind::StopLimit { .. }
-            )
+        // A triggered stop-limit is a resting limit now: moving it to BE could fill at once.
+        .filter(|o| match o.kind {
+            lines_trading::OrderKind::Stop { .. } => true,
+            lines_trading::OrderKind::StopLimit { .. } => !o.triggered,
+            _ => false,
         })
         .filter_map(|o| dom_trade::order_price(o).map(|p| (o.id, o.side, p)))
         .collect();
@@ -502,7 +518,9 @@ pub fn editor_key<V: TradePane>(v: &mut V, ev: &gpui::KeyDownEvent, cx: &mut Con
         None => return false,
     };
     match out {
-        EditorKey::Ignored => return false,
+        // A printable key the editor refused stays in the editor (never the DOM's letter
+        // keys); other keys (commands) pass on.
+        EditorKey::Ignored => return k.key_char.is_some() && !m.control,
         EditorKey::Typing => v.trade().editor_msg = None,
         EditorKey::Refused(why) => v.trade().editor_msg = Some(why),
         EditorKey::Cancel => {
@@ -914,9 +932,10 @@ pub fn breakeven(
     if (long && m.0 <= be.0) || (!long && m.0 >= be.0) {
         return Err("price hasn't moved past breakeven yet");
     }
+    // Only stops still on the losing side move: BE never loosens a stop already at or past it.
     let cmds: Vec<_> = mine
         .iter()
-        .filter(|s| s.2 != be)
+        .filter(|s| if long { s.2.0 < be.0 } else { s.2.0 > be.0 })
         .map(|s| TradeCommand::ModifyOrder {
             account: account.clone(),
             order: s.0,
@@ -925,7 +944,7 @@ pub fn breakeven(
         })
         .collect();
     if cmds.is_empty() {
-        return Err("the stop is already at breakeven");
+        return Err("the stop is already at or past breakeven");
     }
     Ok(cmds)
 }
@@ -979,10 +998,24 @@ pub fn panel_height(width: f32) -> f32 {
     HDR_H + CARD_H + STATUS_H + meters + 2.0 * SEG_H + GRID_H + UTIL_H + PAD_Y
 }
 
-/// The utility row's labels: words, short in a narrow panel.
+/// What a disabled panel says in the joins' place: the lock that binds. With nothing else
+/// in the way, how to enable; with a lockout or another blocker too, that first (enabling
+/// alone would not unlock entries).
+pub fn locked_hint(blocker: Option<&str>) -> String {
+    match blocker {
+        Some(b) => format!("Entries locked: {b} · trading off"),
+        None => format!(
+            "Entries locked: enable trading ({})",
+            crate::commands::hint(crate::commands::Command::Trade(TradeCmd::ToggleArm))
+        ),
+    }
+}
+
+/// The utility row's labels: words, short in a narrow panel ("Cancel all" keeps its object
+/// at every width).
 pub fn util_labels(width: f32) -> [&'static str; 4] {
     if is_narrow(width) {
-        ["BE", "Rev", "Cancel", "Flatten"]
+        ["BE", "Rev", "Cancel all", "Flatten"]
     } else {
         ["BE", "Reverse", "Cancel all", "Flatten"]
     }
@@ -1209,10 +1242,10 @@ pub fn dom_bar<V: TradePane>(
             .child(gate(qty_row(v, narrow, t, cx)))
             .child(gate(bracket_row(v, product, narrow, t, cx)));
         // 7. Order buttons: market (filled) with the price they'd hit, joins (outlined).
-        panel = panel.child(order_grid(v, product, enabled, guarded, t, cx));
+        panel = panel.child(order_grid(v, product, enabled, guarded, blocker, t, cx));
     }
 
-    // 8. Utility row: BE and Reverse (entries: dim while disabled), Cancel all and Flatten
+    // 8. Utility row: BE and Reverse (Reverse dims while disabled), Cancel all and Flatten
     //    (never dim; Flatten outlined in the warning color).
     let labels = util_labels(width);
     let util = [
@@ -1239,7 +1272,8 @@ pub fn dom_bar<V: TradePane>(
                 .border_2()
                 .font_weight(FontWeight::BOLD);
         }
-        if entry {
+        // Reverse is an entry (dims while disabled); BE only moves a stop.
+        if cmd == TradeCmd::Reverse {
             b = gate(b);
         }
         row = row.child(run_on_click(tip(b, name, Some(cmd), t), cmd, cx));
@@ -1323,11 +1357,12 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                 .text_color(t.text_main)
                 // Direction by shape as well as word.
                 .child(if long { "▲" } else { "▼" })
-                .child(format!(
-                    "{} {}",
-                    if long { "LONG" } else { "SHORT" },
-                    q.abs()
-                ))
+                // Narrow: the arrow and the quantity, so the P&L beside them never cuts.
+                .child(if is_narrow(width) {
+                    q.abs().to_string()
+                } else {
+                    format!("{} {}", if long { "LONG" } else { "SHORT" }, q.abs())
+                })
                 .child(
                     div()
                         .font_weight(FontWeight::NORMAL)
@@ -1361,6 +1396,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
             };
             card = card.child(line().child(side).children(big.map(|(s, c)| {
                 div()
+                    .flex_shrink_0()
                     .text_size(px(15.0))
                     .font_weight(FontWeight::BOLD)
                     .text_color(c)
@@ -1616,7 +1652,7 @@ fn qty_row<V: TradePane>(
     };
     let on = pt.qty_edit.is_some() || !dom_trade::QTY_PRESETS.contains(&pt.qty);
     let s = segment("qty-custom", custom, on, t).flex_1();
-    let s = tip(s, "Type a quantity", Some(TradeCmd::QtyUp), t);
+    let s = tip(s, "Type a quantity", None, t);
     row.child(s.on_mouse_down(
         MouseButton::Left,
         cx.listener(|v: &mut V, _, _, cx| {
@@ -1674,7 +1710,7 @@ fn bracket_row<V: TradePane>(
     let off = tip(
         segment("bracket-off", "Off".into(), current.is_none(), t),
         "No bracket",
-        Some(TradeCmd::NextBracket),
+        None,
         t,
     );
     row = row.child(off.on_mouse_down(
@@ -1688,12 +1724,13 @@ fn bracket_row<V: TradePane>(
     for (i, p) in presets.iter().take(shown).enumerate() {
         let b = p.preset();
         let text = if p.name.is_empty() {
-            // Narrow: the numbers only; the unit is on the toggle beside them.
+            // Narrow: the numbers with the unit's letters attached ("8/16t").
             if narrow {
                 format!(
-                    "{}/{}",
+                    "{}/{}{}",
                     crate::brackets::amount_text(b.stop_ticks, product, units),
-                    crate::brackets::amount_text(b.target_ticks, product, units)
+                    crate::brackets::amount_text(b.target_ticks, product, units),
+                    units.suffix()
                 )
             } else {
                 label(b, product, units)
@@ -1752,6 +1789,7 @@ fn order_grid<V: TradePane>(
     product: &Product,
     enabled: bool,
     guarded: bool,
+    blocker: Option<&str>,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> gpui::Div {
@@ -1841,7 +1879,7 @@ fn order_grid<V: TradePane>(
                 .child(run_on_click(ja, TradeCmd::JoinAsk, cx)),
         );
     } else {
-        // Disabled: one line says how to enable, in the joins' place (same height).
+        // Disabled: one line says what locks entries, in the joins' place (same height).
         grid = grid.child(
             div()
                 .h(px(36.0))
@@ -1849,10 +1887,7 @@ fn order_grid<V: TradePane>(
                 .items_center()
                 .justify_center()
                 .text_color(t.text_main)
-                .child(format!(
-                    "Entries locked: enable trading ({})",
-                    crate::commands::hint(crate::commands::Command::Trade(TradeCmd::ToggleArm))
-                )),
+                .child(locked_hint(blocker)),
         );
     }
     grid
@@ -1961,12 +1996,7 @@ fn editor_view<V: TradePane>(
         );
     }
     // Footer: a problem (refused save, off-grid cell), else the live preview.
-    let preview = {
-        let pt = v.trade_ref();
-        let _ = pt;
-        let entry = preview_entry(v);
-        ed.preview(entry)
-    };
+    let preview = ed.preview(preview_entry(v));
     let problem = msg
         .map(str::to_owned)
         .or_else(|| ed.cell_problem(ed.row, ed.field));
@@ -2038,8 +2068,7 @@ fn editor_view<V: TradePane>(
         .child(foot)
 }
 
-/// Where the editor's preview measures from: the position (its side and average), else a
-/// buy at the ask.
+/// Where the editor's preview measures from: a buy at the ask (else the last trade).
 fn preview_entry<V: TradePane>(v: &V) -> Option<(Price, bool)> {
     let d = v.trade_store().try_read()?;
     let ask = d.book.best_ask().map(|a| a.0).or(d.ask).or(d.last_trade);
@@ -2383,7 +2412,62 @@ mod tests {
                 Some(Price(600_100)),
                 25
             ),
-            Err("the stop is already at breakeven")
+            Err("the stop is already at or past breakeven")
+        );
+        // Never loosens: a long's stop already trailed past BE stays; only the one below moves.
+        let cmds = breakeven(
+            &a,
+            1,
+            Some(600_000.0),
+            &[stop(1, Side::Sell, 600_500), stop(2, Side::Sell, 599_000)],
+            Some(Price(601_000)),
+            25,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &cmds[..],
+                [TradeCommand::ModifyOrder {
+                    order: OrderId(2),
+                    price: Some(Price(600_000)),
+                    ..
+                }]
+            ),
+            "{cmds:?}"
+        );
+        assert_eq!(
+            breakeven(
+                &a,
+                -1,
+                Some(600_000.0),
+                &[stop(1, Side::Buy, 599_500)],
+                Some(Price(599_000)),
+                25
+            ),
+            Err("the stop is already at or past breakeven"),
+            "a short's stop below BE stays"
+        );
+    }
+
+    #[test]
+    fn a_split_never_copies_the_switch() {
+        let doc = TradeDoc {
+            enabled: true,
+            account: Some("paper".into()),
+            qty: Some(3),
+            bracket: None,
+        };
+        let c = doc.clone().copied();
+        assert!(!c.enabled);
+        assert_eq!((c.account, c.qty), (doc.account, doc.qty));
+    }
+
+    #[test]
+    fn the_locked_hint_names_the_lock_that_binds() {
+        assert!(locked_hint(None).starts_with("Entries locked: enable trading ("));
+        assert_eq!(
+            locked_hint(Some("cooldown")),
+            "Entries locked: cooldown · trading off"
         );
     }
 

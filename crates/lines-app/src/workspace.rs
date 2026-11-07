@@ -1464,8 +1464,10 @@ impl WindowView {
         let Some(h) = self.tab().focused_handle().cloned() else {
             return;
         };
-        // Same kind, symbol, link and view state as the source.
-        let doc = h.doc(cx);
+        // Same kind, symbol, link and view state as the source; the trading switch is not
+        // copied (new panes start disabled).
+        let mut doc = h.doc(cx);
+        doc.trade = doc.trade.take().map(crate::trade_bar::TradeDoc::copied);
         let new_id = PaneId::next();
         let handle = make_pane(&doc, cx);
         let subs = self.subscribe(new_id, &handle, cx);
