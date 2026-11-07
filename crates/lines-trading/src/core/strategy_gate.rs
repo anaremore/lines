@@ -11,14 +11,8 @@ use crate::event::Event;
 use crate::guardrails::GuardState;
 use crate::order::{Order, Role};
 use crate::rules::TradingState;
-use crate::strategy::{Instance, StrategyId, StrategyState};
+use crate::strategy::{DAILY_LOSS, Instance, LOSS_CLOSED_TODAY, StrategyId, StrategyState};
 use crate::types::{AccountId, Money, OrderId, Side};
-
-/// Why an instance paused when it reached its daily loss (it is also flattened).
-const DAILY_LOSS: &str = "its daily loss limit was reached: its trade was closed";
-/// Why it can't enter again on the trade date its daily loss closed its trade.
-const LOSS_CLOSED_TODAY: &str =
-    "its daily loss limit was reached today: no entries until the next trade date";
 
 fn deny(message: impl Into<String>) -> Reject {
     Reject::new(RejectCode::Strategy, message)
@@ -349,11 +343,8 @@ impl TradingCore {
             let why = self.accounts[&account].guard.change().reason;
             return Some(why.map_or_else(|| "a guardrail lockout".into(), |r| r.to_string()));
         }
-        if self.strategy_day_pnl(now, id) <= -limit {
-            return Some(DAILY_LOSS.into());
-        }
         // Its daily loss closed its trade today: no entries until the next trade date, even if
-        // the flatten filled better than the limit.
+        // the flatten filled better than the limit (said first: it is the whole answer).
         let day = self.trade_day(&account, now).map(|(d, _)| d);
         if day.is_some()
             && self
@@ -362,6 +353,9 @@ impl TradingCore {
                 .is_some_and(|i| i.loss_closed == day)
         {
             return Some(LOSS_CLOSED_TODAY.into());
+        }
+        if self.strategy_day_pnl(now, id) <= -limit {
+            return Some(DAILY_LOSS.into());
         }
         None
     }

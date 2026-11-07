@@ -122,6 +122,13 @@ impl StrategyState {
 /// pauses every armed instance (host liveness is a wall-clock matter: a fast replay moves the
 /// market clock minutes in a moment).
 pub const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The reason an instance paused when it reached its daily loss (its trade was also closed,
+/// decision 0027). Exact text, for the panel to match.
+pub const DAILY_LOSS: &str = "its daily loss limit was reached: its trade was closed";
+/// The reason arming is refused on the trade date its daily loss closed its trade.
+pub const LOSS_CLOSED_TODAY: &str =
+    "its daily loss limit was reached today: no entries until the next trade date";
 /// The order-rate window.
 const RATE_WINDOW_MS: i64 = 60_000;
 

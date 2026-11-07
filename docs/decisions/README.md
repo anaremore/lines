@@ -30,6 +30,6 @@ Format: Status · Context · Decision · Consequences.
 | 0022 | External level sources: a public levels layer, private adapters |
 | 0023 | Trade execution via Sierra Chart's DTC server |
 | 0024 | Contract alignment for live orders, amends 0023 |
-| 0025 | Strategies: pure state machines behind the trading core, backtested on replays (Accepted) |
+| 0025 | Strategies: pure state machines behind the trading core, backtested on replays (Accepted; amended by 0027) |
 | 0026 | User styles for drawings and studies: one style model and editor, custom colors as user data (Accepted) |
-| 0027 | Strategy host heartbeat on the wall clock; the daily loss closes the trade, amends 0025 (Proposed) |
+| 0027 | Strategy host heartbeat on the wall clock; the daily loss closes the trade, amends 0025 (Accepted) |

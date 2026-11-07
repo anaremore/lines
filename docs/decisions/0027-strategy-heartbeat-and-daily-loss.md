@@ -1,6 +1,6 @@
 # 0027: Strategy host heartbeat on the wall clock; the daily loss closes the trade
 
-**Status:** Proposed (amends 0025; the daily-loss rule is the owner's, 2026-11-07)
+**Status:** Accepted (amends 0025; owner accepted 2026-11-07)
 
 **Context:** Building the strategy host (0025, phase (c)) turned up two points where 0025's text doesn't fit the system.
 
@@ -23,4 +23,4 @@
 **Consequences:**
 - Fast replays and `--run-strategy` on a sped-up replay run strategies correctly.
 - A day can't lose more than the limit plus the slippage of one flatten. Before this, it could lose up to one more stop.
-- 0025's text on these two points is superseded by this record once accepted. The rest of 0025 stands.
+- 0025's text on these two points is superseded by this record. The rest of 0025 stands.

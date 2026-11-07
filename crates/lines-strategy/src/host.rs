@@ -88,6 +88,10 @@ pub struct InstanceView {
     pub label: String,
     pub strategy: String,
     pub version: String,
+    /// The account and contract it trades, and its limits (from its config).
+    pub account: lines_trading::AccountId,
+    pub contract: lines_core::ContractKey,
+    pub limits: lines_trading::StrategyLimits,
     pub state: StrategyState,
     pub reason: Option<String>,
     /// The strategy failed (panicked or was refused); it is never called again.
@@ -350,6 +354,9 @@ impl Running {
             label: self.cfg.label.clone(),
             strategy: self.ext.name().to_owned(),
             version: self.ext.version().to_owned(),
+            account: self.cfg.account.clone(),
+            contract: self.cfg.contract,
+            limits: self.cfg.limits.clone(),
             state: self.state,
             reason: self.reason.clone(),
             fault: self.fault.clone(),

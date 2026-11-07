@@ -55,6 +55,7 @@ pub use risk::RiskLimits;
 pub use rules::{RulePreset, RuleStatus, RuleTracker};
 pub use service::{Clock, FeedBridge, Observer, TradingHandle, TradingService};
 pub use strategy::{
-    HoursWindow, StrategyConfig, StrategyId, StrategyLimits, StrategyState, TradingHours,
+    DAILY_LOSS, HoursWindow, LOSS_CLOSED_TODAY, StrategyConfig, StrategyId, StrategyLimits,
+    StrategyState, TradingHours,
 };
 pub use types::{AccountId, CommandId, Money, OrderId, OrderKind, Side};

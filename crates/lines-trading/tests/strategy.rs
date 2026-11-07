@@ -426,13 +426,20 @@ fn daily_loss_closes_the_trade_and_pauses_for_the_trade_date() {
     r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
     r.trade(5990.0, 1);
     assert_eq!(r.state(), StrategyState::Paused);
-    assert!(r.reason().contains("daily loss"), "{}", r.reason());
+    assert_eq!(
+        r.reason(),
+        lines_trading::DAILY_LOSS,
+        "the exact text the panel matches"
+    );
     r.wait(30);
     // The owner's rule: the trade is closed and its working orders are gone.
     assert_eq!(r.core.position(&acct(), es()), 0, "flattened");
     assert!(!r.core.order(stop).unwrap().is_open(), "its stop cancelled");
     // No entries for the rest of the trade date.
-    assert!(denied(r.manual(Command::ArmStrategy { id: ID })).contains("daily loss"));
+    assert!(
+        denied(r.manual(Command::ArmStrategy { id: ID }))
+            .contains(lines_trading::LOSS_CLOSED_TODAY)
+    );
     // The next trade date (Wednesday 10:00 New York) starts over.
     r.t = UtcMillis::parse_iso("2026-11-11T15:00:00Z").unwrap().0;
     r.wait(10);
