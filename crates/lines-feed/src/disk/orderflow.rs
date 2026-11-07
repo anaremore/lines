@@ -63,7 +63,7 @@ pub fn lookback_start(dir: &ContractDir, reference: UtcMillis, sessions: u32) ->
     }
     let newest = partition::trade_date(&dir.product, reference);
     let dates: Vec<CivilDate> = dir.dates().into_iter().filter(|d| *d <= newest).collect();
-    let first = dates.iter().rev().take(sessions as usize).last()?;
+    let first = dates.get(dates.len().saturating_sub(sessions as usize))?;
     Some(partition::trade_date_span(&dir.product, *first).0.0)
 }
 
@@ -73,7 +73,7 @@ pub fn read(dir: &ContractDir, from_ms: i64, mut each: impl FnMut(Chunk)) -> io:
     let started = Instant::now();
     let mut stats = ReadStats::default();
     let mut coverage = dir.trade_coverage();
-    coverage.remove(i64::MIN, from_ms - 1);
+    coverage.remove(i64::MIN, from_ms.saturating_sub(1));
     if coverage.is_empty() {
         return Ok(stats);
     }
@@ -168,4 +168,130 @@ pub fn read(dir: &ContractDir, from_ms: i64, mut each: impl FnMut(Chunk)) -> io:
     }
     stats.elapsed = started.elapsed();
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog;
+    use crate::disk::Coverage;
+    use crate::disk::segment::{ENCODING, FlushPolicy, SegmentHeader, SegmentWriter};
+    use lines_core::{ContractKey, Month, Price, Qty};
+
+    fn dir(name: &str) -> ContractDir {
+        let root =
+            std::env::temp_dir().join(format!("lines-orderflow-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let es = catalog::get(catalog::ES).unwrap();
+        let k = ContractKey::monthly(es.id, 2026, Month::new(12).unwrap());
+        ContractDir::new(&root, "test", &es, Some(k))
+    }
+
+    /// Monday 2026-11-10's ES session: 2026-11-09T23:00Z to 2026-11-10T22:00Z.
+    fn monday() -> (CivilDate, i64) {
+        let d = CivilDate::new(2026, 11, 10).unwrap();
+        (d, UtcMillis::parse_iso("2026-11-09T23:00:00Z").unwrap().0)
+    }
+
+    fn write_day(dir: &ContractDir, date: CivilDate, blocks: &[&[i64]]) {
+        let header = SegmentHeader {
+            created_wall_ms: 0,
+            source: dir.source.clone(),
+            encoding: ENCODING.into(),
+            product: dir.product.symbol.into(),
+            contract: dir.contract,
+            date,
+        };
+        let (mut w, _) =
+            SegmentWriter::open(&dir.segment_path(date), &header, FlushPolicy::default()).unwrap();
+        for times in blocks {
+            let mut buf = Vec::new();
+            for &t in *times {
+                native::encode(
+                    &NativeEvent::Trade {
+                        time_us: t * 1000,
+                        price: Price(600_000),
+                        qty: Qty(1),
+                        aggressor: native::Aggressor::Buy,
+                    },
+                    &mut buf,
+                );
+            }
+            w.append(times.iter().max().unwrap() * 1000, &buf).unwrap();
+        }
+        w.close().unwrap();
+    }
+
+    fn cover(dir: &ContractDir, from: i64, to: i64) {
+        let mut c = Coverage::default();
+        c.trades.add(from, to);
+        c.save(&dir.coverage_path()).unwrap();
+    }
+
+    /// A reconnect re-sends trades already stored: they are left out until time passes the
+    /// newest counted trade; trades of the same millisecond in one run all count.
+    #[test]
+    fn a_redelivery_is_left_out() {
+        let d = dir("redelivery");
+        let (date, open) = monday();
+        let t = |s: i64| open + s * 1000;
+        write_day(
+            &d,
+            date,
+            &[
+                &[t(1), t(2), t(3)],
+                &[t(3), t(4)], // the same millisecond again in the live run: counts
+                &[t(2), t(3), t(4)], // re-delivered after a reconnect
+                &[t(4), t(5)], // still re-delivered (4), then new (5)
+            ],
+        );
+        cover(&d, open, open + 3_600_000);
+        let mut got = Vec::new();
+        let s = read(&d, i64::MIN, |c| {
+            got.extend(c.trades.iter().map(|p| p.time.0))
+        })
+        .unwrap();
+        assert_eq!(got, vec![t(1), t(2), t(3), t(3), t(4), t(5)]);
+        assert_eq!(s.redelivered, 4);
+        assert_eq!((s.decoded, s.replayed, s.cut), (10, 6, 0));
+    }
+
+    /// Only covered trades replay: outside the claims (and before the lookback) they were
+    /// never complete.
+    #[test]
+    fn only_covered_trades_inside_the_lookback_replay() {
+        let d = dir("covered");
+        let (date, open) = monday();
+        let t = |s: i64| open + s * 1000;
+        write_day(&d, date, &[&[t(1), t(2), t(3), t(10), t(11)]]);
+        cover(&d, t(2), t(10));
+        let mut chunks = Vec::new();
+        read(&d, t(3), |c| chunks.push(c)).unwrap();
+        assert_eq!(chunks.len(), 1);
+        let times: Vec<i64> = chunks[0].trades.iter().map(|p| p.time.0).collect();
+        assert_eq!(times, vec![t(3), t(10)]);
+        assert_eq!(chunks[0].covered, vec![(t(3), t(10))]);
+        assert_eq!(chunks[0].trades[0].aggressor, Some(Aggressor::Buy));
+    }
+
+    #[test]
+    fn the_lookback_keeps_the_newest_stored_sessions() {
+        let d = dir("lookback");
+        let dates: Vec<CivilDate> = [9, 10, 11]
+            .into_iter()
+            .map(|day| CivilDate::new(2026, 11, day).unwrap())
+            .collect();
+        for &date in &dates {
+            write_day(&d, date, &[]);
+        }
+        let open = |date| partition::trade_date_span(&d.product, date).0.0;
+        let newest = UtcMillis(open(dates[2]) + 3_600_000);
+        assert_eq!(lookback_start(&d, newest, 1), Some(open(dates[2])));
+        assert_eq!(lookback_start(&d, newest, 2), Some(open(dates[1])));
+        assert_eq!(lookback_start(&d, newest, 9), Some(open(dates[0])));
+        assert_eq!(lookback_start(&d, newest, 0), None, "off");
+        // The reference is the newest stored data: later dates don't count.
+        let older = UtcMillis(open(dates[1]) + 1);
+        assert_eq!(lookback_start(&d, older, 1), Some(open(dates[1])));
+    }
 }

@@ -821,7 +821,135 @@ impl Drop for ChartStore {
 mod tests {
     use super::*;
     use crate::catalog;
-    use lines_core::{Month, Qty, Side};
+    use lines_core::{Aggressor, Month, Qty, Side};
+
+    fn es_store(history: bool) -> ChartStore {
+        let es = catalog::get(catalog::ES).unwrap();
+        let caps = Capabilities {
+            history,
+            ..Capabilities::default()
+        };
+        ChartStore::new(es, None, caps, "test", 60_000, 1000)
+    }
+
+    fn print(t: i64, q: i64) -> Print {
+        Print {
+            time: UtcMillis(t),
+            price: Price(600_000),
+            qty: Qty(q),
+            aggressor: Some(Aggressor::Buy),
+        }
+    }
+
+    fn live(t: i64, q: i64) -> MarketEvent {
+        MarketEvent::Trade {
+            time: UtcMillis(t),
+            price: Price(600_000),
+            qty: Qty(q),
+            aggressor: Some(Aggressor::Buy),
+        }
+    }
+
+    /// The stored → live boundary: a history snapshot older than the newest stored trade
+    /// doesn't count the stored trades again; after it, every live trade counts once.
+    #[test]
+    fn stored_then_live_counts_every_trade_once() {
+        let store = es_store(true);
+        let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+        store.update(|d| {
+            d.apply_stored(
+                &[print(t0 + 1000, 1), print(t0 + 2000, 2)],
+                &[(t0, t0 + 2999)],
+            )
+        });
+        {
+            let d = store.read();
+            assert_eq!(d.vap.total(), Qty(3));
+            assert!(d.series.is_empty(), "stored trades never touch the bars");
+        }
+        store.update(|d| {
+            d.begin_connection();
+            d.apply(&[MarketEvent::History {
+                bars: vec![],
+                as_of: Some(UtcMillis(t0 + 1500)),
+            }]);
+        });
+        // Re-sent after the snapshot (stored already), then new.
+        store.update(|d| d.apply(&[live(t0 + 2000, 2), live(t0 + 5000, 4)]));
+        let d = store.read();
+        assert_eq!(d.vap.total(), Qty(1 + 2 + 4));
+        assert_eq!(d.tape.len(), 3);
+        assert_eq!(
+            d.profiles
+                .footprint()
+                .range(UtcMillis(t0), UtcMillis(t0 + 60_000))
+                .map(|(_, v)| v.total().0)
+                .sum::<i64>(),
+            7
+        );
+        // Stored [t0, t0+2999] and live from the snapshot on: no hole.
+        assert_eq!(
+            d.counted_gaps(t0, t0 + 5000),
+            CountedGaps {
+                any: true,
+                ..CountedGaps::default()
+            }
+        );
+    }
+
+    /// Holes in the counted trades: where the data starts (`partial from`) and the inner
+    /// gaps, but never the market's daily break.
+    #[test]
+    fn counted_gaps_skip_closed_market_time() {
+        let store = es_store(true);
+        let at = |s: &str| UtcMillis::parse_iso(s).unwrap().0;
+        store.update(|d| {
+            // Monday's session to 21:00, a 20-minute hole, then to the 22:00 close; Tuesday's
+            // session from its 23:00 open (the 22:00–23:00 break between is closed).
+            let a = at("2026-11-10T14:00:00Z");
+            d.apply_stored(&[], &[(a, at("2026-11-10T21:00:00Z") - 1)]);
+            d.apply_stored(
+                &[],
+                &[(at("2026-11-10T21:20:00Z"), at("2026-11-10T22:00:00Z") - 1)],
+            );
+            d.apply_stored(
+                &[],
+                &[(at("2026-11-10T23:00:00Z"), at("2026-11-11T01:00:00Z"))],
+            );
+        });
+        let d = store.read();
+        let g = d.counted_gaps(at("2026-11-10T13:00:00Z"), at("2026-11-11T01:00:00Z"));
+        assert!(g.any);
+        assert_eq!(
+            g.data_from,
+            Some(at("2026-11-10T14:00:00Z")),
+            "partial from 14:00"
+        );
+        assert_eq!(
+            g.first_gap,
+            Some((at("2026-11-10T21:00:00Z"), at("2026-11-10T21:20:00Z") - 1))
+        );
+        assert_eq!(g.more_gaps, 0, "the 22:00–23:00 break is no gap");
+        // A hole under a minute of open market isn't reported.
+        drop(d);
+        store.update(|d| {
+            d.apply_stored(
+                &[],
+                &[(
+                    at("2026-11-11T01:00:00Z") + 30_000,
+                    at("2026-11-11T02:00:00Z"),
+                )],
+            )
+        });
+        let d = store.read();
+        let g = d.counted_gaps(at("2026-11-10T21:30:00Z"), at("2026-11-11T02:00:00Z"));
+        assert_eq!((g.data_from, g.first_gap, g.more_gaps), (None, None, 0));
+        // Nothing counted in the span: nothing to say.
+        assert!(
+            !d.counted_gaps(at("2026-11-12T00:00:00Z"), at("2026-11-12T01:00:00Z"))
+                .any
+        );
+    }
 
     /// Exchange → receive per trade on the receive clock; back-fill skipped; the clock
     /// offset bound is the smallest receive − exchange (negative: the local clock is behind).

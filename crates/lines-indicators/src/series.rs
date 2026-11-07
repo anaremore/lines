@@ -626,4 +626,128 @@ mod tests {
         assert!(!b[1].exact, "minute 1 was interrupted by the disconnect");
         assert!(!b[2].exact && b[3].exact);
     }
+
+    /// Ten minutes of trades, two a minute, both sides.
+    fn session() -> Vec<Print> {
+        (0..20)
+            .map(|i| Print {
+                time: t(i / 2, (i % 2) * 30_000 + 5),
+                price: Price(100 + (i * 7) % 5),
+                qty: Qty(1 + i % 3),
+                aggressor: Some(if i % 3 == 0 {
+                    Aggressor::Sell
+                } else {
+                    Aggressor::Buy
+                }),
+            })
+            .collect()
+    }
+
+    fn live_inputs(trades: &[Print]) -> Vec<Input> {
+        let mut v = vec![
+            Input::Connect {
+                expect_history: false,
+            },
+            Input::TradesFrom(t(0, 0)),
+        ];
+        v.extend(trades.iter().map(|p| Input::Trade {
+            time: p.time,
+            price: p.price,
+            qty: p.qty,
+            aggressor: p.aggressor,
+        }));
+        v
+    }
+
+    /// Stored order flow (cached bars + stored trades, `Input::Cached` / `Input::Stored`)
+    /// builds exactly the buckets the same trades build live.
+    #[test]
+    fn stored_trades_equal_live_trades() {
+        let trades = session();
+        let mut live = MarketSeries::new(60_000, 100);
+        live.apply(&live_inputs(&trades));
+        let bars: Vec<Bar> = live.buckets().iter().map(|b| b.bar).collect();
+        let mut stored = MarketSeries::new(60_000, 100);
+        stored.apply(&[
+            Input::Cached(bars),
+            Input::Stored {
+                trades: trades.clone(),
+                covered: vec![(t(0, 0).0, t(10, 0).0 - 1)],
+            },
+        ]);
+        assert_eq!(stored.buckets(), live.buckets());
+        assert!(stored.buckets().iter().all(|b| b.exact));
+    }
+
+    /// A hole in the stored coverage keeps only its buckets approximate (bar-derived).
+    #[test]
+    fn a_coverage_gap_keeps_only_its_buckets_approximate() {
+        let trades = session();
+        let mut live = MarketSeries::new(60_000, 100);
+        live.apply(&live_inputs(&trades));
+        let bars: Vec<Bar> = live.buckets().iter().map(|b| b.bar).collect();
+        // Minutes 4 and 5 are not covered (their trades were never stored complete).
+        let kept: Vec<Print> = trades
+            .iter()
+            .copied()
+            .filter(|p| !(t(4, 0)..t(6, 0)).contains(&p.time))
+            .collect();
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Cached(bars),
+            Input::Stored {
+                trades: kept,
+                covered: vec![(t(0, 0).0, t(4, 0).0 - 1), (t(6, 0).0, t(10, 0).0 - 1)],
+            },
+        ]);
+        let exact: Vec<bool> = m.buckets().iter().map(|b| b.exact).collect();
+        assert_eq!(
+            exact,
+            [true, true, true, true, false, false, true, true, true, true]
+        );
+        assert_eq!(m.buckets()[4].sums, Sums::bar(&m.buckets()[4].bar));
+        assert_eq!(m.buckets()[7], live.buckets()[7]);
+    }
+
+    /// After stored trades, a snapshot older than the store doesn't count them again.
+    #[test]
+    fn no_double_count_across_the_stored_to_live_boundary() {
+        let trades = session();
+        let mut live = MarketSeries::new(60_000, 100);
+        live.apply(&live_inputs(&trades));
+        let bars: Vec<Bar> = live.buckets().iter().map(|b| b.bar).collect();
+        let (first, rest) = trades.split_at(10); // minutes 0-4 stored
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Cached(bars[..5].to_vec()),
+            Input::Stored {
+                trades: first.to_vec(),
+                covered: vec![(t(0, 0).0, t(5, 0).0 - 1)],
+            },
+            Input::Connect {
+                expect_history: true,
+            },
+            // The provider's snapshot ends inside the stored span (minute 3).
+            Input::History {
+                bars: bars[..4].to_vec(),
+                as_of: Some(t(4, 0)),
+            },
+        ]);
+        // Minute 4's trades again (already stored), then minutes 5-9 live.
+        let again: Vec<Input> = first[8..]
+            .iter()
+            .chain(rest)
+            .map(|p| Input::Trade {
+                time: p.time,
+                price: p.price,
+                qty: p.qty,
+                aggressor: p.aggressor,
+            })
+            .collect();
+        m.apply(&again);
+        let total = |s: &MarketSeries| s.buckets().iter().map(|b| b.sums.v).sum::<i128>();
+        assert_eq!(total(&m), total(&live), "every trade once");
+        assert_eq!(m.buckets()[4].sums, live.buckets()[4].sums);
+        assert!(m.buckets()[4].exact && m.buckets()[9].exact);
+    }
 }

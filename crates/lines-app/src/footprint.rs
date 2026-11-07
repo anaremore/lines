@@ -378,7 +378,7 @@ impl FootprintLayer {
             (f.under_legend, "bars under the legend shown as candles"),
             (f.at_edge, "bars cut by the plot's edge shown as candles"),
             (f.too_many, "too many cells: some bars as candles"),
-            (f.no_trades, "footprint from live/replay trades only"),
+            (f.no_trades, "footprint from counted trades only"),
         ] {
             if on {
                 notes.push(text.to_owned());
@@ -935,7 +935,7 @@ mod tests {
         assert_eq!(label, "Footprint · sell × buy");
         assert_eq!(
             note.as_deref(),
-            Some("footprint from live/replay trades only · underline = imbalance")
+            Some("footprint from counted trades only · underline = imbalance")
         );
         fp.check_drawable(&vp).unwrap();
         // Narrow bars: no cells at all; the legend asks to zoom in.

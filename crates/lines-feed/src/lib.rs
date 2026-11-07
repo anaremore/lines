@@ -638,6 +638,9 @@ fn open_writer(
     }
 }
 
+/// Stored trades applied per store update at startup (a few ms under the lock).
+const STORED_SLICE: usize = 20_000;
+
 /// The local store's warm start (decision 0019), on the feed thread before connecting: the
 /// engine gets the cached bars, then the stored trades of the newest stored sessions replay
 /// into everything that counts trades (`disk::orderflow`). Panes show the bars first and
@@ -660,7 +663,12 @@ fn warm_start(
     };
     store.update(|d| d.orderflow_loading = true);
     let result = disk::orderflow::read(writer.dir(), from, |chunk| {
-        store.update(|d| d.apply_stored(&chunk.trades, &chunk.covered));
+        // In slices, so the store's lock is held for milliseconds (panes keep drawing); the
+        // coverage comes with the last one.
+        for part in chunk.trades.chunks(STORED_SLICE) {
+            store.update(|d| d.apply_stored(part, &[]));
+        }
+        store.update(|d| d.apply_stored(&[], &chunk.covered));
         tap.stored(chunk.trades, chunk.covered);
     });
     store.update(|d| d.orderflow_loading = false);
