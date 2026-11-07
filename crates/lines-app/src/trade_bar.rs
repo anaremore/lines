@@ -2209,20 +2209,6 @@ fn account_chip<V: TradePane>(
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
-        .relative()
-        .children(
-            crate::layout_rec::on()
-                .then(|| {
-                    crate::layout_rec::bordered(
-                        lines_core::layout_lint::Kind::Chip,
-                        format!("{name} ▾"),
-                        0,
-                        "",
-                        1.0,
-                    )
-                })
-                .flatten(),
-        )
         .child(format!("{name} ▾"))
         .when(open, |d| d.border_color(accent))
         .hover(move |s| s.border_color(accent));
@@ -2236,15 +2222,32 @@ fn account_chip<V: TradePane>(
         .min_w_0()
         .when(paper, |d| d.child(paper_badge(t)))
         .child(crate::dropdown::dropdown(
-            c.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|v: &mut V, _, _, cx| {
-                    cx.stop_propagation();
-                    let t = v.trade();
-                    t.account_menu = !t.account_menu;
-                    cx.notify();
-                }),
-            ),
+            // The chip is recorded from a wrapper: the chip clips its own children.
+            div()
+                .relative()
+                .min_w_0()
+                .flex()
+                .child(c.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|v: &mut V, _, _, cx| {
+                        cx.stop_propagation();
+                        let t = v.trade();
+                        t.account_menu = !t.account_menu;
+                        cx.notify();
+                    }),
+                ))
+                .children(
+                    crate::layout_rec::on()
+                        .then(|| {
+                            crate::layout_rec::marker(
+                                lines_core::layout_lint::Kind::Chip,
+                                format!("{name} ▾"),
+                                0,
+                                "",
+                            )
+                        })
+                        .flatten(),
+                ),
             menu,
         ))
         .into_any_element()
@@ -2413,7 +2416,13 @@ pub fn chart_chip<V: TradePane>(
         return Some(b.into_any_element());
     }
     let data = empty_data(info.name.clone(), info.paper);
-    Some(account_chip(v, Some(&data), t, cx))
+    // Whole or not at all (the header's fit decides): never shrunk and cut.
+    Some(
+        div()
+            .flex_shrink_0()
+            .child(account_chip(v, Some(&data), t, cx))
+            .into_any_element(),
+    )
 }
 
 /// The quantity the pane trades.
