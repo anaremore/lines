@@ -14,11 +14,11 @@
 
 ## Status: pre-alpha
 
-Lines trades on paper only: no live broker connections and no live order entry. Data comes from a mock futures feed, the Coinbase and Kraken public crypto feeds, and replays of recorded sessions. Live futures connectors (Rithmic, CQG) are planned, not built.
+Lines trades on paper only: no live broker connections and no live order entry. Data comes from a mock futures feed, the Coinbase and Kraken public crypto feeds, and replays of recorded sessions. Live futures connectors (Rithmic, CQG) are planned and not in public builds.
 
 ## What works today
 
-- **Data:** a CQG-protocol mock (ES), Coinbase and Kraken public feeds, record and deterministic replay, and a local market-data store so charts and order flow open instantly on restart.
+- **Data:** a simulated ES futures feed, Coinbase and Kraken public feeds, record and deterministic replay, and a local market-data store for live feeds, so charts and order flow open instantly on restart.
 - **Charts:** minute to weekly candles, plus bars built from counted trades: tick (`500t`), volume (`500v`), range (`10r`) and seconds (`30s`; volume, range and seconds bars are on `main`, after v0.3.0). Footprint, cumulative delta, VWAP with bands, and a volume profile.
 - **Drawings:** lines, rays, trend lines, zones, notes and a measure tool, with color, line style, width and opacity per drawing.
 - **DOM:** a tick-indexed ladder with depth, volume at price and a price trail; click, drag and hotkey paper orders; brackets; Flatten and Cancel all always visible.
@@ -37,7 +37,7 @@ Prices and money are exact integers, never floating point.
 
 ## Install
 
-Download the zip for your platform from the [latest release](https://github.com/anaremore/lines/releases) (Windows x64, macOS Apple silicon, Linux x64), extract it, and run `lines` (`lines.exe` on Windows). SHA-256 checksums are attached. Builds are not code-signed yet, so Windows and macOS may warn on first launch.
+Download your platform's archive from the [latest release](https://github.com/anaremore/lines/releases): a zip for Windows x64 and macOS (Apple silicon), a tar.gz for Linux x64. Extract it and run `lines.exe` (Windows), `Lines.app` (macOS) or `lines` (Linux). SHA-256 checksums are attached. Builds are not code-signed yet, so Windows and macOS may warn on first launch.
 
 ## Quick start
 
@@ -59,14 +59,14 @@ To trade on paper, enable trading in the DOM's header (or Ctrl+Shift+Space), the
 | Ctrl+Shift+P | Command palette: every command, with its key |
 | Ctrl+, | Settings |
 | Ctrl+K, or type a letter on a chart | Symbol picker |
-| `5` / `1h` / `500t` / `500v` / `10r` / `30s` + Enter | Change the chart's timeframe |
+| `5` / `1h` / `500t` + Enter (`500v` / `10r` / `30s` after v0.3.0) | Change the chart's timeframe |
 | Ctrl+I | Studies (VWAP, volume profile, footprint, cumulative delta) |
 | Alt+H / Alt+T / Alt+Z / Alt+N / Alt+U | Horizontal line, trend line, zone, note, measure |
 | Ctrl+Shift+Space | Enable or disable DOM trading |
 | Ctrl+Alt+B / Ctrl+Alt+S | Buy / sell market |
 | Ctrl+Shift+F / Ctrl+Shift+A | Flatten / cancel all orders |
 | Ctrl+Shift+D / Ctrl+Shift+E | Hide or show the DOM / time & sales |
-| Ctrl+T, Ctrl+Tab | New tab, next tab |
+| Ctrl+T, Ctrl+PageDown | New tab, next tab |
 | F1 | Hide or show the key-hint bar |
 
 ## Build from source

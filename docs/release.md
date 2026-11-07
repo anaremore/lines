@@ -4,7 +4,7 @@ Lines ships continuous **pre-alpha** builds. Releases are produced by the planni
 
 ## Versioning
 - `0.MINOR.PATCH`. MINOR bumps when a roadmap milestone is marked done; PATCH for fixes between milestones.
-- Tag `vX.Y.Z` on `main`; a GitHub Release with notes and a Windows build (`lines-vX.Y.Z-windows-x64.zip`: `lines.exe`, `LICENSE.md`, a short README). macOS and Linux artifacts are added once CI builds them.
+- Tag `vX.Y.Z` on `main`; a GitHub Release with notes and builds for Windows (`lines-vX.Y.Z-windows-x64.zip`: `lines.exe`, `LICENSE.md`, a short README), macOS (`lines-vX.Y.Z-macos-arm64.zip`) and Linux (`lines-vX.Y.Z-linux-x64.tar.gz`), plus `SHA256SUMS.txt` and `THIRD_PARTY_LICENSES.txt`.
 - Releases are marked **pre-release** until 1.0.
 
 ## A release requires
