@@ -386,15 +386,16 @@ fn perf_stored_order_flow_startup() {
     }
 }
 
-/// The writer stores every trade once: a connection's late trades (a REST fill of trades
-/// older than newer streamed ones) are stored, as live counts them; a later connection's
-/// re-sent trades (here with a history snapshot older than the store) are not stored again.
+/// The store holds exactly the trades live counted: the writer stores the trades the chart
+/// counted in each frame (`ChartData::frame_counted`). A connection's late trades (a REST fill
+/// older than newer streamed ones) are stored, as live counts them; a reconnect's re-sent
+/// trades the new snapshot covers are not; so the stored session replays to what live built.
 #[test]
-fn the_writer_stores_every_trade_once() {
+fn the_store_holds_exactly_the_counted_trades() {
     use lines_feed::connection::EventSink;
     use lines_feed::disk::ContractWriter;
     use lines_feed::provider::MarketEvent;
-    let root = temp("writer-once");
+    let root = temp("writer-counted");
     let es = catalog::get(catalog::ES).unwrap();
     let caps = lines_core::Capabilities {
         history: true,
@@ -409,17 +410,17 @@ fn the_writer_stores_every_trade_once() {
         1000,
     ));
     let cfg = StoreConfig::new(root.clone(), "test");
-    let (mut w, _) = ContractWriter::open(&cfg, &es, Some(contract()), store).unwrap();
+    let (mut w, _) = ContractWriter::open(&cfg, &es, Some(contract()), store.clone()).unwrap();
     let t0 = at("2026-11-10T15:00:00Z");
     let ms = |s: f64| t0 + (s * 1000.0) as i64;
     let trade = |t: i64| MarketEvent::Trade {
         time: UtcMillis(t),
-        price: Price(600_000),
-        qty: Qty(1),
+        price: Price(600_000 + (t % 7) * 25),
+        qty: Qty(1 + t % 3),
         aggressor: None,
     };
     let snapshot = |as_of: i64| {
-        [
+        vec![
             MarketEvent::History {
                 bars: vec![],
                 as_of: Some(UtcMillis(as_of)),
@@ -427,33 +428,46 @@ fn the_writer_stores_every_trade_once() {
             MarketEvent::HistoryComplete,
         ]
     };
+    // As the feed does: the chart applies the frame, then the writer stores it.
+    let frame = |w: &mut ContractWriter, events: Vec<MarketEvent>, now: i64| {
+        store.update_frame(|d| d.apply(&events));
+        w.frame(&events, UtcMillis(now));
+    };
     // Connection 1: a snapshot to t0, trades 1-5 s, then a late one at 2.5 s.
+    store.update(|d| d.begin_connection());
     w.begin(None, UtcMillis(t0));
-    w.frame(&snapshot(t0), UtcMillis(t0));
+    frame(&mut w, snapshot(t0), t0);
     for s in [1.0, 2.0, 3.0, 4.0, 5.0, 2.5] {
-        w.frame(&[trade(ms(s))], UtcMillis(ms(5.0).max(ms(s))));
+        frame(&mut w, vec![trade(ms(s))], ms(5.0).max(ms(s)));
     }
     w.end(UtcMillis(ms(5.0)));
-    // Connection 2: 3-5 s re-sent, a snapshot to 4 s (older than the store), 5 s again, then
-    // 6 and 7 s.
+    // Connection 2: a snapshot to 5 s, then 3-5 s re-sent (covered by it), then 6 and 7 s.
+    store.update(|d| d.begin_connection());
     w.begin(None, UtcMillis(ms(5.0)));
-    w.frame(
-        &[trade(ms(3.0)), trade(ms(4.0)), trade(ms(5.0))],
-        UtcMillis(ms(5.5)),
+    frame(&mut w, snapshot(ms(5.0)), ms(5.5));
+    frame(
+        &mut w,
+        vec![
+            trade(ms(3.0)),
+            trade(ms(4.0)),
+            trade(ms(5.0)),
+            trade(ms(6.0)),
+        ],
+        ms(6.0),
     );
-    w.frame(&snapshot(ms(4.0)), UtcMillis(ms(5.5)));
-    w.frame(&[trade(ms(5.0)), trade(ms(6.0))], UtcMillis(ms(6.0)));
-    w.frame(&[trade(ms(7.0))], UtcMillis(ms(7.0)));
+    frame(&mut w, vec![trade(ms(7.0))], ms(7.0));
     w.end(UtcMillis(ms(7.0)));
     drop(w);
     let mut got = Vec::new();
-    orderflow::read(&es_dir(&root), i64::MIN, |c| {
-        got.extend(c.trades.iter().map(|p| p.time.0))
-    })
-    .unwrap();
+    orderflow::read(&es_dir(&root), i64::MIN, |c| got.extend(c.trades)).unwrap();
+    let times: Vec<i64> = got.iter().map(|p| p.time.0).collect();
     let expect: Vec<i64> = [1.0, 2.0, 3.0, 4.0, 5.0, 2.5, 6.0, 7.0]
         .into_iter()
         .map(ms)
         .collect();
-    assert_eq!(got, expect);
+    assert_eq!(times, expect);
+    // Replayed into a fresh chart: what live counted, exactly.
+    let fresh = ChartStore::new(es, Some(contract()), caps, "test", 60_000, 1000);
+    fresh.update(|d| d.apply_stored(&got, &[]));
+    assert_eq!(fresh.read().vap, store.read().vap);
 }

@@ -380,7 +380,8 @@ impl FootprintLayer {
             (f.narrow || f.rows_short, "zoom in to see cells"),
             (f.too_wide, "some bars: numbers too wide, zoom in"),
             (f.under_legend, "bars under the legend shown as candles"),
-            (f.at_edge, "bars cut by the plot's edge shown as candles"),
+            // Short, so the capped legend line keeps the key word ("candles").
+            (f.at_edge, "edge bars as candles"),
             (f.too_many, "too many cells: some bars as candles"),
             (f.no_trades, "footprint from counted trades only"),
         ] {
@@ -967,8 +968,7 @@ mod tests {
         assert_eq!(
             note.as_deref(),
             Some(
-                "bars cut by the plot's edge shown as candles · footprint from counted trades \
-                 only · underline = imbalance"
+                "edge bars as candles · footprint from counted trades only · underline = imbalance"
             )
         );
         fp.check_drawable(&vp).unwrap();
@@ -1167,7 +1167,7 @@ mod tests {
         cut.price_hi = 600_000.0 + 5.0;
         fp.prepare(&d, bars, &cut);
         let note = fp.legend().unwrap().1.unwrap();
-        assert!(note.contains("cut by the plot's edge"), "{note}");
+        assert!(note.contains("edge bars as candles"), "{note}");
         assert!(
             !note.contains("? "),
             "{note}: nothing drawn, nothing to count"

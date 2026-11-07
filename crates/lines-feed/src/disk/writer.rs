@@ -78,14 +78,11 @@ pub struct ContractWriter {
     io: Option<thread::JoinHandle<()>>,
     coverage: Coverage,
     run: Run,
-    /// The newest trade time stored by an earlier connection (or claimed complete when the
-    /// store opened). A later connection's trade at or before it is a re-delivery of one
-    /// already stored (a reconnect re-sending, or a history snapshot older than the store):
-    /// it is not stored again, so the segments hold every trade once. Late trades inside one
-    /// connection (a REST fill of missing trades) are newer than this mark's run and kept.
-    stored_mark: Option<i64>,
-    /// The newest trade time stored by this connection.
-    run_newest: Option<i64>,
+    /// Which of the frame's trades the chart counted (`ChartData::frame_counted`, copied
+    /// under the store's lock): only those are stored, so the segments hold exactly the
+    /// trades live counted (each once, late ones included) and a stored session replays to
+    /// what live showed.
+    counted: Vec<bool>,
     buf: Vec<u8>,
     last_save: Instant,
     _lock: File,
@@ -165,6 +162,10 @@ impl ContractWriter {
                 opened.bars = dir.rebuild_bars(period_ms, max_bars)?;
                 opened.rebuilt = true;
                 bars::save(&dir.bars_path(), period_ms, &opened.bars)?;
+                // Segments hold only counted trades: bars rebuilt from them are complete only
+                // where the trades are; history fills the rest.
+                coverage.bars = coverage.trades.clone();
+                coverage.save(&dir.coverage_path())?;
             }
             None => {}
         }
@@ -185,10 +186,9 @@ impl ContractWriter {
                 store,
                 tx: Some(tx),
                 io: Some(io),
-                stored_mark: coverage.trades.ranges().last().map(|r| r.1),
                 coverage,
                 run: Run::default(),
-                run_newest: None,
+                counted: Vec::new(),
                 buf: Vec::with_capacity(4096),
                 last_save: Instant::now(),
                 dir,
@@ -234,13 +234,6 @@ impl ContractWriter {
         self.send(Io::Coverage(self.coverage.clone()));
     }
 
-    /// A connection ended: its trades are now "stored by an earlier connection".
-    fn close_run_mark(&mut self) {
-        if let Some(n) = self.run_newest.take() {
-            self.stored_mark = Some(self.stored_mark.map_or(n, |m| m.max(n)));
-        }
-    }
-
     fn save_bars(&self) {
         let bars = self.store.read().series.bars().to_vec();
         self.send(Io::Bars(bars));
@@ -258,13 +251,18 @@ fn segment_header(dir: &ContractDir, product: &Product, date: CivilDate) -> Segm
     }
 }
 
+/// `*k`, then `*k += 1` (indexing the frame's trades in order inside a match guard).
+fn post_inc(k: &mut usize) -> usize {
+    *k += 1;
+    *k - 1
+}
+
 impl EventSink for ContractWriter {
     fn begin(
         &mut self,
         newest_bar: Option<UtcMillis>,
         window_start: UtcMillis,
     ) -> Option<UtcMillis> {
-        self.close_run_mark();
         let from = newest_bar.map(|newest| {
             // The earliest hole in the bar coverage inside the window, else the newest bar.
             let hole = self
@@ -289,13 +287,30 @@ impl EventSink for ContractWriter {
     fn frame(&mut self, events: &[MarketEvent], now: UtcMillis) {
         let now_us = now.0.saturating_mul(1000);
         self.buf.clear();
+        // Which trades the chart counted when it applied this frame (just before, on this
+        // thread). Without that record (a writer driven directly, as in tests) every trade is
+        // stored.
+        let trades = events
+            .iter()
+            .filter(|e| matches!(e, MarketEvent::Trade { .. }))
+            .count();
+        self.counted.clear();
+        {
+            let d = self.store.read();
+            if d.frame_counted.len() == trades {
+                self.counted.extend_from_slice(&d.frame_counted);
+            }
+        }
+        if self.counted.len() != trades {
+            self.counted.clear();
+            self.counted.resize(trades, true);
+        }
+        let mut k = 0;
         let mut block_us = None::<i64>;
         for e in events {
             let ne = match *e {
-                MarketEvent::Trade { time, .. }
-                    if self.stored_mark.is_some_and(|m| time.0 <= m) =>
-                {
-                    None // stored already, by an earlier connection
+                MarketEvent::Trade { .. } if !self.counted[post_inc(&mut k)] => {
+                    None // not counted live (already in a snapshot, or replayed from here)
                 }
                 MarketEvent::Trade {
                     time,
@@ -303,7 +318,6 @@ impl EventSink for ContractWriter {
                     qty,
                     aggressor,
                 } => {
-                    self.run_newest = Some(self.run_newest.map_or(time.0, |n| n.max(time.0)));
                     let t = time.0.saturating_mul(1000);
                     block_us = Some(block_us.map_or(t, |b| b.max(t)));
                     Some(NativeEvent::Trade {
@@ -399,7 +413,6 @@ impl EventSink for ContractWriter {
         self.commit();
         self.save_bars();
         self.run = Run::default();
-        self.close_run_mark();
     }
 }
 

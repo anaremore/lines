@@ -199,6 +199,9 @@ pub struct ChartData {
     live_run: Option<(i64, i64)>,
     /// Newest stored trade time replayed: a live trade at or before it is already counted.
     stored_through: Option<i64>,
+    /// Whether each `Trade` of the last applied frame was counted (in order): the local
+    /// store's writer stores exactly those (`disk::writer`).
+    pub frame_counted: Vec<bool>,
 }
 
 impl ChartData {
@@ -232,6 +235,7 @@ impl ChartData {
         // Quotes count only if they changed (compared after the batch): a feed that repeats
         // its BBO with every depth batch doesn't repaint charts.
         let quote = (self.bid, self.ask, self.last_trade);
+        self.frame_counted.clear();
         for e in events {
             chart |= !matches!(
                 e,
@@ -280,10 +284,11 @@ impl ChartData {
                     qty,
                     aggressor,
                 } => {
-                    if self.stitch.trade(&mut self.series, time, price, qty)
+                    let counted = self.stitch.trade(&mut self.series, time, price, qty)
                         // Replayed from the store already (a snapshot older than the store).
-                        && self.stored_through.is_none_or(|s| time.0 > s)
-                    {
+                        && self.stored_through.is_none_or(|s| time.0 > s);
+                    self.frame_counted.push(counted);
+                    if counted {
                         self.tape.push(Print {
                             time,
                             price,
@@ -358,10 +363,11 @@ impl ChartData {
             self.tape.push(*p);
             self.vap.add(p.price, p.qty);
             self.profiles.add(p.time, p.price, p.qty, p.aggressor);
+            // The newest replayed trade (exchange time; never the local clock).
+            self.stored_through = Some(self.stored_through.map_or(p.time.0, |s| s.max(p.time.0)));
         }
         for &(a, b) in covered {
             self.counted.add(a, b);
-            self.stored_through = Some(self.stored_through.map_or(b, |s| s.max(b)));
         }
         if !trades.is_empty() {
             self.chart_epoch += 1;
@@ -634,6 +640,7 @@ impl ChartStore {
                 counted: crate::disk::Ranges::default(),
                 live_run: None,
                 stored_through: None,
+                frame_counted: Vec::new(),
             }),
             revision: AtomicU64::new(0),
             chart_revision: AtomicU64::new(0),
@@ -895,6 +902,31 @@ mod tests {
                 ..CountedGaps::default()
             }
         );
+    }
+
+    /// The warm-start floor is the newest replayed trade, never the coverage's end (which can
+    /// follow a fast local clock): a live trade after the last stored one counts.
+    #[test]
+    fn the_stored_floor_is_the_newest_stored_trade() {
+        let store = es_store(true);
+        let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
+        // Coverage claimed 90 s past the last stored trade (a clock running ahead).
+        store.update(|d| d.apply_stored(&[print(t0 + 1000, 1)], &[(t0, t0 + 91_000)]));
+        store.update(|d| {
+            d.begin_connection();
+            d.apply(&[MarketEvent::History {
+                bars: vec![],
+                as_of: Some(UtcMillis(t0 + 500)),
+            }]);
+            d.apply(&[live(t0 + 1000, 1), live(t0 + 30_000, 5)]);
+        });
+        let d = store.read();
+        assert_eq!(
+            d.vap.total(),
+            Qty(1 + 5),
+            "the re-sent stored trade once, the new one counts"
+        );
+        assert_eq!(d.frame_counted, vec![false, true]);
     }
 
     /// Holes in the counted trades: where the data starts (`partial from`) and the inner

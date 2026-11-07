@@ -380,11 +380,15 @@ impl MarketSeries {
                         s.sums.add(&Sums::trade(t.price, t.qty));
                         s.delta.trade(t.qty, t.aggressor);
                         mark(t.time.0, &mut dirty);
+                        // The newest replayed trade (exchange time, never the local clock).
+                        self.stored_through =
+                            Some(self.stored_through.map_or(t.time.0, |s| s.max(t.time.0)));
+                    }
+                    for &(a, _) in covered {
+                        mark(a, &mut dirty);
                     }
                     for &(a, b) in covered {
                         self.complete.add(a, b);
-                        self.stored_through = Some(self.stored_through.map_or(b, |s| s.max(b)));
-                        mark(a, &mut dirty);
                     }
                 }
             }

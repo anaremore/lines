@@ -95,12 +95,13 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # --dom-grouping N (ticks per row; G / Shift+G cycle 1 2 5 10 25 in the app), --large-print SIZE.
 # --dom-trail: DOMs start with the price trail on (a DOM's saved `trail` wins). Evidence from synthetic data:
 #   lines --replay recordings/synth-es-2026-11-05.lfr --screenshot out.png --at 2026-11-05T14:52:00Z --size 1400x800 --dom-trail
-# Local market-data store (decision 0019): on by default for coinbase/cqg, never for mock, replay or
-# screenshots. Location: LINES_DATA_DIR, else %LOCALAPPDATA%\Lines (macOS ~/Library/Application Support/Lines,
+# Local market-data store (decision 0019): on by default for coinbase, kraken, cqg and extensions with a local
+# store, never for mock, replay or screenshots unless --store-dir names one. Location: LINES_DATA_DIR, else %LOCALAPPDATA%\Lines (macOS ~/Library/Application Support/Lines,
 # Linux $XDG_DATA_HOME/lines). --no-store, --store-depth ES,NQ (depth off by default), --store-budget-gb 4.
 # --orderflow-sessions N: at startup replay the stored trades of the newest N stored sessions into the profile,
 # footprint, delta, VWAP, DOM volume and T&S (default 2, 0 = off). --store-dir DIR: use the store under DIR for any
-# source (mock, replays and screenshots included; evidence with a synthetic stored session):
+# source (mock, replays and screenshots included; the run writes into DIR, so give each screenshot a fresh
+# copy; evidence with a synthetic stored session):
 #   cargo run -p lines-feed --example synth_session -- recordings/synth-day1.lfr --day 1   # (and --day 2)
 #   lines --source replay --replay recordings/synth-day1.lfr --speed 0 --headless 20 --store-dir recordings/of-store
 #   lines --replay recordings/synth-day2.lfr --store-dir <a copy of of-store> --screenshot out.png --at 2026-11-04T23:05:00Z
