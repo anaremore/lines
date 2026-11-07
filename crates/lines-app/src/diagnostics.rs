@@ -564,6 +564,18 @@ mod tests {
         "fake.person@example.com",
         "FAKE-session-cookie",
         "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        // Account ids as the keys of account-keyed settings maps.
+        "FAKE-ACCT-0004",
+        "FAKE-ACCT-0005",
+        "FAKE-ACCT-0006",
+        // The OS user name in paths (logs and about.json's log_dir).
+        "FAKEUSERNAME",
+        "FAKEGIVEN",
+        "FAKESURNAME",
+        // An Authorization header's credentials and URL signing parameters.
+        "FAKE-bearer-credential",
+        "FAKEQUERYKEY",
+        "FAKEQUERYSIG",
     ];
 
     fn temp(name: &str) -> PathBuf {
@@ -583,7 +595,10 @@ mod tests {
             r#"{"version":1,"recents":[2,1],"favourites":[1],
                 "connections":{"rithmic":{"user":"trader-FAKE-user","password":"FAKE-pass-123",
                   "account_ids":["FAKE-ACCT-0001"],"api_key":"sk_FAKE_0123456789abcdefABCDEF"}},
-                "contact":"fake.person@example.com","session":"FAKE-session-cookie"}"#,
+                "contact":"fake.person@example.com","session":"FAKE-session-cookie",
+                "guardrails":{"FAKE-ACCT-0004":{"max_trades_per_day":3}},
+                "bracket_presets":{"FAKE-ACCT-0005":{"presets":[]}},
+                "prop_rules":{"FAKE-ACCT-0006":{"preset":"50K evaluation"}}}"#,
         )
         .unwrap();
         std::fs::write(
@@ -604,13 +619,19 @@ mod tests {
             "2026-11-06 INFO logon user=trader-FAKE-user password=FAKE-pass-123\n\
              2026-11-06 INFO broker account_id: FAKE-ACCT-0001 ready\n\
              2026-11-06 WARN mail to fake.person@example.com failed\n\
-             2026-11-06 INFO feed ESZ26 live\n",
+             2026-11-06 INFO feed ESZ26 live\n\
+             2026-11-06 INFO logs in C:\\Users\\FAKEUSERNAME\\AppData\\Local\\lines\\logs\n\
+             2026-11-06 INFO saved \"C:\\\\Users\\\\FAKEUSERNAME\\\\AppData\\\\x.json\"\n\
+             2026-11-06 DEBUG Authorization: Bearer FAKE-bearer-credential\n\
+             2026-11-06 INFO saved C:\\Users\\FAKEGIVEN FAKESURNAME\\Documents\\w.json\n\
+             2026-11-06 DEBUG GET https://example.invalid/v1?key=FAKEQUERYKEY&sig=FAKEQUERYSIG\n",
         )
         .unwrap();
         let inputs = Inputs {
             about: About {
                 version: "0.1.0".into(),
                 exported_at_unix: 1_762_437_600,
+                log_dir: Some(r"C:\Users\FAKEUSERNAME\AppData\Local\lines\logs".into()),
                 ..Default::default()
             },
             config_dir: Some(config),
