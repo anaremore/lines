@@ -410,7 +410,7 @@ impl Columns {
             |cells: &[Cell; MAX_COLS]| cells.iter().any(|c| c.shown && c.right() > total + 0.5);
         let mut set = self.set;
         set.layout(specs, &self.needed, total, &mut self.cells);
-        let mut shed = |set: &mut ColumnSet, cells: &mut [Cell; MAX_COLS], cols: &[usize]| {
+        let shed = |set: &mut ColumnSet, cells: &mut [Cell; MAX_COLS], cols: &[usize]| {
             for &i in cols {
                 if !over(cells) {
                     break;

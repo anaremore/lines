@@ -498,10 +498,10 @@ pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
     live(o) && stop && exit && closes
 }
 
-/// The stops BE may move: those that [`protects`] accepts, reduce-only ones always (the
-/// broker shrinks them with the position), then stop losses, then single stops, each only
-/// while their quantities together stay within the position: moved to one price, they all
-/// trigger together and must never flip it.
+/// The stops BE may move: those that [`protects`] accepts, reduce-only ones first, then stop
+/// losses, then single stops, each only while their quantities together stay within the
+/// position: moved to one price they all trigger together, in any order, and must never flip
+/// it (a reduce-only stop that fills first can't shrink the others).
 pub fn protective<'a>(
     orders: impl IntoIterator<Item = &'a lines_trading::Order>,
     position: i64,
@@ -519,9 +519,6 @@ pub fn protective<'a>(
     cands.sort_by_key(|o| (rank(o), o.id.0));
     let mut total = 0;
     cands.retain(|o| {
-        if o.reduce_only {
-            return true;
-        }
         let q = o.remaining().0;
         if total + q <= position.abs() {
             total += q;
@@ -533,9 +530,8 @@ pub fn protective<'a>(
     cands
 }
 
-/// The commands that move the position's stop(s) to breakeven, from the cache.
-
-/// BE only moves an existing protective stop, like dragging it: it needs no switch.
+/// The commands that move the position's stop(s) to breakeven, from the cache. BE only moves
+/// existing protective stops, like dragging them: it needs no switch.
 fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'static str> {
     if let Some(why) = cant_trade(v, cx) {
         return Err(why);
@@ -558,7 +554,11 @@ fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'s
     let s = t.cache.read();
     let pos = s.position(&account, contract);
     let (qty, avg) = pos.map_or((0, None), |p| (p.qty, p.avg_price));
-    let stops: Vec<_> = protective(s.open_orders(&account, contract), qty)
+    let stops: Vec<_> = protective(s.open_orders(&account, contract), qty);
+    if stops.is_empty() && s.open_orders(&account, contract).any(|o| protects(o, qty)) {
+        return Err("stops exceed the position: drag the stop instead");
+    }
+    let stops: Vec<_> = stops
         .into_iter()
         .filter_map(|o| dom_trade::order_price(o).map(|p| (o.id, o.side, p)))
         .collect();
@@ -2608,10 +2608,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![OrderId(3)]
         );
-        // Reduce-only never flips: always.
+        // A reduce-only stop counts too (filling first, it can't shrink the others).
         let mut r = stop(Side::Sell, 1, Role::Single, OrderState::Working);
         r.reduce_only = true;
-        assert_eq!(protective([&r, &sl], 1).len(), 2);
+        assert_eq!(
+            protective([&sl, &r], 1)
+                .iter()
+                .map(|o| o.id)
+                .collect::<Vec<_>>(),
+            vec![r.id]
+        );
+        // Short 2: a partly filled buy stop for 3 with 2 left fits (the remainder counts).
+        let mut p = stop(Side::Buy, 3, Role::StopLoss, OrderState::PartiallyFilled);
+        p.filled = Qty(1);
+        assert_eq!(protective([&p], -2).len(), 1);
+        // A bracket stop larger than what's left of the position: none.
+        let big = stop(Side::Sell, 2, Role::StopLoss, OrderState::Working);
+        assert!(protects(&big, 1) && protective([&big], 1).is_empty());
     }
 
     #[test]
