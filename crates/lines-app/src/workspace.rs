@@ -37,6 +37,7 @@ use lines_core::{Price, UtcMillis};
 use lines_feed::FeedConfig;
 use lines_feed::availability::Availability;
 
+use crate::chain_view::ChainView;
 use crate::chart_view::{self, ChartView, CrosshairTime, Fixture};
 use crate::commands::{self, Command, DrawCmd, StrategyCmd};
 use crate::dom_view::{DomOptions, DomView};
@@ -220,6 +221,7 @@ pub enum PaneHandle {
     Tape(Entity<TapeView>),
     Journal(Entity<JournalView>),
     Strategies(Entity<StrategyView>),
+    Chain(Entity<ChainView>),
 }
 
 macro_rules! each {
@@ -230,6 +232,7 @@ macro_rules! each {
             PaneHandle::Tape($e) => $body,
             PaneHandle::Journal($e) => $body,
             PaneHandle::Strategies($e) => $body,
+            PaneHandle::Chain($e) => $body,
         }
     };
 }
@@ -254,6 +257,7 @@ impl PaneHandle {
             PaneHandle::Tape(_) => PaneKind::Tape,
             PaneHandle::Journal(_) => PaneKind::Journal,
             PaneHandle::Strategies(_) => PaneKind::Strategies,
+            PaneHandle::Chain(_) => PaneKind::Chain,
         }
     }
 
@@ -338,7 +342,7 @@ impl PaneHandle {
             PaneHandle::Dom(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Tape(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Journal(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
-            PaneHandle::Chart(_) | PaneHandle::Strategies(_) => {
+            PaneHandle::Chart(_) | PaneHandle::Strategies(_) | PaneHandle::Chain(_) => {
                 Err("columns belong to a DOM, time & sales or the journal")
             }
         }
@@ -350,7 +354,7 @@ impl PaneHandle {
             PaneHandle::Dom(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Tape(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Journal(e) => Some(e.read(cx).columns().clone()),
-            PaneHandle::Chart(_) | PaneHandle::Strategies(_) => None,
+            PaneHandle::Chart(_) | PaneHandle::Strategies(_) | PaneHandle::Chain(_) => None,
         }
     }
 
@@ -580,6 +584,10 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
         PaneKind::Strategies => {
             let frozen = env.frozen;
             PaneHandle::Strategies(cx.new(|cx| StrategyView::new(feed, theme, frozen, cx)))
+        }
+        PaneKind::Chain => {
+            let frozen = env.frozen;
+            PaneHandle::Chain(cx.new(|cx| ChainView::new(feed, theme, frozen, cx)))
         }
     };
     handle.set_link(doc.link, cx);
@@ -894,6 +902,11 @@ impl WindowView {
                     this.open_column_menu(id, ev.0, cx)
                 }),
             ],
+            PaneHandle::Chain(e) => {
+                vec![cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
+                    feed_changed(this, ev, cx)
+                })]
+            }
             PaneHandle::Strategies(e) => {
                 vec![cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
                     feed_changed(this, ev, cx)
@@ -1121,6 +1134,7 @@ impl WindowView {
                 self.activate_tab(i, window, cx);
             }
             Command::OpenJournal => self.open_panel(PaneKind::Journal, window, cx),
+            Command::OpenChain => self.open_panel(PaneKind::Chain, window, cx),
             Command::Strategy(StrategyCmd::Open) => {
                 self.open_panel(PaneKind::Strategies, window, cx)
             }
@@ -1511,10 +1525,12 @@ impl WindowView {
         if let Some((i, id, state)) = found {
             if state == PaneState::Detached {
                 self.refuse(
-                    if kind == PaneKind::Journal {
-                        "the journal is popped out: it is in its own window"
-                    } else {
-                        "the strategy panel is popped out: it is in its own window"
+                    match kind {
+                        PaneKind::Journal => "the journal is popped out: it is in its own window",
+                        PaneKind::Chain => {
+                            "the option chain is popped out: it is in its own window"
+                        }
+                        _ => "the strategy panel is popped out: it is in its own window",
                     },
                     cx,
                 );
@@ -2657,6 +2673,7 @@ impl WindowView {
                                 PaneKind::Tape => "T&S",
                                 PaneKind::Journal => "journal",
                                 PaneKind::Strategies => "strategy panel",
+                                PaneKind::Chain => "option chain",
                             };
                             if !v.contains(&l) {
                                 v.push(l);
@@ -3184,6 +3201,9 @@ impl Render for WindowView {
             Some(PaneHandle::Tape(_)) => "Time & sales: type a symbol or Ctrl+K: switch",
             Some(PaneHandle::Journal(_)) => {
                 "Journal: click or Up/Down to select, Enter: tags and note, click the stats: today / all dates"
+            }
+            Some(PaneHandle::Chain(_)) => {
+                "Option chain: Up/Down strike, Left/Right expiry, Tab calls / puts, type a symbol or Ctrl+K: switch"
             }
             _ => chart_view::HINTS_SHORT,
         };

@@ -178,9 +178,14 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
     match (kind, detached) {
         (_, true) => &DETACHED,
         (PaneKind::Chart, false) => &CHART,
-        (PaneKind::Dom | PaneKind::Tape | PaneKind::Journal | PaneKind::Strategies, false) => {
-            &OTHER
-        }
+        (
+            PaneKind::Dom
+            | PaneKind::Tape
+            | PaneKind::Journal
+            | PaneKind::Strategies
+            | PaneKind::Chain,
+            false,
+        ) => &OTHER,
     }
 }
 
@@ -189,7 +194,7 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
 pub fn header_height(kind: PaneKind) -> f32 {
     match kind {
         PaneKind::Chart => 33.0,
-        PaneKind::Dom | PaneKind::Tape | PaneKind::Journal => 27.0,
+        PaneKind::Dom | PaneKind::Tape | PaneKind::Journal | PaneKind::Chain => 27.0,
         // Its Stop all button (20 px) sets the line.
         PaneKind::Strategies => 30.0,
     }
@@ -681,6 +686,7 @@ mod tests {
             PaneKind::Tape,
             PaneKind::Journal,
             PaneKind::Strategies,
+            PaneKind::Chain,
         ]
         .into_iter()
         .flat_map(|k| [(k, false), (k, true)])

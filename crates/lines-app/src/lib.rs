@@ -4,6 +4,7 @@
 
 mod bench;
 mod brackets;
+mod chain_view;
 mod chart_draw;
 mod chart_trade;
 mod chart_view;

@@ -5,14 +5,15 @@
 //! source's default) and its view state. The market data *source* is not part of a workspace:
 //! it belongs to the run (`--source`), so one workspace works on mock, replay or live data.
 //!
-//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 5).
+//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 6).
 //! Version 2 adds each pane's `state` (shown, hidden, hidden by "chart only", detached) and a
 //! detached pane's `window` placement; version 1 files migrate (every pane shown). Version 3
 //! adds the `journal` pane kind (roadmap 8c); version 2 files read unchanged, and an older
 //! build meeting a version 3 file reports it as newer instead of failing on the kind. Version 4
 //! adds the `strategies` pane kind. Version 5 (decision 0028) lets a pane's contract be an
 //! equity or a listed option; every version 4 file reads unchanged, and an older build
-//! reports a version 5 file as newer instead of misreading an option.
+//! reports a version 5 file as newer instead of misreading an option. Version 6 adds the `chain`
+//! pane kind (an underlying's option chain).
 //! Product ids are the catalog's permanent ids; `symbol` is written beside them for people
 //! reading the file and ignored on load. A pane whose product this build doesn't know is kept
 //! as written and shown as unavailable, never dropped.
@@ -89,11 +90,24 @@ fn v4_to_v5(v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
-const MIGRATIONS: &[Migration] = &[v0_never_written, v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5];
+/// Version 6 added the `chain` pane kind (decision 0028): every version 5 file is a valid
+/// version 6 file (an older build reports a file with an option chain as newer).
+fn v5_to_v6(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
+const MIGRATIONS: &[Migration] = &[
+    v0_never_written,
+    v1_to_v2,
+    v2_to_v3,
+    v3_to_v4,
+    v4_to_v5,
+    v5_to_v6,
+];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 5,
+    current: 6,
     migrations: MIGRATIONS,
 };
 
@@ -1077,7 +1091,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 5"#), "{text}");
+        assert!(text.contains(r#""version": 6"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1526,6 +1540,44 @@ mod tests {
         assert_eq!(leaves[1].kind, PaneKind::Strategies);
     }
 
+    /// Version 6 (decision 0028): the `chain` pane kind, pinned; a version 5 file reads
+    /// unchanged.
+    #[test]
+    fn a_version_6_file_with_an_option_chain_reads() {
+        let v6 = br#"{
+          "version": 6,
+          "name": "options",
+          "windows": [{
+            "tabs": [{
+              "focused": 0,
+              "layout": {"split": {"axis": "row", "ratio": 0.4,
+                "first": {"pane": {"kind": "chart", "link": 0, "state": "shown",
+                  "target": {"product": 2001, "symbol": "SPY"}}},
+                "second": {"pane": {"kind": "chain", "link": 0, "state": "shown",
+                  "target": {"product": 2001, "symbol": "SPY"}}}}}
+            }]
+          }]
+        }"#;
+        let Decoded::Ok {
+            value,
+            migrated_from: None,
+        } = decode::<WorkspaceDoc>(&FORMAT, v6)
+        else {
+            panic!("v6 no longer reads")
+        };
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        assert_eq!(leaves[1].kind, PaneKind::Chain);
+        let v5 = br#"{"version": 5, "name": "a", "windows": [{"tabs": [{"focused": 0,
+            "layout": {"pane": {"kind": "dom", "link": 0, "state": "shown"}}}]}]}"#;
+        assert!(matches!(
+            decode::<WorkspaceDoc>(&FORMAT, v5),
+            Decoded::Ok {
+                migrated_from: Some(5),
+                ..
+            }
+        ));
+    }
+
     /// Version 5 (decision 0028): a version 4 file's futures and spot contracts read back as
     /// the same keys; equity and option contracts round-trip; the written file says 5.
     #[test]
@@ -1562,7 +1614,7 @@ mod tests {
             Target::Contract(ContractKey::spot(catalog::BTC_USD))
         );
         let text = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
-        assert!(text.contains(r#""version": 5"#), "{text}");
+        assert!(text.contains(r#""version": 6"#), "{text}");
         assert!(
             text.contains(r#""monthly""#),
             "the futures shape is unchanged"
@@ -1602,8 +1654,8 @@ mod tests {
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 6, "windows": 7}"#),
-            Decoded::Newer { found: 6 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 7, "windows": 7}"#),
+            Decoded::Newer { found: 7 }
         );
     }
 
