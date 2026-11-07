@@ -606,6 +606,12 @@ impl DrawingSet {
         &self.items
     }
 
+    /// New drawings get ids above `id` (ids held elsewhere, e.g. entries a file kept that
+    /// this version can't use).
+    pub fn reserve_ids_through(&mut self, id: DrawingId) {
+        self.next_id = self.next_id.max(id + 1);
+    }
+
     pub fn get(&self, id: DrawingId) -> Option<&Drawing> {
         self.items.iter().find(|d| d.id == id)
     }

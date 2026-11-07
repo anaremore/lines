@@ -16,7 +16,7 @@ use lines_core::drawings::{
     project, snap_anchor,
 };
 use lines_core::instrument::Ratio;
-use lines_core::{PriceFormat, Viewport};
+use lines_core::{PriceFormat, UtcMillis, Viewport};
 
 use crate::drawings_store::{MAX_NOTE, ProductDrawings};
 use crate::theme::Theme;
@@ -37,6 +37,8 @@ struct Drag {
     /// The drawing as it was, and the anchor under the pointer at the press.
     original: Drawing,
     from: Anchor,
+    /// Where it was pressed (plot px): a release within `CLICK_SLOP` is a click (select only).
+    press: (f32, f32),
 }
 
 /// What a key did.
@@ -144,6 +146,7 @@ impl ChartDrawings {
     pub fn set_tool(&mut self, tool: Tool) {
         self.pending = None;
         self.note = None;
+        self.measure = None;
         self.tool = (self.tool != Some(tool)).then_some(tool);
         if self.tool.is_some() {
             self.hidden = false;
@@ -212,6 +215,7 @@ impl ChartDrawings {
                 hit,
                 original: d,
                 from,
+                press: (x, y),
             });
             return true;
         }
@@ -231,8 +235,10 @@ impl ChartDrawings {
             }
             return true;
         }
-        if self.drag.take().is_some() {
-            if let Some(d) = self.dragged.take() {
+        if let Some(drag) = self.drag.take() {
+            let moved = (x - drag.press.0).abs().max((y - drag.press.1).abs()) > CLICK_SLOP;
+            // A click on a drawing (or its handle) only selects it: nothing moves.
+            if let Some(d) = self.dragged.take().filter(|_| moved) {
                 self.data.change(|s| (s.edit(d), ()));
             }
             return true;
@@ -527,17 +533,21 @@ fn dragged(drag: &Drag, at: Anchor, axis: &TimeAxis<'_>, tick: i64) -> Drawing {
     match drag.hit {
         Hit::Handle(i) => drag.original.with_handle(i, at),
         Hit::Body => {
-            // Move by whole bars of this chart and whole ticks.
-            let slots = |t| axis.index_of(t).map(|i| i.round() as i64);
-            let dslot = match (slots(at.time), slots(drag.from.time)) {
+            // Move by whole bars of this chart and whole ticks. Each anchor keeps its offset
+            // inside its bar's bucket, so a 1-minute anchor moved on a 15-minute chart keeps
+            // its minute (and a drawing never collapses onto bucket starts).
+            let slot = |t| axis.index_of(t).map(|i| i.floor() as i64);
+            let dslot = match (slot(at.time), slot(drag.from.time)) {
                 (Some(a), Some(b)) => a - b,
                 _ => 0,
             };
             let dprice = (at.price.0 - drag.from.price.0) / tick.max(1) * tick.max(1);
             let shift = |a: Anchor| Anchor {
-                time: slots(a.time)
-                    .and_then(|s| axis.slot_time(s + dslot))
-                    .unwrap_or(a.time),
+                time: slot(a.time)
+                    .and_then(|s| Some((s, axis.slot_time(s)?, axis.slot_time(s + dslot)?)))
+                    .map_or(a.time, |(_, start, to)| {
+                        UtcMillis(to.0 + (a.time.0 - start.0))
+                    }),
                 price: lines_core::Price(a.price.0 + dprice),
             };
             let mut d = drag.original.clone();
@@ -547,12 +557,6 @@ fn dragged(drag: &Drag, at: Anchor, axis: &TimeAxis<'_>, tick: i64) -> Drawing {
             } else {
                 d.a
             };
-            if dslot == 0 {
-                // Unmoved in time: keep the original times exactly (they may sit inside a
-                // bucket of this timeframe).
-                d.a.time = drag.original.a.time;
-                d.b.time = drag.original.b.time;
-            }
             d
         }
     }
@@ -577,6 +581,20 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, color: Hsla, w: f32) {
 
 /// A line from `a` to `b` (plot-local), solid or dashed: axis-aligned ones as quads (crisp),
 /// others as a stroked path.
+/// Calls `f(start, end)` for each dash along a line `len` long (or once, solid). Generic, so
+/// nothing is boxed per line per frame.
+fn dash_segments(len: f32, dashed: bool, mut f: impl FnMut(f32, f32)) {
+    if dashed {
+        let mut s = 0.0;
+        while s < len {
+            f(s, (s + DASH.0).min(len));
+            s += DASH.0 + DASH.1;
+        }
+    } else {
+        f(0.0, len);
+    }
+}
+
 fn paint_line(
     a: (f32, f32),
     b: (f32, f32),
@@ -592,20 +610,9 @@ fn paint_line(
         return;
     }
     let (ux, uy) = (dx / len, dy / len);
-    let segments = |mut f: Box<dyn FnMut(f32, f32) + '_>| {
-        if dashed {
-            let mut s = 0.0;
-            while s < len {
-                f(s, (s + DASH.0).min(len));
-                s += DASH.0 + DASH.1;
-            }
-        } else {
-            f(0.0, len);
-        }
-    };
     if dy.abs() < 0.01 || dx.abs() < 0.01 {
         let horizontal = dy.abs() < 0.01;
-        segments(Box::new(|s, e| {
+        dash_segments(len, dashed, |s, e| {
             let (x0, y0) = (a.0 + ux * s, a.1 + uy * s);
             let (x1, y1) = (a.0 + ux * e, a.1 + uy * e);
             let b = if horizontal {
@@ -614,11 +621,11 @@ fn paint_line(
                 rect(origin, x0 - width * 0.5, y0.min(y1), width, (y1 - y0).abs())
             };
             window.paint_quad(fill(b, color));
-        }));
+        });
         return;
     }
     let mut path = PathBuilder::stroke(px(width));
-    segments(Box::new(|s, e| {
+    dash_segments(len, dashed, |s, e| {
         path.move_to(point(
             px(origin.0 + a.0 + ux * s),
             px(origin.1 + a.1 + uy * s),
@@ -627,7 +634,7 @@ fn paint_line(
             px(origin.0 + a.0 + ux * e),
             px(origin.1 + a.1 + uy * e),
         ));
-    }));
+    });
     if let Ok(p) = path.build() {
         window.paint_path(p, color);
     }

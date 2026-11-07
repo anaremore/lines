@@ -341,6 +341,8 @@ pub struct ChartView {
     drawings: ChartDrawings,
     /// Note texts shaped (by drawing id; re-shaped only when the text changes).
     note_lines: HashMap<u64, (String, ShapedLine)>,
+    /// The note being typed, shaped once per key.
+    note_entry_line: Option<(String, ShapedLine)>,
     /// Measure readouts (`None`: the temporary one; else a pinned measure's id), shaped once
     /// per distinct reading.
     measure_lines: HashMap<Option<u64>, (lines_core::drawings::MeasureStats, ShapedLine)>,
@@ -474,6 +476,7 @@ impl ChartView {
             cross_partial: false,
             drawings,
             note_lines: HashMap::new(),
+            note_entry_line: None,
             measure_lines: HashMap::new(),
         };
         view.apply_timeframe(timeframe);
@@ -1292,7 +1295,10 @@ impl ChartView {
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let (x, y) = self.local(ev.position);
-        let anchor = self.drawing_anchor(x, y);
+        // A release off the plot (an axis) never places an anchor.
+        let anchor = (self.region(ev.position) == Some(Region::Plot))
+            .then(|| self.drawing_anchor(x, y))
+            .flatten();
         if self.drawings.on_up(x as f32, y as f32, anchor) {
             cx.notify();
         }
@@ -2298,9 +2304,19 @@ impl ChartView {
             self.drawings.set_note_box(i, (w + 2.0, box_h));
         }
         if let Some((d, text)) = self.drawings.note_entry() {
-            // The note being typed (re-shaped per key while typing).
-            let shown = format!("{text}▏");
-            let line = self.shape(&shown, t.text_main, window);
+            // The note being typed: re-shaped only when a key changed it.
+            if self
+                .note_entry_line
+                .as_ref()
+                .is_none_or(|(s, _)| s.strip_suffix('▏') != Some(text))
+            {
+                let shown = format!("{text}▏");
+                let line = self.shape(&shown, t.text_main, window);
+                self.note_entry_line = Some((shown, line));
+            }
+            let Some((_, line)) = &self.note_entry_line else {
+                return;
+            };
             let w = f32::from(line.width) + 2.0 * NOTE_PAD;
             let b = Bounds::new(
                 point(px(ox + d.p0.0 + 2.0), px(oy + d.p0.1)),
