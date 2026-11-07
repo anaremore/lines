@@ -154,6 +154,29 @@ impl ChartDrawings {
         }
     }
 
+    /// Show or hide the drawings on this chart. Hiding ends everything in progress (tool,
+    /// note, measure, selection, drag), so nothing hidden can be deleted or moved.
+    pub fn set_hidden(&mut self, hidden: bool) {
+        if hidden {
+            self.tool = None;
+            self.pending = None;
+            self.note = None;
+            self.measure = None;
+            self.selected = None;
+            self.drag = None;
+            self.dragged = None;
+            self.confirm_clear = false;
+        }
+        self.hidden = hidden;
+    }
+
+    /// The button was released where the chart didn't see it (another window took the
+    /// pointer): a drag in progress is dropped, the drawing stays as it was.
+    pub fn release_lost(&mut self) -> bool {
+        self.dragged = None;
+        self.drag.take().is_some()
+    }
+
     /// Esc: cancel the tool, then the measure, then the selection.
     pub fn cancel(&mut self) -> bool {
         if self.tool.is_some() || self.pending.is_some() || self.note.is_some() {

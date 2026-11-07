@@ -712,6 +712,10 @@ mod tests {
 
     /// Roadmap 9: a chart's timeframe is optional in the file (absent = 1 minute), saved as its
     /// label, and an unknown value loads as 1 minute rather than failing the file.
+    fn json_has(state: &ChartState, key: &str) -> bool {
+        serde_json::to_string(state).unwrap().contains(key)
+    }
+
     #[test]
     fn chart_timeframe_is_optional_and_round_trips() {
         let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
@@ -729,6 +733,15 @@ mod tests {
             }
             assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), state);
         }
+        // Drawings hidden on a chart (roadmap 11): optional, written only when set.
+        assert!(!json_has(&old, "hide_drawings"));
+        let hidden = ChartState {
+            hide_drawings: true,
+            ..old.clone()
+        };
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert!(json.contains(r#""hide_drawings":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
         let future: ChartState =
             serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "3s"}"#).unwrap();
         assert_eq!(future.timeframe.0, Timeframe::ONE_MINUTE);
