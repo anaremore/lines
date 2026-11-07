@@ -203,10 +203,33 @@ pub fn controls_gutter(kind: PaneKind) -> f32 {
     n * crate::icons::HIT + (n - 1.0) * CONTROL_GAP + 2.0 * CONTROL_PAD
 }
 
-/// The timeframe chip's text in a chart header ("5m ▾"): one place for the renderer and the
-/// header layout test.
-pub fn timeframe_chip_text(tf: lines_core::Timeframe) -> String {
-    format!("{tf} ▾")
+/// The chip's timeframe: "233t", with "∞" when tick bars run continuously ("1000t ∞").
+pub fn chip_timeframe(tf: lines_core::Timeframe, continuous: bool) -> String {
+    match tf {
+        lines_core::Timeframe::Ticks(_) if continuous => format!("{tf} ∞"),
+        _ => tf.to_string(),
+    }
+}
+
+/// The chip's quiet part: a forming tick bar's trades still to come (" · 41 left").
+pub fn chip_to_go(n: u32) -> String {
+    format!(" · {n} left")
+}
+
+/// The whole chip ("233t · 41 left ▾", "1000t ∞ ▾"): what the header layout and the layout
+/// lint measure.
+pub fn chip_text(tf: lines_core::Timeframe, continuous: bool, to_go: Option<u32>) -> String {
+    let rest = to_go.map(chip_to_go).unwrap_or_default();
+    format!("{}{rest} ▾", chip_timeframe(tf, continuous))
+}
+
+/// A timeframe as lists and the palette name it: "5m", "233-trade bars" (the chip's short
+/// "233t" spelled out: "t" also means price ticks elsewhere).
+pub fn timeframe_name(tf: lines_core::Timeframe) -> String {
+    match tf {
+        lines_core::Timeframe::Ticks(n) => format!("{n}-trade bars"),
+        _ => tf.to_string(),
+    }
 }
 
 /// A pane header's content row: left and right groups, clipped to the header's content box
@@ -684,12 +707,34 @@ mod tests {
             // follows the chips and shrinks, so it isn't part of the group modelled here.
             let month = if p.is_spot() { "" } else { "Z26" };
             let contract = format!("{}{month}", p.symbol);
-            for tf in lines_core::Timeframe::ALL {
+            // Every listed timeframe (tick presets included), and the widest chip: the largest
+            // typed count with the most trades to go.
+            let widest_tick = chip_text(
+                lines_core::Timeframe::Ticks(lines_core::ticks::MAX_TICKS),
+                true,
+                Some(lines_core::ticks::MAX_TICKS - 1),
+            );
+            let chips = lines_core::Timeframe::ALL
+                .into_iter()
+                .map(|tf| chip_text(tf, false, None))
+                .chain(lines_core::ticks::TICK_PRESETS.iter().flat_map(|n| {
+                    [false, true]
+                        .map(|c| chip_text(lines_core::Timeframe::Ticks(*n), c, Some(n - 1)))
+                }))
+                .chain([
+                    chip_text(
+                        lines_core::Timeframe::Ticks(lines_core::ticks::MAX_TICKS),
+                        false,
+                        None,
+                    ),
+                    widest_tick.clone(),
+                ]);
+            for tf in chips {
                 for account in ["Paper", "Paper 50K eval"] {
                     let w = chart_header_chips_px(
                         true,
                         &contract,
-                        &timeframe_chip_text(tf),
+                        &tf,
                         Some((&format!("{account} ▾"), true)),
                         CHAR,
                     );
@@ -706,11 +751,57 @@ mod tests {
         let with = chart_header_chips_px(
             true,
             "ESZ26",
-            &timeframe_chip_text(lines_core::Timeframe::Minutes(15)),
+            &chip_text(lines_core::Timeframe::Minutes(15), false, None),
             None,
             CHAR,
         );
         assert_eq!(with - without, 5.0 * CHAR);
         assert!(widest > 0.0);
+        assert_eq!(
+            chip_text(lines_core::Timeframe::Ticks(100_000), true, Some(99_999)),
+            "100000t ∞ · 99999 left ▾"
+        );
+        assert_eq!(
+            chip_text(lines_core::Timeframe::Ticks(233), false, Some(146)),
+            "233t · 146 left ▾"
+        );
+        assert_eq!(
+            chip_text(lines_core::Timeframe::Ticks(233), true, None),
+            "233t ∞ ▾"
+        );
+        // Time charts never show the mark.
+        assert_eq!(
+            chip_text(lines_core::Timeframe::Minutes(5), true, None),
+            chip_text(lines_core::Timeframe::Minutes(5), false, None)
+        );
+        assert_eq!(
+            timeframe_name(lines_core::Timeframe::Ticks(233)),
+            "233-trade bars"
+        );
+        assert_eq!(timeframe_name(lines_core::Timeframe::Minutes(5)), "5m");
+    }
+
+    /// The header gives the widest tick chip ("100000t ∞ · 99999 left ▾") its room like any
+    /// other chip: at `CHART_HEADER_MIN_W` with the longest product, the chip shows.
+    #[test]
+    fn the_widest_tick_chip_fits_the_header_model() {
+        let room = CHART_HEADER_MIN_W - controls_gutter(PaneKind::Chart);
+        let chip = chip_text(lines_core::Timeframe::Ticks(100_000), true, Some(99_999));
+        for status in [None, Some("reconnecting")] {
+            let fit = chart_header_fit(
+                room,
+                true,
+                "MNQZ26",
+                status,
+                &chip,
+                Some(("Paper 50K eval ▾", true)),
+                false,
+                &tw7,
+            );
+            assert!(
+                fit.timeframe && fit.status && fit.link,
+                "{status:?}: {fit:?}"
+            );
+        }
     }
 }

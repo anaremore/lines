@@ -92,6 +92,15 @@ impl SegmentReplay {
         Ok(r)
     }
 
+    /// The next stored frame in order, the one `open` read ahead first (no pacing): for
+    /// readers that don't go through [`Transport::recv`].
+    pub(crate) fn next_unpaced(&mut self) -> Result<Option<(i64, Frame)>> {
+        match self.pending.take() {
+            Some(f) => Ok(Some(f)),
+            None => self.next_frame(),
+        }
+    }
+
     /// The next stored block as a frame, with its time in microseconds (no pacing).
     pub(crate) fn next_frame(&mut self) -> Result<Option<(i64, Frame)>> {
         loop {

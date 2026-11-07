@@ -23,6 +23,7 @@ pub mod recording;
 pub mod registry;
 pub mod store;
 pub mod synth;
+pub mod ticks;
 pub mod transport;
 
 use std::path::PathBuf;
@@ -364,6 +365,11 @@ pub async fn run_feed(
     // The local store: cached bars first (panes show them at once), then the feed fills from
     // where they end. One writer per contract; a roll switches it.
     let mut writer = open_writer(&config, &plan.product, plan.contract, &store);
+    // A replay's tick bars are rebuilt from its own file (from the first frame).
+    if let Source::Replay { path, .. } = &config.source {
+        let source = ticks::TickSource::Replay(path.clone());
+        store.update(|d| d.tick_source = Some(source));
+    }
     // Indicators see every batch of this feed from the start (decision 0017).
     let mut tap = indicators::engine().tap(
         indicators::FeedInfo {
@@ -628,7 +634,12 @@ fn open_writer(
                     ""
                 }
             );
-            store.update(|d| d.load_cached(&opened.bars));
+            let source = ticks::TickSource::Stored(w.dir().clone());
+            store.update(|d| {
+                d.load_cached(&opened.bars);
+                // Tick bars are rebuilt from this contract's stored trades.
+                d.tick_source = Some(source);
+            });
             Some(w)
         }
         Err(e) => {
@@ -661,7 +672,12 @@ fn warm_start(
     else {
         return;
     };
-    store.update(|d| d.orderflow_loading = true);
+    let dir = writer.dir().clone();
+    store.update(|d| {
+        d.orderflow_loading = true;
+        // Tick-bar rebuilds read the same stored trades again (`ticks`).
+        d.stored.dir = Some(dir);
+    });
     let result = disk::orderflow::read(writer.dir(), from, |chunk| {
         // In slices, so the store's lock is held for milliseconds (panes keep drawing); the
         // coverage comes with the last one.
@@ -673,7 +689,8 @@ fn warm_start(
         store.update(|d| d.apply_stored(&[], &chunk.covered));
         tap.stored(Vec::new(), chunk.covered);
     });
-    store.update(|d| d.orderflow_loading = false);
+    // Tick charts that asked meanwhile rebuild now, from the trades replayed (`ticks`).
+    drop(store.end_orderflow_loading());
     match result {
         Ok(s) => tracing::info!(
             "stored order flow: {} trades from {} trade dates in {:?} ({} decoded, {} \

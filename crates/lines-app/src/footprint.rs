@@ -295,6 +295,8 @@ pub struct Fallbacks {
     /// Drawn volume without an aggressor side (0: none). A count, so a change re-renders the
     /// legend.
     pub no_side: i64,
+    /// Price ticks per row when rows aggregate (0 or 1: one tick a row): the legend says so.
+    pub row_ticks: i64,
 }
 
 pub struct FootprintLayer {
@@ -389,8 +391,13 @@ impl FootprintLayer {
                 notes.push(text.to_owned());
             }
         }
+        let rows = if f.row_ticks > 1 {
+            format!(" · {} ticks/row", f.row_ticks)
+        } else {
+            String::new()
+        };
         Some((
-            format!("Footprint · {}", self.config.mode.label()),
+            format!("Footprint · {}{rows}", self.config.mode.label()),
             Some({
                 // The key last: if the capped line is cut, the count and reasons stay.
                 notes.push("underline = imbalance".to_owned());
@@ -405,8 +412,7 @@ impl FootprintLayer {
         self.active && self.frame.bars.binary_search_by_key(&i, |b| b.bar).is_ok()
     }
 
-    /// Cells were drawn this frame (tests).
-    #[cfg(test)]
+    /// Cells are drawn this frame.
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -568,6 +574,7 @@ impl ChartLayer for FootprintLayer {
             MIN_ROW_PX,
         );
         let u = (g as i64).saturating_mul(self.tick);
+        self.fallbacks.row_ticks = g as i64;
         let row_h = row_height(vp, u, scale);
         if row_h < MIN_TEXT_ROW_PX {
             self.fallbacks.rows_short = true;

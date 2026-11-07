@@ -73,7 +73,18 @@ pub const BOOK_LEVELS: i64 = 10;
 
 /// Write the sessions to `out`; returns the number of trades.
 pub fn write_es_sessions(out: &Path, depth: bool, transit: bool) -> io::Result<u64> {
-    write(out, depth, transit, None)
+    write(out, depth, transit, None, None)
+}
+
+/// [`write_es_sessions`], recorded only from `from` on (the same trades after it): a replay
+/// that starts mid-session, as a feed opened late does.
+pub fn write_es_sessions_from(
+    out: &Path,
+    depth: bool,
+    transit: bool,
+    from: Option<UtcMillis>,
+) -> io::Result<u64> {
+    write(out, depth, transit, None, from)
 }
 
 /// Only trade date `day` (1 or 2) of the same trades, its first frame at that session's open
@@ -86,17 +97,26 @@ pub fn write_es_day(out: &Path, day: usize, depth: bool, transit: bool) -> io::R
             format!("day {day}: 1..={}", DAYS.len()),
         ));
     }
-    write(out, depth, transit, Some(day))
+    write(out, depth, transit, Some(day), None)
 }
 
-fn write(out: &Path, depth: bool, transit: bool, only_day: Option<usize>) -> io::Result<u64> {
+/// The trades of `only_day` (else every day), recorded from `from` on (else from the first
+/// written day's open).
+fn write(
+    out: &Path,
+    depth: bool,
+    transit: bool,
+    only_day: Option<usize>,
+    from: Option<UtcMillis>,
+) -> io::Result<u64> {
     let mut jitter = Rng(0x7a17_5eed_0000_0042);
     let es = catalog::get(catalog::ES).expect("ES");
     let contract = ContractKey::monthly(es.id, 2026, Month::new(12).expect("month"));
     let ms = |s: &str| UtcMillis::parse_iso(s).expect("time").0;
     let tick = es.price.tick; // 25 units = 0.25
     let pts = |p: f64| (p * 100.0).round() as i64;
-    let start = ms(DAYS[only_day.map_or(0, |d| d - 1)].open);
+    let day_open = ms(DAYS[only_day.map_or(0, |d| d - 1)].open);
+    let start = from.map_or(day_open, |f| f.0.max(day_open));
 
     let header = Header {
         start_wall_ms: start,
@@ -196,7 +216,7 @@ fn write(out: &Path, depth: bool, transit: bool, only_day: Option<usize>) -> io:
             } else {
                 2 + jitter.below(39) as i64
             };
-            if write {
+            if write && t >= start {
                 w.write(
                     Direction::FromServer,
                     Duration::from_millis((t + late - start) as u64),

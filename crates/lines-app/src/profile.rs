@@ -410,10 +410,17 @@ impl ChartLayer for VolumeProfileLayer {
                         list.iter().skip(skip).flat_map(|s| s.volume.iter())
                     });
                 }
-                ProfileMode::VisibleRange => {
-                    let fp = profiles.footprint();
-                    self.build(tick, grouping, || fp.range(from, to));
-                }
+                ProfileMode::VisibleRange => match bars.trades {
+                    // Tick bars: exactly the visible bars' own trades.
+                    Some(tb) => {
+                        let r = vp.visible_range(bars.len());
+                        self.build(tick, grouping, || r.clone().flat_map(|i| tb.levels(i)));
+                    }
+                    None => {
+                        let fp = profiles.footprint();
+                        self.build(tick, grouping, || fp.range(from, to));
+                    }
+                },
                 ProfileMode::Off => {}
             }
             self.key = Some(key);
@@ -695,6 +702,24 @@ mod tests {
         );
         assert_eq!(layer.label.as_str(), "visible range");
         assert_eq!(layer.rows.total, Qty(14));
+
+        // Tick bars (roadmap 9b): the visible bars' own trades, not the minutes they touch.
+        // 2-trade bars: [13:00, 15:00] [15:01, 15:02]; only the second in view.
+        let mut tb = lines_core::TickBars::new(2, lines_core::TickReset::Continuous, None, 64);
+        for (at, p, q) in [
+            ("2026-11-05T13:00:00", 600_000, 5),
+            ("2026-11-05T15:00:00", 600_025, 2),
+            ("2026-11-05T15:01:00", 600_050, 3),
+            ("2026-11-05T15:02:00", 600_025, 4),
+        ] {
+            let t = UtcMillis::parse_iso(at).unwrap();
+            tb.push(t, Price(p), Qty(q), Some(Aggressor::Buy));
+        }
+        let mut tick_vp = vp;
+        tick_vp.right_index = 1.0;
+        tick_vp.bar_px = 2_000.0;
+        layer.prepare(&d, tb.view(), &tick_vp);
+        assert_eq!(layer.rows.total, Qty(7));
 
         layer.set_config(ProfileConfig::default());
         layer.prepare(

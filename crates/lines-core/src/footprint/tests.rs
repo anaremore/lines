@@ -289,3 +289,38 @@ fn buffers_bound_the_work() {
     assert_eq!((g.cells.capacity(), g.bars.capacity()), caps);
     assert!(g.bars.len() < view.len());
 }
+
+/// Tick bars (roadmap 9b) carry their own trades' volume per price: each bar's cells equal
+/// those of a footprint that counted exactly that bar's trades.
+#[test]
+fn a_tick_bar_footprint_counts_its_own_trades() {
+    use crate::ticks::{TickBars, TickReset};
+    let trades = tape(30, 4_000);
+    let n = 233usize;
+    let mut tb = TickBars::new(n as u32, TickReset::Continuous, None, 1_000);
+    // The reference: the same trades, bar k's filed under minute k.
+    let mut direct = Footprint::new(MIN, 10_000);
+    let mut minutes = BarSeries::new(MIN, 10_000);
+    for (k, &(t, p, q, a)) in trades.iter().enumerate() {
+        tb.push(t, p, q, a);
+        let slot = UtcMillis((k / n) as i64 * MIN);
+        direct.add(slot, p, q, a);
+        minutes.apply_trade(slot, p, q);
+    }
+    let view = tb.view();
+    assert_eq!(view.len(), trades.len().div_ceil(n));
+    let mut f = frame();
+    // The store's own footprint is ignored for tick bars: pass an empty one.
+    f.build(
+        &Footprint::new(MIN, 10),
+        view,
+        0..view.len(),
+        TICK,
+        ImbalanceRule::default(),
+    );
+    let mut g = frame();
+    let one = crate::timeframe::BarsView::fixed(minutes.bars(), MIN);
+    g.build(&direct, one, 0..one.len(), TICK, ImbalanceRule::default());
+    assert_eq!(f.with_data, view.len());
+    assert_eq!(snapshot(&f), snapshot(&g));
+}

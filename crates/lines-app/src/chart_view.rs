@@ -53,12 +53,13 @@ use gpui::{
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
     Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
+use lines_core::TickReset;
 use lines_core::drawings::{Anchor, TimeAxis, Tool, snap_anchor, write_measure};
 use lines_core::geometry::{
     Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
     snap, write_ohlcv,
 };
-use lines_core::timeframe::bar_date;
+use lines_core::timeframe::{BarSource, bar_date};
 use lines_core::viewport::{MAX_BAR_PX, MIN_BAR_PX, ScaleDrag, ScaleMode};
 use lines_core::{
     Bar, BarsView, Derived, FixedStr, Price, Product, ProductId, Scene, Timeframe, UtcMillis,
@@ -67,6 +68,7 @@ use lines_core::{
 use lines_feed::ChartData;
 use lines_feed::catalog::Target;
 use lines_feed::store::{ChartStore, FeedStatus};
+use lines_feed::ticks::{TickKey, TickLease};
 
 use crate::chart_draw::{self, ChartDrawings};
 use crate::commands::{Command, DrawCmd};
@@ -119,6 +121,8 @@ enum LabelKind {
     /// axis) or the theme's text color (`Theme::drawing_tag`). Keyed by that color (`0xRRGGBB`),
     /// as the shaped text carries it.
     DrawingTag(u32),
+    /// "tick bars from 14:32" at a tick chart's first bar (keyed by that time).
+    TickFrom,
 }
 
 /// Drawing price tags on the axis considered per frame (labels they cover aren't drawn).
@@ -197,6 +201,8 @@ pub struct Fixture {
     /// Open the style editor on this drawing (screenshots: `--style-editor
     /// ID[:TAB[:COL[:ROW]]]`), on tab `TAB` (0 = first), the focus on (row, col).
     pub style_editor: Option<StyleEditorAt>,
+    /// Tick bars run across sessions (`--tick-continuous`). A mode saved with the pane wins.
+    pub tick_continuous: bool,
 }
 
 /// Which part of a studies-menu row a click hit.
@@ -329,8 +335,9 @@ pub struct ChartView {
     cross: Option<Crosshair>,
     cross_bar: Option<Bar>,
     period_ms: i64,
-    /// OHLCV readout (and whether the bar is partial), shaped once per distinct value.
-    readout: Option<(Bar, bool, ShapedLine)>,
+    /// OHLCV readout (and whether the bar is partial; a tick bar's last trade and count),
+    /// shaped once per distinct value.
+    readout: Option<(Bar, bool, TickInfo, ShapedLine)>,
     labels: HashMap<(LabelKind, i64), ShapedLine>,
     font: Option<Font>,
     rates: Rates,
@@ -359,6 +366,19 @@ pub struct ChartView {
     /// Its bars when it isn't 1 minute: derived from the store's 1-minute bars, updated
     /// incrementally in paint.
     derived: Option<Derived>,
+    /// Its bars on a tick timeframe (roadmap 9b): the store's shared builder, held while this
+    /// chart shows it.
+    ticks: Option<TickLease>,
+    /// Where this chart's tick bars restart their count (saved with the pane).
+    tick_reset: TickReset,
+    /// The hovered tick bar: its last trade's time, trade count and state (crosshair readout).
+    cross_tick: TickInfo,
+    /// Per drawn candle on a tick chart (aligned with `scene.candles`): `MARK_PARTIAL` (closed
+    /// short by a reset, or still forming), `MARK_SESSION` (takes its session's first trade).
+    /// Reserved with the scene (no allocation while painting).
+    tick_marks: Vec<u8>,
+    /// "tick bars from HH:MM": the first bar's time and plot-local x, when it is on screen.
+    tick_from: Option<(UtcMillis, f32)>,
     /// After a timeframe change: put the bar holding this time at this plot-local x.
     tf_anchor: Option<(UtcMillis, f64)>,
     /// The timeframe list (header chip, pane menu), while open.
@@ -536,6 +556,11 @@ impl ChartView {
             pos_glyphs: crate::text::Glyphs::new(LABEL_PX),
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
+            ticks: None,
+            tick_reset: TickReset::Session,
+            cross_tick: None,
+            tick_marks: Vec::new(),
+            tick_from: None,
             tf_anchor: None,
             tf_menu: fixture.timeframe_menu,
             tf_entry: None,
@@ -550,6 +575,9 @@ impl ChartView {
             note_entry_line: None,
             measure_lines: HashMap::new(),
         };
+        if fixture.tick_continuous {
+            view.tick_reset = TickReset::Continuous;
+        }
         view.apply_timeframe(timeframe);
         if let Some(set) = fixture_studies {
             view.set_study_set(set);
@@ -965,6 +993,8 @@ impl ChartView {
     }
 
     fn start_drag(&mut self, drag: Drag) {
+        // A drag moves the view itself: a switch's waiting anchor no longer applies.
+        self.tf_anchor = None;
         self.drag = Some(drag);
         self.vp.set_held(true, self.series_len);
     }
@@ -1006,10 +1036,13 @@ impl ChartView {
         if let Some(index) = self.anchoring {
             // Anchored VWAP: this click picks the bar (off the bars: keep waiting).
             if region == Region::Plot
-                && let Some(from) = self
-                    .store
-                    .try_read()
-                    .and_then(|d| anchor_at(bars_view(&self.derived, &d).bars, &self.vp, x))
+                && let Some(from) = self.store.try_read().and_then(|d| {
+                    anchor_at(
+                        bars_view(&self.derived, self.tick_key(), &d).bars,
+                        &self.vp,
+                        x,
+                    )
+                })
             {
                 self.anchoring = None;
                 self.run_menu(
@@ -1037,6 +1070,8 @@ impl ChartView {
             }
         }
         if ev.click_count >= 2 {
+            // The user's own reset wins over a switch's waiting anchor.
+            self.tf_anchor = None;
             match region {
                 Region::Plot => self.vp.reset(self.series_len),
                 Region::PriceAxis => self.vp.restore_auto_price(),
@@ -1240,6 +1275,7 @@ impl ChartView {
         self.labels.clear();
         // The same timeframe on the new market.
         self.derived = None;
+        self.ticks = None;
         self.tf_anchor = None;
         let tf = std::mem::replace(&mut self.timeframe, Timeframe::ONE_MINUTE);
         self.apply_timeframe(tf);
@@ -1256,20 +1292,10 @@ impl ChartView {
         self.close_popover(Kind::Timeframe, cx);
         self.tf_entry = None;
         if tf != self.timeframe && tf.is_valid() {
-            let x = match self.hover {
-                Some((x, _)) => Some(f64::from(x)),
-                None if !self.vp.follow_live => Some(self.vp.width * 0.5),
-                None => None,
-            };
-            let anchor = x.and_then(|x| {
-                let d = self.store.try_read()?;
-                let view = bars_view(&self.derived, &d);
-                let last = view.len().checked_sub(1)?;
-                let i = self.vp.x_to_index(x).round().clamp(0.0, last as f64) as usize;
-                Some((view.bars[i].time, x))
-            });
+            let anchor = self.view_anchor();
             self.apply_timeframe(tf);
-            self.tf_anchor = anchor;
+            // No bars to anchor on yet (a rebuild still runs): the waiting anchor stays.
+            self.tf_anchor = anchor.or(self.tf_anchor);
         }
         cx.notify();
     }
@@ -1280,8 +1306,11 @@ impl ChartView {
             return;
         }
         self.timeframe = tf;
+        self.ticks = None; // let go of the old series before asking for the new one
+        self.ticks = wanted_tick_key(tf, self.tick_reset).map(|k| self.store.acquire_ticks(k));
         let capacity = self.store.read().series.capacity();
-        self.derived = (!tf.is_one_minute()).then(|| Derived::new(tf, capacity));
+        self.derived = (tf.source() == BarSource::OneMinute && !tf.is_one_minute())
+            .then(|| Derived::new(tf, capacity));
         // Indices change: re-baseline the trim count on the next paint.
         self.series_trimmed = u64::MAX;
         // Time labels are cached by bar time; their text depends on the timeframe.
@@ -1289,6 +1318,70 @@ impl ChartView {
         self.readout = None;
         self.cross = None;
         self.cross_bar = None;
+    }
+
+    /// The store's tick-bar series this chart shows, if it is on a tick timeframe.
+    fn tick_key(&self) -> Option<TickKey> {
+        self.ticks.as_ref().map(TickLease::key)
+    }
+
+    /// Tick bars run continuously (no reset at the session open).
+    pub fn tick_continuous(&self) -> bool {
+        self.tick_reset == TickReset::Continuous
+    }
+
+    /// Whether the chart is on a tick timeframe.
+    pub fn on_ticks(&self) -> bool {
+        self.ticks.is_some()
+    }
+
+    /// Switch tick bars between resetting at the session open and running continuously
+    /// (`Command::TickBarsContinuous`). Kept for the chart's next tick timeframe too.
+    pub fn set_tick_continuous(&mut self, on: bool, cx: &mut Context<Self>) {
+        let reset = if on {
+            TickReset::Continuous
+        } else {
+            TickReset::Session
+        };
+        // A different series: the time in the plot's middle (or under the pointer) stays put.
+        let anchor = self.view_anchor();
+        if self.apply_tick_reset(reset) {
+            // No bars to anchor on yet (a rebuild still runs): the waiting anchor stays.
+            self.tf_anchor = anchor.or(self.tf_anchor);
+        }
+        cx.notify();
+    }
+
+    /// Set where tick bars restart their count; on a tick chart, hold the matching series.
+    /// `true` if the series changed.
+    fn apply_tick_reset(&mut self, reset: TickReset) -> bool {
+        self.tick_reset = reset;
+        let want = wanted_tick_key(self.timeframe, reset);
+        if want == self.tick_key() {
+            return false;
+        }
+        self.ticks = None;
+        self.ticks = want.map(|k| self.store.acquire_ticks(k));
+        self.series_trimmed = u64::MAX;
+        self.readout = None;
+        self.cross = None;
+        self.cross_bar = None;
+        true
+    }
+
+    /// The bar time under the pointer (else the plot's middle, unless following the live
+    /// edge) and its x: kept in place across a change of bars.
+    fn view_anchor(&self) -> Option<(UtcMillis, f64)> {
+        let x = match self.hover {
+            Some((x, _)) => f64::from(x),
+            None if !self.vp.follow_live => self.vp.width * 0.5,
+            None => return None,
+        };
+        let d = self.store.try_read()?;
+        let view = bars_view(&self.derived, self.tick_key(), &d);
+        let last = view.len().checked_sub(1)?;
+        let i = self.vp.x_to_index(x).round().clamp(0.0, last as f64) as usize;
+        Some((view.bars[i].time, x))
     }
 
     /// Open or close the timeframe list (header chip, pane menu, palette).
@@ -1353,6 +1446,9 @@ impl ChartView {
         if !state.timeframe.is_default() {
             self.apply_timeframe(state.timeframe.0);
         }
+        // A saved tick mode wins (a chart already on this timeframe takes the matching series
+        // too); a chart without one keeps its initial (CLI) mode.
+        self.apply_tick_reset(restored_tick_reset(state, self.tick_reset));
         if state.bar_px.is_finite() {
             self.vp.bar_px = state.bar_px.clamp(MIN_BAR_PX, MAX_BAR_PX);
         }
@@ -1659,8 +1755,8 @@ impl ChartView {
                         && !m.alt
                         && !m.platform
                         && c.len() == 1
-                        && (c.as_bytes()[0].is_ascii_digit() || "mhdwMHDW".contains(*c))
-                }) && entry.len() < 4
+                        && (c.as_bytes()[0].is_ascii_digit() || "mhdwtMHDWT".contains(*c))
+                }) && entry.len() < 7
                 {
                     entry.push_str(c);
                 }
@@ -1698,6 +1794,10 @@ impl ChartView {
         self.vp.set_size(plot_w as f64, plot_h as f64);
         // Only allocates when the window grows wider than ever before.
         self.scene.ensure_capacity(plot_w as f64);
+        let marks = self.scene.candles.capacity();
+        if self.tick_marks.capacity() < marks {
+            self.tick_marks.reserve_exact(marks - self.tick_marks.len());
+        }
         if self.font.is_none() {
             self.font = Some(window.text_style().font());
         }
@@ -1720,32 +1820,25 @@ impl ChartView {
             if let Some(dv) = &mut self.derived {
                 dv.update(&d.series, lines_feed::catalog::sessions(d.product.id));
             }
-            let view = bars_view(&self.derived, &d);
-            let trimmed = self
-                .derived
-                .as_ref()
-                .map_or(d.series.trimmed(), Derived::trimmed);
-            if trimmed > self.series_trimmed && (!self.vp.follow_live || self.vp.held) {
-                // Bars dropped from the front shift indices; keep the view anchored.
-                self.vp.right_index -= (trimmed - self.series_trimmed) as f64;
-            }
-            self.series_trimmed = trimmed;
+            let view = bars_view(&self.derived, self.tick_key(), &d);
+            // `None` while the tick series rebuilds (no bars yet: nothing to count from).
+            let trimmed = match (self.tick_key(), &self.derived) {
+                (Some(k), _) => d.ticks.bars(k).map(lines_core::TickBars::trimmed),
+                (None, Some(dv)) => Some(dv.trimmed()),
+                (None, None) => Some(d.series.trimmed()),
+            };
             self.series_len = view.len();
             self.last_trade = d.last_trade;
             let fmt = self.instrument.price;
             let bars = view.bars;
-            if let Some((t, x)) = self.tf_anchor.take()
-                && !bars.is_empty()
-            {
-                // After a timeframe change: the bar holding the anchored time goes where that
-                // time was; live following resumes if the newest bar is then in view.
-                let i = bars.partition_point(|b| b.time <= t).saturating_sub(1);
-                self.vp.right_index += i as f64 - self.vp.x_to_index(x);
-                if self.drag.is_none() {
-                    self.vp.held = true;
-                    self.vp.set_held(false, bars.len());
-                }
-            }
+            keep_view(
+                &mut self.vp,
+                &mut self.series_trimmed,
+                &mut self.tf_anchor,
+                trimmed,
+                bars,
+                self.drag.is_some(),
+            );
             self.vp.on_data(bars, fmt.tick);
             if self.visibility.draws_studies()
                 && self.footprint.config().shown()
@@ -1768,6 +1861,38 @@ impl ChartView {
             }
             self.scene
                 .build(bars, &self.vp, &fmt, scale, self.period_ms);
+            // Tick bars: which drawn candles are partial or start a session, and where the
+            // "tick bars from" label goes.
+            self.tick_marks.clear();
+            self.tick_from = None;
+            // The feed's clock: a closed session's last bar is partial, not forming.
+            let now = self.store.feed_clock();
+            if let (Some(tb), Some(key)) = (view.trades, self.tick_key()) {
+                let first = self.vp.visible_range(bars.len()).start;
+                for k in 0..self.scene.candles.len() {
+                    if self.tick_marks.len() == self.tick_marks.capacity() {
+                        break;
+                    }
+                    let i = first + k;
+                    let mut m = 0;
+                    if tb.is_partial_at(i, now) || tb.is_forming(i) {
+                        m |= MARK_PARTIAL;
+                    }
+                    if i > 0 && tb.starts_session(i) {
+                        m |= MARK_SESSION;
+                    }
+                    self.tick_marks.push(m);
+                }
+                if let lines_feed::ticks::TickStatus::From(t) =
+                    d.ticks.status(key, &d.series, &d.product)
+                    && !bars.is_empty()
+                {
+                    let x = slot_x(&self.vp, 0.0, scale);
+                    if x >= 0.0 && f64::from(x) < self.vp.width {
+                        self.tick_from = Some((t, x));
+                    }
+                }
+            }
             // Hit-test after the viewport update so the crosshair matches this frame. In the
             // sub-pane only the time follows the pointer (the plot's y is the top row).
             self.cross_in_sub = self
@@ -1787,10 +1912,22 @@ impl ChartView {
                 )
             });
             self.cross_bar = self.cross.and_then(|c| c.bar).map(|i| bars[i]);
-            self.cross_partial = match (self.cross.and_then(|c| c.bar), &self.derived) {
-                (Some(i), Some(dv)) => dv.is_partial(i),
+            let hovered = self.cross.and_then(|c| c.bar);
+            self.cross_partial = match (hovered, &self.derived, view.trades) {
+                (Some(i), _, Some(tb)) => tb.is_partial_at(i, now),
+                (Some(i), Some(dv), None) => dv.is_partial(i),
                 _ => false,
             };
+            self.cross_tick = hovered.zip(view.trades).and_then(|(i, tb)| {
+                let state = if tb.is_partial_at(i, now) {
+                    TickState::Partial
+                } else if tb.is_forming_at(i, now) {
+                    TickState::Forming
+                } else {
+                    TickState::Full
+                };
+                Some((tb.last_trade(i)?, tb.count(i), tb.ticks(), state))
+            });
             // Another chart's crosshair time, where this chart has a bar for it (each chart
             // maps it into its own timeframe's bars).
             self.sync_marker = self.synced_time.and_then(|t| {
@@ -2020,11 +2157,53 @@ impl ChartView {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_back(plot, window);
             }
+            // Tick charts: a faint dashed line where each session's bars begin, behind the
+            // bars (dashed: never mistaken for the crosshair's solid line).
+            let half_slot = (self.vp.bar_px * 0.5) as f32;
+            for (k, c) in self.scene.candles.iter().enumerate() {
+                if self
+                    .tick_marks
+                    .get(k)
+                    .is_some_and(|m| m & MARK_SESSION != 0)
+                {
+                    let x = snap(f64::from(c.x - half_slot), scale);
+                    let mut y = 0.0;
+                    while y < ph {
+                        let d = DIVIDER_DASH.min(ph - y);
+                        window.paint_quad(fill(rect(x, y, hair, d), t.session_divider));
+                        y += DIVIDER_DASH + DIVIDER_GAP;
+                    }
+                }
+            }
             let fp_first = self.footprint.first_bar();
+            let fp_on = studies && self.footprint.is_active();
             for (k, c) in self.scene.candles.iter().enumerate() {
                 // The footprint draws this bar as cells (only where it has trade data).
                 if studies && self.footprint.covers(fp_first + k) {
                     continue;
+                }
+                // Beside footprint columns, a bar less than half on the plot is left out (its
+                // candle would show as a stray stub at the edge).
+                if fp_on && (c.x < 0.0 || c.x >= pw) {
+                    continue;
+                }
+                if self
+                    .tick_marks
+                    .get(k)
+                    .is_some_and(|m| m & MARK_PARTIAL != 0)
+                {
+                    // A partial or forming tick bar: a dashed box around it (shape, not color),
+                    // on device pixels, its dashes two device pixels thick (WCAG 1.4.11).
+                    let x0 = snap(f64::from(c.x - c.half_width - 3.0), scale);
+                    let y0 = snap(f64::from(c.wick_top - 3.0), scale);
+                    let x1 = snap(f64::from(c.x + c.half_width + 3.0), scale);
+                    let y1 = snap(f64::from(c.wick_bottom + 3.0), scale);
+                    dashed_box(
+                        window,
+                        rect(x0, y0, x1 - x0, y1 - y0),
+                        2.0 * hair,
+                        t.text_dim,
+                    );
                 }
                 let color = if c.up { t.up } else { t.down };
                 let (bx, bw) = (c.x - c.half_width, c.half_width * 2.0);
@@ -2084,6 +2263,9 @@ impl ChartView {
             if labels {
                 self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
+            }
+            if let Some((from, x)) = self.tick_from {
+                self.draw_tick_from(from, x, (ox, oy), ph, window, cx);
             }
             // Horizontal lines break where they cross footprint cells (never through numbers).
             let fp = &self.footprint;
@@ -2176,11 +2358,14 @@ impl ChartView {
         }
         .map(|(x, time)| {
             let (left, w) = self.time_tag_box(x, time, window);
+            // Axis labels keep 8 px from it.
             Span {
-                top: left,
-                bottom: left + w,
+                top: left - 8.0,
+                bottom: left + w + 8.0,
             }
         });
+        // Under footprint columns a time label is centered on its column.
+        let centered = self.visibility.draws_studies() && self.footprint.is_active();
         // No bars, no prices: an empty chart never shows a made-up scale (design.md §7).
         let price_lines = if self.series_len == 0 {
             0
@@ -2233,15 +2418,16 @@ impl ChartView {
                 }
             };
             let w = f32::from(self.label(kind, l.time.0, t.text_dim, window, text).width);
+            let left = if centered { l.x - w * 0.5 } else { l.x + 4.0 };
             // Entirely on the time axis (not under the price axis), clear of the time tag.
             let span = Span {
-                top: l.x + 4.0,
-                bottom: l.x + 4.0 + w,
+                top: left,
+                bottom: left + w,
             };
-            if span.bottom > pw || !label_clear_of_tags(span, &[time_tag]) {
+            if left < 0.0 || span.bottom > pw || !label_clear_of_tags(span, &[time_tag]) {
                 continue;
             }
-            let origin = point(px(ox + l.x + 4.0), px(oy + self.above_axis + 4.0));
+            let origin = point(px(ox + left), px(oy + self.above_axis + 4.0));
             self.paint_label(kind, l.time.0, origin, line_h, t.text_dim, window, cx, text);
         }
         self.draw_drawing_tags(bounds, window, cx);
@@ -2288,7 +2474,8 @@ impl ChartView {
         }
         if let Some(bar) = self.cross_bar {
             let partial = self.cross_partial;
-            self.draw_readout(bar, partial, bounds, window, cx);
+            let tick = self.cross_tick;
+            self.draw_readout(bar, partial, tick, bounds, window, cx);
         }
     }
 
@@ -2687,7 +2874,7 @@ impl ChartView {
     /// on the tick grid (or its O/H/L/C with the magnet).
     fn drawing_anchor(&self, x: f64, y: f64) -> Option<Anchor> {
         let d = self.store.try_read()?;
-        let axis = TimeAxis::new(bars_view(&self.derived, &d));
+        let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
         snap_anchor(
             &axis,
             &self.vp,
@@ -3090,8 +3277,14 @@ impl ChartView {
                 Timeframe::Week => {
                     let _ = write!(s, "Week of {}", bar_date(tf, calendar, time));
                 }
+                // Tick bars start at a trade: to the second.
+                Timeframe::Ticks(_) => {
+                    let _ = time.write_crosshair_label(1_000, s);
+                    let _ = s.write_str(" UTC");
+                }
                 _ => {
                     let _ = time.write_crosshair_label(period, s);
+                    let _ = s.write_str(" UTC");
                 }
             }
         }
@@ -3154,6 +3347,7 @@ impl ChartView {
         &mut self,
         bar: Bar,
         partial: bool,
+        tick: TickInfo,
         bounds: Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
@@ -3162,18 +3356,24 @@ impl ChartView {
         if self
             .readout
             .as_ref()
-            .is_none_or(|(b, p, _)| *b != bar || *p != partial)
+            .is_none_or(|(b, p, k, _)| *b != bar || *p != partial || *k != tick)
         {
-            let mut s = FixedStr::<128>::new();
+            let mut s = FixedStr::<160>::new();
             let _ = write_ohlcv(&bar, &self.instrument.price, self.instrument.qty, &mut s);
-            if partial {
-                // Cut short by a session break (the close, or a holiday halt).
+            if let Some((last, count, n, state)) = tick {
+                // A tick bar: when it ran (first to last trade) and how many trades it holds
+                // ("partial (41 of 233 trades)" when cut short or still forming).
+                let _ = s.write_str("  ");
+                let _ = write_tick_span(bar.time, last, count, n, state, &mut s);
+            } else if partial {
+                // Cut short by a session break (the close, or a holiday halt; tick bars: the
+                // session's last bar).
                 let _ = s.write_str("  partial");
             }
             let line = self.shape(s.as_str(), t.text_main, window);
-            self.readout = Some((bar, partial, line));
+            self.readout = Some((bar, partial, tick, line));
         }
-        let Some((_, _, line)) = &self.readout else {
+        let Some((_, _, _, line)) = &self.readout else {
             return;
         };
         let scale = window.scale_factor();
@@ -3201,6 +3401,53 @@ impl ChartView {
             cx,
         );
         crate::layout_rec::line(window, line, origin, px(LABEL_PX * 1.3), "");
+    }
+
+    /// "tick bars from 11-05 14:32 UTC" beside the first tick bar, at the plot's
+    /// bottom: the bars begin after their session's open, so earlier trading has none.
+    fn draw_tick_from(
+        &mut self,
+        from: UtcMillis,
+        x: f32,
+        (ox, oy): (f32, f32),
+        ph: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        let text = move |s: &mut FixedStr<32>| {
+            let _ = lines_feed::ticks::write_from(from, s);
+        };
+        let w = f32::from(
+            self.label(LabelKind::TickFrom, from.0, t.text_dim, window, text)
+                .width,
+        );
+        let scale = window.scale_factor();
+        let pw = f32::from(self.plot.size.width);
+        let box_h = LABEL_PX * 1.6;
+        let box_w = w + 12.0;
+        let left = snap(f64::from((x + 6.0).min(pw - box_w).max(0.0)), scale);
+        let top = snap(f64::from(ph - box_h - 6.0), scale);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(ox + left), px(oy + top)),
+                size(px(box_w), px(box_h)),
+            ),
+            t.panel.opacity(0.9),
+        ));
+        self.paint_label(
+            LabelKind::TickFrom,
+            from.0,
+            point(
+                px(ox + left + 6.0),
+                px(oy + top + box_h * 0.5 - LABEL_PX * 0.65),
+            ),
+            px(LABEL_PX * 1.3),
+            t.text_dim,
+            window,
+            cx,
+            text,
+        );
     }
 
     fn shape(&self, text: &str, color: Hsla, window: &mut Window) -> ShapedLine {
@@ -3375,6 +3622,26 @@ impl ChartView {
         if let Some(h) = d.history.label() {
             let _ = write!(right, "  ·  {h}");
         }
+        // Tick bars being rebuilt say so here; bars that begin late say so at their first bar
+        // in the plot (here too while there are none yet).
+        let tick_status = self
+            .tick_key()
+            .map(|k| d.ticks.status(k, &d.series, &d.product));
+        let tick_bars = self.tick_key().and_then(|k| d.ticks.bars(k));
+        if let Some(st) = tick_status
+            && (st == lines_feed::ticks::TickStatus::Building
+                || tick_bars.is_none_or(|b| b.is_empty()))
+            && let Some(l) = st.label()
+        {
+            let _ = write!(right, "  ·  {l}");
+        }
+        // The forming tick bar's trades to go, beside the timeframe in the chip (none once its
+        // session has closed: it can't take another trade).
+        let now = self.store.feed_clock();
+        let to_go = tick_bars.and_then(|b| {
+            let i = b.len().checked_sub(1)?;
+            b.is_forming_at(i, now).then(|| b.ticks() - b.count(i))
+        });
         if self.frozen {
             // Frozen clock: only data-derived time is shown, so screenshots are reproducible.
             if let Some(mt) = d.market_time {
@@ -3410,7 +3677,7 @@ impl ChartView {
                 let _ = write!(right, "  ·  {c}");
             }
         }
-        let list = self.timeframe_list(&t, cx);
+        let list = self.timeframe_list(&t, to_go, cx);
         // What fits whole beside the hover controls' gutter (from last frame's width); the
         // rest is dropped whole, never cut: typing a timeframe and the palette still change
         // the timeframe, and the palette the account.
@@ -3442,7 +3709,7 @@ impl ChartView {
             self.common.link.is_some(),
             &pane::contract_text(&d),
             word,
-            &pane::timeframe_chip_text(self.timeframe),
+            &pane::chip_text(self.timeframe, self.tick_continuous(), to_go),
             acct.as_ref().map(|(n, p)| (n.as_str(), *p)),
             self.tf_menu,
             &measure,
@@ -3453,7 +3720,7 @@ impl ChartView {
             let dismiss: popover::OnDismiss = Box::new(
                 cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::Timeframe, cx)),
             );
-            crate::dropdown::dropdown(self.timeframe_chip(&t, cx), list).on_dismiss(dismiss)
+            crate::dropdown::dropdown(self.timeframe_chip(&t, to_go, cx), list).on_dismiss(dismiss)
         });
         bar().child(
             pane::header_content()
@@ -3580,11 +3847,19 @@ impl ChartView {
         )
     }
 
-    /// The header's timeframe chip ("5m ▾"): opens the list.
-    fn timeframe_chip(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The header's timeframe chip ("5m ▾"; a forming tick bar's trades to go in quiet text:
+    /// "233t · 41 left ▾"; "∞" on continuous tick bars): opens the list.
+    fn timeframe_chip(
+        &self,
+        t: &Theme,
+        to_go: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let accent = t.accent;
         div()
             .id("timeframe")
+            .flex()
+            .flex_row()
             .px_1()
             .rounded_sm()
             .border_1()
@@ -3593,13 +3868,15 @@ impl ChartView {
             .cursor_pointer()
             .hover(move |s| s.border_color(accent))
             .relative()
-            .child(pane::timeframe_chip_text(self.timeframe))
+            .child(pane::chip_timeframe(self.timeframe, self.tick_continuous()))
+            .children(to_go.map(|n| div().text_color(t.text_dim).child(pane::chip_to_go(n))))
+            .child(" ▾")
             .children(
                 crate::layout_rec::on()
                     .then(|| {
                         crate::layout_rec::bordered(
                             lines_core::layout_lint::Kind::Chip,
-                            pane::timeframe_chip_text(self.timeframe),
+                            pane::chip_text(self.timeframe, self.tick_continuous(), to_go),
                             0,
                             "chart-header",
                             1.0,
@@ -3617,7 +3894,12 @@ impl ChartView {
     }
 
     /// The timeframe list, while open: under the chip (`dropdown`).
-    fn timeframe_list(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn timeframe_list(
+        &self,
+        t: &Theme,
+        to_go: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.tf_menu {
             return None;
         }
@@ -3639,7 +3921,11 @@ impl ChartView {
                     .then(|| {
                         crate::layout_rec::bordered(
                             lines_core::layout_lint::Kind::Popup {
-                                trigger: pane::timeframe_chip_text(self.timeframe),
+                                trigger: pane::chip_text(
+                                    self.timeframe,
+                                    self.tick_continuous(),
+                                    to_go,
+                                ),
                             },
                             "timeframe list",
                             crate::layout_rec::POPUP,
@@ -3649,9 +3935,16 @@ impl ChartView {
                     })
                     .flatten(),
             );
+        // Two columns, time bars and tick bars: the list stays as short as the time column.
+        let mut columns = [
+            div().flex().flex_col().min_w(px(110.0)),
+            div().flex().flex_col().min_w(px(110.0)),
+        ];
         for (i, tf) in Timeframe::ALL.into_iter().enumerate() {
             let on = tf == self.timeframe;
-            list = list.child(
+            let col = usize::from(tf.ticks().is_some());
+            let name = pane::timeframe_name(tf);
+            columns[col] = std::mem::replace(&mut columns[col], div()).child(
                 div()
                     .id(("timeframe", i as u64))
                     .px_2()
@@ -3665,9 +3958,9 @@ impl ChartView {
                         FontWeight::NORMAL
                     })
                     .child(if on {
-                        format!("✓ {tf}")
+                        format!("✓ {name}")
                     } else {
-                        format!("   {tf}")
+                        format!("   {name}")
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -3678,6 +3971,8 @@ impl ChartView {
                     ),
             );
         }
+        let [time, ticks] = columns;
+        list = list.child(div().flex().flex_row().child(time).child(ticks));
         Some(
             list.child(
                 div()
@@ -3685,7 +3980,7 @@ impl ChartView {
                     .pt_1()
                     .text_color(t.text_dim)
                     .text_size(px(11.0))
-                    .child("Or type 5, 1h, 1d … + Enter"),
+                    .child("Or type 5, 1h, 1d, 500t … + Enter"),
             )
             .into_any_element(),
         )
@@ -3697,7 +3992,8 @@ impl ChartView {
         let (hint, ok) = match Timeframe::parse(entry) {
             Some(tf) => (format!("Enter: {tf}"), true),
             None => (
-                "1 2 3 5 10 15 30 (m)  ·  1h 2h 4h  ·  1d  ·  1w".to_owned(),
+                "1 2 3 5 10 15 30 (m)  ·  1h 2h 4h  ·  1d  ·  1w  ·  100t 233t 500t (1 to 100000)"
+                    .to_owned(),
                 false,
             ),
         };
@@ -3772,6 +4068,9 @@ impl Pane for ChartView {
             levels: self.levels.config.clone(),
             magnet: self.magnet(),
             hide_drawings: self.drawings.hidden,
+            // Saved on tick charts, and on any chart set to run them continuously.
+            tick_continuous: (self.on_ticks() || self.tick_continuous())
+                .then_some(self.tick_continuous()),
             timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
             footprint: self.footprint.config(),
             subpane: (self.subpane_ratio != crate::subpane::DEFAULT_RATIO)
@@ -4032,11 +4331,275 @@ fn measure_parts(mode: PnlDisplay) -> lines_core::drawings::MeasureParts {
     }
 }
 
-/// The bars a chart shows: its timeframe's, or the store's 1-minute bars.
-fn bars_view<'a>(derived: &'a Option<Derived>, d: &'a ChartData) -> BarsView<'a> {
-    match derived {
-        Some(dv) => dv.view(),
-        None => BarsView::fixed(d.series.bars(), d.series.period_ms()),
+/// A hovered tick bar: its last trade time, trade count, the chart's count and its state
+/// (`None` on time bars).
+type TickInfo = Option<(UtcMillis, u32, u32, TickState)>;
+
+/// A tick bar's state for the readout.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TickState {
+    Full,
+    /// Closed short by a session break.
+    Partial,
+    /// The newest bar, still short of its count.
+    Forming,
+}
+
+/// `tick_marks`: the candle is a partial or forming tick bar.
+const MARK_PARTIAL: u8 = 1;
+/// `tick_marks`: the candle takes its session's first trade (a divider before it).
+const MARK_SESSION: u8 = 2;
+
+/// A tick bar's span and size for the readout: "14:32:05 to 14:32:41  500 trades" (UTC, as
+/// the time axis); short ones "… partial (41 of 233 trades)" or "… forming (41 of 233
+/// trades)". Allocation-free.
+pub fn write_tick_span(
+    first: UtcMillis,
+    last: UtcMillis,
+    count: u32,
+    n: u32,
+    state: TickState,
+    out: &mut impl std::fmt::Write,
+) -> std::fmt::Result {
+    let (_, _, _, h0, m0, s0) = first.to_civil();
+    let (_, _, _, h1, m1, s1) = last.to_civil();
+    write!(out, "{h0:02}:{m0:02}:{s0:02} to {h1:02}:{m1:02}:{s1:02}  ")?;
+    let plural = if n == 1 { "" } else { "s" };
+    match state {
+        TickState::Full => {
+            let plural = if count == 1 { "" } else { "s" };
+            write!(out, "{count} trade{plural}")
+        }
+        TickState::Partial => write!(out, "partial ({count} of {n} trade{plural})"),
+        TickState::Forming => write!(out, "forming ({count} of {n} trade{plural})"),
+    }
+}
+
+/// The tick series a chart on `tf` holds with `reset` (none on time bars).
+fn wanted_tick_key(tf: Timeframe, reset: TickReset) -> Option<TickKey> {
+    tf.ticks().map(|n| TickKey { n, reset })
+}
+
+/// The tick mode a restored chart takes: the saved one; with none saved (an older file, or a
+/// time chart that never set it), `current` (the CLI's `--tick-continuous`) stays.
+fn restored_tick_reset(state: &ChartState, current: TickReset) -> TickReset {
+    match state.tick_continuous {
+        Some(true) => TickReset::Continuous,
+        Some(false) => TickReset::Session,
+        None => current,
+    }
+}
+
+/// One paint's view bookkeeping across a change of bars:
+/// - bars dropped from the front (`trimmed`, counted since `baseline`) shift indices: a view
+///   off the live edge stays on the same bars. `trimmed` is `None` while a tick series
+///   rebuilds; the series that then lands sets a new baseline (its own trim count is not a
+///   shift of this view).
+/// - after a timeframe or tick-mode change (`anchor`: a time and its x), the bar holding that
+///   time goes where it was, once there are bars: while a rebuild shows none the anchor is
+///   kept for the bars that land ("switching keeps the pointer's time in place").
+fn keep_view(
+    vp: &mut Viewport,
+    baseline: &mut u64,
+    anchor: &mut Option<(UtcMillis, f64)>,
+    trimmed: Option<u64>,
+    bars: &[Bar],
+    dragging: bool,
+) {
+    match trimmed {
+        None => *baseline = u64::MAX,
+        Some(trimmed) => {
+            if trimmed > *baseline && (!vp.follow_live || vp.held) {
+                vp.right_index -= (trimmed - *baseline) as f64;
+            }
+            *baseline = trimmed;
+        }
+    }
+    if !bars.is_empty()
+        && let Some((t, x)) = anchor.take()
+    {
+        // Live following resumes if the newest bar is then in view.
+        let i = bars.partition_point(|b| b.time <= t).saturating_sub(1);
+        vp.right_index += i as f64 - vp.x_to_index(x);
+        if !dragging {
+            vp.held = true;
+            vp.set_held(false, bars.len());
+        }
+    }
+}
+
+/// B1: a switch to tick bars that rebuild keeps the pointer's time in place. While the
+/// rebuild shows no bars the anchor waits; the landed series (which already trimmed bars) is
+/// not taken as a trim of the old one.
+#[cfg(test)]
+#[test]
+fn a_rebuilding_switch_keeps_the_pointers_time() {
+    let minute = |i: i64| Bar {
+        time: UtcMillis(1_800_000_000_000 + i * 60_000),
+        open: Price(1),
+        high: Price(2),
+        low: Price(1),
+        close: Price(2),
+        volume: lines_core::Qty(1),
+    };
+    // A 1m chart scrolled back: 1000 bars, bar 600 under the pointer at x = 400.
+    let one_min: Vec<Bar> = (0..1000).map(minute).collect();
+    let mut vp = Viewport::default();
+    vp.set_size(800.0, 600.0);
+    vp.follow_live = false;
+    vp.right_index = 600.0 + 400.0 / vp.bar_px;
+    let mut baseline = 0;
+    let mut anchor = None;
+    keep_view(
+        &mut vp,
+        &mut baseline,
+        &mut anchor,
+        Some(0),
+        &one_min,
+        false,
+    );
+    let x = 400.0;
+    assert_eq!(vp.x_to_index(x).round() as usize, 600);
+    let t = one_min[600].time;
+    // The switch: the anchor and an unknown baseline (`apply_timeframe`).
+    anchor = Some((t, x));
+    baseline = u64::MAX;
+    // Rebuilding: no bars, no trim count. The anchor is kept.
+    for _ in 0..3 {
+        keep_view(&mut vp, &mut baseline, &mut anchor, None, &[], false);
+    }
+    assert_eq!(anchor, Some((t, x)), "kept while rebuilding");
+    // Lands: 5 bars per minute, from minute 100 on, with 64 already trimmed.
+    let ticks: Vec<Bar> = (0..4500)
+        .map(|k| Bar {
+            time: UtcMillis(minute(100).time.0 + k * 12_000),
+            ..minute(0)
+        })
+        .collect();
+    keep_view(&mut vp, &mut baseline, &mut anchor, Some(64), &ticks, false);
+    assert_eq!(anchor, None);
+    assert_eq!(baseline, 64);
+    let i = vp.x_to_index(x).round() as usize;
+    assert!(
+        ticks[i].time <= t && t < ticks[i + 1].time,
+        "the bar holding the pointer's time is under the pointer: {i}"
+    );
+    // A later trim of the tick series shifts the held view by just that much.
+    let before = vp.right_index;
+    keep_view(
+        &mut vp,
+        &mut baseline,
+        &mut anchor,
+        Some(64 + 16),
+        &ticks,
+        false,
+    );
+    assert_eq!(vp.right_index, before - 16.0);
+}
+
+/// The session divider's dashes and gaps (logical px).
+const DIVIDER_DASH: f32 = 4.0;
+const DIVIDER_GAP: f32 = 4.0;
+
+/// A dashed outline of `r`, `hair` thick (marks a partial bar by shape).
+fn dashed_box(window: &mut Window, r: Bounds<Pixels>, hair: f32, color: Hsla) {
+    const ON: f32 = 3.0;
+    const OFF: f32 = 2.0;
+    let (x0, y0) = (f32::from(r.origin.x), f32::from(r.origin.y));
+    let (w, h) = (f32::from(r.size.width), f32::from(r.size.height));
+    let q = |x: f32, y: f32, w: f32, h: f32| {
+        Bounds::new(point(px(x), px(y)), size(px(w.max(hair)), px(h.max(hair))))
+    };
+    let mut x = 0.0;
+    while x < w {
+        let d = ON.min(w - x);
+        window.paint_quad(fill(q(x0 + x, y0, d, hair), color));
+        window.paint_quad(fill(q(x0 + x, y0 + h - hair, d, hair), color));
+        x += ON + OFF;
+    }
+    let mut y = 0.0;
+    while y < h {
+        let d = ON.min(h - y);
+        window.paint_quad(fill(q(x0, y0 + y, hair, d), color));
+        window.paint_quad(fill(q(x0 + w - hair, y0 + y, hair, d), color));
+        y += ON + OFF;
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn tick_span_text() {
+    let a = UtcMillis::parse_iso("2026-11-05T14:32:05.250Z").unwrap();
+    let b = UtcMillis::parse_iso("2026-11-05T14:32:41Z").unwrap();
+    let text = |count, state| {
+        let mut s = FixedStr::<64>::new();
+        write_tick_span(a, b, count, 233, state, &mut s).unwrap();
+        s.as_str().to_owned()
+    };
+    assert_eq!(
+        text(233, TickState::Full),
+        "14:32:05 to 14:32:41  233 trades"
+    );
+    assert_eq!(text(1, TickState::Full), "14:32:05 to 14:32:41  1 trade");
+    assert_eq!(
+        text(41, TickState::Partial),
+        "14:32:05 to 14:32:41  partial (41 of 233 trades)"
+    );
+    assert_eq!(
+        text(41, TickState::Forming),
+        "14:32:05 to 14:32:41  forming (41 of 233 trades)"
+    );
+}
+
+/// A restored chart holds the series its saved mode asks for, also when it is already on that
+/// timeframe (the old code kept the session series), and goes back to session resets when the
+/// saved mode is off. N8: a chart saved with no mode (an older file, a time chart) keeps the
+/// mode it started with (`--tick-continuous`): absent is not "off".
+#[cfg(test)]
+#[test]
+fn restored_tick_mode_picks_the_series() {
+    let mut state: ChartState = serde_json::from_str(r#"{ "bar_px": 8.0 }"#).unwrap();
+    assert_eq!(state.tick_continuous, None);
+    for cli in [TickReset::Session, TickReset::Continuous] {
+        assert_eq!(
+            restored_tick_reset(&state, cli),
+            cli,
+            "absent keeps {cli:?}"
+        );
+    }
+    state.tick_continuous = Some(true);
+    assert_eq!(
+        restored_tick_reset(&state, TickReset::Session),
+        TickReset::Continuous
+    );
+    let tf = Timeframe::Ticks(233);
+    let held = wanted_tick_key(tf, TickReset::Session);
+    let want = wanted_tick_key(tf, restored_tick_reset(&state, TickReset::Session));
+    assert_ne!(held, want, "same timeframe, other mode: re-acquired");
+    assert_eq!(want.unwrap().reset, TickReset::Continuous);
+    state.tick_continuous = Some(false);
+    assert_eq!(
+        wanted_tick_key(tf, restored_tick_reset(&state, TickReset::Continuous)),
+        held,
+        "saved off wins over the CLI"
+    );
+    assert_eq!(
+        wanted_tick_key(Timeframe::Minutes(5), TickReset::Continuous),
+        None
+    );
+}
+
+/// The bars a chart shows: its timeframe's (derived, or the store's tick bars), or the
+/// store's 1-minute bars.
+fn bars_view<'a>(
+    derived: &'a Option<Derived>,
+    ticks: Option<TickKey>,
+    d: &'a ChartData,
+) -> BarsView<'a> {
+    match (derived, ticks) {
+        (_, Some(k)) => d.ticks.view(k),
+        (Some(dv), None) => dv.view(),
+        (None, None) => BarsView::fixed(d.series.bars(), d.series.period_ms()),
     }
 }
 
@@ -4067,7 +4630,7 @@ fn hud_compact(w: f32) -> bool {
 }
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 1d + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 500t + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

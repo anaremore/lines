@@ -123,6 +123,9 @@ pub enum Command {
     Timeframe(Timeframe),
     /// The focused chart's timeframe list.
     TimeframeMenu,
+    /// The focused chart's tick bars: run across sessions, or restart at each session open
+    /// (the default). Saved with the chart.
+    TickBarsContinuous,
     /// Drawings on the focused chart (roadmap 11; `crate::chart_draw`).
     Draw(DrawCmd),
 }
@@ -575,8 +578,14 @@ pub fn label(c: Command) -> String {
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
         Command::Settings => "Settings…".into(),
         Command::Setting(c) => c.label(),
+        Command::Timeframe(tf @ lines_core::Timeframe::Ticks(_)) => {
+            format!("Timeframe: {} ({tf})", crate::pane::timeframe_name(tf))
+        }
         Command::Timeframe(tf) => format!("Timeframe: {tf}"),
         Command::TimeframeMenu => "Chart: timeframe…".into(),
+        Command::TickBarsContinuous => {
+            "Chart: tick bars run continuously, no session reset (on/off)".into()
+        }
         Command::Draw(d) => match d {
             DrawCmd::Tool(t) => format!("Drawings: {}", t.label()),
             DrawCmd::Undo => "Drawings: undo".into(),
@@ -665,6 +674,7 @@ pub fn palette() -> Vec<Command> {
         Command::JournalAllDates,
         Command::Studies,
         Command::TimeframeMenu,
+        Command::TickBarsContinuous,
         Command::SaveAs,
         Command::Open,
         Command::Menu,

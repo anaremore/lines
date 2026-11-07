@@ -28,6 +28,7 @@ use lines_core::{
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::provider::MarketEvent;
+use crate::ticks::{TickSet, TickSource};
 
 /// Inner holes in the counted trades shorter than this (open-market time) are not reported:
 /// footprint bars are a minute wide, and a session's first trade lands just after its open.
@@ -44,6 +45,18 @@ pub struct CountedGaps {
     pub first_gap: Option<(i64, i64)>,
     /// Holes after the first.
     pub more_gaps: u32,
+}
+
+/// What the startup replay of stored order flow took (`ChartData::apply_stored`): a tick-bar
+/// rebuild (`crate::ticks`) reads exactly these stored trades again, in the same order.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StoredReplay {
+    /// The contract's store directory they came from (set by the feed's warm start).
+    pub dir: Option<crate::disk::ContractDir>,
+    /// The replayed ranges: each trade date's covered part, as `disk::orderflow` gave them.
+    pub covered: crate::disk::Ranges,
+    /// Trades replayed.
+    pub trades: u64,
 }
 
 /// Exchange → receive latency of this feed's trades and the clock-offset bound (roadmap 6b),
@@ -198,13 +211,74 @@ pub struct ChartData {
     /// gap).
     live_run: Option<(i64, i64)>,
     /// Newest stored trade time replayed: a live trade at or before it is already counted.
-    stored_through: Option<i64>,
+    pub(crate) stored_through: Option<i64>,
     /// Whether each `Trade` of the last applied frame was counted (in order): the local
     /// store's writer stores exactly those (`disk::writer`).
     pub frame_counted: Vec<bool>,
+    /// How many trades `tape`, `vap` and `profiles` took for this contract (stored ones
+    /// replayed at startup, then live ones): the tape holds them all while this is at most its
+    /// capacity.
+    pub counted_n: u64,
+    /// What the startup replay took from the local store (`apply_stored`), so a tick-bar
+    /// rebuild reads exactly the same stored trades again (`crate::ticks`).
+    pub(crate) stored: StoredReplay,
+    /// Tick bars the charts on this store asked for (`crate::ticks`), fed the same counted
+    /// trades (stored and live).
+    pub ticks: TickSet,
+    /// Where tick bars are rebuilt from when a chart switches to one mid-feed (the replay's
+    /// file, or the local store), if anywhere.
+    pub tick_source: Option<TickSource>,
 }
 
 impl ChartData {
+    /// Empty state for one feed (a store's, or a rebuild's scratch copy: `crate::ticks`).
+    pub fn new(
+        product: Product,
+        contract: Option<ContractKey>,
+        capabilities: Capabilities,
+        provider: &'static str,
+        period_ms: i64,
+        max_bars: usize,
+    ) -> ChartData {
+        let calendar = crate::catalog::sessions(product.id);
+        ChartData {
+            product,
+            contract,
+            retired: Vec::new(),
+            capabilities,
+            provider,
+            series: BarSeries::new(period_ms, max_bars),
+            last_trade: None,
+            bid: None,
+            ask: None,
+            book: OrderBook::default(),
+            tape: Tape::new(TAPE_PRINTS),
+            vap: VolumeAtPrice::default(),
+            profiles: SessionProfiles::new(calendar, period_ms, max_bars),
+            // Journal cap: ~ one busy hour of trades while history is outstanding.
+            stitch: Stitcher::new(period_ms, 500_000),
+            history: if capabilities.history {
+                HistoryState::Loading
+            } else {
+                HistoryState::Unsupported
+            },
+            market_time: None,
+            status: FeedStatus::Connecting,
+            stats: FeedStats::default(),
+            chart_epoch: 0,
+            latency: None,
+            orderflow_loading: false,
+            counted: crate::disk::Ranges::default(),
+            live_run: None,
+            stored_through: None,
+            frame_counted: Vec::new(),
+            counted_n: 0,
+            stored: StoredReplay::default(),
+            ticks: TickSet::default(),
+            tick_source: None,
+        }
+    }
+
     /// Record exchange → receive latency for this frame's trades, received at `recv`
     /// (`wall_clock`: this machine's clock, not a recording's). Back-fill (trades received
     /// more than [`BACKFILL_AFTER_MS`] late) is not latency and is skipped.
@@ -301,6 +375,13 @@ impl ChartData {
                             Some((a, b)) => (a, b.max(time.0)),
                             None => (time.0, time.0),
                         });
+                        self.counted_n += 1;
+                        self.ticks.push(Print {
+                            time,
+                            price,
+                            qty,
+                            aggressor,
+                        });
                     }
                     self.last_trade = Some(price);
                     self.stats.trades_in += 1;
@@ -358,16 +439,21 @@ impl ChartData {
     /// Stored order flow (`disk::orderflow`, feed startup): `trades` add to the tape, VAP and
     /// profiles exactly as counted live trades do, but never to the bars (the cached bars
     /// already hold them). `covered`: where `trades` is every trade.
+    /// Tick-bar builders take them too, as counted trades (`crate::ticks`).
     pub fn apply_stored(&mut self, trades: &[Print], covered: &[(i64, i64)]) {
         for p in trades {
             self.tape.push(*p);
             self.vap.add(p.price, p.qty);
             self.profiles.add(p.time, p.price, p.qty, p.aggressor);
+            self.counted_n += 1;
+            self.ticks.push(*p);
             // The newest replayed trade (exchange time; never the local clock).
             self.stored_through = Some(self.stored_through.map_or(p.time.0, |s| s.max(p.time.0)));
         }
+        self.stored.trades += trades.len() as u64;
         for &(a, b) in covered {
             self.counted.add(a, b);
+            self.stored.covered.add(a, b);
         }
         if !trades.is_empty() {
             self.chart_epoch += 1;
@@ -541,6 +627,9 @@ impl ChartData {
         self.live_run = None;
         self.stored_through = None;
         self.orderflow_loading = false;
+        self.counted_n = 0;
+        self.stored = StoredReplay::default();
+        self.ticks.clear();
     }
 
     fn bump_time(&mut self, t: UtcMillis) {
@@ -610,38 +699,14 @@ impl ChartStore {
             feed_id: NEXT_FEED_ID.fetch_add(1, Ordering::Relaxed),
             market_ms: AtomicI64::new(i64::MIN),
             frame_ms: AtomicI64::new(i64::MIN),
-            data: Mutex::new(ChartData {
+            data: Mutex::new(ChartData::new(
                 product,
                 contract,
-                retired: Vec::new(),
                 capabilities,
                 provider,
-                series: BarSeries::new(period_ms, max_bars),
-                last_trade: None,
-                bid: None,
-                ask: None,
-                book: OrderBook::default(),
-                tape: Tape::new(TAPE_PRINTS),
-                vap: VolumeAtPrice::default(),
-                profiles: SessionProfiles::new(calendar, period_ms, max_bars),
-                // Journal cap: ~ one busy hour of trades while history is outstanding.
-                stitch: Stitcher::new(period_ms, 500_000),
-                history: if capabilities.history {
-                    HistoryState::Loading
-                } else {
-                    HistoryState::Unsupported
-                },
-                market_time: None,
-                status: FeedStatus::Connecting,
-                stats: FeedStats::default(),
-                chart_epoch: 0,
-                latency: None,
-                orderflow_loading: false,
-                counted: crate::disk::Ranges::default(),
-                live_run: None,
-                stored_through: None,
-                frame_counted: Vec::new(),
-            }),
+                period_ms,
+                max_bars,
+            )),
             revision: AtomicU64::new(0),
             chart_revision: AtomicU64::new(0),
             last_data: AtomicU64::new(0),

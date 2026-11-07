@@ -71,14 +71,30 @@ fn parse_and_display() {
     ] {
         assert_eq!(Timeframe::parse(s), Some(tf), "{s}");
     }
-    for bad in ["", "m", "7", "0", "3h", "2d", "5s", "99999999", "1x"] {
+    for (s, tf) in [
+        ("500t", Timeframe::Ticks(500)),
+        ("233T", Timeframe::Ticks(233)),
+        ("1t", Timeframe::Ticks(1)),
+        ("7t", Timeframe::Ticks(7)),
+        ("100000t", Timeframe::Ticks(100_000)),
+    ] {
+        assert_eq!(Timeframe::parse(s), Some(tf), "{s}");
+        assert_eq!(tf.source(), BarSource::Trades);
+        assert!(tf.is_valid());
+    }
+    for bad in [
+        "", "m", "7", "0", "3h", "2d", "5s", "99999999", "1x", "t", "0t", "100001t", "5000000t",
+        "70000", "1.5t", "-5t",
+    ] {
         assert_eq!(Timeframe::parse(bad), None, "{bad}");
     }
+    assert!(!Timeframe::Ticks(0).is_valid() && !Timeframe::Ticks(100_001).is_valid());
     let labels: Vec<String> = Timeframe::ALL.iter().map(|tf| tf.to_string()).collect();
     assert_eq!(
         labels,
         [
-            "1m", "2m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "1D", "1W"
+            "1m", "2m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "1D", "1W", "100t",
+            "233t", "500t", "1000t", "2000t"
         ]
     );
     for tf in Timeframe::ALL {
@@ -87,7 +103,8 @@ fn parse_and_display() {
             Some(tf),
             "round trip {tf}"
         );
-        assert_eq!(tf.source(), BarSource::OneMinute);
+        let trades = matches!(tf, Timeframe::Ticks(_));
+        assert_eq!(tf.source() == BarSource::Trades, trades);
     }
 }
 
@@ -242,7 +259,10 @@ fn buckets_follow_dst() {
 #[test]
 fn incremental_updates_equal_a_full_rebuild() {
     let cal = cme();
-    for tf in Timeframe::ALL {
+    for tf in Timeframe::ALL
+        .into_iter()
+        .filter(|tf| tf.source() == BarSource::OneMinute)
+    {
         let mut s = BarSeries::new(MINUTE, 3_000);
         let mut d = Derived::new(tf, s.capacity());
         let check = |s: &BarSeries, d: &mut Derived, step: &str| {
