@@ -253,3 +253,71 @@ fn charts_of_a_product_share_drawings() {
     assert!(b.changed());
     assert_eq!(b.count(), 1);
 }
+
+/// A drawing made on 1m and moved on a 15m chart keeps each anchor's minute inside its
+/// bucket: it moves by whole 15m bars, never collapsing onto bucket starts.
+#[test]
+fn moving_on_a_higher_timeframe_keeps_minutes() {
+    use lines_core::{BarSeries, Derived, Timeframe};
+    let mut series = BarSeries::new(M, 1_000);
+    for b in bars() {
+        series.upsert(b);
+    }
+    let mut fifteen = Derived::new(Timeframe::Minutes(15), series.capacity());
+    fifteen.update(&series, None);
+    let axis = TimeAxis::new(fifteen.view());
+    let t0 = 1_800_000_000_000; // a 15-minute boundary
+    let at = |min: i64, p: i64| Anchor {
+        time: UtcMillis(t0 + min * M),
+        price: Price(p),
+    };
+    let original = Drawing::new(Tool::Trend, at(8, 600_000), at(22, 600_100), Style::DEFAULT);
+    // Pressed on bar 0 (its start), released on bar 1, 2 ticks higher.
+    let drag = Drag {
+        hit: Hit::Body,
+        original: original.clone(),
+        from: at(0, 600_000),
+        press: (0.0, 0.0),
+    };
+    let moved = dragged(&drag, at(15, 600_050), &axis, 25);
+    assert_eq!(moved.a, at(23, 600_050));
+    assert_eq!(moved.b, at(37, 600_150));
+    // Not moved in time: the anchors keep their exact minutes.
+    let still = dragged(&drag, at(0, 600_000), &axis, 25);
+    assert_eq!((still.a, still.b), (original.a, original.b));
+}
+
+/// A click on a selected drawing's handle (no drag) selects; it never moves the anchor.
+#[test]
+fn a_click_on_a_handle_moves_nothing() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Trend);
+    r.down(100.0, 100.0);
+    r.down(300.0, 200.0);
+    let before = r.items()[0].clone();
+    r.frame(0.0, 0.0);
+    let (hx, hy) = r.d.drawn()[0].handles[0];
+    assert!(r.down(hx + 3.0, hy + 3.0));
+    assert!(r.up(hx + 3.0, hy + 3.0));
+    assert_eq!(r.items()[0], before);
+    assert!(!r.d.data().lock().can_redo());
+}
+
+/// Choosing a tool clears the temporary measure, so a new measure's preview shows.
+#[test]
+fn a_new_tool_clears_the_temporary_measure() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Measure);
+    r.down(200.0, 300.0);
+    r.down(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    let old = r.d.measure_shown().unwrap().0;
+    r.d.set_tool(Tool::Measure);
+    r.down(100.0, 50.0);
+    r.frame(150.0, 80.0);
+    let shown = r.d.measure_shown().unwrap().0;
+    assert_ne!(
+        shown.p0, old.p0,
+        "the new measure's preview, not the old one"
+    );
+}

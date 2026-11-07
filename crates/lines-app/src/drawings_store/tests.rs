@@ -127,6 +127,35 @@ fn unusable_drawings_are_skipped_and_reported() {
     assert!(skipped[2].contains("second anchor"));
 }
 
+/// Entries this version can't use are never lost: every save writes them back unchanged, and
+/// new drawings don't reuse their ids.
+#[test]
+fn unusable_drawings_survive_saves() {
+    let dir = std::env::temp_dir().join(format!("lines-drawings-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut f: DrawingsFile = serde_json::from_str(V1).unwrap();
+    f.drawings[1].tool = "spiral".into(); // id 2: unusable
+    f.drawings[1].id = 9;
+    let file = path(&dir, &es());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, f.encode()).unwrap();
+    let writer = Writer::spawn();
+    let mut g = Drawings::new(Some(dir.clone()), Some(writer.clone()));
+    let (p, report) = g.product(&es());
+    assert!(report.unwrap().contains("kept in the file"));
+    let id = p.change(|s| (true, s.add(sample()[2].clone())));
+    assert_eq!(id, 10, "ids continue above the kept entry's");
+    assert!(writer.flush(std::time::Duration::from_secs(5)));
+    let saved: DrawingsFile = match decode(&FORMAT, &std::fs::read(&file).unwrap()) {
+        Decoded::Ok { value, .. } => value,
+        other => panic!("{other:?}"),
+    };
+    let spiral = saved.drawings.iter().find(|d| d.id == 9).unwrap();
+    assert_eq!(spiral, &f.drawings[1], "written back exactly as read");
+    assert_eq!(saved.drawings.len(), 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn files_are_named_by_product() {
     let dir = Path::new("cfg");

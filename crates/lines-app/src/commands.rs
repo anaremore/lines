@@ -591,17 +591,11 @@ pub fn palette() -> Vec<Command> {
     v
 }
 
-/// While the focused pane takes typed text (a symbol search, a note, a timeframe), only
-/// Ctrl/Cmd keys reach the workspace, and not undo/redo: plain and Alt keys are the text's
-/// (on macOS Option types characters, e.g. in a note).
-pub fn runs_while_typing(k: &Keystroke, cmd: Command) -> bool {
-    let m = k.modifiers;
-    let ctrl = if cfg!(target_os = "macos") {
-        m.platform
-    } else {
-        m.control
-    };
-    ctrl && !matches!(cmd, Command::Draw(DrawCmd::Undo | DrawCmd::Redo))
+/// While the focused pane takes typed text (a symbol search, a note, a timeframe), drawing
+/// commands stay with the text: their Alt+letters (on macOS Option types characters, e.g. in
+/// a note) and undo/redo. Every other binding runs as before (Alt+arrows, F1, Shift+F10, …).
+pub fn runs_while_typing(_k: &Keystroke, cmd: Command) -> bool {
+    !matches!(cmd, Command::Draw(_))
 }
 
 /// Palette entries matching `query`: every word of it appears in the label (any order, any
@@ -713,6 +707,12 @@ mod tests {
             &k(&format!("{}-shift-p", ctrl())),
             Command::Palette
         ));
+        // Other workspace keys are unchanged while typing.
+        assert!(runs_while_typing(
+            &k("alt-left"),
+            Command::Focus(Direction::Left)
+        ));
+        assert!(runs_while_typing(&k("f1"), Command::ToggleHints));
         assert_eq!(cmd("shift-f10"), Some(Command::Menu));
         assert_eq!(c("shift-s"), Some(Command::SaveAs));
         assert_eq!(c("o"), Some(Command::Open));

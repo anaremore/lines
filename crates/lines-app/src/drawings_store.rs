@@ -10,8 +10,8 @@
 //!
 //! The file holds anchors as ISO times and prices as integer units of the product's price
 //! scale (exact). A drawing that can't be used (unknown tool, bad time, a price off the tick
-//! grid: never rounded) is skipped and reported; the file is then not saved over until the
-//! trader changes something, and the original is backed up first (`crate::versioned`).
+//! grid: never rounded) is skipped and reported, and kept: every save writes it back exactly
+//! as it was read, so a newer Lines (or a hand fix) can still use it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -162,6 +162,22 @@ impl DrawingsFile {
         (out, skipped)
     }
 
+    /// The entries `to_drawings` didn't turn into `usable` (each usable id once).
+    pub fn unusable(&self, usable: &[Drawing]) -> Vec<DrawingDoc> {
+        let mut taken: Vec<u64> = Vec::new();
+        self.drawings
+            .iter()
+            .filter(|d| {
+                let use_it = usable.iter().any(|u| u.id == d.id) && !taken.contains(&d.id);
+                if use_it {
+                    taken.push(d.id);
+                }
+                !use_it
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         versioned::encode(&FORMAT, self).unwrap_or_default()
     }
@@ -191,6 +207,8 @@ pub struct ProductDrawings {
     /// Where changes are saved (`None`: in memory only, or a file we couldn't back up).
     path: Option<PathBuf>,
     writer: Option<Writer>,
+    /// Entries of the file this version couldn't use: written back unchanged on every save.
+    kept: Vec<DrawingDoc>,
 }
 
 impl ProductDrawings {
@@ -206,6 +224,7 @@ impl ProductDrawings {
             revision: AtomicU64::new(1),
             path,
             writer,
+            kept: Vec::new(),
         }
     }
 
@@ -236,10 +255,9 @@ impl ProductDrawings {
         if changed {
             self.revision.fetch_add(1, Ordering::AcqRel);
             if let (Some(p), Some(w)) = (&self.path, &self.writer) {
-                w.write(
-                    p.clone(),
-                    DrawingsFile::from_drawings(&self.product, set.items()).encode(),
-                );
+                let mut file = DrawingsFile::from_drawings(&self.product, set.items());
+                file.drawings.extend(self.kept.iter().cloned());
+                w.write(p.clone(), file.encode());
             }
         }
         r
@@ -281,37 +299,37 @@ impl Drawings {
         if let Some(p) = self.products.get(&product.id) {
             return (p.clone(), None);
         }
-        let (set, path, report) = match &self.dir {
-            None => (DrawingSet::default(), None, None),
+        let (set, path, report, kept) = match &self.dir {
+            None => (DrawingSet::default(), None, None, Vec::new()),
             Some(dir) => {
                 let file = path(dir, product);
                 let l = versioned::load::<DrawingsFile>(&FORMAT, &file);
-                let (items, skipped) = l
-                    .value
-                    .map(|f| f.to_drawings(product.price.tick))
-                    .unwrap_or_default();
+                let doc = l.value.unwrap_or_default();
+                let (items, skipped) = doc.to_drawings(product.price.tick);
+                let kept = doc.unusable(&items);
                 let mut report = l.report;
                 if !skipped.is_empty() {
-                    report = Some(format!(
-                        "{} drawings: skipped {} that couldn't be used ({})",
+                    let s = format!(
+                        "{} drawings: skipped {} that couldn't be used, kept in the file ({})",
                         product.symbol,
                         skipped.len(),
                         skipped.join("; ")
-                    ));
+                    );
+                    report = Some(match report {
+                        Some(r) => format!("{r}; {s}"),
+                        None => s,
+                    });
                 }
-                (
-                    DrawingSet::from_drawings(items),
-                    l.writable.then_some(file),
-                    report,
-                )
+                let mut set = DrawingSet::from_drawings(items);
+                if let Some(max) = kept.iter().map(|d| d.id).max() {
+                    set.reserve_ids_through(max);
+                }
+                (set, l.writable.then_some(file), report, kept)
             }
         };
-        let p = Arc::new(ProductDrawings::new(
-            product.clone(),
-            set,
-            path,
-            self.writer.clone(),
-        ));
+        let mut p = ProductDrawings::new(product.clone(), set, path, self.writer.clone());
+        p.kept = kept;
+        let p = Arc::new(p);
         self.products.insert(product.id, p.clone());
         (p, report)
     }

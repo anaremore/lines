@@ -167,8 +167,8 @@ impl Theme {
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
             // sand, teal, silver, orchid
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
-            // sky, gold, paper, pink
-            drawing: [c(0x7cc4ff), c(0xf2c14e), c(brand::PAPER), c(0xf08bd6)],
+            // paper, gold, pink, lime: none near up/down in either palette, nor the accent
+            drawing: [c(brand::PAPER), c(0xe8df4f), c(0xf08bd6), c(0xb8e04a)],
             label_bg: c(0x171b24).opacity(0.9),
             profile_va: c(0x9a9fb2).opacity(0.30),
             profile_poc: c(brand::PAPER).opacity(0.70),
@@ -219,8 +219,8 @@ impl Theme {
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
-            // navy, ochre, ink, magenta
-            drawing: [c(0x1d4f91), c(0x8a6100), c(brand::INK), c(0x9c2a7c)],
+            // ink, brown, plum, olive
+            drawing: [c(brand::INK), c(0x5c4a3a), c(0x6b4c8a), c(0x6b6b00)],
             label_bg: c(brand::PAPER).opacity(0.9),
             profile_va: c(0x565b6e).opacity(0.24),
             profile_poc: c(brand::INK).opacity(0.65),
@@ -596,15 +596,26 @@ mod tests {
     /// (WCAG 1.4.11: 3:1): it stays legible on the strongest fill of either side or neutral,
     /// in every theme and palette.
     /// Drawing colors read against the chart (3:1, graphical objects) and never borrow a
-    /// meaning: not up, down or the accent, in every theme and palette.
+    /// meaning: clearly apart from up, down and the accent (sRGB distance, so near-misses such
+    /// as a sky blue beside the colorblind palette's blue up fail too), in every theme and
+    /// palette.
     #[test]
     fn drawing_colors_contrast_and_stay_distinct() {
+        let dist = |a: Hsla, b: Hsla| {
+            let (a, b) = (a.to_rgb(), b.to_rgb());
+            ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt()
+        };
         for t in Theme::all() {
             for (i, d) in t.drawing.iter().enumerate() {
                 let r = contrast(*d, t.bg);
                 assert!(r >= 3.0, "{}: drawing color {i}: {r:.2}", t.name);
                 for (what, other) in [("up", t.up), ("down", t.down), ("accent", t.accent)] {
-                    assert_ne!(*d, other, "{}: drawing color {i} is {what}", t.name);
+                    let gap = dist(*d, other);
+                    assert!(
+                        gap >= 0.24,
+                        "{}: drawing color {i} near {what}: {gap:.3}",
+                        t.name
+                    );
                 }
             }
         }
