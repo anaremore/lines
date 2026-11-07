@@ -851,15 +851,15 @@ impl ChartView {
         }
         // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
         // go to them when they have a use for it (a tool, a measure, a selection).
-        let typed = k
-            .key_char
-            .as_deref()
-            .filter(|_| !m.control && !m.alt && !m.platform);
-        if !m.control
-            && !m.platform
-            && (self.drawings.typing()
-                || (self.tf_entry.is_none()
-                    && matches!(k.key.as_str(), "escape" | "enter" | "delete" | "backspace")))
+        // A note takes what the layout types: AltGr arrives as Ctrl+Alt on Windows, Option
+        // characters with Alt on macOS; plain Ctrl or Cmd shortcuts are never text.
+        let note_text = !m.platform && (!m.control || m.alt);
+        let typed = k.key_char.as_deref().filter(|_| note_text);
+        if ((self.drawings.typing() && note_text)
+            || (!m.control
+                && !m.platform
+                && self.tf_entry.is_none()
+                && matches!(k.key.as_str(), "escape" | "enter" | "delete" | "backspace")))
             && self.drawings.key(&k.key, typed) == chart_draw::Key::Handled
         {
             cx.stop_propagation();
@@ -1266,6 +1266,9 @@ impl ChartView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
+        if ev.pressed_button != Some(MouseButton::Left) && self.drawings.release_lost() {
+            cx.notify();
+        }
         if self.drag.is_none() {
             return;
         }
@@ -2303,6 +2306,11 @@ impl ChartView {
             );
             self.drawings.set_note_box(i, (w + 2.0, box_h));
         }
+        // Forget deleted notes' shaped text now and then (not every frame).
+        if self.note_lines.len() > 64 {
+            let d = &self.drawings;
+            self.note_lines.retain(|id, _| d.note_text(*id).is_some());
+        }
         if let Some((d, text)) = self.drawings.note_entry() {
             // The note being typed: re-shaped only when a key changed it.
             if self
@@ -2422,8 +2430,8 @@ impl ChartView {
                 d.delete_selected();
             }
             DrawCmd::ToggleVisible => {
-                d.cancel();
-                d.hidden = !d.hidden;
+                let hide = !d.hidden;
+                d.set_hidden(hide);
             }
             DrawCmd::DeleteAll => d.confirm_clear = d.count() > 0,
             DrawCmd::NextColor => d.restyle(|s| Style {

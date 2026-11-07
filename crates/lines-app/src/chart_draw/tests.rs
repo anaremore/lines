@@ -321,3 +321,31 @@ fn a_new_tool_clears_the_temporary_measure() {
         "the new measure's preview, not the old one"
     );
 }
+
+/// Hiding drawings ends everything in progress: a hidden drawing can't stay selected and be
+/// deleted unseen. A lost release drops a drag without moving the drawing.
+#[test]
+fn hiding_clears_the_selection_and_a_lost_release_drops_the_drag() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    r.d.set_tool(Tool::Measure);
+    r.down(200.0, 300.0);
+    r.down(400.0, 150.0);
+    r.frame(0.0, 0.0);
+    let y = r.d.drawn()[0].p0.1;
+    assert!(r.down(500.0, y), "selects the line; the measure stays");
+    r.d.set_hidden(true);
+    assert_eq!(r.d.selected, None);
+    assert_eq!(r.d.key("delete", None), Key::Ignored);
+    assert_eq!(r.items().len(), 1, "nothing deleted while hidden");
+    r.d.set_hidden(false);
+
+    let before = r.items()[0].clone();
+    r.frame(0.0, 0.0);
+    assert!(r.down(500.0, y));
+    r.frame(500.0, y + 60.0);
+    assert!(r.d.release_lost());
+    assert!(!r.up(500.0, y + 60.0), "nothing left to release");
+    assert_eq!(r.items()[0], before);
+}

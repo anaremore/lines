@@ -590,11 +590,6 @@ mod tests {
         }
     }
 
-    /// The DOM price trail (`crate::dom_trail`) is fill only, in its own column, so it never
-    /// sits under text: the price column beside it keeps its AA contrast (its numbers are on
-    /// `bg`, or on the last-price tag). The chevron drawn on the trail is a graphical mark
-    /// (WCAG 1.4.11: 3:1): it stays legible on the strongest fill of either side or neutral,
-    /// in every theme and palette.
     /// Drawing colors read against the chart (3:1, graphical objects) and never borrow a
     /// meaning: clearly apart from up, down and the accent (sRGB distance, so near-misses such
     /// as a sky blue beside the colorblind palette's blue up fail too), in every theme and
@@ -621,6 +616,11 @@ mod tests {
         }
     }
 
+    /// The DOM price trail (`crate::dom_trail`) is fill only, in its own column, so it never
+    /// sits under text: the price column beside it keeps its AA contrast (its numbers are on
+    /// `bg`, or on the last-price tag). The chevron drawn on the trail is a graphical mark
+    /// (WCAG 1.4.11: 3:1): it stays legible on the strongest fill of either side or neutral,
+    /// in every theme and palette.
     #[test]
     fn dom_trail_keeps_contrast() {
         use lines_core::trail::MAX_ALPHA;
