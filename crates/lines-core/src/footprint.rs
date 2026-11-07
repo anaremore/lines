@@ -150,24 +150,29 @@ impl FootprintFrame {
                 self.truncated = true;
                 break;
             }
-            let bar = view.bars[i];
-            let (from, to) = (bar.time, view.end(i));
-            // The bar's rows (from its range) must fit the scratch buffer: checked first, so
-            // `ProfileRows::build` never grows it.
-            let rows = row_of(bar.high, u) - row_of(bar.low, u) + 1;
-            if fp.range(from, to).next().is_none() {
-                continue; // no counted trades: a candle
+            let (from, to) = (view.bars[i].time, view.end(i));
+            // The rows the bucket's trades span (their own prices, not the bar's high/low,
+            // which a history snapshot may have replaced) must fit the scratch buffer: checked
+            // first, so `ProfileRows::build` never grows it.
+            let mut extent: Option<(i64, i64)> = None;
+            for (p, v) in fp.range(from, to) {
+                if v.total().0 != 0 {
+                    let r = row_of(p, u);
+                    extent = Some(extent.map_or((r, r), |(a, b)| (a.min(r), b.max(r))));
+                }
             }
+            let Some((lo, hi)) = extent else {
+                continue; // no counted trades: a candle
+            };
             self.with_data += 1;
-            if rows > row_cap as i64 || rows <= 0 {
+            if hi - lo + 1 > row_cap as i64 {
                 self.truncated = true;
                 continue;
             }
             self.scratch.build(u, 70, || fp.range(from, to));
             let n = self.scratch.rows.len();
-            if n > row_cap || self.cells.len() + n > self.cells.capacity() {
-                // A trade outside the bar's range (never, for counted trades) or out of cells.
-                self.truncated = true;
+            if self.cells.len() + n > self.cells.capacity() {
+                self.truncated = true; // out of cells: this bar is a candle
                 continue;
             }
             let first = self.cells.len();

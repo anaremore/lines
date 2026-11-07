@@ -16,8 +16,6 @@
 //!   the footprint comes from live/replay trades only; when bars are too narrow to read cells,
 //!   every bar is a candle and the legend asks to zoom in.
 
-use std::fmt::Write as _;
-
 use gpui::{App, Bounds, Pixels, Window, fill, point, px, size};
 use lines_core::footprint::{BarCells, FootprintFrame, ImbalanceRule, fit_grouping};
 use lines_core::{BarsView, FixedStr, Qty, Viewport};
@@ -70,7 +68,8 @@ pub struct FootprintConfig {
     pub hidden: bool,
     /// Imbalance ratio, percent (300 = 3×).
     pub imbalance_pct: u32,
-    /// Imbalance minimum volume (quantity units).
+    /// Imbalance minimum volume, in whole units of the product's quantity (contracts; whole
+    /// coins for crypto, whose quantities have decimals).
     pub imbalance_min: i64,
     /// Ticks per row (`None`: the finest readable).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,10 +98,12 @@ impl FootprintConfig {
         self.mode != FootprintMode::Off && !self.hidden
     }
 
-    fn rule(&self) -> ImbalanceRule {
+    /// The rule in the product's quantity units (`decimals` of its `QtyFormat`).
+    fn rule(&self, decimals: u8) -> ImbalanceRule {
+        let unit = 10i64.saturating_pow(u32::from(decimals));
         ImbalanceRule {
             ratio_pct: self.imbalance_pct.max(100),
-            min_volume: Qty(self.imbalance_min.max(1)),
+            min_volume: Qty(self.imbalance_min.max(1).saturating_mul(unit)),
         }
     }
 }
@@ -121,6 +122,8 @@ pub struct FootprintLayer {
     /// Cells are drawn this frame (shown, and bars wide enough).
     active: bool,
     tick: i64,
+    /// The product's quantity format (cells print through it).
+    qty: lines_core::QtyFormat,
     glyphs: Glyphs,
     /// The visible range's first bar (candles are indexed from it).
     first_bar: usize,
@@ -130,9 +133,12 @@ impl FootprintLayer {
     pub fn new(config: FootprintConfig) -> FootprintLayer {
         FootprintLayer {
             config,
-            frame: FootprintFrame::with_capacity(64, MAX_CELLS, MAX_ROWS),
+            // Buffers are reserved the first time the footprint is shown (`ensure_capacity`):
+            // a chart that never shows it holds none.
+            frame: FootprintFrame::with_capacity(0, 0, 0),
             active: false,
             tick: 1,
+            qty: lines_core::QtyFormat::WHOLE,
             glyphs: Glyphs::new(TEXT_PX),
             first_bar: 0,
         }
@@ -192,8 +198,15 @@ impl FootprintLayer {
         self.first_bar
     }
 
-    /// Reserve buffers for a plot `width` px wide (outside paint; only when it grows).
+    /// Reserve buffers for a plot `width` px wide: on first showing, then only when the plot
+    /// grows (before `prepare`, like the candle scene's buffers).
     pub fn ensure_capacity(&mut self, width: f32) {
+        if !self.config.shown() {
+            return;
+        }
+        if self.frame.cells.capacity() == 0 {
+            self.frame = FootprintFrame::with_capacity(64, MAX_CELLS, MAX_ROWS);
+        }
         let need = (width as f64 / 30.0) as usize + 4;
         if self.frame.bars.capacity() < need {
             self.frame.bars.reserve_exact(need - self.frame.bars.len());
@@ -213,6 +226,7 @@ impl ChartLayer for FootprintLayer {
             return; // too narrow to read: candles (the legend asks to zoom in)
         }
         self.tick = data.product.price.tick.max(1);
+        self.qty = data.product.qty;
         let px_per_unit = vp.height / (vp.price_hi - vp.price_lo).abs().max(1e-9);
         let g = fit_grouping(
             self.config.grouping.unwrap_or(1),
@@ -226,7 +240,7 @@ impl ChartLayer for FootprintLayer {
             bars,
             range,
             units,
-            self.config.rule(),
+            self.config.rule(self.qty.decimals),
         );
         self.active = true;
     }
@@ -295,9 +309,10 @@ impl ChartLayer for FootprintLayer {
                     continue;
                 }
                 let y = oy + top;
+                let qty = self.qty;
                 let num = |s: &mut FixedStr<32>, v: i64| {
                     s.clear();
-                    let _ = write!(s, "{v}");
+                    let _ = qty.write(Qty(v), s);
                 };
                 match mode {
                     FootprintMode::BidAsk => {
@@ -424,6 +439,10 @@ mod tests {
             mode: FootprintMode::BidAsk,
             ..Default::default()
         });
+        // No buffers until shown (the chart reserves them before prepare, as here).
+        assert_eq!(fp.frame().cells.capacity(), 0);
+        fp.ensure_capacity(800.0);
+        assert!(fp.frame().cells.capacity() > 0);
         // Wide bars: minutes 1..=3 are cells, the history minute stays a candle.
         let vp = view(80.0);
         fp.prepare(&d, bars, &vp);
@@ -460,6 +479,19 @@ mod tests {
         fp.prepare(&d, bars, &vp);
         assert!(!fp.is_active());
         assert!(fp.legend(80.0, first, None).is_none());
+    }
+
+    /// The minimum is in whole units of the product's quantity: 5 contracts on ES, 5 BTC on a
+    /// Kraken pair (8 decimals), never 5e-8 BTC.
+    #[test]
+    fn the_imbalance_minimum_is_in_whole_units() {
+        let c = FootprintConfig::default();
+        assert_eq!(c.rule(0).min_volume, Qty(5));
+        assert_eq!(c.rule(8).min_volume, Qty(500_000_000));
+        let kraken = catalog::get(catalog::BTC_USD_KR).unwrap();
+        let mut s = FixedStr::<32>::new();
+        kraken.qty.write(Qty(50_000_000), &mut s).unwrap();
+        assert_eq!(s.as_str(), "0.5", "cells print through the quantity format");
     }
 
     #[test]

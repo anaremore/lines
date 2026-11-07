@@ -115,6 +115,9 @@ enum Region {
     Sub,
     /// The divider between the plot and the sub-pane.
     Divider,
+    /// The axis column beside the sub-pane: its scale fits itself, so nothing happens here
+    /// (never the price axis's scaling).
+    SubAxis,
 }
 
 /// A study drawn over the plot (e.g. the volume profile). Implementations keep their own
@@ -243,6 +246,8 @@ pub struct ChartView {
     /// The pointer is in the sub-pane, this far below its top: the crosshair's vertical line
     /// and time follow it; the horizontal line is in the sub-pane, with no price.
     cross_in_sub: Option<f32>,
+    /// The footprint legend's inputs as last read (first visible bar, first counted trade).
+    fp_legend_inputs: std::cell::Cell<(Option<UtcMillis>, Option<UtcMillis>)>,
     /// Study legends/tags or all studies hidden (saved with the pane). Hidden studies keep
     /// their configuration and engine nodes, so showing them again is exact and immediate,
     /// but cost no prepare or paint work while hidden.
@@ -384,6 +389,7 @@ impl ChartView {
             split: None,
             above_axis: 0.0,
             cross_in_sub: None,
+            fp_legend_inputs: std::cell::Cell::new((None, None)),
             visibility: fixture.visibility,
             picker,
             store,
@@ -670,7 +676,13 @@ impl ChartView {
         } else if self.plot.contains(&pos) {
             Some(Region::Plot)
         } else if pos.x >= self.plot.right() {
-            Some(Region::PriceAxis)
+            let y = f32::from(pos.y - self.plot.origin.y);
+            if self.split.is_some() && y >= f32::from(self.plot.size.height) && y < self.above_axis
+            {
+                Some(Region::SubAxis)
+            } else {
+                Some(Region::PriceAxis)
+            }
         } else if let Some(s) = self.split
             && f32::from(pos.y - self.plot.origin.y) < self.above_axis
         {
@@ -741,6 +753,7 @@ impl ChartView {
                 // Each axis resets only itself: time = bar width and the live edge.
                 Region::TimeAxis | Region::Sub => self.vp.reset_time(self.series_len),
                 Region::Divider => self.subpane_ratio = crate::subpane::DEFAULT_RATIO,
+                Region::SubAxis => return,
             }
             cx.notify();
             return;
@@ -751,10 +764,15 @@ impl ChartView {
             }
             Region::Plot => Drag::Pan(ev.position, false),
             Region::Sub => Drag::Pan(ev.position, true),
+            // From the split actually drawn (the minimums may have clamped the saved ratio),
+            // so the divider follows the pointer from the first move.
             Region::Divider => Drag::Divider {
                 y: f32::from(ev.position.y),
-                ratio: self.subpane_ratio,
+                ratio: self.split.map_or(self.subpane_ratio, |s| {
+                    s.sub_h / (self.above_axis - crate::subpane::DIVIDER_PX).max(1.0)
+                }),
             },
+            Region::SubAxis => return,
             Region::PriceAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Price, x, y)),
             Region::TimeAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Time, x, y)),
         };
@@ -1031,16 +1049,18 @@ impl ChartView {
             return None;
         }
         let studies = self.studies.legend(t, &self.instrument);
-        // The footprint's line, from this frame's view and data (as paint will see them).
-        let fp = self.store.try_read().and_then(|d| {
+        // The footprint's line, from this frame's view and data (as paint will see them); if
+        // the feed holds the lock this instant, from the last inputs read (never dropped).
+        if let Some(d) = self.store.try_read() {
             let view = bars_view(&self.derived, &d);
             let first = view
                 .bars
                 .get(self.vp.visible_range(view.len()).start)
                 .map(|b| b.time);
-            self.footprint
-                .legend(self.vp.bar_px, first, d.profiles.data_start())
-        });
+            self.fp_legend_inputs.set((first, d.profiles.data_start()));
+        }
+        let (first, data_start) = self.fp_legend_inputs.get();
+        let fp = self.footprint.legend(self.vp.bar_px, first, data_start);
         let fp = fp.map(|(label, note)| {
             div()
                 .flex()
@@ -1884,13 +1904,17 @@ impl ChartView {
                 window.paint_quad(fill(rect(0.0, s.sub_top + y, pw, hair), t.crosshair));
             }
         });
-        // The axis beside it: a border, the visible range's ends and the newest value.
+        // The axis beside it and the time axis below: borders; the visible range's ends and the
+        // newest value.
         window.paint_quad(fill(rect(pw, s.sub_top, hair, s.sub_h), t.axis_line));
+        window.paint_quad(fill(rect(0.0, s.sub_top + s.sub_h, pw, hair), t.axis_line));
         let Some(sc) = scale else { return };
         let line_h = px(LABEL_PX * 1.3);
+        // Cumulative delta is a quantity: printed in the product's quantity format.
+        let qty = self.instrument.qty;
         let value = |v: i64| {
             move |b: &mut FixedStr<32>| {
-                let _ = write!(b, "{v}");
+                let _ = qty.write(lines_core::Qty(v), b);
             }
         };
         let (top, bottom) = (

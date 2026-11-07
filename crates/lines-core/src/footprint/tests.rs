@@ -235,6 +235,42 @@ fn grouping_coarsens_until_rows_are_readable() {
     assert_eq!(fit_grouping(1, TICK, 0.0005, 9.0), 1_000);
 }
 
+/// The row guard uses the trades' own prices: a bar whose high/low a history snapshot
+/// narrowed below what was traded still never grows the scratch buffer.
+#[test]
+fn trades_outside_the_bars_range_never_grow_the_buffer() {
+    let mut fp = Footprint::new(MIN, 10);
+    for k in 0..10i64 {
+        fp.add(
+            UtcMillis(k),
+            Price(600_000 + k * TICK),
+            Qty(1),
+            Some(Aggressor::Buy),
+        );
+    }
+    // The bar says one tick wide; the trades span ten.
+    let bar = crate::bars::Bar {
+        time: UtcMillis(0),
+        open: Price(600_000),
+        high: Price(600_000),
+        low: Price(600_000),
+        close: Price(600_000),
+        volume: Qty(10),
+    };
+    let bars = [bar];
+    let view = crate::timeframe::BarsView::fixed(&bars, MIN);
+    let mut f = FootprintFrame::with_capacity(4, 100, 4);
+    f.build(&fp, view, 0..1, TICK, ImbalanceRule::default());
+    assert!(
+        f.truncated && f.bars.is_empty(),
+        "a candle, not a reallocation"
+    );
+    assert_eq!(f.with_data, 1);
+    let mut g = FootprintFrame::with_capacity(4, 100, 16);
+    g.build(&fp, view, 0..1, TICK, ImbalanceRule::default());
+    assert_eq!(g.cells_of(&g.bars[0]).len(), 10, "every traded row");
+}
+
 #[test]
 fn buffers_bound_the_work() {
     let trades = tape(60, 3_000);
