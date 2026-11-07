@@ -11,10 +11,14 @@
 //! never over it when there is room; always inside the chart's plot area (above the time axis)
 //! and, when the pane is wide enough to spare it, clear of the price axis (the last-price tag
 //! stays visible); its body scrolling with a visible (display-only) scrollbar when the area is
-//! short, the tabs pinned above it and "Save as default" pinned in the footer. Keyboard focus
-//! scrolls its row into view ([`body_child`]). The box is never taller than the height it was
+//! short, the tabs pinned above it and "Save as default" pinned in the footer. Every key that
+//! moves the focus, to another row or within one, scrolls the focused control into view
+//! ([`EditorScroll`], [`body_child`], [`follow_span`]). The box is never taller than the height it was
 //! placed with ([`content_height`], an upper bound of what it draws at that width: the lines
 //! that could wrap are counted, the rest don't wrap), so it can't spill.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
@@ -155,14 +159,136 @@ fn chrome_height(e: &StyleEditor) -> f32 {
     2.0 + title + tabs_height(e) + 1.0 + save + hint
 }
 
+/// Whether `row` is drawn in the footer ("Save as default"), outside the scroll body.
+fn in_footer(row: &Row) -> bool {
+    matches!(row.controls.as_slice(), [(Control::SaveDefault, _)])
+}
+
 /// The scroll body's child holding model row `r` (rows are direct children so focus can
 /// scroll them into view; "Save as default" is in the footer: `None`).
 pub fn body_child(rows: &[Row], r: usize) -> Option<usize> {
-    let footer = |row: &Row| matches!(row.controls.as_slice(), [(Control::SaveDefault, _)]);
-    if footer(rows.get(r)?) {
+    if in_footer(rows.get(r)?) {
         return None;
     }
-    Some(rows[..r].iter().filter(|row| !footer(row)).count())
+    Some(rows[..r].iter().filter(|row| !in_footer(row)).count())
+}
+
+/// How many children [`render`] gives the scroll body: one per row outside the footer.
+pub fn body_len(rows: &[Row]) -> usize {
+    rows.iter().filter(|row| !in_footer(row)).count()
+}
+
+/// The focus a follow is for: (tab, row, col).
+pub type FocusKey = (usize, usize, usize);
+
+/// Frames a follow waits for the layout it needs (the body's first, or the focused row's
+/// controls) before it settles for what it has.
+const FOLLOW_TRIES: u8 = 3;
+
+/// Which focus the body last scrolled to show (pure, so it is tested): a key that moves the
+/// focus, to another row or within one, follows again; a wheel scroll alone doesn't snap back.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Follow {
+    done: Option<FocusKey>,
+    tries: u8,
+}
+
+impl Follow {
+    /// Whether the focus `key` still has to be scrolled into view.
+    pub fn pending(&self, key: FocusKey) -> bool {
+        self.done != Some(key)
+    }
+
+    /// A frame followed `key`: `exact` when it had the layout it needs. Not exact, it follows
+    /// again next frame, [`FOLLOW_TRIES`] times at most, then settles. Returns whether another
+    /// frame is needed.
+    pub fn step(&mut self, key: FocusKey, exact: bool) -> bool {
+        if self.done != Some(key) && !exact && self.tries < FOLLOW_TRIES {
+            self.tries += 1;
+            return true;
+        }
+        self.done = Some(key);
+        self.tries = 0;
+        false
+    }
+}
+
+/// The span (content top, height) to keep in view for the focused row at `row` in a body
+/// `view` px tall: the whole row when it fits; else, with the focused control's measured span,
+/// from the row's top (a color row's name line) through the control when that fits, else the
+/// control alone; unmeasured, the row (shown from its top).
+pub fn follow_span(view: f32, row: (f32, f32), control: Option<(f32, f32)>) -> (f32, f32) {
+    if row.1 <= view {
+        return row;
+    }
+    match control {
+        Some((top, h)) if top + h - row.0 <= view => (row.0, top + h - row.0),
+        Some(c) => c,
+        None => row,
+    }
+}
+
+/// The focused row's controls as last laid out: (tab, row) and each control's (content top,
+/// height), measured in prepaint so a key that moves within the row scrolls to its control.
+type Measured = Rc<RefCell<Option<((usize, usize), Vec<(f32, f32)>)>>>;
+
+/// The editor body's scroll state: GPUI's handle (its offset, the rows' layout), what the
+/// focus last followed and where the focused row's controls are.
+#[derive(Clone, Default)]
+pub struct EditorScroll {
+    pub handle: ScrollHandle,
+    follow: Follow,
+    controls: Measured,
+}
+
+impl EditorScroll {
+    /// Scroll the editor's focus into view if a key moved it (row or column) since the last
+    /// follow. The offset comes from the last frame's layout (a focus move doesn't move rows),
+    /// so the scrollbar drawn at render shows it; a row that fits is also asked of GPUI
+    /// (`scroll_to_item`, in prepaint, from this frame's layout), so a hex entry or warnings
+    /// that open or close on the same key don't leave it off by their height. Returns whether
+    /// it scrolled (or is still waiting for the layout it needs: the body's, the focused
+    /// row's controls), so the pane renders once more and its scrollbar shows the offset.
+    pub fn follow(&mut self, e: &StyleEditor) -> bool {
+        let key = (e.tab, e.row, e.col);
+        if !self.follow.pending(key) {
+            return false;
+        }
+        let rows = e.rows();
+        let Some(ix) = body_child(&rows, e.row) else {
+            self.follow.step(key, true); // the footer: always shown
+            return false;
+        };
+        let scroll = &self.handle;
+        let view = scroll.bounds();
+        let exact = match scroll.bounds_for_item(ix) {
+            Some(b) if view.size.height > px(0.0) => {
+                let view_h = f32::from(view.size.height);
+                let row = (f32::from(b.top() - view.top()), f32::from(b.size.height));
+                let control = match &*self.controls.borrow() {
+                    Some((at, spans)) if *at == (e.tab, e.row) => spans.get(e.col).copied(),
+                    _ => None,
+                };
+                let (top, h) = follow_span(view_h, row, control);
+                let to = keep_visible(view_h, top, h, -f32::from(scroll.offset().y))
+                    .clamp(0.0, f32::from(scroll.max_offset().y));
+                scroll.set_offset(gpui::point(scroll.offset().x, px(-to)));
+                let fits = row.1 <= view_h;
+                if fits {
+                    // GPUI's own follow shows a row taller than the body from its top, which
+                    // would undo the control's; it is asked only for rows that fit.
+                    scroll.scroll_to_item(ix);
+                }
+                fits || control.is_some()
+            }
+            _ => {
+                scroll.scroll_to_item(ix);
+                false
+            }
+        };
+        self.follow.step(key, exact);
+        true
+    }
 }
 
 /// How tall the editor draws at width `w` (logical px), as an upper bound: rows that wrap,
@@ -405,43 +531,24 @@ pub fn thumb(view: f32, content: f32, scrolled: f32) -> Option<(f32, f32)> {
     Some((top, h))
 }
 
-/// The editor at `at`. `content_h`: [`content_height`] at this width; `scroll`: the body's
-/// scroll state (its scrollbar shows whenever the body doesn't fit); `follow`: the focus just
-/// moved, so its row scrolls into view.
-#[allow(clippy::too_many_arguments)]
+/// The editor at `at`. `content_h`: [`content_height`] at this width; `es`: the body's scroll
+/// state (its scrollbar shows whenever the body doesn't fit; the focus is followed before
+/// render, [`EditorScroll::follow`]).
 pub fn render(
     e: &StyleEditor,
     t: &Theme,
     warnings: &[Warning],
     at: Place,
     content_h: f32,
-    scroll: &ScrollHandle,
-    follow: bool,
+    es: &EditorScroll,
     cx: &mut Context<ChartView>,
 ) -> AnyElement {
+    let scroll = &es.handle;
     // Short of room: the key hint shortens (the keys still work) and the body scrolls.
     let full_hint = content_h <= at.h;
     let rows = e.rows();
     let focus = (e.row, e.col);
     let names = &t.drawing_names;
-    if follow && let Some(ix) = body_child(&rows, e.row) {
-        // From the last frame's layout (a focus move doesn't move rows), so the scrollbar
-        // below is drawn at the new offset; before the first layout GPUI does it in prepaint.
-        let view = scroll.bounds();
-        match scroll.bounds_for_item(ix) {
-            Some(b) if view.size.height > gpui::px(0.0) => {
-                let to = keep_visible(
-                    f32::from(view.size.height),
-                    f32::from(b.top() - view.top()),
-                    f32::from(b.size.height),
-                    -f32::from(scroll.offset().y),
-                )
-                .clamp(0.0, f32::from(scroll.max_offset().y));
-                scroll.set_offset(gpui::point(scroll.offset().x, px(-to)));
-            }
-            _ => scroll.scroll_to_item(ix),
-        }
-    }
     // Each row (a color row with its name line, hex entry and warnings) is one direct child of
     // the scroll container, keeping its own height (flex_none).
     let mut groups: Vec<gpui::Div> = Vec::with_capacity(rows.len());
@@ -533,6 +640,23 @@ pub fn render(
             .flex_wrap()
             .items_center()
             .gap(px(4.0));
+        if e.row == r {
+            // Where the focused row's controls are (content px, from this frame's scrolled
+            // bounds), for a key that moves within the row (`EditorScroll::follow`).
+            let (handle, measured, at_key) = (scroll.clone(), es.controls.clone(), (e.tab, r));
+            controls = controls.on_children_prepainted(move |bounds, _, _| {
+                let view = handle.bounds();
+                let scrolled = handle.offset().y;
+                let spans = bounds
+                    .iter()
+                    .map(|b| {
+                        let top = b.top() - view.top() - scrolled;
+                        (f32::from(top), f32::from(b.size.height))
+                    })
+                    .collect();
+                *measured.borrow_mut() = Some((at_key, spans));
+            });
+        }
         for (k, &(c, on)) in row.controls.iter().enumerate() {
             let focused = focus == (r, k);
             let inner = match c {
@@ -643,6 +767,11 @@ pub fn render(
         }
         groups.push(group);
     }
+    debug_assert_eq!(
+        groups.len(),
+        body_len(&rows),
+        "one body child per row (`body_child`)"
+    );
     let hint = match (full_hint, e.parts.len() > 1) {
         (true, true) => "↑↓←→ move · Enter pick · Tab next part · Esc close",
         (true, false) => "↑↓←→ move · Enter pick · Esc close",
@@ -851,8 +980,94 @@ mod tests {
                     }
                 }
                 assert_eq!(body_child(&rows, rows.len()), None);
+                // `render` gives the body exactly this many children (it asserts it too).
+                assert_eq!(body_len(&rows), next, "{tool:?} {tab}");
+                assert_eq!(
+                    body_len(&rows),
+                    rows.iter()
+                        .filter(|r| !matches!(r.controls.as_slice(), [(Control::SaveDefault, _)]))
+                        .count()
+                );
             }
         }
+    }
+
+    /// Every key that moves the focus follows it, within a row too (Left, Right, Home, End),
+    /// and across rows and tabs; a key that doesn't move it (or a wheel scroll) doesn't snap
+    /// the body back.
+    #[test]
+    fn every_focus_move_follows() {
+        use lines_core::drawings::{Style, Tool};
+        let mut e = StyleEditor::for_drawing(Tool::Rect, &Style::DEFAULT);
+        let mut f = Follow::default();
+        let key = |e: &StyleEditor| (e.tab, e.row, e.col);
+        assert!(f.pending(key(&e)), "opened: follows");
+        assert!(!f.step(key(&e), true));
+        assert!(!f.pending(key(&e)), "followed: a wheel scroll stays");
+        for k in ["right", "right", "end", "left", "home", "down", "up", "tab"] {
+            let before = key(&e);
+            e.key(k, false, None);
+            assert_ne!(key(&e), before, "{k} moves the focus");
+            assert!(f.pending(key(&e)), "{k} follows");
+            assert!(!f.step(key(&e), true));
+        }
+        // At the first control, Left and Home don't move it: nothing to follow.
+        e.key("home", false, None);
+        f.step(key(&e), true);
+        e.key("left", false, None);
+        assert!(!f.pending(key(&e)));
+    }
+
+    /// A follow without the layout it needs waits a few frames for it, then settles; once
+    /// settled the same focus doesn't follow again, another one does (fresh tries).
+    #[test]
+    fn a_follow_waits_for_its_layout_then_settles() {
+        let mut f = Follow::default();
+        let a = (0, 2, 0);
+        for _ in 0..FOLLOW_TRIES {
+            assert!(f.step(a, false), "waits");
+            assert!(f.pending(a));
+        }
+        assert!(!f.step(a, false), "gives up: settles");
+        assert!(!f.pending(a));
+        let b = (0, 2, 5);
+        assert!(f.pending(b));
+        assert!(f.step(b, false), "a new focus waits again");
+        assert!(!f.step(b, true), "laid out: settles");
+        assert!(!f.pending(b));
+        assert_eq!(
+            f,
+            Follow {
+                done: Some(b),
+                tries: 0
+            }
+        );
+    }
+
+    /// A row that fits shows whole; a taller one shows its focused control, with the row's
+    /// top (a color row's name line) when both fit; not yet measured, its top.
+    #[test]
+    fn a_tall_row_follows_its_focused_control() {
+        let view = 100.0;
+        assert_eq!(
+            follow_span(view, (40.0, 60.0), Some((70.0, 24.0))),
+            (40.0, 60.0)
+        );
+        let row = (40.0, 300.0);
+        assert_eq!(follow_span(view, row, None), row);
+        assert_eq!(follow_span(view, row, Some((60.0, 24.0))), (40.0, 44.0));
+        assert_eq!(follow_span(view, row, Some((240.0, 24.0))), (240.0, 24.0));
+        // Scrolled to the top, Right to a swatch on the fifth line brings it into view, and
+        // Home back to the first line.
+        let (top, h) = follow_span(view, row, Some((40.0 + 18.0 + 4.0 * 28.0, 24.0)));
+        let to = keep_visible(view, top, h, 0.0);
+        assert!(top >= to && top + h <= to + view, "{to}");
+        let (top, h) = follow_span(view, row, Some((60.0, 24.0)));
+        let back = keep_visible(view, top, h, to);
+        assert!(
+            top >= back && top + h <= back + view && back <= 40.0,
+            "{back}"
+        );
     }
 
     /// The tallest editor: a zone's line tab with the hex entry open and every warning the

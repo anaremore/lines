@@ -34,7 +34,7 @@ cargo test --release -p lines-indicators --test bench -- --ignored --nocapture  
 cargo test --release -p lines-trading --test session -- --ignored --nocapture   # perf: click->order-sent p50/p99 budget (< 1 ms), run alone
 cargo test --release -p lines-app --lib -- --ignored dom_click_latency_budget --nocapture   # perf: DOM click->order sent, run alone
 # Drawings (screenshots): --drawings FILE (a drawings file naming its product; screenshots never read saved drawings);
-#   --style-editor ID[:TAB[:COL]] (the first chart's style editor open on drawing ID of that file, on tab TAB, 0 = first, with the keyboard focus on control COL of its first row).
+#   --style-editor ID[:TAB[:COL[:ROW]]] (the first chart's style editor open on drawing ID of that file, on tab TAB, 0 = first, with the keyboard focus on control COL of row ROW, both 0 = first, ROW defaulting to the first row: `3`, `4:1`, `3:0:1`, `3:0:1:4`).
 #   In the app: Alt+H/T/Z/L/N/U, Alt+Shift+H/T, Esc, Delete, Enter (pin measure), Ctrl+Z / Ctrl+Y; palette "Drawings: …".
 # Timeframe: --timeframe 5m (1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w, or tick bars 500t: presets 100t 233t 500t 1000t 2000t, any 1t-100000t; first chart; a saved one wins). In the app: type 5 / 1h / 500t + Enter on a chart, or the header chip.
 #   --tick-continuous: tick bars run across sessions (no reset at the session open; a saved mode wins).

@@ -401,13 +401,9 @@ pub struct ChartView {
     /// The area the style editor was last placed in (the chart's width and the height above
     /// its time axis; a new size places it again).
     editor_pane: (f32, f32),
-    /// The style editor body's scroll state (its scrollbar).
-    editor_scroll: gpui::ScrollHandle,
-    /// The style editor's (tab, row) its body last scrolled to show: a key that moves the
-    /// focus elsewhere scrolls again; a wheel scroll alone doesn't snap back.
-    editor_followed: Option<(usize, usize)>,
-    /// Frames the pending follow waited for the body's first layout.
-    editor_follow_tries: u8,
+    /// The style editor body's scroll state: its scrollbar, and the focus it last scrolled to
+    /// show (a key that moves the focus scrolls again; a wheel scroll alone doesn't snap back).
+    editor_scroll: crate::style_editor_view::EditorScroll,
     measure_lines: HashMap<
         Option<u64>,
         (
@@ -568,9 +564,7 @@ impl ChartView {
             drawings,
             saved_styles,
             editor_pane: (0.0, 0.0),
-            editor_scroll: gpui::ScrollHandle::new(),
-            editor_followed: None,
-            editor_follow_tries: 0,
+            editor_scroll: Default::default(),
             note_lines: HashMap::new(),
             note_entry_line: None,
             measure_lines: HashMap::new(),
@@ -3106,9 +3100,7 @@ impl ChartView {
         }
         self.picker.close();
         self.anchoring = None;
-        self.editor_scroll = gpui::ScrollHandle::new();
-        self.editor_followed = None;
-        self.editor_follow_tries = 0;
+        self.editor_scroll = Default::default();
         self.close_popover(Kind::Studies, cx);
         self.close_popover(Kind::Timeframe, cx);
         self.close_popover(Kind::Account, cx);
@@ -3132,31 +3124,15 @@ impl ChartView {
         let w = crate::style_editor_view::width(area.0);
         let h = crate::style_editor_view::content_height(&e, &warnings, w, &t.drawing_names);
         let at = crate::style_editor_view::place(area, self.drawings.extent(id), h);
-        // GPUI scrolls a tracked body to an item in prepaint, and only once it has been laid
-        // out (its overflow and bounds come from a frame): until then the follow stays
-        // pending (a few frames at most). Each follow renders the pane once more (a cached
-        // view), so the scrollbar, drawn from the offset at render, shows where it scrolled.
-        let key = (e.tab, e.row);
-        let follow = self.editor_followed != Some(key);
-        if follow {
-            if self.editor_scroll.bounds().size.height > px(0.0) || self.editor_follow_tries >= 3 {
-                self.editor_followed = Some(key);
-                self.editor_follow_tries = 0;
-            } else {
-                self.editor_follow_tries += 1;
-            }
+        // A key that moved the focus scrolls it into view. Until the layout it needs exists
+        // (the body's first, the focused row's controls) the follow stays pending (a few
+        // frames at most); each follow renders the pane once more (a cached view), so the
+        // scrollbar, drawn from the offset at render, shows where it scrolled.
+        if self.editor_scroll.follow(&e) {
             cx.notify();
         }
-        let editor = crate::style_editor_view::render(
-            &e,
-            t,
-            &warnings,
-            at,
-            h,
-            &self.editor_scroll,
-            follow,
-            cx,
-        );
+        let editor =
+            crate::style_editor_view::render(&e, t, &warnings, at, h, &self.editor_scroll, cx);
         let dismiss: popover::OnDismiss = Box::new(
             cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::StyleEditor, cx)),
         );
