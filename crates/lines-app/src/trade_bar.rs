@@ -502,18 +502,28 @@ pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
 /// in the order the market reaches them (a long's highest sell stop first; at one price, a
 /// reduce-only stop after the others, since it shrinks itself), each while their quantities
 /// together stay within the position. BE moves only these (those not already at or past
-/// breakeven), and only towards the market, so it keeps that order: every stop it leaves
-/// behind is reached only after these have closed the position, exactly as without BE. It
-/// never makes a stop that wasn't going to flip the position flip it.
+/// breakeven), and only towards the market, so it keeps that order: with prices printing one
+/// at a time, every stop it leaves behind is reached only after these have closed the
+/// position, as without BE. Refused while a bracket's entry still works (see the body).
 pub fn protective<'a>(
     orders: impl IntoIterator<Item = &'a lines_trading::Order>,
     position: i64,
-) -> Vec<&'a lines_trading::Order> {
+) -> Result<Vec<&'a lines_trading::Order>, &'static str> {
     use lines_trading::Role;
-    let mut cands: Vec<_> = orders
-        .into_iter()
+    let open: Vec<&lines_trading::Order> = orders.into_iter().collect();
+    let mut cands: Vec<_> = open
+        .iter()
+        .copied()
         .filter(|o| protects(o, position))
         .collect();
+    // A bracket's stop while its entry still works: at BE (at or past the entry's own
+    // price) it could fill before the rest of the entry, which would then have no stop.
+    if cands
+        .iter()
+        .any(|o| o.parent.is_some_and(|p| open.iter().any(|e| e.id == p)))
+    {
+        return Err("the bracket's entry is still working: drag the stop instead");
+    }
     // Reached first: a long's sell stops from the top, a short's buy stops from the bottom.
     let reached = |o: &lines_trading::Order| {
         let p = crate::dom_trade::order_price(o).map_or(0, |p| p.0);
@@ -525,17 +535,21 @@ pub fn protective<'a>(
         (true, _) => 2,
     };
     cands.sort_by_key(|o| (reached(o), role(o), o.id.0));
+    // In that order, up to the first that doesn't fit: nothing BE moves is reached after a
+    // stop it leaves behind.
     let mut total = 0;
-    cands.retain(|o| {
-        let q = o.remaining().0;
-        if total + q <= position.abs() {
-            total += q;
-            true
-        } else {
-            false
-        }
-    });
-    cands
+    let kept: Vec<_> = cands
+        .iter()
+        .copied()
+        .take_while(|o| {
+            total += o.remaining().0;
+            total <= position.abs()
+        })
+        .collect();
+    if kept.is_empty() && !cands.is_empty() {
+        return Err("stops exceed the position: drag the stop instead");
+    }
+    Ok(kept)
 }
 
 /// The commands that move the position's stop(s) to breakeven, from the cache. BE only moves
@@ -562,11 +576,7 @@ fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'s
     let s = t.cache.read();
     let pos = s.position(&account, contract);
     let (qty, avg) = pos.map_or((0, None), |p| (p.qty, p.avg_price));
-    let stops: Vec<_> = protective(s.open_orders(&account, contract), qty);
-    if stops.is_empty() && s.open_orders(&account, contract).any(|o| protects(o, qty)) {
-        return Err("stops exceed the position: drag the stop instead");
-    }
-    let stops: Vec<_> = stops
+    let stops: Vec<_> = protective(s.open_orders(&account, contract), qty)?
         .into_iter()
         .filter_map(|o| dom_trade::order_price(o).map(|p| (o.id, o.side, p)))
         .collect();
@@ -2601,16 +2611,21 @@ mod tests {
         sl.id = OrderId(5);
         let mut single = stop(Side::Sell, 1, Role::Single, OrderState::Working);
         single.id = OrderId(2);
-        let picked: Vec<_> = protective([&single, &sl], 1).iter().map(|o| o.id).collect();
+        let picked: Vec<_> = protective([&single, &sl], 1)
+            .unwrap()
+            .iter()
+            .map(|o| o.id)
+            .collect();
         assert_eq!(picked, vec![OrderId(5)]);
         // Two single stops of 1 against long 2: both; against long 1: the first only.
         let mut a = stop(Side::Sell, 1, Role::Single, OrderState::Working);
         a.id = OrderId(3);
         let mut b = stop(Side::Sell, 1, Role::Single, OrderState::Working);
         b.id = OrderId(4);
-        assert_eq!(protective([&a, &b], 2).len(), 2);
+        assert_eq!(protective([&a, &b], 2).unwrap().len(), 2);
         assert_eq!(
             protective([&b, &a], 1)
+                .unwrap()
                 .iter()
                 .map(|o| o.id)
                 .collect::<Vec<_>>(),
@@ -2623,12 +2638,13 @@ mod tests {
         r.reduce_only = true;
         assert_eq!(
             protective([&r, &sl], 1)
+                .unwrap()
                 .iter()
                 .map(|o| o.id)
                 .collect::<Vec<_>>(),
             vec![sl.id]
         );
-        assert_eq!(protective([&r, &sl], 2).len(), 2);
+        assert_eq!(protective([&r, &sl], 2).unwrap().len(), 2);
         // Taken in the order the market reaches them: a reduce-only stop already past BE
         // (higher, for a long) fills first and uses the budget, so the stop loss below it is
         // not moved (moved to BE, it would fill after the reduce-only one and flip).
@@ -2638,6 +2654,7 @@ mod tests {
         };
         assert_eq!(
             protective([&sl, &high], 1)
+                .unwrap()
                 .iter()
                 .map(|o| o.id)
                 .collect::<Vec<_>>(),
@@ -2655,6 +2672,45 @@ mod tests {
             ),
             Err("the stop is already at or past breakeven")
         );
+        // A bracket stop loss whose entry still works: refused (moved to BE, it could fill
+        // before the rest of the entry, which would then be left without a stop).
+        let mut entry = stop(Side::Buy, 3, Role::Entry, OrderState::PartiallyFilled);
+        entry.id = OrderId(20);
+        entry.kind = OrderKind::Limit {
+            price: Price(599_500),
+        };
+        entry.filled = Qty(1);
+        let mut child = stop(Side::Sell, 1, Role::StopLoss, OrderState::Working);
+        child.id = OrderId(21);
+        child.parent = Some(entry.id);
+        assert_eq!(
+            protective([&entry, &child], 1).map(|v| v.len()),
+            Err("the bracket's entry is still working: drag the stop instead")
+        );
+        // Its entry done (not open): fine.
+        assert_eq!(protective([&child], 1).unwrap().len(), 1);
+        // The budget stops at the first stop that doesn't fit (long 2: 1 @ high, a stop
+        // loss of 2 below it, 1 lower still: only the first).
+        let mut s1 = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        s1.id = OrderId(30);
+        s1.kind = OrderKind::Stop {
+            trigger: Price(601_000),
+        };
+        let mut s2 = stop(Side::Sell, 2, Role::StopLoss, OrderState::Working);
+        s2.id = OrderId(31);
+        let mut s3 = stop(Side::Sell, 1, Role::Single, OrderState::Working);
+        s3.id = OrderId(32);
+        s3.kind = OrderKind::Stop {
+            trigger: Price(597_000),
+        };
+        assert_eq!(
+            protective([&s1, &s2, &s3], 2)
+                .unwrap()
+                .iter()
+                .map(|o| o.id)
+                .collect::<Vec<_>>(),
+            vec![s1.id]
+        );
         // A short: the lowest buy stop is reached first.
         let mut lo = stop(Side::Buy, 1, Role::StopLoss, OrderState::Working);
         lo.id = OrderId(8);
@@ -2668,6 +2724,7 @@ mod tests {
         };
         assert_eq!(
             protective([&hi, &lo], -1)
+                .unwrap()
                 .iter()
                 .map(|o| o.id)
                 .collect::<Vec<_>>(),
@@ -2676,10 +2733,14 @@ mod tests {
         // Short 2: a partly filled buy stop for 3 with 2 left fits (the remainder counts).
         let mut p = stop(Side::Buy, 3, Role::StopLoss, OrderState::PartiallyFilled);
         p.filled = Qty(1);
-        assert_eq!(protective([&p], -2).len(), 1);
+        assert_eq!(protective([&p], -2).unwrap().len(), 1);
         // A bracket stop larger than what's left of the position: none.
         let big = stop(Side::Sell, 2, Role::StopLoss, OrderState::Working);
-        assert!(protects(&big, 1) && protective([&big], 1).is_empty());
+        assert!(protects(&big, 1));
+        assert_eq!(
+            protective([&big], 1).map(|v| v.len()),
+            Err("stops exceed the position: drag the stop instead")
+        );
     }
 
     #[test]
