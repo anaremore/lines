@@ -70,6 +70,9 @@ Run on the exact HEAD you push. Report the SHA and each result.
 - Skills: `review-loop` (fresh-context review), `full-send` (to merged), `full-stop` (to a green PR,
   for the owner to merge). Who merges tier A/B: a thread the owner told "full send", or the planning
   thread (owner's standing instruction, 2026-11-06). Other threads stop at a green PR and report.
+- Keep moving: never end a turn waiting for a decision that isn't owner-only (tier C). Take your
+  recommended option, say so in the report or PR ("Decided: X, because Y; alternative Z"), and
+  continue; the planning thread can still redirect. With queued work, start the next item.
 
 ## Risk tiers (state the tier in the PR)
 - A: docs; tests; pane UI with screenshot evidence; chart layers, studies, indicators; picker;
