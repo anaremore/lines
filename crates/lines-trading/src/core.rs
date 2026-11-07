@@ -553,7 +553,7 @@ impl TradingCore {
                         "an exit can't be larger than the position",
                     ));
                 }
-                self.check_new(now, &spec)?;
+                self.check_exit(now, &spec)?;
                 // A stop and a target for the same position: only one may fill (OCO), so the
                 // broker budgets them as one and cancels the other when one closes the position.
                 let stop = matches!(
@@ -589,6 +589,9 @@ impl TradingCore {
                     // Both ways: the pair is one budget whichever side the broker looks from.
                     if let Some(x) = self.orders.get_mut(&s) {
                         x.oco = Some(o.id);
+                        // The app's cache sees the pair from either side (breakeven reads it).
+                        let x = x.clone();
+                        self.events.push(Event::Order(x));
                     }
                 }
                 let id = o.id;
@@ -941,6 +944,62 @@ impl TradingCore {
                     ));
                 }
             }
+        }
+        self.check_risk(now, spec, &cs)
+    }
+
+    /// The checks for an exit added to the open position (`PlaceExit`, already on the closing
+    /// side and no larger than the position): the contract, tick grid and broker support, and
+    /// risk; never the entry checks (guardrails, reducing only, the contract cap), which an exit
+    /// passes by definition — the stop/target pair can only ever close the position once, so
+    /// counting the other exit as "already closing" would refuse protection exactly when it
+    /// matters. Refused when the broker can't hold OCO orders (the pair would outlive the
+    /// position there) and when prop rules halted the account.
+    fn check_exit(&mut self, now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
+        let cs = self
+            .spec(spec.contract)
+            .ok_or_else(|| Reject::new(RejectCode::UnknownContract, "unknown contract"))?;
+        if let Some(p) = spec.kind.prices().find(|p| !cs.on_tick_grid(*p)) {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                format!(
+                    "price {} is not on the {} tick grid",
+                    cs.product.price.format::<32>(p),
+                    cs.product.symbol
+                ),
+            ));
+        }
+        let caps = self.broker.capabilities();
+        if !caps.oco {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                format!(
+                    "{} can't hold a stop and a target as one-cancels-other",
+                    self.broker.name()
+                ),
+            ));
+        }
+        if matches!(
+            spec.kind,
+            OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
+        ) && !caps.stop_orders
+        {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                "this broker has no stop orders",
+            ));
+        }
+        let acct = &self.accounts[&spec.account];
+        if let Some(preset) = &acct.cfg.rules
+            && acct.tracker.trading_state(preset) == TradingState::Halted
+        {
+            return Err(Reject::new(
+                RejectCode::PropRule,
+                format!(
+                    "trading halted ({}); only Flatten and Cancel All",
+                    preset.name
+                ),
+            ));
         }
         self.check_risk(now, spec, &cs)
     }

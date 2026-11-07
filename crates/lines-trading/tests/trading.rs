@@ -769,6 +769,8 @@ struct Script {
     requests: Vec<BrokerRequest>,
     due: Vec<BrokerEvent>,
     snapshot: BrokerSnapshot,
+    /// A broker that can't hold one-cancels-other orders.
+    no_oco: bool,
 }
 
 /// A broker the test drives: it records requests and emits exactly the events pushed.
@@ -784,7 +786,7 @@ impl Broker for Scripted {
             stop_orders: true,
             modify: true,
             server_brackets: true,
-            oco: true,
+            oco: !self.0.lock().unwrap().no_oco,
             fractional_qty: false,
             external_fills: false,
         }
@@ -1567,4 +1569,60 @@ fn place_exit_repairs_after_a_cancel() {
     let s2o = r.core.order(s2).unwrap();
     assert!(s2o.is_open(), "{:?}", s2o.state);
     assert_eq!(s2o.remaining(), Qty(1));
+}
+
+fn place_exit_cmd(side: Side, qty: i64, kind: OrderKind) -> Command {
+    Command::PlaceExit(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side,
+        qty: Qty(qty),
+        kind,
+    })
+}
+
+/// Review round 3: a chart exit is never refused as an entry. While the account may only
+/// reduce (a prop breach), both the target and the stop of the position go in, though the
+/// first already "closes" the whole position: only one of the pair can ever fill.
+#[test]
+fn place_exit_protects_while_reducing_only() {
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(breach_preset()));
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    r.wait(LAT);
+    r.book(&[(5998.75, 50)], &[(5999.00, 50)]);
+    r.trade(5998.75, 1);
+    assert_eq!(r.core.trading_state(&acct()), TradingState::ReducingOnly);
+    let t = r.cmd(place_exit_cmd(Side::Sell, 3, limit(6010.00)));
+    assert!(t.is_ok(), "{t:?}");
+    let s = r.cmd(place_exit_cmd(
+        Side::Sell,
+        3,
+        OrderKind::Stop {
+            trigger: px(5990.00),
+        },
+    ));
+    assert!(s.is_ok(), "the stop is protection, not an entry: {s:?}");
+}
+
+/// Review round 3: on a broker that can't hold one-cancels-other orders, a chart exit is
+/// refused (the stop would outlive a filled target and could open a position there).
+#[test]
+fn place_exit_needs_a_broker_with_oco() {
+    let (mut r, s) = scripted();
+    let id = working(&mut r, &s, 2);
+    let t = at(&r);
+    r.deliver(&s, vec![fill(id, "f1", 6000.00, 2, t)]);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    s.lock().unwrap().no_oco = true;
+    let e = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: limit(6010.00),
+        }))
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Broker, "{}", e.message);
 }

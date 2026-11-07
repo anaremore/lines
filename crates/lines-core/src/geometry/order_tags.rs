@@ -23,7 +23,7 @@ use crate::{Price, Viewport};
 /// Most tags a chart lays out (orders + position); more are not drawn.
 pub const MAX_TAGS: usize = 32;
 /// Tag height and the `×` box's width, logical px.
-pub const TAG_H: f32 = 16.0;
+pub const TAG_H: f32 = 20.0;
 /// The `×` box: wider than its glyph, so a cancel is aimed, not grazed.
 pub const CLOSE_W: f32 = 22.0;
 /// Gap between stacked tags and between a tag and the plot's right edge.
@@ -386,7 +386,7 @@ mod tests {
             line(3, 604_975),
             line(4, 600_000),
         ];
-        let band = (20.0, 80.0);
+        let band = (16.0, 84.0);
         let n = layout_tags(&v, &lines, 400.0, 100.0, band, 1.0, &mut out);
         // The order at the very bottom (y 100) is outside the band: an edge marker's job.
         assert_eq!(n, 3);
@@ -420,18 +420,18 @@ mod tests {
             &[line(1, 609_800)],
             400.0,
             100.0,
-            (20.0, 80.0),
+            (16.0, 84.0),
             1.0,
             &mut out,
         );
         assert_eq!(n, 1, "not lost under the marker");
-        assert!(out[0].top >= 20.0);
+        assert!(out[0].top >= 16.0);
         // Twelve orders in a band that holds three: three tags, all inside.
         let many: Vec<LineIn> = (0..12).map(|i| line(i, 605_000 + i as i64 * 25)).collect();
-        let n = layout_tags(&v, &many, 400.0, 100.0, (20.0, 80.0), 1.0, &mut out);
+        let n = layout_tags(&v, &many, 400.0, 100.0, (16.0, 84.0), 1.0, &mut out);
         assert_eq!(n, 3);
         for t in &out[..n] {
-            assert!(t.top >= 20.0 && t.top + TAG_H <= 80.0, "{t:?}");
+            assert!(t.top >= 16.0 && t.top + TAG_H <= 84.0, "{t:?}");
         }
     }
 
