@@ -52,6 +52,9 @@ parking_lot = "0.12"
 # machine and replays stay deterministic. No system-tz or zoneinfo lookups.
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 clap = { version = "4.6", features = ["derive"] }
+# Benchmarks only (`benches/`, docs/benchmarks.md). Already in the tree through GPUI; no plots,
+# no rayon: the default features add nothing the published tables use.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.dev.package."*"]
 # Dependencies (GPUI especially) are painfully slow unoptimised.

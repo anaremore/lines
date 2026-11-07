@@ -2904,6 +2904,7 @@ dependencies = [
 name = "lines-core"
 version = "0.3.0"
 dependencies = [
+ "criterion",
  "jiff",
 ]
 
@@ -2914,6 +2915,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cqg-proto",
+ "criterion",
  "futures-util",
  "lines-core",
  "lines-indicators",
@@ -2947,6 +2949,7 @@ dependencies = [
 name = "lines-indicators"
 version = "0.3.0"
 dependencies = [
+ "criterion",
  "lines-core",
  "serde",
  "serde_json",
@@ -2982,6 +2985,7 @@ name = "lines-trading"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "jiff",
  "lines-core",
  "lines-feed",

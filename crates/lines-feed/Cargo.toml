@@ -33,3 +33,10 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "feed"
+harness = false

@@ -17,4 +17,9 @@ tracing.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 tokio.workspace = true
+
+[[bench]]
+name = "trading"
+harness = false
