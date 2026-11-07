@@ -215,7 +215,7 @@ fn the_guard_checks_every_theme_and_never_blocks() {
     let w = e.warnings(&ctxs);
     let all = texts(&w).join(" | ");
     assert!(
-        all.contains("Low contrast in the light theme (1.3:1); lines need 3:1."),
+        all.contains("Low contrast in the light theme, both palettes (1.3:1); lines need 3:1."),
         "{all}"
     );
     // No contrast figure for the dark theme.
@@ -270,14 +270,14 @@ fn the_guard_checks_every_theme_and_never_blocks() {
 #[test]
 fn where_a_finding_holds_is_worded() {
     let c = ctxs();
-    assert_eq!(where_phrase(&c, &[true; 4]), "");
+    assert_eq!(where_phrase(&c, &[true; 4]), " in every theme and palette");
     assert_eq!(
         where_phrase(&c, &[false, false, true, true]),
-        " in the light theme (both palettes)"
+        " in the light theme, both palettes"
     );
     assert_eq!(
         where_phrase(&c, &[false, true, false, true]),
-        " in the colorblind palette (both themes)"
+        " in the colorblind palette, both themes"
     );
     assert_eq!(
         where_phrase(&c, &[false, true, false, false]),

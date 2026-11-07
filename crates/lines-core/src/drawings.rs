@@ -140,10 +140,12 @@ impl Style {
     };
 
     /// In range (a file may hold anything): widths 1–4, opacities 10–100 %, palette indices
-    /// wrapped.
+    /// wrapped, no study-only color.
     pub fn normalised(self) -> Style {
         let wrap = |c: Color| match c {
             Color::Palette(i) => Color::Palette(i % Self::COLORS),
+            // A study part's own color means nothing on a drawing: its default color.
+            Color::Own => Color::Palette(0),
             c => c,
         };
         let mut s = self;

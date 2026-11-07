@@ -5,7 +5,8 @@
 //!
 //! - **On this chart:** each study with a hide toggle (eye) and an editor (gear). The editor
 //!   is a flat list of controls (reset, bands, colour, width, label; profile mode, session,
-//!   split, grouping; level kinds and labels), each one a command.
+//!   split, grouping; level kinds and labels), each one a command, ending with "Style…": the
+//!   shared style editor on the study's parts (`crate::study_style`, decision 0026).
 //! - **Add:** a catalog filtered by typing, like the symbol picker.
 //! - **Templates:** apply or delete saved study sets; save the chart's set as a template or as
 //!   the default for new charts (decision 0021: scope is explicit).
@@ -21,6 +22,7 @@ use crate::footprint::{FootprintConfig, FootprintMode};
 
 use crate::levels_layer::LevelsConfig;
 use crate::profile::{ProfileConfig, ProfileMode, ProfileSession};
+use crate::study_style::{self, Look, StudyStyles};
 
 /// Every study on a chart: what a template or "default for new charts" holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +36,10 @@ pub struct StudySet {
     pub levels: LevelsConfig,
     #[serde(skip_serializing_if = "FootprintConfig::is_default")]
     pub footprint: FootprintConfig,
+    /// User styles of the profile, the footprint and level sources (decision 0026; VWAPs and
+    /// cumulative delta carry theirs in `indicators`). Optional.
+    #[serde(skip_serializing_if = "StudyStyles::is_empty")]
+    pub styles: StudyStyles,
 }
 
 /// A named study set (saved in the app settings).
@@ -84,8 +90,10 @@ pub enum StudyAction {
     SetProfileGrouping(Option<u32>),
     ToggleLevelKind(String, String),
     ToggleLevelLabels(String),
-    /// Replace every study with a template's.
-    Replace(StudySet),
+    /// Restyle a study: every part's look, in its parts' order (`crate::study_style`).
+    SetStyle(StudyRef, Vec<Look>),
+    /// Replace every study with a template's (boxed: a study set is large).
+    Replace(Box<StudySet>),
 }
 
 fn next_color(set: &StudySet) -> u8 {
@@ -110,6 +118,7 @@ impl StudySet {
                 spec,
                 color,
                 display,
+                ..
             } => Some((spec, color, display)),
             IndicatorConfig::CumDelta { .. } => None,
         }
@@ -134,6 +143,7 @@ impl StudySet {
                     },
                     color,
                     display: Default::default(),
+                    style: Default::default(),
                 });
             }
             StudyAction::AnchorAt { index, from } => {
@@ -157,6 +167,7 @@ impl StudySet {
                 self.indicators.push(IndicatorConfig::CumDelta {
                     spec: DeltaSpec { reset: *reset },
                     display: Default::default(),
+                    style: Default::default(),
                 });
             }
             StudyAction::SetDeltaReset(i, reset) => {
@@ -191,10 +202,12 @@ impl StudySet {
                 StudyRef::Footprint => {
                     self.footprint.mode = FootprintMode::Off;
                     self.footprint.hidden = false;
+                    self.styles.footprint.clear();
                 }
                 StudyRef::Profile => {
                     self.profile.mode = ProfileMode::Off;
                     self.profile.hidden = false;
+                    self.styles.profile.clear();
                 }
                 // A registered source can't be removed from a chart, only hidden.
                 StudyRef::Levels(id) => {
@@ -216,13 +229,20 @@ impl StudySet {
                 }
             }
             StudyAction::SetColor(i, c) => {
-                if let Some((_, color, _)) = self.vwap(*i) {
-                    *color = *c % 4;
+                if let Some(cfg @ IndicatorConfig::Vwap { .. }) = self.indicators.get_mut(*i) {
+                    // A theme color replaces a custom one (the style editor's line color).
+                    let mut looks = study_style::vwap_looks(cfg);
+                    if let crate::style_editor::PartStyle::Line(l) =
+                        &mut looks[study_style::VWAP_LINE].style
+                    {
+                        l.color = lines_core::style::Color::Palette(*c % 4);
+                    }
+                    study_style::set_vwap(cfg, &looks);
                 }
             }
             StudyAction::SetWidth(i, w) => {
                 if let Some((.., d)) = self.vwap(*i) {
-                    d.width = (*w).clamp(1, 3);
+                    d.width = (*w).clamp(1, 4);
                 }
             }
             StudyAction::ToggleLabel(i) => {
@@ -237,7 +257,27 @@ impl StudySet {
             StudyAction::SetProfileGrouping(g) => self.profile.grouping = *g,
             StudyAction::ToggleLevelKind(id, kind) => self.levels.toggle_kind(id, kind),
             StudyAction::ToggleLevelLabels(id) => self.levels.toggle_labels(id),
-            StudyAction::Replace(set) => *self = set.clone(),
+            StudyAction::SetStyle(r, looks) => match r {
+                StudyRef::Vwap(i) => {
+                    if let Some(c @ IndicatorConfig::Vwap { .. }) = self.indicators.get_mut(*i) {
+                        study_style::set_vwap(c, looks);
+                    }
+                }
+                StudyRef::Delta(i) => {
+                    if let Some(c @ IndicatorConfig::CumDelta { .. }) = self.indicators.get_mut(*i)
+                    {
+                        study_style::write(c.style_mut(), &study_style::DELTA, looks);
+                    }
+                }
+                StudyRef::Profile => {
+                    study_style::write(&mut self.styles.profile, &study_style::PROFILE, looks)
+                }
+                StudyRef::Footprint => {
+                    study_style::write(&mut self.styles.footprint, &study_style::FOOTPRINT, looks)
+                }
+                StudyRef::Levels(id) => self.styles.set_levels(id, looks),
+            },
+            StudyAction::Replace(set) => *self = (**set).clone(),
         }
     }
 }
@@ -248,6 +288,8 @@ pub enum MenuCmd {
     Set(StudyAction),
     /// Open (or close) the inline editor of a study.
     Edit(StudyRef),
+    /// Open the style editor on a study's parts ("Style…").
+    Style(StudyRef),
     /// Wait for a click on a bar to anchor VWAP `index` (or a new one there).
     BeginAnchor(Option<usize>),
     ApplyTemplate(String),
@@ -281,6 +323,8 @@ pub struct MenuInput<'a> {
 pub enum Swatch {
     /// A theme study colour index.
     Study(u8),
+    /// A color the user chose (a VWAP line's custom color).
+    Custom(lines_core::style::Rgb),
     /// No swatch.
     None,
 }
@@ -334,14 +378,14 @@ pub struct StudyMenu {
     pub naming: Option<String>,
 }
 
-fn reset_label(r: Reset) -> String {
+pub fn reset_label(r: Reset) -> String {
     match r {
         Reset::Anchored { from } => format!("anchored {}", lines_core::UtcMillis(from)),
         r => r.label().to_owned(),
     }
 }
 
-fn vwap_label(spec: &VwapSpec) -> String {
+pub fn vwap_label(spec: &VwapSpec) -> String {
     let mut s = format!("VWAP {}", reset_label(spec.reset));
     for k in 1..=3u8 {
         if spec.bands.has(k) {
@@ -435,7 +479,33 @@ fn matches(query: &str, label: &str) -> bool {
         .all(|w| l.contains(&w.to_lowercase()))
 }
 
+/// A VWAP's swatch: its line's color.
+fn vwap_swatch(c: &IndicatorConfig) -> Swatch {
+    match study_style::vwap_looks(c)[study_style::VWAP_LINE].color() {
+        lines_core::style::Color::Custom(rgb) => Swatch::Custom(rgb),
+        lines_core::style::Color::Palette(i) => Swatch::Study(i),
+        _ => Swatch::None,
+    }
+}
+
 fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
+    controls_of(input, r, out);
+    // Every study ends with its styles (one entry: the parts are the style editor's tabs).
+    if out
+        .last()
+        .is_some_and(|i| matches!(i, Item::Control { .. }))
+    {
+        out.push(Item::Control {
+            group: "Style",
+            label: "Style…".into(),
+            on: false,
+            swatch: Swatch::None,
+            cmd: MenuCmd::Style(r.clone()),
+        });
+    }
+}
+
+fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
     let set = |a| MenuCmd::Set(a);
     let mut c = |group: &'static str, label: String, on: bool, swatch: Swatch, cmd: MenuCmd| {
         out.push(Item::Control {
@@ -448,7 +518,8 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
     };
     match r {
         StudyRef::Delta(i) => {
-            let Some(IndicatorConfig::CumDelta { spec, display }) = input.set.indicators.get(*i)
+            let Some(IndicatorConfig::CumDelta { spec, display, .. }) =
+                input.set.indicators.get(*i)
             else {
                 return;
             };
@@ -530,6 +601,7 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 spec,
                 color,
                 display,
+                ..
             }) = input.set.indicators.get(*i)
             else {
                 return;
@@ -565,16 +637,21 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::ToggleBand(i, k)),
                 );
             }
+            // A custom line color (the style editor's) selects none of the theme colors.
+            let custom = matches!(
+                input.set.indicators.get(i).map(vwap_swatch),
+                Some(Swatch::Custom(_))
+            );
             for k in 0..4u8 {
                 c(
                     "Color",
                     format!("{}", k + 1),
-                    *color == k,
+                    *color == k && !custom,
                     Swatch::Study(k),
                     set(StudyAction::SetColor(i, k)),
                 );
             }
-            for (w, name) in [(1u8, "Thin"), (2, "Normal"), (3, "Thick")] {
+            for (w, name) in [(1u8, "Thin"), (2, "Normal"), (3, "Thick"), (4, "Heavy")] {
                 c(
                     "Width",
                     name.into(),
@@ -674,17 +751,13 @@ impl StudyMenu {
         let mut studies: Vec<(StudyRef, String, Swatch, bool)> = Vec::new();
         for (i, c) in input.set.indicators.iter().enumerate() {
             match c {
-                IndicatorConfig::Vwap {
-                    spec,
-                    color,
-                    display,
-                } => studies.push((
+                IndicatorConfig::Vwap { spec, display, .. } => studies.push((
                     StudyRef::Vwap(i),
                     vwap_label(spec),
-                    Swatch::Study(*color),
+                    vwap_swatch(c),
                     display.hidden,
                 )),
-                IndicatorConfig::CumDelta { spec, display } => studies.push((
+                IndicatorConfig::CumDelta { spec, display, .. } => studies.push((
                     StudyRef::Delta(i),
                     format!("Cumulative delta · {}", spec.reset.label()),
                     Swatch::None,

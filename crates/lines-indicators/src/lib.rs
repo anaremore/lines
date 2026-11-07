@@ -26,6 +26,11 @@ pub use vwap::{Bands, Point, Reset, Vwap, VwapSpec};
 
 use serde::{Deserialize, Serialize};
 
+/// A study's user styles (decision 0026), by part (`"line"`, `"bands"`, ...): each part a
+/// flat object of optional fields the app reads and writes (`lines-app` `study_style`). Kept
+/// as JSON so parts and fields a newer build wrote survive this one saving the study.
+pub type PartStyles = std::collections::BTreeMap<String, serde_json::Value>;
+
 /// One indicator on a chart, as saved with the workspace (decision 0016 persistence; the
 /// workspaces milestone stores a `Vec` of these per chart pane). Stable, versioned by serde
 /// field names; unknown kinds fail to load rather than silently vanish.
@@ -41,6 +46,9 @@ pub enum IndicatorConfig {
         /// How it is shown (line width, label, hidden): optional, defaulted.
         #[serde(flatten, default)]
         display: Display,
+        /// User styles of its line, bands and band fill. Optional.
+        #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
+        style: PartStyles,
     },
     /// Cumulative delta (roadmap 10e), drawn as candles in a sub-pane below the price plot.
     CumDelta {
@@ -48,6 +56,9 @@ pub enum IndicatorConfig {
         spec: DeltaSpec,
         #[serde(flatten, default)]
         display: Display,
+        /// User styles of its rising and falling candles. Optional.
+        #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
+        style: PartStyles,
     },
 }
 
@@ -56,7 +67,8 @@ pub enum IndicatorConfig {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Display {
-    /// Line width step, 1..=3 (thin, normal, thick).
+    /// Line width step, 1..=4 (thin, normal, thick, heavy; the app draws a VWAP at 1.25, 1.75,
+    /// 2.5 and 3.25 px).
     #[serde(skip_serializing_if = "Display::normal_width")]
     pub width: u8,
     /// Shown in the chart's legend.
@@ -103,6 +115,35 @@ impl IndicatorConfig {
         }
     }
 
+    /// Its user styles (every kind has them).
+    pub fn style(&self) -> &PartStyles {
+        match self {
+            IndicatorConfig::Vwap { style, .. } | IndicatorConfig::CumDelta { style, .. } => style,
+        }
+    }
+
+    pub fn style_mut(&mut self) -> &mut PartStyles {
+        match self {
+            IndicatorConfig::Vwap { style, .. } | IndicatorConfig::CumDelta { style, .. } => style,
+        }
+    }
+
+    /// The same study but for its styles (a restyle needs no new engine node): its `style`
+    /// and, for a VWAP, its line's palette `color` and `display.width` (the style editor
+    /// writes the line's color and width there).
+    pub fn same_but_style(&self, other: &IndicatorConfig) -> bool {
+        fn unstyled(c: &IndicatorConfig) -> IndicatorConfig {
+            let mut c = c.clone();
+            c.style_mut().clear();
+            if let IndicatorConfig::Vwap { color, display, .. } = &mut c {
+                *color = 0;
+                display.width = Display::default().width;
+            }
+            c
+        }
+        unstyled(self) == unstyled(other)
+    }
+
     /// Drawn in a sub-pane below the price plot (not in it).
     pub fn in_subpane(&self) -> bool {
         matches!(self, IndicatorConfig::CumDelta { .. })
@@ -127,6 +168,38 @@ impl IndicatorConfig {
 mod tests {
     use super::*;
 
+    /// N1: a VWAP's line color and width are styles; its reset, bands and visibility aren't.
+    #[test]
+    fn same_but_style_ignores_a_vwaps_color_and_width() {
+        let base = IndicatorConfig::Vwap {
+            spec: VwapSpec::default(),
+            color: 0,
+            display: Display::default(),
+            style: Default::default(),
+        };
+        let mut restyled = base.clone();
+        if let IndicatorConfig::Vwap {
+            color,
+            display,
+            style,
+            ..
+        } = &mut restyled
+        {
+            *color = 2;
+            display.width = 4;
+            style.insert("fill".into(), serde_json::json!({"opacity": 80}));
+        }
+        assert!(base.same_but_style(&restyled));
+        let mut hidden = base.clone();
+        hidden.display_mut().hidden = true;
+        assert!(!base.same_but_style(&hidden));
+        let mut rth = base.clone();
+        if let IndicatorConfig::Vwap { spec, .. } = &mut rth {
+            spec.reset = Reset::Rth;
+        }
+        assert!(!base.same_but_style(&rth));
+    }
+
     #[test]
     fn config_round_trips_through_json() {
         let cfgs = vec![
@@ -134,6 +207,7 @@ mod tests {
                 spec: VwapSpec::default(),
                 color: 0,
                 display: Default::default(),
+                style: Default::default(),
             },
             IndicatorConfig::Vwap {
                 spec: VwapSpec {
@@ -144,6 +218,7 @@ mod tests {
                 },
                 color: 2,
                 display: Default::default(),
+                style: Default::default(),
             },
         ];
         let mut cfgs = cfgs;
@@ -152,6 +227,7 @@ mod tests {
                 reset: DeltaReset::Rth,
             },
             display: Default::default(),
+            style: Default::default(),
         });
         let json = serde_json::to_string(&cfgs).unwrap();
         assert!(json.contains(r#""kind":"vwap""#), "{json}");
@@ -166,5 +242,27 @@ mod tests {
         assert!(
             matches!(bare, IndicatorConfig::CumDelta { spec, .. } if spec.reset == DeltaReset::Eth)
         );
+    }
+
+    /// Styles are an optional nested field: a config without them writes none and loads as
+    /// before, and a newer build's parts and fields come back unchanged.
+    #[test]
+    fn styles_are_optional_and_kept_whole() {
+        let plain = IndicatorConfig::Vwap {
+            spec: VwapSpec::default(),
+            color: 1,
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("style"), "{json}");
+        let styled = r##"{"kind":"vwap","reset":"eth","bands":0,"color":1,
+            "style":{"line":{"color":"#f719cb","glow":2},"halo":{"radius":3}}}"##;
+        let c: IndicatorConfig = serde_json::from_str(styled).unwrap();
+        assert!(c.same_but_style(&plain));
+        assert_eq!(c.style()["line"]["glow"], 2);
+        let back = serde_json::to_value(&c).unwrap();
+        assert_eq!(back["style"]["halo"]["radius"], 3);
+        assert_eq!(back["style"]["line"]["color"], "#f719cb");
     }
 }

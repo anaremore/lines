@@ -40,7 +40,9 @@ use lines_feed::ChartData;
 use serde::{Deserialize, Serialize};
 
 use crate::chart_view::ChartLayer;
+use crate::study_style::{self, Look, PROFILE};
 use crate::theme::Theme;
+use lines_indicators::PartStyles;
 
 /// Rows the grouping buffer holds; wider profiles get a coarser grouping
 /// (`ProfileRows::fit_grouping`).
@@ -133,7 +135,7 @@ impl ProfileConfig {
         self.value_area_percent.clamp(1, 100)
     }
 
-    fn width(&self) -> f32 {
+    pub fn width(&self) -> f32 {
         f32::from(self.width_percent.clamp(5, 60)) / 100.0
     }
 
@@ -186,11 +188,16 @@ pub struct VolumeProfileLayer {
     active: bool,
     label: FixedStr<96>,
     shaped: Option<(FixedStr<96>, ShapedLine)>,
+    /// User styles (decision 0026), as saved, and resolved for paint.
+    style: PartStyles,
+    looks: [Look; 4],
 }
 
 impl VolumeProfileLayer {
     pub fn new(config: ProfileConfig) -> Self {
         VolumeProfileLayer {
+            style: PartStyles::new(),
+            looks: Look::defaults(&PROFILE),
             config,
             rows: ProfileRows::with_capacity(MAX_ROWS),
             key: None,
@@ -202,6 +209,18 @@ impl VolumeProfileLayer {
 
     pub fn config(&self) -> ProfileConfig {
         self.config
+    }
+
+    /// Its user styles, as saved.
+    pub fn style(&self) -> &PartStyles {
+        &self.style
+    }
+
+    pub fn set_style(&mut self, style: &PartStyles) {
+        if *style != self.style {
+            self.style = style.clone();
+            self.looks = study_style::read(style, &PROFILE);
+        }
     }
 
     /// Rows were built at least once (tests: hidden studies do no work).
@@ -462,6 +481,10 @@ impl ChartLayer for VolumeProfileLayer {
         let i_hi = (row_of(Price(phi.ceil() as i64), u) - r.base_row).clamp(0, last.max(0));
         let max = r.max_row.0.max(1) as f64;
         let (va_lo, va_hi) = r.value_area.unwrap_or((usize::MAX, 0));
+        let colors = ProfileColors::of(t, &self.looks);
+        let poc = self.looks[study_style::PROFILE_POC].line();
+        let poc_h = f32::from(poc.width) * hair;
+        let poc_dash = crate::theme::drawing_dash(poc.line, poc_h);
         let row_y = |i: usize| {
             let lo = r.row_price(i).0 as f64;
             (
@@ -483,7 +506,7 @@ impl ChartLayer for VolumeProfileLayer {
             let len = snap(row.total.0 as f64 / max * f64::from(width), scale).max(hair);
             let in_va = i >= va_lo && i <= va_hi;
             let dim = if in_va { 1.0 } else { 0.55 };
-            let base = if in_va { t.profile_va } else { t.volume_bar };
+            let base = if in_va { colors.va } else { t.volume_bar };
             if self.config.split {
                 // Sells from the base edge, then buys, then unknown: position tells them
                 // apart, not only colour.
@@ -491,16 +514,19 @@ impl ChartLayer for VolumeProfileLayer {
                 let seg = |q: i64| snap(q as f64 / max * f64::from(width), scale);
                 let (s, b) = (seg(v.sell.0), seg(v.buy.0));
                 let k = (len - s - b).max(0.0);
-                paint(window, 0.0, top, s, h, t.profile_sell.opacity(dim));
-                paint(window, s, top, b, h, t.profile_buy.opacity(dim));
+                paint(window, 0.0, top, s, h, colors.sell.opacity(dim));
+                paint(window, s, top, b, h, colors.buy.opacity(dim));
                 paint(window, s + b, top, k, h, base);
             } else {
                 paint(window, 0.0, top, len, h, base);
             }
             if Some(i) == r.poc {
-                // Point of control: a hairline through the row, the bar's length.
-                let y = snap(f64::from(top + h * 0.5), scale);
-                paint(window, 0.0, y, len, hair, t.profile_poc);
+                // Point of control: a line through the row, the bar's length (by default a
+                // hairline; its width in device pixels, dashed by its line type).
+                let y = snap(f64::from(top + (h - poc_h) * 0.5), scale);
+                poc_dash.segments(len, |a, b| {
+                    paint(window, a, y, b - a, poc_h, colors.poc);
+                });
             }
         }
         // Value-area edges: hairlines across the profile's width.
@@ -509,16 +535,142 @@ impl ChartLayer for VolumeProfileLayer {
             let (_, bottom) = row_y(a);
             for y in [top, bottom - hair] {
                 if (0.0..ph).contains(&y) {
-                    paint(window, 0.0, y, width, hair, t.profile_edge);
+                    paint(window, 0.0, y, width, hair, colors.edge);
                 }
             }
         }
     }
 }
 
+/// The profile's colors in a theme, from its looks (decision 0026): each part's own color is
+/// the theme's profile token, as drawn before styles; the value-area edges follow its rows'
+/// color with the edge token's translucency.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ProfileColors {
+    pub buy: Hsla,
+    pub sell: Hsla,
+    pub poc: Hsla,
+    pub va: Hsla,
+    pub edge: Hsla,
+}
+
+impl ProfileColors {
+    pub fn of(t: &Theme, looks: &[Look; 4]) -> ProfileColors {
+        let c = |i: usize, own: Hsla| t.part_color(looks[i].color(), own, looks[i].opacity());
+        ProfileColors {
+            buy: c(study_style::PROFILE_BUY, t.profile_buy),
+            sell: c(study_style::PROFILE_SELL, t.profile_sell),
+            poc: c(study_style::PROFILE_POC, t.profile_poc),
+            va: c(study_style::PROFILE_VA, t.profile_va),
+            edge: c(study_style::PROFILE_VA, t.profile_edge),
+        }
+    }
+}
+
+/// The style editor's warning on the profile's buy and sell tabs when the rows' colors, as
+/// seen on the chart, are perceptually close (CIEDE2000 under the guard's "looks like" gap)
+/// in some theme or palette: the side then rests on the rows' place alone. Unstyled rows
+/// aren't warned about. `themes` in the order of `ctxs`.
+pub fn sides_warning(
+    looks: &[Look; 4],
+    themes: &[Theme],
+    ctxs: &[crate::style_editor::ThemeCtx],
+) -> Option<crate::style_editor::Warning> {
+    use lines_core::style::{NEAR_MEANING, delta_e_2000};
+    let (b, s) = (study_style::PROFILE_BUY, study_style::PROFILE_SELL);
+    if looks[b].style == PROFILE[b].style && looks[s].style == PROFILE[s].style {
+        return None;
+    }
+    let hit: Vec<bool> = themes
+        .iter()
+        .map(|t| {
+            let c = ProfileColors::of(t, looks);
+            let bg = crate::theme::rgb_of(t.bg);
+            let seen = |h: Hsla| crate::footprint::blend(crate::theme::rgb_of(h), h.a, bg);
+            delta_e_2000(seen(c.buy), seen(c.sell)) < NEAR_MEANING
+        })
+        .collect();
+    hit.iter().any(|h| *h).then(|| crate::style_editor::Warning {
+        text: format!(
+            "Buy and sell rows look alike{}; only their place tells them apart (sells at the base edge, buys after them).",
+            crate::style_editor::where_phrase(ctxs, &hit)
+        ),
+        swatch: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P8: buy and sell rows styled alike are warned about, naming theme and palette;
+    /// unstyled and clearly different rows aren't.
+    #[test]
+    fn alike_buy_and_sell_rows_are_warned_about() {
+        use crate::style_editor::PartStyle;
+        use lines_core::style::{Color, Rgb};
+        let themes = Theme::all();
+        let ctxs: Vec<_> = themes.iter().map(Theme::study_ctx).collect();
+        let mut looks = Look::defaults(&PROFILE);
+        assert_eq!(sides_warning(&looks, &themes, &ctxs), None);
+        let recolor = |looks: &mut [Look; 4], i: usize, c: Color| {
+            let PartStyle::Fill(f) = &mut looks[i].style else {
+                panic!("rows are fills");
+            };
+            f.color = c;
+        };
+        // Sells in the buys' own color: alike everywhere.
+        let teal = Color::Custom(Rgb::hex(0x3fcf9a));
+        recolor(&mut looks, study_style::PROFILE_SELL, teal);
+        recolor(&mut looks, study_style::PROFILE_BUY, teal);
+        let w = sides_warning(&looks, &themes, &ctxs).expect("alike");
+        assert!(w.text.contains("every theme and palette"), "{}", w.text);
+        assert!(w.text.contains("base edge"), "{}", w.text);
+        // Blue and orange: never alike.
+        recolor(
+            &mut looks,
+            study_style::PROFILE_BUY,
+            Color::Custom(Rgb::hex(0x3d7bf5)),
+        );
+        recolor(
+            &mut looks,
+            study_style::PROFILE_SELL,
+            Color::Custom(Rgb::hex(0xff9f1a)),
+        );
+        assert_eq!(sides_warning(&looks, &themes, &ctxs), None);
+    }
+
+    /// Unstyled, every part is the theme token it always was; a custom value area keeps the
+    /// rows' and edges' translucency.
+    #[test]
+    fn profile_colors_default_to_the_theme_and_follow_styles() {
+        use crate::style_editor::PartStyle;
+        use lines_core::style::{Color, Rgb};
+        for t in Theme::all() {
+            let d = ProfileColors::of(&t, &Look::defaults(&PROFILE));
+            assert_eq!(
+                (d.buy, d.sell, d.poc, d.va, d.edge),
+                (
+                    t.profile_buy,
+                    t.profile_sell,
+                    t.profile_poc,
+                    t.profile_va,
+                    t.profile_edge
+                )
+            );
+            let mut looks = Look::defaults(&PROFILE);
+            let PartStyle::Fill(f) = &mut looks[study_style::PROFILE_VA].style else {
+                panic!("the value area is a fill");
+            };
+            f.color = Color::Custom(Rgb::hex(0x3d7bf5));
+            f.opacity = 50;
+            let c = ProfileColors::of(&t, &looks);
+            assert!((c.va.a - t.profile_va.a * 0.5).abs() < 1e-6);
+            assert!((c.edge.a - t.profile_edge.a * 0.5).abs() < 1e-6);
+            assert_eq!(crate::theme::rgb_of(c.va), Rgb::hex(0x3d7bf5));
+            assert_eq!(c.buy, t.profile_buy, "other parts stay");
+        }
+    }
 
     #[test]
     fn config_round_trips_and_tolerates_missing_fields() {

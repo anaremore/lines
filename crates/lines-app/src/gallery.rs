@@ -312,6 +312,93 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     ];
     t.extend(["--style-editor".into(), "1".into()]);
     v.push(s("style-editor-tiled", false, end, t));
+    // Study styles (decision 0026, PR 2): the style editor on a VWAP (dark), the volume
+    // profile's POC (light) and the footprint (dark, colorblind: its cells, and its POC in a
+    // color that warns); restyled studies (light and dark: a heavy band fill under the
+    // candles); white footprint cells on dark, held back so their counts stay AA.
+    let studies = |name, theme: &str, extra: &str| {
+        let mut a = args(&format!(
+            "--layout chart --size 1400x800 --theme {theme}{extra} --study-set"
+        ));
+        a.push(ws("studies-styled.json"));
+        s(name, false, end, a)
+    };
+    let mut e = studies("study-style-vwap-dark", "dark", "");
+    e.args
+        .extend(["--studies-menu".into(), "style:vwap:0".into()]);
+    v.push(e);
+    let mut e = studies("study-style-profile-light", "light", "");
+    e.args
+        .extend(["--studies-menu".into(), "style:profile:2".into()]);
+    v.push(e);
+    v.push(studies("restyled-studies-light", "light", ""));
+    v.push(studies("restyled-studies-dark", "dark", ""));
+    // The VWAP's Band fill tab (light): a heavy fill held back under the candles, warned.
+    let mut e = studies("study-style-vwap-band-fill-light", "light", "");
+    e.args
+        .extend(["--studies-menu".into(), "style:vwap:0:2".into()]);
+    v.push(e);
+    // An unstyled VWAP with ±1σ ±2σ ±3σ bands: its fills now sit under the candles.
+    for theme in ["light", "dark"] {
+        let mut a = args(&format!(
+            "--layout chart --size 1400x800 --theme {theme} --study-set"
+        ));
+        a.push(ws("vwap-bands-unstyled.json"));
+        v.push(s(
+            if theme == "light" {
+                "unstyled-vwap-bands-light"
+            } else {
+                "unstyled-vwap-bands-dark"
+            },
+            false,
+            end,
+            a,
+        ));
+    }
+    let footprint = |name, palette: &str, set: &str, menu: &str| {
+        s(
+            name,
+            false,
+            end,
+            vec![
+                "--workspace".into(),
+                ws("footprint.json"),
+                "--size".into(),
+                "1400x800".into(),
+                "--palette".into(),
+                palette.into(),
+                "--study-set".into(),
+                ws(set),
+                "--studies-menu".into(),
+                menu.into(),
+            ],
+        )
+    };
+    v.push(footprint(
+        "study-style-footprint-dark-cb",
+        "cb",
+        "footprint-styled.json",
+        "style:footprint",
+    ));
+    v.push(footprint(
+        "study-style-footprint-poc-dark-cb",
+        "cb",
+        "footprint-styled.json",
+        "style:footprint:2",
+    ));
+    // The Imbalances tab: one color for both sides' marks, warned (place tells them apart).
+    v.push(footprint(
+        "study-style-footprint-imbalances-dark-cb",
+        "cb",
+        "footprint-styled.json",
+        "style:footprint:1",
+    ));
+    v.push(footprint(
+        "study-style-footprint-white-cells-dark",
+        "standard",
+        "footprint-white-cells.json",
+        "style:footprint",
+    ));
     // Trading lines and a styled horizontal line a few ticks apart: a pending, a working and
     // a held order, a position, and the drawing with its axis tag.
     let mut o = args("--layout trading --size 1600x900 --theme dark --arm --drawings");
@@ -508,6 +595,33 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         anchor("17:00", 599_500),
     );
     std::fs::write(dir.join("editor-edge.json"), edge).context("editor-edge.json")?;
+    // Restyled studies: a VWAP in a custom dashed line with dotted ±1σ edges, cumulative
+    // delta in study colors, a split profile with every part styled.
+    let studies = r##"{
+  "indicators": [
+    { "kind": "vwap", "reset": "eth", "bands": 3, "color": 1,
+      "style": { "line": { "color": "#f719cb", "line": "dashed" },
+                 "bands": { "shown": true, "line": "dotted" },
+                 "fill": { "opacity": 100 } } },
+    { "kind": "cum_delta", "reset": "eth",
+      "style": { "up": { "color": "p1" }, "down": { "color": "#9c8756" } } } ],
+  "profile": { "mode": "session", "split": true },
+  "styles": { "profile": { "buy": { "color": "p1" }, "sell": { "color": "#9c8756" },
+                           "poc": { "color": "#f719cb", "width": 2, "line": "dashed" },
+                           "va": { "color": "p3", "opacity": 75 } } } }"##;
+    std::fs::write(dir.join("studies-styled.json"), studies).context("studies-styled.json")?;
+    let bands = r##"{ "indicators": [ { "kind": "vwap", "reset": "eth", "bands": 7 } ] }"##;
+    std::fs::write(dir.join("vwap-bands-unstyled.json"), bands)
+        .context("vwap-bands-unstyled.json")?;
+    let fp = r##"{ "footprint": { "mode": "bid_ask" },
+  "styles": { "footprint": { "cells": { "color": "p1", "opacity": 75 },
+                             "imbalance": { "color": "#f719cb" },
+                             "poc": { "color": "#4fa8ff" } } } }"##;
+    std::fs::write(dir.join("footprint-styled.json"), fp).context("footprint-styled.json")?;
+    let white = r##"{ "footprint": { "mode": "bid_ask" },
+  "styles": { "footprint": { "cells": { "color": "#ffffff" } } } }"##;
+    std::fs::write(dir.join("footprint-white-cells.json"), white)
+        .context("footprint-white-cells.json")?;
     let near = format!(
         r##"{{ "version": 1, "product": "ES", "drawings": [
   {{ "id": 1, "tool": "hline", "a": {}, "line_color": "#f719cb", "width": 2, "dashed": true,

@@ -1,0 +1,806 @@
+use super::*;
+use crate::study_menu::{StudyAction, StudyRef, StudySet, StudyTemplate, save_template};
+use crate::style_editor::{Control, Outcome, ThemeCtx};
+use crate::theme::Theme;
+use lines_core::style::Rgb;
+use lines_indicators::{Bands, Reset, VwapSpec};
+
+const MAGENTA: Rgb = Rgb::hex(0xf719cb);
+
+fn vwap(color: u8) -> IndicatorConfig {
+    IndicatorConfig::Vwap {
+        spec: VwapSpec {
+            reset: Reset::Eth,
+            bands: Bands(0b011),
+        },
+        color,
+        display: Default::default(),
+        style: Default::default(),
+    }
+}
+
+fn delta() -> IndicatorConfig {
+    IndicatorConfig::CumDelta {
+        spec: Default::default(),
+        display: Default::default(),
+        style: Default::default(),
+    }
+}
+
+fn set_line(look: &mut Look, f: impl FnOnce(&mut LineStyle)) {
+    let PartStyle::Line(l) = &mut look.style else {
+        panic!("not a line");
+    };
+    f(l);
+}
+
+fn set_fill(look: &mut Look, f: impl FnOnce(&mut FillStyle)) {
+    let PartStyle::Fill(x) = &mut look.style else {
+        panic!("not a fill");
+    };
+    f(x);
+}
+
+/// Every study's default is its parts' own colors at 100 % of their own translucency (a
+/// VWAP's line: its palette color; band fill and level zones: the 25 % that is the
+/// translucency they always had), and an optional part is off.
+#[test]
+fn defaults_are_todays_look_and_write_nothing() {
+    for defs in [
+        &VWAP[..],
+        &DELTA[..],
+        &PROFILE[..],
+        &FOOTPRINT[..],
+        &LEVELS[..],
+    ] {
+        let looks: Vec<Look> = defs
+            .iter()
+            .map(|d| Look {
+                style: d.style,
+                shown: !d.optional,
+            })
+            .collect();
+        let mut map = PartStyles::new();
+        write(&mut map, defs, &looks);
+        assert!(map.is_empty(), "{defs:?}: {map:?}");
+        for d in defs {
+            assert!(
+                d.own.is_some() || d.key == "line" && defs.len() == 3,
+                "{}",
+                d.key
+            );
+        }
+    }
+    assert!((VWAP_FILL_ALPHA * 0.25 - 0.06).abs() < 1e-6);
+    assert!((LEVEL_ZONE_ALPHA * 0.25 - 0.10).abs() < 1e-6);
+    assert_eq!(read(&PartStyles::new(), &PROFILE), Look::defaults(&PROFILE));
+    // Today's look in every theme: the own color, unchanged.
+    for t in Theme::all() {
+        for own in [t.up, t.profile_buy, t.profile_va, t.text_dim.opacity(0.2)] {
+            assert_eq!(t.part_color(Color::Own, own, 100), own);
+        }
+    }
+}
+
+/// Every part of every study round-trips through its saved form.
+#[test]
+fn every_part_round_trips() {
+    let mut looks = Look::defaults(&PROFILE);
+    set_fill(&mut looks[PROFILE_BUY], |f| f.color = Color::Palette(1));
+    set_fill(&mut looks[PROFILE_SELL], |f| {
+        f.color = Color::Custom(MAGENTA);
+        f.opacity = 50;
+    });
+    set_line(&mut looks[PROFILE_POC], |l| {
+        l.line = LineType::Dashed;
+        l.width = 3;
+    });
+    set_fill(&mut looks[PROFILE_VA], |f| f.opacity = 75);
+    let mut map = PartStyles::new();
+    write(&mut map, &PROFILE, &looks);
+    let json = serde_json::to_string(&map).unwrap();
+    let back: PartStyles = serde_json::from_str(&json).unwrap();
+    assert_eq!(read(&back, &PROFILE), looks);
+    assert_eq!(map["sell"]["color"], "#f719cb");
+    assert_eq!(map["buy"]["color"], "p1");
+    assert!(
+        map["va"].get("color").is_none(),
+        "only what differs is written"
+    );
+
+    let mut looks = Look::defaults(&VWAP);
+    set_line(&mut looks[VWAP_BANDS], |l| l.line = LineType::Dotted);
+    looks[VWAP_BANDS].shown = true;
+    set_fill(&mut looks[VWAP_FILL], |f| f.color = Color::Custom(MAGENTA));
+    let mut map = PartStyles::new();
+    write(&mut map, &VWAP, &looks);
+    assert_eq!(map["bands"]["shown"], true);
+    assert_eq!(read(&map, &VWAP), looks);
+}
+
+/// A part's fields a newer build wrote, and parts this build doesn't know, survive a
+/// restyle; values this build can't use fall back to the default.
+#[test]
+fn unknown_fields_and_parts_are_kept() {
+    let mut map: PartStyles = serde_json::from_str(
+        r##"{"buy": {"color": "#f719cb", "glow": 3}, "halo": {"radius": 2},
+             "poc": {"line": "wavy", "width": 99, "color": "text", "opacity": 0}}"##,
+    )
+    .unwrap();
+    let looks = read(&map, &PROFILE);
+    assert_eq!(looks[PROFILE_BUY].color(), Color::Custom(MAGENTA));
+    let poc = looks[PROFILE_POC].line();
+    // Unknown line type: the default; the theme text color isn't a study color; width and
+    // opacity are kept in range.
+    assert_eq!(
+        (poc.line, poc.color, poc.width, poc.opacity),
+        (LineType::Solid, Color::Own, 4, 10)
+    );
+    let mut looks = looks;
+    set_fill(&mut looks[PROFILE_BUY], |f| f.opacity = 50);
+    write(&mut map, &PROFILE, &looks);
+    assert_eq!(map["buy"]["glow"], 3);
+    assert_eq!(map["buy"]["opacity"], 50);
+    assert_eq!(map["halo"]["radius"], 2);
+    // Back to the default: the unknown field still keeps the part.
+    write(&mut map, &PROFILE, &Look::defaults(&PROFILE));
+    assert_eq!(map["buy"], serde_json::json!({"glow": 3}));
+}
+
+/// N2: a file a newer build wrote keeps its values: writing touches only the part whose look
+/// changed, and in it only the fields that changed (a fill's `line` and `width`, which this
+/// build doesn't read there, and out-of-range values it clamps on reading, stay as saved).
+#[test]
+fn writing_touches_only_the_changed_part_and_fields() {
+    let mut map: PartStyles = serde_json::from_str(
+        r##"{"buy": {"color": "#3d7bf5", "opacity": 250, "glow": 1},
+             "poc": {"width": 9, "line": "zigzag", "opacity": 5},
+             "sell": {"line": "dashed", "width": 3, "color": "p1"},
+             "future": {"x": 1}}"##,
+    )
+    .unwrap();
+    let before = map.clone();
+    let mut looks = read(&map, &PROFILE);
+    write(&mut map, &PROFILE, &looks);
+    assert_eq!(map, before, "nothing changed: written back as read");
+    // The value area's opacity: only that part, only that field.
+    set_fill(&mut looks[PROFILE_VA], |f| f.opacity = 50);
+    write(&mut map, &PROFILE, &looks);
+    assert_eq!(map["va"], serde_json::json!({"opacity": 50}));
+    for k in ["buy", "poc", "sell", "future"] {
+        assert_eq!(map[k], before[k], "{k} untouched");
+    }
+    // A fill's color: its `line` and `width` (not read for a fill) stay.
+    set_fill(&mut looks[PROFILE_SELL], |f| f.color = Color::Palette(2));
+    write(&mut map, &PROFILE, &looks);
+    assert_eq!(
+        map["sell"],
+        serde_json::json!({"line": "dashed", "width": 3, "color": "p2"})
+    );
+    // A line's color: its clamped width, unknown type and opacity stay as saved.
+    set_line(&mut looks[PROFILE_POC], |l| l.color = Color::Palette(3));
+    write(&mut map, &PROFILE, &looks);
+    assert_eq!(
+        map["poc"],
+        serde_json::json!({"width": 9, "line": "zigzag", "opacity": 5, "color": "p3"})
+    );
+    assert_eq!(map["buy"], before["buy"]);
+}
+
+/// P7: a styled study line never looks like the position line (a dim dashed line, 6/4) nor a
+/// held order (3/3), at any VWAP width step: the pattern differs whatever its color.
+#[test]
+fn styled_study_dashes_never_look_like_trading_lines() {
+    use crate::theme::{HELD_DASH, POSITION_DASH, drawing_dash};
+    for w in 1..=4u8 {
+        for lt in LineType::ALL {
+            let d = drawing_dash(lt, vwap_px(w));
+            if d.is_solid() {
+                continue;
+            }
+            let period = d.seg[0] + d.seg[1];
+            for t in [POSITION_DASH, HELD_DASH] {
+                let tp = t.on + t.off;
+                let alike = d.n == 2
+                    && (period - tp).abs() <= tp / 3.0
+                    && (d.seg[0] / period - t.on / tp).abs() <= 0.2;
+                assert!(!alike, "{lt:?} at width step {w} looks like {t:?}");
+            }
+        }
+    }
+}
+
+/// A VWAP's line color stays the config's palette index and its width the config's width
+/// (older builds read those); a custom color is a saved part.
+#[test]
+fn vwap_line_keeps_the_legacy_fields() {
+    let mut c = vwap(2);
+    let looks = vwap_looks(&c);
+    assert_eq!(looks[VWAP_LINE].color(), Color::Palette(2));
+    assert_eq!(looks[VWAP_LINE].line().width, 2);
+    assert!(
+        !looks[VWAP_BANDS].shown,
+        "band edges are off, as before styles"
+    );
+
+    let mut new = looks;
+    set_line(&mut new[VWAP_LINE], |l| {
+        l.color = Color::Palette(3);
+        l.width = 4;
+    });
+    set_vwap(&mut c, &new);
+    let IndicatorConfig::Vwap {
+        color,
+        display,
+        style,
+        ..
+    } = &c
+    else {
+        unreachable!()
+    };
+    assert_eq!((*color, display.width), (3, 4));
+    assert!(style.is_empty(), "{style:?}");
+
+    set_line(&mut new[VWAP_LINE], |l| l.color = Color::Custom(MAGENTA));
+    set_vwap(&mut c, &new);
+    assert_eq!(c.style()["line"]["color"], "#f719cb");
+    assert_eq!(vwap_looks(&c), new);
+    // The studies menu's theme color replaces it.
+    let mut set = StudySet {
+        indicators: vec![c],
+        ..StudySet::default()
+    };
+    set.apply(&StudyAction::SetColor(0, 1));
+    assert_eq!(
+        vwap_looks(&set.indicators[0])[VWAP_LINE].color(),
+        Color::Palette(1)
+    );
+    assert!(set.indicators[0].style().is_empty());
+}
+
+/// Files written before styles load with today's look; a study set or chart without styles
+/// writes none; a template carries its styles and applying it restores them.
+#[test]
+fn study_sets_and_templates_carry_styles() {
+    let old: StudySet = serde_json::from_str(
+        r#"{"indicators": [{"kind": "vwap", "reset": "eth", "bands": 1, "color": 1}],
+            "profile": {"mode": "session"}}"#,
+    )
+    .unwrap();
+    assert!(old.styles.is_empty());
+    assert_eq!(
+        vwap_looks(&old.indicators[0])[VWAP_LINE].color(),
+        Color::Palette(1)
+    );
+    assert!(!serde_json::to_string(&old).unwrap().contains("style"));
+
+    let mut set = old.clone();
+    set.indicators.push(delta());
+    let mut v = Look::defaults(&VWAP);
+    set_line(&mut v[VWAP_LINE], |l| l.color = Color::Custom(MAGENTA));
+    set.apply(&StudyAction::SetStyle(StudyRef::Vwap(0), v.to_vec()));
+    let mut d = Look::defaults(&DELTA);
+    set_fill(&mut d[DELTA_UP], |f| f.color = Color::Palette(1));
+    set.apply(&StudyAction::SetStyle(StudyRef::Delta(1), d.to_vec()));
+    let mut p = Look::defaults(&PROFILE);
+    set_line(&mut p[PROFILE_POC], |l| l.width = 2);
+    set.apply(&StudyAction::SetStyle(StudyRef::Profile, p.to_vec()));
+    let mut f = Look::defaults(&FOOTPRINT);
+    set_line(&mut f[FP_POC], |l| l.color = Color::Palette(3));
+    set.apply(&StudyAction::SetStyle(StudyRef::Footprint, f.to_vec()));
+    let mut l = Look::defaults(&LEVELS);
+    set_fill(&mut l[LEVEL_ZONES], |z| z.opacity = 50);
+    set.apply(&StudyAction::SetStyle(
+        StudyRef::Levels("demo".into()),
+        l.to_vec(),
+    ));
+
+    let mut templates = Vec::new();
+    save_template(&mut templates, "styled", set.clone());
+    let json = serde_json::to_string(&templates).unwrap();
+    let back: Vec<StudyTemplate> = serde_json::from_str(&json).unwrap();
+    assert_eq!(back[0].set, set);
+    let t = &back[0].set;
+    assert_eq!(
+        vwap_looks(&t.indicators[0])[VWAP_LINE].color(),
+        Color::Custom(MAGENTA)
+    );
+    assert_eq!(read(t.indicators[1].style(), &DELTA), d);
+    assert_eq!(read(&t.styles.profile, &PROFILE), p);
+    assert_eq!(read(&t.styles.footprint, &FOOTPRINT), f);
+    assert_eq!(read(&t.styles.levels["demo"], &LEVELS), l);
+
+    let mut chart = StudySet::default();
+    chart.apply(&StudyAction::Replace(Box::new(t.clone())));
+    assert_eq!(chart, set);
+    // A level override back to the source's own style is dropped; removing a study drops
+    // its styles.
+    chart.apply(&StudyAction::SetStyle(
+        StudyRef::Levels("demo".into()),
+        Look::defaults(&LEVELS).to_vec(),
+    ));
+    assert!(chart.styles.levels.is_empty());
+    chart.apply(&StudyAction::Remove(StudyRef::Profile));
+    assert!(chart.styles.profile.is_empty());
+}
+
+/// Styles a newer build saved for a study this one doesn't have are kept.
+#[test]
+fn unknown_study_styles_are_kept() {
+    let s: StudyStyles = serde_json::from_str(
+        r#"{"profile": {"poc": {"width": 2}}, "heatmap": {"cells": {"color": "p2"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(read(&s.profile, &PROFILE)[PROFILE_POC].line().width, 2);
+    let back = serde_json::to_value(&s).unwrap();
+    assert_eq!(back["heatmap"]["cells"]["color"], "p2");
+    assert!(StudyStyles::default().is_empty());
+    assert_eq!(
+        serde_json::to_string(&StudyStyles::default()).unwrap(),
+        "{}"
+    );
+}
+
+/// A study's editor: one tab per part, the part's own color offered first (named), study
+/// colors, line opacities everywhere; styling the hidden band edges shows them.
+#[test]
+fn the_editor_has_a_tab_per_part() {
+    let c = vwap(0);
+    let mut e = editor("VWAP style".into(), &VWAP, &vwap_looks(&c), None);
+    assert!(e.study);
+    let titles: Vec<_> = e.parts.iter().map(|p| p.title).collect();
+    assert_eq!(titles, ["Line", "Band edges", "Band fill"]);
+    assert_eq!(e.default_label, None, "the studies menu saves study sets");
+    // The line has no own color: its theme colors first.
+    let rows = e.rows();
+    assert_eq!(
+        rows[0].controls[0],
+        (Control::Color(Color::Palette(0)), true)
+    );
+    e.select_tab(1);
+    let rows = e.rows();
+    assert_eq!(rows[0].label, "Show");
+    assert_eq!(rows[0].controls, [(Control::Shown, false)]);
+    assert_eq!(rows[1].controls[0], (Control::Color(Color::Own), true));
+    assert_eq!(e.own_name(), "Line color");
+    // Pick the first study color for the bands: they show.
+    assert_eq!(e.click(1, 1), Outcome::Changed);
+    let looks = looks_of(&e);
+    assert!(looks[VWAP_BANDS].shown);
+    assert_eq!(looks[VWAP_BANDS].color(), Color::Palette(0));
+    // The fill tab offers the line opacities (its own translucency scaled).
+    e.select_tab(2);
+    let op = e.rows().into_iter().find(|r| r.label == "Opacity").unwrap();
+    let values: Vec<_> = op.controls.iter().map(|(c, _)| *c).collect();
+    assert_eq!(
+        values,
+        [100, 75, 50, 25].map(Control::Opacity),
+        "with 25 % selected"
+    );
+    assert!(op.controls[3].1);
+    // A level source's own color shows the source's first color.
+    let e = editor(
+        "Levels style".into(),
+        &LEVELS,
+        &Look::defaults(&LEVELS),
+        Some(MAGENTA),
+    );
+    assert_eq!(
+        e.parts[0].own.map(|o| o.token),
+        Some(OwnToken::Source(Some(MAGENTA)))
+    );
+    assert!(
+        e.parts.iter().all(|p| !p.stroke),
+        "source keeps type and weight"
+    );
+}
+
+fn study_ctxs() -> Vec<ThemeCtx> {
+    Theme::all().iter().map(Theme::study_ctx).collect()
+}
+
+/// The readability guard per part: a part's own color is never flagged (the theme's token,
+/// the source's colors); a custom color near a meaning is, naming where.
+#[test]
+fn readability_warnings_per_part() {
+    let ctxs = study_ctxs();
+    for (defs, n) in [
+        (&VWAP[..], 3),
+        (&DELTA[..], 2),
+        (&PROFILE[..], 4),
+        (&FOOTPRINT[..], 3),
+        (&LEVELS[..], 2),
+    ] {
+        // Opaque, so what is seen is the color typed.
+        let looks: Vec<Look> = defs
+            .iter()
+            .map(|d| {
+                let mut style = d.style;
+                if let PartStyle::Line(l) = &mut style {
+                    l.opacity = 100;
+                }
+                Look { style, shown: true }
+            })
+            .collect();
+        let mut e = editor("x".into(), defs, &looks, None);
+        for tab in 0..n {
+            e.select_tab(tab);
+            if e.parts[tab].own.is_some() {
+                assert!(e.warnings(&ctxs).is_empty(), "{}", e.parts[tab].title);
+            }
+            // The dark standard palette's up color, typed in.
+            let row = e.rows().iter().position(|r| r.label == "Color").unwrap();
+            let col = e.rows()[row].controls.len() - 1;
+            e.click(row, col);
+            for ch in "3fcf9a".chars() {
+                e.key(&ch.to_string(), false, Some(&ch.to_string()));
+            }
+            assert_eq!(e.key("enter", false, None), Outcome::Changed);
+            let w = e.warnings(&ctxs);
+            assert!(
+                w.iter().any(|w| w.text.contains("up color")
+                    && w.text.contains("dark theme, standard palette")),
+                "{}: {w:?}",
+                e.parts[tab].title
+            );
+        }
+    }
+}
+
+/// A custom color keeps a part's own translucency (a profile row stays see-through).
+#[test]
+fn custom_colors_keep_the_parts_translucency() {
+    for t in Theme::all() {
+        let c = t.part_color(Color::Custom(MAGENTA), t.profile_buy, 100);
+        assert!((c.a - t.profile_buy.a).abs() < 1e-6);
+        assert_eq!(crate::theme::rgb_of(c), MAGENTA);
+        let c = t.part_color(Color::Palette(1), t.text_main, 50);
+        assert!((c.a - 0.5).abs() < 1e-6);
+        assert_eq!(crate::theme::rgb_of(c), crate::theme::rgb_of(t.study[1]));
+    }
+}
+
+// ---- no allocation in styled paint ----------------------------------------------------------
+
+struct Counting;
+
+thread_local! {
+    static ALLOCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+        unsafe { std::alloc::System.realloc(ptr, layout, size) }
+    }
+}
+
+/// Counts this thread's allocations (lines-app's unit tests: the styled paint check below).
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+fn allocs_during(f: impl FnOnce()) -> usize {
+    let before = ALLOCS.with(|c| c.get());
+    f();
+    ALLOCS.with(|c| c.get()) - before
+}
+
+/// What a frame does with styles once they are resolved: the color and dash calls the styled
+/// paint paths make (profile colors, VWAP line, band and fill colors and dashes, delta
+/// candles, footprint cell shades, level lines, zones and zone edges, legend text), and the
+/// footprint's shading when it is recomputed. None of it allocates. Not covered here: the
+/// paint functions themselves (they need a GPUI window; their paths, quads and text are
+/// GPUI's) and the geometry (`lines-core/tests/no_alloc.rs`).
+#[test]
+fn styled_study_paint_does_not_allocate() {
+    let themes = Theme::all();
+    let mut profile = Look::defaults(&PROFILE);
+    set_line(&mut profile[PROFILE_POC], |l| {
+        l.line = LineType::DashDot;
+        l.width = 2;
+        l.color = Color::Custom(MAGENTA);
+    });
+    let mut vwap = Look::defaults(&VWAP);
+    set_line(&mut vwap[VWAP_LINE], |l| l.line = LineType::Dotted);
+    vwap[VWAP_BANDS].shown = true;
+    let fp = Look::defaults(&FOOTPRINT);
+    let delta = Look::defaults(&DELTA);
+    let levels = Look::defaults(&LEVELS);
+    assert_eq!(allocs_during(|| drop(vec![1u8])), 1, "the counter counts");
+    let mut sink = 0.0f32;
+    let n = allocs_during(|| {
+        for frame in 0..200 {
+            let t = &themes[frame % 4];
+            let p = crate::profile::ProfileColors::of(t, &profile);
+            sink += p.poc.a + p.edge.a;
+            let poc = profile[PROFILE_POC].line();
+            crate::theme::drawing_dash(poc.line, f32::from(poc.width)).segments(300.0, |a, b| {
+                sink += b - a;
+            });
+            for l in vwap {
+                let line = l.line();
+                let c = t.part_color(line.color, t.study[1], line.opacity);
+                let d = crate::theme::drawing_dash(line.line, vwap_px(line.width));
+                sink += c.a + d.seg[0];
+            }
+            for l in fp.iter().chain(&delta).chain(&levels) {
+                sink += t.part_color(l.color(), t.up.opacity(0.3), l.opacity()).a;
+                sink += t.own_color(OwnToken::Source(Some(MAGENTA)), t.text_main).a;
+            }
+            let shades =
+                crate::footprint::CellShades::of(t, &fp, crate::footprint::FootprintMode::Delta);
+            for tint in [
+                crate::footprint::Tint::Neutral,
+                crate::footprint::Tint::Up,
+                crate::footprint::Tint::Down,
+            ] {
+                sink += shades.color(tint, 0.5).a;
+            }
+            sink += t.level_line(&levels, 0x3d7bf5ff, 1.0).a;
+            sink += t.level_zone(&levels, 0x3d7bf5ff, 1.0).a;
+            sink += t.level_zone_edge(&levels, 0x3d7bf5ff, 0.6).a;
+            sink += t.legend_text(t.study_line(1, Color::Custom(MAGENTA))).a;
+            // The caps under the candles (cached in paint; here every frame).
+            sink += t.under_candles(t.study[frame % 4].opacity(0.24), 3).0.a;
+            sink += crate::levels_layer::zone_scale(t, &levels, [0x3d7bf5ffu32].into_iter());
+        }
+    });
+    assert!(sink > 0.0);
+    assert_eq!(n, 0, "styled study paint allocated {n} times");
+}
+
+/// The colors a part may take in the sweeps: its own, the study colors, the swatches and
+/// sampled custom colors (light, dark, saturated, close to up/down).
+fn sweep_colors() -> Vec<Color> {
+    let mut colors = vec![Color::Own];
+    colors.extend((0..4).map(Color::Palette));
+    for hex in [
+        0xf719cb, 0x9c8756, 0xffffff, 0x000000, 0x808080, 0x3fcf9a, 0xff6b7f, 0x0a7350, 0x8c7bff,
+        0xfff7c0, 0x1a1a1a,
+    ] {
+        colors.push(Color::Custom(Rgb::hex(hex)));
+    }
+    colors
+}
+
+/// `fill` drawn `layers` times over the chart in `t`, as composited.
+fn under(t: &Theme, fill: gpui::Hsla, layers: u8) -> Rgb {
+    let mut seen = crate::theme::rgb_of(t.bg);
+    for _ in 0..layers {
+        seen = crate::footprint::blend(crate::theme::rgb_of(fill), fill.a, seen);
+    }
+    seen
+}
+
+/// The candles' up and down colors and the last-price line (as drawn: translucent) keep 3:1
+/// over `seen` (a mark under 3:1 on the bare chart: `UNDER_3_KEEP` of its contrast there).
+fn assert_marks_read(t: &Theme, seen: Rgb, what: &str) {
+    use crate::footprint::blend;
+    use lines_core::style::contrast;
+    let bg = crate::theme::rgb_of(t.bg);
+    let last = crate::theme::LAST_LINE_ALPHA;
+    for (name, m, a) in [
+        ("up", t.up, 1.0),
+        ("down", t.down, 1.0),
+        ("last", t.last, last),
+    ] {
+        let m = crate::theme::rgb_of(m);
+        let bare = contrast(blend(m, a, bg), bg);
+        // Already under 3:1 on the bare chart (the translucent last-price line): it keeps
+        // most of what it has there.
+        let need = if bare >= 3.0 {
+            3.0
+        } else {
+            bare * crate::theme::UNDER_3_KEEP
+        };
+        let r = contrast(blend(m, a, seen), seen);
+        assert!(
+            r >= need,
+            "{} {what}: {name} {r:.2}:1 (needs {need:.2})",
+            t.name
+        );
+    }
+}
+
+/// B1: a VWAP's band fill, under the candles, never takes the up/down candles or the
+/// last-price line below 3:1 (WCAG 1.4.11), whatever its color and opacity and however many
+/// bands nest, in every theme and palette; a fill that isn't held back is exactly the
+/// control's, and an unstyled one is never held back.
+#[test]
+fn band_fill_keeps_the_candles_visible() {
+    for t in Theme::all() {
+        for line in (0..4).map(Color::Palette).chain([Color::Custom(MAGENTA)]) {
+            let base = t.study_line(0, line);
+            for &color in &sweep_colors() {
+                for opacity in [10, 25, 50, 75, 100] {
+                    let want = t.part_color(color, base.opacity(VWAP_FILL_ALPHA), opacity);
+                    for layers in 1..=3u8 {
+                        let (got, held) = t.under_candles(want, layers);
+                        for k in [0.25, 0.5, 1.0] {
+                            let weaker = crate::theme::with_alpha(got, got.a * k);
+                            let what = format!("{line:?} fill {color:?} {opacity}% x{layers}");
+                            assert_marks_read(&t, under(&t, weaker, layers), &what);
+                        }
+                        if !held {
+                            assert_eq!(got, want);
+                        }
+                        if color == Color::Own && opacity == 25 {
+                            assert!(!held, "{} unstyled fill x{layers} held back", t.name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// B1 for level zones (also under the candles): any color and opacity, every theme and
+/// palette; unstyled zones of the sampled source colors are never held back.
+#[test]
+fn level_zones_keep_the_candles_visible() {
+    let sources = [
+        0x3d7bf5ffu32,
+        0xf5b83dff,
+        0xffffffff,
+        0x000000ff,
+        0xd94c4cff,
+        0x2fbf71ff,
+    ];
+    for t in Theme::all() {
+        for &color in &sweep_colors() {
+            for opacity in [10, 25, 50, 75, 100] {
+                let mut looks = Look::defaults(&LEVELS);
+                set_fill(&mut looks[LEVEL_ZONES], |f| {
+                    f.color = color;
+                    f.opacity = opacity;
+                });
+                for rgba in sources {
+                    let k = crate::levels_layer::zone_scale(&t, &looks, std::iter::once(rgba));
+                    let mut z = t.level_zone(&looks, rgba, 1.0);
+                    z.a *= k;
+                    let what = format!("zone {color:?} {opacity}% {rgba:08x}");
+                    assert_marks_read(&t, under(&t, z, 1), &what);
+                    if color == Color::Own && opacity == 25 {
+                        assert_eq!(k, 1.0, "{} unstyled zone {rgba:08x} held back", t.name);
+                    }
+                }
+                // One scale for a source: its most held-back zone.
+                let all = crate::levels_layer::zone_scale(&t, &looks, sources.into_iter());
+                for rgba in sources {
+                    let one = crate::levels_layer::zone_scale(&t, &looks, std::iter::once(rgba));
+                    assert!(all <= one);
+                }
+            }
+        }
+    }
+}
+
+/// B1: the Band fill and Zones tabs warn when held back, naming theme and palette; unstyled
+/// and light fills don't.
+#[test]
+fn held_fills_are_warned_about() {
+    let themes = Theme::all();
+    let ctxs = study_ctxs();
+    let mut looks = vwap_looks(&vwap(3)).to_vec();
+    assert_eq!(
+        band_fill_warning(&looks, 3, &themes, &ctxs),
+        None,
+        "unstyled"
+    );
+    set_fill(&mut looks[VWAP_FILL], |f| {
+        f.color = Color::Custom(MAGENTA);
+        f.opacity = 100;
+    });
+    let w = band_fill_warning(&looks, 3, &themes, &ctxs).expect("heavy magenta, 3 bands");
+    assert!(w.text.starts_with("Shown fainter in "), "{}", w.text);
+    assert!(w.text.contains("3:1"), "{}", w.text);
+    assert_eq!(
+        band_fill_warning(&looks, 0, &themes, &ctxs),
+        None,
+        "no bands, no fill"
+    );
+    set_fill(&mut looks[VWAP_FILL], |f| f.opacity = 30);
+    assert_eq!(
+        band_fill_warning(&looks, 1, &themes, &ctxs),
+        None,
+        "light enough"
+    );
+
+    let mut z = Look::defaults(&LEVELS).to_vec();
+    let src = Some(Rgb::hex(0x3d7bf5));
+    assert_eq!(zones_warning(&z, src, &themes, &ctxs), None, "unstyled");
+    set_fill(&mut z[LEVEL_ZONES], |f| {
+        f.color = Color::Palette(0);
+        f.opacity = 100;
+    });
+    let w = zones_warning(&z, src, &themes, &ctxs).expect("heavy zones");
+    assert!(w.text.contains("over the zones"), "{}", w.text);
+
+    // Through the editor, on its tab only.
+    let set = StudySet {
+        indicators: vec![vwap(3)],
+        ..Default::default()
+    };
+    let r = StudyRef::Vwap(0);
+    let chart = ChartCtx::of(&set, &r, &themes);
+    assert_eq!(chart.vwap_layers, 2);
+    let mut e = editor("VWAP style".into(), &VWAP, &looks, None);
+    e.parts[VWAP_FILL].style = PartStyle::Fill(FillStyle {
+        color: Color::Custom(MAGENTA),
+        opacity: 100,
+    });
+    e.tab = VWAP_FILL;
+    let all = warnings(&r, &e, &themes, &chart);
+    assert!(all.iter().any(|w| w.text.contains("band fill")), "{all:?}");
+    e.tab = VWAP_LINE;
+    let all = warnings(&r, &e, &themes, &chart);
+    assert!(!all.iter().any(|w| w.text.contains("band fill")), "{all:?}");
+}
+
+/// A study line styled like another visible study's (close color and the same line type) is
+/// warned about by name; another line type or color, or a hidden study, isn't.
+#[test]
+fn a_line_like_another_studys_is_warned_about() {
+    let themes = Theme::all();
+    let mut second = vwap(1);
+    if let IndicatorConfig::Vwap { spec, .. } = &mut second {
+        spec.reset = Reset::Rth;
+    }
+    let set = StudySet {
+        indicators: vec![vwap(1), second],
+        ..Default::default()
+    };
+    let r = StudyRef::Vwap(1);
+    let chart = ChartCtx::of(&set, &r, &themes);
+    let looks = vwap_looks(&set.indicators[1]);
+    let mut e = editor("VWAP RTH style".into(), &VWAP, &looks, None);
+    let alike = |e: &StyleEditor, chart: &ChartCtx| {
+        warnings(&r, e, &themes, chart)
+            .into_iter()
+            .filter(|w| w.text.contains("same line type"))
+            .collect::<Vec<_>>()
+    };
+    let w = alike(&e, &chart);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].text.contains("the VWAP ETH line"), "{}", w[0].text);
+    assert!(
+        w[0].text.contains("every theme and palette"),
+        "{}",
+        w[0].text
+    );
+    // Another line type tells them apart.
+    if let PartStyle::Line(l) = &mut e.parts[VWAP_LINE].style {
+        l.line = LineType::Dashed;
+    }
+    assert!(alike(&e, &chart).is_empty());
+    // Another color too.
+    if let PartStyle::Line(l) = &mut e.parts[VWAP_LINE].style {
+        l.line = LineType::Solid;
+        l.color = Color::Palette(0);
+    }
+    assert!(alike(&e, &chart).is_empty());
+    // A hidden study isn't on the chart.
+    let mut hidden = set.clone();
+    hidden.indicators[0].display_mut().hidden = true;
+    let e = editor("VWAP RTH style".into(), &VWAP, &looks, None);
+    assert!(alike(&e, &ChartCtx::of(&hidden, &r, &themes)).is_empty());
+}
+
+/// The Imbalances tab warns once a color is picked (both sides share it); its own colors
+/// don't.
+#[test]
+fn a_shared_imbalance_color_is_warned_about() {
+    let mut looks = Look::defaults(&FOOTPRINT);
+    assert_eq!(crate::footprint::imbalance_warning(&looks), None);
+    set_line(&mut looks[FP_IMBALANCE], |l| l.color = Color::Palette(1));
+    let w = crate::footprint::imbalance_warning(&looks).expect("one color for both sides");
+    assert!(w.text.contains("every theme and palette"), "{}", w.text);
+    assert!(w.text.contains("place"), "{}", w.text);
+}

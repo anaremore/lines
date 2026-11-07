@@ -5,9 +5,10 @@
 //! - [`LineStyle`]: color, line type (solid, dashed, dotted, dash-dot), width 1–4 px, opacity.
 //! - [`FillStyle`]: color, opacity. [`TextStyle`]: size S/M/L, color, background on/off.
 //! - A [`Color`] is a theme token by default ([`Color::Palette`]: the n-th color of the palette
-//!   the context offers, e.g. the theme's drawing colors; [`Color::Text`]: the theme's main
-//!   text color), so it follows dark/light and the colorblind palette. [`Color::Custom`] is
-//!   user data saved with the drawing or study, never a literal in code.
+//!   the context offers, the theme's drawing or study colors; [`Color::Text`]: the theme's main
+//!   text color; [`Color::Own`]: a study part's own color), so it follows dark/light and the
+//!   colorblind palette. [`Color::Custom`] is user data saved with the drawing or study, never
+//!   a literal in code.
 //! - Opacity is a whole percent ([`MIN_OPACITY`]..=100): exact, so styles compare and save
 //!   exactly.
 //!
@@ -72,6 +73,10 @@ pub enum Color {
     Text,
     /// A color the user chose (user data, saved with the drawing or study).
     Custom(Rgb),
+    /// A study part's own color (decision 0026, studies only): the theme's color for that
+    /// part, the color of the study's line it follows, or the colors a level source gives
+    /// its levels (decision 0022). Never saved: a part without a saved color has it.
+    Own,
 }
 
 /// How a line is stroked.

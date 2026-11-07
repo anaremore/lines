@@ -97,8 +97,11 @@ pub struct Theme {
     /// Link group swatches A..D (decision 0016). Always shown with the group's letter, so a
     /// group never relies on colour alone; none of them is violet or up/down.
     pub link: [Hsla; 4],
-    /// Study lines (VWAP, …), picked per instance. Never up/down or the accent.
+    /// Study lines (VWAP, …), picked per instance. Never up/down or the accent. Also the
+    /// theme colors a study part's style editor offers (decision 0026).
     pub study: [Hsla; 4],
+    /// The study colors' names in the style editor.
+    pub study_names: [&'static str; 4],
     /// Drawings (roadmap 11: lines, zones, notes, measures), picked per drawing
     /// (`lines_core::drawings::Style::color`). Perceptually clear (CIEDE2000 >= 20) of every
     /// color with a meaning (up/down in both palettes, accent/last, warn, bracket target and
@@ -211,9 +214,105 @@ impl Theme {
                 // `opacity` scales the token's own alpha.
                 palette[usize::from(i) % palette.len()].opacity(a)
             }
-            Color::Palette(_) | Color::Text => self.text_main.opacity(a),
+            Color::Palette(_) | Color::Text | Color::Own => self.text_main.opacity(a),
             Color::Custom(rgb) => user_color(rgb, opacity),
         }
+    }
+
+    /// A study part's color (decision 0026): `own` is the part's own color as drawn today
+    /// (a theme token with its own translucency, the study's line, a level source's color);
+    /// `opacity` scales that translucency whatever the color, so a translucent part stays
+    /// translucent in any color. Theme colors are the study colors ([`Theme::study`]).
+    pub fn part_color(&self, c: Color, own: Hsla, opacity: u8) -> Hsla {
+        let a = own.a * f32::from(opacity.min(100)) / 100.0;
+        let mut out = match c {
+            Color::Own => own,
+            Color::Palette(i) => self.study[usize::from(i) % self.study.len()],
+            Color::Text => self.text_main,
+            Color::Custom(rgb) => user_color(rgb, 100),
+        };
+        out.a = a;
+        out
+    }
+
+    /// A VWAP's line color, opaque: its study color `index`, unless `line` (its style's line
+    /// color) is another.
+    pub fn study_line(&self, index: u8, line: Color) -> Hsla {
+        let base = self.study[usize::from(index) % self.study.len()];
+        self.part_color(line, base, 100)
+    }
+
+    /// A level line's color: the source's `rgba` at `alpha`, unless the chart restyled the
+    /// source's lines (decision 0026: the user's override wins; the source's is the default).
+    pub fn level_line(&self, looks: &[crate::study_style::Look; 2], rgba: u32, alpha: f32) -> Hsla {
+        let l = looks[crate::study_style::LEVEL_LINES];
+        self.part_color(l.color(), source_colour(rgba, alpha), l.opacity())
+    }
+
+    /// A level zone's edge: the Zones color (the source's by default) at the source's `alpha`
+    /// scaled by the Lines opacity (an edge is a line).
+    pub fn level_zone_edge(
+        &self,
+        looks: &[crate::study_style::Look; 2],
+        rgba: u32,
+        alpha: f32,
+    ) -> Hsla {
+        let z = looks[crate::study_style::LEVEL_ZONES];
+        let l = looks[crate::study_style::LEVEL_LINES];
+        self.part_color(z.color(), source_colour(rgba, alpha), l.opacity())
+    }
+
+    /// A level zone's fill: its own translucency is `LEVEL_ZONE_ALPHA` (default 25 %: the 10 %
+    /// it always had), dimmed by `dim`.
+    pub fn level_zone(&self, looks: &[crate::study_style::Look; 2], rgba: u32, dim: f32) -> Hsla {
+        let z = looks[crate::study_style::LEVEL_ZONES];
+        let own = source_colour(rgba, crate::study_style::LEVEL_ZONE_ALPHA * dim);
+        self.part_color(z.color(), own, z.opacity())
+    }
+
+    /// A style editor's color chip: a study's theme colors are the study colors; a part's own
+    /// color is its theme token, its study's line or its source's first color.
+    pub fn swatch_color(&self, e: &crate::style_editor::StyleEditor, c: Color) -> Hsla {
+        use crate::style_editor::PartStyle;
+        let palette: &[Hsla] = if e.study { &self.study } else { &self.drawing };
+        match c {
+            Color::Own => {
+                let line = e
+                    .parts
+                    .first()
+                    .map(|p| match p.style {
+                        PartStyle::Line(l) => l.color,
+                        PartStyle::Fill(f) => f.color,
+                        PartStyle::Text(x) => x.color,
+                    })
+                    .filter(|c| *c != Color::Own)
+                    .map_or(self.text_main, |c| self.style_color(c, palette, 100));
+                let token = e.parts.get(e.tab).and_then(|p| p.own).map(|o| o.token);
+                token.map_or(self.text_dim, |k| self.own_color(k, line))
+            }
+            c => self.style_color(c, palette, 100),
+        }
+    }
+
+    /// A study part's own color as the style editor shows it (its swatch). `line`: the study's
+    /// line color (parts that follow it).
+    pub fn own_color(&self, token: crate::style_editor::OwnToken, line: Hsla) -> Hsla {
+        use crate::style_editor::OwnToken as T;
+        let mut c = match token {
+            T::Up | T::UpDown => self.up,
+            T::Down => self.down,
+            T::Neutral => self.text_dim,
+            T::Text => self.text_main,
+            T::ProfileBuy => self.profile_buy,
+            T::ProfileSell => self.profile_sell,
+            T::ProfilePoc => self.profile_poc,
+            T::ProfileVa => self.profile_va,
+            T::Line => line,
+            T::Source(Some(rgb)) => user_color(rgb, 100),
+            T::Source(None) => self.text_dim,
+        };
+        c.a = 1.0;
+        c
     }
 
     /// Colors with a meaning, which a user color shouldn't resemble (decision 0026): this
@@ -247,6 +346,15 @@ impl Theme {
         }
     }
 
+    /// This theme as a study style editor's guard sees it: its theme colors are the study
+    /// colors.
+    pub fn study_ctx(&self) -> crate::style_editor::ThemeCtx {
+        crate::style_editor::ThemeCtx {
+            palette: self.study.map(rgb_of),
+            ..self.style_ctx()
+        }
+    }
+
     /// Text on a swatch filled with `fill` (the editor's "current" dot): the theme's ink or
     /// paper, whichever reads better.
     pub fn on_fill(&self, fill: Hsla) -> Hsla {
@@ -265,6 +373,95 @@ impl Theme {
         solid.a = 1.0;
         let reads = lines_core::style::contrast(rgb_of(solid), rgb_of(self.bg)) >= 4.5;
         (solid, if reads { solid } else { self.text_main })
+    }
+
+    /// What the plot can show under text on the legend box (`label_bg`), as composited: the
+    /// chart, the grid, candles, the last price, the profile's value area and POC, and the
+    /// study colors. The label-box test and [`Theme::legend_text`] both check these.
+    pub fn chart_underlays(&self) -> [(&'static str, Rgb); 11] {
+        use lines_core::style::over;
+        let pct = |a: f32| (a * 100.0).round() as u8;
+        let bg = rgb_of(self.bg);
+        let on_bg = |c: Hsla| over(rgb_of(c), pct(c.a), bg);
+        [
+            ("bg", bg),
+            ("up", rgb_of(self.up)),
+            ("down", rgb_of(self.down)),
+            ("grid", rgb_of(self.grid)),
+            ("profile_va", on_bg(self.profile_va)),
+            ("profile_poc", on_bg(self.profile_poc)),
+            ("last", rgb_of(self.last)),
+            ("study0", rgb_of(self.study[0])),
+            ("study1", rgb_of(self.study[1])),
+            ("study2", rgb_of(self.study[2])),
+            ("study3", rgb_of(self.study[3])),
+        ]
+    }
+
+    /// A study legend's text for a study drawn in `color` (opaque): that color where it is AA
+    /// on the legend box (`label_bg`, translucent) over everything the plot can show under it
+    /// ([`Theme::chart_underlays`]), else the theme's text. The legend's swatch shows the
+    /// color either way.
+    pub fn legend_text(&self, color: Hsla) -> Hsla {
+        use lines_core::style::{contrast, over};
+        let pct = (self.label_bg.a * 100.0).round() as u8;
+        let c = rgb_of(color);
+        let reads = self
+            .chart_underlays()
+            .iter()
+            .all(|(_, u)| contrast(c, over(rgb_of(self.label_bg), pct, *u)) >= 4.5);
+        if reads { color } else { self.text_main }
+    }
+
+    /// A fill drawn under the candles (a VWAP's band fill, `layers` nested; a level zone, 1),
+    /// held back so it never costs the candles their 3:1 (WCAG 1.4.11): the strongest alpha,
+    /// at most `fill`'s own, at which `fill` drawn `layers` times over the chart keeps the up
+    /// and down candle colors and the last-price line (as drawn, at [`LAST_LINE_ALPHA`]) at
+    /// [`UNDER_CANDLES_CONTRAST`] against it (one already under that on the bare chart, the
+    /// last-price line at 2.8:1 dark and 2.7:1 light: [`UNDER_3_KEEP`] of its contrast there),
+    /// and so does
+    /// every weaker alpha (steps of 1/64; no allocation). Returns (the fill, held back).
+    pub fn under_candles(&self, fill: Hsla, layers: u8) -> (Hsla, bool) {
+        use lines_core::style::contrast;
+        const STEPS: u16 = 64;
+        let top = fill.a;
+        if top <= 0.0 {
+            return (fill, false);
+        }
+        let bg = rgb_of(self.bg);
+        let tint = rgb_of(fill);
+        let blend = crate::footprint::blend;
+        // Each mark as drawn (the last-price line is translucent) against what it's drawn on.
+        let marks = [
+            (rgb_of(self.up), 1.0),
+            (rgb_of(self.down), 1.0),
+            (rgb_of(self.last), LAST_LINE_ALPHA),
+        ];
+        let k = |(m, a): (Rgb, f32), under: Rgb| contrast(blend(m, a, under), under);
+        let need = marks.map(|m| {
+            let bare = k(m, bg);
+            if bare >= UNDER_CANDLES_CONTRAST {
+                UNDER_CANDLES_CONTRAST
+            } else {
+                bare * UNDER_3_KEEP
+            }
+        });
+        let reads = |a: f32| {
+            let mut seen = bg;
+            for _ in 0..layers.max(1) {
+                seen = blend(tint, a, seen);
+            }
+            marks.iter().zip(&need).all(|(m, n)| k(*m, seen) >= *n)
+        };
+        let mut ok = 0.0;
+        for i in 1..=STEPS {
+            let a = top * f32::from(i) / f32::from(STEPS);
+            if !reads(a) {
+                break;
+            }
+            ok = a;
+        }
+        (with_alpha(fill, ok), ok < top)
     }
 
     /// A note's text drawn in `color` (opaque), its box asked for or not: (draw the box, text
@@ -336,6 +533,7 @@ impl Theme {
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
             // sand, teal, silver, orchid
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
+            study_names: ["Sand", "Teal", "Silver", "Orchid"],
             // paper, lime, olive, slate
             drawing: [c(brand::PAPER), c(0xd4ff3a), c(0x78871e), c(0x788787)],
             drawing_names: ["White", "Lime", "Olive", "Slate"],
@@ -391,6 +589,7 @@ impl Theme {
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
+            study_names: ["Ochre", "Teal", "Slate", "Plum"],
             // ink, warm gray, olive, slate: none in the red or green families
             drawing: [c(brand::INK), c(0x695a5a), c(0x707000), c(0x3a3a50)],
             drawing_names: ["Black", "Warm gray", "Olive", "Slate"],
@@ -418,6 +617,23 @@ impl Theme {
             Theme::light(Palette::Colorblind),
         ]
     }
+}
+
+/// The last-price line's alpha (over the plot and every study).
+pub const LAST_LINE_ALPHA: f32 = 0.6;
+
+/// The contrast the candles and the last-price line keep over a fill drawn under them (WCAG
+/// 1.4.11 graphics, 3:1), with a margin for the GPU's blend rounding.
+pub const UNDER_CANDLES_CONTRAST: f64 = 3.0 + 0.05;
+
+/// What a fill under the candles leaves of the contrast of a mark that is already under 3:1
+/// on the bare chart (the translucent last-price line). Unstyled band fills (3 nested) take
+/// at most 18 %, so they are never held back (tested).
+pub const UNDER_3_KEEP: f64 = 0.8;
+
+/// `c` with alpha `a` (GPUI's `opacity` scales the alpha instead).
+pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
+    Hsla { a, ..c }
 }
 
 /// A colour an external level source fixed for its levels (`0xRRGGBBAA`), alpha scaled by
@@ -574,6 +790,32 @@ mod tests {
         );
     }
 
+    /// N9: a study legend's name is its line's color only where that is AA on the legend box
+    /// over chart content; the theme's study colors always are; light and dark customs fall
+    /// back to the theme's text.
+    #[test]
+    fn legend_text_is_aa_on_the_legend_box() {
+        for t in Theme::all() {
+            for s in t.study {
+                assert_eq!(
+                    t.legend_text(s),
+                    s,
+                    "{}: study colors keep their color",
+                    t.name
+                );
+            }
+            for hex in [0xffffff, 0x000000, 0x808080, 0xc4c8d6, 0x4a4f63, 0xf719cb] {
+                let c = user_color(Rgb::hex(hex), 100);
+                let shown = t.legend_text(c);
+                // Every underlay the label-box test checks (`chart_underlays`).
+                for (name, under) in t.chart_underlays() {
+                    let r = contrast(shown, over(t.label_bg, user_color(under, 100)));
+                    assert!(r >= 4.5, "{} #{hex:06x} over {name}: {r:.2}:1", t.name);
+                }
+            }
+        }
+    }
+
     /// Legend and tag text sits on `label_bg` over whatever the plot shows there: the
     /// background, candles (up/down), study lines and fills, profile rows. Every text colour
     /// used on it must meet AA over each, in every theme and palette.
@@ -581,18 +823,11 @@ mod tests {
     fn label_box_text_meets_aa_over_chart_content() {
         let mut failures = Vec::new();
         for t in Theme::all() {
-            let mut under = vec![
-                ("bg", t.bg),
-                ("up", t.up),
-                ("down", t.down),
-                ("grid", t.grid),
-                ("profile_va", over(t.profile_va, t.bg)),
-                ("profile_poc", over(t.profile_poc, t.bg)),
-                ("last", t.last),
-            ];
-            for (i, s) in t.study.iter().enumerate() {
-                under.push((["study0", "study1", "study2", "study3"][i], *s));
-            }
+            let under: Vec<(&str, Hsla)> = t
+                .chart_underlays()
+                .iter()
+                .map(|(n, u)| (*n, user_color(*u, 100)))
+                .collect();
             let mut text = vec![("text_dim", t.text_dim), ("text_main", t.text_main)];
             for (i, s) in t.study.iter().enumerate() {
                 text.push((["study0", "study1", "study2", "study3"][i], *s));
@@ -755,6 +990,9 @@ mod tests {
             ("chart_draw.rs", include_str!("chart_draw.rs")),
             ("style_editor.rs", include_str!("style_editor.rs")),
             ("style_editor_view.rs", include_str!("style_editor_view.rs")),
+            ("study_style.rs", include_str!("study_style.rs")),
+            ("study_menu_view.rs", include_str!("study_menu_view.rs")),
+            ("footprint.rs", include_str!("footprint.rs")),
         ] {
             for needle in ["rgb(", "rgba(", "hsla(", "Hsla {"] {
                 assert!(

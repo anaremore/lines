@@ -8,7 +8,8 @@
 //! label. Keyboard focus is a separate 2 px accent ring around the control.
 //!
 //! Placement ([`place`]): beside the edited drawing (right, left, below, above, in that order),
-//! never over it when there is room; always inside the chart's plot area (above the time axis)
+//! never over it when there is room; a study's at the plot's left under the study legend
+//! ([`place_study`]), away from the newest bars; always inside the chart's plot area (above the time axis)
 //! and, when the pane is wide enough to spare it, clear of the price axis (the last-price tag
 //! stays visible); its body scrolling with a visible (display-only) scrollbar when the area is
 //! short, the tabs pinned above it and "Save as default" pinned in the footer. Every key that
@@ -31,6 +32,7 @@ use crate::style_editor::{
     Control, Row, StyleEditor, Warning, color_name, control_label, is_toggle,
 };
 use crate::theme::{Theme, user_color};
+use lines_core::style::Color;
 
 /// Widest the editor gets (logical px).
 pub const W: f32 = 440.0;
@@ -98,6 +100,34 @@ pub fn place(area: (f32, f32), target: Option<(f32, f32, f32, f32)>, h: f32) -> 
         }
     }
     at(clamp_x(right - w), clamp_y(MARGIN + 16.0))
+}
+
+/// A study's editor in an `area` (as [`place`]) for content `h` tall, touching the bottom of
+/// the study legend it opens from (`below`), away from the newest bars and the price axis on
+/// the right; moved up (over the legend) only when it wouldn't fit below.
+///
+/// At the plot's left, unless the study edited is drawn there (`left_clear`: the right edge
+/// of the left-anchored volume profile's widest row, 0 for others): then right of it, or at
+/// the plot's center, when either keeps the editor in the plot's left three quarters (clear
+/// of the newest bars); else at the left (a narrow pane). All in the chart's coordinates,
+/// which are the plot's: the plot starts at the chart's top-left (the price axis is on its
+/// right, the time axis below), and the legend's bottom is measured from there.
+pub fn place_study(area: (f32, f32), below: f32, left_clear: f32, h: f32) -> Place {
+    let (pw, ph) = area;
+    let w = width(pw);
+    let h = h.min((ph - 2.0 * MARGIN).max(0.0));
+    let y = below.min(ph - h - MARGIN).max(MARGIN);
+    let newest = (pw - AXIS_W).max(0.0) * 0.75;
+    let x = if left_clear <= MARGIN {
+        MARGIN
+    } else if left_clear + GAP + w <= newest {
+        left_clear + GAP
+    } else if ((pw - AXIS_W) - w) * 0.5 >= left_clear && ((pw - AXIS_W) + w) * 0.5 <= newest {
+        ((pw - AXIS_W) - w) * 0.5
+    } else {
+        MARGIN
+    };
+    Place { x, y, w, h }
 }
 
 /// GPUI's default line height for text `size` px (1.618 em).
@@ -317,6 +347,9 @@ pub fn content_height(
         if r.label == "Color" {
             let lines = wrapped_lines(widths, controls_w);
             h += 4.0 + line_h(12.0) + lines * 24.0 + (lines - 1.0) * 4.0 + 2.0;
+            if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note) {
+                h += 4.0 + text_lines(note.chars().count(), 11.0, inner) * line_h(11.0);
+            }
             if e.hex.is_some() {
                 // The entry, then its hint beside it or below, wrapping on its own when it
                 // is wider than the row.
@@ -358,6 +391,40 @@ fn ring(t: &Theme, focused: bool) -> gpui::Div {
         } else {
             gpui::transparent_black()
         })
+}
+
+/// A color row's name line (row `r`), for drawings and studies alike: the focused swatch's
+/// name while the focus is on the row, then " · selected: <name>" when another one is
+/// selected; else the selected one's (focus and selection are never told by color alone).
+pub fn color_row_name(
+    e: &StyleEditor,
+    row: &Row,
+    r: usize,
+    names: &[&'static str],
+) -> Option<String> {
+    let name = |c: &Control| match c {
+        Control::Color(Color::Own) => e.own_name().to_owned(),
+        Control::Color(c) => color_name(*c, names),
+        c => control_label(*c, names),
+    };
+    let selected = row.controls.iter().find(|(_, on)| *on);
+    match row.controls.get(e.col).filter(|_| e.row == r) {
+        Some((c, false)) => Some(match selected {
+            Some((s, _)) => format!("{} · selected: {}", name(c), name(s)),
+            None => name(c),
+        }),
+        Some((c, true)) => Some(name(c)),
+        None => selected.map(|(c, _)| name(c)),
+    }
+}
+
+/// The theme color names an editor's palette swatches go by (a study's: the study colors).
+pub fn names<'t>(e: &StyleEditor, t: &'t Theme) -> &'t [&'static str; 4] {
+    if e.study {
+        &t.study_names
+    } else {
+        &t.drawing_names
+    }
 }
 
 fn swatch(t: &Theme, fill: Hsla, on: bool) -> gpui::Div {
@@ -554,7 +621,7 @@ pub fn render(
     let full_hint = content_h <= at.h;
     let rows = e.rows();
     let focus = (e.row, e.col);
-    let names = &t.drawing_names;
+    let names = names(e, t);
     // Each row (a color row with its name line, hex entry and warnings) is one direct child of
     // the scroll container, keeping its own height (flex_none).
     let mut groups: Vec<gpui::Div> = Vec::with_capacity(rows.len());
@@ -666,7 +733,7 @@ pub fn render(
         for (k, &(c, on)) in row.controls.iter().enumerate() {
             let focused = focus == (r, k);
             let inner = match c {
-                Control::Color(color) => swatch(t, t.style_color(color, &t.drawing, 100), on),
+                Control::Color(color) => swatch(t, t.swatch_color(e, color), on),
                 c if is_toggle(c) => checkbox(t, on, control_label(c, names)),
                 c => choice(t, on, control_label(c, names)),
             };
@@ -685,21 +752,7 @@ pub fn render(
             .text_color(t.text_dim)
             .child(row.label);
         if is_color {
-            // The swatch's name beside the label: the focused one while the focus is on this
-            // row, with the selected one after it when they differ; else the selected one.
-            let name = |c: &Control| match c {
-                Control::Color(c) => color_name(*c, names),
-                c => control_label(*c, names),
-            };
-            let selected = row.controls.iter().find(|(_, on)| *on);
-            let named = match row.controls.get(e.col).filter(|_| e.row == r) {
-                Some((c, false)) => Some(match selected {
-                    Some((s, _)) => format!("{} · selected: {}", name(c), name(s)),
-                    None => name(c),
-                }),
-                Some((c, true)) => Some(name(c)),
-                None => selected.map(|(c, _)| name(c)),
-            };
+            let named = color_row_name(e, row, r, names);
             group = group.child(
                 div()
                     .px(px(12.0))
@@ -742,7 +795,19 @@ pub fn render(
             );
         }
         if is_color {
-            // The custom color entry, then the readability warnings, right under the colors.
+            // A study part's note (how its colors apply), the custom color entry, then the
+            // readability warnings, right under the colors.
+            if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note) {
+                group = group.child(
+                    div()
+                        .px(px(12.0))
+                        .pb(px(4.0))
+                        .text_size(px(11.0))
+                        .text_color(t.text_dim)
+                        .whitespace_normal()
+                        .child(note),
+                );
+            }
             if let Some(hex) = &e.hex {
                 group = group.child(
                     div()
@@ -878,6 +943,85 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P4: a study's editor names its focused swatch and, apart, the selected one, as a
+    /// drawing's does ("Teal · selected: Theme").
+    #[test]
+    fn a_study_editor_names_focus_and_selection_apart() {
+        use crate::study_style::{FOOTPRINT, Look, editor};
+        let t = crate::theme::Theme::dark(crate::theme::Palette::Standard);
+        let mut e = editor(
+            "Footprint style".into(),
+            &FOOTPRINT,
+            &Look::defaults(&FOOTPRINT),
+            None,
+        );
+        let names = names(&e, &t);
+        let r = e.rows().iter().position(|r| r.label == "Color").unwrap();
+        let rows = e.rows();
+        assert_eq!(
+            color_row_name(&e, &rows[r], r, names).as_deref(),
+            Some("Theme")
+        );
+        // Focus the second study color (Teal): named first, the selection after it.
+        e.row = r;
+        e.col = 2;
+        let rows = e.rows();
+        assert_eq!(
+            color_row_name(&e, &rows[r], r, names).as_deref(),
+            Some("Teal · selected: Theme")
+        );
+    }
+
+    /// P2: a study's editor opens at the left under the legend, clear of the newest bars at
+    /// the right, and never past the plot's bottom.
+    #[test]
+    fn a_study_editor_opens_left_under_the_legend() {
+        let area = (1400.0, 760.0);
+        let p = place_study(area, 120.0, 0.0, 400.0);
+        // Touching the legend it opens from.
+        assert_eq!((p.x, p.y), (MARGIN, 120.0));
+        assert!(p.x + p.w < area.0 * 0.5, "left half: {p:?}");
+        inside(p, area);
+        // Too tall to fit below the legend: moved up, inside the area.
+        let p = place_study(area, 500.0, 0.0, 400.0);
+        assert!(p.y + p.h <= area.1 - MARGIN && p.y >= MARGIN, "{p:?}");
+        inside(p, area);
+        // Taller than the area: as tall as fits, scrolling.
+        let p = place_study((600.0, 300.0), 120.0, 0.0, 900.0);
+        assert!(p.y >= MARGIN && p.y + p.h <= 300.0 - MARGIN + 0.01, "{p:?}");
+        inside(p, (600.0, 300.0));
+    }
+
+    /// The volume profile's editor never covers the profile (its POC included) when the plot
+    /// has room: right of its widest row, else at the plot's center; always clear of the
+    /// newest bars (the plot's right quarter), inside the area.
+    #[test]
+    fn the_profile_editor_sits_clear_of_the_profile() {
+        let area = (1400.0, 760.0);
+        let plot_w = area.0 - AXIS_W;
+        let newest = plot_w * 0.75;
+        // A quarter-wide profile: right of it.
+        let p = place_study(area, 120.0, plot_w * 0.25, 400.0);
+        assert_eq!(p.x, plot_w * 0.25 + GAP);
+        assert!(p.x + p.w <= newest, "{p:?}");
+        inside(p, area);
+        // A wide profile: the editor can't fit right of it before the newest bars, so it
+        // sits at the plot's center (still right of the profile)... or, when even that
+        // overlaps the profile, at the left.
+        for clear in [plot_w * 0.4, plot_w * 0.6] {
+            let p = place_study(area, 120.0, clear, 400.0);
+            assert!(p.x + p.w <= newest + 0.01, "{p:?}");
+            inside(p, area);
+            if p.x > MARGIN {
+                assert!(p.x >= clear, "{p:?} covers the profile ({clear})");
+            }
+        }
+        // A narrow pane: at the left, inside.
+        let narrow = (520.0, 400.0);
+        let p = place_study(narrow, 60.0, 100.0, 300.0);
+        inside(p, narrow);
+    }
 
     fn inside(p: Place, pane: (f32, f32)) {
         assert!(p.x >= MARGIN - 0.01 && p.y >= MARGIN - 0.01, "{p:?}");

@@ -8,8 +8,8 @@
 //! goes in `line_color` (older builds fall back to `color`), and dotted / dash-dot lines also
 //! set `dashed` (older builds draw them dashed).
 //!
-//! Colors are strings: `p0`..`p3` (theme palette), `text` (the theme's text color) or
-//! `#rrggbb` (custom).
+//! Colors are strings: `p0`..`p3` (theme palette), `text` (the theme's text color), `own` (a
+//! study part's own color; never written, a missing color means it) or `#rrggbb` (custom).
 
 use lines_core::drawings::Style;
 use lines_core::style::{Color, FillStyle, LineType, Rgb, TextSize, TextStyle};
@@ -20,6 +20,7 @@ pub fn color_key(c: Color) -> String {
     match c {
         Color::Palette(i) => format!("p{i}"),
         Color::Text => "text".to_owned(),
+        Color::Own => "own".to_owned(),
         Color::Custom(rgb) => {
             let mut s = String::with_capacity(7);
             let _ = rgb.write_hex(&mut s);
@@ -32,6 +33,9 @@ pub fn color_key(c: Color) -> String {
 pub fn parse_color(s: &str) -> Option<Color> {
     if s == "text" {
         return Some(Color::Text);
+    }
+    if s == "own" {
+        return Some(Color::Own);
     }
     if let Some(i) = s.strip_prefix('p') {
         return i.parse().ok().map(Color::Palette);
@@ -239,12 +243,27 @@ mod tests {
     use super::*;
     use lines_core::style::LineStyle;
 
+    /// N5: "own" is a study part's color; a drawing file holding it (hand-edited, or a
+    /// study style pasted in) loads as the drawing's default color, everywhere it can sit.
+    #[test]
+    fn own_on_a_drawing_loads_as_the_default_color() {
+        let d: StyleDoc =
+            serde_json::from_str(r#"{"line_color":"own","fill_color":"own","text_color":"own"}"#)
+                .unwrap();
+        let s = d.to_style();
+        assert_eq!(s.line.color, Color::Palette(0));
+        assert_eq!(s.fill.color, Color::Palette(0));
+        assert_eq!(s.text.color, Color::Palette(0));
+        assert_eq!(Style::DEFAULT.normalised(), Style::DEFAULT);
+    }
+
     #[test]
     fn colors_round_trip() {
         for c in [
             Color::Palette(0),
             Color::Palette(3),
             Color::Text,
+            Color::Own,
             Color::Custom(Rgb::hex(0x12ab9f)),
         ] {
             assert_eq!(parse_color(&color_key(c)), Some(c));
