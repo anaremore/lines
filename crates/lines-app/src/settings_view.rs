@@ -59,8 +59,9 @@ fn look_now(cx: &App) -> (schema::Appearance, schema::Appearance) {
     )
 }
 
-/// Put the look back as it was saved, with its flags (an undo of a look change).
-fn restore_look(saved: schema::Appearance, flags: schema::Appearance, cx: &mut App) {
+/// Put one look field back as it was saved and flagged (an undo of a look change).
+fn restore_look(key: &str, then: (schema::Appearance, schema::Appearance), cx: &mut App) {
+    let (saved, flags) = schema::Appearance::undo_field(key, look_now(cx), then);
     update_settings(cx, move |s| s.appearance = saved);
     if let Some(w) = cx.try_global::<Workspace>() {
         w.env.look_flags.set(flags);
@@ -581,9 +582,9 @@ impl SettingsWindow {
         let i = entry.index;
         // The setting it undoes, for its account: what is undone (or asked) is in view.
         self.show(i);
-        if let Some((saved, flags)) = entry.look {
-            // A look change: the look as saved and the run's flags, exactly as they were.
-            restore_look(saved, flags, cx);
+        if let Some(then) = entry.look {
+            // A look change: that field as saved and flagged before it, nothing else.
+            restore_look(schema::all()[i].key, then, cx);
             self.note = Some((i, "Undone".to_owned(), Tone::Done));
             cx.notify();
             return;
@@ -1111,10 +1112,16 @@ impl SettingsWindow {
             .when(st.safety == Safety::Trading, |d| {
                 d.border_l_2().border_color(t.warn)
             })
-            // A selected trading row keeps its warn bar: the selection shows as an accent bar
-            // beside it.
-            .when(selected && st.safety == Safety::Trading, |d| {
-                d.child(div().w(px(3.0)).h(px(28.0)).flex_none().bg(t.accent))
+            // A trading row keeps its warn bar; its selection shows as an accent bar beside
+            // it, in a slot every trading row has (selecting never moves the text).
+            .when(st.safety == Safety::Trading, |d| {
+                d.child(
+                    div()
+                        .w(px(3.0))
+                        .self_stretch()
+                        .flex_none()
+                        .when(selected, |b| b.bg(t.accent)),
+                )
             })
             .child(left)
             .child(self.control(i, &value, cx))

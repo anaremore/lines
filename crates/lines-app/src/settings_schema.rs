@@ -243,19 +243,38 @@ impl Appearance {
         before: Appearance,
         after: Appearance,
     ) -> (Appearance, Appearance) {
+        // Compared as shown (absent = the default): re-picking the value a default-valued
+        // flag shows changes nothing, so it never writes over what is saved.
         let mut s = saved;
         let mut f = flags;
-        if after.theme != before.theme {
+        if after.theme.unwrap_or_default() != before.theme.unwrap_or_default() {
             s.theme = after.theme;
             f.theme = None;
         }
-        if after.palette != before.palette {
+        if after.palette.unwrap_or_default() != before.palette.unwrap_or_default() {
             s.palette = after.palette;
             f.palette = None;
         }
-        if after.hollow != before.hollow {
+        if after.hollow.unwrap_or_default() != before.hollow.unwrap_or_default() {
             s.hollow = after.hollow;
             f.hollow = None;
+        }
+        (s, f)
+    }
+
+    /// An undo of the look field `key` ("appearance.theme", …): that field back as it was
+    /// saved and flagged (`then`), every other field as it is `now` (later changes stay).
+    pub fn undo_field(
+        key: &str,
+        now: (Appearance, Appearance),
+        then: (Appearance, Appearance),
+    ) -> (Appearance, Appearance) {
+        let ((mut s, mut f), (s0, f0)) = (now, then);
+        match key {
+            "appearance.theme" => (s.theme, f.theme) = (s0.theme, f0.theme),
+            "appearance.palette" => (s.palette, f.palette) = (s0.palette, f0.palette),
+            "appearance.hollow" => (s.hollow, f.hollow) = (s0.hollow, f0.hollow),
+            _ => {}
         }
         (s, f)
     }
@@ -1427,6 +1446,65 @@ mod tests {
         };
         let (s, f) = Appearance::changed(saved, flags, shown, after);
         assert_eq!((s.theme, f.theme), (Some(ThemeName::Dark), None));
+    }
+
+    /// Re-picking the value a default-valued flag shows saves nothing over a saved value;
+    /// an undo restores only its field, never saving a flag.
+    #[test]
+    fn re_picks_and_undos_never_save_a_flag() {
+        // Saved light, run with --theme dark (the default), the trader picks Dark.
+        let saved = Appearance {
+            theme: Some(ThemeName::Light),
+            ..Default::default()
+        };
+        let flags = Appearance {
+            theme: Some(ThemeName::Dark),
+            ..Default::default()
+        };
+        let shown = saved.with_flags(flags);
+        let picked = Appearance {
+            theme: None,
+            ..shown
+        };
+        let (s, f) = Appearance::changed(saved, flags, shown, picked);
+        assert_eq!((s, f), (saved, flags), "nothing changed, nothing saved");
+
+        // Run with --theme light, nothing saved: Dark, then palette Colorblind, then undo
+        // the theme: the theme and its flag come back; the palette change stays.
+        let saved = Appearance::default();
+        let flags = Appearance {
+            theme: Some(ThemeName::Light),
+            ..Default::default()
+        };
+        let then = (saved, flags);
+        let shown = saved.with_flags(flags);
+        let (s1, f1) = Appearance::changed(
+            saved,
+            flags,
+            shown,
+            Appearance {
+                theme: None,
+                ..shown
+            },
+        );
+        let shown1 = s1.with_flags(f1);
+        let (s2, f2) = Appearance::changed(
+            s1,
+            f1,
+            shown1,
+            Appearance {
+                palette: Some(PaletteName::Colorblind),
+                ..shown1
+            },
+        );
+        let (s3, f3) = Appearance::undo_field("appearance.theme", (s2, f2), then);
+        assert_eq!(s3.theme, None, "the flag's Light is never saved");
+        assert_eq!(f3.theme, Some(ThemeName::Light), "it holds again");
+        assert_eq!(
+            s3.palette,
+            Some(PaletteName::Colorblind),
+            "the later change stays"
+        );
     }
 
     #[test]
