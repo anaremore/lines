@@ -128,6 +128,7 @@ pub fn toggle_kind<Id: Copy + Eq + Hash>(
             PaneKind::Dom => "no DOM goes with this pane",
             PaneKind::Tape => "no time & sales goes with this pane",
             PaneKind::Chart => "no chart goes with this pane",
+            PaneKind::Journal => "no journal goes with this pane",
         });
     }
     let any_shown = candidates.iter().any(|id| leaves[id].state.is_shown());
@@ -178,9 +179,10 @@ pub fn chart_only<Id: Copy + Eq + Hash>(
     if c.link.is_none() {
         return Err("this chart isn't linked to a DOM or time & sales".into());
     }
+    // Its DOMs and time & sales only: a linked journal isn't the chart's.
     let mine = |id: &Id| {
         let l = leaves[id];
-        l.kind != PaneKind::Chart && l.link == c.link
+        matches!(l.kind, PaneKind::Dom | PaneKind::Tape) && l.link == c.link
     };
     if is_chart_only(leaves, chart) {
         return Ok(order
@@ -475,6 +477,23 @@ mod tests {
             },
         );
         assert_eq!(hide(&[1], &solo, 1), Err("the last visible pane stays"));
+    }
+
+    /// A journal in the chart's link group isn't one of the chart's panes: "chart only"
+    /// leaves it shown.
+    #[test]
+    fn chart_only_leaves_a_linked_journal_alone() {
+        let mut leaves = HashMap::new();
+        let leaf = |kind| Leaf {
+            kind,
+            link: Some(0),
+            state: PaneState::Shown,
+        };
+        leaves.insert(1u32, leaf(PaneKind::Chart));
+        leaves.insert(2, leaf(PaneKind::Dom));
+        leaves.insert(3, leaf(PaneKind::Journal));
+        let c = chart_only(&[1, 2, 3], &leaves, 1).unwrap();
+        assert_eq!(c, vec![(2, PaneState::ChartOnly)]);
     }
 
     #[test]

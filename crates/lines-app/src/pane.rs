@@ -139,7 +139,7 @@ pub fn control_labels(kind: PaneKind, detached: bool) -> &'static [&'static str]
     match (kind, detached) {
         (_, true) => &["dock", "re-attach"],
         (PaneKind::Chart, false) => &["chart only", "pop out"],
-        (PaneKind::Dom | PaneKind::Tape, false) => &["pop out", "hide"],
+        (PaneKind::Dom | PaneKind::Tape | PaneKind::Journal, false) => &["pop out", "hide"],
     }
 }
 
@@ -150,7 +150,7 @@ pub fn control_labels(kind: PaneKind, detached: bool) -> &'static [&'static str]
 pub fn controls_gutter(kind: PaneKind) -> f32 {
     match kind {
         PaneKind::Chart => 150.0,
-        PaneKind::Dom | PaneKind::Tape => 120.0,
+        PaneKind::Dom | PaneKind::Tape | PaneKind::Journal => 120.0,
     }
 }
 
@@ -350,9 +350,14 @@ mod tests {
         const BUTTON_PAD: f32 = 8.0; // px_1 each side
         const GAP: f32 = 4.0; // gap_1
         const ROW_PAD: f32 = 8.0; // px_1 each side
-        for (kind, detached) in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape]
-            .into_iter()
-            .flat_map(|k| [(k, false), (k, true)])
+        for (kind, detached) in [
+            PaneKind::Chart,
+            PaneKind::Dom,
+            PaneKind::Tape,
+            PaneKind::Journal,
+        ]
+        .into_iter()
+        .flat_map(|k| [(k, false), (k, true)])
         {
             let labels = control_labels(kind, detached);
             let need: f32 = labels

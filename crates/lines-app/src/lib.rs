@@ -11,6 +11,7 @@ mod dom_trade;
 mod dom_trail;
 mod dom_view;
 mod feeds;
+mod journal_view;
 mod layout;
 mod levels_layer;
 mod logs;
@@ -903,6 +904,8 @@ where
     // The trader's guardrails (roadmap 8b) from settings.json.
     setup.guardrails = settings.settings.guardrails.clone();
     let trading = trading::Trading::start(setup, registry.clone(), config.clone());
+    // Kept to flush the journal's last records on quit.
+    let journal = trading.journal.clone();
     if let Some(r) = &trading.report {
         reports.push(r.clone());
     }
@@ -932,6 +935,7 @@ where
         cx.activate(true);
     });
     writer.flush(Duration::from_secs(3));
+    journal.flush(Duration::from_secs(3));
     Ok(())
 }
 
