@@ -317,7 +317,6 @@ impl TradeState {
     }
 
     /// The account's guardrail lockout, if one is in force (`None`: active).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn guard(&self, account: &AccountId) -> Option<&GuardView> {
         self.guards
             .get(account)
@@ -1412,6 +1411,7 @@ mod tests {
             contract: es(),
             qty: Qty(2),
             position,
+            working: 0,
             bracket: None,
             tick: 25,
             best_bid: Some(px(best.0)),

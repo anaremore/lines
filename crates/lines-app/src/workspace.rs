@@ -1258,8 +1258,11 @@ impl WindowView {
                     Some(PaneHandle::Dom(d)) => {
                         d.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
                     }
-                    Some(PaneHandle::Chart(c)) => {
+                    Some(PaneHandle::Chart(c)) if crate::trade_bar::chart_runs(tc) => {
                         c.update(cx, |v, cx| crate::trade_bar::run(v, tc, issued, cx));
+                    }
+                    Some(PaneHandle::Chart(_)) => {
+                        self.refuse("arming and orders act on a DOM: focus one first", cx);
                     }
                     _ => self.refuse("trading commands act on the focused DOM or chart", cx),
                 }

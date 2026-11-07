@@ -215,11 +215,13 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
     let pt = v.trade_ref();
     let account = pt.account.clone().ok_or("no account")?;
     let contract = contract_of(v.trade_store()).ok_or("contract unknown")?;
-    let position = t
-        .cache
-        .read()
-        .position(&account, contract)
-        .map_or(0, |p| p.qty);
+    let (position, working) = {
+        let s = t.cache.read();
+        (
+            s.position(&account, contract).map_or(0, |p| p.qty),
+            s.open_orders(&account, contract).count(),
+        )
+    };
     let (best_bid, best_ask, last, tick) = v
         .trade_store()
         .try_read()
@@ -237,12 +239,20 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
         contract,
         qty: qty(pt),
         position,
+        working,
         bracket: pt.bracket,
         tick,
         best_bid,
         best_ask,
         last,
     })
+}
+
+/// Whether a chart runs this trading command when focused. Charts show no arming state yet
+/// (chart trading is roadmap 8), so arming and order entry act only in a DOM; Flatten,
+/// Cancel all, account, quantity and bracket commands work from a chart.
+pub fn chart_runs(cmd: TradeCmd) -> bool {
+    cmd.quick().is_none() && cmd != TradeCmd::ToggleArm
 }
 
 /// Run a trading command from a hotkey or the palette. `issued`: the input time.
@@ -1122,6 +1132,33 @@ pub fn qty(v: &PaneTrade) -> Qty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review round 1: a chart shows no arming state, so the order keys and arming never act
+    /// from a focused chart (the workspace refuses them); the commands that never send an
+    /// entry still work there.
+    #[test]
+    fn charts_never_arm_or_enter_orders() {
+        for cmd in [
+            TradeCmd::ToggleArm,
+            TradeCmd::BuyMarket,
+            TradeCmd::SellMarket,
+            TradeCmd::JoinBid,
+            TradeCmd::JoinAsk,
+            TradeCmd::Reverse,
+        ] {
+            assert!(!chart_runs(cmd), "{cmd:?}");
+        }
+        for cmd in [
+            TradeCmd::Flatten,
+            TradeCmd::CancelAll,
+            TradeCmd::NextAccount,
+            TradeCmd::QtyUp,
+            TradeCmd::QtyDown,
+            TradeCmd::NextBracket,
+        ] {
+            assert!(chart_runs(cmd), "{cmd:?}");
+        }
+    }
 
     /// The guardrail strip: state, reason and time left in words; minutes round up; P&L
     /// off (or ticks) keeps the reason but never a loss amount.

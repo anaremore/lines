@@ -178,6 +178,8 @@ pub struct EntryCtx {
     pub qty: Qty,
     /// Signed current position in the contract.
     pub position: i64,
+    /// Orders open on the contract (bracket exits included).
+    pub working: usize,
     pub bracket: Option<BracketPreset>,
     /// Price units per tick.
     pub tick: i64,
@@ -185,6 +187,10 @@ pub struct EntryCtx {
     pub best_ask: Option<Price>,
     pub last: Option<Price>,
 }
+
+/// Reverse refused while orders work on the contract.
+pub const REVERSE_WORKING: &str =
+    "cancel working orders first: their fills would add to the reversed position";
 
 /// Why a click did nothing (shown inline in the DOM, briefly).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -308,6 +314,11 @@ pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeComma
         QuickOrder::Reverse => {
             if ctx.position == 0 {
                 return Err(Refusal("no position to reverse"));
+            }
+            // A working order (a bracket exit above all) could fill after the reversal and
+            // add to the new position: the trader cancels first (Cancel all), then reverses.
+            if ctx.working > 0 {
+                return Err(Refusal(REVERSE_WORKING));
             }
             let side = if ctx.position > 0 {
                 Side::Sell
@@ -623,6 +634,7 @@ mod tests {
             contract: esz6(),
             qty: Qty(2),
             position: 0,
+            working: 0,
             bracket: None,
             tick: ES,
             best_bid: Some(Price(600_000)),
@@ -834,6 +846,22 @@ mod tests {
         c.position = -3;
         let s2 = quick(QuickOrder::Reverse, armed(), &c).unwrap();
         assert_eq!((spec(&s2).side, spec(&s2).qty), (Side::Buy, Qty(6)));
+    }
+
+    /// Review round 1: a bracketed position's exits keep working after a reversal (they
+    /// aren't the reversal's exits), and a later exit fill would double the new position.
+    /// Reverse is refused while any order works on the contract.
+    #[test]
+    fn reverse_is_refused_while_orders_work() {
+        let mut c = ctx();
+        c.position = 2;
+        c.working = 2; // the bracket's target and stop
+        assert_eq!(
+            quick(QuickOrder::Reverse, armed(), &c),
+            Err(Refusal(REVERSE_WORKING))
+        );
+        c.working = 0;
+        assert!(quick(QuickOrder::Reverse, armed(), &c).is_ok());
     }
 
     #[test]
