@@ -478,7 +478,13 @@ impl TapeView {
                             .gap_2()
                             .items_center()
                             .children(pane::link_chip(self.common.link, &t))
-                            .child(div().text_color(t.text_main).child(left))
+                            .child(
+                                div()
+                                    .text_color(t.text_main)
+                                    .relative()
+                                    .children(crate::layout_rec::text_marker(&left))
+                                    .child(left),
+                            )
                             .children(pane::stale_badge(&self.store, &t)),
                     )
                     .child(
@@ -486,6 +492,8 @@ impl TapeView {
                             .min_w_0()
                             .truncate()
                             .text_color(t.text_dim)
+                            .relative()
+                            .children(crate::layout_rec::text_marker(&right))
                             .child(right),
                     ),
             )

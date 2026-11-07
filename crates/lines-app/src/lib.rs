@@ -16,10 +16,13 @@ mod drawings_store;
 mod dropdown;
 mod feeds;
 mod footprint;
+#[cfg(feature = "screenshot")]
+mod gallery;
 mod icons;
 mod journal_view;
 mod latency_hud;
 mod layout;
+mod layout_rec;
 mod levels_layer;
 mod logs;
 mod menu;
@@ -486,6 +489,18 @@ struct Cli {
     /// the saved drawings.
     #[arg(long, requires = "screenshot")]
     drawings: Option<PathBuf>,
+    /// Screenshot: record the frame's layout and write the layout lint's findings beside each
+    /// PNG (`<stem>.lint.txt`, empty when clean; `docs/design.md` "Checking a UI change").
+    #[arg(long, requires = "screenshot")]
+    layout_report: bool,
+    /// The UI gallery: render the fixed scene set into DIR from synthetic data, one PNG per
+    /// scene, and lint each; exits 1 on any finding (`DIR/gallery.txt`). Screenshot builds
+    /// only. The quick set unless `--gallery-full`.
+    #[arg(long, conflicts_with = "screenshot")]
+    gallery: Option<PathBuf>,
+    /// With `--gallery`: every scene (themes, palettes, widths, states, menus).
+    #[arg(long, requires = "gallery")]
+    gallery_full: bool,
 }
 
 /// The CLI with every registered source as a `--source` value, with its help.
@@ -802,6 +817,18 @@ where
 {
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
+    if let Some(dir) = &cli.gallery {
+        #[cfg(feature = "screenshot")]
+        {
+            gallery::check_dir(dir)?;
+            std::process::exit(gallery::run(dir, cli.gallery_full)?);
+        }
+        #[cfg(not(feature = "screenshot"))]
+        {
+            let _ = (dir, cli.gallery_full);
+            bail!("this build has no screenshot support; rebuild with `--features screenshot`");
+        }
+    }
     // Logs (roadmap U1): stderr always; rotating files only for the interactive app, never
     // for headless, screenshot or benchmark runs (tests run those). A second call in one
     // process (tests) keeps the first setup.
@@ -999,6 +1026,7 @@ where
                 bracket_units: cli.bracket_units.map(BracketUnitsArg::units),
                 bracket_editor: cli.bracket_editor,
                 hover_header: cli.hover_header,
+                layout_report: cli.layout_report,
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);

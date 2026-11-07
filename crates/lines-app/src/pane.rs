@@ -374,9 +374,256 @@ pub fn paint_stale_veil(
     }
 }
 
+/// Logical px the chart header's left group takes through its chips, as the renderer lays it
+/// out: row padding, link chip, contract text, timeframe chip, account chip (and its PAPER
+/// badge), at `char_px` a character. The quotes and status that follow may be clipped at the
+/// controls' gutter; the chips must fit before it (`CHART_HEADER_MIN_W`).
+#[cfg(test)]
+fn chart_header_chips_px(
+    linked: bool,
+    contract: &str,
+    timeframe: &str,
+    account: Option<(&str, bool)>,
+    char_px: f32,
+) -> f32 {
+    let tw = |s: &str| s.chars().count() as f32 * char_px;
+    let mut w = header_base_px(linked, contract, &tw) + header_chip_px(timeframe, &tw);
+    if let Some(a) = account {
+        w += header_account_px(a, &tw);
+    }
+    w
+}
+
+/// Width of a header text in logical px: measured from the shaped text by the chart, a
+/// fixed glyph width in tests.
+pub type TextPx<'a> = &'a dyn Fn(&str) -> f32;
+
+const HEADER_GAP: f32 = 8.0; // gap_2 between the left group's items
+const HEADER_CHIP_PAD: f32 = 10.0; // px_1 each side + a 1 px border each side
+/// The PAPER/LIVE badges are bold: their text is measured regular and widened by this.
+const BOLD: f32 = 1.12;
+
+/// Row padding, link chip and contract: the part of the left group that never gives way.
+fn header_base_px(linked: bool, contract: &str, tw: TextPx) -> f32 {
+    let mut w = 12.0 + tw(contract); // px_3
+    if linked {
+        w += 8.0 + 4.0 + tw("A") + HEADER_GAP; // swatch, gap_1, letter
+    }
+    w
+}
+
+/// A bordered chip ("5m ▾") after a gap.
+fn header_chip_px(text: &str, tw: TextPx) -> f32 {
+    HEADER_GAP + tw(text) + HEADER_CHIP_PAD
+}
+
+/// The badge alone, after a gap: "PAPER", or the bordered "LIVE" (the wider of the two).
+fn header_badge_px(tw: TextPx) -> f32 {
+    HEADER_GAP + tw("PAPER").max(tw("LIVE")) * BOLD + HEADER_CHIP_PAD
+}
+
+/// The account chip (bold), with its PAPER badge.
+fn header_account_px((name, paper): (&str, bool), tw: TextPx) -> f32 {
+    let mut w = HEADER_GAP + tw(name) * BOLD + HEADER_CHIP_PAD;
+    if paper {
+        w += 4.0 + tw("PAPER") * BOLD + 8.0; // gap_1, the badge (px_1)
+    }
+    w
+}
+
+/// What the chart header shows whole beside the hover controls' gutter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeaderFit {
+    /// The account chip; without it the header shows only the PAPER or LIVE badge.
+    pub account: bool,
+    pub timeframe: bool,
+    /// The status word whole; else it truncates with "…" (only when even the badge and the
+    /// contract leave no room for it).
+    pub status: bool,
+    /// The link chip; it gives way (the pane menu still shows the group) before the status
+    /// word truncates.
+    pub link: bool,
+}
+
+/// What the chart header shows in `room` logical px (the header's width less the controls'
+/// gutter; 0 or less: not laid out yet, everything shows). The order of importance: link,
+/// contract and the PAPER/LIVE badge never give way; then the feed's status word (truncated,
+/// never dropped); then the account chip (dropped to its badge), then the timeframe chip. An
+/// open timeframe list keeps its chip (the list hangs under it), taking the room from the
+/// account chip.
+#[allow(clippy::too_many_arguments)]
+pub fn chart_header_fit(
+    room: f32,
+    linked: bool,
+    contract: &str,
+    status: Option<&str>,
+    timeframe: &str,
+    account: Option<(&str, bool)>,
+    menu_open: bool,
+    tw: TextPx,
+) -> HeaderFit {
+    if room <= 0.0 {
+        return HeaderFit {
+            account: true,
+            timeframe: true,
+            status: true,
+            link: true,
+        };
+    }
+    let badge = account.map_or(0.0, |_| header_badge_px(tw));
+    let mut w =
+        header_base_px(linked, contract, tw) + badge + status.map_or(0.0, |s| HEADER_GAP + tw(s));
+    // Too narrow for the badge and the status word: the link chip goes first.
+    let link = !linked || w <= room;
+    if !link {
+        w -= header_base_px(true, contract, tw) - header_base_px(false, contract, tw);
+    }
+    let status_fits = w <= room;
+    let tf = header_chip_px(timeframe, tw);
+    let reserve = if menu_open { tf } else { 0.0 };
+    let full = account.map_or(0.0, |a| header_account_px(a, tw));
+    let fits_account = account.is_none() || w - badge + full + reserve <= room;
+    if fits_account {
+        w += full - badge;
+    }
+    HeaderFit {
+        account: fits_account,
+        timeframe: menu_open || w + tf <= room,
+        status: status_fits,
+        link,
+    }
+}
+
+/// The feed's state as one short word for the chart header, for every state but live. It
+/// never gives way: an ended or failed feed must not read as live at any width.
+pub fn status_word(s: &lines_feed::store::FeedStatus) -> Option<&'static str> {
+    use lines_feed::store::FeedStatus as S;
+    match s {
+        S::Live => None,
+        S::Connecting | S::LoggingOn => Some("connecting"),
+        S::Reconnecting { .. } => Some("reconnecting"),
+        S::ReplayFinished => Some("ended"),
+        S::Failed(_) => Some("failed"),
+        S::Stopped => Some("stopped"),
+    }
+}
+
+/// Glyph width the header model tests assume (wide: the UI font's lowercase is narrower).
+#[cfg(test)]
+const HEADER_CHAR_PX: f32 = 7.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tw7(s: &str) -> f32 {
+        s.chars().count() as f32 * HEADER_CHAR_PX
+    }
+
+    fn fit(room: f32, account: Option<(&str, bool)>, menu_open: bool) -> HeaderFit {
+        chart_header_fit(
+            room,
+            true,
+            "ESZ26",
+            Some("ended"),
+            "5m ▾",
+            account,
+            menu_open,
+            &tw7,
+        )
+    }
+
+    /// Width at which exactly the given items fit (link, contract, badge, "ended", the rest).
+    fn need(account: Option<(&str, bool)>, chip: bool, tf: bool) -> f32 {
+        let mut w = header_base_px(true, "ESZ26", &tw7) + HEADER_GAP + tw7("ended");
+        if let Some(a) = account {
+            w += if chip {
+                header_account_px(a, &tw7)
+            } else {
+                header_badge_px(&tw7)
+            };
+        }
+        if tf {
+            w += header_chip_px("5m ▾", &tw7);
+        }
+        w
+    }
+
+    const ALL: HeaderFit = HeaderFit {
+        account: true,
+        timeframe: true,
+        status: true,
+        link: true,
+    };
+
+    #[test]
+    fn header_gives_way_in_order_timeframe_account_chip_status() {
+        for paper in [true, false] {
+            let a = Some(("Eval 50K ▾", paper));
+            let wide = need(a, true, true);
+            assert_eq!(fit(wide, a, false), ALL);
+            // Just short of everything: the timeframe chip goes first.
+            let f = fit(wide - 1.0, a, false);
+            assert!(f.account && f.status && !f.timeframe, "paper {paper}");
+            // Short of the account chip: it drops to its badge (PAPER or LIVE), and the
+            // timeframe chip comes back only if it fits beside the badge.
+            let chip = need(a, true, false);
+            let f = fit(chip - 1.0, a, false);
+            assert!(!f.account && f.status, "paper {paper}");
+            assert_eq!(f.timeframe, need(a, false, true) <= chip - 1.0);
+            // Short of the badge and the status word: the link chip goes, then (short of
+            // even that) the status word truncates, last.
+            let bare = need(a, false, false);
+            let f = fit(bare - 1.0, a, false);
+            assert!(
+                !f.account && !f.timeframe && !f.link && f.status,
+                "paper {paper}"
+            );
+            let link = header_base_px(true, "ESZ26", &tw7) - header_base_px(false, "ESZ26", &tw7);
+            let f = fit(bare - link - 1.0, a, false);
+            assert!(!f.link && !f.status, "paper {paper}");
+        }
+    }
+
+    #[test]
+    fn header_without_an_account_or_width_shows_what_fits() {
+        assert_eq!(fit(0.0, Some(("A ▾", false)), false), ALL);
+        let tf = need(None, false, true);
+        assert_eq!(fit(tf, None, false), ALL);
+        assert!(!fit(tf - 1.0, None, false).timeframe);
+    }
+
+    /// The timeframe list hangs under its chip: while open, the chip stays (a list opened from
+    /// the palette is never invisible) and the account chip gives way to it instead.
+    #[test]
+    fn open_timeframe_list_keeps_its_chip() {
+        let a = Some(("Eval 50K ▾", true));
+        let f = fit(need(a, true, true) - 1.0, a, true);
+        assert!(!f.account && f.timeframe);
+        assert!(fit(10.0, None, true).timeframe);
+    }
+
+    #[test]
+    fn every_state_but_live_has_a_status_word() {
+        use lines_feed::store::FeedStatus as S;
+        assert_eq!(status_word(&S::Live), None);
+        for (s, w) in [
+            (S::Connecting, "connecting"),
+            (S::LoggingOn, "connecting"),
+            (
+                S::Reconnecting {
+                    attempt: 1,
+                    reason: "x".into(),
+                },
+                "reconnecting",
+            ),
+            (S::ReplayFinished, "ended"),
+            (S::Failed("x".into()), "failed"),
+            (S::Stopped, "stopped"),
+        ] {
+            assert_eq!(status_word(&s), Some(w));
+        }
+    }
 
     /// The owner's report: "chart only" and "pop out" drew over the chart header's account
     /// chip. The controls draw in a fixed gutter at the header's right end, and the gutter
@@ -413,35 +660,6 @@ mod tests {
     /// a chart pane narrower than this clips them at the gutter (never draws under it).
     const CHART_HEADER_MIN_W: f32 = 700.0;
 
-    /// Logical px the chart header's left group takes through its chips, as the renderer lays it
-    /// out: row padding, link chip, contract text, timeframe chip, account chip (and its PAPER
-    /// badge), at `char_px` a character. The quotes and status that follow may be clipped at the
-    /// controls' gutter; the chips must fit before it (`CHART_HEADER_MIN_W`).
-    fn chart_header_chips_px(
-        linked: bool,
-        contract: &str,
-        timeframe: &str,
-        account: Option<(&str, bool)>,
-        char_px: f32,
-    ) -> f32 {
-        const ROW_PAD: f32 = 12.0; // px_3
-        const GAP: f32 = 8.0; // gap_2 between the group's items
-        const CHIP_PAD: f32 = 10.0; // px_1 each side + a 1 px border each side
-        let text = |s: &str| s.chars().count() as f32 * char_px;
-        let mut w = ROW_PAD + text(contract);
-        if linked {
-            w += 8.0 + 4.0 + char_px + GAP; // swatch, gap_1, letter
-        }
-        w += GAP + text(timeframe) + CHIP_PAD;
-        if let Some((name, paper)) = account {
-            w += GAP + text(name) + CHIP_PAD;
-            if paper {
-                w += 4.0 + text("PAPER") + 8.0; // gap_1, the badge (px_1, no border)
-            }
-        }
-        w
-    }
-
     /// The chart header's chips (timeframe, account) sit with the contract on the left and
     /// stay clear of the hover controls' gutter: for every catalog product, every timeframe
     /// and the default accounts, the group through the account chip fits before the gutter in
@@ -452,9 +670,10 @@ mod tests {
         let room = CHART_HEADER_MIN_W - controls_gutter(PaneKind::Chart);
         let mut widest: f32 = 0.0;
         for p in lines_feed::catalog::all() {
-            // Contract label ("MNQZ26"; a spot product's is its symbol) and its description.
+            // Contract label ("MNQZ26"; a spot product's is its symbol). The description
+            // follows the chips and shrinks, so it isn't part of the group modelled here.
             let month = if p.is_spot() { "" } else { "Z26" };
-            let contract = format!("{}{month}  {}", p.symbol, p.description);
+            let contract = format!("{}{month}", p.symbol);
             for tf in lines_core::Timeframe::ALL {
                 for account in ["Paper", "Paper 50K eval"] {
                     let w = chart_header_chips_px(

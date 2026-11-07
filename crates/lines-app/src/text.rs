@@ -117,6 +117,13 @@ impl Glyphs {
             );
             at += w;
         }
+        if crate::layout_rec::on() {
+            crate::layout_rec::record_xywh(
+                window,
+                (x, top, at - x, self.size * 1.3),
+                crate::layout_rec::Spec::text(s).owner(crate::layout_rec::owner()),
+            );
+        }
         at
     }
 

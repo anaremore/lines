@@ -3066,6 +3066,13 @@ pub(crate) fn header_controls<V: 'static>(
         let on = chart_only && cmd == Command::ChartOnly;
         row = row.child(
             crate::icons::button(("pane-control", i), c.icon, c.name, Some(cmd), on, t)
+                .relative()
+                .children(crate::layout_rec::marker(
+                    lines_core::layout_lint::Kind::Button,
+                    c.name,
+                    0,
+                    "hover-controls",
+                ))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -3076,7 +3083,13 @@ pub(crate) fn header_controls<V: 'static>(
                 ),
         );
     }
-    row.into_any_element()
+    row.children(crate::layout_rec::marker(
+        lines_core::layout_lint::Kind::HoverSlot,
+        "hover controls",
+        0,
+        "",
+    ))
+    .into_any_element()
 }
 
 /// The window's screen rectangle (logical px).

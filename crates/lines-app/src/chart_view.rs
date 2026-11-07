@@ -1828,7 +1828,13 @@ impl ChartView {
 
         let fmt = self.instrument.price;
         window.with_content_mask(Some(ContentMask { bounds: plot }), |window| {
-            for l in &self.scene.price_lines {
+            // No bars: no price grid either (an empty chart has no scale to show).
+            let grid = if self.series_len == 0 {
+                &self.scene.price_lines[..0]
+            } else {
+                &self.scene.price_lines[..]
+            };
+            for l in grid {
                 window.paint_quad(fill(rect(0.0, l.y, pw, hair), t.grid));
             }
             for l in &self.scene.time_lines {
@@ -1989,7 +1995,13 @@ impl ChartView {
                 bottom: left + w,
             }
         });
-        for i in 0..self.scene.price_lines.len() {
+        // No bars, no prices: an empty chart never shows a made-up scale (design.md §7).
+        let price_lines = if self.series_len == 0 {
+            0
+        } else {
+            self.scene.price_lines.len()
+        };
+        for i in 0..price_lines {
             let l = self.scene.price_lines[i];
             if l.y < 0.0 || l.y > ph {
                 continue;
@@ -2050,6 +2062,11 @@ impl ChartView {
                 rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
                 t.last,
             ));
+            crate::layout_rec::reserved(
+                window,
+                (ox + pw + hair, oy + y - TAG_H * 0.5, AXIS_W, TAG_H),
+                "last-price-tag",
+            );
             let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
             self.paint_label(
                 LabelKind::LastPrice,
@@ -2431,14 +2448,9 @@ impl ChartView {
                 Bounds::new(point(px(ox + x + 2.0), px(oy + y)), size(px(w), px(box_h))),
                 t.panel,
             ));
-            let _ = line.paint(
-                point(px(ox + x + 2.0 + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5)),
-                line_h,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+            let at = point(px(ox + x + 2.0 + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5));
+            let _ = line.paint(at, line_h, TextAlign::Left, None, window, cx);
+            crate::layout_rec::line(window, line, at, line_h, "");
             self.drawings.set_note_box(i, (w + 2.0, box_h));
         }
         // Forget deleted notes' shaped text now and then (not every frame).
@@ -2528,18 +2540,14 @@ impl ChartView {
         let pw = f32::from(self.plot.size.width);
         let ph = f32::from(self.plot.size.height);
         let (x, y) = measure_label_at(m, (w, box_h), (pw, ph));
+        // Opaque: no drawing stroke shows through the numbers.
         window.paint_quad(fill(
             Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(box_h))),
-            t.label_bg,
+            t.panel,
         ));
-        let _ = line.paint(
-            point(px(ox + x + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5)),
-            px(LABEL_PX * 1.3),
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
+        let at = point(px(ox + x + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5));
+        let _ = line.paint(at, px(LABEL_PX * 1.3), TextAlign::Left, None, window, cx);
+        crate::layout_rec::line(window, line, at, px(LABEL_PX * 1.3), "");
     }
 
     /// Takes typed text now (symbol search, a timeframe, a note, a menu's filter): the
@@ -2778,6 +2786,7 @@ impl ChartView {
             window,
             cx,
         );
+        crate::layout_rec::line(window, line, origin, px(LABEL_PX * 1.3), "");
     }
 
     fn shape(&self, text: &str, color: Hsla, window: &mut Window) -> ShapedLine {
@@ -2837,12 +2846,18 @@ impl ChartView {
     ) {
         let line = self.label(kind, key, color, window, text);
         let _ = line.paint(origin, line_h, TextAlign::Left, None, window, cx);
+        let owner = if kind == LabelKind::LastPrice {
+            "last-price-tag"
+        } else {
+            ""
+        };
+        crate::layout_rec::line(window, line, origin, line_h, owner);
     }
 
     /// The chart's header. `account`: its trading account chip (with the PAPER badge), shown
     /// with the contract and the timeframe chip on the left; the right end is the hover
     /// controls' gutter.
-    fn header(&self, account: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> gpui::Div {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
         let bar = || {
             div()
@@ -2884,27 +2899,50 @@ impl ChartView {
         let f = i.price;
         // The active contract is always shown (decision 0013); unknown is labelled, not hidden.
         let _ = match d.contract_label() {
-            Some(c) => write!(left, "{c}  {}", i.description),
-            None => write!(left, "{} (contract unknown)  {}", i.symbol, i.description),
+            Some(c) => write!(left, "{c}"),
+            None => write!(left, "{} (contract unknown)", i.symbol),
         };
         // Last, bid, ask: a missing value shows as a dimmed dash (docs/design.md §7), never as
         // a bare label that reads like a layout bug.
         let quote = |label: &str, p: Option<Price>| {
             let (text, missing) = quote_text(label, p, &f);
             div()
-                .ml_2()
                 .text_color(if missing { t.text_dim } else { t.text_main })
                 .child(text)
         };
-        let mut quotes = vec![quote("last", d.last_trade)];
+        // Each item is dropped whole when it doesn't fit (it wraps onto a hidden second line,
+        // never cut); bid and ask are one item, so the quote never shows one side alone.
+        let item = |d: gpui::Div, label: String| {
+            d.ml_2()
+                .flex_shrink_0()
+                .relative()
+                .children(crate::layout_rec::text_marker(&label))
+        };
+        let mut quotes = vec![item(
+            div().child(quote("last", d.last_trade)),
+            "last".to_owned(),
+        )];
         if d.capabilities.bbo {
-            quotes.push(quote("bid", d.bid));
-            quotes.push(quote("ask", d.ask));
+            quotes.push(item(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(quote("bid", d.bid))
+                    .child(quote("ask", d.ask)),
+                "bid / ask".to_owned(),
+            ));
         }
         if let Some(n) = pane::adopted_note(&self.feed) {
             let _ = write!(right, "{n}  ·  ");
         }
-        let _ = write!(right, "{}  ·  {}", d.provider, d.status.label());
+        // Every state but live has a short word beside the contract that never gives way;
+        // the status text (which does) then names only the provider.
+        let word = pane::status_word(&d.status);
+        let _ = write!(right, "{}", d.provider);
+        if word.is_none() {
+            let _ = write!(right, "  ·  {}", d.status.label());
+        }
         // History back-fill is shown as state, not a spinner (docs/design.md).
         if let Some(h) = d.history.label() {
             let _ = write!(right, "  ·  {h}");
@@ -2945,39 +2983,131 @@ impl ChartView {
             }
         }
         let list = self.timeframe_list(&t, cx);
-        let timeframe = crate::dropdown::dropdown(self.timeframe_chip(&t, cx), list);
+        // What fits whole beside the hover controls' gutter (from last frame's width); the
+        // rest is dropped whole, never cut: typing a timeframe and the palette still change
+        // the timeframe, and the palette the account.
+        let room = f32::from(self.chart.size.width)
+            - pane::controls_gutter(crate::layout::PaneKind::Chart);
+        let acct = crate::trade_bar::chart_account(self, cx);
+        // Header text widths as the UI font shapes them (text_sm).
+        let font = window.text_style().font();
+        let size = gpui::rems(0.875).to_pixels(window.rem_size());
+        let measure = |s: &str| -> f32 {
+            let run = TextRun {
+                len: s.len(),
+                font: font.clone(),
+                color: t.text_main,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                SharedString::from(s.to_owned()),
+                size,
+                &[run],
+                None,
+            );
+            f32::from(line.width)
+        };
+        let fit = pane::chart_header_fit(
+            room,
+            self.common.link.is_some(),
+            &pane::contract_text(&d),
+            word,
+            &pane::timeframe_chip_text(self.timeframe),
+            acct.as_ref().map(|(n, p)| (n.as_str(), *p)),
+            self.tf_menu,
+            &measure,
+        );
+        let desc_w = measure(i.description).ceil() + 1.0;
+        let account = crate::trade_bar::chart_chip(self, &t, fit.account, cx);
+        let timeframe = fit
+            .timeframe
+            .then(|| crate::dropdown::dropdown(self.timeframe_chip(&t, cx), list));
         bar().child(
             pane::header_content()
                 .child(
+                    // Order of importance, left to right: link, contract, account (PAPER/LIVE
+                    // first), status word, timeframe (`pane::chart_header_fit`); the status
+                    // text gives way first, then the quotes and the description.
                     div()
                         .flex()
                         .flex_row()
                         .gap_2()
                         .items_center()
-                        .flex_shrink_0()
-                        .children(chip)
-                        .child(div().text_color(t.text_main).child(left))
-                        .child(timeframe)
+                        .min_w_0()
+                        .children(if fit.link { chip } else { None })
+                        // The contract never gives way; its description does, with "…".
+                        .child(
+                            div()
+                                .text_color(t.text_main)
+                                .flex_shrink_0()
+                                .relative()
+                                .children(crate::layout_rec::text_marker(&left))
+                                .child(left),
+                        )
                         .children(account)
+                        // Whole unless nothing else is left to give way: then "…", never cut.
+                        .children(word.map(|w| {
+                            let d = div().text_color(t.text_main);
+                            if fit.status {
+                                d.flex_shrink_0()
+                            } else {
+                                d.min_w_0().truncate()
+                            }
+                            .relative()
+                            .children(crate::layout_rec::text_marker(w))
+                            .child(w)
+                        }))
+                        .children(timeframe)
+                        // The description truncates with "…" down to 48 px, then drops whole
+                        // (wraps onto a hidden second line) rather than show a bare "…".
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .min_w_0()
+                                // Its whole text's width, shrinking from there (a wrapping
+                                // row's own width otherwise comes from the 48 px basis).
+                                .flex_basis(px(desc_w))
+                                .h(px(QUOTE_ROW_H))
+                                .line_height(px(QUOTE_ROW_H))
+                                .items_center()
+                                .overflow_hidden()
+                                .child(div().w(px(0.0)).h(px(QUOTE_ROW_H)))
+                                .child(
+                                    div()
+                                        .flex_basis(px(48.0))
+                                        .flex_grow(1.0)
+                                        .min_w_0()
+                                        .text_color(t.text_main)
+                                        .truncate()
+                                        .relative()
+                                        .children(crate::layout_rec::text_marker(i.description))
+                                        .child(i.description),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .min_w_0()
+                                .h(px(QUOTE_ROW_H))
+                                .line_height(px(QUOTE_ROW_H))
+                                .items_center()
+                                .overflow_hidden()
+                                // A zero-width first item: the first quote can wrap away too
+                                // (a line's first item never wraps).
+                                .child(div().w(px(0.0)).h(px(QUOTE_ROW_H)))
+                                .children(quotes),
+                        )
                         .children(pane::stale_badge(&self.store, &t))
                         .children(self.clock_warning(&t)),
                 )
-                // Last, bid, ask: whole or not at all. One wrapping line, clipped to its
-                // height: a quote that doesn't fit moves to the hidden second line, so a
-                // narrow chart never shows half a price.
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .min_w_0()
-                        .h(px(QUOTE_ROW_H))
-                        .line_height(px(QUOTE_ROW_H))
-                        .overflow_hidden()
-                        .children(quotes),
-                )
-                // Status text takes only what the quotes leave (it gives way first), at the
-                // right end, cut with "…".
+                // Status text takes only what the left group leaves (it gives way first), at
+                // the right end, cut with "…"; it never runs over the chips.
                 .child(
                     div()
                         .flex_1()
@@ -2990,6 +3120,8 @@ impl ChartView {
                                 .min_w_0()
                                 .truncate()
                                 .text_color(t.text_dim)
+                                .relative()
+                                .children(crate::layout_rec::text_marker(&right))
                                 .child(right),
                         ),
                 ),
@@ -3029,7 +3161,21 @@ impl ChartView {
             .text_color(t.text_main)
             .cursor_pointer()
             .hover(move |s| s.border_color(accent))
+            .relative()
             .child(pane::timeframe_chip_text(self.timeframe))
+            .children(
+                crate::layout_rec::on()
+                    .then(|| {
+                        crate::layout_rec::bordered(
+                            lines_core::layout_lint::Kind::Chip,
+                            pane::timeframe_chip_text(self.timeframe),
+                            0,
+                            "chart-header",
+                            1.0,
+                        )
+                    })
+                    .flatten(),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|v, _, _, cx| {
@@ -3056,7 +3202,22 @@ impl ChartView {
             .border_1()
             .border_color(accent)
             .rounded_sm()
-            .text_size(px(12.0));
+            .text_size(px(12.0))
+            .children(
+                crate::layout_rec::on()
+                    .then(|| {
+                        crate::layout_rec::bordered(
+                            lines_core::layout_lint::Kind::Popup {
+                                trigger: pane::timeframe_chip_text(self.timeframe),
+                            },
+                            "timeframe list",
+                            crate::layout_rec::POPUP,
+                            "",
+                            1.0,
+                        )
+                    })
+                    .flatten(),
+            );
         for (i, tf) in Timeframe::ALL.into_iter().enumerate() {
             let on = tf == self.timeframe;
             list = list.child(
@@ -3400,7 +3561,7 @@ impl Render for ChartView {
                 .flex()
                 .flex_col()
                 .bg(t.bg)
-                .child(self.header(None, cx))
+                .child(self.header(window, cx))
                 .child(
                     div()
                         .relative()
@@ -3413,13 +3574,12 @@ impl Render for ChartView {
                 );
         }
         let _ = window;
-        let account = crate::trade_bar::chart_chip(self, &t, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header(account, cx))
+            .child(self.header(window, cx))
             .child(
                 div()
                     .relative()
