@@ -36,6 +36,7 @@ use parking_lot::RwLock;
 
 pub use lines_core::levels::{
     LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape, LevelStyle, LevelValue,
+    NamedValue,
 };
 
 /// How a source refreshes.

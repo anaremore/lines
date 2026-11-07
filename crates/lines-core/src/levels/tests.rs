@@ -287,3 +287,51 @@ fn vwap_relative_levels_follow_the_vwap_and_wait_for_it() {
         LevelError::NotFinite
     );
 }
+
+#[test]
+fn named_values_ride_with_the_map() {
+    let at = Some(t("2026-11-05T14:31:00"));
+    let m = b()
+        .value("dd-ratio", 0.62, at)
+        .value("res", -3.5, None)
+        .build(TICK)
+        .unwrap();
+    assert_eq!(
+        m.value("dd-ratio").map(|v| (v.value, v.as_of)),
+        Some((0.62, at))
+    );
+    assert_eq!(m.value("res").map(|v| v.value), Some(-3.5));
+    assert!(m.value("missing").is_none());
+    assert!(m.levels.is_empty(), "values are not levels");
+}
+
+#[test]
+fn named_values_are_checked() {
+    for bad in ["", "Caps", "has space", "a/b", &"x".repeat(33)] {
+        assert_eq!(
+            b().value(bad, 1.0, None).build(TICK).unwrap_err(),
+            LevelError::BadSlug(bad.to_string()),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        b().value("a", 1.0, None)
+            .value("a", 2.0, None)
+            .build(TICK)
+            .unwrap_err(),
+        LevelError::BadSlug("a".into())
+    );
+    assert_eq!(
+        b().value("a", f64::NAN, None).build(TICK).unwrap_err(),
+        LevelError::NotFinite
+    );
+    let mut many = b();
+    for i in 0..=MAX_VALUES {
+        many = many.value(&format!("v{i}"), 0.0, None);
+    }
+    assert_eq!(many.build(TICK).unwrap_err(), LevelError::TooMany("values"));
+}
+
+fn b() -> LevelMapBuilder {
+    LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+}

@@ -150,6 +150,20 @@ impl Level {
     }
 }
 
+/// A source's named number that isn't a price (an indicator reading, a statistic), published
+/// with its map for strategies (decision 0025). Never drawn, never an order price.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedValue {
+    /// Stable name: 1-32 lowercase letters, digits, `-`, `_` or `.`, unique in the map.
+    pub name: String,
+    pub value: f64,
+    /// When the source computed it, if it says (else the map's as-of).
+    pub as_of: Option<UtcMillis>,
+}
+
+/// Named values a map may carry.
+pub const MAX_VALUES: usize = 64;
+
 /// One source's levels for one product (and contract, if the source is contract specific).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LevelMap {
@@ -163,6 +177,8 @@ pub struct LevelMap {
     pub kinds: Vec<String>,
     pub levels: Vec<Level>,
     pub meta: LevelMeta,
+    /// Named values (not prices): see [`NamedValue`].
+    pub values: Vec<NamedValue>,
 }
 
 impl LevelMap {
@@ -176,9 +192,15 @@ impl LevelMap {
                 kinds: Vec::new(),
                 levels: Vec::new(),
                 meta: LevelMeta::default(),
+                values: Vec::new(),
             },
             error: None,
         }
+    }
+
+    /// A named value by name.
+    pub fn value(&self, name: &str) -> Option<&NamedValue> {
+        self.values.iter().find(|v| v.name == name)
     }
 
     /// Index of a kind slug.
@@ -315,6 +337,16 @@ impl LevelMapBuilder {
         )
     }
 
+    /// Add a named value (not a price): see [`NamedValue`].
+    pub fn value(mut self, name: &str, value: f64, as_of: Option<UtcMillis>) -> Self {
+        self.map.values.push(NamedValue {
+            name: name.to_owned(),
+            value,
+            as_of,
+        });
+        self
+    }
+
     /// Validate against the instrument's `tick` (catalog units) and return the map.
     pub fn build(mut self, tick: i64) -> Result<LevelMap, LevelError> {
         if !slug_ok(&self.map.source) {
@@ -340,6 +372,22 @@ impl LevelMapBuilder {
         };
         if !meta_ok(&self.map.meta) {
             self.fail(LevelError::TooLong("metadata"));
+        }
+        if self.map.values.len() > MAX_VALUES {
+            self.fail(LevelError::TooMany("values"));
+        }
+        for (i, v) in self.map.values.iter().enumerate() {
+            let name_ok = !v.name.is_empty()
+                && v.name.len() <= 32
+                && v.name.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+                });
+            if !name_ok || self.map.values[..i].iter().any(|o| o.name == v.name) {
+                self.error
+                    .get_or_insert(LevelError::BadSlug(v.name.clone()));
+            } else if !v.value.is_finite() {
+                self.error.get_or_insert(LevelError::NotFinite);
+            }
         }
         for i in 0..self.map.levels.len() {
             let l = &self.map.levels[i];
