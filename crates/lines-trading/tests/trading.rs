@@ -589,6 +589,7 @@ fn trailing_drawdown_breach_liquidates_and_blocks() {
         consistency: None,
         liquidate_on_breach: true,
         on_breach: Default::default(),
+        news: None,
     };
     let mut r = Rig::with(FillModel::TradeThrough, prop_account(preset));
     r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
@@ -656,6 +657,7 @@ fn contract_cap_counts_micro_equivalents() {
         consistency: None,
         liquidate_on_breach: false,
         on_breach: Default::default(),
+        news: None,
     };
     let mut r = Rig::with(FillModel::TradeThrough, prop_account(preset));
     // 2 NQ = 20 micro-equivalents (1 NQ = 10 MNQ): allowed; working orders count too.
@@ -1012,6 +1014,7 @@ fn breach_preset() -> RulePreset {
         consistency: None,
         liquidate_on_breach: false,
         on_breach: BreachStates::default(),
+        news: None,
     }
 }
 

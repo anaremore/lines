@@ -1,0 +1,140 @@
+# Lines economic calendar: scheduled US releases as versioned data (roadmap 8b).
+# Parsed and validated by lines_core::econ::EconSchedule (format documented there); embedded in
+# lines-feed by econ::BUNDLED. Times are local to `zone` (US Eastern, DST included).
+#
+# Official sources only: the agencies' own published schedules. No other site.
+#
+# Directives:  release <key>      starts a release; key is [a-z0-9-]+, unique
+#              name <text>        short name shown in the UI ("CPI")
+#              agency <text>      who publishes it
+#              importance high|medium|low
+#              affects <SYMBOL>…  catalog product symbols it moves (blackouts apply to these)
+#              coverage <from> <through> verified|unverified
+#                                 dates the list is complete for; outside them the calendar is
+#                                 "missing" for this release, never assumed clear
+#              source <url>       at least one
+#              YYYY-MM-DD HH:MM verified|unverified <label>
+#
+# VERIFICATION STATUS (2026-11-07):
+#   BEA  verified: dates and times read directly from the BEA schedule page's table.
+#   FOMC dates verified from the Federal Reserve's FOMC calendar page; the 14:00 statement time
+#        is the Fed's standing practice and is not printed on that page, so lines are unverified.
+#   BLS  unverified: bls.gov refuses automated downloads (HTTP 403); the rows were read through a
+#        text extraction of the BLS schedule pages, not compared by a person. To verify, open each
+#        source in a browser, compare, and flip `unverified` to `verified` per line.
+# BEA's page lists 2026 only; 2027 BEA releases are not published yet, so BEA coverage ends
+# 2026-12-31 and the calendar reports BEA missing after that until this file is updated.
+
+format 1
+version 2026-11-07
+zone America/New_York
+
+release cpi
+name CPI
+agency BLS
+importance high
+affects ES MES NQ MNQ ZN
+coverage 2026-11-01 2027-12-31 unverified
+source https://www.bls.gov/schedule/news_release/cpi.htm
+2026-11-10 08:30 unverified October 2026
+2026-12-10 08:30 unverified November 2026
+2027-01-13 08:30 unverified December 2026
+2027-02-11 08:30 unverified January 2027
+2027-03-10 08:30 unverified February 2027
+2027-04-13 08:30 unverified March 2027
+2027-05-12 08:30 unverified April 2027
+2027-06-10 08:30 unverified May 2027
+2027-07-14 08:30 unverified June 2027
+2027-08-11 08:30 unverified July 2027
+2027-09-14 08:30 unverified August 2027
+2027-10-14 08:30 unverified September 2027
+2027-11-10 08:30 unverified October 2027
+2027-12-10 08:30 unverified November 2027
+
+release nfp
+name Jobs report
+agency BLS (Employment Situation)
+importance high
+affects ES MES NQ MNQ ZN
+coverage 2026-11-01 2027-12-31 unverified
+source https://www.bls.gov/schedule/news_release/empsit.htm
+2026-11-06 08:30 unverified October 2026
+2026-12-04 08:30 unverified November 2026
+2027-01-08 08:30 unverified December 2026
+2027-02-05 08:30 unverified January 2027
+2027-03-05 08:30 unverified February 2027
+2027-04-02 08:30 unverified March 2027
+2027-05-07 08:30 unverified April 2027
+2027-06-04 08:30 unverified May 2027
+2027-07-02 08:30 unverified June 2027
+2027-08-06 08:30 unverified July 2027
+2027-09-03 08:30 unverified August 2027
+2027-10-08 08:30 unverified September 2027
+2027-11-05 08:30 unverified October 2027
+2027-12-03 08:30 unverified November 2027
+
+release ppi
+name PPI
+agency BLS
+importance medium
+affects ES MES NQ MNQ ZN
+coverage 2026-11-01 2027-12-31 unverified
+source https://www.bls.gov/schedule/news_release/ppi.htm
+2026-11-13 08:30 unverified October 2026
+2026-12-15 08:30 unverified November 2026
+2027-01-14 08:30 unverified December 2026
+2027-02-12 08:30 unverified January 2027
+2027-03-12 08:30 unverified February 2027
+2027-04-14 08:30 unverified March 2027
+2027-05-13 08:30 unverified April 2027
+2027-06-11 08:30 unverified May 2027
+2027-07-15 08:30 unverified June 2027
+2027-08-10 08:30 unverified July 2027
+2027-09-10 08:30 unverified August 2027
+2027-10-15 08:30 unverified September 2027
+2027-11-12 08:30 unverified October 2027
+2027-12-15 08:30 unverified November 2027
+
+release gdp
+name GDP
+agency BEA
+importance medium
+affects ES MES NQ MNQ ZN
+coverage 2026-11-07 2026-12-31 verified
+source https://www.bea.gov/news/schedule
+2026-11-25 08:30 verified Q3 2026, second estimate
+2026-12-23 08:30 verified Q3 2026, third estimate
+
+release pce
+name PCE
+agency BEA (Personal Income and Outlays)
+importance medium
+affects ES MES NQ MNQ ZN
+coverage 2026-11-07 2026-12-31 verified
+source https://www.bea.gov/news/schedule
+2026-11-25 08:30 verified October 2026
+2026-12-23 08:30 verified November 2026
+
+release fomc
+name FOMC statement
+agency Federal Reserve
+importance high
+affects ES MES NQ MNQ ZN
+coverage 2026-01-01 2027-12-31 verified
+source https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+2026-01-28 14:00 unverified January meeting
+2026-03-18 14:00 unverified March meeting (projections)
+2026-04-29 14:00 unverified April meeting
+2026-06-17 14:00 unverified June meeting (projections)
+2026-07-29 14:00 unverified July meeting
+2026-09-16 14:00 unverified September meeting (projections)
+2026-10-28 14:00 unverified October meeting
+2026-12-09 14:00 unverified December meeting (projections)
+2027-01-27 14:00 unverified January meeting
+2027-03-17 14:00 unverified March meeting (projections)
+2027-04-28 14:00 unverified April meeting
+2027-06-09 14:00 unverified June meeting (projections)
+2027-07-28 14:00 unverified July meeting
+2027-09-15 14:00 unverified September meeting (projections)
+2027-10-27 14:00 unverified October meeting
+2027-12-08 14:00 unverified December meeting (projections)

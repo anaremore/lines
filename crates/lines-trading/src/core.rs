@@ -8,7 +8,9 @@
 //!
 //! A command passes, in order: validation (account, contract, quantity, tick grid, broker
 //! capabilities) → prop rules (blocked after a breach; contract cap) → pre-trade risk → the
-//! broker. Flatten, Cancel All and cancels skip rules and risk: they always work.
+//! broker. Flatten, Cancel All and cancels skip rules and risk: they always work. The news
+//! blackout (roadmap 8b) reads the economic calendar given with
+//! [`TradingCore::set_econ_schedule`] (the bundled one by default) on the core's clock.
 //!
 //! Orders, positions and balances are the **broker's**; the core keeps a cache updated from
 //! broker events and replaced wholesale by [`TradingCore::rebuild`] after a (re)connect.
@@ -17,6 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use lines_core::econ::EconSchedule;
 use lines_core::latency::{self as lat, LatencyWindow};
 
 use lines_core::sessions::SessionKind;
@@ -28,6 +31,7 @@ use crate::command::{Command, Envelope, OrderSpec, Reject, RejectCode, Source};
 use crate::event::{AccountView, Event, FillEvent, PositionView};
 use crate::guardrails::{Entry, GuardChange, GuardState, GuardrailTracker};
 use crate::market::MarketInput;
+use crate::news::{self, NewsAction, NewsBlackout};
 use crate::order::{Order, OrderState, Role};
 use crate::position::Position;
 use crate::risk::{self, RiskContext, RiskLimits};
@@ -202,6 +206,13 @@ pub struct TradingCore {
     /// Strategy instances (decision 0025), and which instance placed each order.
     strategies: BTreeMap<StrategyId, Instance>,
     strategy_orders: HashMap<OrderId, StrategyId>,
+    /// The economic calendar for news blackouts (`None`: none loaded, never assumed clear).
+    econ: Option<Arc<EconSchedule>>,
+    /// Positions a news blackout already flattened: (account, contract, release time). Each
+    /// window flattens a contract once; entries stay refused for the rest of it.
+    news_flattened: HashSet<(AccountId, ContractKey, UtcMillis)>,
+    /// The latest time the core was given (for `next_wake`, which takes none).
+    seen_now: UtcMillis,
 }
 
 const KEEP_FINISHED: usize = 2000;
@@ -249,7 +260,30 @@ impl TradingCore {
             held: VecDeque::new(),
             strategies: BTreeMap::new(),
             strategy_orders: HashMap::new(),
+            econ: Some(lines_feed::econ::bundled()),
+            news_flattened: HashSet::new(),
+            seen_now: UtcMillis(i64::MIN),
         }
+    }
+
+    /// The economic calendar news blackouts read (`None`: none, and a blackout rule that
+    /// refuses entries refuses them all, since nothing can be confirmed clear).
+    pub fn set_econ_schedule(&mut self, schedule: Option<Arc<EconSchedule>>) {
+        self.econ = schedule;
+    }
+
+    pub fn econ_schedule(&self) -> Option<&Arc<EconSchedule>> {
+        self.econ.as_ref()
+    }
+
+    /// The news blackout in force for an account: its guardrail and its prop preset's, the
+    /// tighter of each part.
+    pub fn news_rule(&self, account: &AccountId) -> Option<NewsBlackout> {
+        let a = self.accounts.get(account)?;
+        NewsBlackout::tighter(
+            a.guard.active.news,
+            a.cfg.rules.as_ref().and_then(|r| r.news),
+        )
     }
 
     pub fn set_overfill_policy(&mut self, p: OverfillPolicy) {
@@ -544,6 +578,7 @@ impl TradingCore {
     /// Handle a command whose id was assigned elsewhere (the threaded runtime assigns ids at
     /// the caller so it can return them without waiting).
     pub fn handle(&mut self, now: UtcMillis, env: Envelope) {
+        self.seen_now = self.seen_now.max(now);
         if env.id.0 < INTERNAL_COMMAND_IDS {
             self.next_command = self.next_command.max(env.id.0 + 1);
         }
@@ -1199,7 +1234,77 @@ impl TradingCore {
         self.accounts[&spec.account]
             .guard
             .check(now, &entry)
-            .map_err(|m| Reject::new(RejectCode::Guardrail, m))
+            .map_err(|m| Reject::new(RejectCode::Guardrail, m))?;
+        // The news blackout (exits always pass, as above).
+        if !entry.is_exit()
+            && let Some(rule) = self.news_rule(&spec.account)
+        {
+            let symbol = lines_feed::catalog::get(spec.contract.product).map_or("", |p| p.symbol);
+            news::check(self.econ.as_deref(), &rule, symbol, now)
+                .map_err(|m| Reject::new(RejectCode::Guardrail, m))?;
+        }
+        Ok(())
+    }
+
+    /// Flatten-action blackouts: every position whose product is inside a window is flattened
+    /// once per window (a rule command, so it passes no checks and cancels that contract's
+    /// orders too).
+    fn news_flatten(&mut self, now: UtcMillis) {
+        let Some(sched) = self.econ.clone() else {
+            return;
+        };
+        self.news_flattened
+            .retain(|(_, _, at)| at.0 + 86_400_000 > now.0);
+        let mut todo = Vec::new();
+        for (id, a) in &self.accounts {
+            let Some(rule) = self
+                .news_rule(id)
+                .filter(|r| r.action == NewsAction::Flatten)
+            else {
+                continue;
+            };
+            for (contract, p) in &a.positions {
+                if p.qty() == 0 {
+                    continue;
+                }
+                let Some(product) = lines_feed::catalog::get(contract.product) else {
+                    continue;
+                };
+                if let Some(e) = sched.window_at(
+                    Some(product.symbol),
+                    now,
+                    rule.before_ms(),
+                    rule.after_ms(),
+                    rule.min_importance(),
+                ) && !self.news_flattened.contains(&(id.clone(), *contract, e.at))
+                {
+                    todo.push((id.clone(), *contract, e.at));
+                }
+            }
+        }
+        for (account, contract, at) in todo {
+            self.news_flattened.insert((account.clone(), contract, at));
+            self.submit(
+                now,
+                Source::Rule,
+                Instant::now(),
+                Command::Flatten {
+                    account,
+                    contract: Some(contract),
+                },
+            );
+        }
+    }
+
+    /// When the next flatten-action window opens, for any account that has one.
+    fn news_wake(&self, now: UtcMillis) -> Option<UtcMillis> {
+        let sched = self.econ.as_ref()?;
+        self.accounts
+            .keys()
+            .filter_map(|id| self.news_rule(id))
+            .filter(|r| r.action == NewsAction::Flatten)
+            .filter_map(|r| sched.next_window_start(None, now, r.before_ms(), r.min_importance()))
+            .min()
     }
 
     /// Report the account's guardrail state if it changed since last reported.
@@ -1407,7 +1512,9 @@ impl TradingCore {
 
     /// Apply whatever the broker has due by `now` (acks after latency, fills, cancels).
     pub fn tick(&mut self, now: UtcMillis) {
+        self.seen_now = self.seen_now.max(now);
         self.poll(now);
+        self.news_flatten(now);
         self.strategy_watch(now);
     }
 
@@ -1415,7 +1522,14 @@ impl TradingCore {
     pub fn next_wake(&self) -> Option<UtcMillis> {
         // A lockout's end too (its event goes out on time).
         let cooldowns = self.accounts.values().filter_map(|a| a.guard.next_wake());
-        self.broker.next_wake().into_iter().chain(cooldowns).min()
+        // A news window opening (flatten), on the clock last seen.
+        let news = self.news_wake(self.seen_now);
+        self.broker
+            .next_wake()
+            .into_iter()
+            .chain(cooldowns)
+            .chain(news)
+            .min()
     }
 
     fn poll(&mut self, now: UtcMillis) {
@@ -1692,6 +1806,7 @@ impl TradingCore {
 
     /// Market data for a contract: marks (P&L, risk bands) and the broker's simulation.
     pub fn market(&mut self, now: UtcMillis, contract: ContractKey, inputs: &[MarketInput]) {
+        self.seen_now = self.seen_now.max(now);
         self.spec(contract);
         for i in inputs {
             let m = self.marks.entry(contract).or_default();
@@ -2023,6 +2138,7 @@ fn no_rules() -> RulePreset {
         consistency: None,
         liquidate_on_breach: false,
         on_breach: crate::rules::BreachStates::default(),
+        news: None,
     }
 }
 

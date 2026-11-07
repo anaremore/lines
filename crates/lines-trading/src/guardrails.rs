@@ -13,6 +13,9 @@
 //! - **Max position** (quantity units, worst case with open orders, as `RiskLimits`): denied
 //!   above it; no lockout.
 //! - **No new entries in the last N minutes before the session closes.**
+//! - **News blackout** ([`crate::news`]): around scheduled releases, warn, refuse entries, or
+//!   refuse entries and flatten. Checked by the core with the economic calendar; a preset's
+//!   rule and this one combine part by part.
 //!
 //! **Exits are never blocked**: Flatten, Cancel All and cancels never reach the guardrails,
 //! and an order that only shrinks the position (no more than is left to close) always passes.
@@ -28,6 +31,7 @@
 use lines_core::{CivilDate, ContractKey, UtcMillis};
 use serde::{Deserialize, Serialize};
 
+use crate::news::NewsBlackout;
 use crate::types::{Money, Side, contract_serde};
 
 /// A trader's guardrails. Every rule is optional (`None`: off).
@@ -47,6 +51,9 @@ pub struct Guardrails {
     /// No new entries this many minutes before the session closes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_entries_before_close_min: Option<u32>,
+    /// Around scheduled economic releases (roadmap 8b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub news: Option<NewsBlackout>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +99,7 @@ impl Guardrails {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             },
+            news: NewsBlackout::tighter(self.news, other.news),
         }
     }
 }

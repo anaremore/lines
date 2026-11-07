@@ -17,6 +17,8 @@
 //! above `−limit`; a breach blocks new orders until the next trade date.
 //! **Contract cap**: open position plus open orders, in micro-equivalent contracts (the
 //! product's equivalence ratio: 1 NQ = 10 MNQ).
+//! **News blackout** (optional, [`crate::news`]): the preset's restriction around scheduled
+//! releases; with the trader's own guardrail, the tighter of each part applies.
 //! **Profit target** and **consistency** (the best day's share of total profit) are tracked and
 //! reported; they don't block orders.
 
@@ -76,6 +78,9 @@ pub struct RulePreset {
     /// What the account may still do after each breach.
     #[serde(default)]
     pub on_breach: BreachStates,
+    /// Restriction around scheduled economic releases (roadmap 8b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub news: Option<crate::news::NewsBlackout>,
 }
 
 /// The tighter of two optional maxima (a limit is tighter than none).
@@ -204,6 +209,7 @@ pub fn presets() -> Vec<RulePreset> {
         consistency: None,
         liquidate_on_breach: true,
         on_breach: BreachStates::default(),
+        news: None,
     };
     vec![
         base(
@@ -473,6 +479,7 @@ mod tests {
             }),
             liquidate_on_breach: false,
             on_breach: BreachStates::default(),
+            news: None,
         }
     }
 
