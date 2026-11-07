@@ -792,6 +792,11 @@ struct BarData {
     blocked_short: Option<&'static str>,
     /// The guardrail lockout in force, as words (`guard_line`), and its state.
     guard: Option<(lines_trading::GuardState, String)>,
+    /// The economic calendar (roadmap 8b): the chip's words and whether it warns (a news
+    /// blackout window, or a calendar that can't answer), and the switch's reason when it
+    /// refuses entries.
+    news: Option<(bool, String)>,
+    news_block: Option<&'static str>,
     /// (label, text): DENIED / REJECTED / WARNING / NOT SENT.
     flashes: Vec<(&'static str, String)>,
     unresolved: usize,
@@ -813,6 +818,8 @@ fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
         blocked: None,
         blocked_short: None,
         guard: None,
+        news: None,
+        news_block: None,
         flashes: Vec::new(),
         unresolved: 0,
         working: 0,
@@ -864,6 +871,22 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
                 };
                 data.stop = near(dom_trade::MarkRole::Stop);
                 data.target = near(dom_trade::MarkRole::Target);
+            }
+        }
+        // The calendar: a release coming, or the account's news blackout, for this product.
+        if let Some(now) = t.now(v.trade_store()) {
+            let rule = s
+                .account(account)
+                .and_then(|a| crate::econ_ui::rule_of(&a.limits));
+            let schedule = crate::econ_ui::schedule();
+            if let Some(c) =
+                crate::econ_ui::chip(Some(&schedule), rule.as_ref(), product.symbol, now)
+            {
+                data.news = Some((
+                    crate::econ_ui::warns(&c),
+                    crate::econ_ui::chip_text(&c, now),
+                ));
+                data.news_block = crate::econ_ui::blocker(&c);
             }
         }
         if let Some(a) = s.account(account) {
@@ -957,6 +980,9 @@ fn blocker<V: TradePane>(
     }
     if let Some(b) = data.and_then(|d| d.blocked_short) {
         return Some(b.into());
+    }
+    if let Some(b) = data.and_then(|d| d.news_block) {
+        return Some(b);
     }
     let t = Trading::try_global(cx)?;
     if t.check_sessions
@@ -1395,7 +1421,9 @@ pub fn dom_bar<V: TradePane>(
     let mode = data.as_ref().map(|d| d.mode).unwrap_or_default();
     // A guardrail lockout dims entries too (the core still decides; a click is denied with
     // the reason). Flatten and Cancel all never dim.
-    let guarded = data.as_ref().is_some_and(|d| d.guard.is_some());
+    let guarded = data
+        .as_ref()
+        .is_some_and(|d| d.guard.is_some() || d.news_block.is_some());
     let gate = |el: gpui::Stateful<gpui::Div>| {
         if !enabled || guarded {
             el.opacity(0.4)
@@ -1518,6 +1546,26 @@ pub fn dom_bar<V: TradePane>(
                 narrow,
                 t,
             )),
+            // The calendar: a blackout (or a calendar that can't answer) as a strip; a
+            // release coming as a quiet line.
+            (None, None, None) if d.news.is_some() => {
+                let (warns, text) = d.news.as_ref().expect("checked");
+                if *warns {
+                    let tail = if d.news_block.is_some() {
+                        "exits, Flatten and Cancel all still work"
+                    } else {
+                        ""
+                    };
+                    status.child(lock_strip(text, tail, narrow, t))
+                } else {
+                    status.child(
+                        div()
+                            .min_w_0()
+                            .text_color(t.text_dim)
+                            .child(format!("Scheduled release: {text}")),
+                    )
+                }
+            }
             // Narrow: the switch shows only "!", the reason is here.
             _ => match blocker.filter(|_| narrow && enabled) {
                 Some(b) => status.child(lock_strip(&blocked_line(b), "", true, t)),

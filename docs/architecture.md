@@ -99,6 +99,8 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # they win over Settings › Appearance for that run.
 #   --settings SECTION (also render the Settings window into <out stem>-settings.png), --settings-search TEXT,
 #   --settings-set KEY=VALUE (repeatable; e.g. guard.max_daily_loss=1500 shows a loosening's confirmation).
+#   --econ-calendar FILE (an economic calendar in the bundled file's format, read instead of the bundled one by
+#   the app and its trading cores: synthetic releases on synthetic data). Trading scripts: `guard news warn|block|flatten`.
 # --price-zoom F zooms the auto-fitted price range by F (as Ctrl+wheel), i.e. manual price scale.
 # Layout: --layout trading (default: chart | DOM over time & sales) or chart, or --workspace NAME
 # (a built-in, e.g. `pair`, or a workspace .json file; screenshots never read saved workspaces).
