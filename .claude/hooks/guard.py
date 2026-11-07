@@ -50,20 +50,36 @@ def finish():
 def guardrail_path(path):
     """CLAUDE.md, CLAUDE.local.md, .claude/** (not worktrees or memory) and .github/**."""
     low = path.replace("\\", "/").lower()
-    if re.search(r"(^|/)\.claude/(worktrees|projects)/", low):
+    # A worktree under .claude/worktrees/<name>/ is a checkout: judge the path inside it.
+    low = re.sub(r"^.*?(^|/)\.claude/worktrees/[^/]+/", "/", low)
+    if re.search(r"(^|/)\.claude/projects/", low):
         return False
     return bool(re.search(r"(^|/)\.claude/|(^|/)\.github/|(^|/)claude(\.local)?\.md$", low))
 
 
+def native_path(p):
+    """Git Bash paths (`/z/x`, `~/x`) as the native paths Python can open."""
+    if not p:
+        return p
+    p = os.path.expanduser(p)
+    m = re.match(r"^/([a-zA-Z])(/.*)?$", p)
+    if os.name == "nt" and m:
+        return f"{m.group(1).upper()}:{m.group(2) or '/'}"
+    return p
+
+
 def current_branch(cwd):
+    """The checked-out branch; "" when detached; None when it can't be determined."""
     try:
         out = subprocess.run(
             ["git", "symbolic-ref", "--short", "-q", "HEAD"],
-            cwd=cwd or None, capture_output=True, text=True, timeout=5,
+            cwd=native_path(cwd) or None, capture_output=True, text=True, timeout=5,
         )
+        if out.returncode not in (0, 1):
+            return None
         return out.stdout.strip()
     except Exception:
-        return ""
+        return None
 
 
 def split_parts(cmd):
@@ -110,8 +126,14 @@ def check_git(args, cwd, raw):
         refs = [a for a in rest if not a.startswith("-")]
         if any(re.search(r"(^|:)(refs/heads/)?main$", r) for r in refs[1:]):
             deny("pushing to main (open a PR)")
-        if current_branch(cwd) == "main" and (len(refs) <= 1 or "HEAD" in refs[1:]):
-            deny("pushing from main (open a PR)")
+        if len(refs) <= 1 or "HEAD" in refs[1:]:
+            branch = current_branch(cwd)
+            if branch == "main":
+                deny("pushing from main (open a PR)")
+            if branch is None:
+                deny("pushing with no explicit branch where the current branch is unknown (name the branch)")
+        if "--no-verify" in rest:
+            deny("skipping push hooks")
         if re.search(r"--force(?![-\w])", joined) or "f" in flags or any(r.startswith("+") for r in refs):
             deny("force push (use --force-with-lease to your own branch)")
         if re.search(r"--(delete|mirror|prune)\b", joined) or "d" in flags or any(r.startswith(":") for r in refs):
@@ -139,7 +161,7 @@ def check_git(args, cwd, raw):
     elif sub == "reflog" and rest[:1] == ["expire"]:
         deny("expiring the reflog")
     elif sub == "commit":
-        if "n" in flags or "--no-verify" in joined or "--no-gpg-sign" in joined:
+        if "n" in flags or "--no-verify" in rest or "--no-gpg-sign" in rest:
             deny("skipping commit hooks or signing")
     elif sub == "apply":
         ask("applying a patch (tier C if it touches the agent rules)")
@@ -157,7 +179,7 @@ def check_gh(args):
     if sub == "pr merge":
         if re.search(r"--admin\b|--delete-branch\b|(^|\s)-d(\s|$)", joined):
             deny("merging with --admin or deleting the branch")
-        num = next((a for a in args[2:] if not a.startswith("-")), "")
+        num = next((a for a in args[2:] if re.match(r"^(\d+|https?://\S+/pull/\d+)$", a)), "")
         try:
             out = subprocess.run(
                 ["gh", "pr", "diff", *([num] if num else []), "--name-only"],
@@ -177,7 +199,7 @@ def check_gh(args):
 def check_shell(cmd, cwd):
     for part in split_parts(cmd):
         prog, args = command_of(part)
-        if prog == "cd" and args:
+        if prog in ("cd", "pushd", "set-location", "sl", "chdir") and args:
             cwd = args[0]
             continue
         if SECRET.search(part):

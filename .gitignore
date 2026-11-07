@@ -13,3 +13,6 @@
 /fuzz/artifacts/
 /fuzz/coverage/
 /fuzz/target/
+
+# Python bytecode (the agent guard hook)
+__pycache__/

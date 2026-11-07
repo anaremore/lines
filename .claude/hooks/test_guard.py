@@ -104,6 +104,8 @@ CASES = [
     ("& git push origin main", "deny"),
     ("command git push origin main", "deny"),
     ('git commit -m "guard: deny disableAllHooks"', "allow"),
+    ('git commit -m "guard: block --no-verify"', "allow"),
+    ("git push --no-verify origin feature", "deny"),
     # Searching for rule words is fine.
     ('rg -n -- "--no-verify" CLAUDE.md', "allow"),
     ("grep -rn sim-once crates", "allow"),
@@ -154,6 +156,10 @@ FILES = [
     (R + "CLAUDE.local.md", "x", "ask"),
     (R + ".claude/hooks/guard.py", 'if "disableAllHooks" in part:', "ask"),
     (R + ".claude/worktrees/feat/crates/lines-app/src/lib.rs", "x", "allow"),
+    (R + ".claude/worktrees/feat/.claude/hooks/guard.py", "x", "ask"),
+    (R + ".claude/worktrees/feat/.claude/settings.json", "{}", "ask"),
+    (R + ".claude/worktrees/feat/CLAUDE.md", "x", "ask"),
+    (R + ".claude/worktrees/feat/.github/workflows/ci.yml", "x", "ask"),
     (R + "CLAUDE.md", "x", "ask"),
     (R + ".github/workflows/ci.yml", "x", "ask"),
     (R + "deny.toml", "x", "allow"),
@@ -173,7 +179,18 @@ def main_branch_cases():
             (sh("git push -u origin feature", d), "allow", "named branch from main checkout"),
             (sh(f"git -C {d} push origin HEAD"), "deny", "git -C into a checkout on main"),
             (sh(f"cd {d} && git push"), "deny", "cd into a checkout on main"),
+            (sh(f"cd {bash_path(d)} && git push"), "deny", "cd with a Git Bash path"),
+            (sh(f"git -C {bash_path(d)} push"), "deny", "git -C with a Git Bash path"),
+            (sh(f"Set-Location {d}; git push"), "deny", "Set-Location into a checkout on main"),
+            (sh("cd /no/such/dir && git push"), "deny", "unknown branch, no explicit refspec"),
+            (sh("cd /no/such/dir && git push -u origin feature"), "allow", "unknown branch, named branch"),
         ]
+
+
+def bash_path(p):
+    """C:\\x\\y -> /c/x/y (how Git Bash spells native paths)."""
+    p = p.replace("\\", "/")
+    return f"/{p[0].lower()}{p[2:]}" if os.name == "nt" and p[1:2] == ":" else p
 
 
 def decision_cases():
