@@ -1668,9 +1668,11 @@ impl ChartView {
                     if let Some(d) = &mut self.ct.drag {
                         d.to = Price(to.0 + self.ct.grab);
                     }
+                    if self.ct.pos_drag || self.ct.adding.is_some() {
+                        self.ct.moved = self.ct.moved.max((y as f32 - self.ct.press_y).abs());
+                    }
                     if self.ct.pos_drag {
-                        let (qty, avg) = self.ct.position.unwrap_or((0, 0.0));
-                        let avg = Price(avg.round() as i64);
+                        let (qty, avg) = self.ct.position.unwrap_or((0, f64::NAN));
                         self.ct.adding =
                             lines_core::geometry::order_tags::position_drag_exit(qty, avg, to)
                                 .map(|target| crate::chart_trade::AddExit { target, to });
@@ -1735,16 +1737,19 @@ impl ChartView {
             cx.notify();
             return;
         }
-        // A position-line drag released at the average (no exit side yet) places nothing.
-        if std::mem::take(&mut self.ct.pos_drag) && self.ct.adding.is_none() {
+        // An add drag (a handle or the position line): place, move the existing exit of that
+        // kind, or nothing (a click, or released at the average) — `chart_trade::release_action`.
+        if std::mem::take(&mut self.ct.pos_drag) || self.ct.adding.is_some() {
+            let adding = self.ct.adding.take();
             self.ct.add_from = None;
-            cx.notify();
-            return;
-        }
-        if let Some(a) = self.ct.adding.take() {
-            // A click on a handle without dragging it places nothing.
-            if self.ct.add_from.take() != Some(a.to) {
-                self.place_exit(a, cx);
+            let existing = |target: bool| self.ct.existing_exit(target).map(|m| m.id);
+            let action = crate::chart_trade::release_action(adding, self.ct.moved, existing);
+            match action {
+                crate::chart_trade::Release::Nothing => {}
+                crate::chart_trade::Release::Place(a) => self.place_exit(a, cx),
+                crate::chart_trade::Release::Move { order, to } => {
+                    self.drop_order(crate::dom_orders::DragOrder { order, to }, cx)
+                }
             }
             cx.notify();
             return;
@@ -1785,6 +1790,8 @@ impl ChartView {
             {
                 self.ct.pos_drag = true;
                 self.ct.adding = None;
+                self.ct.press_y = y as f32;
+                self.ct.moved = 0.0;
                 self.ct.add_from =
                     lines_core::geometry::snap_price(&self.vp, y, self.instrument.price.tick);
                 cx.notify();
@@ -1821,6 +1828,8 @@ impl ChartView {
                         to,
                     });
                     self.ct.add_from = Some(to);
+                    self.ct.press_y = y as f32;
+                    self.ct.moved = 0.0;
                 }
             }
             TagHit::Edge(price) => {
@@ -2352,17 +2361,15 @@ impl ChartView {
         let refused = self
             .ct
             .prepare(&t.cache, self.trade.account.as_ref(), contract);
-        // Screenshot fixture: the position line held dragged (a preview, never placed).
+        // Screenshot fixture: the position line held dragged (a preview, never placed: it sets
+        // only `adding`, never `pos_drag` or `moved`, so a release would see a click; and the
+        // flag exists only with `--screenshot`, which has no pointer).
         if let (Some(y), Some((qty, avg))) = (self.drag_position, self.ct.position)
             && let Some(to) =
                 lines_core::geometry::snap_price(&self.vp, y as f64, self.instrument.price.tick)
         {
-            self.ct.adding = lines_core::geometry::order_tags::position_drag_exit(
-                qty,
-                Price(avg.round() as i64),
-                to,
-            )
-            .map(|target| crate::chart_trade::AddExit { target, to });
+            self.ct.adding = lines_core::geometry::order_tags::position_drag_exit(qty, avg, to)
+                .map(|target| crate::chart_trade::AddExit { target, to });
         }
         let shown = cx
             .try_global::<crate::picker_view::AppSettings>()
