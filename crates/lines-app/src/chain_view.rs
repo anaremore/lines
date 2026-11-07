@@ -9,7 +9,10 @@
 //!   between: a dashed line labelled with the symbol and price. Each side's in-the-money cells are shaded (calls
 //!   below the price, puts above it); the line says where that changes, so the shading isn't
 //!   the only cue.
-//! - **Missing** values read `—`; a stale feed dims the pane like every other.
+//! - **Missing** values read `—`; the feed's state ("ended", "connecting", …) is a word in the
+//!   header, as on the chart, and a stale feed dims the pane like every other.
+//! - **Expiry chips** (the soonest 8) are whole: those that don't fit drop off the end
+//!   entirely (onto a hidden second line), never cut.
 //! - **Keys** (the pane focused): Up/Down move by strike, Page Up/Down by a page, Home goes
 //!   back to the money, Left/Right change the expiry, Tab switches calls and puts. Enter will
 //!   open an order ticket with paper options (decision 0028, phase 3); until then it says so.
@@ -97,8 +100,8 @@ impl Col {
     /// The widest text the column shows, for its width.
     fn sample(self) -> &'static str {
         match self {
-            Col::Oi | Col::Vol => "888,888",
-            Col::Iv => "188.8%",
+            Col::Oi | Col::Vol => "8,888,888",
+            Col::Iv => "888.8%",
             Col::Delta => "-0.88",
             Col::Last | Col::Bid | Col::Ask => "8888.88",
         }
@@ -143,6 +146,11 @@ pub fn row_at(v: usize, start: usize, line_at: Option<usize>) -> Option<usize> {
     }
 }
 
+/// The visual row of chain row `n` of the window: one lower from the price row on.
+pub fn visual_row(n: usize, line_at: Option<usize>) -> usize {
+    n + usize::from(line_at.is_some_and(|l| n >= l))
+}
+
 /// The rows to show: `fit` rows of `n` around `center` (as centered as the ends allow).
 pub fn window(n: usize, fit: usize, center: usize) -> std::ops::Range<usize> {
     if n <= fit {
@@ -161,7 +169,7 @@ pub fn write_count(out: &mut impl std::fmt::Write, n: i64) -> std::fmt::Result {
     let _ = std::fmt::Write::write_fmt(&mut digits, format_args!("{}", n.unsigned_abs()));
     let d = digits.as_str();
     for (i, c) in d.chars().enumerate() {
-        if i > 0 && (d.len() - i) % 3 == 0 {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
             out.write_char(',')?;
         }
         out.write_char(c)?;
@@ -172,7 +180,9 @@ pub fn write_count(out: &mut impl std::fmt::Write, n: i64) -> std::fmt::Result {
 /// IV in hundredths of a percent as `14.8%`.
 pub fn write_iv(out: &mut impl std::fmt::Write, bp: i32) -> std::fmt::Result {
     let tenths = (i64::from(bp) + if bp >= 0 { 5 } else { -5 }) / 10;
-    write!(out, "{}.{}%", tenths / 10, (tenths % 10).abs())
+    let sign = if tenths < 0 { "-" } else { "" };
+    let a = tenths.abs();
+    write!(out, "{sign}{}.{}%", a / 10, a % 10)
 }
 
 /// Delta in ten-thousandths as `0.51` / `-0.49` (signed: never color alone).
@@ -190,11 +200,21 @@ pub fn write_dte(
     expiry: CivilDate,
 ) -> std::fmt::Result {
     let days = expiry.days() - today.days();
-    if days <= 0 {
+    if days < 0 {
+        out.write_str("expired")
+    } else if days == 0 {
         out.write_str("0DTE")
     } else {
         write!(out, "{days}d")
     }
+}
+
+/// `Nov 9`: an expiry as its chip and the title name it.
+fn chip_date(e: CivilDate) -> String {
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][usize::from(e.month.clamp(1, 12)) - 1];
+    format!("{month} {}", e.day)
 }
 
 /// A cell's text for a quote field (`—` when missing).
@@ -262,6 +282,52 @@ pub struct ChainView {
     bounds: Bounds<Pixels>,
     /// Column x ranges last frame, for clicks: (call cell start, put cell start, row top).
     layout: Layout,
+    frame: Frame,
+}
+
+/// Rows kept per frame (a pane taller than this shows this many).
+const MAX_ROWS: usize = 256;
+
+/// The visible part of the chain, copied out of the store (so the lock is held only for the
+/// copy, and a busy store this instant redraws the last frame instead of going blank).
+#[derive(Debug, Default)]
+struct Frame {
+    /// The chain rows in view (capacity [`MAX_ROWS`]: refreshing never allocates).
+    rows: Vec<lines_core::ChainRow>,
+    first_row: usize,
+    line_at: Option<usize>,
+    last: Option<Price>,
+    has_chain: bool,
+}
+
+impl Frame {
+    fn refresh(
+        &mut self,
+        chain: Option<&OptionChain>,
+        last: Option<Price>,
+        selected: Option<Price>,
+        fit: usize,
+    ) {
+        self.last = last;
+        self.rows.clear();
+        let Some(chain) = chain else {
+            self.has_chain = false;
+            return;
+        };
+        self.has_chain = true;
+        let center = selected
+            .and_then(|s| chain.find(s).ok())
+            .or_else(|| last.and_then(|l| chain.atm(l)))
+            .unwrap_or(chain.rows.len() / 2);
+        // One row is the underlying's price when it falls in view.
+        let range = window_rows(chain, fit.saturating_sub(1).clamp(1, MAX_ROWS), center);
+        self.first_row = range.start;
+        self.line_at = last
+            .map(|l| chain.split_at(l))
+            .filter(|si| *si >= range.start && *si <= range.end)
+            .map(|si| si - range.start);
+        self.rows.extend_from_slice(&chain.rows[range]);
+    }
 }
 
 /// Where last frame's columns were (for clicks).
@@ -342,6 +408,10 @@ impl ChainView {
             glyphs: Glyphs::new(TEXT_PX),
             bounds: Bounds::default(),
             layout: Layout::default(),
+            frame: Frame {
+                rows: Vec::with_capacity(MAX_ROWS),
+                ..Frame::default()
+            },
         }
     }
 
@@ -363,14 +433,17 @@ impl ChainView {
         };
         let from = match self.selected.and_then(|s| chain.find(s).ok()) {
             Some(i) => i,
-            None => match d.last_trade.and_then(|l| chain.atm(l)) {
-                Some(i) => {
-                    // The first press selects the money.
-                    self.selected = Some(chain.rows[i].strike);
-                    return;
+            None => {
+                // The first press selects the money (the middle row before any trade).
+                let i = d
+                    .last_trade
+                    .and_then(|l| chain.atm(l))
+                    .unwrap_or(chain.rows.len() / 2);
+                if let Some(r) = chain.rows.get(i) {
+                    self.selected = Some(r.strike);
                 }
-                None => return,
-            },
+                return;
+            }
         };
         let to = (from as i64 + delta).clamp(0, chain.rows.len() as i64 - 1) as usize;
         self.selected = Some(chain.rows[to].strike);
@@ -394,7 +467,10 @@ impl ChainView {
         };
         let i = all.iter().position(|e| *e == cur).unwrap_or(0) as i64;
         let j = (i + delta).clamp(0, all.len() as i64 - 1) as usize;
-        self.expiry = Some(all[j]);
+        if all[j] != cur {
+            self.expiry = Some(all[j]);
+            self.selected = None; // that strike may not exist there: back to the money
+        }
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -517,18 +593,23 @@ impl ChainView {
         self.bounds = bounds;
         let t = self.theme;
         window.paint_quad(fill(bounds, t.bg));
-        let Some(d) = self.store.try_read() else {
-            // Busy this instant: next poll.
-            self.seen_revision = u64::MAX;
-            return;
-        };
         let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
         let (w, h) = (f(bounds.size.width), f(bounds.size.height));
         if w < 1.0 || h < 1.0 {
             return; // not laid out yet (a first frame can be empty and far off)
         }
         let hair = 1.0 / window.scale_factor();
-        let Some(chain) = self.shown_expiry(&d.chains).and_then(|e| d.chains.chain(e)) else {
+        let fit = (((h - HEAD_H) / ROW_H).floor().max(1.0)) as usize;
+        self.page = fit.saturating_sub(1).max(1);
+        // Copy what's in view and let go of the store; busy this instant: last frame's rows.
+        match self.store.try_read() {
+            Some(d) => {
+                let chain = self.shown_expiry(&d.chains).and_then(|e| d.chains.chain(e));
+                self.frame.refresh(chain, d.last_trade, self.selected, fit);
+            }
+            None => self.seen_revision = u64::MAX,
+        }
+        if !self.frame.has_chain {
             let msg = if self.product.options().is_some() {
                 "No option chain from this source yet."
             } else {
@@ -545,8 +626,8 @@ impl ChainView {
                 cx,
             );
             return;
-        };
-        let last = d.last_trade;
+        }
+        let last = self.frame.last;
         // Column widths from their titles and widest values.
         let mut cols = [0.0f32; 7];
         for (i, c) in Col::CALLS.iter().enumerate() {
@@ -647,30 +728,19 @@ impl ChainView {
             ),
             t.axis_line,
         ));
-        // Rows: around the selection, else the money.
-        let fit = (((h - HEAD_H) / ROW_H).floor().max(1.0)) as usize;
-        self.page = fit.saturating_sub(1).max(1);
-        let center = self
-            .selected
-            .and_then(|s| chain.find(s).ok())
-            .or_else(|| last.and_then(|l| chain.atm(l)))
-            .unwrap_or(chain.rows.len() / 2);
-        // One row is the underlying's price when it falls in view.
-        let range = window_rows(chain, fit.saturating_sub(1).max(1), center);
-        let split = last.map(|l| chain.split_at(l));
-        let line_at = split
-            .filter(|si| *si >= range.start && *si <= range.end)
-            .map(|si| si - range.start);
+        // Rows: around the selection, else the money (copied in `frame`).
+        let line_at = self.frame.line_at;
         self.layout = Layout {
             strike_x: (calls_end, puts_start),
-            first_row: range.start,
-            rows: range.len() + usize::from(line_at.is_some()),
+            first_row: self.frame.first_row,
+            rows: self.frame.rows.len() + usize::from(line_at.is_some()),
             line_at,
         };
         let mut s = FixedStr::<24>::new();
-        for (n, ri) in range.clone().enumerate() {
-            let row = &chain.rows[ri];
-            let v = n + usize::from(line_at.is_some_and(|l| n >= l));
+        for n in 0..self.frame.rows.len() {
+            let row = self.frame.rows[n];
+            let row = &row;
+            let v = visual_row(n, line_at);
             let y = top + HEAD_H + v as f32 * ROW_H;
             // In the money: calls below the underlying's price, puts above it.
             let (call_itm, put_itm) = match last {
@@ -680,7 +750,7 @@ impl ChainView {
             if call_itm {
                 window.paint_quad(fill(
                     Bounds::new(point(px(x0), px(y)), size(px(calls_end - x0), px(ROW_H))),
-                    t.large_print,
+                    t.grid,
                 ));
             }
             if put_itm {
@@ -689,7 +759,7 @@ impl ChainView {
                         point(px(puts_start), px(y)),
                         size(px(x - puts_start), px(ROW_H)),
                     ),
-                    t.large_print,
+                    t.grid,
                 ));
             }
             for i in 0..7 {
@@ -732,7 +802,7 @@ impl ChainView {
             ));
             if self.selected == Some(row.strike) {
                 // The selected strike: an accent outline; the selected side: a bar at its
-                // outer edge (and its title row says CALLS / PUTS).
+                // outer edge.
                 for (yy, hh) in [(y, 2.0 * hair), (y + ROW_H - 2.0 * hair, 2.0 * hair)] {
                     window.paint_quad(fill(
                         Bounds::new(point(px(x0), px(yy)), size(px(x - x0), px(hh))),
@@ -784,7 +854,6 @@ impl ChainView {
                 cx,
             );
         }
-        drop(d);
         pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
     }
 
@@ -794,6 +863,7 @@ impl ChainView {
         let today = pane::today(self.frozen, &self.store);
         self.expiries.clear();
         let mut shown = None;
+        let mut word = None;
         if let Some(title) = pane::unavailable_title(&self.feed) {
             left.push_str(&title);
         } else if let Some(d) = self.store.try_read() {
@@ -804,20 +874,30 @@ impl ChainView {
                 let _ = self.product.price.write(l, &mut s);
                 left.push_str(s.as_str());
             }
-            self.expiries.extend(d.chains.expiries().take(MAX_EXPIRIES));
             shown = self.shown_expiry(&d.chains);
+            // The chips: the soonest few, shifted so the shown expiry is always among them.
+            let at = shown
+                .and_then(|s| d.chains.expiries().position(|e| e == s))
+                .unwrap_or(0);
+            let skip = (at + 1).saturating_sub(MAX_EXPIRIES);
+            self.expiries
+                .extend(d.chains.expiries().skip(skip).take(MAX_EXPIRIES));
+            // Every state but live is a word that never gives way (as on the chart).
+            word = pane::status_word(&d.status);
         }
         left.push_str("  Option chain");
+        // The shown expiry, named even where its chip doesn't fit.
+        if let Some(e) = shown {
+            left.push_str(&format!("  {}", chip_date(e)));
+        }
         let chips = self.expiries.clone().into_iter().map(|e| {
             let on = Some(e) == shown;
-            let mut label = String::with_capacity(16);
-            let month = [
-                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-            ][usize::from(e.month.clamp(1, 12)) - 1];
-            label.push_str(&format!("{month} {} · ", e.day));
+            let mut label = chip_date(e);
+            label.push_str(" · ");
             let _ = write_dte(&mut label, today, e);
             div()
                 .id(gpui::SharedString::from(format!("expiry-{e}")))
+                .flex_shrink_0()
                 .px_1()
                 .cursor_pointer()
                 .border_b_2()
@@ -833,7 +913,10 @@ impl ChainView {
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        this.expiry = Some(e);
+                        if this.expiry != Some(e) {
+                            this.expiry = Some(e);
+                            this.selected = None;
+                        }
                         cx.notify();
                     }),
                 )
@@ -861,9 +944,24 @@ impl ChainView {
                         .gap_2()
                         .items_center()
                         .children(pane::link_chip(self.common.link, &t))
-                        .child(div().text_color(t.text_main).child(left))
+                        .child(div().flex_shrink_0().text_color(t.text_main).child(left))
+                        .children(
+                            word.map(|w| div().flex_shrink_0().text_color(t.text_main).child(w)),
+                        )
                         .children(pane::stale_badge(&self.store, &t))
-                        .children(chips),
+                        .child(
+                            // Whole chips only: those that don't fit wrap onto a second line,
+                            // which the fixed height hides.
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_2()
+                                .h(px(18.0))
+                                .overflow_hidden()
+                                .min_w_0()
+                                .children(chips),
+                        ),
                 ),
             )
     }
@@ -1000,6 +1098,101 @@ mod tests {
             [false, false, false, false, false, true, true],
             "bid and ask always"
         );
+    }
+
+    #[test]
+    fn every_cell_and_edge_case() {
+        let spy = lines_feed::catalog::get(lines_feed::catalog::SPY).unwrap();
+        let q = OptionQuote {
+            last: Some(Price(1_234)),
+            volume: lines_core::Qty(18_331),
+            open_interest: 1_234_567,
+            iv_bp: Some(1_480),
+            delta_e4: Some(-4_900),
+            ..Default::default()
+        };
+        let mut c = FixedStr::<24>::new();
+        for (col, want) in [
+            (Col::Last, "12.34"),
+            (Col::Vol, "18,331"),
+            (Col::Oi, "1,234,567"),
+            (Col::Iv, "14.8%"),
+            (Col::Delta, "-0.49"),
+        ] {
+            cell(&mut c, &spy, Some(&q), col);
+            assert_eq!(c.as_str(), want, "{col:?}");
+        }
+        assert_eq!(s(|o| write_count(o, -1_234)), "-1,234");
+        assert_eq!(s(|o| write_iv(o, -55)), "-0.6%");
+        let d = |y, m, dd| CivilDate::new(y, m, dd).unwrap();
+        assert_eq!(
+            s(|o| write_dte(o, d(2026, 11, 10), d(2026, 11, 9))),
+            "expired"
+        );
+        assert_eq!(chip_date(d(2026, 12, 18)), "Dec 18");
+        // Unequal widths: delta and last go before bid and ask, still outside in.
+        let cols = [50.0, 60.0, 55.0, 45.0, 60.0, 60.0, 60.0];
+        let w = 70.0 + 2.0 * (60.0 + 60.0 + 60.0 + 45.0);
+        assert_eq!(
+            fit_columns(w, 70.0, cols),
+            [false, false, false, true, true, true, true]
+        );
+    }
+
+    /// The window, the price row and the rows drawn agree: every chain row in view maps back
+    /// from its visual row, and the price row maps to none.
+    #[test]
+    fn layout_and_clicks_agree() {
+        let mut c = lines_core::OptionChains::default();
+        let exp = CivilDate::new(2026, 11, 9).unwrap();
+        for k in 664..=704 {
+            c.apply(
+                lines_core::OptionKey {
+                    expiry: exp,
+                    strike: Price(k * 100),
+                    right: Right::Call,
+                },
+                OptionQuote::default(),
+            );
+        }
+        let chain = c.chain(exp).unwrap();
+        for (last, fit, selected) in [
+            (Some(Price(68_269)), 20, None),
+            (Some(Price(66_000)), 20, None),
+            (Some(Price(71_000)), 20, None),
+            (Some(Price(68_269)), 1, None),
+            (Some(Price(68_269)), 60, None),
+            (None, 10, Some(Price(70_000))),
+        ] {
+            let mut f = Frame::default();
+            f.refresh(Some(chain), last, selected, fit);
+            assert!(f.rows.len() + usize::from(f.line_at.is_some()) <= fit.max(2));
+            for n in 0..f.rows.len() {
+                let v = visual_row(n, f.line_at);
+                assert_eq!(row_at(v, f.first_row, f.line_at), Some(f.first_row + n));
+                assert_eq!(chain.rows[f.first_row + n], f.rows[n]);
+            }
+            if let Some(l) = f.line_at {
+                assert_eq!(row_at(l, f.first_row, f.line_at), None);
+                // The price falls between the rows around its row.
+                let p = last.unwrap();
+                if l > 0 {
+                    assert!(f.rows[l - 1].strike <= p);
+                }
+                if l < f.rows.len() {
+                    assert!(f.rows[l].strike > p);
+                }
+            }
+            if let Some(s) = selected {
+                assert!(
+                    f.rows.iter().any(|r| r.strike == s),
+                    "the selection stays in view"
+                );
+            }
+        }
+        let mut f = Frame::default();
+        f.refresh(None, None, None, 10);
+        assert!(!f.has_chain && f.rows.is_empty());
     }
 
     #[test]

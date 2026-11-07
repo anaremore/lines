@@ -1543,10 +1543,19 @@ impl WindowView {
             self.focus_pane(id, window, cx);
             return;
         }
+        // An option chain opens on the focused pane's market, in its link group (the
+        // journal and the strategy panel aren't per market).
+        let (target, link) = match (
+            kind,
+            self.tabs.get(self.active).and_then(|t| t.focused_handle()),
+        ) {
+            (PaneKind::Chain, Some(h)) => (h.feed(cx).target_doc, h.link(cx)),
+            _ => (None, None),
+        };
         let tab = Self::build_tab(
             &TabDoc {
                 focused: 0,
-                layout: Layout::Pane(PaneDoc::new(kind, None, None)),
+                layout: Layout::Pane(PaneDoc::new(kind, link, target)),
             },
             cx,
         );
