@@ -512,18 +512,20 @@ struct Cli {
     #[arg(long, value_parser = parse_vwap)]
     vwap: Vec<lines_indicators::VwapSpec>,
     /// The first chart's timeframe: 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w (a bare number is
-    /// minutes; bars align to the product's session open), or tick bars `500t` (100t 233t 500t
-    /// 1000t 2000t, any 1t to 100000t; built from counted trades, reset at each session open). A
-    /// timeframe saved with the chart wins. In the app: type it on a chart (`5`, `1h`, `500t` +
+    /// minutes; bars align to the product's session open), or bars built from counted trades
+    /// (reset at each session open): tick `500t` (100t 233t 500t 1000t 2000t, any 1t to
+    /// 100000t), volume `500v` (whole contracts, 1v to 1000000v), range `10r` (price ticks, 1r
+    /// to 10000r) or seconds `30s` (dividing the day, 1s to 3600s). A timeframe saved with the
+    /// chart wins. In the app: type it on a chart (`5`, `1h`, `500t`, `500v`, `10r`, `30s` +
     /// Enter) or use the header chip.
     #[arg(long, value_parser = parse_timeframe)]
     timeframe: Option<lines_core::Timeframe>,
     /// Screenshot: the first chart with its timeframe list open (the header's "5m ▾" chip).
     #[arg(long, requires = "screenshot")]
     timeframe_menu: bool,
-    /// Tick bars (`--timeframe 500t`) run across sessions instead of restarting at each
-    /// session open. A mode saved with the chart wins. In the app: the palette or the pane
-    /// menu ("Tick bars run continuously").
+    /// Tick, volume, range and seconds bars (`--timeframe 500t`) run across sessions instead of
+    /// restarting at each session open. A mode saved with the chart wins. In the app: the palette or the pane
+    /// menu ("Trade-built bars run continuously").
     #[arg(long)]
     tick_continuous: bool,
     /// Screenshot: charts and DOMs with their account list open (the header's account chip).
@@ -676,8 +678,9 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
 
 fn parse_timeframe(s: &str) -> Result<lines_core::Timeframe, String> {
     lines_core::Timeframe::parse(s).ok_or_else(|| {
-        "expected 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d or 1w, or tick bars 100t 233t 500t \
-             1000t 2000t (any 1t to 100000t)"
+        "expected 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d or 1w, tick bars 500t (1t to 100000t), \
+             volume bars 500v (1v to 1000000v), range bars 10r (1r to 10000r) or seconds bars \
+             30s (1s to 3600s, dividing the day)"
             .into()
     })
 }

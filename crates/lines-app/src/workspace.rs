@@ -1992,7 +1992,7 @@ impl WindowView {
                 ));
                 if chart.read(cx).on_ticks() {
                     items.push(MenuItem::named(
-                        "Tick bars run continuously (no session reset)",
+                        "Trade-built bars run continuously (no session reset)",
                         Command::TickBarsContinuous,
                         chart.read(cx).tick_continuous(),
                     ));

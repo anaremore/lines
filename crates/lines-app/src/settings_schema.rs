@@ -372,9 +372,9 @@ impl NewPanes {
 /// Grouping choices offered (the DOM's G key cycles the same).
 pub const GROUPINGS: [u32; 5] = [1, 2, 5, 10, 25];
 const GROUPING_NAMES: [&str; 5] = ["1", "2", "5", "10", "25"];
-const TIMEFRAME_NAMES: [&str; 17] = [
+const TIMEFRAME_NAMES: [&str; 23] = [
     "1m", "2m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "D", "W", "100t", "233t",
-    "500t", "1000t", "2000t",
+    "500t", "1000t", "2000t", "15s", "30s", "500v", "1000v", "4r", "10r",
 ];
 
 fn choice(names: &[&str], current: &str) -> usize {

@@ -158,15 +158,15 @@ async fn launch(
 }
 
 const AT_START: TickKey = TickKey {
-    n: 233,
+    kind: lines_core::BarKind::Ticks(233),
     reset: TickReset::Session,
 };
 const LATER: TickKey = TickKey {
-    n: 500,
+    kind: lines_core::BarKind::Ticks(500),
     reset: TickReset::Continuous,
 };
 const FROM_STORE: TickKey = TickKey {
-    n: 89,
+    kind: lines_core::BarKind::Ticks(89),
     reset: TickReset::Session,
 };
 

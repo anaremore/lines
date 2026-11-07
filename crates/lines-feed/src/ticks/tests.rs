@@ -13,7 +13,7 @@ use crate::recording::{Direction, FORMAT_VERSION, Header, Writer};
 use crate::store::TAPE_PRINTS;
 
 const KEY: TickKey = TickKey {
-    n: 233,
+    kind: lines_core::BarKind::Ticks(233),
     reset: TickReset::Session,
 };
 
@@ -370,19 +370,19 @@ fn warm_start(
 }
 
 const AT_START: TickKey = TickKey {
-    n: 233,
+    kind: lines_core::BarKind::Ticks(233),
     reset: TickReset::Session,
 };
 const DURING: TickKey = TickKey {
-    n: 144,
+    kind: lines_core::BarKind::Ticks(144),
     reset: TickReset::Session,
 };
 const AFTER: TickKey = TickKey {
-    n: 89,
+    kind: lines_core::BarKind::Ticks(89),
     reset: TickReset::Continuous,
 };
 const LATER: TickKey = TickKey {
-    n: 55,
+    kind: lines_core::BarKind::Ticks(55),
     reset: TickReset::Session,
 };
 
@@ -600,7 +600,7 @@ fn released_builders_and_rebuilds_stop() {
             KEY,
             Arc::downgrade(&alive),
             7,
-            TickBars::new(KEY.n, KEY.reset, None, 16),
+            TickBars::new(KEY.kind.size(), KEY.reset, None, 16),
             Some(Vec::new()),
             None,
         ));
@@ -764,7 +764,10 @@ fn bars_from_the_open_are_complete_unless_continuous_misses_earlier_sessions() {
                 as_of: Some(t("2026-11-04T21:29:59.999Z")),
             }])
         });
-        let key = TickKey { n: 233, reset };
+        let key = TickKey {
+            kind: lines_core::BarKind::Ticks(233),
+            reset,
+        };
         let _lease = s.acquire_ticks(key);
         for i in 0..500 {
             let e = MarketEvent::Trade {
@@ -787,7 +790,7 @@ fn leases_share_and_release() {
     let a = s.acquire_ticks(KEY);
     let b = s.acquire_ticks(KEY);
     let c = s.acquire_ticks(TickKey {
-        n: 500,
+        kind: lines_core::BarKind::Ticks(500),
         reset: TickReset::Continuous,
     });
     assert_eq!(s.read().ticks.slots.len(), 2);
@@ -900,7 +903,7 @@ fn a_failed_rebuild_falls_back_to_the_tape() {
                 KEY,
                 Arc::downgrade(&alive),
                 g,
-                TickBars::new(KEY.n, KEY.reset, None, 16),
+                TickBars::new(KEY.kind.size(), KEY.reset, None, 16),
                 Some(Vec::new()),
                 None,
             ));
@@ -970,7 +973,7 @@ fn a_landing_rebuild_never_moves_the_feed_clocks() {
             KEY,
             Arc::downgrade(&alive),
             g,
-            TickBars::new(KEY.n, KEY.reset, None, 16),
+            TickBars::new(KEY.kind.size(), KEY.reset, None, 16),
             Some(Vec::new()),
             None,
         ));
@@ -1001,21 +1004,26 @@ fn landing_applies_held_trades_in_chunks() {
             KEY,
             Arc::downgrade(&alive),
             3,
-            TickBars::new(KEY.n, KEY.reset, None, 1000),
+            TickBars::new(KEY.kind.size(), KEY.reset, None, 1000),
             Some(prints.clone()),
             None,
         ));
     }
     // Over the limit: handed out, still rebuilding.
-    let mut b = TickBars::new(KEY.n, KEY.reset, None, 1000);
+    let mut b = TickBars::new(KEY.kind.size(), KEY.reset, None, 1000);
     let chunk = s.update(|d| take_held(d, KEY, 3, &mut b, 100));
     assert!(matches!(&chunk, Held::Chunk(v) if v.len() == prints.len()));
     assert!(s.read().ticks.bars(KEY).is_none());
     s.update(|d| {
         d.ticks.slots[0].pending = Some(prints.clone());
     });
-    land(&s, KEY, 3, TickBars::new(KEY.n, KEY.reset, None, 1000));
-    let mut want = TickBars::new(KEY.n, KEY.reset, None, 1000);
+    land(
+        &s,
+        KEY,
+        3,
+        TickBars::new(KEY.kind.size(), KEY.reset, None, 1000),
+    );
+    let mut want = TickBars::new(KEY.kind.size(), KEY.reset, None, 1000);
     for p in &prints {
         want.push(p.time, p.price, p.qty, p.aggressor);
     }
@@ -1023,9 +1031,62 @@ fn landing_applies_held_trades_in_chunks() {
     assert!(d.ticks.bars(KEY).unwrap().same_bars(&want));
     drop(d);
     // Replaced meanwhile: nothing lands.
-    let mut b = TickBars::new(KEY.n, KEY.reset, None, 16);
+    let mut b = TickBars::new(KEY.kind.size(), KEY.reset, None, 16);
     assert!(matches!(
         s.update(|d| take_held(d, KEY, 4, &mut b, 100)),
         Held::Gone
     ));
+}
+
+/// Roadmap 9b: volume, range and seconds bars go through the same seam as tick bars: a chart
+/// asking mid-feed gets, from the replay, the tape and the trades counted while it rebuilds,
+/// exactly the bars built live from the first trade, every counted trade once.
+#[test]
+fn every_kind_rebuilt_from_a_replay_equals_live_built() {
+    use lines_core::BarKind;
+    let dir = scratch("kinds");
+    let frames = frames();
+    let path = recording(&dir, &frames);
+    for kind in [BarKind::Volume(40), BarKind::Range(6), BarKind::Seconds(60)] {
+        let key = TickKey {
+            kind,
+            reset: TickReset::Session,
+        };
+        // Live from the first trade.
+        let s = store();
+        let lease = s.acquire_ticks(key);
+        for (_, e) in &frames {
+            s.update(|d| d.apply(&events(e)));
+        }
+        let live = s.read().ticks.bars(lease.key()).unwrap().clone();
+        drop(lease);
+        assert!(live.len() > 20, "{kind:?}: {}", live.len());
+        // Asked after 6000 frames: rebuilt from the replay, 50 frames counted meanwhile.
+        let s = store();
+        s.update(|d| d.tick_source = Some(TickSource::Replay(path.clone())));
+        let cut = 6_000;
+        for (_, e) in &frames[..cut] {
+            s.update(|d| d.apply(&events(e)));
+        }
+        let mut lease = s.acquire_ticks(key);
+        for (_, e) in &frames[cut..cut + 50] {
+            s.update(|d| d.apply(&events(e)));
+        }
+        lease.join_rebuild();
+        for (_, e) in &frames[cut + 50..] {
+            s.update(|d| d.apply(&events(e)));
+        }
+        let d = s.read();
+        let rebuilt = d.ticks.bars(key).unwrap();
+        assert!(
+            rebuilt.same_bars(&live),
+            "{kind:?}: rebuilt from the replay"
+        );
+        assert_eq!(
+            rebuilt.trades(),
+            d.counted_n,
+            "{kind:?}: every counted trade once"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

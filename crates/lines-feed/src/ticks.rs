@@ -54,7 +54,8 @@ use std::time::{Duration, Instant};
 
 use lines_core::sessions::SessionKind;
 use lines_core::{
-    Aggressor, BarSeries, BarsView, CivilDate, Print, Product, TickBars, TickReset, UtcMillis,
+    Aggressor, BarKind, BarScale, BarSeries, BarsView, CivilDate, Print, Product, TickBars,
+    TickReset, UtcMillis,
 };
 
 use crate::disk::segment::SegmentReader;
@@ -63,10 +64,10 @@ use crate::native::{self, NativeEvent};
 use crate::recorded::RecordedEvents;
 use crate::store::{ChartData, ChartStore};
 
-/// One tick-bar series a chart asks for.
+/// One trade-built bar series a chart asks for (tick, volume, range or seconds bars).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TickKey {
-    pub n: u32,
+    pub kind: BarKind,
     pub reset: TickReset,
 }
 
@@ -537,7 +538,13 @@ impl ChartStore {
                 };
             }
             let cal = crate::catalog::sessions(d.product.id);
-            let mut bars = TickBars::new(key.n, key.reset, cal, d.series.max_len());
+            let mut bars = TickBars::with_kind(
+                key.kind,
+                key.reset,
+                cal,
+                BarScale::of(&d.product),
+                d.series.max_len(),
+            );
             let tape = tape_prints(&d);
             let all_in_tape = d.counted_n <= tape.len() as u64;
             let mut pending = None;
@@ -795,7 +802,13 @@ fn take_held(
 fn rebuild(job: &Job, cancelled: impl FnMut() -> bool) -> Option<TickBars> {
     let cal = crate::catalog::sessions(job.product.id);
     let tape_only = || {
-        let mut b = TickBars::new(job.key.n, job.key.reset, cal, job.max_bars);
+        let mut b = TickBars::with_kind(
+            job.key.kind,
+            job.key.reset,
+            cal,
+            BarScale::of(&job.product),
+            job.max_bars,
+        );
         for p in &job.tape {
             b.push(p.time, p.price, p.qty, p.aggressor);
         }
@@ -830,7 +843,13 @@ enum Read {
 /// the cut.
 fn from_source(job: &Job, mut cancelled: impl FnMut() -> bool) -> anyhow::Result<Read> {
     let cal = crate::catalog::sessions(job.product.id);
-    let mut bars = TickBars::new(job.key.n, job.key.reset, cal, job.max_bars);
+    let mut bars = TickBars::with_kind(
+        job.key.kind,
+        job.key.reset,
+        cal,
+        BarScale::of(&job.product),
+        job.max_bars,
+    );
     let mut taken = 0u64;
     let through = job.stored.as_ref().map(|s| s.through);
     if let Some(s) = &job.stored {

@@ -77,14 +77,45 @@ fn parse_and_display() {
         ("1t", Timeframe::Ticks(1)),
         ("7t", Timeframe::Ticks(7)),
         ("100000t", Timeframe::Ticks(100_000)),
+        ("500v", Timeframe::Volume(500)),
+        ("1000000v", Timeframe::Volume(1_000_000)),
+        ("10R", Timeframe::Range(10)),
+        ("10000r", Timeframe::Range(10_000)),
+        ("30s", Timeframe::Seconds(30)),
+        ("5sec", Timeframe::Seconds(5)),
+        ("3600s", Timeframe::Seconds(3_600)),
     ] {
         assert_eq!(Timeframe::parse(s), Some(tf), "{s}");
         assert_eq!(tf.source(), BarSource::Trades);
         assert!(tf.is_valid());
     }
     for bad in [
-        "", "m", "7", "0", "3h", "2d", "5s", "99999999", "1x", "t", "0t", "100001t", "5000000t",
-        "70000", "1.5t", "-5t",
+        "",
+        "m",
+        "7",
+        "0",
+        "3h",
+        "2d",
+        "7s",
+        "0s",
+        "3601s",
+        "99999999",
+        "1x",
+        "t",
+        "0t",
+        "100001t",
+        "5000000t",
+        "70000",
+        "1.5t",
+        "-5t",
+        "0v",
+        "1000001v",
+        "v",
+        "0r",
+        "10001r",
+        "r",
+        "s",
+        "10000000v",
     ] {
         assert_eq!(Timeframe::parse(bad), None, "{bad}");
     }
@@ -94,7 +125,7 @@ fn parse_and_display() {
         labels,
         [
             "1m", "2m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "1D", "1W", "100t",
-            "233t", "500t", "1000t", "2000t"
+            "233t", "500t", "1000t", "2000t", "15s", "30s", "500v", "1000v", "4r", "10r"
         ]
     );
     for tf in Timeframe::ALL {
@@ -103,7 +134,13 @@ fn parse_and_display() {
             Some(tf),
             "round trip {tf}"
         );
-        let trades = matches!(tf, Timeframe::Ticks(_));
+        let trades = matches!(
+            tf,
+            Timeframe::Ticks(_)
+                | Timeframe::Volume(_)
+                | Timeframe::Range(_)
+                | Timeframe::Seconds(_)
+        );
         assert_eq!(tf.source() == BarSource::Trades, trades);
     }
 }

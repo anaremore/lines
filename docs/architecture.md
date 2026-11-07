@@ -36,8 +36,11 @@ cargo test --release -p lines-app --lib -- --ignored dom_click_latency_budget --
 # Drawings (screenshots): --drawings FILE (a drawings file naming its product; screenshots never read saved drawings);
 #   --style-editor ID[:TAB[:COL[:ROW]]] (the first chart's style editor open on drawing ID of that file, on tab TAB, 0 = first, with the keyboard focus on control COL of row ROW, both 0 = first, ROW defaulting to the first row: `3`, `4:1`, `3:0:1`, `3:0:1:4`).
 #   In the app: Alt+H/T/Z/L/N/U, Alt+Shift+H/T, Esc, Delete, Enter (pin measure), Ctrl+Z / Ctrl+Y; palette "Drawings: …".
-# Timeframe: --timeframe 5m (1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w, or tick bars 500t: presets 100t 233t 500t 1000t 2000t, any 1t-100000t; first chart; a saved one wins). In the app: type 5 / 1h / 500t + Enter on a chart, or the header chip.
-#   --tick-continuous: tick bars run across sessions (no reset at the session open; a saved mode wins).
+# Timeframe: --timeframe 5m (1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w; or bars from counted trades: tick 500t (presets 100t 233t 500t
+#   1000t 2000t, any 1t-100000t), volume 500v (whole contracts, 1v-1000000v), range 10r (price ticks, 1r-10000r), seconds
+#   30s (dividing the day, 1s-3600s); first chart; a saved one wins). In the app: type 5 / 1h / 500t / 500v / 10r / 30s +
+#   Enter on a chart, or the header chip.
+#   --tick-continuous: tick, volume, range and seconds bars run across sessions (no reset at the session open; a saved mode wins).
 # VWAP: --vwap eth|rth|week|month|anchor@TIME, optional bands after a slash ("eth/1,2,3", quoted in PowerShell); repeatable; first chart; also in screenshots. Ctrl+I in the app.
 LINES_SIERRA_DATA="C:\SierraChart\SierraChart - Apex\Data" cargo test -p lines-sierra -- --ignored   # real Sierra data, ~1 min
 cargo clippy --workspace --all-targets -- -D warnings
