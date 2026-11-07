@@ -310,21 +310,38 @@ fn named_values_are_checked() {
     for bad in ["", "Caps", "has space", "a/b", &"x".repeat(33)] {
         assert_eq!(
             b().value(bad, 1.0, None).build(TICK).unwrap_err(),
-            LevelError::BadSlug(bad.to_string()),
+            LevelError::BadValueName(bad.to_string()),
             "{bad:?}"
         );
+    }
+    for good in ["rsi.14", "dd-ratio", "a_b", &"x".repeat(32)] {
+        assert!(b().value(good, 1.0, None).build(TICK).is_ok(), "{good:?}");
     }
     assert_eq!(
         b().value("a", 1.0, None)
             .value("a", 2.0, None)
             .build(TICK)
             .unwrap_err(),
-        LevelError::BadSlug("a".into())
+        LevelError::DuplicateValue("a".into())
     );
-    assert_eq!(
-        b().value("a", f64::NAN, None).build(TICK).unwrap_err(),
-        LevelError::NotFinite
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            b().value("a", x, None).build(TICK).unwrap_err(),
+            LevelError::ValueNotFinite("a".into())
+        );
+    }
+    // One bad value refuses the whole map, levels and all.
+    assert!(
+        b().line("p", LevelValue::Tick(Price(600_000)), None, style())
+            .value("a", f64::NAN, None)
+            .build(TICK)
+            .is_err()
     );
+    let mut exactly = b();
+    for i in 0..MAX_VALUES {
+        exactly = exactly.value(&format!("v{i}"), 0.0, None);
+    }
+    assert!(exactly.build(TICK).is_ok());
     let mut many = b();
     for i in 0..=MAX_VALUES {
         many = many.value(&format!("v{i}"), 0.0, None);
