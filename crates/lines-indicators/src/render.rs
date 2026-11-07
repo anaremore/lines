@@ -113,6 +113,88 @@ pub fn build_columns(
     }
 }
 
+/// Columns for a study computed on the chart's own bars (averages, Bollinger Bands: one point
+/// per chart bar, at the bar's start time). A bar takes the point at its start time. Trade-built
+/// bars can share a start millisecond: such a group pairs with the points of that time
+/// aligned at its end (a missing value is an early bar's, before the window fills), except the
+/// newest group, aligned at its start (a missing value is the newest bar's, the engine not
+/// there yet). A bar without a point has no column. Fills `out` up to its capacity: never
+/// allocates.
+pub fn build_bar_columns(
+    points: &[Point],
+    bars: BarsView<'_>,
+    vp: &Viewport,
+    bands: Bands,
+    out: &mut Vec<Column>,
+) {
+    out.clear();
+    let range = vp.visible_range(bars.len());
+    if range.is_empty() || points.is_empty() {
+        return;
+    }
+    let half = (vp.bar_px * 0.5) as f32;
+    let all = bars.bars;
+    let mut prev: Option<usize> = None;
+    for i in range {
+        if out.len() == out.capacity() {
+            break;
+        }
+        let t = all[i].time;
+        let p0 = points.partition_point(|p| p.time < t);
+        let k = points[p0..].partition_point(|p| p.time <= t);
+        if k == 0 {
+            continue;
+        }
+        let alone = (i == 0 || all[i - 1].time != t) && all.get(i + 1).is_none_or(|b| b.time != t);
+        let p = if k == 1 && alone {
+            &points[p0]
+        } else {
+            let mut g0 = i;
+            while g0 > 0 && all[g0 - 1].time == t {
+                g0 -= 1;
+            }
+            let mut g1 = i + 1;
+            while g1 < all.len() && all[g1].time == t {
+                g1 += 1;
+            }
+            let (m, at) = (g1 - g0, i - g0);
+            let at = if k >= m || g1 == all.len() {
+                at
+            } else {
+                match at.checked_sub(m - k) {
+                    Some(a) => a,
+                    None => continue,
+                }
+            };
+            match points.get(p0 + at).filter(|_| at < k) {
+                Some(p) => p,
+                None => continue,
+            }
+        };
+        let x = vp.index_to_x(i as f64) as f32;
+        let y = vp.price_to_y(p.vwap) as f32;
+        let mut up = [y; 3];
+        let mut down = [y; 3];
+        for kk in 1..=3u8 {
+            if bands.has(kk) {
+                let d = p.sd * kk as f64;
+                up[kk as usize - 1] = vp.price_to_y(p.vwap + d) as f32;
+                down[kk as usize - 1] = vp.price_to_y(p.vwap - d) as f32;
+            }
+        }
+        out.push(Column {
+            left: x - half,
+            right: x + half,
+            y,
+            up,
+            down,
+            approx: p.approx,
+            joins: prev.is_some_and(|pi| pi + 1 == i),
+        });
+        prev = Some(i);
+    }
+}
+
 /// The 1-minute point holding `t` (points sorted by their minute's start), if there is one.
 fn point_at<P>(points: &[P], t: UtcMillis, time: impl Fn(&P) -> UtcMillis) -> Option<&P> {
     let k = points.partition_point(|p| time(p) <= t).checked_sub(1)?;

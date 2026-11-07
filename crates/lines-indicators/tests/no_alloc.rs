@@ -157,3 +157,62 @@ fn delta_candles_do_not_allocate() {
     assert!(drawn > 0);
     assert_eq!(n, 0, "delta geometry allocated {n} times");
 }
+
+/// Averages and Bollinger Bands (roadmap 10a): one point per chart bar, paired by start time;
+/// trade-built bars that share a start millisecond pair one to one. No allocation in paint.
+#[test]
+fn bar_study_columns_do_not_allocate() {
+    use lines_indicators::render::build_bar_columns;
+    // Pairs of bars sharing a start time, as fast tick bars can.
+    let bars: Vec<Bar> = (0..6_000i64)
+        .map(|i| Bar {
+            time: UtcMillis((i / 2) * 1_000),
+            open: Price(600_000),
+            high: Price(600_100),
+            low: Price(599_900),
+            close: Price(600_000 + i % 9),
+            volume: Qty(5),
+        })
+        .collect();
+    let points: Vec<Point> = bars
+        .iter()
+        .enumerate()
+        .skip(19) // the window fills at the 20th bar
+        .map(|(i, b)| Point {
+            time: b.time,
+            vwap: 600_000.0 + i as f64,
+            sd: 40.0,
+            approx: false,
+            period: 0,
+            forming: false,
+        })
+        .collect();
+    let mut vp = Viewport::default();
+    vp.set_size(1600.0, 900.0);
+    vp.price_lo = 590_000.0;
+    vp.price_hi = 610_000.0;
+    let view = BarsView::fixed(&bars, 1_000);
+    let mut out: Vec<Column> = Vec::with_capacity(4096);
+    let before = ALLOCS.with(|c| c.get());
+    let mut drawn = 0;
+    for frame in 0..300 {
+        vp.right_index = 5_999.0 - (frame % 200) as f64;
+        vp.bar_px = [2.0, 5.0, 9.5][frame % 3];
+        build_bar_columns(&points, view, &vp, Bands(0b001), &mut out);
+        drawn += out.len();
+    }
+    assert_eq!(ALLOCS.with(|c| c.get()) - before, 0, "bar study geometry allocated");
+    assert!(drawn > 0);
+    // Each column is its own bar's point (bars i and i + 1 share a time, values differ).
+    vp.right_index = 40.0;
+    vp.bar_px = 10.0;
+    build_bar_columns(&points, view, &vp, Bands::NONE, &mut out);
+    let range = vp.visible_range(bars.len());
+    let first = range.start.max(19);
+    assert_eq!(out.len(), range.end - first);
+    for (c, i) in out.iter().zip(first..) {
+        assert_eq!(c.y, vp.price_to_y(600_000.0 + i as f64) as f32, "bar {i}");
+    }
+    let joins: Vec<bool> = out.iter().map(|c| c.joins).collect();
+    assert!(joins[1..].iter().all(|j| *j), "{joins:?} {range:?}");
+}

@@ -240,6 +240,8 @@ pub struct MarketSeries {
     stored_through: Option<i64>,
     complete: Complete,
     buckets: Vec<Bucket>,
+    /// Times the series started over (`Input::Reset`).
+    epoch: u64,
     /// Evaluations (inputs batches applied), for tests and stats.
     pub batches: u64,
 }
@@ -259,8 +261,19 @@ impl MarketSeries {
             stored_through: None,
             complete: Complete::default(),
             buckets: Vec::with_capacity(max_buckets.min(1 << 16)),
+            epoch: 0,
             batches: 0,
         }
+    }
+
+    /// The stitched bars (the chart's 1-minute bars), for bar studies and derived timeframes.
+    pub fn bar_series(&self) -> &BarSeries {
+        &self.bars
+    }
+
+    /// Changes each time the series starts over (a contract change).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub fn period_ms(&self) -> i64 {
@@ -362,7 +375,9 @@ impl MarketSeries {
                     self.restart_on_trade = true;
                 }
                 Input::Reset => {
+                    let epoch = self.epoch + 1;
                     *self = MarketSeries::new(self.period_ms, self.bars.max_len());
+                    self.epoch = epoch;
                     dirty = Some(i64::MIN);
                 }
                 Input::Cached(bars) => {

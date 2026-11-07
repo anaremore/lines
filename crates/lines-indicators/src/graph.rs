@@ -15,9 +15,10 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use lines_core::UtcMillis;
-use serde::{Deserialize, Serialize};
+use lines_core::{Bar, UtcMillis};
 
+use crate::average::{Average, AverageSpec};
+use crate::bars::{BarsOut, ChartBars, ExternalBars, TimeBars};
 use crate::delta::{CumDelta, DeltaPoint, DeltaSpec};
 use crate::series::{Input, MarketSeries};
 use crate::vwap::{Point, Vwap, VwapSpec};
@@ -26,8 +27,7 @@ use crate::vwap::{Point, Vwap, VwapSpec};
 pub type FeedId = u64;
 
 /// What a series is.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Spec {
     /// The feed's base series at a bar period ([`MarketSeries`]).
     Market { period_ms: i64 },
@@ -35,6 +35,15 @@ pub enum Spec {
     Vwap { period_ms: i64, vwap: VwapSpec },
     /// Cumulative aggressor delta over the base series at a bar period.
     CumDelta { period_ms: i64, delta: DeltaSpec },
+    /// The chart's bars on a timeframe other than the base's ([`crate::bars`]): derived in
+    /// the engine for time bars, set by the runtime for trade-built bars.
+    Bars { period_ms: i64, bars: ChartBars },
+    /// A moving average or Bollinger Bands on the chart's bars.
+    Average {
+        period_ms: i64,
+        bars: ChartBars,
+        average: AverageSpec,
+    },
     /// A user or plugin indicator, by name; the engine's factory resolves it (its inputs may
     /// name other indicators, which is how cycles could arise).
     Named(String),
@@ -44,8 +53,19 @@ impl Spec {
     pub fn output_type(&self) -> SeriesType {
         match self {
             Spec::Market { .. } => SeriesType::Market,
-            Spec::Vwap { .. } | Spec::Named(_) => SeriesType::Line,
+            Spec::Vwap { .. } | Spec::Average { .. } | Spec::Named(_) => SeriesType::Line,
             Spec::CumDelta { .. } => SeriesType::Candles,
+            Spec::Bars { .. } => SeriesType::Bars,
+        }
+    }
+
+    /// What a study on the chart's `bars` reads: the base series itself on its own period
+    /// (1 minute), else a bars node.
+    pub fn bars_input(period_ms: i64, bars: ChartBars) -> Spec {
+        if bars.tf.is_one_minute() {
+            Spec::Market { period_ms }
+        } else {
+            Spec::Bars { period_ms, bars }
         }
     }
 }
@@ -65,6 +85,8 @@ pub enum SeriesType {
     Line,
     /// One candle per bucket ([`DeltaPoint`]).
     Candles,
+    /// The chart's bars ([`BarsOut`]).
+    Bars,
 }
 
 /// Read access to a node's output.
@@ -73,14 +95,28 @@ pub enum Output<'a> {
     Market(&'a MarketSeries),
     Line(&'a [Point]),
     Candles(&'a [DeltaPoint]),
+    Bars(BarsOut<'a>),
 }
 
-impl Output<'_> {
+impl<'a> Output<'a> {
     pub fn series_type(&self) -> SeriesType {
         match self {
             Output::Market(_) => SeriesType::Market,
             Output::Line(_) => SeriesType::Line,
             Output::Candles(_) => SeriesType::Candles,
+            Output::Bars(_) => SeriesType::Bars,
+        }
+    }
+
+    /// Bars, from a bars node or the base series' own (1-minute) bars.
+    pub fn bars(&self) -> Option<BarsOut<'a>> {
+        match *self {
+            Output::Bars(b) => Some(b),
+            Output::Market(m) => Some(BarsOut {
+                bars: m.bar_series().bars(),
+                trimmed: m.bar_series().trimmed(),
+            }),
+            _ => None,
         }
     }
 }
@@ -165,9 +201,61 @@ impl Indicator for CumDelta {
     }
 }
 
+impl Indicator for TimeBars {
+    fn inputs(&self) -> Vec<Spec> {
+        vec![Spec::Market {
+            period_ms: self.period_ms(),
+        }]
+    }
+
+    fn update(&mut self, inputs: &[Output<'_>], _from: UtcMillis) -> usize {
+        if let Some(Output::Market(m)) = inputs.first() {
+            TimeBars::update(self, m);
+        }
+        0
+    }
+
+    fn output(&self) -> Output<'_> {
+        Output::Bars(TimeBars::output(self))
+    }
+
+    fn evaluations(&self) -> u64 {
+        self.evaluations
+    }
+}
+
+/// A study on the chart's bars and the series it reads them from.
+struct OnBars<T> {
+    input: Spec,
+    imp: T,
+}
+
+impl Indicator for OnBars<Average> {
+    fn inputs(&self) -> Vec<Spec> {
+        vec![self.input.clone()]
+    }
+
+    fn update(&mut self, inputs: &[Output<'_>], from: UtcMillis) -> usize {
+        match inputs.first().and_then(Output::bars) {
+            Some(b) => self.imp.update(b, from),
+            None => 0,
+        }
+    }
+
+    fn output(&self) -> Output<'_> {
+        Output::Line(self.imp.points())
+    }
+
+    fn evaluations(&self) -> u64 {
+        self.imp.evaluations
+    }
+}
+
 /// A node's computation.
 pub enum NodeKind {
     Market(Box<MarketSeries>),
+    /// Bars set from outside the graph ([`Graph::sync_bars`]): the store's trade-built bars.
+    Bars(Box<ExternalBars>),
     Indicator {
         /// `imp.inputs()`, captured when the node is made.
         inputs: Vec<Spec>,
@@ -185,7 +273,7 @@ impl NodeKind {
 
     fn input_specs(&self) -> &[Spec] {
         match self {
-            NodeKind::Market(_) => &[],
+            NodeKind::Market(_) | NodeKind::Bars(_) => &[],
             NodeKind::Indicator { inputs, .. } => inputs,
         }
     }
@@ -193,6 +281,7 @@ impl NodeKind {
     fn output(&self) -> Output<'_> {
         match self {
             NodeKind::Market(m) => Output::Market(m),
+            NodeKind::Bars(b) => Output::Bars(b.output()),
             NodeKind::Indicator { imp, .. } => imp.output(),
         }
     }
@@ -248,6 +337,25 @@ pub fn make_builtin(
         Spec::CumDelta { period_ms, delta } => Some(NodeKind::indicator(Box::new(CumDelta::new(
             *delta, *period_ms, calendar,
         )))),
+        // The base series is the 1-minute bars (`Spec::bars_input`).
+        Spec::Bars { bars, .. } if bars.tf.is_one_minute() => None,
+        Spec::Bars { bars, .. } if bars.from_trades() => {
+            Some(NodeKind::Bars(Box::new(ExternalBars::new(max_buckets))))
+        }
+        Spec::Bars { period_ms, bars } => Some(NodeKind::indicator(Box::new(TimeBars::new(
+            *period_ms,
+            bars.tf,
+            calendar,
+            max_buckets,
+        )))),
+        Spec::Average {
+            period_ms,
+            bars,
+            average,
+        } => Some(NodeKind::indicator(Box::new(OnBars {
+            input: Spec::bars_input(*period_ms, *bars),
+            imp: Average::new(*average),
+        }))),
         Spec::Named(_) => None,
     }
 }
@@ -299,6 +407,7 @@ impl Graph {
         match self.nodes.get(id).and_then(|n| n.as_ref()).map(|n| &n.kind) {
             Some(NodeKind::Indicator { imp, .. }) => imp.evaluations(),
             Some(NodeKind::Market(m)) => m.batches,
+            Some(NodeKind::Bars(b)) => b.syncs,
             None => 0,
         }
     }
@@ -331,7 +440,6 @@ impl Graph {
         path.push(key.spec.clone());
         let mut inputs = Vec::new();
         for spec in kind.input_specs().to_vec() {
-            let expected = SeriesType::Line;
             let input_key = SeriesKey {
                 feed: key.feed,
                 spec: spec.clone(),
@@ -339,12 +447,9 @@ impl Graph {
             match self.acquire_in(input_key, make, path) {
                 Ok(id) => {
                     // Built-ins say which shape they need through the spec; named inputs are
-                    // lines unless they name the market series.
+                    // lines.
                     let got = self.output(id).map(|o| o.series_type());
-                    let want = match spec {
-                        Spec::Market { .. } => SeriesType::Market,
-                        _ => expected,
-                    };
+                    let want = spec.output_type();
                     if got != Some(want) {
                         for &i in &inputs {
                             self.release(i);
@@ -418,7 +523,49 @@ impl Graph {
     pub fn push(&mut self, feed: FeedId, inputs: &[Input]) -> Vec<Changed> {
         let mut dirty: HashMap<usize, UtcMillis> = HashMap::new();
         let mut changed = Vec::new();
-        for id in 0..self.nodes.len() {
+        self.propagate(feed, 0, Some(inputs), &mut dirty, &mut changed);
+        changed
+    }
+
+    /// The node for `key`, if it exists.
+    pub fn id(&self, key: &SeriesKey) -> Option<usize> {
+        self.index.get(key).copied()
+    }
+
+    /// Bring bars node `id` (trade-built bars, [`NodeKind::Bars`]) up to `bars` (`trimmed`
+    /// dropped from their front so far). Cheap: compares and copies only what changed (the
+    /// runtime calls it under the store's lock). Returns the first changed bar's time, for
+    /// [`Graph::bars_changed`].
+    pub fn sync_bars(&mut self, id: usize, bars: &[Bar], trimmed: u64) -> Option<UtcMillis> {
+        match &mut self.nodes.get_mut(id)?.as_mut()?.kind {
+            NodeKind::Bars(b) => b.sync(bars, trimmed),
+            _ => None,
+        }
+    }
+
+    /// Update everything that depends on bars node `id`, changed from `from`
+    /// ([`Graph::sync_bars`]). Returns the nodes whose output changed (`id` first).
+    pub fn bars_changed(&mut self, id: usize, from: UtcMillis) -> Vec<Changed> {
+        let Some(feed) = self.key(id).map(|k| k.feed) else {
+            return Vec::new();
+        };
+        let mut dirty = HashMap::from([(id, from)]);
+        let mut changed = vec![Changed { node: id, first: 0 }];
+        self.propagate(feed, id + 1, None, &mut dirty, &mut changed);
+        changed
+    }
+
+    /// Nodes of `feed` from `start` on, in order: base series take `inputs` (if any), the
+    /// others update from the earliest change of their inputs.
+    fn propagate(
+        &mut self,
+        feed: FeedId,
+        start: usize,
+        inputs: Option<&[Input]>,
+        dirty: &mut HashMap<usize, UtcMillis>,
+        changed: &mut Vec<Changed>,
+    ) {
+        for id in start..self.nodes.len() {
             let Some(node) = self.nodes[id].as_mut() else {
                 continue;
             };
@@ -427,11 +574,12 @@ impl Graph {
             }
             match &mut node.kind {
                 NodeKind::Market(m) => {
-                    if let Some(from) = m.apply(inputs) {
+                    if let Some(from) = inputs.and_then(|i| m.apply(i)) {
                         dirty.insert(id, from);
                         changed.push(Changed { node: id, first: 0 });
                     }
                 }
+                NodeKind::Bars(_) => {}
                 NodeKind::Indicator { .. } => {
                     let from = node
                         .inputs
@@ -448,6 +596,5 @@ impl Graph {
                 }
             }
         }
-        changed
     }
 }
