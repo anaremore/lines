@@ -697,4 +697,39 @@ fn latency_windows_do_not_allocate() {
     });
     assert_eq!(n, 0, "latency windows allocated {n} times");
     assert!(seen > 0);
+
+#[test]
+fn chart_order_tags_do_not_allocate() {
+    use lines_core::geometry::order_tags::{
+        LineIn, MAX_TAGS, TagBox, edge_markers, handles, hit, layout_tags, tag_band,
+    };
+    use lines_core::geometry::snap_price;
+    let vp = Viewport {
+        width: 800.0,
+        height: 400.0,
+        price_lo: 590_000.0,
+        price_hi: 610_000.0,
+        ..Viewport::default()
+    };
+    // Orders on the plot and beyond both edges.
+    let lines: Vec<LineIn> = (0..40)
+        .map(|i| LineIn {
+            id: i,
+            price: Price(585_000 + (i as i64) * 700),
+            text_w: 90.0,
+        })
+        .collect();
+    let mut tags = [TagBox::default(); MAX_TAGS];
+    let n = allocs_during(|| {
+        for frame in 0..200 {
+            let m = edge_markers(&vp, &lines, 800.0, 400.0, [80.0, 80.0]);
+            let band = tag_band(&m, 400.0);
+            let k = layout_tags(&vp, &lines, 800.0, band, 1.0, &mut tags);
+            let h = handles(&tags[0], [true, true]);
+            let y = frame as f32 % 400.0;
+            let _ = hit(&tags[..k], &m, &h, 700.0, y);
+            let _ = snap_price(&vp, y as f64, 25);
+        }
+    });
+    assert_eq!(n, 0, "chart order tags allocated {n} times");
 }
