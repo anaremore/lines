@@ -13,8 +13,9 @@
 //! Keys: ↑↓ row, ←→ control, Enter or Space picks, Tab / Shift+Tab switch tabs, Esc closes (or
 //! leaves the custom color entry first). A custom color is typed as six hex digits.
 //!
-//! The readability guard ([`StyleEditor::warning`]) never blocks: it words what
-//! `lines_core::style::readability` found for the tab's color.
+//! The readability guard ([`StyleEditor::warnings`]) never blocks: it words what
+//! `lines_core::style::readability` found for the tab's color in each of the four theme and
+//! palette combinations (a custom color is the same in all of them; a theme token follows).
 
 use lines_core::drawings::{Style, Tool};
 use lines_core::style::{
@@ -77,7 +78,8 @@ pub enum Control {
     Width(u8),
     Opacity(u8),
     TextSize(TextSize),
-    Background(bool),
+    /// A note's box behind its text (a checkbox).
+    TextBox,
     ExtendLeft,
     ExtendRight,
     AxisTag,
@@ -125,12 +127,118 @@ pub struct StyleEditor {
     pub saved: bool,
 }
 
-/// A capitalized label: "trend line" → "Trend line".
-fn capitalized(s: &str) -> String {
-    let mut c = s.chars();
-    c.next()
-        .map(|f| f.to_uppercase().chain(c).collect())
-        .unwrap_or_default()
+/// A tool's name in the editor: its title ("Zone style") and the plural of "Save as default
+/// for zones".
+pub fn tool_names(tool: Tool) -> (&'static str, &'static str) {
+    match tool {
+        Tool::HLine => ("Horizontal line", "horizontal lines"),
+        Tool::HRay => ("Horizontal ray", "horizontal rays"),
+        Tool::Trend => ("Trend line", "trend lines"),
+        Tool::Ray => ("Ray", "rays"),
+        Tool::Rect => ("Zone", "zones"),
+        Tool::VLine => ("Vertical line", "vertical lines"),
+        Tool::Note => ("Note", "notes"),
+        Tool::Measure => ("Measure", "measures"),
+    }
+}
+
+/// Whether a control is a checkbox (on/off), not one of a row's choices.
+pub fn is_toggle(c: Control) -> bool {
+    matches!(
+        c,
+        Control::TextBox | Control::ExtendLeft | Control::ExtendRight | Control::AxisTag
+    )
+}
+
+/// One theme and palette combination the guard checks a color in (decision 0026: a custom
+/// color is the same in every theme, so it is checked in all four).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ThemeCtx {
+    pub dark: bool,
+    pub colorblind: bool,
+    /// The palette `Color::Palette` indexes (drawings: the theme's drawing colors).
+    pub palette: [Rgb; 4],
+    /// `Color::Text`.
+    pub text: Rgb,
+    /// The chart's background, and a note box's.
+    pub chart: Rgb,
+    pub panel: Rgb,
+    /// Colors with a meaning: (name, color), names as `Theme::meanings` gives them.
+    pub meanings: [(&'static str, Rgb); 6],
+}
+
+impl ThemeCtx {
+    pub fn resolve(&self, c: Color) -> Rgb {
+        match c {
+            Color::Palette(i) => self.palette[usize::from(i) % self.palette.len()],
+            Color::Text => self.text,
+            Color::Custom(rgb) => rgb,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match (self.dark, self.colorblind) {
+            (true, false) => "dark",
+            (false, false) => "light",
+            (true, true) => "dark colorblind",
+            (false, true) => "light colorblind",
+        }
+    }
+}
+
+/// One readability warning: its words and, for a color with a meaning it looks like, that
+/// color (shown as a small swatch beside the words).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Warning {
+    pub text: String,
+    pub swatch: Option<Rgb>,
+}
+
+/// What a color that looks like a meaning may be misread as.
+fn misread(name: &str) -> &'static str {
+    match name {
+        "up" => "up",
+        "down" => "down",
+        "last-price" => "the last price",
+        "order target" => "an order target",
+        "order stop" => "an order stop",
+        _ => "a warning",
+    }
+}
+
+/// Where a finding holds, from the contexts it holds in (`hit[i]` for `ctxs[i]`): nothing when
+/// it holds in all of them, else " in the light theme", " in the colorblind palette", or the
+/// combinations named.
+fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
+    if hit.iter().all(|h| *h) {
+        return String::new();
+    }
+    let exactly = |f: fn(&ThemeCtx) -> bool| {
+        ctxs.iter().filter(|c| f(c)).count() >= 2 && ctxs.iter().zip(hit).all(|(c, h)| *h == f(c))
+    };
+    if exactly(|c| c.dark) {
+        return " in the dark theme".into();
+    }
+    if exactly(|c| !c.dark) {
+        return " in the light theme".into();
+    }
+    if exactly(|c| c.colorblind) {
+        return " in the colorblind palette".into();
+    }
+    if exactly(|c| !c.colorblind) {
+        return " in the standard palette".into();
+    }
+    let names: Vec<&str> = ctxs
+        .iter()
+        .zip(hit)
+        .filter(|(_, h)| **h)
+        .map(|(c, _)| c.label())
+        .collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => format!(" in the {one} theme"),
+        [init @ .., last] => format!(" in the {} and {last} themes", init.join(", ")),
+    }
 }
 
 impl StyleEditor {
@@ -175,18 +283,27 @@ impl StyleEditor {
             });
         }
         let (l, r) = tool.extends();
-        let mut e = StyleEditor::new(
-            format!("{} style", capitalized(tool.label())),
-            parts,
-            Style::COLORS,
-        );
+        let (name, plural) = tool_names(tool);
+        let mut e = StyleEditor::new(format!("{name} style"), parts, Style::COLORS);
         e.options = Options {
             extend_left: l.then_some(s.extend_left),
             extend_right: r.then_some(s.extend_right),
             axis_tag: tool.has_axis_tag().then_some(s.axis_tag),
         };
-        e.default_label = Some(format!("Save as default for {}s", tool.label()));
+        e.default_label = Some(format!("Save as default for {plural}"));
+        e.focus_current();
         e
+    }
+
+    /// Focus the first row's current value (an editor opened or a tab switched starts on what
+    /// is set, so the color row names the current color).
+    fn focus_current(&mut self) {
+        self.row = 0;
+        self.col = self
+            .rows()
+            .first()
+            .and_then(|r| r.controls.iter().position(|(_, on)| *on))
+            .unwrap_or(0);
     }
 
     /// `base` with this editor's parts and options (what it doesn't edit stays).
@@ -229,15 +346,20 @@ impl StyleEditor {
     }
 
     fn color_row(&self, current: Color, text: bool) -> Row {
-        let mut controls = Vec::with_capacity(16);
+        let mut controls = Vec::with_capacity(12);
         if text {
             controls.push((Control::Color(Color::Text), current == Color::Text));
         }
         for i in 0..self.palette {
             let c = Color::Palette(i);
+            // The first theme drawing color is the theme's text color: text offers it once,
+            // as "Text" (unless a note already uses the palette entry).
+            if text && i == 0 && current != c {
+                continue;
+            }
             controls.push((Control::Color(c), current == c));
         }
-        for hex in CUSTOM_SWATCHES {
+        for (hex, _) in CUSTOM_SWATCHES {
             let c = Color::Custom(Rgb::hex(hex));
             controls.push((Control::Color(c), current == c));
         }
@@ -306,10 +428,7 @@ impl StyleEditor {
                 rows.push(self.color_row(t.color, true));
                 rows.push(Row {
                     label: "Box",
-                    controls: vec![
-                        (Control::Background(true), t.background),
-                        (Control::Background(false), !t.background),
-                    ],
+                    controls: vec![(Control::TextBox, t.background)],
                 });
             }
         }
@@ -375,10 +494,9 @@ impl StyleEditor {
     pub fn select_tab(&mut self, i: usize) {
         if i < self.parts.len() && i != self.tab {
             self.tab = i;
-            self.row = 0;
-            self.col = 0;
             self.hex = None;
             self.saved = false;
+            self.focus_current();
         }
     }
 
@@ -471,7 +589,7 @@ impl StyleEditor {
                     (PartStyle::Line(l), Control::Opacity(o)) => l.opacity = o,
                     (PartStyle::Fill(f), Control::Opacity(o)) => f.opacity = o,
                     (PartStyle::Text(t), Control::TextSize(s)) => t.size = s,
-                    (PartStyle::Text(t), Control::Background(b)) => t.background = b,
+                    (PartStyle::Text(t), Control::TextBox) => t.background = !t.background,
                     _ => {}
                 }
                 p.style != before
@@ -513,49 +631,90 @@ impl StyleEditor {
 
     // ---- readability guard ----------------------------------------------------------------
 
-    /// The current tab's readability warning, in words, or `None`. `resolve` gives a color in
-    /// the current theme; `chart` and `panel` are the chart background and a text box's;
-    /// `meanings` the theme's colors with a meaning. Never blocks anything.
-    pub fn warning(
-        &self,
-        resolve: impl Fn(Color) -> Rgb,
-        chart: Rgb,
-        panel: Rgb,
-        meanings: &[(&'static str, Rgb)],
-    ) -> Option<String> {
-        let part = self.parts.get(self.tab)?;
-        let (color, opacity, bg, text, contrast) = match part.style {
-            PartStyle::Line(l) => (l.color, l.opacity, chart, false, true),
-            // A fill is translucent area behind data: only its hue can mislead.
-            PartStyle::Fill(f) => (f.color, 100, chart, false, false),
-            PartStyle::Text(t) => (
-                t.color,
-                100,
-                if t.background { panel } else { chart },
-                true,
-                true,
-            ),
+    /// The current tab's readability warnings, in words: colors with a meaning it looks like
+    /// first (with that color, for a swatch), then low contrast; each says in which theme or
+    /// palette it holds. `ctxs`: the four theme and palette combinations. Never blocks.
+    pub fn warnings(&self, ctxs: &[ThemeCtx]) -> Vec<Warning> {
+        let mut out = Vec::new();
+        let Some(part) = self.parts.get(self.tab) else {
+            return out;
         };
-        let r = readability(resolve(color), opacity, bg, meanings, text);
-        let mut out = Vec::with_capacity(2);
-        if let Some(name) = r.near {
-            out.push(format!(
-                "Close to {name}, which already means something on the chart."
-            ));
+        let (color, opacity, text, contrast, boxed) = match part.style {
+            PartStyle::Line(l) => (l.color, l.opacity, false, true, false),
+            // A fill is translucent area behind data: only its hue can mislead.
+            PartStyle::Fill(f) => (f.color, 100, false, false, false),
+            PartStyle::Text(t) => (t.color, 100, true, true, t.background),
+        };
+        let found: Vec<_> = ctxs
+            .iter()
+            .map(|c| {
+                let bg = if boxed { c.panel } else { c.chart };
+                readability(c.resolve(color), opacity, bg, &c.meanings, text)
+            })
+            .collect();
+        // Looks like a meaning: one warning per meaning, in the order first found.
+        let mut names: Vec<&'static str> = Vec::with_capacity(4);
+        for r in &found {
+            if let Some(n) = r.near
+                && !names.contains(&n)
+            {
+                names.push(n);
+            }
         }
-        if let Some(c) = r.low_contrast.filter(|_| contrast) {
-            let what = if text { "text" } else { "lines" };
-            let against = if text && bg == panel {
-                "its box"
-            } else {
-                "the chart"
-            };
-            out.push(format!(
-                "Low contrast: {c:.1}:1 against {against} ({what} need {}:1).",
-                r.needed
-            ));
+        for name in names {
+            let hit: Vec<bool> = found.iter().map(|r| r.near == Some(name)).collect();
+            let swatch = ctxs
+                .iter()
+                .zip(&hit)
+                .find(|(_, h)| **h)
+                .and_then(|(c, _)| c.meanings.iter().find(|(n, _)| *n == name))
+                .map(|(_, rgb)| *rgb);
+            out.push(Warning {
+                text: format!(
+                    "Looks like the {name} color{}; may be misread as {}.",
+                    where_phrase(ctxs, &hit),
+                    misread(name)
+                ),
+                swatch,
+            });
         }
-        (!out.is_empty()).then(|| out.join(" "))
+        if contrast {
+            // Contrast depends on the theme's background only: one figure per theme.
+            let mut low: Vec<(&'static str, f64)> = Vec::with_capacity(2);
+            for dark in [true, false] {
+                let worst = ctxs
+                    .iter()
+                    .zip(&found)
+                    .filter(|(c, _)| c.dark == dark)
+                    .filter_map(|(_, r)| r.low_contrast)
+                    .min_by(f64::total_cmp);
+                if let Some(w) = worst {
+                    low.push((if dark { "dark" } else { "light" }, w));
+                }
+            }
+            if !low.is_empty() {
+                let against = if boxed { " against its box" } else { "" };
+                let what = if text {
+                    "text needs 4.5:1"
+                } else {
+                    "lines need 3:1"
+                };
+                let themes: Vec<String> = low
+                    .iter()
+                    .map(|(n, r)| format!("the {n} theme ({r:.1}:1)"))
+                    .collect();
+                let mut words =
+                    format!("Low contrast{against} in {}; {what}.", themes.join(" and "));
+                if text && !boxed {
+                    words.push_str(" The note shows its box there.");
+                }
+                out.push(Warning {
+                    text: words,
+                    swatch: None,
+                });
+            }
+        }
+        out
     }
 }
 
@@ -569,27 +728,39 @@ fn flip(o: &mut Option<bool>) -> bool {
     }
 }
 
-/// What a control reads (chips in the editor; swatches have no words and are named for the
-/// accessibility tree).
-pub fn control_label(c: Control) -> String {
+/// A color's name: a theme drawing color's from `names` (the theme's, e.g. "Lime"), a
+/// starting swatch's own, else "Custom #RRGGBB".
+pub fn color_name(c: Color, names: &[&'static str]) -> String {
     match c {
-        Control::Color(Color::Text) => "Text".to_owned(),
-        Control::Color(Color::Palette(i)) => format!("Theme {}", i + 1),
-        Control::Color(Color::Custom(rgb)) => {
-            let mut s = String::from("Custom ");
-            let _ = rgb.write_hex(&mut s);
-            s
-        }
+        Color::Text => "Text".to_owned(),
+        Color::Palette(i) => names
+            .get(usize::from(i) % names.len().max(1))
+            .map_or_else(|| format!("Theme {}", i + 1), |n| (*n).to_owned()),
+        Color::Custom(rgb) => match CUSTOM_SWATCHES.iter().find(|(h, _)| Rgb::hex(*h) == rgb) {
+            Some((_, n)) => (*n).to_owned(),
+            None => {
+                let mut hex = String::with_capacity(7);
+                let _ = rgb.write_hex(&mut hex);
+                format!("Custom {}", hex.to_ascii_uppercase())
+            }
+        },
+    }
+}
+
+/// What a control reads (chips and checkboxes; a swatch's name shows beside its row's label,
+/// [`color_name`]).
+pub fn control_label(c: Control, names: &[&'static str]) -> String {
+    match c {
+        Control::Color(c) => color_name(c, names),
         Control::Custom => "Custom…".to_owned(),
         Control::LineType(t) => t.label().to_owned(),
         Control::Width(w) => format!("{w} px"),
         Control::Opacity(o) => format!("{o}%"),
         Control::TextSize(s) => s.label().to_owned(),
-        Control::Background(true) => "On".to_owned(),
-        Control::Background(false) => "Off".to_owned(),
+        Control::TextBox => "Behind the text".to_owned(),
         Control::ExtendLeft => "Left".to_owned(),
         Control::ExtendRight => "Right".to_owned(),
-        Control::AxisTag => "On axis".to_owned(),
+        Control::AxisTag => "On the price axis".to_owned(),
         Control::SaveDefault => "Save as default".to_owned(),
     }
 }

@@ -148,6 +148,11 @@ impl PaneWindow {
             return;
         }
         if let Some(cmd) = commands::command_for(&ev.keystroke).and_then(command) {
+            // A pane taking typed text (a note, the style editor, the symbol search) keeps its
+            // plain and Alt keys, as in main windows.
+            if self.handle.takes_text(cx) && !commands::runs_while_typing(&ev.keystroke, cmd) {
+                return;
+            }
             // A held key repeats only commands that may repeat: never an order or arming.
             if !ev.is_held || commands::repeats(cmd) {
                 self.run(cmd, window, cx);

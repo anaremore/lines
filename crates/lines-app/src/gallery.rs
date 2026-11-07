@@ -227,6 +227,23 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     let mut d = args("--layout chart --size 1400x800 --theme dark --timeframe 5m --drawings");
     d.push(ws("drawings.json"));
     v.push(s("drawings", false, end, d));
+    // User styles (decision 0026): styled drawings in three theme/palette combinations, and
+    // the style editor open on a trend line (dark) and a note (light).
+    let styled = |name, theme: &str, extra: &str| {
+        let mut a = args(&format!(
+            "--layout chart --size 1400x800 --theme {theme} --timeframe 5m{extra} --drawings"
+        ));
+        a.push(ws("styled-drawings.json"));
+        s(name, false, end, a)
+    };
+    v.push(styled("styled-drawings-dark", "dark", ""));
+    v.push(styled("styled-drawings-light-cb", "light", " --palette cb"));
+    let mut e = styled("style-editor-trend-dark", "dark", "");
+    e.args.extend(["--style-editor".into(), "3".into()]);
+    v.push(e);
+    let mut e = styled("style-editor-note-light", "light", "");
+    e.args.extend(["--style-editor".into(), "7".into()]);
+    v.push(e);
     v
 }
 
@@ -283,6 +300,32 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         anchor("21:00", 602_000),
     );
     std::fs::write(dir.join("drawings.json"), drawings).context("drawings.json")?;
+    // Styled: custom colors, line types and widths, extensions, axis tags, a zone's own fill,
+    // a large note without its box (in a yellow that needs one on light).
+    let styled = format!(
+        r##"{{ "version": 1, "product": "ES", "drawings": [
+  {{ "id": 1, "tool": "hline", "a": {}, "color": 1, "axis_tag": true }},
+  {{ "id": 2, "tool": "hray", "a": {}, "line_color": "#f719cb", "width": 2, "axis_tag": true }},
+  {{ "id": 3, "tool": "trend", "a": {}, "b": {}, "line_color": "#9c8756", "width": 3,
+     "dashed": true, "line": "dash-dot", "extend_right": true }},
+  {{ "id": 4, "tool": "ray", "a": {}, "b": {}, "color": 3, "dashed": true, "line": "dotted" }},
+  {{ "id": 5, "tool": "rect", "a": {}, "b": {}, "line_color": "#f719cb",
+     "fill_color": "#9c8756", "fill_opacity": 25, "axis_tag": true }},
+  {{ "id": 6, "tool": "vline", "a": {}, "color": 2, "width": 2 }},
+  {{ "id": 7, "tool": "note", "a": {}, "text": "Yellow note, no box",
+     "text_color": "#e0b000", "text_bg": false, "text_size": "l" }} ] }}"##,
+        anchor("14:00", 601_600),
+        anchor("15:45", 599_000),
+        anchor("14:30", 603_400),
+        anchor("15:45", 599_000),
+        anchor("15:45", 599_000),
+        anchor("17:30", 600_400),
+        anchor("18:00", 600_700),
+        anchor("20:40", 600_300),
+        anchor("14:30", 603_500),
+        anchor("15:50", 598_900),
+    );
+    std::fs::write(dir.join("styled-drawings.json"), styled).context("styled-drawings.json")?;
     for (f, layout) in [
         ("popout.json", popout),
         ("footprint.json", footprint),

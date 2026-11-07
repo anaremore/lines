@@ -202,6 +202,48 @@ impl ChartDrawings {
         pick(&self.drawn, self.selected, x, y, HIT_TOL, HANDLE_R).map(|(id, _)| id)
     }
 
+    /// A double click at plot-local (`x`, `y`): the drawing whose style editor it opens. Never
+    /// with Ctrl/Cmd (chart trading's), in drawing mode, or with drawings hidden.
+    pub fn double_click(&self, x: f32, y: f32, ctrl: bool) -> Option<DrawingId> {
+        if ctrl || self.tool.is_some() {
+            return None;
+        }
+        self.hit_at(x, y)
+    }
+
+    /// A right click at plot-local (`x`, `y`): the drawing under it becomes the selection (the
+    /// pane menu then offers its style); on empty chart the selection clears, so the menu never
+    /// offers an older selection (one scrolled off screen). Whether a drawing is selected.
+    pub fn right_click(&mut self, x: f32, y: f32) -> bool {
+        if self.hidden || self.tool.is_some() {
+            return false;
+        }
+        self.selected = self.hit_at(x, y);
+        self.selected.is_some()
+    }
+
+    /// Whether the selection is a drawing shown on this chart now (the pane menu's "Drawing
+    /// style…", Alt+S).
+    pub fn selection_shown(&self) -> bool {
+        !self.hidden
+            && self
+                .selected
+                .is_some_and(|id| self.drawn.iter().any(|d| d.id == id))
+    }
+
+    /// Drawing `id`'s extent on screen this frame, plot-local (x0, y0, x1, y1): a note with
+    /// its box, a line with its handles. `None` when it isn't drawn.
+    pub fn extent(&self, id: DrawingId) -> Option<(f32, f32, f32, f32)> {
+        let d = self.drawn.iter().find(|d| d.id == id)?;
+        // A note's `p1` is its box's far corner (`set_note_box`).
+        let (mut x0, mut y0) = (d.p0.0.min(d.p1.0), d.p0.1.min(d.p1.1));
+        let (mut x1, mut y1) = (d.p0.0.max(d.p1.0), d.p0.1.max(d.p1.1));
+        for &(x, y) in &d.handles[..usize::from(d.n_handles)] {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+        Some((x0, y0, x1, y1))
+    }
+
     // ---- the style editor ---------------------------------------------------------------
 
     /// Open the style editor on drawing `id` (selected). False if it isn't there.
@@ -243,6 +285,11 @@ impl ChartDrawings {
                 None
             }
         }
+    }
+
+    /// The drawing the editor is open on.
+    pub fn editor_target(&self) -> Option<DrawingId> {
+        self.editor.as_ref().map(|(id, _)| *id)
     }
 
     pub fn editing(&self) -> bool {
@@ -689,7 +736,12 @@ impl ChartDrawings {
 
     /// Axis price tags this frame: each drawing with its tag on, its price and plot-local y
     /// (a zone has two, top and bottom). Allocation-free.
-    pub fn axis_tags(&self) -> impl Iterator<Item = (lines_core::Price, f32, Style)> + '_ {
+    /// Only tags on the plot (`0..=plot_h`): an off-screen zone edge takes no tag slot and
+    /// hides no grid label.
+    pub fn axis_tags(
+        &self,
+        plot_h: f32,
+    ) -> impl Iterator<Item = (lines_core::Price, f32, Style)> + '_ {
         self.drawn
             .iter()
             .filter(|d| d.style.axis_tag && d.tool.has_axis_tag())
@@ -702,6 +754,7 @@ impl ChartDrawings {
                 let ys = [d.p0.1, d.p1.1];
                 (0..n).map(move |i| (d.prices[i], ys[i], d.style))
             })
+            .filter(move |(_, y, _)| (0.0..=plot_h).contains(y))
     }
 }
 

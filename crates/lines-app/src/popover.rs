@@ -1,4 +1,5 @@
-//! Popovers: the studies menu, the timeframe and account lists, the pane/tab/column menus.
+//! Popovers: the studies menu, the timeframe and account lists, the pane/tab/column menus,
+//! the drawing style editor.
 //!
 //! The rule (docs/invariants.md, lines-app UI): a click outside an open popover closes it and
 //! does nothing else (no pan, no drawing selected, no order, no focus change in what was under
@@ -70,6 +71,8 @@ pub enum Kind {
     Account,
     /// A pane, tab, column or detached-pane menu (`crate::menu`).
     Menu,
+    /// A chart's drawing style editor (`crate::style_editor`).
+    StyleEditor,
 }
 
 /// The one open popover, as a pure value: `K` names a popover (owner and kind).

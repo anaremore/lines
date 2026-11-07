@@ -113,14 +113,18 @@ enum LabelKind {
     SubCross,
     CrossTime,
     Indicator,
-    /// A drawing's price tag on the axis, its text in the theme's text color or its
-    /// background color (whichever reads on the tag: `Theme::on_fill`).
-    DrawingTagMain,
-    DrawingTagBg,
+    /// A drawing's price tag on the axis, its text in the drawing's color (when AA on the
+    /// axis) or the theme's text color (`Theme::drawing_tag`). Keyed by that color (`0xRRGGBB`),
+    /// as the shaped text carries it.
+    DrawingTag(u32),
 }
 
 /// Drawing price tags on the axis considered per frame (labels they cover aren't drawn).
 const MAX_DRAWING_TAGS: usize = 8;
+/// A drawing tag's height: shorter than the last-price tag (`TAG_H`), never mistaken for it.
+const DRAWING_TAG_H: f32 = 16.0;
+/// A drawing tag starts this far into the axis, joined to the plot by its notch.
+const DRAWING_TAG_INSET: f32 = 4.0;
 
 /// Behind a drawing's note text: the box's padding (logical px).
 const NOTE_PAD: f32 = 6.0;
@@ -372,6 +376,8 @@ pub struct ChartView {
     /// The per-tool drawing styles last read from the settings (new defaults saved on any
     /// chart are picked up when a tool is next chosen).
     saved_styles: crate::chart_draw::ToolStyles,
+    /// The pane size the style editor was last placed in (a new size places it again).
+    editor_pane: (f32, f32),
     measure_lines: HashMap<
         Option<u64>,
         (
@@ -526,6 +532,7 @@ impl ChartView {
             cross_partial: false,
             drawings,
             saved_styles,
+            editor_pane: (0.0, 0.0),
             note_lines: HashMap::new(),
             note_entry_line: None,
             measure_lines: HashMap::new(),
@@ -538,7 +545,7 @@ impl ChartView {
             view.open_menu_at(&spec, cx);
         }
         if let Some((id, tab)) = fixture_style_editor
-            && view.drawings.open_editor(id)
+            && view.open_style_editor(id, cx)
         {
             view.drawings.edit_style(|e| {
                 e.select_tab(tab);
@@ -652,6 +659,11 @@ impl ChartView {
                 }
             }
             Kind::Account => return crate::trade_bar::close_account_menu(self, cx),
+            Kind::StyleEditor => {
+                if !self.drawings.close_editor() {
+                    return;
+                }
+            }
             Kind::Menu => return,
         }
         popover::closed(cx, kind);
@@ -948,22 +960,22 @@ impl ChartView {
         // An open list or menu normally takes this press on its backdrop (`crate::popover`);
         // this is the fallback (a list whose chip is clipped away draws none). A press that
         // closes something does only that: no focus change, no pan.
-        if self.tf_menu || self.trade.account_menu || self.study_menu.is_some() {
+        if self.tf_menu
+            || self.trade.account_menu
+            || self.study_menu.is_some()
+            || self.drawings.editing()
+        {
             popover::mark_dismissing();
             self.close_popover(Kind::Timeframe, cx);
             self.close_popover(Kind::Account, cx);
             self.close_popover(Kind::Studies, cx);
+            self.close_popover(Kind::StyleEditor, cx);
             cx.stop_propagation();
             return;
         }
         self.focus.focus(window, cx);
         if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
-            cx.notify();
-            return;
-        }
-        if self.drawings.close_editor() {
-            // Clicking the chart dismisses the style editor (its controls handle their own).
             cx.notify();
             return;
         }
@@ -988,18 +1000,15 @@ impl ChartView {
         // Drawings take a press only in drawing mode or on a drawing, never with Ctrl (chart
         // trading's); otherwise the chart pans and scales as usual.
         if region == Region::Plot {
-            // A double click on a drawing opens its style editor.
+            // A double click on a drawing opens its style editor (never with Ctrl/Cmd).
+            let ctrl = ev.modifiers.control || ev.modifiers.platform;
             if ev.click_count >= 2
-                && self.drawings.tool().is_none()
-                && let Some(id) = self.drawings.hit_at(x as f32, y as f32)
-                && self.drawings.open_editor(id)
+                && let Some(id) = self.drawings.double_click(x as f32, y as f32, ctrl)
+                && self.open_style_editor(id, cx)
             {
-                self.study_menu = None;
-                cx.notify();
                 return;
             }
             let anchor = self.drawing_anchor(x, y);
-            let ctrl = ev.modifiers.control || ev.modifiers.platform;
             if self.drawings.on_down(x as f32, y as f32, ctrl, anchor) {
                 cx.notify();
                 return;
@@ -1065,13 +1074,25 @@ impl ChartView {
             cx.stop_propagation();
             return;
         }
-        if self.drawings.editing() && !m.control && !m.platform {
-            // The style editor takes its keys (Ctrl/Cmd shortcuts such as undo still work).
-            let text = k.key_char.as_deref().filter(|_| !m.alt);
-            let (key, shift) = (k.key.clone(), m.shift);
-            self.style_edit(|e| e.key(&key, shift, text), cx);
-            cx.stop_propagation();
-            return;
+        if self.drawings.editing() {
+            // The style editor takes its keys; Undo and Redo still work (the workspace leaves
+            // them to a pane taking text, so they run here).
+            match editor_key(k) {
+                EditorKey::Editor => {
+                    let text = k.key_char.as_deref().filter(|_| !m.alt);
+                    let (key, shift) = (k.key.clone(), m.shift);
+                    self.style_edit(|e| e.key(&key, shift, text), cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                EditorKey::Draw(d) => {
+                    self.drawing_command(d, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                EditorKey::Pass => {}
+            }
         }
         if self.anchoring.is_some() && k.key == "escape" {
             self.anchoring = None;
@@ -1642,6 +1663,10 @@ impl ChartView {
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
         self.footprint.ensure_capacity(plot_w);
         self.chart = bounds;
+        if self.drawings.editing() && self.editor_pane != (w, h) {
+            // The style editor is placed from the pane's size: place it again.
+            cx.notify();
+        }
         // The HUD's form follows the chart's width: rebuild it when the width crosses over.
         if self.latency_hud && hud_compact(w) != self.hud_compact {
             self.hud_at = None;
@@ -2099,11 +2124,11 @@ impl ChartView {
         let sync_price = self
             .sync_price
             .filter(|_| self.cross.is_none() && self.sync_marker.is_some());
-        // Drawings' price tags too (up to a few per frame, allocation-free).
+        // Drawings' price tags too (up to a few per frame, on the plot only, allocation-free).
         let mut drawing_tags = [None; MAX_DRAWING_TAGS];
         if !self.drawings.hidden {
-            for (slot, (_, y, _)) in drawing_tags.iter_mut().zip(self.drawings.axis_tags()) {
-                *slot = Some(Span::around(cross_tag_y(y, ph), TAG_H * 0.5));
+            for (slot, (_, y, _)) in drawing_tags.iter_mut().zip(self.drawings.axis_tags(ph)) {
+                *slot = Some(Span::around(cross_tag_y(y, ph), DRAWING_TAG_H * 0.5));
             }
         }
         let tags = [
@@ -2473,8 +2498,11 @@ impl ChartView {
     }
 
     /// Drawings' price tags (decision 0026: horizontal lines and rays, a zone's edges, with
-    /// the option on): the last-price tag's box in the drawing's color (opaque), its text in
-    /// whichever theme color reads on it. Under the last-price and crosshair tags.
+    /// the option on). Their own shape, which no color can make look like the last price's or
+    /// an order's filled tag: an outline in the drawing's color on the axis background, a
+    /// notch from the plot's edge, shorter and inset; text in the drawing's color where that
+    /// is AA, else the theme's text (`Theme::drawing_tag`). Under the last-price and
+    /// crosshair tags, which are drawn after.
     fn draw_drawing_tags(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         if self.drawings.hidden {
             return;
@@ -2491,36 +2519,42 @@ impl ChartView {
         let fmt = self.instrument.price;
         let mut tags = [(Price(0), 0.0f32, lines_core::drawings::Style::DEFAULT); MAX_DRAWING_TAGS];
         let mut n = 0;
-        for (slot, tag) in tags.iter_mut().zip(self.drawings.axis_tags()) {
+        for (slot, tag) in tags.iter_mut().zip(self.drawings.axis_tags(ph)) {
             *slot = tag;
             n += 1;
         }
+        let x0 = ox + pw + hair;
         for &(price, y, style) in &tags[..n] {
-            if !(0.0..=ph).contains(&y) {
-                continue;
-            }
-            let bg = t.style_color(style.line.color, &t.drawing, 100);
-            let on = t.on_fill(bg);
-            let kind = if on == t.text_main {
-                LabelKind::DrawingTagMain
-            } else {
-                LabelKind::DrawingTagBg
-            };
+            let color = t.style_color(style.line.color, &t.drawing, 100);
+            let (border, text) = t.drawing_tag(color);
             let y = cross_tag_y(y, ph);
-            let top = snap(f64::from(y - TAG_H * 0.5), scale);
+            let top = snap(f64::from(y - DRAWING_TAG_H * 0.5), scale);
+            let mid = snap(f64::from(y), scale);
+            // The notch: the line's level carried from the plot's edge to the tag.
             window.paint_quad(fill(
                 Bounds::new(
-                    point(px(ox + pw + hair), px(oy + top)),
-                    size(px(AXIS_W), px(TAG_H)),
+                    point(px(x0), px(oy + mid - hair)),
+                    size(px(DRAWING_TAG_INSET), px(2.0 * hair)),
                 ),
-                bg,
+                border,
             ));
+            window.paint_quad(
+                fill(
+                    Bounds::new(
+                        point(px(x0 + DRAWING_TAG_INSET), px(oy + top)),
+                        size(px(AXIS_W - DRAWING_TAG_INSET - 2.0), px(DRAWING_TAG_H)),
+                    ),
+                    t.bg,
+                )
+                .border_widths(px(1.0))
+                .border_color(border),
+            );
             self.paint_label(
-                kind,
+                LabelKind::DrawingTag(crate::theme::rgb_of(text).to_u32()),
                 price.0,
                 point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65)),
                 line_h,
-                on,
+                text,
                 window,
                 cx,
                 |s| {
@@ -2628,13 +2662,16 @@ impl ChartView {
             // A note's text style (decision 0026): size, color, its box on or off. Re-shaped
             // only when the text or its style changes.
             let ts = d.style.text;
+            // Text below AA on the chart gets its box anyway; below AA on the box it is drawn
+            // in the theme's text color (`Theme::note_text`; the saved style is unchanged).
+            let (boxed, color) =
+                t.note_text(t.style_color(ts.color, &t.drawing, 100), ts.background);
             if self
                 .note_lines
                 .get(&d.id)
                 .is_none_or(|(s, k, _)| s != text || *k != ts)
             {
                 let text = text.to_owned();
-                let color = t.style_color(ts.color, &t.drawing, 100);
                 let line = self.shape_sized(&text, color, ts.size.px(), window);
                 self.note_lines.insert(d.id, (text, ts, line));
             }
@@ -2645,7 +2682,7 @@ impl ChartView {
             let box_h = size_px * 1.3 + NOTE_PAD;
             let w = f32::from(line.width) + 2.0 * NOTE_PAD;
             let (x, y) = d.p0;
-            if ts.background {
+            if boxed {
                 window.paint_quad(fill(
                     Bounds::new(point(px(ox + x + 2.0), px(oy + y)), size(px(w), px(box_h))),
                     t.panel,
@@ -2772,16 +2809,14 @@ impl ChartView {
         f: impl FnOnce(&mut crate::style_editor::StyleEditor) -> crate::style_editor::Outcome,
         cx: &mut Context<Self>,
     ) {
-        let (_, saved) = self.drawings.edit_style(f);
+        let (out, saved) = self.drawings.edit_style(f);
+        if out == crate::style_editor::Outcome::Close {
+            popover::closed(cx, Kind::StyleEditor);
+        }
         if let Some((tool, style)) = saved {
             self.saved_styles[crate::chart_draw::tool_index(tool)] = style;
-            let doc = crate::style_doc::StyleDoc::from_style(&style);
             crate::picker_view::update_settings(cx, |s| {
-                if style == lines_core::drawings::Style::DEFAULT {
-                    s.drawing_styles.remove(tool.key());
-                } else {
-                    s.drawing_styles.insert(tool.key().to_owned(), doc);
-                }
+                crate::style_doc::save_default(&mut s.drawing_styles, tool.key(), &style);
             });
         }
         cx.notify();
@@ -2810,24 +2845,68 @@ impl ChartView {
             return;
         }
         let (x, y) = self.local(ev.position);
-        if let Some(id) = self.drawings.hit_at(x as f32, y as f32) {
-            self.drawings.selected = Some(id);
+        let before = self.drawings.selected;
+        self.drawings.right_click(x as f32, y as f32);
+        if self.drawings.selected != before {
             cx.notify();
         }
     }
 
-    /// Whether a drawing is selected (the pane menu's "Drawing style...").
+    /// Whether a drawing shown on this chart is selected (the pane menu's "Drawing style…").
     pub fn drawing_selected(&self) -> bool {
-        self.drawings.selected.is_some() && !self.drawings.hidden
+        self.drawings.selection_shown()
+    }
+
+    /// Open the style editor on drawing `id`: the chart's other popovers close, and any other
+    /// in the app (`popover::opened`).
+    fn open_style_editor(&mut self, id: u64, cx: &mut Context<Self>) -> bool {
+        if !self.drawings.open_editor(id) {
+            return false;
+        }
+        self.picker.close();
+        self.anchoring = None;
+        self.close_popover(Kind::Studies, cx);
+        self.close_popover(Kind::Timeframe, cx);
+        self.close_popover(Kind::Account, cx);
+        popover::opened(cx, Kind::StyleEditor, |v: &mut Self, cx| {
+            v.close_popover(Kind::StyleEditor, cx)
+        });
+        cx.notify();
+        true
+    }
+
+    /// The open style editor over the window, with a backdrop under it (`crate::popover`):
+    /// placed beside its drawing, inside the pane; its warnings checked in every theme.
+    fn style_editor_layer(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let e = self.drawings.editor()?.clone();
+        let id = self.drawings.editor_target()?;
+        let ctxs: Vec<_> = Theme::all().iter().map(Theme::style_ctx).collect();
+        let warnings = e.warnings(&ctxs);
+        let pane = (
+            f32::from(self.chart.size.width),
+            f32::from(self.chart.size.height),
+        );
+        self.editor_pane = pane;
+        let h = crate::style_editor_view::estimated_height(&e, warnings.len());
+        let at = crate::style_editor_view::place(pane, self.drawings.extent(id), h);
+        let editor = crate::style_editor_view::render(&e, t, &warnings, at, cx);
+        let dismiss: popover::OnDismiss = Box::new(
+            cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::StyleEditor, cx)),
+        );
+        Some(popover::layer(editor, dismiss).into_any_element())
     }
 
     /// Pick up per-tool defaults saved since this chart last looked (on any chart).
     fn refresh_tool_styles(&mut self, cx: &App) {
+        // Only the tools whose saved default changed: this chart's session restyles of the
+        // other tools stay.
         let saved = saved_tool_styles(cx);
-        if saved != self.saved_styles {
-            self.saved_styles = saved;
-            self.drawings.defaults = saved;
+        for (i, s) in saved.iter().enumerate() {
+            if *s != self.saved_styles[i] {
+                self.drawings.defaults[i] = *s;
+            }
         }
+        self.saved_styles = saved;
     }
 
     /// A drawing command (`Command::Draw`) on this chart.
@@ -2840,16 +2919,13 @@ impl ChartView {
                 self.picker.close();
                 self.tf_menu = false;
                 self.tf_entry = None;
-                self.drawings.close_editor();
+                self.close_popover(Kind::StyleEditor, cx);
                 self.refresh_tool_styles(cx);
                 self.drawings.set_tool(tool);
             }
             DrawCmd::Style => {
-                if let Some(id) = d.selected
-                    && d.open_editor(id)
-                {
-                    self.study_menu = None;
-                    self.picker.close();
+                if let Some(id) = d.selected.filter(|_| d.selection_shown()) {
+                    self.open_style_editor(id, cx);
                 }
             }
             DrawCmd::Undo => {
@@ -3722,6 +3798,30 @@ fn last_tag_y(vp: &Viewport, p: Price, plot_h: f32) -> f32 {
 }
 
 /// Centre of the crosshair's price tag, kept fully inside the plot's height.
+/// Where a key goes while the style editor is open.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum EditorKey {
+    /// The editor's (plain, Shift and Alt keys: moves, picks, hex digits, Esc).
+    Editor,
+    /// Undo or Redo: still the drawings' (one step each, the editor follows).
+    Draw(DrawCmd),
+    /// Another Ctrl/Cmd shortcut: on to the chart's other handling.
+    Pass,
+}
+
+fn editor_key(k: &gpui::Keystroke) -> EditorKey {
+    let m = k.modifiers;
+    if !m.control && !m.platform {
+        return EditorKey::Editor;
+    }
+    match crate::commands::command_for(k) {
+        Some(crate::commands::Command::Draw(d @ (DrawCmd::Undo | DrawCmd::Redo))) => {
+            EditorKey::Draw(d)
+        }
+        _ => EditorKey::Pass,
+    }
+}
+
 /// Each tool's style for new drawings from the settings ("Save as default for ..."; tools
 /// without one: the default style). No settings global (tests): all defaults.
 fn saved_tool_styles(cx: &App) -> crate::chart_draw::ToolStyles {
@@ -3729,8 +3829,8 @@ fn saved_tool_styles(cx: &App) -> crate::chart_draw::ToolStyles {
     if cx.has_global::<crate::picker_view::AppSettings>() {
         let saved = &crate::picker_view::settings(cx).drawing_styles;
         for (i, tool) in Tool::ALL.iter().enumerate() {
-            if let Some(doc) = saved.get(tool.key()) {
-                out[i] = doc.to_style();
+            if let Some(e) = saved.get(tool.key()) {
+                out[i] = e.doc.to_style();
             }
         }
     }
@@ -3943,13 +4043,7 @@ impl Render for ChartView {
                     .when(self.anchoring.is_some(), |d| {
                         d.child(crate::study_menu_view::anchor_banner(&t))
                     })
-                    .when_some(
-                        self.drawings
-                            .editor()
-                            .cloned()
-                            .map(|e| crate::style_editor_view::render(&e, &t, cx)),
-                        |d, e| d.child(e),
-                    )
+                    .when_some(self.style_editor_layer(&t, cx), |d, e| d.child(e))
                     .when_some(overlay, |d, overlay| d.child(overlay))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
                     .when_some(self.drawing_banner(&t), |d, b| d.child(b)),
@@ -3965,6 +4059,49 @@ mod tests {
     use lines_feed::provider::MarketEvent;
 
     use crate::profile::{ProfileConfig, ProfileMode};
+
+    /// While the style editor is open it takes plain, Shift and Alt keys (moves, hex digits,
+    /// Esc closes it), and Undo/Redo still reach the drawings (the workspace leaves them to a
+    /// pane taking text); other Ctrl/Cmd shortcuts pass on.
+    #[test]
+    fn style_editor_keys_route_undo_redo_and_esc() {
+        let k = |s: &str| gpui::Keystroke::parse(Box::leak(s.to_owned().into_boxed_str())).unwrap();
+        let ctrl = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        assert_eq!(
+            editor_key(&k(&format!("{ctrl}-z"))),
+            EditorKey::Draw(DrawCmd::Undo)
+        );
+        assert_eq!(
+            editor_key(&k(&format!("{ctrl}-y"))),
+            EditorKey::Draw(DrawCmd::Redo)
+        );
+        assert_eq!(
+            editor_key(&k(&format!("{ctrl}-shift-z"))),
+            EditorKey::Draw(DrawCmd::Redo)
+        );
+        for plain in ["escape", "a", "shift-tab", "alt-s", "enter", "left"] {
+            assert_eq!(editor_key(&k(plain)), EditorKey::Editor, "{plain}");
+        }
+        assert_eq!(editor_key(&k(&format!("{ctrl}-shift-p"))), EditorKey::Pass);
+        // Esc reaches the editor and closes it.
+        let mut e = crate::style_editor::StyleEditor::for_drawing(
+            lines_core::drawings::Tool::Trend,
+            &lines_core::drawings::Style::DEFAULT,
+        );
+        assert_eq!(
+            e.key("escape", false, None),
+            crate::style_editor::Outcome::Close
+        );
+        // The workspace leaves Undo to a pane taking text: this route is the only one.
+        assert!(!crate::commands::runs_while_typing(
+            &k(&format!("{ctrl}-z")),
+            Command::Draw(DrawCmd::Undo)
+        ));
+    }
 
     /// Hidden studies do no work: no profile rows are built, no study columns prepared.
     /// Showing them again prepares from the same configuration.

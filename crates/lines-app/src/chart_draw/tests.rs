@@ -318,14 +318,14 @@ fn axis_tags_follow_the_option() {
     r.down(200.0, 150.0);
     r.down(300.0, 250.0);
     r.frame(0.0, 0.0);
-    assert_eq!(r.d.axis_tags().count(), 0);
+    assert_eq!(r.d.axis_tags(400.0).count(), 0);
     for d in r.items() {
         let mut d = d.clone();
         d.style.axis_tag = true;
         r.d.data().change(|s| (s.edit(d), ()));
     }
     r.frame(0.0, 0.0);
-    let tags: Vec<_> = r.d.axis_tags().map(|(p, _, _)| p).collect();
+    let tags: Vec<_> = r.d.axis_tags(400.0).map(|(p, _, _)| p).collect();
     let items = r.items();
     assert_eq!(tags, [items[0].a.price, items[1].a.price, items[1].b.price]);
 }
@@ -480,4 +480,54 @@ fn the_chart_pans_inside_a_zone() {
     );
     assert!(r.d.selected.is_some());
     assert!(r.down(x0, 200.0), "edge of the selected zone: drags");
+}
+
+/// Double click opens the editor on a drawing, never with Ctrl/Cmd or in drawing mode; right
+/// click selects what is under it and clears an older selection on empty chart.
+#[test]
+fn double_and_right_clicks_route_to_the_drawing_under_them() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    r.frame(400.0, 100.0);
+    let id = r.d.hit_at(400.0, 100.0).unwrap();
+    assert_eq!(r.d.double_click(400.0, 100.0, false), Some(id));
+    assert_eq!(r.d.double_click(400.0, 100.0, true), None, "Ctrl/Cmd");
+    assert_eq!(r.d.double_click(400.0, 300.0, false), None, "empty chart");
+    r.d.set_tool(Tool::Trend);
+    assert_eq!(r.d.double_click(400.0, 100.0, false), None, "drawing mode");
+    r.d.set_tool(Tool::Trend); // off again
+    r.d.selected = None;
+    assert!(r.d.right_click(400.0, 100.0));
+    assert!(r.d.selection_shown());
+    assert!(!r.d.right_click(400.0, 300.0));
+    assert_eq!(r.d.selected, None, "a right click on empty chart clears it");
+    // A selection scrolled off screen isn't offered.
+    r.d.selected = Some(id);
+    r.vp.price_lo = 610_000.0;
+    r.vp.price_hi = 612_000.0;
+    r.frame(0.0, 0.0);
+    assert!(!r.d.selection_shown());
+}
+
+/// An off-screen tag (a zone edge above the plot) takes no slot.
+#[test]
+fn axis_tags_off_the_plot_are_left_out() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Rect);
+    r.down(200.0, 150.0);
+    r.down(300.0, 250.0);
+    let mut d = r.items()[0].clone();
+    d.style.axis_tag = true;
+    r.d.data().change(|s| (s.edit(d), ()));
+    r.frame(0.0, 0.0);
+    assert_eq!(r.d.axis_tags(400.0).count(), 2);
+    assert_eq!(
+        r.d.axis_tags(200.0).count(),
+        1,
+        "the bottom edge is below a 200 px plot"
+    );
+    let id = r.items()[0].id;
+    let (x0, y0, x1, y1) = r.d.extent(id).unwrap();
+    assert!(x0 <= 200.0 && x1 >= 300.0 && y0 <= 150.0 && y1 >= 250.0);
 }

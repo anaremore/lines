@@ -192,6 +192,48 @@ impl StyleDoc {
     }
 }
 
+/// A tool's saved default (settings `drawing_styles`): its style, and the fields a newer
+/// build wrote that this one doesn't know, kept and written back unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedStyle {
+    #[serde(flatten)]
+    pub doc: StyleDoc,
+    /// After `doc`, which takes its own fields first.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+// JSON values have no NaN, so equality is total (settings compare whole files).
+impl Eq for SavedStyle {}
+
+/// Save `style` as the default for the tool keyed `key`: a newer build's fields on that entry
+/// stay; the default style with nothing else to keep removes the entry.
+pub fn save_default(
+    map: &mut std::collections::BTreeMap<String, SavedStyle>,
+    key: &str,
+    style: &Style,
+) {
+    let doc = StyleDoc::from_style(style);
+    match map.get_mut(key) {
+        Some(e) => e.doc = doc,
+        None => {
+            map.insert(
+                key.to_owned(),
+                SavedStyle {
+                    doc,
+                    extra: serde_json::Map::new(),
+                },
+            );
+        }
+    }
+    if map
+        .get(key)
+        .is_some_and(|e| e.extra.is_empty() && e.doc == StyleDoc::default())
+    {
+        map.remove(key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +307,38 @@ mod tests {
         assert_eq!((s.line.width, s.line.opacity), (4, 10));
         // A zone without a saved fill fills in its line's color.
         assert_eq!(s.fill.color, Color::Palette(2));
+    }
+
+    /// A newer build's fields on a saved default survive this build saving a new default.
+    #[test]
+    fn saved_defaults_keep_a_newer_builds_fields() {
+        let mut map: std::collections::BTreeMap<String, SavedStyle> = serde_json::from_str(
+            r#"{"trend": {"width": 2, "glow": {"radius": 3}}, "spiral": {"turns": 4}}"#,
+        )
+        .unwrap();
+        assert_eq!(map["trend"].doc.width, 2);
+        let s = Style {
+            line: LineStyle {
+                width: 4,
+                ..LineStyle::DEFAULT
+            },
+            ..Style::DEFAULT
+        };
+        save_default(&mut map, "trend", &s);
+        save_default(&mut map, "hline", &Style::DEFAULT);
+        let json = serde_json::to_value(&map).unwrap();
+        assert_eq!(json["trend"]["width"], 4);
+        assert_eq!(json["trend"]["glow"]["radius"], 3);
+        assert_eq!(json["spiral"]["turns"], 4, "an unknown tool's entry stays");
+        assert!(
+            json.get("hline").is_none(),
+            "the default style writes nothing"
+        );
+        // Back to the default: the newer fields still keep the entry.
+        save_default(&mut map, "trend", &Style::DEFAULT);
+        assert_eq!(
+            serde_json::to_value(&map).unwrap()["trend"]["glow"]["radius"],
+            3
+        );
     }
 }

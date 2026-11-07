@@ -258,7 +258,7 @@ impl PaneHandle {
     }
 
     /// Taking typed text now (symbol search, a note, a timeframe being typed).
-    fn takes_text(&self, cx: &App) -> bool {
+    pub(crate) fn takes_text(&self, cx: &App) -> bool {
         each!(self, e => e.read(cx).takes_text())
     }
 

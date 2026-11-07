@@ -99,6 +99,9 @@ pub struct Theme {
     /// color with a meaning (up/down in both palettes, accent/last, warn, bracket target and
     /// stop) and at least 3:1 against the chart background (WCAG 1.4.11): tested.
     pub drawing: [Hsla; 4],
+    /// The drawing colors' names in the style editor (shown beside the color row's label, so a
+    /// swatch never needs its color to be told apart).
+    pub drawing_names: [&'static str; 4],
     /// Behind text drawn over the plot (study legends, the volume profile's tag): a slightly
     /// translucent panel box, so lines and profile rows never run through the text. Its text
     /// meets AA over any chart content below it (`label_box_text_meets_aa_over_chart_content`).
@@ -144,8 +147,8 @@ pub const HELD_DASH: Dash = Dash { on: 3.0, off: 3.0 };
 pub const DRAWING_DASH: Dash = Dash { on: 12.0, off: 4.0 };
 
 /// A drawing's (or a styled study line's) dash pattern for its line type and width (logical
-/// px). Dashed is [`DRAWING_DASH`]; dotted dots are as long as the line is wide with twice
-/// that between (round dots at every width); dash-dot is a long dash, a dot, and gaps. None of
+/// px). Dashed is [`DRAWING_DASH`]; dotted dots are as long as the line is wide (at least 2
+/// px) with about twice that between; dash-dot is a long dash, a dot, and gaps. None of
 /// them matches [`POSITION_DASH`] or [`HELD_DASH`] (tested). No allocation.
 pub fn drawing_dash(line: LineType, width: f32) -> DashPattern {
     let w = width.max(1.0);
@@ -155,8 +158,9 @@ pub fn drawing_dash(line: LineType, width: f32) -> DashPattern {
             seg: [DRAWING_DASH.on, DRAWING_DASH.off, 0.0, 0.0],
             n: 2,
         },
+        // Dots at least 2 px long, so a thin dotted line still reads (on dark especially).
         LineType::Dotted => DashPattern {
-            seg: [w, 2.0 * w + 1.0, 0.0, 0.0],
+            seg: [w.max(2.0), 2.0 * w + 2.0, 0.0, 0.0],
             n: 2,
         },
         LineType::DashDot => DashPattern {
@@ -166,13 +170,12 @@ pub fn drawing_dash(line: LineType, width: f32) -> DashPattern {
     }
 }
 
-/// Starting points for a custom color in the style editor (decision 0026). These are *user
-/// data presets*, not theme tokens: once chosen, a color is saved with the drawing as the
-/// user's own. Several deliberately sit near colors with a meaning (a red, a green), which the
-/// editor's readability guard warns about.
-pub const CUSTOM_SWATCHES: [u32; 8] = [
-    0xe5484d, 0xf5a524, 0xf2e05a, 0x46c35a, 0x34c6d9, 0x3d7bf5, 0xa461f0, 0x8a8f98,
-];
+/// Starting points for a custom color in the style editor (decision 0026), with their names.
+/// These are *user data presets*, not theme tokens: once chosen, a color is saved with the
+/// drawing as the user's own. Picked to read as a line (3:1) on both themes' charts and to stay
+/// clear (CIEDE2000 >= 20) of every color with a meaning in all four theme/palette combinations
+/// (tested): no market up/down colors among them; any color is still one "Custom…" away.
+pub const CUSTOM_SWATCHES: [(u32, &str); 2] = [(0xf719cb, "Magenta"), (0x9c8756, "Khaki")];
 
 /// A user-chosen color (decision 0026: user data saved with a drawing or study, never a
 /// literal in a view), at `opacity` percent.
@@ -209,24 +212,71 @@ impl Theme {
 
     /// Colors with a meaning, which a user color shouldn't resemble (decision 0026): this
     /// theme and palette's up and down, the violet last price / accent, the bracket target and
-    /// stop, and warn.
+    /// stop, and warn. Names as the style editor words them ("the {name} color").
     pub fn meanings(&self) -> [(&'static str, Rgb); 6] {
         [
-            ("the up color", rgb_of(self.up)),
-            ("the down color", rgb_of(self.down)),
-            ("the last-price violet", rgb_of(self.last)),
-            ("the order target color", rgb_of(self.order_target)),
-            ("the order stop color", rgb_of(self.order_stop)),
-            ("the warning color", rgb_of(self.warn)),
+            ("up", rgb_of(self.up)),
+            ("down", rgb_of(self.down)),
+            ("last-price", rgb_of(self.last)),
+            ("order target", rgb_of(self.order_target)),
+            ("order stop", rgb_of(self.order_stop)),
+            ("warning", rgb_of(self.warn)),
         ]
     }
 
-    /// Text on a tag filled with `fill`: the theme's ink or paper, whichever reads better.
+    pub fn is_dark(&self) -> bool {
+        self.name.starts_with("dark")
+    }
+
+    /// This theme as the style editor's guard sees it (`crate::style_editor::ThemeCtx`).
+    pub fn style_ctx(&self) -> crate::style_editor::ThemeCtx {
+        crate::style_editor::ThemeCtx {
+            dark: self.is_dark(),
+            colorblind: self.name.ends_with("colorblind"),
+            palette: self.drawing.map(rgb_of),
+            text: rgb_of(self.text_main),
+            chart: rgb_of(self.bg),
+            panel: rgb_of(self.panel),
+            meanings: self.meanings(),
+        }
+    }
+
+    /// Text on a swatch filled with `fill` (the editor's "current" dot): the theme's ink or
+    /// paper, whichever reads better.
     pub fn on_fill(&self, fill: Hsla) -> Hsla {
         let f = rgb_of(fill);
         let (a, b) = (self.text_main, self.bg);
         let k = |x: Hsla| lines_core::style::contrast(f, rgb_of(x));
         if k(a) >= k(b) { a } else { b }
+    }
+
+    /// A drawing's price tag on the axis (decision 0026): outlined, never filled (filled tags
+    /// are the last price's and orders'). Its border is the drawing's color, opaque; its text
+    /// the same color where that is AA (4.5:1) on the axis background, else the theme's text
+    /// color. Returns (border, text).
+    pub fn drawing_tag(&self, color: Hsla) -> (Hsla, Hsla) {
+        let mut solid = color;
+        solid.a = 1.0;
+        let reads = lines_core::style::contrast(rgb_of(solid), rgb_of(self.bg)) >= 4.5;
+        (solid, if reads { solid } else { self.text_main })
+    }
+
+    /// A note's text drawn in `color` (opaque), its box asked for or not: (draw the box, text
+    /// color). Text below AA on the chart gets its box anyway (the saved style is unchanged);
+    /// text below AA on the box is drawn in the theme's text color.
+    pub fn note_text(&self, color: Hsla, boxed: bool) -> (bool, Hsla) {
+        let k = |bg: Hsla| lines_core::style::contrast(rgb_of(color), rgb_of(bg));
+        if !boxed && k(self.bg) >= 4.5 {
+            return (false, color);
+        }
+        (
+            true,
+            if k(self.panel) >= 4.5 {
+                color
+            } else {
+                self.text_main
+            },
+        )
     }
 }
 
@@ -273,6 +323,7 @@ impl Theme {
             study: [c(0xe2c46a), c(0x4cc4c9), c(0xc4c8d6), c(0xd98ac4)],
             // paper, lime, olive, slate
             drawing: [c(brand::PAPER), c(0xd4ff3a), c(0x78871e), c(0x788787)],
+            drawing_names: ["White", "Lime", "Olive", "Slate"],
             label_bg: c(0x171b24).opacity(0.9),
             profile_va: c(0x9a9fb2).opacity(0.30),
             profile_poc: c(brand::PAPER).opacity(0.70),
@@ -325,6 +376,7 @@ impl Theme {
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
             // ink, warm gray, olive, slate: none in the red or green families
             drawing: [c(brand::INK), c(0x695a5a), c(0x707000), c(0x3a3a50)],
+            drawing_names: ["Black", "Warm gray", "Olive", "Slate"],
             label_bg: c(brand::PAPER).opacity(0.9),
             profile_va: c(0x565b6e).opacity(0.24),
             profile_poc: c(brand::INK).opacity(0.65),
@@ -340,8 +392,7 @@ impl Theme {
         }
     }
 
-    /// Every built-in theme/preset combination.
-    #[cfg(test)]
+    /// Every built-in theme/preset combination (the style editor checks user colors in all).
     pub fn all() -> [Theme; 4] {
         [
             Theme::dark(Palette::Standard),
@@ -796,21 +847,79 @@ mod tests {
         assert!((t.style_color(Color::Text, &t.drawing, 25).a - 0.25).abs() < 1e-6);
     }
 
-    /// Drawing price tags put `on_fill` text on the drawing's color: AA on every theme
-    /// drawing color and every custom starting swatch, in every theme and palette.
+    /// Any color a user can pick, coarsely: every 0x33 step per channel (216 colors).
+    fn any_user_color() -> impl Iterator<Item = Hsla> {
+        (0..216u32).map(|i| {
+            let ch = |k: u32| (k % 6) * 0x33;
+            let rgb = ch(i / 36) << 16 | ch(i / 6) << 8 | ch(i);
+            user_color(Rgb::hex(rgb), 100)
+        })
+    }
+
+    /// A drawing's axis tag is outlined in the drawing's color and its text reads: AA on the
+    /// axis background for every theme drawing color, starting swatch and any custom color
+    /// (216 sampled, with half opacity too), in every theme and palette.
     #[test]
-    fn drawing_tag_text_meets_aa() {
+    fn drawing_tag_text_meets_aa_for_any_color() {
         for t in Theme::all() {
-            let fills = t.drawing.iter().copied().chain(
-                CUSTOM_SWATCHES
-                    .iter()
-                    .map(|&h| user_color(Rgb::hex(h), 100)),
-            );
-            for f in fills {
-                let r = contrast(t.on_fill(f), f);
-                assert!(r >= 4.5, "{}: tag text on {:?}: {r:.2}", t.name, rgb_of(f));
+            let colors = t
+                .drawing
+                .iter()
+                .copied()
+                .chain(
+                    CUSTOM_SWATCHES
+                        .iter()
+                        .map(|&(h, _)| user_color(Rgb::hex(h), 100)),
+                )
+                .chain(any_user_color())
+                .chain(any_user_color().map(|c| c.opacity(0.5)));
+            for c in colors {
+                let (border, text) = t.drawing_tag(c);
+                assert_eq!(border.a, 1.0, "the outline is opaque");
+                let r = contrast(text, t.bg);
+                assert!(r >= 4.5, "{}: tag text for {:?}: {r:.2}", t.name, rgb_of(c));
             }
         }
+    }
+
+    /// A note's text reads in any color: on the chart, or on its box (drawn when needed).
+    #[test]
+    fn note_text_meets_aa_for_any_color() {
+        for t in Theme::all() {
+            for c in any_user_color() {
+                for boxed in [false, true] {
+                    let (draw_box, text) = t.note_text(c, boxed);
+                    assert!(draw_box || !boxed, "a box asked for is drawn");
+                    let bg = if draw_box { t.panel } else { t.bg };
+                    let r = contrast(text, bg);
+                    assert!(r >= 4.5, "{}: note in {:?}: {r:.2}", t.name, rgb_of(c));
+                }
+            }
+        }
+    }
+
+    /// The quick custom swatches carry no warning anywhere: 3:1 as a line on both charts and
+    /// clear of every color with a meaning (no market up/down) in all four combinations; and
+    /// they are clear of each other and of the theme's drawing colors (no near-duplicates).
+    #[test]
+    fn quick_swatches_are_clear_everywhere() {
+        use lines_core::style::{NEAR_MEANING, readability};
+        for t in Theme::all() {
+            for (h, name) in CUSTOM_SWATCHES {
+                let c = Rgb::hex(h);
+                let r = readability(c, 100, rgb_of(t.bg), &t.meanings(), false);
+                assert!(r.ok(), "{}: {name}: {r:?}", t.name);
+                for d in t.drawing {
+                    let de = lines_core::style::delta_e_2000(c, rgb_of(d));
+                    assert!(de >= 10.0, "{}: {name} next to a drawing color", t.name);
+                }
+            }
+        }
+        let (a, b) = (
+            Rgb::hex(CUSTOM_SWATCHES[0].0),
+            Rgb::hex(CUSTOM_SWATCHES[1].0),
+        );
+        assert!(lines_core::style::delta_e_2000(a, b) >= NEAR_MEANING);
     }
 
     /// The default style reads: a note's text color on its box and on the chart, and every
