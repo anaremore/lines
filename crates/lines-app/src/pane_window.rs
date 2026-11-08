@@ -164,6 +164,13 @@ impl PaneWindow {
             items.push(row);
             items.push(MenuItem::sep());
         }
+        if let PaneHandle::Chart(chart) = &self.handle {
+            items.push(MenuItem::named(
+                "Hide strategy markers on this chart",
+                Command::Strategy(commands::StrategyCmd::ToggleMarks),
+                chart.read(cx).strategy_marks_hidden(),
+            ));
+        }
         items.push(MenuItem::named(
             "Re-attach to its previous spot",
             Command::Reattach,

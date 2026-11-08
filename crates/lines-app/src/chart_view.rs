@@ -1901,7 +1901,7 @@ impl ChartView {
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
         self.drawings.hidden = state.hide_drawings;
-        self.marks.hidden = state.hide_strategy_marks;
+        self.marks.set_hidden(state.hide_strategy_marks);
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -4732,7 +4732,7 @@ impl ChartView {
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(t.label_bg)
+                .bg(t.panel)
                 .border_1()
                 .border_color(t.axis_line)
                 .text_color(t.text_main)
@@ -4745,7 +4745,7 @@ impl ChartView {
 
     /// Show or hide the strategy markers on this chart (saved with it).
     pub fn toggle_strategy_marks(&mut self, cx: &mut Context<Self>) {
-        self.marks.hidden = !self.marks.hidden;
+        self.marks.set_hidden(!self.marks.hidden);
         cx.notify();
     }
 
@@ -5659,6 +5659,7 @@ impl Pane for ChartView {
         self.drawings
             .set_data(crate::drawings_store::for_product(&self.instrument, cx));
         self.note_lines.clear();
+        self.marks.clear();
         self.trade.feed_changed(&self.store, follow, cx);
         cx.notify();
     }

@@ -120,8 +120,10 @@ pub struct Row {
     pub label: String,
     /// `level-touch 0.1.0`.
     pub strategy: String,
-    /// `ESZ26 · Paper 1`.
-    pub scope: String,
+    /// `ESZ26`.
+    pub contract: String,
+    /// `Paper 1`.
+    pub account: String,
     pub phase: Phase,
     /// Why it is paused, halted, faulted or stopped.
     pub why: Option<String>,
@@ -129,7 +131,7 @@ pub struct Row {
     pub position: String,
     /// `3 trades today`.
     pub trades: String,
-    /// Its own limits: `max 2 · loss $500 · 6 entries/min · 09:30-16:00 America/New_York`
+    /// Its own limits: `max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York`
     /// (no money while the P&L display hides it).
     pub limits: String,
     /// Today's net P&L as the P&L display allows (`None`: off, or nothing to show).
@@ -155,6 +157,13 @@ pub struct RowCtx<'a> {
     pub today: Option<CivilDate>,
     pub account_name: &'a str,
     pub mode: PnlDisplay,
+}
+
+/// A quantity (quantity units) as the product prints it: `2`, `0.5`.
+pub fn qty_text(product: &lines_core::Product, units: i64) -> String {
+    let mut s = String::new();
+    let _ = product.qty.write(lines_core::Qty(units), &mut s);
+    s
 }
 
 /// First letter upper case (the core's reasons start lower case).
@@ -211,7 +220,11 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
                 }
                 _ => String::new(),
             };
-            format!("{side} {}{avg}", p.qty.abs())
+            let qty = match &product {
+                Some(pr) => qty_text(pr, p.qty.abs()),
+                None => p.qty.abs().to_string(),
+            };
+            format!("{side} {qty}{avg}")
         }
         None => "Flat".to_owned(),
     };
@@ -244,7 +257,12 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         )
     });
     let l = &info.limits;
-    let mut limits = format!("max {}", l.max_position);
+    // Quantities in the product's own units (a crypto spot's aren't whole contracts).
+    let mut limits = match &product {
+        Some(pr) if pr.qty.decimals > 0 => format!("max {}", qty_text(pr, l.max_position)),
+        Some(pr) => format!("max {} contracts", qty_text(pr, l.max_position)),
+        None => format!("max {}", l.max_position),
+    };
     // P&L display off shows no money: the limit is still named.
     if c.mode.money() {
         limits.push_str(&format!(" · daily loss ${}", l.max_daily_loss));
@@ -265,7 +283,8 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         id: info.id,
         label: info.label.clone(),
         strategy: format!("{} {}", info.strategy, info.version),
-        scope: format!("{contract} · {}", c.account_name),
+        contract,
+        account: c.account_name.to_owned(),
         phase,
         why,
         position,
@@ -385,8 +404,7 @@ impl DemoStrategies {
             });
         }
         if let Some((at, price)) = skip_at {
-            let mut d =
-                Decision::note("skip-wide", "Skipped: the target crosses the zone boundary");
+            let mut d = Decision::note("skip-wide", "The target crosses the zone boundary");
             d.levels.push(level(price));
             out.push(DecisionRecord {
                 at,
@@ -432,8 +450,9 @@ impl DemoStrategies {
             contract.product,
             lines_feed::catalog::MNQ,
         ];
-        // #3's daily loss matches the screenshot script's (`strategy N`: 100).
+        // #3's limits match the screenshot script's (`strategy N`: 10 contracts, 100).
         let limit = |id: u32| StrategyLimits {
+            max_position: if id == 3 { 10 } else { 2 },
             max_daily_loss: if id == 3 { 100 } else { 500 },
             ..limits.clone()
         };
@@ -588,10 +607,13 @@ mod tests {
         assert_eq!(starts, [false, true, false, true]);
         let stops: Vec<bool> = rows.iter().map(|r| r.can_stop).collect();
         assert_eq!(stops, [true, true, true, false]);
-        assert_eq!(rows[0].scope, "MESZ26 · Paper 1");
+        assert_eq!(
+            (rows[0].contract.as_str(), rows[0].account.as_str()),
+            ("MESZ26", "Paper 1")
+        );
         assert_eq!(
             rows[0].limits,
-            "max 2 · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
+            "max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
         );
         let off = row(&i[0], &ctx(&[], None, PnlDisplay::Off));
         assert!(!off.limits.contains('$'), "{}", off.limits);

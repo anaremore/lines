@@ -136,7 +136,8 @@ pub fn build<'f>(
                     kind,
                     head: head(&info.label, what, f.at),
                     text: format!(
-                        "{side} {qty} @ {} · {why}",
+                        "{side} {} @ {} · {why}",
+                        crate::strategy_panel::qty_text(product, qty),
                         product.price.format::<32>(f.price).as_str()
                     ),
                 });
@@ -241,6 +242,21 @@ impl StrategyMarksLayer {
                 self.shown.push((x, y, i));
             }
         }
+    }
+
+    /// Show or hide them (nothing is left to hover).
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+        if hidden {
+            self.shown.clear();
+        }
+    }
+
+    /// Forget the marks (another market: the next poll builds its own).
+    pub fn clear(&mut self) {
+        self.marks.clear();
+        self.shown.clear();
+        self.built = None;
     }
 
     /// The mark under plot-local (`x`, `y`), nearest first.
@@ -679,6 +695,51 @@ mod tests {
         let at = UtcMillis(60_000 + 59_000);
         assert_eq!(mark_x(&axis, &vp, at), Some(vp.index_to_x(1.0) as f32));
         assert_ne!(axis.x_of(&vp, at), mark_x(&axis, &vp, at));
+    }
+
+    /// Quantities print in the product's units: 0.5 BTC, not 50000000.
+    #[test]
+    fn hover_text_prints_the_products_quantity() {
+        let btc = ContractKey::spot(catalog::BTC_USD);
+        let mut i = info(vec![rec(
+            10,
+            "Long",
+            Cmd::Place,
+            Some(Ok(vec![OrderId(1)])),
+            None,
+        )]);
+        i.contract = btc;
+        let product = catalog::get(catalog::BTC_USD).unwrap();
+        let mut f = fill(
+            1,
+            Side::Buy,
+            product.qty.parse_decimal("0.5").unwrap().0,
+            0,
+            11,
+        );
+        f.contract = btc;
+        let m = build(&[i], [f].iter(), btc, &product, unknown);
+        assert!(m[0].text.starts_with("Buy 0.5 @ "), "{}", m[0].text);
+    }
+
+    #[test]
+    fn hidden_marks_can_not_be_hovered() {
+        let mut l = StrategyMarksLayer::default();
+        l.shown.push((10.0, 10.0, 0));
+        l.marks.push(Mark {
+            at: UtcMillis(0),
+            price: Price(0),
+            kind: MarkKind::Exit,
+            head: String::new(),
+            text: String::new(),
+        });
+        assert!(l.hit(10.0, 10.0).is_some());
+        l.set_hidden(true);
+        assert!(l.hit(10.0, 10.0).is_none());
+        l.set_hidden(false);
+        l.shown.push((10.0, 10.0, 0));
+        l.clear();
+        assert!(l.hit(10.0, 10.0).is_none());
     }
 
     #[test]
