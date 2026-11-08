@@ -435,6 +435,20 @@ impl DomView {
         .map(|(_, d)| d)
     }
 
+    /// The mark a press in the orders column is on.
+    fn mark_pressed(
+        &self,
+        price: lines_core::Price,
+        p: Point<Pixels>,
+    ) -> crate::dom_orders::MarkPress {
+        let cell = self
+            .cols
+            .cell(DomCol::Orders.index(), f(self.bounds.origin.x));
+        let (cx, w) = cell.unwrap_or((f(p.x), 0.0));
+        self.orders
+            .press_at(price, self.row_units(), f(p.x) - cx, w)
+    }
+
     /// What a click needs (`trade_bar::entry_ctx`, shared with the header's buttons).
     fn entry_ctx(&self, cx: &App) -> Result<EntryCtx, &'static str> {
         trade_bar::entry_ctx(self, cx)
@@ -454,14 +468,13 @@ impl DomView {
             return;
         };
         if col == DomColumn::Orders {
-            if let Some(m) = self.orders.order_at(price, self.row_units()) {
-                self.orders.drag = Some(DragOrder {
-                    order: m.id,
-                    to: price,
-                });
-                cx.stop_propagation();
-                cx.notify();
+            match self.mark_pressed(price, ev.position).order() {
+                Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
+                Ok(None) => return,
+                Err(why) => self.trade.flash(why),
             }
+            cx.stop_propagation();
+            cx.notify();
             return;
         }
         if !matches!(col, DomColumn::Bid | DomColumn::Ask) {
@@ -584,17 +597,22 @@ impl DomView {
         // Right-click one of the trader's orders: cancel it (never needs arming).
         if self.column_at(ev.position) == Some(DomColumn::Orders)
             && let Some(price) = self.row_at(ev.position)
-            && let Some(m) = self.orders.order_at(price, self.row_units())
-            && let (Some(account), Some(t)) = (self.trade.account.clone(), Trading::try_global(cx))
         {
-            t.submit(
-                lines_trading::Source::Dom,
-                std::time::Instant::now(),
-                lines_trading::Command::CancelOrder {
-                    account,
-                    order: m.id,
-                },
-            );
+            match self.mark_pressed(price, ev.position).order() {
+                Ok(Some(order)) => {
+                    if let (Some(account), Some(t)) =
+                        (self.trade.account.clone(), Trading::try_global(cx))
+                    {
+                        t.submit(
+                            lines_trading::Source::Dom,
+                            std::time::Instant::now(),
+                            lines_trading::Command::CancelOrder { account, order },
+                        );
+                    }
+                }
+                Ok(None) => return,
+                Err(why) => self.trade.flash(why),
+            }
             cx.stop_propagation();
             cx.notify();
         }

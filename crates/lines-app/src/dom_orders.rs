@@ -52,6 +52,47 @@ pub struct DragOrder {
     pub to: Price,
 }
 
+/// What a press on a row of the orders column is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkPress {
+    /// No mark there.
+    Nothing,
+    /// A mark for one order: that order.
+    One(OrderId),
+    /// A mark for this many orders (`S 200 ×20`): no action on it may touch only one of them.
+    Many(usize),
+}
+
+impl MarkPress {
+    /// The order a drag or a right-click acts on: `Ok(None)` with no mark there, and for a mark
+    /// standing for several orders the refusal to show, never its first order.
+    pub fn order(self) -> Result<Option<OrderId>, String> {
+        match self {
+            MarkPress::Nothing => Ok(None),
+            MarkPress::One(id) => Ok(Some(id)),
+            MarkPress::Many(n) => Err(format!(
+                "{n} orders on this mark: use the chart's order list"
+            )),
+        }
+    }
+}
+
+/// The mark at `x` px into the orders cell (`cell_w` wide), laid out as `paint` draws `n` of them
+/// side by side.
+fn mark_press(slots: &[(OrderMark, i64, usize); 2], n: usize, x: f32, cell_w: f32) -> MarkPress {
+    if n == 0 {
+        return MarkPress::Nothing;
+    }
+    let w = ((cell_w - 2.0) / n as f32).max(1.0);
+    let k = (((x - 1.0) / w).floor().max(0.0) as usize).min(n - 1);
+    let (m, _, count) = &slots[k];
+    if *count > 1 {
+        MarkPress::Many(*count)
+    } else {
+        MarkPress::One(m.id)
+    }
+}
+
 pub struct OrdersLayer {
     marks: Vec<OrderMark>,
     flashes: Vec<RowFlash>,
@@ -142,10 +183,12 @@ impl OrdersLayer {
         refused
     }
 
-    /// The order drawn on the row containing `price` (the first; for drag and right-click).
-    pub fn order_at(&self, price: Price, units: i64) -> Option<&OrderMark> {
+    /// What a press in the orders cell is on: the mark drawn there, on the row containing
+    /// `price`, at `x` px into a cell `cell_w` wide (for drag and right-click).
+    pub fn press_at(&self, price: Price, units: i64, x: f32, cell_w: f32) -> MarkPress {
         let row = row_of(price.0, units);
-        self.marks.iter().find(|m| row_of(m.price.0, units) == row)
+        let (slots, n, _) = row_marks(&self.marks, |m| row_of(m.price.0, units) == row);
+        mark_press(&slots, n, x, cell_w)
     }
 
     /// Paint over the ladder. `orders`: the orders column's cell (x, w), if shown; `price`:
@@ -574,6 +617,45 @@ mod tests {
             },
             exit,
         }
+    }
+
+    /// A mark for several orders refuses a drag and a right-click, naming the count and the
+    /// chart's list, and touches none of them; a mark for one order is that order. A press acts
+    /// on the mark under it, not on the row's first order.
+    #[test]
+    fn a_mark_for_several_orders_refuses_and_one_for_a_single_order_acts() {
+        let stops: Vec<_> = (0..20)
+            .map(|i| mark(i, Side::Sell, 10, true, true, MarkStyle::Working))
+            .collect();
+        let (s, n, _) = row_marks(&stops, |_| true);
+        let press = mark_press(&s, n, 30.0, 78.0);
+        assert_eq!(press, MarkPress::Many(20));
+        assert_eq!(
+            press.order(),
+            Err("20 orders on this mark: use the chart's order list".to_owned())
+        );
+        // One order: that order, as before.
+        let one = [mark(7, Side::Sell, 10, true, true, MarkStyle::Working)];
+        let (s, n, _) = row_marks(&one, |_| true);
+        assert_eq!(mark_press(&s, n, 30.0, 78.0).order(), Ok(Some(OrderId(7))));
+        // Nothing on the row: nothing to do, nothing to say.
+        let (s, n, _) = row_marks(&[], |_| true);
+        assert_eq!(mark_press(&s, n, 30.0, 78.0).order(), Ok(None));
+        // Two marks on a row: each press is on its own mark, wherever the group is.
+        let mut both = vec![mark(50, Side::Buy, 1, false, false, MarkStyle::Working)];
+        both.extend(stops.iter().copied());
+        let (s, n, _) = row_marks(&both, |_| true);
+        assert_eq!(n, 2);
+        assert_eq!(mark_press(&s, n, 5.0, 78.0), MarkPress::One(OrderId(50)));
+        assert_eq!(mark_press(&s, n, 60.0, 78.0), MarkPress::Many(20));
+        let mut rev = stops.clone();
+        rev.push(mark(50, Side::Buy, 1, false, false, MarkStyle::Working));
+        let (s, n, _) = row_marks(&rev, |_| true);
+        assert_eq!(mark_press(&s, n, 5.0, 78.0), MarkPress::Many(20));
+        assert_eq!(mark_press(&s, n, 60.0, 78.0), MarkPress::One(OrderId(50)));
+        // The cell's edges stay on a mark.
+        assert_eq!(mark_press(&s, n, -3.0, 78.0), MarkPress::Many(20));
+        assert_eq!(mark_press(&s, n, 500.0, 78.0), MarkPress::One(OrderId(50)));
     }
 
     /// Twenty stops on a row are one mark saying so; another kind keeps its own; a third kind
