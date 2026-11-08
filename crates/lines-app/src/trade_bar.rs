@@ -291,6 +291,8 @@ pub trait TradePane: Sized + 'static {
     fn trade_store(&self) -> &Arc<ChartStore>;
     /// The product the pane shows: its order size is that symbol's.
     fn trade_product(&self) -> &Product;
+    /// The pane's focus: a size being typed needs its keys.
+    fn trade_focus(&self) -> &gpui::FocusHandle;
     /// Whether the pane shows the size control now. A DOM's panel shows other things in its
     /// place during the bracket editor or confirmation; a chart overrides this (its strip).
     fn shows_size(&self) -> bool {
@@ -321,6 +323,11 @@ pub fn pane_size<V: TradePane>(v: &V, cx: &App) -> i64 {
 
 /// Set the order size of the pane's product, for every pane on it (saved).
 pub fn set_size<V: TradePane>(v: &mut V, q: i64, cx: &mut Context<V>) {
+    // An unavailable pane's product may be a stand-in: never change a real symbol's size for it.
+    if v.trade_unavailable() {
+        v.trade().qty_edit = None;
+        return;
+    }
     let symbol = v.trade_product().symbol.to_owned();
     crate::picker_view::update_settings(cx, |s| {
         s.order_sizes.insert(symbol, q);
@@ -681,7 +688,8 @@ fn run_with<V: TradePane>(
             if v.shows_size() {
                 v.trade().qty_edit = Some(String::new());
             } else {
-                v.trade().flash("Show the order strip to type a size");
+                v.trade()
+                    .flash("The size control isn't showing: can't type a size now");
             }
         }
         TradeCmd::NextBracket => {
@@ -2335,8 +2343,10 @@ fn qty_row<V: TradePane>(
     let s = tip(s, "Type a quantity", None, t);
     row.child(s.on_mouse_down(
         MouseButton::Left,
-        cx.listener(|v: &mut V, _, _, cx| {
+        cx.listener(|v: &mut V, _, window, cx| {
             cx.stop_propagation();
+            // The keys must reach the pane: in a popped-out window focus may sit on its root.
+            v.trade_focus().clone().focus(window, cx);
             v.trade().qty_edit = Some(String::new());
             cx.notify();
         }),

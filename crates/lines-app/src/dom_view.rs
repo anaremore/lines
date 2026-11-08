@@ -133,6 +133,9 @@ impl TradePane for DomView {
     fn trade_product(&self) -> &lines_core::Product {
         &self.product
     }
+    fn trade_focus(&self) -> &FocusHandle {
+        &self.focus
+    }
     fn trade_unavailable(&self) -> bool {
         self.feed.unavailable.is_some()
     }

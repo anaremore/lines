@@ -464,6 +464,9 @@ impl crate::trade_bar::TradePane for ChartView {
     fn trade_product(&self) -> &Product {
         &self.instrument
     }
+    fn trade_focus(&self) -> &FocusHandle {
+        &self.focus
+    }
     fn shows_size(&self) -> bool {
         self.strip_box().is_some()
     }
