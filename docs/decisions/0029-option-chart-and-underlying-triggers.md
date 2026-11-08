@@ -1,6 +1,6 @@
 # 0029: Trading options from the underlying's chart, with triggers on the underlying's price
 
-**Status:** Proposed (amends 0028)
+**Status:** Accepted (amends 0028; owner accepted 2026-11-08)
 
 **Context:** Decision 0028 gives options a chain pane and resting limits. A trader who reads levels on SPY wants to act on those levels: enter when SPY reaches a price, and exit on SPY's price rather than on the option's, whose quote is noisier and whose spread can be wide. The owner reviewed mocks on 2026-11-08 and chose a chain locked to the chart's price scale, with projected P&L as a toggle. Other platforms offer pieces of this (order pills on an option's chart, P&L curves, form-based conditional orders); the search found none locking the chain to the underlying's chart, though it wasn't exhaustive.
 
@@ -18,9 +18,10 @@
 - Triggers fire only during the option's regular hours, so a premarket print can't set one off. A long put's direction is flipped: its stop fires when the underlying rises.
 - **Entry trigger:** when it fires, sends a limit at the ask, capped at a max price the trader set. It doesn't chase. If the ask is above the cap, the entry is refused with its reason, and the trigger ends. The far-from-mid guard, guardrails and all new-order checks apply when it fires, not only when armed.
 - **Exit triggers:** Stop and Target are linked (one-cancels-other) and reduce-only. They can never open, grow or flip a position, and they shrink with it.
-- **A fired exit chases:** it sends a limit at the bid and re-prices to the current bid every few seconds (default 3 s) until filled, with no floor. The chase stops if the position is gone or the trader cancels it.
-- A reduce-only exit at the current bid is exempt from the far-from-mid guard, because a wide quote must never trap an exit. An exit with no usable bid keeps waiting, and says so loudly.
-- Market orders stay refused by default (0028).
+- **A fired Stop exits at once with a market order** (owner's ruling, 2026-11-08). It fills at the option's own bid, with no floor and no limit step first.
+- **A fired Target chases:** it sends a limit at the bid and re-prices to the current bid every few seconds (default 3 s) until filled, with no floor. The chase stops if the position is gone or the trader cancels it.
+- A reduce-only Target limit at the current bid is exempt from the far-from-mid guard, because a wide quote must never trap an exit. An exit with no usable bid can't fill: it keeps waiting, and says so loudly.
+- Market orders stay refused by default (0028), with one exception: the reduce-only market order a fired Stop sends. Live routing of that order is part of the separate live decision.
 
 *When data or the app is missing*
 - **A stale underlying feed never fires a trigger.** It shows a loud warning on the line and the armed row. When the feed returns already past a level, an exit fires at once and an entry ends with its reason.
