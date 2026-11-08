@@ -922,39 +922,34 @@ mod tests {
     }
 
     /// Review round 3: key repeat must never repeat an order (or flip arming back and forth).
-    /// The size keys: Ctrl+Alt, as every trading key. AltGr (Ctrl+Alt on European layouts) that
-    /// types a character stays text; Alt alone stays focus movement and never sets a size.
+    /// The size keys: Ctrl+Alt (Cmd+Option on macOS), as every trading key. Alt alone stays focus
+    /// movement and never sets a size. They send nothing, so they need no switch or Keys on.
     #[test]
-    fn the_size_keys_are_ctrl_alt_and_altgr_text_never_sets_a_size() {
-        let chord = |key: &'static str, ctrl, alt, key_char: Option<&str>| {
-            let mut k = Keystroke::parse(key).unwrap();
-            k.modifiers.control = ctrl;
-            k.modifiers.alt = alt;
-            k.key_char = key_char.map(str::to_owned);
-            command_for(&k)
-        };
+    fn the_size_keys_are_ctrl_alt() {
         for (i, key) in ["1", "2", "3", "4", "5"].into_iter().enumerate() {
-            assert_eq!(
-                chord(key, true, true, None),
-                Some(Command::Trade(TradeCmd::QtyPreset(i as u8))),
-                "{key}"
-            );
-            assert_ne!(
-                chord(key, false, true, None),
-                Some(Command::Trade(TradeCmd::QtyPreset(i as u8))),
-                "Alt alone: {key}"
-            );
+            let preset = Some(Command::Trade(TradeCmd::QtyPreset(i as u8)));
+            assert_eq!(cmd(&format!("{}-alt-{key}", ctrl())), preset, "{key}");
+            assert_ne!(cmd(&format!("alt-{key}")), preset, "Alt alone: {key}");
         }
         assert_eq!(
-            chord("t", true, true, None),
+            cmd(&format!("{}-alt-t", ctrl())),
             Some(Command::Trade(TradeCmd::TypeQty))
         );
-        // AltGr+2 on a German layout types "²", AltGr+T nothing special but with a character.
-        assert_eq!(chord("2", true, true, Some("²")), None);
-        assert_eq!(chord("t", true, true, Some("ŧ")), None);
-        for cmd in [TradeCmd::QtyUp, TradeCmd::QtyPreset(0), TradeCmd::TypeQty] {
-            assert!(crate::trade_bar::chart_runs(cmd), "{cmd:?}");
-            assert!(!cmd.needs_hotkeys(), "{cmd:?}: no order is sent");
+        for tc in [TradeCmd::QtyUp, TradeCmd::QtyPreset(0), TradeCmd::TypeQty] {
+            assert!(crate::trade_bar::chart_runs(tc), "{tc:?}");
+            assert!(!tc.needs_hotkeys(), "{tc:?}: no order is sent");
+        }
+    }
+
+    /// AltGr (Ctrl+Alt on Windows' European layouts) that types a character stays text.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn altgr_text_never_sets_a_size() {
+        for (key, ch) in [("ctrl-alt-2", "²"), ("ctrl-alt-t", "ŧ")] {
+            let mut k = Keystroke::parse(key).unwrap();
+            assert!(command_for(&k).is_some(), "{key}");
+            k.key_char = Some(ch.into());
+            assert_eq!(command_for(&k), None, "{key} typing {ch}");
         }
     }
 
