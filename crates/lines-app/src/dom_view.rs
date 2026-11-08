@@ -468,7 +468,8 @@ impl DomView {
             return;
         };
         if col == DomColumn::Orders {
-            match self.mark_pressed(price, ev.position).order() {
+            let width = f(self.bounds.size.width);
+            match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
                 Ok(None) => return,
                 Err(why) => self.trade.flash(why),
@@ -598,7 +599,8 @@ impl DomView {
         if self.column_at(ev.position) == Some(DomColumn::Orders)
             && let Some(price) = self.row_at(ev.position)
         {
-            match self.mark_pressed(price, ev.position).order() {
+            let width = f(self.bounds.size.width);
+            match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => {
                     if let (Some(account), Some(t)) =
                         (self.trade.account.clone(), Trading::try_global(cx))

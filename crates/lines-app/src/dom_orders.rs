@@ -65,14 +65,16 @@ pub enum MarkPress {
 
 impl MarkPress {
     /// The order a drag or a right-click acts on: `Ok(None)` with no mark there, and for a mark
-    /// standing for several orders the refusal to show, never its first order.
-    pub fn order(self) -> Result<Option<OrderId>, String> {
+    /// standing for several orders the refusal to show, never its first order. A DOM narrower
+    /// than `KEYS_IN_HEADER` gets the short words: the status line shows what fits, whole.
+    pub fn order(self, dom_width: f32) -> Result<Option<OrderId>, String> {
         match self {
             MarkPress::Nothing => Ok(None),
             MarkPress::One(id) => Ok(Some(id)),
-            MarkPress::Many(n) => Err(format!(
+            MarkPress::Many(n) if crate::trade_bar::keys_in_header(dom_width) => Err(format!(
                 "{n} orders on this mark: use the chart's order list"
             )),
+            MarkPress::Many(n) => Err(format!("×{n}: chart's list")),
         }
     }
 }
@@ -631,16 +633,29 @@ mod tests {
         let press = mark_press(&s, n, 30.0, 78.0);
         assert_eq!(press, MarkPress::Many(20));
         assert_eq!(
-            press.order(),
+            press.order(1000.0),
             Err("20 orders on this mark: use the chart's order list".to_owned())
+        );
+        // A narrow DOM: words that fit its status line (240 px wide: 148 px beside the label,
+        // 7.5 px a character), so the count and the pointer both show.
+        let short = press.order(240.0).unwrap_err();
+        assert_eq!(short, "×20: chart's list");
+        assert!(short.chars().count() as f32 * 7.5 <= 148.0, "{short}");
+        assert_eq!(
+            press.order(0.0),
+            press.order(1000.0),
+            "not laid out yet: full"
         );
         // One order: that order, as before.
         let one = [mark(7, Side::Sell, 10, true, true, MarkStyle::Working)];
         let (s, n, _) = row_marks(&one, |_| true);
-        assert_eq!(mark_press(&s, n, 30.0, 78.0).order(), Ok(Some(OrderId(7))));
+        assert_eq!(
+            mark_press(&s, n, 30.0, 78.0).order(240.0),
+            Ok(Some(OrderId(7)))
+        );
         // Nothing on the row: nothing to do, nothing to say.
         let (s, n, _) = row_marks(&[], |_| true);
-        assert_eq!(mark_press(&s, n, 30.0, 78.0).order(), Ok(None));
+        assert_eq!(mark_press(&s, n, 30.0, 78.0).order(240.0), Ok(None));
         // Two marks on a row: each press is on its own mark, wherever the group is.
         let mut both = vec![mark(50, Side::Buy, 1, false, false, MarkStyle::Working)];
         both.extend(stops.iter().copied());
@@ -656,6 +671,31 @@ mod tests {
         // The cell's edges stay on a mark.
         assert_eq!(mark_press(&s, n, -3.0, 78.0), MarkPress::Many(20));
         assert_eq!(mark_press(&s, n, 500.0, 78.0), MarkPress::One(OrderId(50)));
+    }
+
+    /// A press counts only the orders on its own row.
+    #[test]
+    fn a_press_reads_only_its_row() {
+        let mut layer = OrdersLayer::default();
+        layer.marks = (0..3)
+            .map(|i| mark(i, Side::Sell, 10, true, true, MarkStyle::Working))
+            .collect();
+        layer.marks.push(OrderMark {
+            price: Price(125),
+            ..mark(9, Side::Sell, 10, true, true, MarkStyle::Working)
+        });
+        assert_eq!(
+            layer.press_at(Price(100), 25, 30.0, 78.0),
+            MarkPress::Many(3)
+        );
+        assert_eq!(
+            layer.press_at(Price(125), 25, 30.0, 78.0),
+            MarkPress::One(OrderId(9))
+        );
+        assert_eq!(
+            layer.press_at(Price(150), 25, 30.0, 78.0),
+            MarkPress::Nothing
+        );
     }
 
     /// Twenty stops on a row are one mark saying so; another kind keeps its own; a third kind
