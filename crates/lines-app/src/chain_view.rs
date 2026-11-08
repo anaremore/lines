@@ -467,7 +467,10 @@ impl Frame {
         self.last = last;
         // The rows on screen, before they're replaced: they stay put while the selection is
         // among them, so a press never lands on a strike that moved under the pointer.
-        let was = self.first_row..self.first_row + self.rows.len();
+        // By the strike on top, not its index: a strike listed since moves the indices, not them.
+        let top = self.rows.first().map(|r| r.strike);
+        let shown = self.rows.len();
+        let line_was = self.line_at;
         self.rows.clear();
         let Some(chain) = chain else {
             self.has_chain = false;
@@ -478,6 +481,9 @@ impl Frame {
             .and_then(|s| chain.find(s).ok())
             .or_else(|| last.and_then(|l| chain.atm(l)))
             .unwrap_or(chain.rows.len() / 2);
+        let was = top
+            .and_then(|t| chain.find(t).ok())
+            .map_or(0..0, |start| start..start + shown);
         // One row is the underlying's price when it falls in view.
         let fit_rows = fit.saturating_sub(1).clamp(1, MAX_ROWS);
         let selected_at = selected.and_then(|s| chain.find(s).ok());
@@ -485,12 +491,24 @@ impl Frame {
         let hold = self.hold
             && (selected == self.last_selected || selected_at.is_some_and(|s| was.contains(&s)));
         self.last_selected = selected;
-        let range = window_held(chain.rows.len(), fit_rows, center, selected_at, was, hold);
+        let range = window_held(
+            chain.rows.len(),
+            fit_rows,
+            center,
+            selected_at,
+            was.clone(),
+            hold,
+        );
         self.first_row = range.start;
         self.line_at = last
             .map(|l| chain.split_at(l))
             .filter(|si| *si >= range.start && *si <= range.end)
             .map(|si| si - range.start);
+        // Holding, the price row keeps its slot: crossing a strike would move the rows between.
+        // Its tag and the in-the-money shading still read the live price.
+        if hold && !was.is_empty() {
+            self.line_at = line_was.filter(|l| *l <= range.len());
+        }
         self.rows.extend_from_slice(&chain.rows[range]);
     }
 }
@@ -578,6 +596,7 @@ impl Pane for ChainView {
         self.leave_ticket();
         self.frame.rows.clear();
         self.frame.marks.clear();
+        self.frame.has_chain = false;
         self.layout = Layout::default();
         self.quotes_stale = false;
         self.one_click = false;
@@ -638,7 +657,7 @@ impl ChainView {
             layout: Layout::default(),
             frame: Frame {
                 rows: Vec::with_capacity(MAX_ROWS),
-                // Past any real count of series on one expiry: paint never grows it.
+                // Past any real count of series on one expiry (it would grow once, and keep it).
                 marks: Vec::with_capacity(512),
                 ..Frame::default()
             },
@@ -806,7 +825,10 @@ impl ChainView {
         let now = t.now(&self.store);
         let at_start = info.as_ref().is_some_and(|i| i.rules.is_some());
         // Only an order that opens: exits always pass a guardrail.
-        let opens = !close && self.size(cx) > ticket::closes(self.position(key), side).unwrap_or(0);
+        // As the core counts it: the position less what's already working to close it.
+        let closable =
+            ticket::closes(self.position(key), side).unwrap_or(0) - self.other_working(key, side);
+        let opens = !close && self.size(cx) > closable.max(0);
         let (prop, locked) = match self.trade.try_cache() {
             Some(st) => (
                 ticket::has_rules(&st, id, at_start),
@@ -1599,7 +1621,12 @@ impl ChainView {
         // Copy what's in view and let go of the store; busy this instant: last frame's rows.
         match self.store.try_read() {
             Some(d) => {
-                self.frame.expiry = self.shown_expiry(&d.chains);
+                let expiry = self.shown_expiry(&d.chains);
+                // Another expiry is other rows (a sooner one can arrive while following it).
+                if expiry != self.frame.expiry {
+                    self.frame.rows.clear();
+                }
+                self.frame.expiry = expiry;
                 self.frame.hold = self.one_click;
                 let chain = self.frame.expiry.and_then(|e| d.chains.chain(e));
                 self.frame.refresh(chain, d.last_trade, self.selected, fit);
@@ -2823,8 +2850,8 @@ impl ChainView {
     }
 }
 
-/// How many of a series' orders the strip's one line holds; at least one, so its Cancel is
-/// always there.
+/// How many of a series' orders the strip's one line holds; at least one (at the narrowest its
+/// Cancel can clip: Cancel for all of them stays).
 pub fn strip_orders_fit(width: f32, narrow: bool, has_position: bool, orders: usize) -> usize {
     const ORDER_W: f32 = 150.0;
     let mut room = width - 2.0 * PAD;
@@ -2847,8 +2874,9 @@ pub fn window_held(
     was: std::ops::Range<usize>,
     hold: bool,
 ) -> std::ops::Range<usize> {
+    // Holding, not even the chain's end moves them: blank space shows below its last strike.
     if hold && !was.is_empty() {
-        let start = was.start.min(n.saturating_sub(fit));
+        let start = was.start.min(n.saturating_sub(1));
         return start..(start + fit).min(n);
     }
     if let Some(s) = selected
@@ -3121,6 +3149,8 @@ mod tests {
         assert_eq!(window_held(41, 10, 30, None, 10..20, true), 10..20);
         assert_eq!(window_held(41, 3, 14, Some(14), 10..20, true), 10..13);
         assert_eq!(window_held(41, 12, 30, Some(30), 10..20, true), 10..22);
+        // Not even at the chain's end, when room comes back.
+        assert_eq!(window_held(41, 16, 40, Some(40), 30..41, true), 30..41);
         // Until there's nothing on screen to hold.
         assert_eq!(window_held(41, 10, 14, Some(14), 0..0, true), 9..19);
         // Selected row 14 in view: the rows stay, whatever the center says.
@@ -3173,6 +3203,55 @@ mod tests {
         f.hold = false;
         f.refresh(Some(chain), None, sel, fit);
         assert_ne!(f.first_row, start);
+    }
+
+    /// With One-click on the same strikes stay in the same places: when a new strike is listed
+    /// below them, and when the underlying's price crosses a strike.
+    #[test]
+    fn holding_keeps_strikes_in_place() {
+        let exp = CivilDate::new(2026, 11, 9).unwrap();
+        let build = |low: i64| {
+            let mut c = lines_core::OptionChains::default();
+            for k in low..=704 {
+                c.apply(
+                    lines_core::OptionKey {
+                        expiry: exp,
+                        strike: Price(k * 100),
+                        right: Right::Call,
+                    },
+                    OptionQuote::default(),
+                );
+            }
+            c
+        };
+        let drawn = |f: &Frame| -> Vec<(usize, Price)> {
+            f.rows
+                .iter()
+                .enumerate()
+                .map(|(n, r)| (visual_row(n, f.line_at), r.strike))
+                .collect()
+        };
+        let before = build(664);
+        let after = build(650);
+        let last = Some(Price(68_350));
+        let sel = Some(Price(68_400));
+        let mut f = Frame::default();
+        f.refresh(before.chain(exp), last, sel, 21);
+        f.hold = true;
+        let want = drawn(&f);
+        let line = f.line_at;
+        // Fourteen new strikes below the rows: their indices move, they don't.
+        f.refresh(after.chain(exp), last, sel, 21);
+        assert_eq!(drawn(&f), want, "a new strike");
+        // The price crosses two strikes: the price row keeps its slot, and so does every strike.
+        f.refresh(after.chain(exp), Some(Price(68_650)), sel, 21);
+        assert_eq!(drawn(&f), want, "the price moved");
+        assert_eq!(f.line_at, line);
+        assert_eq!(f.last, Some(Price(68_650)), "its tag reads the live price");
+        // Let go, it goes back between the strikes it falls between.
+        f.hold = false;
+        f.refresh(after.chain(exp), Some(Price(68_650)), sel, 21);
+        assert_ne!(f.line_at, line);
     }
 
     #[test]
