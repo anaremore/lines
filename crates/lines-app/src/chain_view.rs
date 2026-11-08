@@ -25,8 +25,8 @@
 //!   guard would refuse says so there, in the core's words, and Enter sends nothing.
 //! - **Positions and working orders** sit on their strike rows, in a Pos column at each outer
 //!   edge, with Close and Cancel; a narrow pane leaves the column out and marks the strike. The
-//!   selected series lists all of its own above the ticket, at any width. An expiry holding any
-//!   carries a dot on its chip.
+//!   selected series lists its own above the ticket, at any width, in a one-line slot that is
+//!   always there. An expiry holding any carries a dot on its chip.
 //! - **Flatten and Cancel** (decision 0028, `docs/design.md` §3), shown while the account has
 //!   something on the underlying's options: the DOM's commands and keys, never gated by the
 //!   feed, the quote or One-click. A DOM's act on its contract; these act on every series of the
@@ -34,8 +34,9 @@
 //!   narrow. Growing leftward from the account, they move nothing else.
 //! - **One-click** (off in every new pane, never saved, off again on another symbol or account):
 //!   a single click in the focused pane sends a limit at the clicked side, still under the guard,
-//!   for the size the switch shows (Shift+Up/Down, or the ticket's chips). The rows stay put under
-//!   the pointer while the selected strike is in view.
+//!   for the size the switch shows (Shift+Up/Down, or the ticket's chips). While it's on the
+//!   rows don't scroll at all, even if less room cuts off the selected one; moving the selection
+//!   out of view, Home or another expiry still scroll them.
 //!
 //! Paint reads the store's chains under a `try_lock` and formats every cell into a stack
 //! string: no allocation. The pane repaints on the store's revision (chain quotes don't move
@@ -88,6 +89,8 @@ const SEND_W: f32 = 126.0;
 const MAX_ASKED: usize = 64;
 /// How long to wait for the core's answer before saying it hasn't come.
 const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The selected series' strip: one line of controls, always the same.
+const STRIP_H: f32 = MIN_HIT + 9.0;
 /// A control's smallest height (`docs/design.md`).
 const MIN_HIT: f32 = 20.0;
 
@@ -373,6 +376,10 @@ struct Frame {
     expiry: Option<CivilDate>,
     /// The account's positions and working orders on this expiry (capacity kept).
     marks: Vec<Mark>,
+    /// One-click is on: a press sends, so the rows don't move at all.
+    hold: bool,
+    /// The selection last frame.
+    last_selected: Option<Price>,
 }
 
 /// What the account has on one option series.
@@ -474,7 +481,11 @@ impl Frame {
         // One row is the underlying's price when it falls in view.
         let fit_rows = fit.saturating_sub(1).clamp(1, MAX_ROWS);
         let selected_at = selected.and_then(|s| chain.find(s).ok());
-        let range = window_held(chain.rows.len(), fit_rows, center, selected_at, was);
+        // Holding: the same selection (even if less room now cuts it off), or one in view.
+        let hold = self.hold
+            && (selected == self.last_selected || selected_at.is_some_and(|s| was.contains(&s)));
+        self.last_selected = selected;
+        let range = window_held(chain.rows.len(), fit_rows, center, selected_at, was, hold);
         self.first_row = range.start;
         self.line_at = last
             .map(|l| chain.split_at(l))
@@ -917,10 +928,16 @@ impl ChainView {
             cx.notify();
             return;
         }
-        // The cache's lock is held only for updates: an emergency exit waits that moment.
-        let contracts = {
-            let st = t.cache.read();
-            ticket::held_contracts(&st, &account, self.product.id)
+        // The UI never blocks on the trading core: if its state is mid-update this instant, say
+        // so and let the press be repeated (the lock is held only for an update).
+        let Some(contracts) = self
+            .trade
+            .try_cache()
+            .map(|st| ticket::held_contracts(&st, &account, self.product.id))
+        else {
+            self.note = Some(format!("{what}: trading state busy; press again"));
+            cx.notify();
+            return;
         };
         if contracts.is_empty() {
             self.note = Some(format!(
@@ -1354,6 +1371,7 @@ impl ChainView {
             drop(d);
             self.expiry = Some(all[j]);
             self.selected = None; // that strike may not exist there: back to the money
+            self.frame.rows.clear();
             self.leave_ticket();
         }
     }
@@ -1411,7 +1429,10 @@ impl ChainView {
             "down" => self.move_strike(1),
             "pageup" => self.move_strike(-(self.page.max(1) as i64)),
             "pagedown" => self.move_strike(self.page.max(1) as i64),
-            "home" => self.selected = None,
+            "home" => {
+                self.selected = None;
+                self.frame.rows.clear();
+            }
             "left" => self.step_expiry(-1),
             "right" => self.step_expiry(1),
             "tab" if m.shift => self.cell = self.cell.other(),
@@ -1579,6 +1600,7 @@ impl ChainView {
         match self.store.try_read() {
             Some(d) => {
                 self.frame.expiry = self.shown_expiry(&d.chains);
+                self.frame.hold = self.one_click;
                 let chain = self.frame.expiry.and_then(|e| d.chains.chain(e));
                 self.frame.refresh(chain, d.last_trade, self.selected, fit);
             }
@@ -1799,7 +1821,9 @@ impl ChainView {
             strike_x: (calls_end, puts_start),
             calls: quotes(&call_x),
             puts: quotes(&put_x),
-            actions: (pos_w > 0.0 && !compact).then(|| [action_at(x0), action_at(put_pos_x)]),
+            // As large as the row allows: its height, and out to the cell's edge.
+            actions: (pos_w > 0.0 && !compact)
+                .then(|| [x0, put_pos_x].map(|cell_x| (action_at(cell_x).0 - 2.0, cell_x + pos_w))),
             first_row: self.frame.first_row,
             rows: self.frame.rows.len() + usize::from(line_at.is_some()),
             line_at,
@@ -2134,6 +2158,7 @@ impl ChainView {
                         if this.expiry != Some(e) {
                             this.expiry = Some(e);
                             this.selected = None;
+                            this.frame.rows.clear();
                             this.leave_ticket();
                         }
                         cx.notify();
@@ -2149,7 +2174,9 @@ impl ChainView {
             .overflow_hidden()
             .px_2()
             .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chain)))
-            .py_1()
+            // Fixed: the exits' buttons appearing never push the rows down.
+            .h(px(pane::header_height(crate::layout::PaneKind::Chain)))
+            .items_center()
             .bg(t.panel)
             .border_b_1()
             .border_t_1()
@@ -2274,25 +2301,27 @@ impl ChainView {
         out
     }
 
-    /// The selected series' position and orders with Close and Cancel: at any width, and with
-    /// every order when the row's cell has room for one.
+    /// The selected series' position and orders with Close and Cancel, in a slot of its own
+    /// that is always there while the pane trades: nothing moves when a first order lands.
     fn row_strip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let t = self.theme;
-        let key = self.selected_key()?;
         let account = self.trade.account.as_ref()?;
-        let contract = self.contract(key);
-        let (position, orders) = {
-            let st = self.trade.try_cache()?;
-            let position = st.position(account, contract).map(|p| (p.qty, p.avg_price));
-            let orders: Vec<(OrderId, Side, i64, Option<Price>)> = st
-                .open_orders(account, contract)
-                .map(|o| (o.id, o.side, o.qty.0 - o.filled.0, o.kind.prices().next()))
-                .collect();
-            (position, orders)
-        };
-        if position.is_none() && orders.is_empty() {
+        if !self.frame.has_chain {
             return None;
         }
+        let key = self.selected_key();
+        let (position, orders) = match (key, self.trade.try_cache()) {
+            (Some(key), Some(st)) => {
+                let contract = self.contract(key);
+                let position = st.position(account, contract).map(|p| (p.qty, p.avg_price));
+                let orders: Vec<(OrderId, Side, i64, Option<Price>)> = st
+                    .open_orders(account, contract)
+                    .map(|o| (o.id, o.side, o.qty.0 - o.filled.0, o.kind.prices().next()))
+                    .collect();
+                (position, orders)
+            }
+            _ => (None, Vec::new()),
+        };
         let button = |id: gpui::SharedString, word: &'static str| {
             div()
                 .id(id)
@@ -2308,24 +2337,46 @@ impl ChainView {
                 .text_color(t.text_main)
                 .child(word)
         };
+        let width = f(self.bounds.size.width);
+        let narrow = width < NARROW_HEADER;
         let mut row = div()
             .flex()
             .flex_row()
-            .flex_wrap()
+            .flex_shrink_0()
+            .h(px(STRIP_H))
+            .overflow_hidden()
+            .whitespace_nowrap()
             .items_center()
             .gap_2()
             .px_2()
-            .py_1()
             .bg(t.panel)
             .border_t_1()
             .border_color(t.axis_line)
             .text_size(px(12.0))
-            .text_color(t.text_main)
-            .child(ticket::contract_name(
+            .text_color(t.text_main);
+        // Narrow: the row's own place in the table names it; the room goes to its actions.
+        if let Some(key) = key.filter(|_| !narrow) {
+            row = row.child(ticket::contract_name(
                 &self.product,
                 key,
                 &chip_date(key.expiry),
             ));
+        }
+        if position.is_none() && orders.is_empty() {
+            row = row.child(div().text_color(t.text_dim).child(if key.is_some() {
+                "No position or orders here"
+            } else {
+                "Select a strike for its position and orders"
+            }));
+        }
+        let key = key.unwrap_or(OptionKey {
+            expiry: self.frame.expiry?,
+            strike: Price(0),
+            right: self.side,
+        });
+        let shown = strip_orders_fit(width, narrow, position.is_some(), orders.len());
+        let hidden = orders.len() - shown;
+        let orders = orders.into_iter().take(shown);
         if let Some((qty, avg)) = position {
             let mut s = String::new();
             let _ = ticket::write_position(&mut s, &self.product, qty, avg);
@@ -2378,6 +2429,15 @@ impl ChainView {
                             }),
                         ),
                     ),
+            );
+        }
+        // The rest stay reachable: the row's mark, and Cancel for all of them.
+        if hidden > 0 {
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(t.text_dim)
+                    .child(format!("+{hidden} more")),
             );
         }
         Some(row.into_any_element())
@@ -2714,6 +2774,9 @@ impl ChainView {
         div()
             .flex()
             .flex_row()
+            .flex_shrink_0()
+            // The exits' height whether they show or not.
+            .min_h(px(STRIP_H))
             .items_center()
             .gap_2()
             .px_2()
@@ -2754,15 +2817,34 @@ impl ChainView {
     }
 }
 
-/// The rows to show: those on screen while the selected row is still among them and they still
-/// fit, else [`window`] around `center`.
+/// How many of a series' orders the strip's one line holds; at least one, so its Cancel is
+/// always there.
+pub fn strip_orders_fit(width: f32, narrow: bool, has_position: bool, orders: usize) -> usize {
+    const ORDER_W: f32 = 150.0;
+    let mut room = width - 2.0 * PAD;
+    if !narrow {
+        room -= 150.0; // the contract's name
+    }
+    if has_position {
+        room -= 130.0;
+    }
+    (((room / ORDER_W).floor().max(1.0)) as usize).min(orders)
+}
+
+/// The rows to show: those on screen when `hold`ing, or while the selected row is still among
+/// them and they still fit, else [`window`] around `center`.
 pub fn window_held(
     n: usize,
     fit: usize,
     center: usize,
     selected: Option<usize>,
     was: std::ops::Range<usize>,
+    hold: bool,
 ) -> std::ops::Range<usize> {
+    if hold && !was.is_empty() {
+        let start = was.start.min(n.saturating_sub(fit));
+        return start..(start + fit).min(n);
+    }
     if let Some(s) = selected
         && !was.is_empty()
     {
@@ -3029,20 +3111,72 @@ mod tests {
     /// them, and follow it once it leaves.
     #[test]
     fn rows_hold_still_under_the_pointer() {
+        // One-click: they hold through less room, more room and a moving center, selected or not.
+        assert_eq!(window_held(41, 10, 30, None, 10..20, true), 10..20);
+        assert_eq!(window_held(41, 3, 14, Some(14), 10..20, true), 10..13);
+        assert_eq!(window_held(41, 12, 30, Some(30), 10..20, true), 10..22);
+        // Until there's nothing on screen to hold.
+        assert_eq!(window_held(41, 10, 14, Some(14), 0..0, true), 9..19);
         // Selected row 14 in view: the rows stay, whatever the center says.
-        assert_eq!(window_held(41, 10, 14, Some(14), 10..20), 10..20);
+        assert_eq!(window_held(41, 10, 14, Some(14), 10..20, false), 10..20);
         // Nothing selected: they follow the center.
-        assert_eq!(window_held(41, 10, 30, None, 10..20), 25..35);
+        assert_eq!(window_held(41, 10, 30, None, 10..20, false), 25..35);
         // The selection left the rows: around it.
-        assert_eq!(window_held(41, 10, 30, Some(30), 10..20), 25..35);
+        assert_eq!(window_held(41, 10, 30, Some(30), 10..20, false), 25..35);
         // First frame: around it.
-        assert_eq!(window_held(41, 10, 14, Some(14), 0..0), 9..19);
+        assert_eq!(window_held(41, 10, 14, Some(14), 0..0, false), 9..19);
         // The ticket opened and fewer rows fit, with the selection still among them.
-        assert_eq!(window_held(41, 6, 14, Some(14), 10..20), 10..16);
+        assert_eq!(window_held(41, 6, 14, Some(14), 10..20, false), 10..16);
         // Fewer rows, the selection now below them: around it.
-        assert_eq!(window_held(41, 3, 14, Some(14), 10..20), 13..16);
+        assert_eq!(window_held(41, 3, 14, Some(14), 10..20, false), 13..16);
         // A shorter chain.
-        assert_eq!(window_held(5, 10, 2, Some(2), 3..8), 0..5);
+        assert_eq!(window_held(5, 10, 2, Some(2), 3..8, false), 0..5);
+    }
+
+    /// A frame holding through less room doesn't jump on the next frame, when the selected row
+    /// is cut off and no longer among the rows drawn.
+    #[test]
+    fn holding_lasts_past_the_first_frame() {
+        let mut c = lines_core::OptionChains::default();
+        let exp = CivilDate::new(2026, 11, 9).unwrap();
+        for k in 664..=704 {
+            c.apply(
+                lines_core::OptionKey {
+                    expiry: exp,
+                    strike: Price(k * 100),
+                    right: Right::Call,
+                },
+                OptionQuote::default(),
+            );
+        }
+        let chain = c.chain(exp).unwrap();
+        let mut f = Frame::default();
+        let sel = Some(Price(68_400));
+        f.refresh(Some(chain), None, sel, 21);
+        let start = f.first_row;
+        let at = chain.find(Price(68_400)).unwrap();
+        assert!(at > start && at < start + f.rows.len());
+        f.hold = true;
+        // The strip takes its height: fewer rows, the selection now below them.
+        let fit = at - start;
+        for _ in 0..3 {
+            f.refresh(Some(chain), None, sel, fit);
+            assert_eq!(f.first_row, start, "no row moved");
+        }
+        // Not holding, the rows follow the selection.
+        f.hold = false;
+        f.refresh(Some(chain), None, sel, fit);
+        assert_ne!(f.first_row, start);
+    }
+
+    #[test]
+    fn the_strip_holds_at_least_one_order() {
+        assert_eq!(strip_orders_fit(340.0, true, true, 3), 1);
+        assert_eq!(strip_orders_fit(340.0, true, false, 3), 2);
+        assert_eq!(strip_orders_fit(1600.0, false, true, 3), 3);
+        assert_eq!(strip_orders_fit(1000.0, false, true, 9), 4);
+        assert_eq!(strip_orders_fit(100.0, true, true, 2), 1);
+        assert_eq!(strip_orders_fit(1000.0, false, false, 0), 0);
     }
 
     #[test]
