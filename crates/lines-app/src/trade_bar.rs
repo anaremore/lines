@@ -266,6 +266,12 @@ impl PaneTrade {
         window: &mut Window,
         cx: &mut Context<V>,
     ) {
+        // The rule for a size being typed, on every path to a frame: it is drawn only while its
+        // control shows and the pane holds the keys, so a drawn field is always a live one.
+        if view.trade_ref().qty_edit.is_some() && (!view.shows_size() || !focus.is_focused(window))
+        {
+            view.trade().qty_edit = None;
+        }
         let id = window.window_handle().window_id();
         if view.trade_ref().watched.as_ref().is_some_and(|w| w.0 == id) {
             return;
@@ -297,12 +303,10 @@ pub trait TradePane: Sized + 'static {
     fn trade_product(&self) -> &Product;
     /// The pane's focus: a size being typed needs its keys.
     fn trade_focus(&self) -> &gpui::FocusHandle;
-    /// Whether the pane shows the size control now. A DOM's panel shows other things in its
-    /// place during the bracket editor or confirmation; a chart overrides this (its strip).
-    fn shows_size(&self) -> bool {
-        let t = self.trade_ref();
-        t.bracket_confirm.is_none() && t.editor.is_none()
-    }
+    /// Whether the size control shows and could take keys now: not while something else holds
+    /// them (a picker, a menu), and a DOM's panel shows other things in its place during the
+    /// bracket editor or confirmation; a chart also needs its strip.
+    fn shows_size(&self) -> bool;
     /// The pane's feed can't serve its target (nothing to trade).
     fn trade_unavailable(&self) -> bool;
 }
@@ -944,8 +948,7 @@ pub fn open_size_field<V: TradePane>(v: &mut V) {
     } else if v.shows_size() {
         v.trade().qty_edit = Some(String::new());
     } else {
-        v.trade()
-            .flash("The size control isn't showing: can't type a size now");
+        v.trade().flash("Can't type a size now");
     }
 }
 

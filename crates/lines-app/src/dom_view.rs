@@ -136,6 +136,11 @@ impl TradePane for DomView {
     fn trade_focus(&self) -> &FocusHandle {
         &self.focus
     }
+    fn shows_size(&self) -> bool {
+        self.trade.bracket_confirm.is_none()
+            && self.trade.editor.is_none()
+            && !self.picker.is_open()
+    }
     fn trade_unavailable(&self) -> bool {
         self.feed.unavailable.is_some()
     }

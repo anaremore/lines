@@ -469,6 +469,9 @@ impl crate::trade_bar::TradePane for ChartView {
     }
     fn shows_size(&self) -> bool {
         self.strip_box().is_some()
+            && !self.picker.is_open()
+            && self.study_menu.is_none()
+            && !self.drawings.editing()
     }
     fn trade_unavailable(&self) -> bool {
         self.feed.unavailable.is_some()
