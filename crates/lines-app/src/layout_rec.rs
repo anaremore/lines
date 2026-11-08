@@ -171,6 +171,28 @@ pub fn line(
 #[cfg(feature = "screenshot")]
 thread_local! {
     static OWNER: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+    static LAYER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// The layer glyph text painted from now on records in: 1 for text painted opaque over what is
+/// under it, clipped to that cell (the lint then doesn't call the covered text an overlap); 0
+/// after.
+#[inline(always)]
+pub fn set_layer(_layer: u8) {
+    #[cfg(feature = "screenshot")]
+    LAYER.with(|l| l.set(_layer));
+}
+
+#[inline(always)]
+pub fn layer() -> u8 {
+    #[cfg(feature = "screenshot")]
+    {
+        LAYER.with(|l| l.get())
+    }
+    #[cfg(not(feature = "screenshot"))]
+    {
+        0
+    }
 }
 
 /// The reserved region text painted from now on belongs to (`""`: none). Glyph text (DOM,

@@ -121,7 +121,9 @@ impl Glyphs {
             crate::layout_rec::record_xywh(
                 window,
                 (x, top, at - x, self.size * 1.3),
-                crate::layout_rec::Spec::text(s).owner(crate::layout_rec::owner()),
+                crate::layout_rec::Spec::text(s)
+                    .owner(crate::layout_rec::owner())
+                    .layer(crate::layout_rec::layer()),
             );
         }
         at
