@@ -715,9 +715,7 @@ impl Drop for Trading {
 const VENUE_POLL: Duration = Duration::from_millis(250);
 /// At most one rebuild from a venue's broker this often (the snapshot is the truth).
 const VENUE_REBUILD: Duration = Duration::from_millis(500);
-/// Why a broker account the broker doesn't list right now (disconnected, or not yet
-/// connected after a start) can't be used.
-/// Moves whenever a venue's watcher rewrites the account list (a broker joins, an account's
+/// Moves whenever a venue's watcher changes the account list (a broker joins, an account's
 /// name or kind changes, one stops being listed), so panes that show account kinds repaint.
 static ACCOUNTS_EPOCH: AtomicU64 = AtomicU64::new(0);
 
@@ -726,6 +724,8 @@ pub fn accounts_epoch() -> u64 {
     ACCOUNTS_EPOCH.load(Ordering::Acquire)
 }
 
+/// Why a broker account the broker doesn't list right now (disconnected, or not yet
+/// connected after a start) can't be used.
 pub const NOT_LISTED: &str = "not listed by its broker now (disconnected?)";
 
 /// A connected venue that sent nothing for this long is shown stale.
@@ -948,9 +948,17 @@ fn spawn_watcher(
                             }
                         }
                         known = infos.iter().map(|a| a.id.clone()).collect();
+                        // A venue's revision also moves for orders and fills: the generation
+                        // moves only when its accounts really changed.
+                        let changed = !all
+                            .iter()
+                            .filter(|a| a.venue == Some(index))
+                            .eq(infos.iter());
                         all.retain(|a| a.venue != Some(index));
                         all.extend(infos);
-                        ACCOUNTS_EPOCH.fetch_add(1, Ordering::AcqRel);
+                        if changed {
+                            ACCOUNTS_EPOCH.fetch_add(1, Ordering::AcqRel);
+                        }
                     }
                     if let Some(j) = &unmarked {
                         j.add_unmarked(known.clone());

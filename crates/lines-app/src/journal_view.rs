@@ -322,14 +322,41 @@ pub fn group_headers(g: JournalGroup) -> [&'static str; GROUP_COLS] {
 /// account removed): never assumed to be paper.
 const UNLISTED: &str = "UNLISTED";
 
+/// How real a badge's money is, most real first (so a clip or an id clash never favors paper).
+fn realness(badge: &str) -> u8 {
+    match badge {
+        "LIVE" => 0,
+        "PAPER" => 3,
+        "SIM" => 2,
+        _ => 1, // UNLISTED: treated as real until a list says otherwise
+    }
+}
+
+/// Accounts, least real first: collected into a map, the most real of a clashing id wins.
+fn least_real_first(accounts: &[crate::trading::AccountInfo]) -> Vec<&crate::trading::AccountInfo> {
+    let mut v: Vec<_> = accounts.iter().collect();
+    v.sort_by_key(|a| std::cmp::Reverse(realness(a.badge)));
+    v
+}
+
 /// Each account's label: its badge in words (PAPER, SIM or LIVE, as the trading header shows
 /// it), first so a narrow column cuts the name and never the kind; then its name.
 fn account_labels(
     accounts: &[crate::trading::AccountInfo],
 ) -> std::collections::HashMap<String, String> {
-    accounts
-        .iter()
+    least_real_first(accounts)
+        .into_iter()
         .map(|a| (a.id.0.clone(), format!("{} · {}", a.badge, a.name)))
+        .collect()
+}
+
+/// Each account's badge (the most real of a clashing id).
+fn account_badges(
+    accounts: &[crate::trading::AccountInfo],
+) -> std::collections::HashMap<String, &'static str> {
+    least_real_first(accounts)
+        .into_iter()
+        .map(|a| (a.id.0.clone(), a.badge))
         .collect()
 }
 
@@ -342,9 +369,10 @@ fn account_label(names: &std::collections::HashMap<String, String>, id: &str) ->
 }
 
 /// What the header says the pane's money is: the kinds of the accounts that have trades in
-/// the journal (with none yet, of the accounts listed), as words: "PAPER", "LIVE",
-/// "PAPER + LIVE", "PAPER + UNLISTED". A PAPER mark means every trade is on a listed paper
-/// account: real money never sits under it, and a mixed journal says it is mixed.
+/// the journal (with none yet, of the accounts listed), as words, most real first so a narrow
+/// header clips the paper word and never the live one: "PAPER", "LIVE", "LIVE + PAPER",
+/// "UNLISTED + PAPER". A PAPER mark means every trade is on a listed paper account: real money
+/// never sits under it, and a mixed journal says it is mixed.
 fn view_mark<'a>(
     traded: impl Iterator<Item = &'a str>,
     badges: &std::collections::HashMap<String, &'static str>,
@@ -355,13 +383,7 @@ fn view_mark<'a>(
     if words.is_empty() {
         words = badges.values().copied().collect();
     }
-    let rank = |w: &&str| match *w {
-        "PAPER" => 0,
-        "SIM" => 1,
-        "LIVE" => 2,
-        _ => 3,
-    };
-    words.sort_by_key(rank);
+    words.sort_by_key(|w| realness(w));
     words.dedup();
     (!words.is_empty()).then(|| words.join(" + "))
 }
@@ -531,8 +553,8 @@ pub struct JournalView {
     frozen: bool,
     journal: Option<Arc<JournalShared>>,
     seen_revision: u64,
-    /// The journal revision, P&L display epoch and trade date the rows and stats were built
-    /// from.
+    /// The journal revision, P&L display epoch, account generation and trade date the rows
+    /// and stats were built from.
     built: Option<(u64, u64, u64, CivilDate)>,
     /// The current trade date as last known (kept while the store is busy).
     today: Option<CivilDate>,
@@ -776,7 +798,7 @@ impl JournalView {
         self.accounts_seen = epoch;
         let accounts = t.accounts();
         self.names = account_labels(&accounts);
-        self.badges = accounts.iter().map(|a| (a.id.0.clone(), a.badge)).collect();
+        self.badges = account_badges(&accounts);
     }
 
     /// Rebuild rows and stats if the journal moved. Returns false if the journal was busy
@@ -1311,10 +1333,13 @@ impl JournalView {
                             // (docs/design.md §3): the PAPER chip only when every trade is on a
                             // paper account.
                             .children(mark.map(|m| {
-                                if m == "PAPER" {
-                                    crate::trade_bar::paper_badge(&t).into_any_element()
-                                } else {
-                                    div()
+                                let one = |w| crate::trade_bar::account_badge(w, &t);
+                                match m {
+                                    "PAPER" => one("PAPER").into_any_element(),
+                                    "SIM" => one("SIM").into_any_element(),
+                                    "LIVE" => one("LIVE").into_any_element(),
+                                    // Mixed or unlisted: outlined like LIVE, never the paper chip.
+                                    _ => div()
                                         .flex_shrink_0()
                                         .px_1()
                                         .rounded_sm()
@@ -1322,8 +1347,10 @@ impl JournalView {
                                         .border_color(t.text_main)
                                         .text_color(t.text_main)
                                         .font_weight(gpui::FontWeight::BOLD)
+                                        .relative()
+                                        .children(crate::layout_rec::text_marker(m))
                                         .child(m.to_owned())
-                                        .into_any_element()
+                                        .into_any_element(),
                                 }
                             }))
                             .child(self.group_tabs(cx)),
@@ -1699,14 +1726,19 @@ mod tests {
         let mark = |ids: &[&'static str]| view_mark(ids.iter().copied(), &badges);
         assert_eq!(mark(&["sim", "sim"]).as_deref(), Some("PAPER"));
         assert_eq!(mark(&["ext"]).as_deref(), Some("LIVE"));
-        assert_eq!(mark(&["ext", "sim"]).as_deref(), Some("PAPER + LIVE"));
-        assert_eq!(mark(&["demo", "sim"]).as_deref(), Some("PAPER + SIM"));
+        // Most real first: a narrow header clips the paper word, never the live one.
+        assert_eq!(mark(&["sim", "ext"]).as_deref(), Some("LIVE + PAPER"));
+        assert_eq!(mark(&["sim", "demo"]).as_deref(), Some("SIM + PAPER"));
+        assert_eq!(
+            mark(&["sim", "demo", "ext"]).as_deref(),
+            Some("LIVE + SIM + PAPER")
+        );
         // After a restart the list is paper only, while the file holds a broker's trades.
         let paper_only: std::collections::HashMap<String, &'static str> =
             [("sim".to_owned(), "PAPER")].into();
         assert_eq!(
             view_mark(["sim", "venue-01"].into_iter(), &paper_only).as_deref(),
-            Some("PAPER + UNLISTED"),
+            Some("UNLISTED + PAPER"),
             "real money never under a PAPER mark"
         );
         assert_eq!(
@@ -1721,6 +1753,15 @@ mod tests {
         assert_eq!(view_mark(std::iter::empty(), &Default::default()), None);
         // Any change to the account list repaints the pane, even with the count unchanged.
         assert_ne!(revision_of(7, 1, 0), revision_of(7, 1, 1));
+        // An id two venues share reads as the more real of the two, whatever the list's order.
+        let clash = [
+            account("same", "A", false, "LIVE"),
+            account("same", "B", false, "SIM"),
+        ];
+        assert_eq!(account_badges(&clash)["same"], "LIVE");
+        assert_eq!(account_labels(&clash)["same"], "LIVE · A");
+        let clash = [clash[1].clone(), clash[0].clone()];
+        assert_eq!(account_badges(&clash)["same"], "LIVE");
         assert_eq!(group_headers(JournalGroup::Tags)[0], "Tag");
     }
 

@@ -289,6 +289,38 @@ fn a_read_only_venue_shows_its_state_and_refuses_every_command() {
     );
 }
 
+/// A venue's account changing kind with the count unchanged moves the account generation, so
+/// the journal's labels and header are read again (real money never stays marked simulated).
+#[test]
+fn a_changed_account_moves_the_account_generation() {
+    let shared = Arc::new(Shared {
+        v: Mutex::new(Venue {
+            accounts: vec![sim_account()],
+            rev: 1,
+            ..Default::default()
+        }),
+        requests: AtomicUsize::new(0),
+    });
+    let t = start(&shared);
+    let id = AccountId::new("venue-sim");
+    assert!(until(&t, |t| t
+        .account(&id)
+        .is_some_and(|a| a.badge == "SIM")));
+    let count = t.accounts().len();
+    let before = super::accounts_epoch();
+    {
+        let mut v = shared.v.lock().unwrap();
+        v.accounts[0].kind = AccountKind::Live;
+        v.rev += 1;
+    }
+    assert!(until(&t, |t| t
+        .account(&id)
+        .is_some_and(|a| a.badge == "LIVE")));
+    assert_eq!(t.accounts().len(), count, "the same count");
+    // `>`: the static is shared with tests running alongside.
+    assert!(super::accounts_epoch() > before);
+}
+
 #[test]
 fn venue_fills_reach_the_journal_without_moving_its_positions() {
     let shared = Arc::new(Shared {
