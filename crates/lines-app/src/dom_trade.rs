@@ -159,7 +159,7 @@ pub fn order_size(
         .get(symbol)
         .copied()
         .filter(|&q| q > 0)
-        .or(default.map(i64::from))
+        .or(default.map(i64::from).filter(|&q| q > 0))
         .unwrap_or(1)
 }
 
@@ -1452,6 +1452,11 @@ mod tests {
             order_size(&sizes, "NQ", Some(3)),
             3,
             "another symbol's is its own"
+        );
+        assert_eq!(
+            order_size(&sizes, "CL", Some(0)),
+            1,
+            "a bad saved default never trades 0"
         );
         sizes.insert("NQ".to_owned(), 0);
         assert_eq!(

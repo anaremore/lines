@@ -1408,11 +1408,7 @@ impl ChartView {
             return;
         }
         // A size being typed takes the plain keys (digits, Enter, Esc), only while its field is
-        // on screen: a strip that went away (hidden, a narrow plot) drops it, so the chart's own
-        // keys never go dead with nothing showing why.
-        if self.trade.qty_edit.is_some() && self.strip_box().is_none() {
-            self.trade.qty_edit = None;
-        }
+        // on screen (`qty_key`).
         if !(m.control || m.alt || m.platform)
             && crate::trade_bar::qty_key(self, k.key.as_str(), cx)
         {
@@ -1708,7 +1704,8 @@ impl ChartView {
 
     /// The order strip's box this frame (plot-local), if shown and it fits.
     fn strip_box(&self) -> Option<crate::chart_trade::StripBox> {
-        if !self.order_strip {
+        // An unavailable pane draws its notice instead of the chart.
+        if !self.order_strip || self.feed.unavailable.is_some() {
             return None;
         }
         crate::chart_trade::strip_box(

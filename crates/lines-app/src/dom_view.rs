@@ -436,6 +436,11 @@ impl DomView {
     /// the trader's orders to move it (orders column).
     fn body_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
         let issued = std::time::Instant::now();
+        // A press on the ladder leaves a size being typed (not entered, so the buttons' size is
+        // what a click sends).
+        if self.trade.qty_edit.take().is_some() {
+            cx.notify();
+        }
         let (Some(price), Some(col)) = (self.row_at(ev.position), self.column_at(ev.position))
         else {
             return;
@@ -620,16 +625,20 @@ impl DomView {
             cx.stop_propagation();
             return;
         }
-        if trade_bar::qty_key(self, k.key.as_str(), cx) {
-            cx.stop_propagation();
-            return;
-        }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
             let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
             self.picked(outcome, cx);
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        // A size being typed takes the plain keys (digits, Enter, Esc), only while its field is
+        // on screen (`qty_key`).
+        if !(k.modifiers.control || k.modifiers.alt || k.modifiers.platform)
+            && trade_bar::qty_key(self, k.key.as_str(), cx)
+        {
+            cx.stop_propagation();
             return;
         }
         if k.modifiers.control && !k.modifiers.alt && k.key == "k" {

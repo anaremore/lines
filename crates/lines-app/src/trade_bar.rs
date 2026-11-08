@@ -291,9 +291,11 @@ pub trait TradePane: Sized + 'static {
     fn trade_store(&self) -> &Arc<ChartStore>;
     /// The product the pane shows: its order size is that symbol's.
     fn trade_product(&self) -> &Product;
-    /// Whether the pane shows the size control now (a chart: its order strip).
+    /// Whether the pane shows the size control now. A DOM's panel shows other things in its
+    /// place during the bracket editor or confirmation; a chart overrides this (its strip).
     fn shows_size(&self) -> bool {
-        true
+        let t = self.trade_ref();
+        t.bracket_confirm.is_none() && t.editor.is_none()
     }
     /// The pane's feed can't serve its target (nothing to trade).
     fn trade_unavailable(&self) -> bool;
@@ -938,8 +940,14 @@ fn say_size<V: TradePane>(v: &mut V, cx: &App) {
     }
 }
 
-/// Keys while a custom quantity is being typed. Returns whether the key was used.
+/// Keys while a custom quantity is being typed. Returns whether the key was used. A field
+/// with nothing drawing it (`shows_size`) is dropped here, so a pane's keys never go dead with
+/// nothing showing why.
 pub fn qty_key<V: TradePane>(v: &mut V, key: &str, cx: &mut Context<V>) -> bool {
+    if !v.shows_size() {
+        v.trade().qty_edit = None;
+        return false;
+    }
     let t = v.trade();
     let Some(edit) = t.qty_edit.as_mut() else {
         return false;
