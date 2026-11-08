@@ -18,6 +18,12 @@ pub fn size_key(symbol: &str) -> String {
     format!("{symbol} options")
 }
 
+/// Whether a press on a quote cell sends at once: One-click on, in a pane already focused (the
+/// click that only brings the pane forward sends nothing), and only a double-click's first.
+pub fn click_sends(one_click: bool, focused: bool, clicks: usize) -> bool {
+    one_click && focused && clicks <= 1
+}
+
 /// A cell of the quote: which side of the market a click or Enter takes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Cell {
@@ -183,6 +189,8 @@ pub struct Check<'a> {
     pub now: Option<lines_core::UtcMillis>,
     /// The account has prop rules.
     pub prop: bool,
+    /// Outside the option's session: the broker would reject it on arrival.
+    pub closed: bool,
     /// Why the account can't be traded through Lines.
     pub read_only: Option<&'a str>,
 }
@@ -194,6 +202,9 @@ pub fn refusal(check: &Check<'_>, price: Option<Price>, close: bool) -> Option<S
     }
     if check.prop && !close {
         return Some(PROP_OPTIONS_REFUSAL.to_owned());
+    }
+    if check.closed {
+        return Some(format!("{} market is closed", check.product.symbol));
     }
     let spec = ContractSpec::new(check.product.clone(), check.contract, Money::ZERO)?;
     let (bid, ask) = sides(check.quote);
@@ -377,6 +388,7 @@ pub struct ShotTicket {
     pub one_click: bool,
 }
 
+#[cfg(any(test, feature = "screenshot"))]
 pub fn parse_shot(s: &str) -> Result<ShotTicket, String> {
     let mut out = ShotTicket::default();
     let w: Vec<&str> = s.split_whitespace().collect();
@@ -483,6 +495,7 @@ mod tests {
             quote: q,
             now: Some(lines_core::UtcMillis(1_000_500)),
             prop: false,
+            closed: false,
             read_only: None,
         }
     }
@@ -603,6 +616,16 @@ mod tests {
         assert!(matches!(exit, Command::PlaceExit(_)));
     }
 
+    /// Only an aimed single click sends: not the click that brings the pane forward, and not a
+    /// double-click's second press.
+    #[test]
+    fn only_an_aimed_click_sends() {
+        assert!(click_sends(true, true, 1));
+        assert!(!click_sends(false, true, 1), "the switch is off");
+        assert!(!click_sends(true, false, 1), "the pane wasn't focused");
+        assert!(!click_sends(true, true, 2), "a double-click sends once");
+    }
+
     /// One-click takes the clicked side's own price, and nothing on a missing side.
     #[test]
     fn one_click_needs_the_side_it_takes() {
@@ -652,6 +675,13 @@ mod tests {
             Some(PROP_OPTIONS_REFUSAL)
         );
         assert_eq!(refusal(&prop, Some(Price(241)), true), None);
+        // Outside the session, in the broker's words: no order goes just to be rejected.
+        let mut closed = check(&p, &g, Some(&q));
+        closed.closed = true;
+        assert_eq!(
+            refusal(&closed, Some(Price(241)), true).as_deref(),
+            Some("SPY market is closed")
+        );
         // A read-only account's reason comes first.
         let mut ro = check(&p, &g, Some(&q));
         ro.read_only = Some("observe mode");
@@ -772,6 +802,7 @@ mod tests {
                 quote: Some(q),
                 now: Some(lines_core::UtcMillis(now)),
                 prop,
+                closed: false,
                 read_only: None,
             };
             refusal(&c, Some(Price(cents)), false)

@@ -139,6 +139,12 @@ struct Market {
     quoted_at: Option<UtcMillis>,
 }
 
+/// Whether a product's options trade at `now`: its regular session (the UI asks before sending).
+pub fn option_session_open(product: lines_core::ProductId, now: UtcMillis) -> bool {
+    lines_feed::catalog::sessions(product)
+        .is_none_or(|cal| cal.session_at(now, SessionKind::Rth).is_some())
+}
+
 pub struct PaperBroker {
     cfg: PaperConfig,
     accounts: BTreeMap<AccountId, PaperAccount>,
