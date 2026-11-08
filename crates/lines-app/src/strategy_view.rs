@@ -530,21 +530,14 @@ impl StrategyView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(r.label.clone()),
             )
-            // Narrow panes truncate these with "…": the symbol first in the scope, the version
-            // last on the line.
+            // One text, so a narrow pane truncates its end with "…": the symbol stays, the
+            // version goes first.
             .child(
                 div()
                     .min_w_0()
                     .truncate()
                     .text_color(t.text_main)
-                    .child(r.scope.clone()),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(t.text_dim)
-                    .child(r.strategy.clone()),
+                    .child(format!("{} · {}", r.scope, r.strategy)),
             );
         let mut line2 = div()
             .flex()
