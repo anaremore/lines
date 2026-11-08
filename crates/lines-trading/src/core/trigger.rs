@@ -67,14 +67,29 @@ impl Mark {
 }
 
 impl TradingCore {
-    /// A strategy instance is running on this contract: armed, or paused and owning its position.
-    /// One merely added, or stopped, trades nothing.
-    fn strategy_running(&self, account: &AccountId, contract: ContractKey) -> bool {
+    /// A strategy instance is on this contract in a way a trigger would trade under: armed or
+    /// paused, or holding a position of its own. One merely added, or stopped and flat, isn't.
+    fn strategy_holds(&self, account: &AccountId, contract: ContractKey) -> bool {
         self.strategies.values().any(|i| {
             &i.cfg.account == account
                 && i.cfg.contract == contract
-                && matches!(i.state, StrategyState::Armed | StrategyState::Paused)
+                && (matches!(i.state, StrategyState::Armed | StrategyState::Paused)
+                    || i.position.qty() != 0)
         })
+    }
+
+    /// Why a strategy can't arm on this contract: a trigger is alive on it. The trigger stays: the
+    /// trader decides, and an exit is never ended to make room.
+    pub(super) fn trigger_blocks_strategy(
+        &self,
+        account: &AccountId,
+        contract: ContractKey,
+    ) -> Option<String> {
+        self.triggers
+            .live
+            .values()
+            .find(|l| &l.view.account == account && l.view.contract == contract)
+            .map(|l| format!("a {} trigger is on this option", l.view.kind.word()))
     }
 
     fn guard_of(&self, account: &AccountId) -> OptionGuard {
@@ -103,11 +118,12 @@ impl TradingCore {
                 "triggers are on options, at a price of their underlying",
             ));
         };
-        // Firing would trade under the strategy: its book would miss the fills.
-        if self.strategy_running(&spec.account, spec.contract) {
+        // Never together on a contract: firing would trade under the strategy, and its book would
+        // miss the fills (`trigger_blocks_strategy` is the other way round).
+        if self.strategy_holds(&spec.account, spec.contract) {
             return Err(Reject::new(
                 RejectCode::Strategy,
-                "a strategy trades this option: no triggers on it",
+                "a strategy is on this option: stop it and close what it holds first",
             ));
         }
         if self.accounts[&spec.account].cfg.rules.is_some() {
@@ -481,11 +497,6 @@ impl TradingCore {
             let Some(l) = self.triggers.live.get(&id) else {
                 continue; // its partner fired just now
             };
-            // A strategy started on it since: it fires nothing under one.
-            if self.strategy_running(&l.view.account, l.view.contract) {
-                self.trigger_end(id, "a strategy trades this option now");
-                continue;
-            }
             match l.view.kind {
                 TriggerKind::Entry { .. } if gap => {
                     self.trigger_end(
@@ -619,12 +630,6 @@ impl TradingCore {
             );
             if super::option_close(contract).is_some_and(|c| now >= c) {
                 self.trigger_end(id, "the option expired");
-                continue;
-            }
-            // A strategy started on it: an armed one ends, and says so at once, since it couldn't
-            // fire. One already closing the position carries on: nothing blocks an exit.
-            if state == TriggerState::Armed && self.strategy_running(&account, contract) {
-                self.trigger_end(id, "a strategy trades this option now");
                 continue;
             }
             if kind.is_exit() {

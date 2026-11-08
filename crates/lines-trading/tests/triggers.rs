@@ -7,7 +7,9 @@ use std::time::Instant;
 
 use lines_core::{CivilDate, ContractKey, Price, Qty, Right, UtcMillis};
 use lines_feed::catalog;
-use lines_trading::broker::{Broker, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot};
+use lines_trading::broker::{
+    Broker, BrokerAccount, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot,
+};
 use lines_trading::guardrails::Guardrails;
 use lines_trading::persist::{self, TradingFile};
 use lines_trading::rules::presets;
@@ -1031,11 +1033,11 @@ fn a_fired_exit_ends_the_entry_on_its_series() {
     assert_eq!(r.position(call()), 0, "flat, not long 1");
 }
 
-/// A strategy running on an option takes no trigger, and one armed there ends when it starts: a
-/// fill under the strategy would be missing from its book. An instance merely added trades
-/// nothing, so it ends nothing; and an exit already closing the position carries on.
+/// Triggers and strategies never share an option, either way round, so a fill can't go missing
+/// from a strategy's book. An exit is never ended to make room; an instance merely added or
+/// stopped and flat is in nobody's way.
 #[test]
-fn no_triggers_under_a_running_strategy() {
+fn triggers_and_strategies_never_share_an_option() {
     use lines_trading::strategy::{
         HoursWindow, StrategyConfig, StrategyId, StrategyLimits, TradingHours,
     };
@@ -1062,40 +1064,92 @@ fn no_triggers_under_a_running_strategy() {
     // Added, not running: the position's Stop stays, and still fires.
     let mut r = Rig::long_call(1);
     let stop = r.arm(call(), TriggerKind::Stop, 68_000);
-    add(&mut r, call());
+    let id = add(&mut r, call());
     r.wait(1);
     assert_eq!(r.state(stop), TriggerState::Armed);
+    // It can't arm while the trigger is there, whatever the books say.
+    let e = r.cmd(Command::ArmStrategy { id }).unwrap_err();
+    assert_eq!(e.code, RejectCode::Strategy);
+    assert!(e.message.contains("Stop trigger"), "{}", e.message);
+    assert_eq!(r.state(stop), TriggerState::Armed, "the exit stays");
     r.print(68_000);
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 0, "it closed");
 
-    // A chasing Target carries on through one being added.
+    // A chasing Target: the strategy can't arm under it, and it finishes.
     let mut r = Rig::long_call(1);
     let target = r.arm(call(), TriggerKind::Target, 68_500);
     r.quote(Some(300), Some(900));
     r.print(68_500);
     r.quote(Some(280), Some(900));
-    add(&mut r, call());
+    let id = add(&mut r, call());
+    assert!(r.cmd(Command::ArmStrategy { id }).is_err());
     r.wait(LAT + 1);
     r.wait(CHASE);
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 0);
     assert_eq!(r.reason(target), "closed");
+    // With the trigger gone, it can.
+    r.cmd(Command::ArmStrategy { id }).unwrap();
 
-    // Running: an armed entry ends at once, and nothing new arms.
+    // An entry stands in its way too, until it's disarmed.
     let mut r = Rig::new();
     r.print(68_300);
     r.quote(Some(240), Some(242));
     let armed = r.arm(call(), entry(1, 300), 68_350);
     let id = add(&mut r, call());
+    assert!(r.cmd(Command::ArmStrategy { id }).is_err());
+    r.cmd(Command::CancelTrigger {
+        account: acct(),
+        id: armed,
+    })
+    .unwrap();
     r.cmd(Command::ArmStrategy { id }).unwrap();
-    r.wait(1);
-    assert_eq!(r.state(armed), TriggerState::Ended);
-    assert_eq!(r.reason(armed), "a strategy trades this option now");
+    // Running: nothing arms, with the way out in the reason.
     let e = r.try_arm(call(), entry(1, 300), 68_350).unwrap_err();
     assert_eq!(e.code, RejectCode::Strategy);
-    r.print(68_350);
-    assert!(r.orders(call()).is_empty(), "nothing went under it");
+    assert!(e.message.contains("stop it"), "{}", e.message);
+    // Paused: still its option.
+    r.cmd(Command::PauseStrategy {
+        id,
+        reason: "test".into(),
+    })
+    .unwrap();
+    assert!(r.try_arm(call(), entry(1, 300), 68_350).is_err());
+    // Another option is free.
+    r.arm(put(), entry(1, 300), 68_350);
+}
+
+/// A rebuild's positions come first: an exit whose position is gone at the broker ends, rather
+/// than being published as alive.
+#[test]
+fn a_rebuild_ends_an_exit_whose_position_is_gone() {
+    let (mut r, s) = scripted(true);
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let buy = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: call(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit { price: Price(242) },
+        }))
+        .unwrap()[0];
+    r.wait(1);
+    fill(&mut r, &s, buy, 242, 1);
+    let id = r.arm(call(), TriggerKind::Stop, 68_000);
+    // The broker lists the account, flat.
+    s.lock().unwrap().snapshot.accounts.push(BrokerAccount {
+        id: acct(),
+        balance: lines_trading::Money::whole(100_000),
+        positions: Vec::new(),
+        orders: Vec::new(),
+    });
+    r.core.rebuild(r.now());
+    r.collect();
+    assert_eq!(r.state(id), TriggerState::Ended);
+    assert_eq!(r.core.triggers().count(), 0);
 }
 
 /// A Stop the broker couldn't fill on a quote says so, and tries on the next quote.
@@ -1431,6 +1485,7 @@ struct Script {
     modified: Vec<(OrderId, Option<Price>)>,
     simulated: bool,
     next_trade: u64,
+    snapshot: BrokerSnapshot,
 }
 
 struct ScriptBroker(Arc<Mutex<Script>>);
@@ -1477,7 +1532,7 @@ impl Broker for ScriptBroker {
         None
     }
     fn snapshot(&self) -> BrokerSnapshot {
-        BrokerSnapshot::default()
+        self.0.lock().unwrap().snapshot.clone()
     }
     fn simulated(&self) -> bool {
         self.0.lock().unwrap().simulated
