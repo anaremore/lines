@@ -48,17 +48,17 @@ fn is_exit(o: &Order) -> bool {
     o.reduce_only || matches!(o.role, Role::TakeProfit | Role::StopLoss)
 }
 
-/// Why this order's size can't be changed at all, if so.
-fn fixed(o: &Order, entry_working: bool) -> Option<String> {
+/// Why this order's size can't be changed at all, if so. Static: `can_grow` runs in paint.
+fn fixed(o: &Order, entry_working: bool) -> Option<&'static str> {
     if !o.is_open() {
-        return Some("the order is gone".to_owned());
+        return Some("the order is gone");
     }
     if o.role == Role::Flatten {
-        return Some("a Flatten order can't be resized".to_owned());
+        return Some("a Flatten order can't be resized");
     }
     // Its size follows the entry's fills (one-updates-other).
     if entry_working && matches!(o.role, Role::TakeProfit | Role::StopLoss) {
-        return Some("this exit's size follows its entry until the entry is filled".to_owned());
+        return Some("this exit's size follows its entry until the entry is filled");
     }
     None
 }
@@ -80,7 +80,7 @@ pub fn plan(
     one_leg: bool,
 ) -> Result<Plan, String> {
     if let Some(why) = fixed(o, entry_working) {
-        return Err(why);
+        return Err(why.to_owned());
     }
     let left = o.remaining().0;
     let target = match step {
