@@ -339,7 +339,8 @@ fn tf_text(tf: Timeframe) -> String {
     }
 }
 
-/// The net P&L as the display allows (`None`: off).
+/// The net P&L as the display allows (`None`: off, or ticks only for a product with no tick to
+/// state).
 fn pnl_text(t: &Trade, product: Option<&Product>, mode: PnlDisplay) -> Option<String> {
     let ticks = product
         .and_then(|p| t.ticks(p.price.tick))
@@ -1108,6 +1109,16 @@ mod tests {
         );
         let none = render(&r.trade, "PAPER", None, look(PnlDisplay::Off));
         assert!(!none.contains('$') && !none.contains("net "), "{none}");
+    }
+
+    /// A product not in the catalog has no tick to state: its dollars, never raw price units
+    /// called ticks.
+    #[test]
+    fn an_unlisted_product_states_no_ticks() {
+        let r = request();
+        assert_eq!(pnl_text(&r.trade, None, PnlDisplay::Ticks), None);
+        let both = pnl_text(&r.trade, None, PnlDisplay::Both).unwrap();
+        assert!(both.starts_with("net ") && !both.contains(" t"), "{both}");
     }
 
     /// The theme at the time colors the file (from its tokens).
