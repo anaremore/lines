@@ -268,9 +268,10 @@ fn only_an_armed_instance_enters() {
         e,
         Event::Strategy {
             id: ID,
+            account,
             state: StrategyState::Armed,
             ..
-        }
+        } if *account == acct()
     )));
 }
 

@@ -314,6 +314,7 @@ impl TradingCore {
         if let Some(i) = self.strategies.get(&id) {
             self.events.push(Event::Strategy {
                 id,
+                account: i.cfg.account.clone(),
                 state: i.state,
                 reason: i.reason.clone(),
                 removed,

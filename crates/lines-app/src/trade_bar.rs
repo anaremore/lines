@@ -1028,6 +1028,8 @@ struct BarData {
     flashes: Vec<(&'static str, String)>,
     unresolved: usize,
     working: usize,
+    /// Strategy instances armed on this account (the switch says so: it doesn't stop them).
+    strategies_armed: usize,
 }
 
 fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
@@ -1050,6 +1052,7 @@ fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
         flashes: Vec::new(),
         unresolved: 0,
         working: 0,
+        strategies_armed: 0,
     }
 }
 
@@ -1148,6 +1151,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
             };
         }
         let now = Instant::now();
+        data.strategies_armed = s.strategies_armed(account);
         data.flashes = s
             .flashes(account, contract, now)
             .map(|f| {
@@ -1235,6 +1239,44 @@ pub fn switch_text(enabled: bool, blocker: Option<&str>, narrow: bool) -> String
         (_, _, true) => state.to_owned(),
         _ => format!("Trading: {state}"),
     }
+}
+
+/// From this width the switch spells out "2 strategies armed" (with the account and the Keys
+/// chip beside it); narrower, "2 armed".
+pub const SWITCH_WORDS: f32 = 600.0;
+
+/// The switch's text with strategies armed on its account (a switch that says "Disabled"
+/// doesn't stop them, decision 0025), as whole items that fit its row at each width: the state
+/// always, and the count always (the switch doesn't shrink: the account chip gives way, so
+/// the number is never cut). A reason orders would be denied goes to the status line
+/// ([`reason_on_status`]). No strategies armed: [`switch_text`].
+pub fn switch_text_armed(enabled: bool, blocker: Option<&str>, armed: usize, width: f32) -> String {
+    let narrow = is_narrow(width);
+    if armed == 0 {
+        return switch_text(enabled, blocker, narrow);
+    }
+    let alert = if enabled && blocker.is_some() {
+        " !"
+    } else {
+        ""
+    };
+    if narrow {
+        let state = if enabled { "On" } else { "Off" };
+        format!("{state}{} · {armed} armed", alert.trim_start())
+    } else if width == 0.0 || width >= SWITCH_WORDS {
+        let state = if enabled { "Enabled" } else { "Disabled" };
+        let what = if armed == 1 { "strategy" } else { "strategies" };
+        format!("Trading: {state}{alert} · {armed} {what} armed")
+    } else {
+        let state = if enabled { "Enabled" } else { "Disabled" };
+        format!("{state}{alert} · {armed} armed")
+    }
+}
+
+/// Whether why orders would be denied shows on the status line, not the switch: narrow panels,
+/// and any panel whose switch is already showing a strategy count.
+pub fn reason_on_status(narrow: bool, armed: usize) -> bool {
+    narrow || armed > 0
 }
 
 /// The order hotkeys chip's text: the state in words (narrow: "Keys" and the knob).
@@ -1728,6 +1770,8 @@ pub fn dom_bar<V: TradePane>(
     };
     let blocked = blocker(v, product, data.as_ref(), cx);
     let blocker = blocked.as_deref();
+    let strategies_armed = data.as_ref().map_or(0, |d| d.strategies_armed);
+    let reason_below = reason_on_status(narrow, strategies_armed);
 
     let mut panel = div()
         .relative()
@@ -1752,6 +1796,8 @@ pub fn dom_bar<V: TradePane>(
             .items_center()
             .gap_1()
             .h(px(MIN_HIT + 2.0))
+            // Never cut (its count is a number): the account chip gives way.
+            .flex_shrink_0()
             .px_2()
             .rounded_full()
             .border_1()
@@ -1767,18 +1813,30 @@ pub fn dom_bar<V: TradePane>(
                 .text_color(t.on_warn)
                 .child(knob.bg(t.on_warn).border_color(t.on_warn))
         } else {
+            // Disabled reads quiet, unless strategies are armed: that part mustn't be missed.
             s.border_color(t.axis_line)
-                .text_color(t.text_dim)
+                .text_color(if strategies_armed > 0 {
+                    t.text_main
+                } else {
+                    t.text_dim
+                })
                 .child(knob.border_color(t.text_dim))
         };
-        let s = s.child(switch_text(enabled, blocker, narrow));
-        let name = if enabled {
+        let s = s.child(switch_text_armed(enabled, blocker, strategies_armed, width));
+        let verb = if enabled {
             "Disable trading"
         } else {
             "Enable trading"
         };
+        let name = match strategies_armed {
+            0 => verb.to_owned(),
+            1 => format!("{verb}. 1 strategy armed: this switch doesn't stop it (Stop all does)"),
+            n => format!(
+                "{verb}. {n} strategies armed: this switch doesn't stop them (Stop all does)"
+            ),
+        };
         run_on_click(
-            tip(s, name, Some(TradeCmd::ToggleArm), t),
+            tip(s, &name, Some(TradeCmd::ToggleArm), t),
             TradeCmd::ToggleArm,
             cx,
         )
@@ -1852,7 +1910,7 @@ pub fn dom_bar<V: TradePane>(
             // orders are denied.
             (None, None, None)
                 if d.news.as_ref().is_some_and(|(warns, _)| {
-                    *warns || !(narrow && enabled && blocker.is_some())
+                    *warns || !(reason_below && enabled && blocker.is_some())
                 }) =>
             {
                 let (warns, text) = d.news.as_ref().expect("checked");
@@ -1873,9 +1931,9 @@ pub fn dom_bar<V: TradePane>(
                     status.child(whole_items(&line, t.text_dim, false))
                 }
             }
-            // Narrow: the switch shows only "!", the reason is here.
-            _ => match blocker.filter(|_| narrow && enabled) {
-                Some(b) => status.child(lock_strip(&blocked_line(b), "", true, t)),
+            // Narrow, or a strategy count on the switch: it shows only "!", the reason is here.
+            _ => match blocker.filter(|_| reason_below && enabled) {
+                Some(b) => status.child(lock_strip(&blocked_line(b), "", narrow, t)),
                 None => status,
             },
         },
@@ -4230,6 +4288,39 @@ mod tests {
         );
         assert_eq!(switch_text(true, None, true), "Enabled");
         assert_eq!(switch_text(true, Some("market closed"), true), "Enabled !");
+        // Strategies armed on the account: the state and the count at every width.
+        let closed = Some("market closed");
+        assert_eq!(switch_text_armed(false, None, 0, 240.0), "Disabled");
+        assert_eq!(switch_text_armed(false, None, 1, 240.0), "Off · 1 armed");
+        assert_eq!(switch_text_armed(true, closed, 2, 240.0), "On! · 2 armed");
+        assert_eq!(
+            switch_text_armed(false, None, 2, 420.0),
+            "Disabled · 2 armed"
+        );
+        assert_eq!(
+            switch_text_armed(true, closed, 2, 420.0),
+            "Enabled ! · 2 armed"
+        );
+        assert_eq!(
+            switch_text_armed(false, None, 1, 800.0),
+            "Trading: Disabled · 1 strategy armed"
+        );
+        assert_eq!(
+            switch_text_armed(false, closed, 2, 800.0),
+            "Trading: Disabled · 2 strategies armed"
+        );
+        assert_eq!(
+            switch_text_armed(true, closed, 2, 800.0),
+            "Trading: Enabled ! · 2 strategies armed"
+        );
+        // Not laid out yet: the full layout.
+        assert_eq!(
+            switch_text_armed(true, None, 2, 0.0),
+            "Trading: Enabled · 2 strategies armed"
+        );
+        // The reason moves below whenever a count is on the switch.
+        assert!(reason_on_status(true, 0) && reason_on_status(false, 1));
+        assert!(!reason_on_status(false, 0));
         assert_eq!(
             blocked_line("market closed"),
             "Enabled, but orders are denied: market closed"
@@ -4285,6 +4376,22 @@ mod tests {
             60.0 + w("PAPER") + switch + 2.0 * 8.0 <= room,
             "header {switch}"
         );
+        // With strategies armed, a two-digit count and a blocker on the switch: its text beside
+        // the badge, and the account (which gives way) keeps at least a hit target. The
+        // switch is text, px_2, border, knob and gap: 30 px past the text (`w` has 10).
+        let account_left = |width: f32, keys: f32| {
+            let text = switch_text_armed(true, Some("market closed"), 12, width);
+            let gaps = if keys > 0.0 { 3.0 } else { 2.0 } * 8.0;
+            width - 2.0 * 8.0 - w("PAPER") - keys - (w(&text) + 20.0) - gaps
+        };
+        assert!(
+            account_left(MIN_DOM_WIDTH, 0.0) >= MIN_HIT,
+            "240 px with a count"
+        );
+        assert!(
+            account_left(NARROW_BELOW, 0.0) >= MIN_HIT,
+            "300 px with a count"
+        );
         // From KEYS_IN_HEADER: the account, the Keys chip (knob and px_2 on top of `w`) and
         // the widest wide switch text fit one row.
         let room_k = KEYS_IN_HEADER - 2.0 * 8.0;
@@ -4315,6 +4422,14 @@ mod tests {
         );
         assert!(keys_in_header(0.0) && keys_in_header(KEYS_IN_HEADER));
         assert!(!keys_in_header(KEYS_IN_HEADER - 1.0) && !keys_in_header(MIN_DOM_WIDTH));
+        assert!(
+            account_left(KEYS_IN_HEADER, keys) >= 60.0,
+            "480 px with a count"
+        );
+        assert!(
+            account_left(SWITCH_WORDS, keys) >= 60.0,
+            "600 px with a count"
+        );
         let header = 60.0 + w("PAPER") + keys + widest + 3.0 * 8.0;
         assert!(header <= room_k, "header with Keys {header} > {room_k}");
         const { assert!(MIN_HIT >= 20.0) };
