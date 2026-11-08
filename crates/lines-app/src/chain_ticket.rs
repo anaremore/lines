@@ -185,6 +185,13 @@ pub fn closes(position: i64, side: Side) -> Option<i64> {
     (position != 0 && position.signum() == -side.sign()).then(|| position.abs())
 }
 
+/// Whether an order opens, so a guardrail lockout stops it: as the core counts an exit, what it
+/// can close is the position less everything already working on that side.
+pub fn order_opens(qty: i64, position: i64, side: Side, working: i64) -> bool {
+    let closable = closes(position, side).unwrap_or(0) - working;
+    qty > closable.max(0)
+}
+
 /// What decides a ticket: the account's standing and the guard's inputs.
 pub struct Check<'a> {
     pub product: &'a Product,
@@ -708,6 +715,27 @@ mod tests {
         assert_eq!(t.refused, None);
         assert_eq!(t.typed, None);
         assert!(!t.backspace(&p), "nothing being typed");
+    }
+
+    /// A lockout stops what opens; an exit always passes, as the core counts one.
+    #[test]
+    fn what_opens_is_counted_as_the_core_does() {
+        assert!(order_opens(1, 0, Side::Buy, 0), "flat");
+        assert!(order_opens(1, 2, Side::Buy, 0), "adds");
+        assert!(!order_opens(2, 2, Side::Sell, 0), "closes");
+        assert!(order_opens(3, 2, Side::Sell, 0), "goes through flat");
+        assert!(
+            order_opens(2, 2, Side::Sell, 1),
+            "one of them already works"
+        );
+        assert!(
+            order_opens(1, 5, Side::Sell, 5),
+            "a close works for all of it"
+        );
+        assert!(
+            !order_opens(1, -3, Side::Buy, 2),
+            "closes what's left of a short"
+        );
     }
 
     /// Close prices at the mid again, and a ticket only offers it against the position.

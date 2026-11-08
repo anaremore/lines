@@ -380,6 +380,10 @@ struct Frame {
     marks: Vec<Mark>,
     /// One-click is on: a press sends, so the rows don't move at all.
     hold: bool,
+    /// The strikes held in their places, and the price row's slot (capacity kept).
+    holding: bool,
+    held: Vec<Price>,
+    held_line: Option<usize>,
     /// The selection last frame.
     last_selected: Option<Price>,
 }
@@ -472,13 +476,47 @@ impl Frame {
         // By the strike on top, not its index: a strike listed since moves the indices, not them.
         let top = self.rows.first().map(|r| r.strike);
         let shown = self.rows.len();
-        let line_was = self.line_at;
         self.rows.clear();
         let Some(chain) = chain else {
             self.has_chain = false;
             return;
         };
         self.has_chain = true;
+        let fit_rows = fit.saturating_sub(1).clamp(1, MAX_ROWS);
+        // One-click: the same strikes in the same places, whatever is listed or priced, until the
+        // trader moves the selection off them.
+        let keep = self.hold
+            && self.holding
+            && (selected == self.last_selected || selected.is_none_or(|s| self.held.contains(&s)));
+        self.last_selected = selected;
+        if keep {
+            // More room: the next strikes go below, moving nothing.
+            while self.held.len() < fit_rows {
+                let after = self.held.last().copied();
+                let next = chain
+                    .rows
+                    .iter()
+                    .find(|r| after.is_none_or(|a| r.strike > a));
+                match next {
+                    Some(r) => self.held.push(r.strike),
+                    None => break,
+                }
+            }
+            for &strike in self.held.iter().take(fit_rows) {
+                self.rows.push(match chain.find(strike) {
+                    Ok(i) => chain.rows[i],
+                    Err(_) => lines_core::ChainRow {
+                        strike,
+                        call: None,
+                        put: None,
+                    },
+                });
+            }
+            // The price row keeps its slot (its tag and the in-the-money shading read the live
+            // price); kept apart, so a frame with less room doesn't lose it.
+            self.line_at = self.held_line.filter(|l| *l <= self.rows.len());
+            return;
+        }
         let center = selected
             .and_then(|s| chain.find(s).ok())
             .or_else(|| last.and_then(|l| chain.atm(l)))
@@ -487,31 +525,26 @@ impl Frame {
             .and_then(|t| chain.find(t).ok())
             .map_or(0..0, |start| start..start + shown);
         // One row is the underlying's price when it falls in view.
-        let fit_rows = fit.saturating_sub(1).clamp(1, MAX_ROWS);
         let selected_at = selected.and_then(|s| chain.find(s).ok());
-        // Holding: the same selection (even if less room now cuts it off), or one in view.
-        let hold = self.hold
-            && (selected == self.last_selected || selected_at.is_some_and(|s| was.contains(&s)));
-        self.last_selected = selected;
-        let range = window_held(
-            chain.rows.len(),
-            fit_rows,
-            center,
-            selected_at,
-            was.clone(),
-            hold,
-        );
+        let range = window_held(chain.rows.len(), fit_rows, center, selected_at, was);
         self.first_row = range.start;
         self.line_at = last
             .map(|l| chain.split_at(l))
             .filter(|si| *si >= range.start && *si <= range.end)
             .map(|si| si - range.start);
-        // Holding, the price row keeps its slot: crossing a strike would move the rows between.
-        // Its tag and the in-the-money shading still read the live price.
-        if hold && !was.is_empty() {
-            self.line_at = line_was.filter(|l| *l <= range.len());
-        }
         self.rows.extend_from_slice(&chain.rows[range]);
+        self.holding = self.hold;
+        if self.hold {
+            self.held.clear();
+            self.held.extend(self.rows.iter().map(|r| r.strike));
+            self.held_line = self.line_at;
+        }
+    }
+
+    /// The trader moved the rows: nothing is held, and the next frame centers.
+    fn release(&mut self) {
+        self.rows.clear();
+        self.holding = false;
     }
 }
 
@@ -596,7 +629,7 @@ impl Pane for ChainView {
         // A ticket or a One-click press belongs to the symbol it was opened on, and so do the
         // rows the last frame drew.
         self.leave_ticket();
-        self.frame.rows.clear();
+        self.frame.release();
         self.frame.marks.clear();
         self.frame.has_chain = false;
         self.layout = Layout::default();
@@ -661,6 +694,7 @@ impl ChainView {
                 rows: Vec::with_capacity(MAX_ROWS),
                 // Past any real count of series on one expiry (it would grow once, and keep it).
                 marks: Vec::with_capacity(512),
+                held: Vec::with_capacity(MAX_ROWS),
                 ..Frame::default()
             },
         }
@@ -728,12 +762,17 @@ impl ChainView {
 
     /// Contracts of plain working orders on `side` of this series: a close doesn't touch them.
     fn other_working(&self, key: OptionKey, side: Side) -> i64 {
+        self.working_on(key, side, false)
+    }
+
+    /// Contracts working on `side` of this series, a close's too if asked.
+    fn working_on(&self, key: OptionKey, side: Side, closes: bool) -> i64 {
         let Some(a) = self.trade.account.as_ref() else {
             return 0;
         };
         self.trade.try_cache().map_or(0, |st| {
             st.open_orders(a, self.contract(key))
-                .filter(|o| o.side == side && !o.reduce_only)
+                .filter(|o| o.side == side && (closes || !o.reduce_only))
                 .map(|o| o.qty.0 - o.filled.0)
                 .sum()
         })
@@ -828,9 +867,13 @@ impl ChainView {
         let at_start = info.as_ref().is_some_and(|i| i.rules.is_some());
         // Only an order that opens: exits always pass a guardrail.
         // As the core counts it: the position less what's already working to close it.
-        let closable =
-            ticket::closes(self.position(key), side).unwrap_or(0) - self.other_working(key, side);
-        let opens = !close && self.size(cx) > closable.max(0);
+        let opens = !close
+            && ticket::order_opens(
+                self.size(cx),
+                self.position(key),
+                side,
+                self.working_on(key, side, true),
+            );
         let (prop, locked) = match self.trade.try_cache() {
             Some(st) => (
                 ticket::has_rules(&st, id, at_start),
@@ -1395,7 +1438,7 @@ impl ChainView {
             drop(d);
             self.expiry = Some(all[j]);
             self.selected = None; // that strike may not exist there: back to the money
-            self.frame.rows.clear();
+            self.frame.release();
             self.leave_ticket();
         }
     }
@@ -1455,7 +1498,7 @@ impl ChainView {
             "pagedown" => self.move_strike(self.page.max(1) as i64),
             "home" => {
                 self.selected = None;
-                self.frame.rows.clear();
+                self.frame.release();
             }
             "left" => self.step_expiry(-1),
             "right" => self.step_expiry(1),
@@ -1623,10 +1666,14 @@ impl ChainView {
         // Copy what's in view and let go of the store; busy this instant: last frame's rows.
         match self.store.try_read() {
             Some(d) => {
+                // One-click pins the expiry it shows: a sooner one arriving replaces no rows.
+                if self.one_click && self.expiry.is_none() {
+                    self.expiry = self.shown_expiry(&d.chains);
+                }
                 let expiry = self.shown_expiry(&d.chains);
                 // Another expiry is other rows (a sooner one can arrive while following it).
                 if expiry != self.frame.expiry {
-                    self.frame.rows.clear();
+                    self.frame.release();
                 }
                 self.frame.expiry = expiry;
                 self.frame.hold = self.one_click;
@@ -2187,7 +2234,7 @@ impl ChainView {
                         if this.expiry != Some(e) {
                             this.expiry = Some(e);
                             this.selected = None;
-                            this.frame.rows.clear();
+                            this.frame.release();
                             this.leave_ticket();
                         }
                         cx.notify();
@@ -2881,21 +2928,15 @@ pub fn strip_orders_fit(width: f32, narrow: bool, has_position: bool, orders: us
     (((room / ORDER_W).floor().max(1.0)) as usize).min(orders)
 }
 
-/// The rows to show: those on screen when `hold`ing, or while the selected row is still among
-/// them and they still fit, else [`window`] around `center`.
+/// The rows to show: those on screen while the selected row is still among them and they still
+/// fit, else [`window`] around `center`.
 pub fn window_held(
     n: usize,
     fit: usize,
     center: usize,
     selected: Option<usize>,
     was: std::ops::Range<usize>,
-    hold: bool,
 ) -> std::ops::Range<usize> {
-    // Holding, not even the chain's end moves them: blank space shows below its last strike.
-    if hold && !was.is_empty() {
-        let start = was.start.min(n.saturating_sub(1));
-        return start..(start + fit).min(n);
-    }
     if let Some(s) = selected
         && !was.is_empty()
     {
@@ -3162,28 +3203,20 @@ mod tests {
     /// them, and follow it once it leaves.
     #[test]
     fn rows_hold_still_under_the_pointer() {
-        // One-click: they hold through less room, more room and a moving center, selected or not.
-        assert_eq!(window_held(41, 10, 30, None, 10..20, true), 10..20);
-        assert_eq!(window_held(41, 3, 14, Some(14), 10..20, true), 10..13);
-        assert_eq!(window_held(41, 12, 30, Some(30), 10..20, true), 10..22);
-        // Not even at the chain's end, when room comes back.
-        assert_eq!(window_held(41, 16, 40, Some(40), 30..41, true), 30..41);
-        // Until there's nothing on screen to hold.
-        assert_eq!(window_held(41, 10, 14, Some(14), 0..0, true), 9..19);
         // Selected row 14 in view: the rows stay, whatever the center says.
-        assert_eq!(window_held(41, 10, 14, Some(14), 10..20, false), 10..20);
+        assert_eq!(window_held(41, 10, 14, Some(14), 10..20), 10..20);
         // Nothing selected: they follow the center.
-        assert_eq!(window_held(41, 10, 30, None, 10..20, false), 25..35);
+        assert_eq!(window_held(41, 10, 30, None, 10..20), 25..35);
         // The selection left the rows: around it.
-        assert_eq!(window_held(41, 10, 30, Some(30), 10..20, false), 25..35);
+        assert_eq!(window_held(41, 10, 30, Some(30), 10..20), 25..35);
         // First frame: around it.
-        assert_eq!(window_held(41, 10, 14, Some(14), 0..0, false), 9..19);
+        assert_eq!(window_held(41, 10, 14, Some(14), 0..0), 9..19);
         // The ticket opened and fewer rows fit, with the selection still among them.
-        assert_eq!(window_held(41, 6, 14, Some(14), 10..20, false), 10..16);
-        // Fewer rows, the selection now below them: around it.
-        assert_eq!(window_held(41, 3, 14, Some(14), 10..20, false), 13..16);
+        assert_eq!(window_held(41, 6, 14, Some(14), 10..20), 10..16);
+        // Fewer rows, the selection now below them: around it (with One-click on, `Frame` holds).
+        assert_eq!(window_held(41, 3, 14, Some(14), 10..20), 13..16);
         // A shorter chain.
-        assert_eq!(window_held(5, 10, 2, Some(2), 3..8, false), 0..5);
+        assert_eq!(window_held(5, 10, 2, Some(2), 3..8), 0..5);
     }
 
     /// A frame holding through less room doesn't jump on the next frame, when the selected row
@@ -3209,7 +3242,10 @@ mod tests {
         let start = f.first_row;
         let at = chain.find(Price(68_400)).unwrap();
         assert!(at > start && at < start + f.rows.len());
+        // One-click goes on: the next frame takes hold of what's on screen.
         f.hold = true;
+        f.refresh(Some(chain), None, sel, 21);
+        assert_eq!(f.first_row, start);
         // The strip takes its height: fewer rows, the selection now below them.
         let fit = at - start;
         for _ in 0..3 {
@@ -3259,7 +3295,27 @@ mod tests {
         let line = f.line_at;
         // Fourteen new strikes below the rows: their indices move, they don't.
         f.refresh(after.chain(exp), last, sel, 21);
-        assert_eq!(drawn(&f), want, "a new strike");
+        assert_eq!(drawn(&f), want, "a new strike below");
+        // A strike listed among the rows stays out of them until the hold ends.
+        let mut among = build(650);
+        among.apply(
+            lines_core::OptionKey {
+                expiry: exp,
+                strike: Price(68_750),
+                right: Right::Call,
+            },
+            OptionQuote::default(),
+        );
+        f.refresh(among.chain(exp), last, sel, 21);
+        assert_eq!(drawn(&f), want, "a new strike among them");
+        // Less room, then the room back: the price row's slot and every strike return.
+        f.refresh(among.chain(exp), last, sel, 6);
+        f.refresh(among.chain(exp), last, sel, 21);
+        assert_eq!(drawn(&f), want, "less room and back");
+        // More room than ever: the next strikes go below, nothing above moves.
+        f.refresh(among.chain(exp), last, sel, 24);
+        assert_eq!(drawn(&f)[..want.len()], want[..], "more room");
+        f.refresh(among.chain(exp), last, sel, 21);
         // The price crosses two strikes: the price row keeps its slot, and so does every strike.
         f.refresh(after.chain(exp), Some(Price(68_650)), sel, 21);
         assert_eq!(drawn(&f), want, "the price moved");
