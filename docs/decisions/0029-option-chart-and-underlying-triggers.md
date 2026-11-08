@@ -14,7 +14,7 @@
 - **"P&L to close" is a toggle, off by default.** With it on, the chart continues past now to the close, shaded by the contract's estimated P&L at each time and price, with signed values and a breakeven line, so color isn't the only signal. The chart widens and the chain keeps only the traded side.
 
 *Triggers (public, in the trading core)*
-- A **trigger** is held by the trading core, not the UI, so it fires on the core's market data with the UI closed to the tray or busy. It watches the underlying's last trade.
+- A **trigger** is held by the trading core, not the UI, so it fires on the core's market data and a busy UI can't delay it. It watches the underlying's last trade.
 - Triggers fire only during the option's regular hours, so a premarket print can't set one off. A long put's direction is flipped: its stop fires when the underlying rises.
 - **Entry trigger:** when it fires, sends a limit at the ask, capped at a max price the trader set. It doesn't chase. If the ask is above the cap, the entry is refused with its reason, and the trigger ends. The far-from-mid guard, guardrails and all new-order checks apply when it fires, not only when armed.
 - **Exit triggers:** Stop and Target are linked (one-cancels-other) and reduce-only. They can never open, grow or flip a position, and they shrink with it.
