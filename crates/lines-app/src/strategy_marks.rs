@@ -200,7 +200,7 @@ impl StrategyMarksLayer {
                     let rows = 4;
                     let step = SIZE / rows as f32;
                     for r in 0..rows {
-                        let w = step * (r as f32 + 1.0) * 2.0 - step;
+                        let w = 3.0 + 2.0 * r as f32;
                         let dy = 2.0 + step * r as f32;
                         let top = if side == Side::Buy {
                             cy + dy
@@ -241,6 +241,27 @@ impl StrategyMarksLayer {
             }
         }
     }
+}
+
+/// The hover text's box (plot-local left, top, width): beside the pointer, on whichever side
+/// has room, inside the plot (markers mostly sit at the live edge, by the price axis).
+pub fn tip_place(x: f32, y: f32, plot_w: f32, plot_h: f32) -> (f32, f32, f32) {
+    const WIDTH: f32 = 320.0;
+    const HEIGHT: f32 = 60.0; // up to three lines of text
+    const GAP: f32 = 12.0;
+    const EDGE: f32 = 4.0;
+    let w = WIDTH.min((plot_w - 2.0 * EDGE).max(0.0));
+    let left = if x + GAP + w <= plot_w - EDGE {
+        x + GAP
+    } else {
+        (x - GAP - w).max(EDGE)
+    };
+    let top = if y + GAP + HEIGHT <= plot_h - EDGE {
+        y + GAP
+    } else {
+        (y - GAP - HEIGHT).max(EDGE)
+    };
+    (left, top, w)
 }
 
 /// The index of the mark nearest (`x`, `y`) within [`HIT`], if any.
@@ -419,6 +440,22 @@ mod tests {
             [MarkKind::Entry(Side::Buy), MarkKind::Skip, MarkKind::Exit]
         );
         assert!(m[2].text.contains("Stop: Support broke"), "{}", m[2].text);
+    }
+
+    #[test]
+    fn the_hover_text_stays_inside_the_plot() {
+        // Room on the right and below: beside the pointer.
+        assert_eq!(
+            tip_place(100.0, 100.0, 1000.0, 600.0),
+            (112.0, 112.0, 320.0)
+        );
+        // At the live edge and the plot's bottom: flips left and up.
+        assert_eq!(
+            tip_place(990.0, 590.0, 1000.0, 600.0),
+            (658.0, 518.0, 320.0)
+        );
+        // A plot narrower than the box: it fits the plot, at its left edge.
+        assert_eq!(tip_place(100.0, 10.0, 200.0, 40.0), (4.0, 4.0, 192.0));
     }
 
     #[test]

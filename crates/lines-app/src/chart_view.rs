@@ -4713,12 +4713,18 @@ impl ChartView {
     fn strategy_mark_tip(&self, t: &Theme) -> Option<AnyElement> {
         let (x, y) = self.hover?;
         let m = self.marks.hit(x, y)?;
+        let (left, top, w) = crate::strategy_marks::tip_place(
+            x,
+            y,
+            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.height),
+        );
         Some(
             div()
                 .absolute()
-                .left(px(x + 12.0))
-                .top(px(y + 12.0))
-                .max_w(px(360.0))
+                .left(px(left))
+                .top(px(top))
+                .w(px(w))
                 .px_2()
                 .py_1()
                 .rounded_sm()
