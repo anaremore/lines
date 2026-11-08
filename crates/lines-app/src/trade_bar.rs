@@ -70,8 +70,13 @@ pub struct PaneTrade {
     pub hotkeys: bool,
     /// Typing a custom quantity (digits so far).
     pub qty_edit: Option<String>,
-    /// Wheel travel over the size control, not yet a step.
+    /// Wheel travel over a size control, not yet a step.
     pub qty_scroll: f32,
+    /// A working order's size being typed: the order and the digits so far.
+    pub resize_edit: Option<(lines_trading::OrderId, String)>,
+    /// The wheel may resize the order under the pointer: only after the pointer moved, so a zoom
+    /// or ladder scroll that drifts a mark or tag under a still pointer never sends anything.
+    pub resize_armed: bool,
     /// `SIZE_EPOCH` last drawn.
     seen_size: u64,
     pub account_menu: bool,
@@ -154,6 +159,8 @@ impl PaneTrade {
             hotkeys: saved.is_some_and(|s| s.hotkeys),
             qty_edit: None,
             qty_scroll: 0.0,
+            resize_edit: None,
+            resize_armed: false,
             seen_size: SIZE_EPOCH.load(Ordering::Relaxed),
             account_menu: trading.is_some_and(|t| t.start_account_menu),
             local_flash: None,
@@ -250,6 +257,7 @@ impl PaneTrade {
         self.editor = None;
         // A size being typed was for the old symbol: it never lands on this one.
         self.qty_edit = None;
+        self.resize_edit = None;
         self.bracket_forget();
         self.account_menu = false;
         if follow && let Some(t) = Trading::try_global(cx) {
@@ -272,13 +280,23 @@ impl PaneTrade {
         {
             view.trade().qty_edit = None;
         }
+        // The same for an order's size, while its order is open.
+        if let Some((id, _)) = view.trade_ref().resize_edit
+            && (!view.keys_free()
+                || !view.resize_drawn(id)
+                || !focus.is_focused(window)
+                || !resize_order_open(view.trade_ref(), id))
+        {
+            view.trade().resize_edit = None;
+        }
         let id = window.window_handle().window_id();
         if view.trade_ref().watched.as_ref().is_some_and(|w| w.0 == id) {
             return;
         }
         let blur = cx.on_focus_out(focus, window, |v: &mut V, _, _, cx| {
             // A size being typed needs the pane's keys: a drawn field always has them.
-            if v.trade().qty_edit.take().is_some() {
+            let open = v.trade().qty_edit.take().is_some();
+            if v.trade().resize_edit.take().is_some() || open {
                 cx.notify();
             }
             if v.trade().arm_event(ArmEvent::FocusLost, cx) {
@@ -299,6 +317,18 @@ pub trait TradePane: Sized + 'static {
     fn trade(&mut self) -> &mut PaneTrade;
     fn trade_ref(&self) -> &PaneTrade;
     fn trade_store(&self) -> &Arc<ChartStore>;
+    /// Nothing else holds the pane's keys (a picker, a menu, a bracket editor).
+    fn keys_free(&self) -> bool;
+    /// Whether this order's own mark or tag is on screen, standing for it alone.
+    fn resize_drawn(&self, order: lines_trading::OrderId) -> bool;
+    /// Resize a working order from this pane, or say why not (`order_resize`).
+    fn send_resize(
+        &mut self,
+        order: lines_trading::OrderId,
+        step: crate::order_resize::SizeStep,
+        one_leg: bool,
+        cx: &mut Context<Self>,
+    );
     /// The product the pane shows: its order size is that symbol's.
     fn trade_product(&self) -> &Product;
     /// The pane's focus: a size being typed needs its keys.
@@ -732,6 +762,7 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
     let t = v.trade();
     if account.is_some() && account != t.account {
         t.account = account;
+        t.resize_edit = None;
         t.seen = u64::MAX;
         v.trade().arm_event(ArmEvent::AccountChanged, cx);
         v.trade().editor = None;
@@ -941,11 +972,126 @@ pub fn editor_key<V: TradePane>(v: &mut V, ev: &gpui::KeyDownEvent, cx: &mut Con
     true
 }
 
+/// Whether order `id` is still open, as far as the pane's cache knows (busy: assume so).
+fn resize_order_open(t: &PaneTrade, id: lines_trading::OrderId) -> bool {
+    let Some(cache) = &t.cache else {
+        return false;
+    };
+    cache
+        .try_read()
+        .is_none_or(|s| s.order(id).is_some_and(lines_trading::Order::is_open))
+}
+
+/// What resizing order `id` would send, from the cache's state (`order_resize::plan`).
+pub fn resize_plan(
+    id: lines_trading::OrderId,
+    step: crate::order_resize::SizeStep,
+    one_leg: bool,
+    cx: &App,
+) -> Result<crate::order_resize::Plan, String> {
+    let t = Trading::try_global(cx).ok_or("trading is not running")?;
+    let s = t.cache.read();
+    let o = s.order(id).ok_or("the order is gone")?;
+    let sibling = o.oco.and_then(|i| s.order(i));
+    let entry_working = o
+        .parent
+        .and_then(|p| s.order(p))
+        .is_some_and(lines_trading::Order::is_open);
+    let position = s.position(&o.account, o.contract).map_or(0, |p| p.qty);
+    // A position bracket sizes its exits to the position itself: a change would bounce back.
+    let symbol = lines_feed::catalog::get(o.contract.product).map(|p| p.symbol);
+    if o.reduce_only
+        && symbol.is_some_and(|sym| {
+            let brackets = &crate::picker_view::settings(cx).bracket_presets;
+            crate::brackets::position_mode(brackets, &o.account.0, sym)
+        })
+    {
+        return Err("the position bracket sizes its exits to the position".to_owned());
+    }
+    crate::order_resize::plan(o, sibling, entry_working, position, step, one_leg)
+}
+
+/// Open the field to type a working order's size.
+pub fn open_resize_field<V: TradePane>(v: &mut V, id: lines_trading::OrderId) {
+    v.trade().qty_edit = None;
+    v.trade().resize_edit = Some((id, String::new()));
+}
+
+/// Keys while a working order's size is being typed. Enter sends it (Alt: one leg of a linked
+/// pair). Returns whether the key was used.
+pub fn resize_key<V: TradePane>(v: &mut V, key: &str, alt: bool, cx: &mut Context<V>) -> bool {
+    if let Some((id, _)) = v.trade_ref().resize_edit
+        && !(v.keys_free() && v.resize_drawn(id))
+    {
+        v.trade().resize_edit = None;
+        return false;
+    }
+    // Alt only means something on Enter; other Alt keys are the pane's.
+    if alt && key != "enter" {
+        return false;
+    }
+    let t = v.trade();
+    let Some((id, edit)) = t.resize_edit.as_mut() else {
+        return false;
+    };
+    let id = *id;
+    match key {
+        "enter" => match parse_qty(edit) {
+            Some(q) => {
+                t.resize_edit = None;
+                v.send_resize(id, crate::order_resize::SizeStep::To(q), alt, cx);
+            }
+            None => t.flash("quantity: whole number 1–9999"),
+        },
+        "escape" => t.resize_edit = None,
+        "backspace" => {
+            edit.pop();
+        }
+        k if k.len() == 1 && k.as_bytes()[0].is_ascii_digit() && edit.len() < 4 => edit.push_str(k),
+        _ => {}
+    }
+    cx.notify();
+    true
+}
+
+/// Wheel travel: resize the order under the pointer when the pointer moved there first (see
+/// `resize_armed`). Returns whether the wheel was used; otherwise it scrolls or zooms as usual
+/// and the wheel stays off orders until the pointer moves.
+pub fn wheel_resize<V: TradePane>(
+    v: &mut V,
+    hovered: Option<lines_trading::OrderId>,
+    ev: &gpui::ScrollEvent,
+    w: &Window,
+    cx: &mut Context<V>,
+) -> bool {
+    let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
+    // A sideways wheel, or Shift, pans: it never resizes.
+    let dx = f32::from(ev.delta.pixel_delta(w.line_height()).x);
+    if dy == 0.0 || dx.abs() > dy.abs() || ev.modifiers.shift {
+        return false;
+    }
+    let Some(id) = hovered.filter(|_| v.trade_ref().resize_armed && !ev.modifiers.control) else {
+        v.trade().resize_armed = false;
+        return false;
+    };
+    if let Some(up) = dom_trade::scroll_qty(&mut v.trade().qty_scroll, dy) {
+        let step = if up {
+            crate::order_resize::SizeStep::Up
+        } else {
+            crate::order_resize::SizeStep::Down
+        };
+        v.send_resize(id, step, ev.modifiers.alt, cx);
+    }
+    cx.stop_propagation();
+    true
+}
+
 /// Open the field to type a size, or say why not.
 pub fn open_size_field<V: TradePane>(v: &mut V) {
     if v.trade_unavailable() {
         v.trade().flash("this pane has no market data");
     } else if v.shows_size() {
+        v.trade().resize_edit = None;
         v.trade().qty_edit = Some(String::new());
     } else {
         v.trade().flash("Can't type a size now");

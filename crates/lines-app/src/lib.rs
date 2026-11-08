@@ -36,6 +36,7 @@ mod logs;
 mod menu;
 mod notice;
 mod order_group_view;
+mod order_resize;
 mod pane;
 mod pane_columns;
 mod pane_window;
@@ -452,6 +453,9 @@ struct Cli {
     /// pane).
     #[arg(long = "enable-hotkeys", requires = "screenshot")]
     hotkeys: bool,
+    /// Screenshot: the first single-order mark and tag show their − / size / +, as if hovered.
+    #[arg(long, requires = "screenshot")]
+    order_controls: bool,
     /// Screenshot: the order size every symbol starts with (the Qty control, the Buy/Sell
     /// buttons).
     #[arg(long, requires = "screenshot")]
@@ -1465,6 +1469,7 @@ where
                 paper: cli.paper.clone(),
                 arm: cli.arm,
                 hotkeys: cli.hotkeys,
+                order_controls: cli.order_controls,
                 order_size: cli.order_size,
                 max_order_qty: cli.max_order_qty,
                 demo_broker: cli.demo_broker,

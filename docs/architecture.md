@@ -84,6 +84,7 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
 # --drag-position Y previews the position line dragged to plot-local Y (the stop or target it would set, with its P&L; nothing is placed).
+# --order-controls shows the first single-order mark's and tag's − / size / +, as if hovered.
 # --order-size N starts every symbol at that order size; --max-order-qty N sets the paper accounts' largest allowed order (a larger size shows "max N").
 # --order-strip shows the order strip on the first chart; --strip-pick buy|sell shows it with that limit's price pick armed.
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair; --magnet snaps it to OHLC.

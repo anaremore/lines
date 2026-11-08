@@ -689,6 +689,9 @@ pub struct Trading {
     /// Screenshot fixture (`--enable-hotkeys`): DOMs start with order hotkeys on. Never set
     /// in the app (there, the hotkeys switch is saved per pane).
     pub start_hotkeys: bool,
+    /// Screenshot fixture (`--order-controls`): the first single-order mark and tag show their
+    /// resize control, as if hovered. Never set in the app.
+    pub start_order_controls: bool,
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
@@ -1344,6 +1347,7 @@ impl Trading {
             report,
             start_armed: false,
             start_hotkeys: false,
+            start_order_controls: false,
             start_account_menu: false,
             start_chain_ticket: None,
             start_editor: false,

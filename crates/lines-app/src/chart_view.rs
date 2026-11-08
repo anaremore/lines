@@ -474,10 +474,63 @@ impl crate::trade_bar::TradePane for ChartView {
         &self.focus
     }
     fn shows_size(&self) -> bool {
-        self.strip_box().is_some()
-            && !self.picker.is_open()
-            && self.study_menu.is_none()
-            && !self.drawings.editing()
+        self.strip_box().is_some() && self.keys_free()
+    }
+    fn keys_free(&self) -> bool {
+        !self.picker.is_open() && self.study_menu.is_none() && !self.drawings.editing()
+    }
+    fn resize_drawn(&self, order: lines_trading::OrderId) -> bool {
+        self.ct.group_of(order.0).is_none()
+            && self.ct.tags[..self.ct.n_tags]
+                .iter()
+                .any(|b| b.id == order.0 && b.left >= crate::chart_trade::RESIZE_W)
+    }
+    fn send_resize(
+        &mut self,
+        order: lines_trading::OrderId,
+        step: crate::order_resize::SizeStep,
+        one_leg: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let issued = std::time::Instant::now();
+        let plan = crate::trade_bar::resize_plan(order, step, one_leg, cx);
+        let (plan, Some(t)) = (plan, crate::trading::Trading::try_global(cx)) else {
+            return;
+        };
+        match plan {
+            Err(why) => self.trade.flash(why),
+            // More quantity is more exposure: only through a linked DOM's switch, like an order
+            // from the strip. Each order's account and contract are the chart's.
+            Ok(p) if p.grows && self.store.stale_for().is_some() => {
+                self.trade.flash(crate::trade_bar::FEED_STALE);
+            }
+            Ok(p) if p.grows => {
+                let (Some(account), Some(contract)) = (
+                    self.trade.account.clone(),
+                    crate::trade_bar::contract_of(&self.store),
+                ) else {
+                    return;
+                };
+                for leg in p.commands {
+                    cx.emit(ChartOrder {
+                        command: leg.command,
+                        refused: crate::chart_trade::ENABLE_TO_GROW,
+                        account: account.clone(),
+                        contract,
+                        link: self.common.link,
+                        issued,
+                        resize: Some((leg.order, leg.price, leg.qty)),
+                    });
+                }
+            }
+            Ok(p) => {
+                for leg in p.commands {
+                    let command = t.submit(lines_trading::Source::Chart, issued, leg.command);
+                    self.track_resize(leg.order, leg.price, leg.qty, command);
+                }
+            }
+        }
+        cx.notify();
     }
     fn trade_unavailable(&self) -> bool {
         self.feed.unavailable.is_some()
@@ -1248,6 +1301,7 @@ impl ChartView {
         self.focus.focus(window, cx);
         // A press on the chart leaves a size being typed.
         self.trade.qty_edit = None;
+        let typing = self.trade.resize_edit.take().map(|(id, _)| id.0);
         if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
             cx.notify();
@@ -1289,6 +1343,15 @@ impl ChartView {
                     cx,
                 );
             }
+            return;
+        }
+        // The − / size / + first: quick clicks on them are steps, never a double click.
+        if region == Region::Plot
+            && !ev.modifiers.control
+            && !self.drawings.active()
+            && self.resize_pressed(x, y, ev.modifiers.alt, typing, cx)
+        {
+            cx.stop_propagation();
             return;
         }
         // Drawings take a press only in drawing mode or on a drawing, never with Ctrl (chart
@@ -1425,6 +1488,13 @@ impl ChartView {
             cx.notify();
             return;
         }
+        // A working order's size being typed (Alt+Enter: one leg of a linked pair).
+        if !(m.control || m.platform)
+            && crate::trade_bar::resize_key(self, k.key.as_str(), m.alt, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         // A size being typed takes the plain keys (digits, Enter, Esc), only while its field is
         // on screen (`qty_key`).
         if !(m.control || m.alt || m.platform)
@@ -1550,6 +1620,7 @@ impl ChartView {
         // A limit pick belongs to the symbol it was armed on; so does a size being typed.
         self.ct.feed_changed();
         self.trade.qty_edit = None;
+        self.trade.resize_edit = None;
         self.readout = None;
         self.labels.clear();
         // The same timeframe on the new market.
@@ -2105,13 +2176,25 @@ impl ChartView {
     }
 
     fn on_mouse_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.hover.take().is_some() {
+        let tag = self.ct.resize_hover.take().is_some();
+        if self.hover.take().is_some() || tag {
             cx.notify();
         }
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
+        self.trade.resize_armed = true;
+        let (tx, ty) = self.local(ev.position);
+        let typing = self.trade.resize_edit.as_ref().map(|(id, _)| id.0);
+        let tag = self
+            .ct
+            .resize_target(tx as f32, ty as f32, typing)
+            .map(|(id, _)| id);
+        if tag != self.ct.resize_hover {
+            self.ct.resize_hover = tag;
+            cx.notify();
+        }
         if let Some((from, _)) = self.pick_press {
             let d = ev.position - from;
             if ev.pressed_button != Some(MouseButton::Left) {
@@ -2264,6 +2347,32 @@ impl ChartView {
             self.end_drag();
             cx.notify();
         }
+    }
+
+    /// A press on the hovered tag's − / size / +. Returns whether it was on one.
+    fn resize_pressed(
+        &mut self,
+        x: f64,
+        y: f64,
+        alt: bool,
+        typing: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::order_resize::{ResizeHit, SizeStep};
+        use crate::trade_bar::TradePane;
+        let Some((id, Some(hit))) = self.ct.resize_target(x as f32, y as f32, typing) else {
+            return false;
+        };
+        let id = lines_trading::OrderId(id);
+        match hit {
+            ResizeHit::Down => self.send_resize(id, SizeStep::Down, alt, cx),
+            ResizeHit::Up => self.send_resize(id, SizeStep::Up, alt, cx),
+            ResizeHit::Value => {
+                crate::trade_bar::open_resize_field(self, id);
+                cx.notify();
+            }
+        }
+        true
     }
 
     /// A press in the plot at plot-local (`x`, `y`) on an order tag, its `×`, a position
@@ -2456,6 +2565,7 @@ impl ChartView {
                 order: o.id,
                 price: d.to,
                 command: id,
+                qty: None,
             });
         }
     }
@@ -2489,6 +2599,7 @@ impl ChartView {
             Ok(command) => cx.emit(ChartOrder {
                 command,
                 refused: crate::chart_trade::ENABLE_TO_ADD,
+                resize: None,
                 account,
                 contract,
                 link: self.common.link,
@@ -2561,6 +2672,7 @@ impl ChartView {
                 None => cx.emit(ChartOrder {
                     command,
                     refused: ENABLE_TO_ORDER,
+                    resize: None,
                     account: ctx.account,
                     contract: ctx.contract,
                     link: self.common.link,
@@ -2574,6 +2686,20 @@ impl ChartView {
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
+        // Under the pointer now, and hovered since the pointer last moved.
+        let (tx, ty) = self.local(ev.position);
+        let typing = self.trade.resize_edit.as_ref().map(|(id, _)| id.0);
+        let hovered = self
+            .ct
+            .resize_target(tx as f32, ty as f32, typing)
+            .map(|(id, _)| id)
+            .filter(|id| self.ct.resize_hover == Some(*id))
+            .map(lines_trading::OrderId);
+        if crate::trade_bar::wheel_resize(self, hovered, ev, window, cx) {
+            return;
+        }
+        // The chart moves under the pointer: no tag is hovered until it moves.
+        self.ct.resize_hover = None;
         // The sub-pane shares the plot's time axis: the wheel pans and zooms time there too
         // (its value scale fits itself, so Ctrl+wheel does nothing).
         let in_sub = matches!(self.region(ev.position), Some(Region::Sub));
@@ -3280,10 +3406,13 @@ impl ChartView {
         }
         // The order being dragged, moves awaiting the broker: dashed accent.
         let drag = self.ct.drag.map(|d| d.to);
-        for p in drag
-            .into_iter()
-            .chain(self.ct.ghosts.iter().map(|g| g.price))
-        {
+        for p in drag.into_iter().chain(
+            self.ct
+                .ghosts
+                .iter()
+                .filter(|g| g.qty.is_none())
+                .map(|g| g.price),
+        ) {
             let y = self.vp.price_to_y(p.0 as f64) as f32;
             if (0.0..=ph).contains(&y) {
                 dashed(window, y, t.accent, 5.0);
@@ -3439,6 +3568,79 @@ impl ChartView {
                 window,
                 cx,
             );
+        }
+        // Screenshot fixture: as if the first single-order tag were hovered (a frame later its
+        // + knows whether it can grow).
+        if self.ct.resize_hover.is_none()
+            && crate::trading::Trading::try_global(cx).is_some_and(|t| t.start_order_controls)
+        {
+            self.ct.resize_hover = self.ct.tags[..self.ct.n_tags]
+                .iter()
+                .find(|b| self.ct.group_of(b.id).is_none())
+                .map(|b| b.id);
+            window.refresh();
+        }
+        // The hovered tag's − / size / +, left of it (a tag's height, each at least 20 px).
+        // While its size is typed the field stays up, wherever the pointer is.
+        let shown = self
+            .trade
+            .resize_edit
+            .as_ref()
+            .map(|(id, _)| id.0)
+            .or(self.ct.resize_hover)
+            .filter(|h| self.ct.group_of(*h).is_none());
+        if let Some(b) = shown
+            .and_then(|h| self.ct.tags[..self.ct.n_tags].iter().find(|b| b.id == h))
+            .copied()
+            .filter(|b| b.left >= crate::chart_trade::RESIZE_W)
+            && let Some(m) = self.ct.mark(b.id).copied()
+        {
+            use crate::chart_trade::{RESIZE_BTN_W, RESIZE_VALUE_W, RESIZE_W};
+            let left = b.left - RESIZE_W;
+            let mut value = lines_core::FixedStr::<16>::new();
+            match &self.trade.resize_edit {
+                Some((id, digits)) if id.0 == b.id => {
+                    let _ = write!(value, "{digits}_");
+                }
+                _ => {
+                    let _ = write!(value, "{}", (m.qty.0 - m.filled.0).max(0));
+                }
+            }
+            let plus = if self.ct.resize_grows {
+                t.text_main
+            } else {
+                t.text_dim
+            };
+            let parts = [
+                (left, RESIZE_BTN_W, "−", t.text_main),
+                (
+                    left + RESIZE_BTN_W,
+                    RESIZE_VALUE_W,
+                    value.as_str(),
+                    t.text_main,
+                ),
+                (
+                    left + RESIZE_BTN_W + RESIZE_VALUE_W,
+                    RESIZE_BTN_W,
+                    "+",
+                    plus,
+                ),
+            ];
+            for (x, w, text, colour) in parts {
+                let r = rect(x, b.top, w, TAG_H);
+                window.paint_quad(fill(r, t.panel));
+                self.outline(r, t.control_edge, hair, window);
+                self.pos_glyphs.paint(
+                    text,
+                    ox + x + 6.0,
+                    oy + b.top,
+                    TAG_H,
+                    colour,
+                    true,
+                    window,
+                    cx,
+                );
+            }
         }
         // Edge markers: orders off the plot, nearest first; click scrolls there.
         for (k, text) in edge_text.iter().enumerate() {
@@ -5597,6 +5799,8 @@ impl EventEmitter<FeedChanged> for ChartView {}
 pub struct ChartOrder {
     pub command: lines_trading::Command,
     pub refused: &'static str,
+    /// A working order's resize: its order, price and new total, so the chart tracks the answer.
+    pub resize: Option<(lines_trading::OrderId, Price, lines_core::Qty)>,
     /// The chart's link group: the DOMs whose switch may send it.
     pub link: crate::layout::LinkGroup,
     pub account: lines_trading::AccountId,
@@ -5612,6 +5816,25 @@ impl ChartView {
     pub fn exit_refused(&mut self, why: &'static str, cx: &mut Context<Self>) {
         self.trade.flash(why);
         cx.notify();
+    }
+
+    /// A resize was sent: its refusal shows as a rejected drag does; only the newest counts.
+    pub fn track_resize(
+        &mut self,
+        order: lines_trading::OrderId,
+        price: Price,
+        qty: lines_core::Qty,
+        command: lines_trading::CommandId,
+    ) {
+        self.ct
+            .ghosts
+            .retain(|g| g.order != order || g.qty.is_none());
+        self.ct.ghosts.push(crate::dom_trade::Ghost {
+            order,
+            price,
+            command,
+            qty: Some(qty),
+        });
     }
 }
 

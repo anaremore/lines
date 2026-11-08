@@ -649,7 +649,12 @@ impl PaperBroker {
                 let Some(sp) = self.orders.get_mut(&sib) else {
                     return;
                 };
-                let left = (sp.order.remaining().0 - qty.0).max(0);
+                // What the bracket has open is its larger leg before this fill (the trader can
+                // size one leg alone); the sibling covers at most what's left of that. Equal legs
+                // shrink by the fill; a smaller stop stays whole while the position allows.
+                let before = o.remaining().0 + qty.0;
+                let open = before.max(sp.order.remaining().0) - qty.0;
+                let left = sp.order.remaining().0.min(open).max(0);
                 if left == 0 && !entry_open {
                     self.cancel(now, sib, "OCO: the other exit filled");
                     return;

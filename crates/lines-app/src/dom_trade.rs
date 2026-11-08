@@ -677,6 +677,9 @@ pub struct Ghost {
     pub order: OrderId,
     pub price: Price,
     pub command: CommandId,
+    /// A resize: the order's new total. Acked by that, not by a price it already rests at; and
+    /// nothing is drawn for it (the mark or tag updates when the order reports it).
+    pub qty: Option<Qty>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -700,8 +703,13 @@ pub fn ghost_outcome(
         return GhostOutcome::Rejected(r.message.clone());
     }
     match order {
+        // A resize's order finished meanwhile: nothing was refused.
+        None if g.qty.is_some() => GhostOutcome::Acked,
+        Some(o) if g.qty.is_some() && !o.is_open() => GhostOutcome::Acked,
         None => GhostOutcome::Rejected("the order is gone".into()),
         Some(o) if !o.is_open() => GhostOutcome::Rejected(format!("order {}", o.state.label())),
+        Some(o) if g.qty == Some(o.qty) => GhostOutcome::Acked,
+        Some(_) if g.qty.is_some() => GhostOutcome::Pending,
         Some(o) if order_price(o) == Some(g.price) => GhostOutcome::Acked,
         Some(_) => GhostOutcome::Pending,
     }
@@ -1615,7 +1623,28 @@ mod tests {
             order: OrderId(7),
             price: Price(599_900),
             command: CommandId(1),
+            qty: None,
         };
+        // A resize: the order already rests at its price, so only its quantity acks it, and a
+        // refusal still shows.
+        let sized = Ghost {
+            order: OrderId(7),
+            price: Price(599_950),
+            command: CommandId(2),
+            qty: Some(Qty(4)),
+        };
+        assert_eq!(ghost_outcome(&sized, Some(&o), None), GhostOutcome::Pending);
+        let mut resized = o.clone();
+        resized.qty = Qty(4);
+        assert_eq!(
+            ghost_outcome(&sized, Some(&resized), None),
+            GhostOutcome::Acked
+        );
+        let refused = Err(Reject::new(RejectCode::Risk, "over the maximum"));
+        assert_eq!(
+            ghost_outcome(&sized, Some(&o), Some(&refused)),
+            GhostOutcome::Rejected("over the maximum".into())
+        );
         // Before the ack: pending (the order still reports its old price).
         assert_eq!(ghost_outcome(&g, Some(&o), None), GhostOutcome::Pending);
         assert_eq!(
