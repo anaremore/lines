@@ -46,6 +46,15 @@ impl TriggerKind {
         !matches!(self, TriggerKind::Entry { .. })
     }
 
+    /// `a Stop`, `an Entry`.
+    pub fn article_word(self) -> &'static str {
+        match self {
+            TriggerKind::Entry { .. } => "an Entry",
+            TriggerKind::Stop => "a Stop",
+            TriggerKind::Target => "a Target",
+        }
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             TriggerKind::Entry { .. } => "Entry",

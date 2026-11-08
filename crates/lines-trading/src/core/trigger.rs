@@ -89,7 +89,7 @@ impl TradingCore {
             .live
             .values()
             .find(|l| &l.view.account == account && l.view.contract == contract)
-            .map(|l| format!("a {} trigger is on this option", l.view.kind.word()))
+            .map(|l| format!("{} trigger is on this option", l.view.kind.article_word()))
     }
 
     fn guard_of(&self, account: &AccountId) -> OptionGuard {

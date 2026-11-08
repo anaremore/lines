@@ -1098,7 +1098,8 @@ fn triggers_and_strategies_never_share_an_option() {
     r.quote(Some(240), Some(242));
     let armed = r.arm(call(), entry(1, 300), 68_350);
     let id = add(&mut r, call());
-    assert!(r.cmd(Command::ArmStrategy { id }).is_err());
+    let e = r.cmd(Command::ArmStrategy { id }).unwrap_err();
+    assert!(e.message.contains("an Entry trigger"), "{}", e.message);
     r.cmd(Command::CancelTrigger {
         account: acct(),
         id: armed,
@@ -1118,6 +1119,13 @@ fn triggers_and_strategies_never_share_an_option() {
     assert!(r.try_arm(call(), entry(1, 300), 68_350).is_err());
     // Another option is free.
     r.arm(put(), entry(1, 300), 68_350);
+    // Stopped and flat: out of the way.
+    r.cmd(Command::StopStrategies {
+        id: Some(id),
+        flatten: false,
+    })
+    .unwrap();
+    r.arm(call(), entry(1, 300), 68_350);
 }
 
 /// A rebuild's positions come first: an exit whose position is gone at the broker ends, rather
