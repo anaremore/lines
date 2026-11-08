@@ -399,7 +399,7 @@ fn stats_math() {
     let by_tag = grouped(&trades, GroupBy::Tag);
     assert_eq!(by_tag["breakout"].count, 3);
     assert_eq!(by_tag["breakout"].net, dollars(275.0));
-    assert_eq!(by_tag["(none)"].count, 3);
+    assert_eq!(by_tag[super::stats::UNTAGGED].count, 3);
     assert_eq!(by_tag["fade"].losses, 1);
     let by_date = grouped(&trades, GroupBy::TradeDate);
     assert_eq!(
@@ -408,6 +408,15 @@ fn stats_math() {
     );
     assert_eq!(by_date["2026-11-06"].net, dollars(-220.0));
     assert_eq!(grouped(&trades, GroupBy::Product)["ES"].count, 7);
+    // By account: each trade once, under its account id.
+    let mut other = closed(40.0, 1080, &["fade"]);
+    other.account = AccountId::new("eval");
+    let with_other: Vec<Trade> = trades.iter().cloned().chain([other]).collect();
+    let by_account = grouped(&with_other, GroupBy::Account);
+    assert_eq!(by_account.keys().collect::<Vec<_>>(), ["eval", "paper"]);
+    assert_eq!(by_account["paper"], s);
+    assert_eq!(by_account["eval"].net, dollars(40.0));
+    assert_eq!(grouped(&with_other, GroupBy::Tag)["fade"].count, 2);
     assert_eq!(
         grouped(&trades, GroupBy::Hour)["09"].count,
         7,

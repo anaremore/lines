@@ -1,6 +1,6 @@
 //! Journal statistics over closed trades: count, win rate, average win and loss,
 //! expectancy, profit factor, max drawdown on closed trades, streaks; grouped by trade date,
-//! product, hour of day (exchange time) or tag.
+//! product, hour of day (exchange time), account or tag.
 //!
 //! A **win** nets more than zero after fees, a **loss** less; a scratch (exactly zero) is
 //! neither but counts as a trade and breaks streaks. Money stays exact (`Money`); ratios are
@@ -102,9 +102,15 @@ pub enum GroupBy {
     /// The hour of the entry in the exchange's time zone (UTC without a session calendar),
     /// `"09"`.
     Hour,
-    /// Each tag; a trade with several counts in each, untagged trades under `"(none)"`.
+    /// The account id.
+    Account,
+    /// Each tag; a trade with several counts in each, untagged trades under [`UNTAGGED`].
     Tag,
 }
+
+/// The group key of trades without tags: empty, which no tag can be (tags are trimmed and
+/// empty ones dropped), so it never merges with a user's tag.
+pub const UNTAGGED: &str = "";
 
 /// The group keys of a trade (one, except by tag).
 pub fn keys(t: &Trade, by: GroupBy) -> Vec<String> {
@@ -115,7 +121,8 @@ pub fn keys(t: &Trade, by: GroupBy) -> Vec<String> {
             |p| p.symbol.to_owned(),
         )],
         GroupBy::Hour => vec![format!("{:02}", entry_hour(t))],
-        GroupBy::Tag if t.tags.is_empty() => vec!["(none)".to_owned()],
+        GroupBy::Account => vec![t.account.0.clone()],
+        GroupBy::Tag if t.tags.is_empty() => vec![UNTAGGED.to_owned()],
         GroupBy::Tag => t.tags.clone(),
     }
 }

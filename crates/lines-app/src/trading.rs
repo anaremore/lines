@@ -1696,6 +1696,8 @@ pub enum Step {
     /// A synthetic market trade the trading core sees (paper fills, the journal's MAE/MFE);
     /// the panes don't (screenshots and tests only).
     Print(ContractKey, Price, lines_core::Qty),
+    /// Tag the newest closed trade (the journal's by-tag view).
+    Tag(Vec<String>),
 }
 
 #[cfg(any(test, feature = "screenshot"))]
@@ -1704,7 +1706,8 @@ pub enum Step {
 /// - `buy 2 mkt`, `sell 1 @ 6000.25`, `buy 1 stop 6010.00`, with an optional
 ///   `bracket STOP/TARGET` (ticks) after a limit or stop;
 /// - `ack` (acks arrive; orders sent after the last `ack` stay pending);
-/// - `flatten`, `cancelall` (the contract), `account ID`;
+/// - `flatten`, `cancelall` (the contract), `account ID`, `tag A,B` (the newest closed trade's
+///   tags in the journal);
 /// - `guard trades N | streak LOSSES/MINUTES | loss MONEY | position N | close MINUTES`: one
 ///   guardrail for the account (roadmap 8b; the others unchanged);
 /// - `wait SECONDS` (market time moves on), `print PRICE [QTY]`: a synthetic market trade
@@ -1752,6 +1755,12 @@ pub fn parse_script(
                 };
                 out.push(Step::Print(contract, price(p)?, lines_core::Qty(q)));
             }
+            ["tag", tags @ ..] if !tags.is_empty() => out.push(Step::Tag(
+                tags.join(" ")
+                    .split(',')
+                    .map(|t| t.trim().to_owned())
+                    .collect(),
+            )),
             ["account", id] => {
                 account = AccountId::new(id);
                 out.push(Step::Account(account.clone()));
@@ -1926,10 +1935,26 @@ impl Trading {
                         }],
                     );
                 }
+                Step::Tag(tags) => {
+                    self.settle();
+                    self.journal.sync();
+                    if let Some(t) = self
+                        .journal
+                        .snapshot()
+                        .and_then(|s| s.trades.last().cloned())
+                    {
+                        self.journal.edit(lines_trading::journal::Edit {
+                            id: t.id,
+                            tags: tags.clone(),
+                            note: t.note,
+                        });
+                    }
+                }
                 Step::Account(_) => {}
             }
         }
         self.settle();
+        self.journal.sync();
     }
 }
 
@@ -2803,6 +2828,12 @@ mod tests {
         assert!(
             snap.trades[0].mfe > lines_trading::Money::ZERO,
             "MAE/MFE still follow"
+        ); // The script's `tag` tags the newest closed trade (the journal's by-tag view).
+        let tag = parse_script("tag A+,breakout", &es_product, es(), &a).unwrap();
+        t.run_script(&tag, UtcMillis(start.0 + 2_000), 25);
+        assert_eq!(
+            t.journal.snapshot().unwrap().trades[0].tags,
+            ["A+", "breakout"]
         );
     }
 
