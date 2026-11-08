@@ -2509,6 +2509,9 @@ impl WindowView {
                 let flatten = tc == crate::commands::TradeCmd::Flatten;
                 c.update(cx, |v, cx| v.run_exit(flatten, source, cx));
             }
+            Some(PaneHandle::Chain(c)) if tc == crate::commands::TradeCmd::NextAccount => {
+                c.update(cx, |v, cx| v.next_account(cx));
+            }
             _ => self.refuse("trading commands act on the focused DOM or chart", cx),
         }
     }

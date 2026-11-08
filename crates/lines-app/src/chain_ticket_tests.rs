@@ -284,6 +284,77 @@ fn the_exits_act_on_the_underlyings_options_only() {
     assert_eq!(r.orders(other).len(), 1);
 }
 
+/// The prop check reads the rules in force, which Settings can change, not the start's preset.
+#[test]
+fn prop_rules_are_read_live() {
+    let r = Rig::new();
+    let has = |at_start| has_rules(&r.t.cache.read(), &account(), at_start);
+    // Before the core has reported the account: the starting preset.
+    r.t.settle();
+    assert!(!has(false));
+    r.t.submit(
+        Source::Test,
+        Instant::now(),
+        Command::SetRules {
+            account: account(),
+            rules: lines_trading::rules::presets()
+                .into_iter()
+                .nth(1)
+                .map(|mut p| {
+                    p.account_size = 100_000;
+                    p
+                }),
+        },
+    );
+    r.t.settle();
+    assert!(has(false), "rules added while running");
+    assert!(ticket_refuses_prop(&r));
+}
+
+/// The order path's own check, on rules that changed while running.
+fn ticket_refuses_prop(r: &Rig) -> bool {
+    let cmd = command(
+        account(),
+        contract_of(key(684, Right::Call)),
+        Side::Buy,
+        1,
+        Price(241),
+        false,
+    );
+    let id = r.t.submit(Source::Test, Instant::now(), cmd);
+    r.t.settle();
+    let st = r.t.cache.read();
+    matches!(st.result(id), Some(Err(e)) if e.message == lines_trading::risk::PROP_OPTIONS_REFUSAL)
+}
+
+/// `--paper`'s `option` step puts what follows on that series, and refuses a bad one.
+#[test]
+fn the_script_trades_an_option_series() {
+    let spy = catalog::get(catalog::SPY).unwrap();
+    let eq = ContractKey::equity(catalog::SPY);
+    let steps = crate::trading::parse_script(
+        "option 2026-11-09 684 call; buy 2 @ 2.42",
+        &spy,
+        eq,
+        &account(),
+    )
+    .unwrap();
+    assert!(steps.iter().any(|s| matches!(
+        s,
+        crate::trading::Step::Command(Command::PlaceOrder(o))
+            if o.contract == contract_of(key(684, Right::Call)) && o.qty == Qty(2)
+    )));
+    for bad in [
+        "option 2026-13-09 684 call",
+        "option 2026-11-09 684 sideways",
+    ] {
+        assert!(
+            crate::trading::parse_script(bad, &spy, eq, &account()).is_err(),
+            "{bad}"
+        );
+    }
+}
+
 #[test]
 fn the_exits_say_what_they_act_on() {
     assert_eq!(exit_label("SPY", true), "Flatten SPY options");

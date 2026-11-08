@@ -15,8 +15,7 @@
 //!   entirely (onto a hidden second line), never cut.
 //! - **Keys** (the pane focused): Up/Down move by strike, Page Up/Down by a page, Home goes
 //!   back to the money, Left/Right change the expiry, Tab switches calls and puts, Shift+Tab
-//!   the selected cell's bid and ask, Enter opens the ticket on it, Delete cancels the selected
-//!   series' first working order. Enter always opens the ticket, and a held Enter sends nothing.
+//!   the selected cell's bid and ask, Enter opens the ticket on it. Enter always opens the ticket, and a held Enter sends nothing.
 //!   Clicking a cell selects its
 //!   strike and side; clicking an expiry chip selects it. Typing a symbol (or Ctrl+K) opens the
 //!   symbol picker, as in the other panes.
@@ -628,7 +627,8 @@ impl ChainView {
             layout: Layout::default(),
             frame: Frame {
                 rows: Vec::with_capacity(MAX_ROWS),
-                marks: Vec::with_capacity(64),
+                // Past any real count of series on one expiry: paint never grows it.
+                marks: Vec::with_capacity(512),
                 ..Frame::default()
             },
         }
@@ -651,7 +651,7 @@ impl ChainView {
     }
 
     /// The next account: a ticket on the last one doesn't carry over.
-    fn next_account(&mut self, cx: &mut Context<Self>) {
+    pub fn next_account(&mut self, cx: &mut Context<Self>) {
         if let Some(t) = Trading::try_global(cx) {
             let next = t.next_account(self.trade.account.as_ref());
             self.trade.account = next;
@@ -775,6 +775,7 @@ impl ChainView {
     fn refusal_of(
         &self,
         key: OptionKey,
+        side: Side,
         price: Option<Price>,
         close: bool,
         cx: &App,
@@ -786,7 +787,31 @@ impl ChainView {
             return Some("no account".to_owned());
         };
         let info = t.account(id);
-        let read_only = t.read_only_reason(id);
+        // A venue account is never traded here in options: the core's words, before the press.
+        let read_only = t.read_only_reason(id).or_else(|| {
+            let venue = info.as_ref().filter(|i| !i.paper)?.venue?;
+            Some(ticket::paper_only(&t.venue_status(venue)?.0))
+        });
+        let now = t.now(&self.store);
+        let at_start = info.as_ref().is_some_and(|i| i.rules.is_some());
+        // Only an order that opens: exits always pass a guardrail.
+        let opens = !close && self.size(cx) > ticket::closes(self.position(key), side).unwrap_or(0);
+        let (prop, locked) = match self.trade.try_cache() {
+            Some(st) => (
+                ticket::has_rules(&st, id, at_start),
+                st.guard(id).filter(|_| opens).and_then(|g| {
+                    let money = crate::picker_view::settings(cx).pnl_display.money();
+                    trade_bar::guard_line(
+                        g.state,
+                        g.reason.as_deref().unwrap_or(""),
+                        g.until,
+                        now,
+                        money,
+                    )
+                }),
+            ),
+            None => (at_start, None),
+        };
         let guard = info
             .as_ref()
             .map(|i| i.option_guard.clone())
@@ -798,11 +823,13 @@ impl ChainView {
                 contract: self.contract(key),
                 guard: &guard,
                 quote: q.as_ref(),
-                now: t.now(&self.store),
-                prop: info.as_ref().is_some_and(|i| i.rules.is_some()),
-                closed: t.now(&self.store).is_some_and(|n| {
-                    !lines_trading::paper::option_session_open(self.product.id, n)
-                }),
+                now,
+                prop,
+                closed: t.check_sessions
+                    && now.is_some_and(|n| {
+                        !lines_trading::paper::option_session_open(self.product.id, n)
+                    }),
+                locked: locked.as_deref(),
                 read_only: read_only.as_deref(),
             },
             price,
@@ -850,7 +877,7 @@ impl ChainView {
             self.leave_ticket();
             let q = self.quote(key);
             let price = ticket::click_limit(cell, q.as_ref());
-            if let Some(why) = self.refusal_of(key, price, false, cx) {
+            if let Some(why) = self.refusal_of(key, cell.side(), price, false, cx) {
                 self.note = Some(format!("Not sent: {why}"));
                 return;
             }
@@ -992,8 +1019,8 @@ impl ChainView {
         if t.sent.is_some() {
             return;
         }
-        let (key, close, price) = (t.key, t.close, t.price);
-        if self.refusal_of(key, price, close, cx).is_some() {
+        let (key, side, close, price) = (t.key, t.side, t.close, t.price);
+        if self.refusal_of(key, side, price, close, cx).is_some() {
             return; // already on the ticket, in the core's words
         }
         let Some(account) = self.trade.account.clone() else {
@@ -1044,7 +1071,7 @@ impl ChainView {
         }
         let q = self.quote(key);
         match ticket::close_command(account, self.contract(key), position, q.as_ref(), rules) {
-            Some(cmd) => match self.refusal_of(key, order_price(&cmd), true, cx) {
+            Some(cmd) => match self.refusal_of(key, Side::Sell, order_price(&cmd), true, cx) {
                 Some(why) => self.note = Some(format!("Not sent: {why}")),
                 None => {
                     let side = if position > 0 { Side::Sell } else { Side::Buy };
@@ -1057,7 +1084,7 @@ impl ChainView {
             },
             None if position != 0 => {
                 let why = self
-                    .refusal_of(key, None, true, cx)
+                    .refusal_of(key, Side::Sell, None, true, cx)
                     .unwrap_or_else(|| "no mid to close at".to_owned());
                 self.note = Some(format!("Not sent: {why}"));
             }
@@ -1388,19 +1415,6 @@ impl ChainView {
             "left" => self.step_expiry(-1),
             "right" => self.step_expiry(1),
             "tab" if m.shift => self.cell = self.cell.other(),
-            // A held key cancels one order, not all of them.
-            "delete" if ev.is_held => {}
-            "delete" => {
-                // The selected series' first working order: pressed again, the next.
-                let first = self.selected_key().and_then(|key| {
-                    let a = self.trade.account.as_ref()?;
-                    let st = self.trade.try_cache()?;
-                    st.open_orders(a, self.contract(key)).next().map(|o| o.id)
-                });
-                if let Some(id) = first {
-                    self.press_cancel(id, cx);
-                }
-            }
             "tab" => {
                 self.side = match self.side {
                     Right::Call => Right::Put,
@@ -1867,16 +1881,56 @@ impl ChainView {
                     continue;
                 }
                 let mut pos = FixedStr::<48>::new();
+                let more = m.orders.saturating_sub(1);
                 if compact {
-                    let order = m.order.map(|(_, side, open, _)| (side, open));
-                    let _ = ticket::write_compact(&mut pos, m.position, order);
-                    if m.position == 0 {
+                    if m.position != 0 {
+                        let _ = ticket::write_compact(&mut pos, m.position, None);
                         let tw = self.glyphs.width(pos.as_str(), t.text_main, false, window);
+                        self.glyphs.paint(
+                            pos.as_str(),
+                            cell_x + 2.0,
+                            y,
+                            ROW_H,
+                            t.text_main,
+                            false,
+                            window,
+                            cx,
+                        );
+                        // No room for the order's words: its filled mark (the strip has them).
+                        if m.orders > 0 {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(px(cell_x + 3.0 + tw), px(y + ROW_H / 2.0 - 2.0)),
+                                    size(px(4.0), px(4.0)),
+                                ),
+                                t.text_dim,
+                            ));
+                        }
+                    } else {
+                        let order = m.order.map(|(_, side, open, _)| (side, open));
+                        let _ = ticket::write_compact(&mut pos, 0, order);
+                        let tw = self.glyphs.width(pos.as_str(), t.bg, false, window);
                         paint_order_chip(cell_x, y, tw + 4.0, &t, window);
+                        self.glyphs.paint(
+                            pos.as_str(),
+                            cell_x + 2.0,
+                            y,
+                            ROW_H,
+                            t.bg,
+                            false,
+                            window,
+                            cx,
+                        );
                     }
+                    continue;
+                }
+                let mut order_x = cell_x + PAD;
+                if m.position != 0 {
+                    let _ = ticket::write_position(&mut pos, &self.product, m.position, m.avg);
+                    order_x += self.glyphs.width(pos.as_str(), t.text_main, false, window) + 6.0;
                     self.glyphs.paint(
                         pos.as_str(),
-                        cell_x + 2.0,
+                        cell_x + PAD,
                         y,
                         ROW_H,
                         t.text_main,
@@ -1884,37 +1938,23 @@ impl ChainView {
                         window,
                         cx,
                     );
-                    continue;
                 }
-                if m.position != 0 {
-                    let _ = ticket::write_position(&mut pos, &self.product, m.position, m.avg);
-                    if let Some((_, side, open, _)) = m.order {
-                        let more = m.orders.saturating_sub(1);
-                        let _ = ticket::write_with_orders(&mut pos, side, open, more);
+                // A working order is filled (`docs/design.md` §3), never a position's plain text.
+                if let Some((_, side, open, price)) = m.order {
+                    pos.clear();
+                    let _ = if m.position != 0 {
+                        ticket::write_order_short(&mut pos, side, open, more)
+                    } else {
+                        ticket::write_order(&mut pos, &self.product, side, open, price)
+                    };
+                    if m.position == 0 && more > 0 {
+                        let _ = std::fmt::Write::write_fmt(&mut pos, format_args!(" +{more}"));
                     }
-                } else if let Some((_, side, open, price)) = m.order {
-                    let _ = ticket::write_order(&mut pos, &self.product, side, open, price);
-                    if m.orders > 1 {
-                        let _ = std::fmt::Write::write_fmt(
-                            &mut pos,
-                            format_args!(" +{}", m.orders - 1),
-                        );
-                    }
+                    let tw = self.glyphs.width(pos.as_str(), t.bg, false, window);
+                    paint_order_chip(order_x - 3.0, y, tw + 6.0, &t, window);
+                    self.glyphs
+                        .paint(pos.as_str(), order_x, y, ROW_H, t.bg, false, window, cx);
                 }
-                if m.position == 0 {
-                    let tw = self.glyphs.width(pos.as_str(), t.text_main, false, window);
-                    paint_order_chip(cell_x + PAD - 3.0, y, tw + 6.0, &t, window);
-                }
-                self.glyphs.paint(
-                    pos.as_str(),
-                    cell_x + PAD,
-                    y,
-                    ROW_H,
-                    t.text_main,
-                    false,
-                    window,
-                    cx,
-                );
                 let (ax, end) = action_at(cell_x);
                 let word = if m.position != 0 { "Close" } else { "Cancel" };
                 window.paint_quad(gpui::outline(
@@ -2315,7 +2355,14 @@ impl ChainView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_2()
-                    .child(s)
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(t.text_dim)
+                            .text_color(t.bg)
+                            .child(s),
+                    )
                     .child(
                         button(format!("chain-cancel-{}", id.0).into(), "Cancel").on_mouse_down(
                             MouseButton::Left,
@@ -2358,10 +2405,18 @@ impl ChainView {
         };
         // What's true now decides the button; the core's last refusal stays in view until the
         // ticket changes or Enter tries again.
+        let closing_now = tk.close
+            && self
+                .trade
+                .account
+                .as_ref()
+                .is_some_and(|a| self.closing(a, tk.key));
         let live = if tk.close && closable.is_none() {
             Some("no position to close".to_owned())
+        } else if closing_now {
+            Some("a close is already working; Cancel it first".to_owned())
         } else {
-            self.refusal_of(tk.key, tk.price, tk.close, cx)
+            self.refusal_of(tk.key, tk.side, tk.price, tk.close, cx)
         };
         let can_send_now = live.is_none();
         let reason = live.or_else(|| tk.refused.clone());
@@ -2691,10 +2746,10 @@ impl ChainView {
         self.note.clone().unwrap_or_else(|| {
                 if self.one_click {
                     return format!(
-                        "One-click ON: a click on an ask or bid sends a limit there for {size}, at once  ·  Shift+Up/Down: quantity  ·  Enter: ticket"
+                        "One-click ON: a click on a bid or ask sends {size} at once  ·  Shift+Up/Down: quantity"
                     );
                 }
-                "Click an ask to buy, a bid to sell, or Enter  ·  Up/Down: strike  ·  Left/Right: expiry  ·  Tab: calls / puts  ·  Shift+Tab: bid / ask  ·  Delete: cancel  ·  Home: the money  ·  Shaded: in the money".to_owned()
+                "Click an ask to buy, a bid to sell, or Enter  ·  Up/Down: strike  ·  Left/Right: expiry  ·  Tab: calls / puts  ·  Shift+Tab: bid / ask  ·  Home: the money  ·  Shaded: in the money".to_owned()
         })
     }
 }
@@ -2724,11 +2779,10 @@ fn leaves_working(n: i64) -> String {
     format!("{n} more on this side stay working and could open a new position; Cancel them")
 }
 
-/// A working order's mark behind its text: filled and edged, so it never reads as a position.
+/// A working order's mark behind its text (`t.bg` on it): filled, as `docs/design.md` §3 has it.
 fn paint_order_chip(x: f32, y: f32, w: f32, t: &Theme, window: &mut Window) {
     let b = Bounds::new(point(px(x), px(y + 1.0)), size(px(w), px(ROW_H - 2.0)));
-    window.paint_quad(fill(b, t.panel));
-    window.paint_quad(gpui::outline(b, t.text_dim, gpui::BorderStyle::Solid));
+    window.paint_quad(fill(b, t.text_dim));
 }
 
 /// A limit command's price.

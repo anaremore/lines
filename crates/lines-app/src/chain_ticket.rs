@@ -196,6 +196,8 @@ pub struct Check<'a> {
     pub prop: bool,
     /// Outside the option's session: the broker would reject it on arrival.
     pub closed: bool,
+    /// A guardrail lockout or cooldown, for an order that opens: exits always pass.
+    pub locked: Option<&'a str>,
     /// Why the account can't be traded through Lines.
     pub read_only: Option<&'a str>,
 }
@@ -210,6 +212,9 @@ pub fn refusal(check: &Check<'_>, price: Option<Price>, close: bool) -> Option<S
     }
     if check.closed {
         return Some(format!("{} market is closed", check.product.symbol));
+    }
+    if let Some(l) = check.locked {
+        return Some(l.to_owned());
     }
     let spec = ContractSpec::new(check.product.clone(), check.contract, Money::ZERO)?;
     let (bid, ask) = sides(check.quote);
@@ -442,14 +447,25 @@ pub fn write_position(
     Ok(())
 }
 
-/// A position with working orders too: `+3 @ 1.18 · S 2`, `+3 @ 1.18 · S 2 +1`.
-pub fn write_with_orders(
+/// The account's prop rules in force now: they change from Settings, so this is the core's
+/// latest report, and the account's starting preset only until the first one.
+pub fn has_rules(st: &crate::trading::TradeState, account: &AccountId, at_start: bool) -> bool {
+    st.account(account)
+        .map_or(at_start, |v| v.limits.rules_in_force.is_some())
+}
+
+/// A venue account's refusal: option orders are paper only until a live broker is enabled.
+pub fn paper_only(venue: &str) -> String {
+    format!("{venue} takes no option orders here: paper only")
+}
+
+/// Working orders beside a position: `S 2`, `S 2 +1`.
+pub fn write_order_short(
     out: &mut impl std::fmt::Write,
     side: Side,
     open: i64,
     more: u32,
 ) -> std::fmt::Result {
-    out.write_str(" · ")?;
     out.write_char(side_letter(side))?;
     write!(out, " {open}")?;
     if more > 0 {
@@ -616,6 +632,7 @@ mod tests {
             now: Some(lines_core::UtcMillis(1_000_500)),
             prop: false,
             closed: false,
+            locked: None,
             read_only: None,
         }
     }
@@ -802,6 +819,14 @@ mod tests {
             refusal(&closed, Some(Price(241)), true).as_deref(),
             Some("SPY market is closed")
         );
+        // A guardrail lockout, in its own line.
+        let mut locked = check(&p, &g, Some(&q));
+        locked.locked = Some("Locked · max 5 trades reached · until the next trade date");
+        assert!(
+            refusal(&locked, Some(Price(241)), false)
+                .unwrap()
+                .starts_with("Locked")
+        );
         // A read-only account's reason comes first.
         let mut ro = check(&p, &g, Some(&q));
         ro.read_only = Some("observe mode");
@@ -856,8 +881,14 @@ mod tests {
         // A position with orders, and the narrow row's mark.
         s.clear();
         write_position(&mut s, &p, 3, Some(118.0)).unwrap();
-        write_with_orders(&mut s, Side::Sell, 2, 1).unwrap();
-        assert_eq!(s, "+3 @ 1.18 · S 2 +1");
+        assert_eq!(s, "+3 @ 1.18");
+        s.clear();
+        write_order_short(&mut s, Side::Sell, 2, 1).unwrap();
+        assert_eq!(s, "S 2 +1");
+        assert_eq!(
+            paper_only("Sim venue"),
+            "Sim venue takes no option orders here: paper only"
+        );
         s.clear();
         write_compact(&mut s, 3, Some((Side::Sell, 2))).unwrap();
         assert_eq!(s, "+3");
@@ -950,6 +981,7 @@ mod tests {
                 now: Some(lines_core::UtcMillis(now)),
                 prop,
                 closed: false,
+                locked: None,
                 read_only: None,
             };
             refusal(&c, Some(Price(cents)), false)
