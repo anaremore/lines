@@ -203,6 +203,12 @@ enum BracketUnitsArg {
     Points,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum BracketPositionArg {
+    On,
+    Ask,
+}
+
 impl BracketUnitsArg {
     #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     fn units(self) -> brackets::BracketUnits {
@@ -448,6 +454,11 @@ struct Cli {
     /// Screenshot: DOMs open their bracket-preset editor.
     #[arg(long, requires = "screenshot")]
     bracket_editor: bool,
+    /// Screenshot: one bracket for the whole position (`on`: saved as the setting for every
+    /// account on the recording's product; `ask`: DOMs switch to it as the trader would,
+    /// after `--paper`, showing the confirmation when exits are working).
+    #[arg(long, value_enum, requires = "screenshot")]
+    bracket_position: Option<BracketPositionArg>,
     /// Screenshot: draw the focused pane's header controls as if the pointer were over the
     /// pane (no OS pointer involved).
     #[arg(long, requires = "screenshot")]
@@ -1436,6 +1447,7 @@ where
                 drawings,
                 bracket_units: cli.bracket_units.map(BracketUnitsArg::units),
                 bracket_editor: cli.bracket_editor,
+                bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
                 layout_report: cli.layout_report,
                 settings: cli

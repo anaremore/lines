@@ -87,6 +87,26 @@ pub struct PaneTrade {
     pub editor: Option<crate::brackets::Editor>,
     /// The editor's last refusal (Enter with an invalid cell).
     pub editor_msg: Option<String>,
+    /// Position bracket: a mode change on its way to the core.
+    bracket_ask: Option<BracketAsk>,
+    /// Asking the person to replace this many working exits with one pair (and the mode).
+    pub bracket_confirm: Option<(usize, lines_trading::BracketMode)>,
+    /// What this pane last told the core for its account and contract.
+    bracket_told: Option<(AccountId, ContractKey, lines_trading::BracketMode)>,
+    /// Switch the bracket mode as the trader would, once drawn (screenshot fixture).
+    pub switch_pending: bool,
+}
+
+/// A bracket-mode command sent, waiting for the core's answer.
+struct BracketAsk {
+    id: lines_trading::CommandId,
+    account: AccountId,
+    contract: ContractKey,
+    symbol: &'static str,
+    mode: lines_trading::BracketMode,
+    /// The person switched it (saved on success; a refusal asking to replace exits becomes
+    /// the confirmation). Otherwise the saved mode is being applied (at start, a new preset).
+    by_person: bool,
 }
 
 impl TradeDoc {
@@ -137,6 +157,10 @@ impl PaneTrade {
             meters_open: false,
             editor: None,
             editor_msg: None,
+            bracket_ask: None,
+            bracket_confirm: None,
+            bracket_told: None,
+            switch_pending: false,
         }
     }
 
@@ -481,6 +505,9 @@ fn run_with<V: TradePane>(
             } else {
                 v.trade().flash("no account");
             }
+        }
+        TradeCmd::BracketMode => {
+            bracket_switch(v, cx);
         }
         TradeCmd::EditBrackets => {
             if v.trade_ref().editor.is_some() {
@@ -1516,6 +1543,10 @@ pub fn dom_bar<V: TradePane>(
     cx: &mut Context<V>,
 ) -> Option<AnyElement> {
     Trading::try_global(cx)?;
+    if bracket_needs_sync(v, cx) {
+        let pane = cx.entity();
+        cx.defer(move |cx| pane.update(cx, |v, cx| bracket_sync(v, cx)));
+    }
     let data = gather(v, product, cx);
     let pt = v.trade_ref();
     let narrow = is_narrow(width);
@@ -1706,7 +1737,9 @@ pub fn dom_bar<V: TradePane>(
     panel = panel.child(meters(v, data.as_ref(), mode, narrow, t, cx));
 
     // 5.–6. Quantity and bracket, or the bracket editor in their place (with the buttons).
-    if let Some(ed) = &pt.editor {
+    if let Some((n, mode)) = pt.bracket_confirm {
+        panel = panel.child(bracket_confirm_view(n, mode, product, t, cx));
+    } else if let Some(ed) = &pt.editor {
         panel = panel.child(editor_view(ed, pt.editor_msg.as_deref(), v, t, cx));
     } else {
         panel = panel
@@ -2188,7 +2221,13 @@ fn bracket_row<V: TradePane>(
 ) -> gpui::Stateful<gpui::Div> {
     use crate::brackets::label;
     let (presets, units) = presets_and_units(v, product, cx);
-    let current = v.trade_ref().bracket;
+    let position = position_on(v, cx);
+    // In position mode the pair uses a preset (the first one when none is picked).
+    let current = v.trade_ref().bracket.or_else(|| {
+        position
+            .then(|| presets.first().map(|p| p.preset()))
+            .flatten()
+    });
     let shown = presets_shown(narrow);
     let mut row = div()
         .id("bracket-row")
@@ -2212,11 +2251,18 @@ fn bracket_row<V: TradePane>(
         None,
         t,
     );
+    let off = if position { off.opacity(0.4) } else { off };
     row = row.child(off.on_mouse_down(
         MouseButton::Left,
-        cx.listener(|v: &mut V, _, _, cx| {
+        cx.listener(move |v: &mut V, _, _, cx| {
             cx.stop_propagation();
-            v.trade().bracket = None;
+            if position {
+                v.trade().flash(
+                    "Off isn't available with one bracket for the position: switch to Entry first",
+                );
+            } else {
+                v.trade().bracket = None;
+            }
             cx.notify();
         }),
     ));
@@ -2265,6 +2311,18 @@ fn bracket_row<V: TradePane>(
         row = row.child(run_on_click(s, TradeCmd::NextBracket, cx));
     }
     row = row.child(div().flex_1());
+    // One bracket for the whole position (on), or a bracket per entry (off).
+    let pos = tip(
+        segment("bracket-position", "Pos".into(), position, t),
+        if position {
+            "One stop and one target for the whole position (on): click for a bracket per entry"
+        } else {
+            "A bracket per entry: click for one stop and one target for the whole position"
+        },
+        Some(TradeCmd::BracketMode),
+        t,
+    );
+    row = row.child(run_on_click(pos, TradeCmd::BracketMode, cx));
     let u = tip(
         cell("bracket-units", t).child(units.suffix()),
         "Bracket units: ticks / points",
@@ -2893,6 +2951,292 @@ pub fn chart_chip<V: TradePane>(
 /// The quantity the pane trades.
 pub fn qty(v: &PaneTrade) -> Qty {
     Qty(v.qty)
+}
+
+// ---- position bracket (one stop and one target for the whole position) ---------------------
+
+/// Whether the pane's account trades its product with one bracket for the whole position
+/// (saved per account and product symbol).
+fn position_on<V: TradePane>(v: &V, cx: &App) -> bool {
+    let (Some(a), Some(d)) = (v.trade_ref().account.as_ref(), v.trade_store().try_read()) else {
+        return false;
+    };
+    crate::brackets::position_mode(
+        &crate::picker_view::settings(cx).bracket_presets,
+        &a.0,
+        d.product.symbol,
+    )
+}
+
+/// The position mode this pane's saved setting wants the core to hold, with the pane's
+/// preset (or the first one): `None` when it is per entry or nothing is known yet.
+fn want_mode<V: TradePane>(
+    v: &V,
+    cx: &App,
+) -> Option<(AccountId, ContractKey, lines_trading::BracketMode)> {
+    if !position_on(v, cx) {
+        return None;
+    }
+    let account = v.trade_ref().account.clone()?;
+    let contract = contract_of(v.trade_store())?;
+    let preset = v.trade_ref().bracket.or_else(|| first_preset(v, cx))?;
+    Some((
+        account,
+        contract,
+        lines_trading::BracketMode::Position {
+            stop_ticks: preset.stop_ticks,
+            target_ticks: preset.target_ticks,
+        },
+    ))
+}
+
+fn first_preset<V: TradePane>(v: &V, cx: &App) -> Option<BracketPreset> {
+    let a = v.trade_ref().account.as_ref()?;
+    let d = v.trade_store().try_read()?;
+    crate::brackets::presets_for(
+        &crate::picker_view::settings(cx).bracket_presets,
+        &a.0,
+        d.product.symbol,
+    )
+    .first()
+    .map(|p| p.preset())
+}
+
+/// Whether [`bracket_sync`] has something to do: an answer to collect, or the saved mode (or
+/// a new preset) not yet told to the core for this account and contract.
+pub fn bracket_needs_sync<V: TradePane>(v: &V, cx: &App) -> bool {
+    let pt = v.trade_ref();
+    if pt.switch_pending {
+        // After the fixture's script (screenshot mode), so its exits are there to replace.
+        return Trading::try_global(cx)
+            .is_some_and(|t| t.settled.load(std::sync::atomic::Ordering::Acquire));
+    }
+    if let Some(ask) = &pt.bracket_ask {
+        return pt
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.read().result(ask.id).is_some());
+    }
+    want_mode(v, cx).is_some_and(|w| pt.bracket_told.as_ref() != Some(&w))
+}
+
+/// Collect the core's answer to a mode change, or tell it the saved mode (at start, after a
+/// new preset, on another account or contract). The core keeps an existing pair (adopted)
+/// and applies new offsets to the next position.
+pub fn bracket_sync<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
+    if v.trade_ref().switch_pending {
+        v.trade().switch_pending = false;
+        bracket_switch(v, cx);
+        // Screenshot fixture only: wait for the core's answer, so the frame shows it.
+        #[cfg(any(test, feature = "screenshot"))]
+        if let Some(t) = Trading::try_global(cx) {
+            t.settle();
+        }
+    }
+    if let Some(ask) = v.trade_ref().bracket_ask.as_ref() {
+        let Some(r) = v
+            .trade_ref()
+            .cache
+            .as_ref()
+            .and_then(|c| c.read().result(ask.id).cloned())
+        else {
+            return;
+        };
+        let Some(ask) = v.trade().bracket_ask.take() else {
+            return;
+        };
+        let position = matches!(ask.mode, lines_trading::BracketMode::Position { .. });
+        match r {
+            Ok(_) => {
+                if ask.by_person {
+                    let (account, symbol) = (ask.account.0.clone(), ask.symbol.to_owned());
+                    crate::picker_view::update_settings(cx, |s| {
+                        let e = s.bracket_presets.entry(account).or_default();
+                        if position {
+                            e.position.insert(symbol);
+                        } else {
+                            e.position.remove(&symbol);
+                        }
+                    });
+                }
+            }
+            Err(rej) => match crate::brackets::replace_count(&rej.message) {
+                Some(n) if ask.by_person && position => {
+                    v.trade().bracket_confirm = Some((n, ask.mode));
+                }
+                _ => v.trade().flash(rej.message),
+            },
+        }
+        // Told, whatever the answer: a refusal isn't sent again until something changes.
+        v.trade().bracket_told = Some((ask.account, ask.contract, ask.mode));
+        cx.notify();
+        return;
+    }
+    if let Some((account, contract, mode)) = want_mode(v, cx)
+        && v.trade_ref().bracket_told.as_ref() != Some(&(account.clone(), contract, mode))
+    {
+        send_mode(v, account, contract, mode, false, false, cx);
+    }
+}
+
+fn send_mode<V: TradePane>(
+    v: &mut V,
+    account: AccountId,
+    contract: ContractKey,
+    mode: lines_trading::BracketMode,
+    replace: bool,
+    by_person: bool,
+    cx: &mut Context<V>,
+) {
+    let (Some(t), Some(symbol)) = (
+        Trading::try_global(cx),
+        v.trade_store().try_read().map(|d| d.product.symbol),
+    ) else {
+        return;
+    };
+    let id = t.submit(
+        Source::Dom,
+        Instant::now(),
+        TradeCommand::SetBracketMode {
+            account: account.clone(),
+            contract,
+            mode,
+            replace,
+        },
+    );
+    v.trade().bracket_ask = Some(BracketAsk {
+        id,
+        account,
+        contract,
+        symbol,
+        mode,
+        by_person,
+    });
+    cx.notify();
+}
+
+/// `TradeCmd::BracketMode`: per entry ↔ one bracket for the whole position.
+fn bracket_switch<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
+    let (Some(account), Some(contract)) =
+        (v.trade_ref().account.clone(), contract_of(v.trade_store()))
+    else {
+        v.trade().flash("no account or contract");
+        return;
+    };
+    if v.trade_ref().bracket_ask.is_some() {
+        v.trade()
+            .flash("the last bracket change is still on its way");
+        return;
+    }
+    v.trade().bracket_confirm = None;
+    if position_on(v, cx) {
+        send_mode(
+            v,
+            account,
+            contract,
+            lines_trading::BracketMode::PerEntry,
+            false,
+            true,
+            cx,
+        );
+        return;
+    }
+    let Some(preset) = v.trade_ref().bracket.or_else(|| first_preset(v, cx)) else {
+        v.trade()
+            .flash("add a bracket preset first: the position's bracket uses its distances");
+        return;
+    };
+    v.trade().bracket = Some(preset);
+    let mode = lines_trading::BracketMode::Position {
+        stop_ticks: preset.stop_ticks,
+        target_ticks: preset.target_ticks,
+    };
+    send_mode(v, account, contract, mode, false, true, cx);
+}
+
+/// The confirmation, in the place of quantity, bracket and order buttons: switching to one
+/// bracket for the position cancels `n` working exits.
+fn bracket_confirm_view<V: TradePane>(
+    n: usize,
+    mode: lines_trading::BracketMode,
+    product: &Product,
+    t: &Theme,
+    cx: &mut Context<V>,
+) -> gpui::Div {
+    let h = 2.0 * SEG_H + GRID_H;
+    let what = match mode {
+        lines_trading::BracketMode::Position {
+            stop_ticks,
+            target_ticks,
+        } => format!(
+            "This cancels {n} working exit order{} and places one stop and one target, {stop_ticks} and {target_ticks} ticks from the average, for the whole position.",
+            if n == 1 { "" } else { "s" }
+        ),
+        lines_trading::BracketMode::PerEntry => String::new(),
+    };
+    let cancel = tip(
+        cell("bracket-confirm-cancel", t).px_2().child("Cancel"),
+        "Keep the exits as they are (per entry)",
+        None,
+        t,
+    )
+    .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|v: &mut V, _, _, cx| {
+            cx.stop_propagation();
+            v.trade().bracket_confirm = None;
+            cx.notify();
+        }),
+    );
+    let replace = tip(
+        cell("bracket-confirm-replace", t)
+            .px_2()
+            .bg(t.accent)
+            .border_color(t.accent)
+            .text_color(t.on_last)
+            .font_weight(FontWeight::BOLD)
+            .child(format!("Replace {n} exit{}", if n == 1 { "" } else { "s" })),
+        "Cancel them and place one bracket for the position",
+        None,
+        t,
+    )
+    .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |v: &mut V, _, _, cx| {
+            cx.stop_propagation();
+            v.trade().bracket_confirm = None;
+            if let (Some(account), Some(contract)) =
+                (v.trade_ref().account.clone(), contract_of(v.trade_store()))
+            {
+                send_mode(v, account, contract, mode, true, true, cx);
+            }
+        }),
+    );
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .h(px(h))
+        .child(
+            div()
+                .font_weight(FontWeight::BOLD)
+                .text_color(t.text_main)
+                .child(format!(
+                    "Use one bracket for the {} position?",
+                    product.symbol
+                )),
+        )
+        .child(div().text_color(t.text_main).child(what))
+        .child(div().flex_1())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .justify_end()
+                .child(cancel)
+                .child(replace),
+        )
 }
 
 #[cfg(test)]
@@ -3592,7 +3936,8 @@ mod tests {
         assert!(qty <= room, "qty row {qty}");
         // Bracket (narrow, no label): Off, the presets shown, "…", units and Edit.
         let n = presets_shown(true) as f32;
-        let bracket = w("Off") + n * w("20/40") + w("…") + w("pt") + w("Edit") + (n + 4.0) * 4.0;
+        let bracket =
+            w("Off") + n * w("20/40") + w("…") + w("Pos") + w("pt") + w("Edit") + (n + 5.0) * 4.0;
         assert!(bracket <= room, "bracket row {bracket}");
         // Header: the switch (its widest narrow text) beside an account name that shrinks;
         // narrow, the Keys chip is on the status line, not here (a wide header holds both).

@@ -10,10 +10,13 @@
 //! - **Presets differ per product** (an NQ stop in ticks isn't an ES stop): keyed by account,
 //!   then product symbol, with [`DEFAULT_PRESETS`] for a product that has none.
 //! - **The display unit** is per account ([`BracketUnits`], default ticks).
+//! - **Position mode** (per account and product symbol, [`position_mode`]): one stop and one
+//!   target for the whole manual position (`lines_trading::BracketMode::Position`) instead of
+//!   a bracket per entry; the core holds it, the app sends it from here.
 //!
 //! Saved in `settings.json` as the optional `bracket_presets` field (no version bump).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lines_core::{Price, Product};
 use serde::{Deserialize, Serialize};
@@ -83,6 +86,9 @@ pub struct AccountBrackets {
     /// Presets per product symbol (`ES`, `NQ`, …), in display order.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub products: BTreeMap<String, Vec<NamedBracket>>,
+    /// Product symbols traded with one bracket for the whole position (absent: per entry).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub position: BTreeSet<String>,
 }
 
 /// Every account's bracket settings, keyed by account id (`settings.json`).
@@ -95,6 +101,21 @@ pub const DEFAULT_PRESETS: [(u32, u32); 3] = [(8, 16), (12, 24), (20, 40)];
 pub const MAX_SHOWN: usize = 4;
 /// Largest distance accepted, in ticks.
 pub const MAX_TICKS: u32 = 100_000;
+
+/// Whether `account` trades `product` with one bracket for the whole position.
+pub fn position_mode(s: &BracketSettings, account: &str, product: &str) -> bool {
+    s.get(account).is_some_and(|a| a.position.contains(product))
+}
+
+/// How many working exits the core said switching to a position bracket would cancel (its
+/// refusal asks for a confirmation that names them).
+pub fn replace_count(message: &str) -> Option<usize> {
+    if !message.contains("confirm to replace") {
+        return None;
+    }
+    let rest = message.split("cancels ").nth(1)?;
+    rest.split_whitespace().next()?.parse().ok()
+}
 
 pub fn units_for(s: &BracketSettings, account: &str) -> BracketUnits {
     s.get(account).map(|a| a.units).unwrap_or_default()
@@ -805,5 +826,49 @@ mod tests {
             Some("S 5817.50 · T 5802.50")
         );
         assert_eq!(e.preview(None), None);
+    }
+
+    /// Position mode is saved per account and product, only when on (an optional field).
+    #[test]
+    fn position_mode_is_saved_per_account_and_product() {
+        let mut s = BracketSettings::new();
+        assert!(!position_mode(&s, "paper-1", "ES"));
+        let none = serde_json::to_string(&AccountBrackets::default()).unwrap();
+        assert_eq!(none, "{}", "nothing written while it is off");
+        s.entry("paper-1".into())
+            .or_default()
+            .position
+            .insert("ES".into());
+        assert!(position_mode(&s, "paper-1", "ES"));
+        assert!(!position_mode(&s, "paper-1", "NQ"));
+        assert!(!position_mode(&s, "paper-2", "ES"));
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#"{"paper-1":{"position":["ES"]}}"#);
+        let back: BracketSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+        // An older file (no `position`) reads as per entry.
+        let old: BracketSettings =
+            serde_json::from_str(r#"{"paper-1":{"units":"points"}}"#).unwrap();
+        assert!(!position_mode(&old, "paper-1", "ES"));
+    }
+
+    /// The core's refusal names how many exits switching would cancel: the confirmation's
+    /// count. Other refusals ask for nothing.
+    #[test]
+    fn replace_count_reads_the_cores_refusal() {
+        let m = "switching to one bracket for the position cancels 4 working exit orders;                  confirm to replace them";
+        assert_eq!(replace_count(m), Some(4));
+        let one = "switching to one bracket for the position cancels 1 working exit order;                    confirm to replace them";
+        assert_eq!(replace_count(one), Some(1));
+        assert_eq!(
+            replace_count(
+                "the market is already past the bracket's target: place this position's exits by hand"
+            ),
+            None
+        );
+        assert_eq!(
+            replace_count("a strategy trades this contract on this account: its exits are its own"),
+            None
+        );
     }
 }

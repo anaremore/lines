@@ -637,6 +637,11 @@ pub struct Trading {
     pub start_account_menu: bool,
     /// Screenshot fixture (`--bracket-editor`): DOMs open their bracket-preset editor.
     pub start_editor: bool,
+    /// Screenshot fixture: panes switch to one bracket for the whole position, once the
+    /// fixture's script has run (`settled`).
+    pub start_bracket_switch: bool,
+    /// Screenshot fixture: `settle` has run (the script's events reached the cache).
+    pub settled: std::sync::atomic::AtomicBool,
     /// The paper broker refuses orders while the product's session is closed (the switch's
     /// "market closed" badge follows it; off for the mock).
     pub check_sessions: bool,
@@ -1247,6 +1252,8 @@ impl Trading {
             start_hotkeys: false,
             start_account_menu: false,
             start_editor: false,
+            start_bracket_switch: false,
+            settled: std::sync::atomic::AtomicBool::new(false),
             check_sessions,
             start_account: None,
             journal,
@@ -1411,6 +1418,8 @@ impl Trading {
         }
         // The journal applied every event the core sent before the sync above.
         self.journal.sync();
+        self.settled
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Wait (bounded, 5 s) until every venue's accounts are listed and its core has rebuilt
@@ -1475,7 +1484,8 @@ impl Trading {
 }
 
 /// The note for a command: its account, contract and price (`None`: strategy controls, which
-/// name an instance and show in the strategy panel, decision 0025).
+/// name an instance and show in the strategy panel, decision 0025; and the bracket mode, whose
+/// answer the trade panel shows itself: a confirmation, or its own message).
 fn note_for(cmd: &TradeCommand) -> Option<Note> {
     let (account, contract, price) = match cmd {
         TradeCommand::PlaceOrder(o) | TradeCommand::PlaceExit(o) => {
@@ -1493,10 +1503,8 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
             (account.clone(), None, None)
         }
-        TradeCommand::SetBracketMode {
-            account, contract, ..
-        } => (account.clone(), Some(*contract), None),
-        TradeCommand::AddStrategy(_)
+        TradeCommand::SetBracketMode { .. }
+        | TradeCommand::AddStrategy(_)
         | TradeCommand::RemoveStrategy { .. }
         | TradeCommand::ArmStrategy { .. }
         | TradeCommand::PauseStrategy { .. }
