@@ -188,6 +188,9 @@ impl TradingCore {
             let i = &self.strategies[&id];
             (i.cfg.account.clone(), i.cfg.contract, i.position.qty())
         };
+        if let Some(why) = self.trigger_blocks_strategy(&account, contract) {
+            return Err(deny(format!("can't arm: {why}")));
+        }
         let held = self.position(&account, contract);
         if held != own {
             if held != 0 {

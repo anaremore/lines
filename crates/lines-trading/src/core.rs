@@ -43,6 +43,7 @@ use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind
 pub const EXTERNAL_ORDER: OrderId = OrderId(0);
 mod position_bracket;
 mod strategy_gate;
+mod trigger;
 
 /// An account as configured (saved with the trading state).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +238,8 @@ pub struct TradingCore {
     seen_now: UtcMillis,
     /// Guardrails for accounts joining later (`set_join_guardrails`).
     join_guards: JoinGuards,
+    /// Triggers on options' underlyings (decision 0029).
+    triggers: trigger::Triggers,
 }
 
 /// Saved guardrail progress (by id) and settings (by name or id) for accounts that join.
@@ -297,6 +300,7 @@ impl TradingCore {
             news_flattened: HashSet::new(),
             seen_now: UtcMillis(i64::MIN),
             join_guards: JoinGuards::default(),
+            triggers: trigger::Triggers::default(),
         }
     }
 
@@ -696,7 +700,12 @@ impl TradingCore {
                 (env, result)
             }
         };
+        // A fired exit's exemption was for its own command, not what follows it here.
+        self.triggers.exempt = false;
         self.bracket_note_cancel(&env, &result);
+        if result.is_ok() {
+            self.trigger_person_acted(&env);
+        }
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
             if let Ok(ids) = &result {
@@ -713,6 +722,7 @@ impl TradingCore {
         self.poll(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
+        self.triggers_step(now);
     }
 
     fn run(&mut self, now: UtcMillis, env: &Envelope) -> Result<Vec<OrderId>, Reject> {
@@ -741,6 +751,8 @@ impl TradingCore {
             self.strategy_manual(now, &account, &env.command);
         }
         match env.command.clone() {
+            Command::ArmTrigger(spec) => self.trigger_arm(now, env, spec),
+            Command::CancelTrigger { id, .. } => self.trigger_cancel(now, &account, id),
             Command::PlaceOrder(spec) => {
                 self.check_new(now, &spec)?;
                 let o = self.new_order(now, &spec, Role::Single, None);
@@ -888,8 +900,9 @@ impl TradingCore {
                 order, qty, price, ..
             } => {
                 let o = self.open_order(&account, order)?;
+                let exempt = self.triggers.exempt;
                 let a = self.accounts.get_mut(&account).expect("checked");
-                if let Some(max) = a.cfg.limits.max_modifies_per_sec
+                if let Some(max) = a.cfg.limits.max_modifies_per_sec.filter(|_| !exempt)
                     && in_last_second(&mut a.modifies, now) >= max
                 {
                     return Err(Reject::new(
@@ -1044,9 +1057,12 @@ impl TradingCore {
                         price_band_ticks: limits.price_band_ticks,
                         ..Default::default()
                     };
-                    risk::check(&band_only, &spec, o.side, Qty(0), &kind, &ctx)?;
+                    if !self.triggers.exempt {
+                        risk::check(&band_only, &spec, o.side, Qty(0), &kind, &ctx)?;
+                    }
                     if o.contract.option_key().is_some() {
-                        self.check_option_kind(now, &account, o.contract, &kind)?;
+                        let reducing = o.reduce_only.then_some(o.side);
+                        self.check_option_kind(now, &account, o.contract, &kind, reducing)?;
                     }
                 }
                 if let Some(a) = self.accounts.get_mut(&account) {
@@ -1289,6 +1305,7 @@ impl TradingCore {
         account: &AccountId,
         contract: ContractKey,
         kind: &OrderKind,
+        reducing: Option<Side>,
     ) -> Result<(), Reject> {
         if !self.broker.simulated() {
             return Err(Reject::new(
@@ -1317,7 +1334,10 @@ impl TradingCore {
             ask: m.and_then(|m| m.ask),
             at: m.and_then(|m| m.quoted_at),
         };
-        risk::check_option(&guard, &cs, kind, quote, now)
+        match reducing {
+            Some(side) => risk::check_option_exit(&guard, &cs, side, kind, quote, now),
+            None => risk::check_option(&guard, &cs, kind, quote, now),
+        }
     }
 
     /// Expired option positions settle at their intrinsic value against the underlying's close
@@ -1416,7 +1436,7 @@ impl TradingCore {
                     crate::risk::PROP_OPTIONS_REFUSAL,
                 ));
             }
-            self.check_option_kind(now, &spec.account, spec.contract, &spec.kind)?;
+            self.check_option_kind(now, &spec.account, spec.contract, &spec.kind, None)?;
         }
         if spec.qty.0 <= 0 {
             return Err(Reject::new(
@@ -1517,7 +1537,8 @@ impl TradingCore {
             .spec(spec.contract)
             .ok_or_else(|| Reject::new(RejectCode::UnknownContract, "unknown contract"))?;
         if spec.contract.option_key().is_some() {
-            self.check_option_kind(now, &spec.account, spec.contract, &spec.kind)?;
+            let side = Some(spec.side);
+            self.check_option_kind(now, &spec.account, spec.contract, &spec.kind, side)?;
         }
         if let Some(p) = spec.kind.prices().find(|p| !cs.on_tick_grid(*p)) {
             return Err(Reject::new(
@@ -1566,6 +1587,10 @@ impl TradingCore {
                     preset.name
                 ),
             ));
+        }
+        // A fired trigger's exit: risk limits block entries, never exits (decision 0029).
+        if self.triggers.exempt {
+            return Ok(());
         }
         self.check_risk(now, spec, &cs)
     }
@@ -1895,6 +1920,7 @@ impl TradingCore {
         self.news_flatten(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
+        self.triggers_step(now);
     }
 
     /// When the broker next needs a tick.
@@ -1908,6 +1934,7 @@ impl TradingCore {
             .into_iter()
             .chain(cooldowns)
             .chain(news)
+            .chain(self.triggers_wake())
             .min()
     }
 
@@ -2229,6 +2256,9 @@ impl TradingCore {
                 _ => {}
             }
             self.broker.market(now, contract, i);
+            if let MarketInput::Trade { price, time, .. } = *i {
+                self.trigger_print(now, contract, price, time);
+            }
         }
         self.poll(now);
         // Open P&L moved for every account holding the contract.
@@ -2244,6 +2274,7 @@ impl TradingCore {
         }
         self.strategy_watch(now);
         self.position_brackets_sync(now);
+        self.triggers_step(now);
     }
 
     fn mark(&self, contract: ContractKey) -> Option<Price> {
@@ -2526,6 +2557,10 @@ impl TradingCore {
             accounts: snap.accounts.len(),
             open_orders: open,
         });
+        self.triggers_restore();
+        // What the rebuilt positions say first (flat, flipped), then the full state.
+        self.triggers_step(now);
+        self.triggers_publish();
         let ids: Vec<AccountId> = self.accounts.keys().cloned().collect();
         for a in ids {
             let mut contracts: Vec<ContractKey> =

@@ -355,6 +355,92 @@ fn the_script_trades_an_option_series() {
     }
 }
 
+/// A position's Stop comes back through the app's own start, the file and the first rebuild, and
+/// fires on the first print past it. An entry doesn't come back (decision 0029).
+#[test]
+fn a_saved_stop_comes_back_through_the_apps_start() {
+    use lines_trading::trigger::{TriggerKind, TriggerSpec};
+    let dir = std::env::temp_dir().join(format!("lines-chain-stop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let file = dir.join("paper.json");
+    let k = key(684, Right::Call);
+    let c = contract_of(k);
+    let spy = ContractKey::equity(catalog::SPY);
+    let start = |at: i64| {
+        let mut setup = TradingSetup::manual();
+        setup.accounts = Some(vec![AccountConfig::paper("paper", 100_000)]);
+        setup.file = Some(file.clone());
+        let base = FeedConfig::new(FeedSource::Replay {
+            path: "unused.lfr".into(),
+            speed: 0.0,
+            stop_at: None,
+        });
+        let t = Trading::start(setup, FeedRegistry::new(), base);
+        t.handle().advance_to(UtcMillis(at));
+        t.settle();
+        Rig { t, now: at }
+    };
+    let print = |r: &mut Rig, cents: i64| {
+        r.wait(1);
+        let time = UtcMillis(r.now);
+        r.t.handle().market(
+            spy,
+            vec![MarketInput::Trade {
+                time,
+                price: Price(cents),
+                qty: Qty(1),
+            }],
+        );
+        r.t.settle();
+    };
+    let at = UtcMillis::parse_iso("2026-11-09T15:00:00Z").unwrap().0;
+    let mut r = start(at);
+    print(&mut r, 68_300);
+    r.quote(k, 240, 242);
+    r.hold(c, 2, 242);
+    for (contract, kind, level) in [
+        (c, TriggerKind::Stop, 68_000),
+        (
+            contract_of(key(690, Right::Put)),
+            TriggerKind::Entry {
+                qty: Qty(1),
+                max_price: Price(1_000),
+            },
+            68_200,
+        ),
+    ] {
+        r.send(Command::ArmTrigger(TriggerSpec {
+            account: account(),
+            contract,
+            kind,
+            level: Price(level),
+        }));
+    }
+    let now = r.now;
+    drop(r);
+
+    let mut r = start(now);
+    assert_eq!(r.position(c), 2, "the position is back");
+    // The notice reaches the app, though it was raised before the app was listening.
+    {
+        let st = r.t.cache.read();
+        let back: Vec<_> = st.triggers().collect();
+        assert_eq!(back.len(), 1, "the Stop, not the entry");
+        assert_eq!(back[0].kind, TriggerKind::Stop);
+        assert!(back[0].restored, "with a notice");
+    }
+    r.quote(k, 150, 152);
+    print(&mut r, 67_900);
+    r.wait(LATENCY_MS);
+    assert_eq!(r.position(c), 0, "its Stop fired");
+    assert!(
+        r.orders(contract_of(key(690, Right::Put))).is_empty(),
+        "the entry didn't come back"
+    );
+    drop(r);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_exits_say_what_they_act_on() {
     assert_eq!(exit_label("SPY", true), "Flatten SPY options");

@@ -55,6 +55,8 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         removed: bool,
     },
+    /// A trigger on an underlying (decision 0029) after any change; [`crate::trigger`].
+    Trigger(crate::trigger::TriggerView),
     /// The cache was rebuilt from the broker (after a (re)connect or restart).
     Rebuilt {
         accounts: usize,

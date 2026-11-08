@@ -10,9 +10,12 @@
 //!   rules in force, pending looser ones, the day's counts, a lockout). The version moved so
 //!   that a build from before guardrails **refuses** the file instead of reading it and
 //!   silently dropping a lockout.
-//! - **v3**: the current format: the same layout, and contracts may be equities or options
-//!   (decision 0028, `types::ContractDoc`). The version moved so that an older build refuses
-//!   the file instead of reading an option position as spot.
+//! - **v3**: the same layout, and contracts may be equities or options (decision 0028,
+//!   `types::ContractDoc`). The version moved so that an older build refuses the file instead
+//!   of reading an option position as spot.
+//! - **v4**: the current format: an optional list of armed exit triggers (decision 0029). The
+//!   version moved so that an older build refuses the file instead of reading it and silently
+//!   dropping a position's Stop.
 //!
 //! A file from a newer Lines is refused (never half-read), and a damaged file is reported,
 //! never silently replaced.
@@ -28,7 +31,7 @@ use crate::guardrails::GuardrailTracker;
 use crate::paper::{PaperConfig, PaperState};
 use crate::rules::RuleTracker;
 
-pub const VERSION: u64 = 3;
+pub const VERSION: u64 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAccount {
@@ -56,6 +59,10 @@ pub struct TradingFile {
     /// unresolved, never assumed working). Optional: older files have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_flight: Vec<crate::order::Order>,
+    /// Stops and Targets on open option positions (decision 0029; entries never come back).
+    /// Optional: older files have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<crate::trigger::SavedTrigger>,
 }
 
 /// Bring any older layout up to the current one.
@@ -69,10 +76,22 @@ pub fn migrate(mut v: Value) -> Result<Value> {
             0 => v0_to_v1(v)?,
             1 => v1_to_v2(v)?,
             2 => v2_to_v3(v)?,
+            3 => v3_to_v4(v)?,
             n => bail!("no migration from version {n}"),
         };
         version += 1;
     }
+    Ok(v)
+}
+
+/// v3 → v4: the layout is unchanged (triggers are optional, absent = none); only the version
+/// moves, so older builds refuse what this one writes.
+fn v3_to_v4(mut v: Value) -> Result<Value> {
+    let o = v.as_object_mut().context("v3 file is not an object")?;
+    if !o.get("accounts").is_some_and(Value::is_array) {
+        bail!("v3 file has no accounts");
+    }
+    o.insert("version".into(), json!(4));
     Ok(v)
 }
 
@@ -379,9 +398,9 @@ mod tests {
         let f = read(V2);
         assert_eq!(f.version, VERSION);
         assert_eq!(f.accounts[0].guardrails.state(), GuardState::Locked);
-        // Written back: v3 (decision 0028: contracts may be options), the same content.
+        // Written back: the current version (decision 0028: contracts may be options), the same content.
         let again = serde_json::to_value(&f).unwrap();
-        assert_eq!(again["version"], json!(3));
+        assert_eq!(again["version"], json!(VERSION));
         assert_eq!(read(&again.to_string()), f);
     }
 

@@ -39,6 +39,7 @@ pub mod risk;
 pub mod rules;
 pub mod service;
 pub mod strategy;
+pub mod trigger;
 pub mod types;
 
 pub use broker::{

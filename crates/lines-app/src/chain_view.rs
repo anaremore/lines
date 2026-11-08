@@ -932,7 +932,7 @@ impl ChainView {
                 read_only: read_only.as_deref(),
             },
             price,
-            close,
+            close.then_some(side),
         )
     }
 
@@ -1175,8 +1175,9 @@ impl ChainView {
             return;
         }
         let q = self.quote(key);
+        let closing = if position > 0 { Side::Sell } else { Side::Buy };
         match ticket::close_command(account, self.contract(key), position, q.as_ref(), rules) {
-            Some(cmd) => match self.refusal_of(key, Side::Sell, order_price(&cmd), true, cx) {
+            Some(cmd) => match self.refusal_of(key, closing, order_price(&cmd), true, cx) {
                 Some(why) => self.note = Some(format!("Not sent: {why}")),
                 None => {
                     let side = if position > 0 { Side::Sell } else { Side::Buy };
@@ -1189,7 +1190,7 @@ impl ChainView {
             },
             None if position != 0 => {
                 let why = self
-                    .refusal_of(key, Side::Sell, None, true, cx)
+                    .refusal_of(key, closing, None, true, cx)
                     .unwrap_or_else(|| "no mid to close at".to_owned());
                 self.note = Some(format!("Not sent: {why}"));
             }

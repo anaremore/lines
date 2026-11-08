@@ -170,6 +170,8 @@ pub struct TradeState {
     flashes: VecDeque<Flash>,
     results: VecDeque<(CommandId, Result<Vec<OrderId>, Reject>)>,
     notes: HashMap<CommandId, Note>,
+    /// The triggers the core has alive (decision 0029).
+    triggers: BTreeMap<lines_trading::trigger::TriggerId, lines_trading::trigger::TriggerView>,
     /// Rebuilds seen (from the broker after a (re)connect).
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
@@ -262,6 +264,16 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
+            // No UI yet (decision 0029's build order), but kept for it: a restored one's notice.
+            Event::Trigger(t) => {
+                let account = t.account.clone();
+                if t.state == lines_trading::trigger::TriggerState::Ended {
+                    self.triggers.remove(&t.id);
+                } else {
+                    self.triggers.insert(t.id, t);
+                }
+                Some(account)
+            }
             Event::Strategy {
                 id,
                 account,
@@ -465,6 +477,12 @@ impl TradeState {
         self.guards
             .get(account)
             .filter(|g| g.state != GuardState::Active)
+    }
+
+    /// The triggers the core has alive, as last reported.
+    #[cfg(test)]
+    pub fn triggers(&self) -> impl Iterator<Item = &lines_trading::trigger::TriggerView> {
+        self.triggers.values()
     }
 
     pub fn result(&self, id: CommandId) -> Option<&Result<Vec<OrderId>, Reject>> {
@@ -1081,6 +1099,8 @@ impl Trading {
                 core.set_next_order_id(f.next_order_id);
                 // Sent before the app stopped, no answer: unresolved until the broker says.
                 core.restore_in_flight(f.in_flight);
+                // A position's Stop and Target come back armed, and say so (decision 0029).
+                core.restore_triggers(f.triggers);
                 (core, f.paper)
             }
             None => {
@@ -1605,6 +1625,8 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
             (account.clone(), None, None)
         }
+        TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
+        TradeCommand::CancelTrigger { account, .. } => (account.clone(), None, None),
         TradeCommand::SetBracketMode {
             account, contract, ..
         } => {

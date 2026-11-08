@@ -98,6 +98,14 @@ pub enum Command {
         account: AccountId,
         rules: Option<crate::rules::RulePreset>,
     },
+    /// Arm a trigger on an option, at a price of its underlying (decision 0029). A person's, not
+    /// a strategy's yet.
+    ArmTrigger(crate::trigger::TriggerSpec),
+    /// Disarm one, or stop a fired Target's chase and cancel its order.
+    CancelTrigger {
+        account: AccountId,
+        id: crate::trigger::TriggerId,
+    },
     /// Create or replace a strategy instance (decision 0025). It starts Disarmed; an armed
     /// instance must be stopped or paused first. Not from a strategy.
     AddStrategy(StrategyConfig),
@@ -160,6 +168,8 @@ impl Command {
         match self {
             Command::PlaceOrder(o) | Command::PlaceExit(o) => Some(&o.account),
             Command::PlaceBracket(b) => Some(&b.entry.account),
+            Command::ArmTrigger(t) => Some(&t.account),
+            Command::CancelTrigger { account, .. } => Some(account),
             Command::ModifyOrder { account, .. }
             | Command::CancelOrder { account, .. }
             | Command::CancelAll { account, .. }
@@ -182,6 +192,7 @@ impl Command {
             Command::CancelAll { .. }
                 | Command::Flatten { .. }
                 | Command::CancelOrder { .. }
+                | Command::CancelTrigger { .. }
                 | Command::StopStrategies { .. }
         )
     }

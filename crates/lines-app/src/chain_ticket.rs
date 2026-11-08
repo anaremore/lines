@@ -7,7 +7,9 @@
 //! before the press and in the core's words.
 
 use lines_core::{ContractKey, OptionKey, OptionQuote, OptionRules, Price, Product, Qty, Right};
-use lines_trading::risk::{OptionGuard, OptionQuoteView, PROP_OPTIONS_REFUSAL, check_option};
+use lines_trading::risk::{
+    OptionGuard, OptionQuoteView, PROP_OPTIONS_REFUSAL, check_option, check_option_exit,
+};
 use lines_trading::types::ContractSpec;
 use lines_trading::{AccountId, Command, CommandId, Money, OrderKind, OrderSpec, Side};
 
@@ -81,6 +83,18 @@ pub fn default_limit(side: Side, q: Option<&OptionQuote>, rules: OptionRules) ->
         (Some(b), Some(a)) => Some(mid_limit(side, b, a, rules)),
         _ => None,
     }
+}
+
+/// The limit a close opens with: the mid, or with only its own side of the quote, that side,
+/// which the core takes with no mid (`risk::check_option_exit`).
+pub fn close_limit(side: Side, q: Option<&OptionQuote>, rules: OptionRules) -> Option<Price> {
+    default_limit(side, q, rules).or_else(|| {
+        let (bid, ask) = sides(q);
+        match side {
+            Side::Sell => bid,
+            Side::Buy => ask,
+        }
+    })
 }
 
 /// One tick up or down the option's grid, and never to zero.
@@ -174,7 +188,11 @@ impl Ticket {
     /// Close the position instead of trading `side`, priced at the mid again (or back).
     pub fn set_close(&mut self, close: bool, q: Option<&OptionQuote>, rules: OptionRules) {
         self.close = close;
-        self.price = default_limit(self.side, q, rules);
+        self.price = if close {
+            close_limit(self.side, q, rules)
+        } else {
+            default_limit(self.side, q, rules)
+        };
         self.typed = None;
         self.refused = None;
     }
@@ -210,11 +228,12 @@ pub struct Check<'a> {
 }
 
 /// Why this limit won't go, in the core's words (`None`: it will, as far as the UI can tell).
-pub fn refusal(check: &Check<'_>, price: Option<Price>, close: bool) -> Option<String> {
+pub fn refusal(check: &Check<'_>, price: Option<Price>, close: Option<Side>) -> Option<String> {
+    let closing = close.is_some();
     if let Some(r) = check.read_only {
         return Some(r.to_owned());
     }
-    if check.prop && !close {
+    if check.prop && !closing {
         return Some(PROP_OPTIONS_REFUSAL.to_owned());
     }
     if check.closed {
@@ -237,13 +256,13 @@ pub fn refusal(check: &Check<'_>, price: Option<Price>, close: bool) -> Option<S
         None => (Price(rules_tick.max(1)), true),
     };
     let now = check.now.unwrap_or(lines_core::UtcMillis(0));
-    match check_option(
-        check.guard,
-        &spec,
-        &OrderKind::Limit { price: priced },
-        view,
-        now,
-    ) {
+    // A close at its own side of the quote passes however wide it is, as in the core.
+    let kind = OrderKind::Limit { price: priced };
+    let checked = match close {
+        Some(side) => check_option_exit(check.guard, &spec, side, &kind, view, now),
+        None => check_option(check.guard, &spec, &kind, view, now),
+    };
+    match checked {
         Err(e) if !stand_in || bid.is_none() || ask.is_none() => Some(e.message),
         Err(e) if e.message.contains("stale") => Some(e.message),
         _ if stand_in => Some("type a limit price".to_owned()),
@@ -366,7 +385,7 @@ pub fn close_command(
         return None;
     }
     let side = if position > 0 { Side::Sell } else { Side::Buy };
-    let price = default_limit(side, q, rules)?;
+    let price = close_limit(side, q, rules)?;
     Some(command(
         account,
         contract,
@@ -773,7 +792,15 @@ mod tests {
         assert_eq!((s.side, s.qty), (Side::Buy, Qty(3)));
         assert!(close_command(a.clone(), contract(), 0, Some(&q), rules()).is_none());
         let one = quote(Some(240), None);
-        assert!(close_command(a.clone(), contract(), 2, Some(&one), rules()).is_none());
+        // Only its own side: that side, which the core takes with no mid.
+        let bid_only = close_command(a.clone(), contract(), 2, Some(&one), rules()).unwrap();
+        let Command::PlaceExit(s) = bid_only else {
+            panic!("{bid_only:?}");
+        };
+        assert_eq!(s.kind, OrderKind::Limit { price: Price(240) });
+        // Only the other side: nothing to close on.
+        assert!(close_command(a.clone(), contract(), -2, Some(&one), rules()).is_none());
+        assert!(close_command(a.clone(), contract(), 2, None, rules()).is_none());
         // A ticket's own order is reduce-only only in Close mode.
         let plain = command(a.clone(), contract(), Side::Sell, 1, Price(241), false);
         assert!(matches!(plain, Command::PlaceOrder(_)));
@@ -812,9 +839,9 @@ mod tests {
         let g = OptionGuard::default();
         let q = quote(Some(240), Some(242));
         let ok = check(&p, &g, Some(&q));
-        assert_eq!(refusal(&ok, Some(Price(241)), false), None);
+        assert_eq!(refusal(&ok, Some(Price(241)), None), None);
         // Too far from the mid: the same message the core gives.
-        let far = refusal(&ok, Some(Price(1_000)), false).unwrap();
+        let far = refusal(&ok, Some(Price(1_000)), None).unwrap();
         assert!(far.contains("too far from the mid"), "{far}");
         // One-sided, missing, crossed: no two-sided quote.
         for q in [
@@ -822,36 +849,36 @@ mod tests {
             quote(None, Some(242)),
             quote(Some(250), Some(240)),
         ] {
-            let r = refusal(&check(&p, &g, Some(&q)), Some(Price(241)), false).unwrap();
+            let r = refusal(&check(&p, &g, Some(&q)), Some(Price(241)), None).unwrap();
             assert!(r.contains("no two-sided quote"), "{r}");
-            let r = refusal(&check(&p, &g, Some(&q)), None, false).unwrap();
+            let r = refusal(&check(&p, &g, Some(&q)), None, None).unwrap();
             assert!(r.contains("no two-sided quote"), "no price either: {r}");
         }
         // Stale: past the guard's limit.
         let mut late = check(&p, &g, Some(&q));
         late.now = Some(lines_core::UtcMillis(q.time.0 + g.stale_after_ms + 1));
-        let r = refusal(&late, Some(Price(241)), false).unwrap();
+        let r = refusal(&late, Some(Price(241)), None).unwrap();
         assert!(r.contains("stale"), "{r}");
         // A prop-rule account can't open, in the core's own words, and closing isn't refused.
         let mut prop = check(&p, &g, Some(&q));
         prop.prop = true;
         assert_eq!(
-            refusal(&prop, Some(Price(241)), false).as_deref(),
+            refusal(&prop, Some(Price(241)), None).as_deref(),
             Some(PROP_OPTIONS_REFUSAL)
         );
-        assert_eq!(refusal(&prop, Some(Price(241)), true), None);
+        assert_eq!(refusal(&prop, Some(Price(241)), Some(Side::Sell)), None);
         // Outside the session, in the broker's words: no order goes just to be rejected.
         let mut closed = check(&p, &g, Some(&q));
         closed.closed = true;
         assert_eq!(
-            refusal(&closed, Some(Price(241)), true).as_deref(),
+            refusal(&closed, Some(Price(241)), Some(Side::Sell)).as_deref(),
             Some("SPY market is closed")
         );
         // A guardrail lockout, in its own line.
         let mut locked = check(&p, &g, Some(&q));
         locked.locked = Some("Locked · max 5 trades reached · until the next trade date");
         assert!(
-            refusal(&locked, Some(Price(241)), false)
+            refusal(&locked, Some(Price(241)), None)
                 .unwrap()
                 .starts_with("Locked")
         );
@@ -859,12 +886,27 @@ mod tests {
         let mut ro = check(&p, &g, Some(&q));
         ro.read_only = Some("observe mode");
         assert_eq!(
-            refusal(&ro, Some(Price(241)), false).as_deref(),
+            refusal(&ro, Some(Price(241)), None).as_deref(),
             Some("observe mode")
         );
+        // A close at its own bid passes however wide the quote: the core takes it too.
+        let wide = quote(Some(5), Some(900));
+        let c = check(&p, &g, Some(&wide));
+        assert_eq!(refusal(&c, Some(Price(5)), Some(Side::Sell)), None);
+        assert!(
+            refusal(&c, Some(Price(5)), None).is_some(),
+            "an opening one doesn't"
+        );
+        assert!(
+            refusal(&c, Some(Price(6)), Some(Side::Sell)).is_some(),
+            "only at its bid"
+        );
+        let no_ask = quote(Some(5), None);
+        let c = check(&p, &g, Some(&no_ask));
+        assert_eq!(refusal(&c, Some(Price(5)), Some(Side::Sell)), None);
         // A cleared field asks for a price; a quote problem says so first.
         assert_eq!(
-            refusal(&ok, None, false).as_deref(),
+            refusal(&ok, None, None).as_deref(),
             Some("type a limit price")
         );
     }
@@ -1012,7 +1054,7 @@ mod tests {
                 locked: None,
                 read_only: None,
             };
-            refusal(&c, Some(Price(cents)), false)
+            refusal(&c, Some(Price(cents)), None)
         };
 
         // Each refusal, in the same words as the core.
