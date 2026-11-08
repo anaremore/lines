@@ -339,14 +339,12 @@ fn tf_text(tf: Timeframe) -> String {
     }
 }
 
-/// The net P&L as the display allows (`None`: off).
+/// The net P&L as the display allows (`None`: off, or ticks only for a product with no tick to
+/// state).
 fn pnl_text(t: &Trade, product: Option<&Product>, mode: PnlDisplay) -> Option<String> {
-    let tick = product.map_or(1, |p| p.price.tick);
-    let ticks = t.ticks(tick).map(|v| {
-        let mut s = String::new();
-        let _ = pnl::write_ticks(&mut s, v);
-        s
-    });
+    let ticks = product
+        .and_then(|p| t.ticks(p.price.tick))
+        .map(crate::journal_view::per_contract_text);
     let mut money = String::new();
     let _ = pnl::write_money(&mut money, t.net());
     match (mode.money(), mode.ticks(), ticks) {
@@ -817,8 +815,9 @@ mod tests {
         assert!(svg.contains(
             "Entry 2026-11-05 14:31:07  →  exit 2026-11-05 14:35:07 UTC  ·  held 4m 00s<"
         ));
-        // +2 points × 2 × $50 = $200, less $2.48 of fees; and in ticks.
-        assert!(svg.contains("net +$197.52  (+8.0 t)"), "{svg}");
+        // +2 points × 2 × $50 = $200, less $2.48 of fees; and in ticks, per contract like the
+        // journal's (the file stands alone: no header says so).
+        assert!(svg.contains("net +$197.52  (+8.0 t/ct)"), "{svg}");
         assert!(svg.contains("avg entry 6000.00") && svg.contains("avg exit 6002.00"));
         // One candle per bar up to the exit (60 before the entry minute, the entry minute, 4).
         assert_eq!(d.bars.len(), 65);
@@ -1099,17 +1098,27 @@ mod tests {
         let d = data(&r.trade);
         let off = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off));
         assert!(
-            !off.contains('$') && !off.contains(" t<") && !off.contains("net "),
+            !off.contains('$') && !off.contains(" t/ct<") && !off.contains("net "),
             "{off}"
         );
         assert!(off.contains("avg entry 6000.00"), "prices stay");
         let ticks = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Ticks));
         assert!(
-            ticks.contains(">+8.0 t<") && !ticks.contains('$'),
+            ticks.contains(">+8.0 t/ct<") && !ticks.contains('$'),
             "{ticks}"
         );
         let none = render(&r.trade, "PAPER", None, look(PnlDisplay::Off));
         assert!(!none.contains('$') && !none.contains("net "), "{none}");
+    }
+
+    /// A product not in the catalog has no tick to state: its dollars, never raw price units
+    /// called ticks.
+    #[test]
+    fn an_unlisted_product_states_no_ticks() {
+        let r = request();
+        assert_eq!(pnl_text(&r.trade, None, PnlDisplay::Ticks), None);
+        let both = pnl_text(&r.trade, None, PnlDisplay::Both).unwrap();
+        assert!(both.starts_with("net ") && !both.contains(" t"), "{both}");
     }
 
     /// The theme at the time colors the file (from its tokens).

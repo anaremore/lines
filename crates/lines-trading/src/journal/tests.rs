@@ -279,9 +279,50 @@ fn mae_and_mfe_follow_the_market_while_open() {
     assert_eq!(t.mae, dollars(-500.0));
     assert_eq!(t.mfe, dollars(700.0));
     assert_eq!((t.low, t.high), (px(5995.00), px(6010.00)));
-    assert_eq!(t.mae_ticks(25), Some(20.0));
-    assert_eq!(t.mfe_ticks(25), Some(40.0));
+    // Ticks are those dollars at the largest size, 2 × $12.50 a tick: deliberately not the 40 t
+    // the price ran from the entry, since only 1 contract was left for the last of that run.
+    let product = catalog::get(t.contract.product).unwrap();
+    assert_eq!(t.excursion_ticks(&product), Some((-20.0, 28.0)));
     assert_eq!(t.realized, dollars(350.0));
+}
+
+/// Dollars = ticks × quantity × tick value, however the size was built: a price measured from the
+/// final average entry would read 36 t against an add to a winner that was never under water.
+#[test]
+fn excursion_ticks_follow_the_dollars_through_a_scale_in() {
+    let product = catalog::get(es().product).unwrap();
+    let mut j = Journal::new();
+    let t = &feed(
+        &mut j,
+        &[
+            fill("w1", 1, Side::Buy, 6000.00, 1, 0.0, 0),
+            fill("w2", 2, Side::Buy, 6010.00, 9, 0.0, 10),
+            fill("w3", 3, Side::Sell, 6011.00, 10, 0.0, 20),
+        ],
+    )[0];
+    assert_eq!((t.mae, t.mfe), (Money::ZERO, dollars(1000.0)));
+    assert_eq!(t.excursion_ticks(&product), Some((0.0, 8.0)));
+
+    // Averaging down: 1 contract's −$500 before the add, over the 10 of the largest size.
+    let mut j = Journal::new();
+    feed(&mut j, &[fill("d1", 1, Side::Buy, 6000.00, 1, 0.0, 0)]);
+    j.on_market(
+        es(),
+        &[MarketInput::Trade {
+            time: at(1),
+            price: px(5990.00),
+            qty: Qty(1),
+        }],
+    );
+    let t = &feed(
+        &mut j,
+        &[
+            fill("d2", 2, Side::Buy, 5990.00, 9, 0.0, 10),
+            fill("d3", 3, Side::Sell, 5995.00, 10, 0.0, 20),
+        ],
+    )[0];
+    assert_eq!(t.mae, dollars(-500.0));
+    assert_eq!(t.excursion_ticks(&product).map(|e| e.0), Some(-4.0));
 }
 
 #[test]

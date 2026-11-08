@@ -194,6 +194,7 @@ impl JournalCol {
         match self {
             JournalCol::MaeMfe => "MAE / MFE",
             JournalCol::Duration => "Held",
+            JournalCol::Ticks => "Ticks/ct",
             // Averages over every fill on that side (they can sit between ticks).
             JournalCol::Entry => "Avg entry",
             JournalCol::Exit => "Avg exit",
@@ -211,7 +212,7 @@ impl JournalCol {
             JournalCol::Entry => "Entry",
             JournalCol::Exit => "Exit",
             JournalCol::Pnl => "P&L",
-            JournalCol::Ticks => "Ticks",
+            JournalCol::Ticks => "Ticks per contract",
             JournalCol::Duration => "Duration",
             JournalCol::MaeMfe => "MAE/MFE",
             JournalCol::Chart => "Snapshot",

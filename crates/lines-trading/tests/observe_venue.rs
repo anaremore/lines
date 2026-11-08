@@ -359,9 +359,16 @@ fn unmarked_accounts_take_no_mae_from_market_batches() {
         j.trades()
             .iter()
             .find(|tr| tr.account == AccountId::new(a))
-            .and_then(|tr| tr.mae_ticks(25))
+            .map(|tr| tr.mae)
             .unwrap()
     };
-    assert_eq!(mae("venue-sim"), 0.0, "not from the replay's prices");
-    assert!(mae("paper") >= 40.0);
+    assert_eq!(
+        mae("venue-sim"),
+        Money::ZERO,
+        "not from the replay's prices"
+    );
+    assert!(
+        mae("paper") <= Money::cents(-50_000),
+        "40 t at $12.50 or more"
+    );
 }

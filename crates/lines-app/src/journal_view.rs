@@ -7,6 +7,9 @@
 //! - **P&L display** (`crate::pnl`, app-wide): off shows no money or tick number at all
 //!   (P&L, ticks, MAE/MFE and the strip's money read `—`; count, win rate and streak stay);
 //!   ticks or currency show only that unit. CSV export is always complete.
+//! - **One basis**: dollars are the whole position; ticks are always per contract (`t/ct`, the
+//!   CSV's too), so 4 contracts' `+$100.00` is `+2.0 t/ct` on ES. MAE/MFE ticks are their exact
+//!   dollars at the trade's largest size (`Trade::excursion_ticks`), so the cell reconciles.
 //! - **Stats strip**: count, win rate, net, average win and loss, expectancy, profit factor,
 //!   max drawdown, streak; click it (or the palette) to switch between the current trade date
 //!   and all dates.
@@ -37,7 +40,6 @@ use lines_core::{CivilDate, UtcMillis};
 use lines_feed::store::ChartStore;
 use lines_trading::journal::stats::{self, GroupBy, Stats};
 use lines_trading::journal::{Edit, Trade, price_value};
-use lines_trading::types::ContractSpec;
 use lines_trading::{JournalShared, Money, Side};
 
 use crate::feeds::PaneFeed;
@@ -81,10 +83,24 @@ fn ticks_text(t: f64) -> String {
     s
 }
 
+/// `+6.3`: ticks under a header that gives their unit.
+fn tick_number(t: f64) -> String {
+    let s = ticks_text(t);
+    s.strip_suffix(" t").unwrap_or(&s).to_owned()
+}
+
+/// `+6.3 t/ct`: ticks where a header doesn't already say they are per contract.
+pub(crate) fn per_contract_text(t: f64) -> String {
+    let mut s = ticks_text(t);
+    s.push_str("/ct");
+    s
+}
+
 /// Format a trade for the table, showing P&L as `mode` allows.
 pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
     let product = lines_feed::catalog::get(t.contract.product);
-    let tick = product.as_ref().map_or(1, |p| p.price.tick);
+    // An unlisted product has no tick to state, rather than raw price units called ticks.
+    let ticks = product.as_ref().and_then(|p| t.ticks(p.price.tick));
     let price = |v: Option<f64>| match (v, &product) {
         (Some(v), Some(p)) => decimal(price_value(p, v), p.price.scale.den()),
         _ => "—".to_owned(),
@@ -107,37 +123,31 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
     }
     let dash = || "—".to_owned();
     let tk = |v: Option<f64>| match v {
-        Some(v) if mode.ticks() => ticks_text(v),
+        Some(v) if mode.ticks() => tick_number(v),
         _ => dash(),
     };
     let net = t.net();
     let pnl = if mode.money() {
         money_text(net)
     } else if mode.ticks() {
-        tk(t.ticks(tick))
+        ticks.map_or_else(dash, per_contract_text)
     } else {
         dash()
     };
-    // MAE/MFE are the whole position's worst/best P&L while open (realized + open), so the
-    // ticks shown are that money in ticks of one contract: dollars and ticks always describe
-    // the same number (not the per-contract price excursion, which can differ after a
-    // scale-out).
-    let tick_money = product
-        .as_ref()
-        .and_then(|p| ContractSpec::new(p.clone(), t.contract, Money::ZERO))
-        .map(|s| s.money(i128::from(tick), 1))
-        .filter(|m| m.0 > 0);
-    let as_ticks = |m: Money| tick_money.map(|tm| m.0 as f64 / tm.0 as f64);
+    // The whole position's worst/best P&L while open, and the same dollars per contract (like the
+    // Ticks column and the CSV) at the trade's largest size.
+    let excursion_ticks = match product.as_ref().and_then(|p| t.excursion_ticks(p)) {
+        Some((mae, mfe)) => format!("{} / {}", tick_number(mae), per_contract_text(mfe)),
+        None => "— / —".to_owned(),
+    };
     let excursions = match (mode.money(), mode.ticks()) {
         (true, true) => format!(
-            "{} / {}  ({} / {})",
+            "{} / {}  ({excursion_ticks})",
             money_text(t.mae),
             money_text(t.mfe),
-            tk(as_ticks(t.mae)),
-            tk(as_ticks(t.mfe))
         ),
         (true, false) => format!("{} / {}", money_text(t.mae), money_text(t.mfe)),
-        (false, true) => format!("{} / {}", tk(as_ticks(t.mae)), tk(as_ticks(t.mfe))),
+        (false, true) => excursion_ticks,
         (false, false) => dash(),
     };
     Row {
@@ -151,7 +161,7 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
             price(t.avg_entry()),
             price(t.avg_exit()),
             pnl,
-            tk(t.ticks(tick)),
+            tk(ticks),
             duration_text(t.duration_ms()),
             excursions,
             if t.screenshots.is_empty() {
@@ -169,8 +179,7 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
                 pnl::Tone::Flat => 0,
             }
         } else if mode.ticks() {
-            t.ticks(tick)
-                .map_or(0, |v| ((v * 10.0).round() as i64).signum() as i8)
+            ticks.map_or(0, |v| ((v * 10.0).round() as i64).signum() as i8)
         } else {
             0
         },
@@ -1617,12 +1626,16 @@ mod tests {
         assert_eq!(c(JournalCol::Entry), "5999.9375");
         assert_eq!(c(JournalCol::Exit), "6001.50");
         assert_eq!(c(JournalCol::Pnl), "+$310.02");
-        assert_eq!(c(JournalCol::Ticks), "+6.3 t");
+        // The header says what unit: `Ticks/ct`.
+        assert_eq!(c(JournalCol::Ticks), "+6.3");
         assert_eq!(c(JournalCol::Duration), "2m 00s");
-        // Position P&L in dollars and the same amount in ticks of one contract ($12.50).
+        // Deliberately changed: this was `-7.0 t / +33.0 t` (the position's dollars over one
+        // contract's $12.50), which shared a row and a unit with the Ticks column's per-contract
+        // number, and disagreed with the CSV. Now every tick number is per contract, and these
+        // still reconcile: 4 contracts × 8.25 t × $12.50 is the +$412.50.
         assert_eq!(
             c(JournalCol::MaeMfe),
-            "-$87.50 / +$412.50  (-7.0 t / +33.0 t)"
+            "-$87.50 / +$412.50  (-1.8 / +8.3 t/ct)"
         );
         assert_eq!(c(JournalCol::Tags), "breakout, A+");
         assert_eq!(r.sign, 1);
@@ -1630,6 +1643,64 @@ mod tests {
         assert_eq!(duration_text(3_780_000), "1h 03m");
         assert_eq!(decimal(6001.0, 100), "6001.00");
         assert_eq!(decimal(0.5, 1), "0.5");
+    }
+
+    /// A product not in the catalog has no tick to state: dashes and empty fields, not raw price
+    /// units called ticks. Its dollars stay.
+    #[test]
+    fn an_unlisted_product_states_no_ticks() {
+        let mut t = trade();
+        t.contract.product = lines_core::ProductId(u32::MAX);
+        let cells = row(&t, PnlDisplay::Both).cells;
+        assert_eq!(
+            cells[JournalCol::MaeMfe.index()],
+            "-$87.50 / +$412.50  (— / —)"
+        );
+        assert_eq!(cells[JournalCol::Ticks.index()], "—");
+        assert_eq!(
+            row(&t, PnlDisplay::Ticks).cells[JournalCol::Pnl.index()],
+            "—"
+        );
+        let export = lines_trading::journal::csv(std::slice::from_ref(&t));
+        let mut lines = export.lines();
+        let names: Vec<&str> = lines.next().unwrap().split(',').collect();
+        // From the end: the unlisted contract's label is quoted and holds commas.
+        let from_end: Vec<&str> = lines.next().unwrap().rsplit(',').collect();
+        for name in ["ticks", "mae_ticks", "mfe_ticks"] {
+            let i = names.iter().position(|n| *n == name).unwrap();
+            assert_eq!(from_end[names.len() - 1 - i], "", "{name}");
+        }
+    }
+
+    /// One basis in the pane and the export: the cells' ticks are the CSV's numbers (its
+    /// `mae_ticks` is a magnitude, the cell is signed), and the header says per contract.
+    #[test]
+    fn pane_and_csv_ticks_share_one_basis() {
+        let t = trade();
+        let export = lines_trading::journal::csv(std::slice::from_ref(&t));
+        let mut lines = export.lines();
+        let names: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let values: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let field = |name: &str| {
+            let i = names.iter().position(|n| *n == name).unwrap();
+            values[i].parse::<f64>().unwrap()
+        };
+        assert_eq!(field("ticks"), 6.25);
+        assert_eq!(field("mae_ticks"), 1.75);
+        assert_eq!(field("mfe_ticks"), 8.25);
+        let cells = row(&t, PnlDisplay::Both).cells;
+        assert_eq!(cells[JournalCol::Ticks.index()], tick_number(6.25));
+        assert!(
+            cells[JournalCol::MaeMfe.index()].ends_with(&format!(
+                "({} / {})",
+                tick_number(-1.75),
+                per_contract_text(8.25)
+            )),
+            "{}",
+            cells[JournalCol::MaeMfe.index()]
+        );
+        assert_eq!(JournalCol::Ticks.header(), "Ticks/ct");
+        assert_eq!(JournalCol::Ticks.label(), "Ticks per contract");
     }
 
     /// The Chart cell: "view" with a file, a dash without (the reverse state).
@@ -1658,8 +1729,9 @@ mod tests {
         assert_eq!(row(&t, PnlDisplay::Off).sign, 0, "nothing colored");
         assert_eq!(off[JournalCol::Entry.index()], "5999.9375", "prices stay");
         let ticks = cells(PnlDisplay::Ticks);
-        assert_eq!(ticks[JournalCol::Pnl.index()], "+6.3 t");
-        assert_eq!(ticks[JournalCol::MaeMfe.index()], "-7.0 t / +33.0 t");
+        assert_eq!(ticks[JournalCol::Pnl.index()], "+6.3 t/ct");
+        assert_eq!(ticks[JournalCol::Ticks.index()], "+6.3");
+        assert_eq!(ticks[JournalCol::MaeMfe.index()], "-1.8 / +8.3 t/ct");
         // In ticks mode the color follows the ticks shown, not the money after fees.
         let mut scratch = t.clone();
         scratch.exit_value = scratch.entry_value; // exit = entry: 0.0 t, a loss after fees
