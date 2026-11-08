@@ -4466,9 +4466,9 @@ mod tests {
         // The disabled panel's line, whole in its short forms at the narrowest (a two-digit
         // count at this glyph width leaves only "armed" to its "…", never the number).
         let line = |s: &str| s.chars().count() as f32 * CHAR;
-        // The denied line keeps its reason beside the Keys chip (the longest reason).
-        let chip = w(keys_text(true, true)) + 20.0;
-        assert!(line(&blocked_line("feed stale 1234 s", true)) + 8.0 + chip + 12.0 <= room);
+        // The denied line keeps its longest reason, whole (with the Keys chip on the line too,
+        // a long reason is left out whole: the switch's tooltip has it).
+        assert!(line(&blocked_line("feed stale 1234 s", true)) + 12.0 <= room);
         assert!(line(&locked_hint(None, 0, MIN_DOM_WIDTH)) <= room);
         assert!(line(&locked_hint(None, 1, MIN_DOM_WIDTH)) <= room);
         assert!(line("DOM locked: 12") <= room);
