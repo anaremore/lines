@@ -34,9 +34,9 @@
 //!   footer when narrow, so they move nothing and never appear under a pointer.
 //! - **One-click** (off in every new pane, never saved, off again on another symbol or account):
 //!   a single click in the focused pane sends a limit at the clicked side, still under the guard,
-//!   for the size the switch shows (Shift+Up/Down, or the ticket's chips). While it's on the
-//!   rows don't scroll at all, even if less room cuts off the selected one; moving the selection
-//!   out of view, Home or another expiry still scroll them.
+//!   for the size the switch shows (Shift+Up/Down, or the ticket's chips). While it's on the same
+//!   strikes stay in the same places, and keys move only among them; Home or another expiry let
+//!   go.
 //!
 //! Paint reads the store's chains under a `try_lock` and formats every cell into a stack
 //! string: no allocation. The pane repaints on the store's revision (chain quotes don't move
@@ -322,6 +322,8 @@ pub struct ChainView {
     product: Product,
     /// The expiry asked for (`None`: the soonest).
     expiry: Option<CivilDate>,
+    /// `expiry` is One-click's pin, not the trader's choice.
+    expiry_pinned: bool,
     /// The expiries shown in the header, as of the last render.
     expiries: Vec<CivilDate>,
     /// The selected strike and side (`None`: none yet; the view centers on the money).
@@ -380,8 +382,9 @@ struct Frame {
     marks: Vec<Mark>,
     /// One-click is on: a press sends, so the rows don't move at all.
     hold: bool,
-    /// The strikes held in their places, and the price row's slot (capacity kept).
+    /// Holding `held` now.
     holding: bool,
+    /// The strikes held in their places (capacity kept), and the price row's slot.
     held: Vec<Price>,
     held_line: Option<usize>,
     /// The selection last frame.
@@ -487,7 +490,9 @@ impl Frame {
         // trader moves the selection off them.
         let keep = self.hold
             && self.holding
-            && (selected == self.last_selected || selected.is_none_or(|s| self.held.contains(&s)));
+            && (selected == self.last_selected
+                || selected
+                    .is_none_or(|s| self.held[..fit_rows.min(self.held.len())].contains(&s)));
         self.last_selected = selected;
         if keep {
             // More room: the next strikes go below, moving nothing.
@@ -539,6 +544,16 @@ impl Frame {
             self.held.extend(self.rows.iter().map(|r| r.strike));
             self.held_line = self.line_at;
         }
+    }
+
+    /// The selection `delta` strikes on, among the rows on screen; the middle one to start.
+    fn step_held(&self, selected: Option<Price>, delta: i64) -> Option<Price> {
+        let last = self.rows.len().checked_sub(1)? as i64;
+        let to = match selected.and_then(|s| self.rows.iter().position(|r| r.strike == s)) {
+            Some(i) => (i as i64 + delta).clamp(0, last),
+            None => last / 2,
+        };
+        Some(self.rows[to as usize].strike)
     }
 
     /// The trader moved the rows: nothing is held, and the next frame centers.
@@ -625,6 +640,7 @@ impl Pane for ChainView {
         let follow = feed.sub.is_some();
         self.feed = feed;
         self.expiry = None;
+        self.expiry_pinned = false;
         self.selected = None;
         // A ticket or a One-click press belongs to the symbol it was opened on, and so do the
         // rows the last frame drew.
@@ -670,6 +686,7 @@ impl ChainView {
             seen_revision: u64::MAX,
             product,
             expiry: None,
+            expiry_pinned: false,
             expiries: Vec::with_capacity(MAX_EXPIRIES),
             selected: None,
             side: Right::Call,
@@ -713,6 +730,10 @@ impl ChainView {
     /// The One-click switch.
     pub fn toggle_one_click(&mut self, cx: &mut Context<Self>) {
         self.one_click = !self.one_click;
+        // Its pin ends with it: the pane follows the soonest expiry again.
+        if !self.one_click && std::mem::take(&mut self.expiry_pinned) {
+            self.expiry = None;
+        }
         cx.notify();
     }
 
@@ -1389,6 +1410,14 @@ impl ChainView {
 
     /// Move the selection by `delta` strikes (from the money if nothing is selected yet).
     fn move_strike(&mut self, delta: i64) {
+        // One-click holds the rows: keys move only among the strikes on screen, never onto one
+        // the hold keeps out or below them.
+        if self.frame.holding {
+            if let Some(s) = self.frame.step_held(self.selected, delta) {
+                self.selected = Some(s);
+            }
+            return;
+        }
         let Some(d) = self.store.try_read() else {
             return;
         };
@@ -1437,6 +1466,7 @@ impl ChainView {
         if all[j] != cur {
             drop(d);
             self.expiry = Some(all[j]);
+            self.expiry_pinned = false;
             self.selected = None; // that strike may not exist there: back to the money
             self.frame.release();
             self.leave_ticket();
@@ -1669,6 +1699,7 @@ impl ChainView {
                 // One-click pins the expiry it shows: a sooner one arriving replaces no rows.
                 if self.one_click && self.expiry.is_none() {
                     self.expiry = self.shown_expiry(&d.chains);
+                    self.expiry_pinned = true;
                 }
                 let expiry = self.shown_expiry(&d.chains);
                 // Another expiry is other rows (a sooner one can arrive while following it).
@@ -2233,6 +2264,7 @@ impl ChainView {
                         cx.stop_propagation();
                         if this.expiry != Some(e) {
                             this.expiry = Some(e);
+                            this.expiry_pinned = false;
                             this.selected = None;
                             this.frame.release();
                             this.leave_ticket();
@@ -3258,6 +3290,21 @@ mod tests {
         assert_ne!(f.first_row, start);
     }
 
+    fn key_chain(exp: CivilDate, low: i64, high: i64) -> lines_core::OptionChains {
+        let mut c = lines_core::OptionChains::default();
+        for k in low..=high {
+            c.apply(
+                lines_core::OptionKey {
+                    expiry: exp,
+                    strike: Price(k * 100),
+                    right: Right::Call,
+                },
+                OptionQuote::default(),
+            );
+        }
+        c
+    }
+
     /// With One-click on the same strikes stay in the same places: when a new strike is listed
     /// below them, and when the underlying's price crosses a strike.
     #[test]
@@ -3321,6 +3368,44 @@ mod tests {
         assert_eq!(drawn(&f), want, "the price moved");
         assert_eq!(f.line_at, line);
         assert_eq!(f.last, Some(Price(68_650)), "its tag reads the live price");
+        // Keys move only among the strikes on screen: never onto the one listed among them.
+        let on = |p: i64| Some(Price(p));
+        assert_eq!(f.step_held(sel, 3), on(68_700));
+        assert_eq!(
+            f.step_held(on(68_700), 1),
+            on(68_800),
+            "past the hidden 687.50"
+        );
+        let (top, bottom) = (f.rows[0].strike, f.rows[f.rows.len() - 1].strike);
+        assert_eq!(f.step_held(on(68_700), -1_000), Some(top));
+        assert_eq!(f.step_held(on(68_700), 1_000), Some(bottom));
+        assert_eq!(
+            f.step_held(None, 1),
+            Some(f.rows[(f.rows.len() - 1) / 2].strike)
+        );
+        // Home or another expiry: released, the next frame centers again and holds from there.
+        f.release();
+        f.refresh(among.chain(exp), Some(Price(68_650)), None, 21);
+        assert!(
+            f.rows.iter().any(|r| r.strike == Price(68_750)),
+            "shown now"
+        );
+        assert!(f.holding);
+        // At the chain's end, more room adds nothing and moves nothing.
+        let end = key_chain(exp, 700, 704);
+        let mut g = Frame {
+            hold: true,
+            ..Frame::default()
+        };
+        g.refresh(end.chain(exp), None, None, 4);
+        let was = drawn(&g);
+        g.refresh(end.chain(exp), None, None, 30);
+        assert_eq!(drawn(&g)[..was.len()], was[..]);
+        assert_eq!(
+            g.rows.len(),
+            4,
+            "held from 701: to the chain's own end, blank below"
+        );
         // Let go, it goes back between the strikes it falls between.
         f.hold = false;
         f.refresh(after.chain(exp), Some(Price(68_650)), sel, 21);
