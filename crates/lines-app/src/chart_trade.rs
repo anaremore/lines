@@ -719,13 +719,18 @@ impl ChartTradeState {
     }
 
     /// The single-order tag under plot-local (`x`, `y`) for the resize control, and the control's
-    /// piece if the point is on it: the hovered tag's control first (it sits left of the tag,
-    /// over whatever is there). A group's tag has none: no action on it may touch only one of
-    /// its orders.
-    pub fn resize_target(&self, x: f32, y: f32) -> Option<(u64, Option<ResizeHit>)> {
+    /// piece if the point is on it: the drawn control first (`typing`'s tag, else the hovered
+    /// tag's; it sits left of the tag, over whatever is there). A group's tag has none: no action
+    /// on it may touch only one of its orders.
+    pub fn resize_target(
+        &self,
+        x: f32,
+        y: f32,
+        typing: Option<u64>,
+    ) -> Option<(u64, Option<ResizeHit>)> {
         let tags = &self.tags[..self.n_tags];
-        if let Some(b) = self
-            .resize_hover
+        if let Some(b) = typing
+            .or(self.resize_hover)
             .filter(|h| self.group_of(*h).is_none())
             .and_then(|h| tags.iter().find(|b| b.id == h))
             && let Some(hit) = resize_hit(b, x, y)

@@ -91,17 +91,18 @@ pub fn plan(
     if target < 1 {
         return Err(format!("{left} left: cancel the order to remove it"));
     }
-    let legs = std::iter::once(o).chain(sibling.filter(|s| !one_leg && s.is_open()));
+    // A typed size is for the pair. A step moves the other leg only when the two are equal: one
+    // click never takes a larger stop down to a smaller target's size.
+    let together = |s: &&Order| match step {
+        SizeStep::To(_) => true,
+        SizeStep::Down | SizeStep::Up => s.remaining() == o.remaining(),
+    };
+    let legs =
+        std::iter::once(o).chain(sibling.filter(|s| !one_leg && s.is_open()).filter(together));
     let mut commands = Vec::with_capacity(2);
     let mut grows = false;
     for leg in legs {
-        // A step never moves a leg the other way: − on a larger leg never grows a smaller one.
-        let skip = match step {
-            SizeStep::Down => target >= leg.remaining().0,
-            SizeStep::Up => target <= leg.remaining().0,
-            SizeStep::To(_) => target == leg.remaining().0,
-        };
-        if skip {
+        if target == leg.remaining().0 {
             continue;
         }
         if target > leg.remaining().0 {
@@ -190,11 +191,19 @@ mod tests {
         let small = order(2, Role::TakeProfit, 2, 0);
         let meet = plan(&stop, Some(&small), false, 4, SizeStep::To(2), false).unwrap();
         assert_eq!((qtys(&meet), meet.grows), (vec![(1, 2)], false));
-        // − on the larger leg shrinks it and leaves a smaller one; + the same way up.
-        let down = plan(&stop, Some(&small), false, 4, SizeStep::Down, false).unwrap();
-        assert_eq!((qtys(&down), down.grows), (vec![(1, 3)], false));
-        let up = plan(&small, Some(&stop), false, 4, SizeStep::Up, false).unwrap();
-        assert_eq!((qtys(&up), up.grows), (vec![(2, 3)], true));
+        // Equal legs step together; unequal, a step moves only the leg it is on, either way.
+        let together = plan(&stop, Some(&target), false, 4, SizeStep::Down, false).unwrap();
+        assert_eq!(qtys(&together), vec![(1, 3), (2, 3)]);
+        for (leg, other, step, want) in [
+            (&stop, &small, SizeStep::Down, (1, 3)),
+            (&small, &stop, SizeStep::Down, (2, 1)),
+            (&small, &stop, SizeStep::Up, (2, 3)),
+        ] {
+            let p = plan(leg, Some(other), false, 5, step, false).unwrap();
+            assert_eq!(qtys(&p), vec![want], "{step:?}");
+        }
+        let larger_up = plan(&stop, Some(&small), false, 5, SizeStep::Up, false).unwrap();
+        assert_eq!(qtys(&larger_up), vec![(1, 5)]);
         // A sibling that finished isn't touched.
         let mut done = order(2, Role::TakeProfit, 4, 4);
         done.state = OrderState::Filled;

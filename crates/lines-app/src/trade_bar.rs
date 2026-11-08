@@ -70,7 +70,7 @@ pub struct PaneTrade {
     pub hotkeys: bool,
     /// Typing a custom quantity (digits so far).
     pub qty_edit: Option<String>,
-    /// Wheel travel over the size control, not yet a step.
+    /// Wheel travel over a size control, not yet a step.
     pub qty_scroll: f32,
     /// A working order's size being typed: the order and the digits so far.
     pub resize_edit: Option<(lines_trading::OrderId, String)>,
@@ -1065,8 +1065,9 @@ pub fn wheel_resize<V: TradePane>(
     cx: &mut Context<V>,
 ) -> bool {
     let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
-    // A sideways wheel never resizes (it pans).
-    if dy == 0.0 {
+    // A sideways wheel, or Shift, pans: it never resizes.
+    let dx = f32::from(ev.delta.pixel_delta(w.line_height()).x);
+    if dy == 0.0 || dx.abs() > dy.abs() || ev.modifiers.shift {
         return false;
     }
     let Some(id) = hovered.filter(|_| v.trade_ref().resize_armed && !ev.modifiers.control) else {

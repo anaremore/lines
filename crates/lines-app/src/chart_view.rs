@@ -501,6 +501,9 @@ impl crate::trade_bar::TradePane for ChartView {
             Err(why) => self.trade.flash(why),
             // More quantity is more exposure: only through a linked DOM's switch, like an order
             // from the strip. Each order's account and contract are the chart's.
+            Ok(p) if p.grows && self.store.stale_for().is_some() => {
+                self.trade.flash(crate::trade_bar::FEED_STALE);
+            }
             Ok(p) if p.grows => {
                 let (Some(account), Some(contract)) = (
                     self.trade.account.clone(),
@@ -1298,7 +1301,7 @@ impl ChartView {
         self.focus.focus(window, cx);
         // A press on the chart leaves a size being typed.
         self.trade.qty_edit = None;
-        self.trade.resize_edit = None;
+        let typing = self.trade.resize_edit.take().map(|(id, _)| id.0);
         if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
             cx.notify();
@@ -1345,7 +1348,8 @@ impl ChartView {
         // The − / size / + first: quick clicks on them are steps, never a double click.
         if region == Region::Plot
             && !ev.modifiers.control
-            && self.resize_pressed(x, y, ev.modifiers.alt, cx)
+            && !self.drawings.active()
+            && self.resize_pressed(x, y, ev.modifiers.alt, typing, cx)
         {
             cx.stop_propagation();
             return;
@@ -2182,9 +2186,10 @@ impl ChartView {
         self.set_hover(ev.position, cx);
         self.trade.resize_armed = true;
         let (tx, ty) = self.local(ev.position);
+        let typing = self.trade.resize_edit.as_ref().map(|(id, _)| id.0);
         let tag = self
             .ct
-            .resize_target(tx as f32, ty as f32)
+            .resize_target(tx as f32, ty as f32, typing)
             .map(|(id, _)| id);
         if tag != self.ct.resize_hover {
             self.ct.resize_hover = tag;
@@ -2345,10 +2350,17 @@ impl ChartView {
     }
 
     /// A press on the hovered tag's − / size / +. Returns whether it was on one.
-    fn resize_pressed(&mut self, x: f64, y: f64, alt: bool, cx: &mut Context<Self>) -> bool {
+    fn resize_pressed(
+        &mut self,
+        x: f64,
+        y: f64,
+        alt: bool,
+        typing: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use crate::order_resize::{ResizeHit, SizeStep};
         use crate::trade_bar::TradePane;
-        let Some((id, Some(hit))) = self.ct.resize_target(x as f32, y as f32) else {
+        let Some((id, Some(hit))) = self.ct.resize_target(x as f32, y as f32, typing) else {
             return false;
         };
         let id = lines_trading::OrderId(id);
@@ -2676,9 +2688,10 @@ impl ChartView {
         self.set_hover(ev.position, cx);
         // Under the pointer now, and hovered since the pointer last moved.
         let (tx, ty) = self.local(ev.position);
+        let typing = self.trade.resize_edit.as_ref().map(|(id, _)| id.0);
         let hovered = self
             .ct
-            .resize_target(tx as f32, ty as f32)
+            .resize_target(tx as f32, ty as f32, typing)
             .map(|(id, _)| id)
             .filter(|id| self.ct.resize_hover == Some(*id))
             .map(lines_trading::OrderId);

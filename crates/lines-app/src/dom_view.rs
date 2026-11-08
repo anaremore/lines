@@ -165,6 +165,9 @@ impl TradePane for DomView {
             Ok(p) if p.grows && !self.trade.arming.is_armed() => {
                 self.trade.flash(dom_trade::ENABLE_TO_TRADE);
             }
+            Ok(p) if p.grows && self.store.stale_for().is_some() => {
+                self.trade.flash(trade_bar::FEED_STALE);
+            }
             Ok(p) => {
                 for leg in p.commands {
                     let command = t.submit(lines_trading::Source::Dom, issued, leg.command);
@@ -623,11 +626,16 @@ impl DomView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.trade.resize_armed = true;
-        let hover = (self.column_at(ev.position) == Some(DomColumn::Orders))
-            .then(|| self.row_at(ev.position))
-            .flatten()
-            .and_then(|price| self.zone_pressed(price, ev.position))
-            .map(|(id, _)| id);
+        // On the hovered mark's − or + (a pixel past its row) it stays hovered.
+        let hover = if self.hover_step(ev.position).is_some() {
+            self.orders.hover
+        } else {
+            (self.column_at(ev.position) == Some(DomColumn::Orders))
+                .then(|| self.row_at(ev.position))
+                .flatten()
+                .and_then(|price| self.zone_pressed(price, ev.position))
+                .map(|(id, _)| id)
+        };
         if hover != self.orders.hover {
             self.orders.hover = hover;
             cx.notify();
