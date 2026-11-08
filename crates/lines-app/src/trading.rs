@@ -1954,7 +1954,10 @@ mod tests {
         let mut s = TradeState::default();
         s.deny(CommandId(9), n, "read-only".into(), Instant::now());
         assert!(s.flashes.is_empty(), "no DENIED flash");
-        assert!(matches!(s.result(CommandId(9)), Some(Err(_))), "the panel reads it");
+        assert!(
+            matches!(s.result(CommandId(9)), Some(Err(_))),
+            "the panel reads it"
+        );
     }
 
     #[test]
