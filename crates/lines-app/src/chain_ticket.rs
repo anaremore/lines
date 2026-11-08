@@ -24,6 +24,11 @@ pub fn click_sends(one_click: bool, focused: bool, clicks: usize) -> bool {
     one_click && focused && clicks <= 1
 }
 
+/// Whether a quote is past the guard's limit: nothing about it can be used (nor shown as live).
+pub fn quote_stale(q: &OptionQuote, guard: &OptionGuard, now: lines_core::UtcMillis) -> bool {
+    now.0 - q.time.0 > guard.stale_after_ms
+}
+
 /// A cell of the quote: which side of the market a click or Enter takes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Cell {
@@ -358,6 +363,41 @@ pub fn write_position(
     Ok(())
 }
 
+/// A position with working orders too: `+3 @ 1.18 · S 2`, `+3 @ 1.18 · S 2 +1`.
+pub fn write_with_orders(
+    out: &mut impl std::fmt::Write,
+    side: Side,
+    open: i64,
+    more: u32,
+) -> std::fmt::Result {
+    out.write_str(" · ")?;
+    out.write_char(side_letter(side))?;
+    write!(out, " {open}")?;
+    if more > 0 {
+        write!(out, " +{more}")?;
+    }
+    Ok(())
+}
+
+/// What a narrow row has room for: `+3`, `-1`, or an order's `S2`.
+pub fn write_compact(
+    out: &mut impl std::fmt::Write,
+    position: i64,
+    order: Option<(Side, i64)>,
+) -> std::fmt::Result {
+    match (position, order) {
+        (0, Some((side, open))) => write!(out, "{}{open}", side_letter(side)),
+        (p, _) => write!(out, "{p:+}"),
+    }
+}
+
+fn side_letter(side: Side) -> char {
+    match side {
+        Side::Buy => 'B',
+        Side::Sell => 'S',
+    }
+}
+
 /// A working order on its row: `S 2 @ 1.60`, `B 1 @ 2.40`.
 pub fn write_order(
     out: &mut impl std::fmt::Write,
@@ -366,10 +406,7 @@ pub fn write_order(
     open: i64,
     p: Option<Price>,
 ) -> std::fmt::Result {
-    out.write_char(match side {
-        Side::Buy => 'B',
-        Side::Sell => 'S',
-    })?;
+    out.write_char(side_letter(side))?;
     write!(out, " {open}")?;
     if let Some(p) = p {
         out.write_str(" @ ")?;
@@ -733,6 +770,33 @@ mod tests {
         write_order(&mut s, &p, Side::Buy, 1, Some(Price(240))).unwrap();
         assert_eq!(s, "B 1 @ 2.40");
         assert_eq!(size_key("SPY"), "SPY options");
+        // A position with orders, and the narrow row's mark.
+        s.clear();
+        write_position(&mut s, &p, 3, Some(118.0)).unwrap();
+        write_with_orders(&mut s, Side::Sell, 2, 1).unwrap();
+        assert_eq!(s, "+3 @ 1.18 · S 2 +1");
+        s.clear();
+        write_compact(&mut s, 3, Some((Side::Sell, 2))).unwrap();
+        assert_eq!(s, "+3");
+        s.clear();
+        write_compact(&mut s, -1, None).unwrap();
+        assert_eq!(s, "-1");
+        s.clear();
+        write_compact(&mut s, 0, Some((Side::Sell, 2))).unwrap();
+        assert_eq!(s, "S2");
+        // Past the guard's limit, a quote is stale.
+        let g = OptionGuard::default();
+        let q = quote(Some(240), Some(242));
+        assert!(!quote_stale(
+            &q,
+            &g,
+            lines_core::UtcMillis(q.time.0 + g.stale_after_ms)
+        ));
+        assert!(quote_stale(
+            &q,
+            &g,
+            lines_core::UtcMillis(q.time.0 + g.stale_after_ms + 1)
+        ));
     }
 
     /// The real core, end to end: what the ticket says beforehand is what the core answers, and

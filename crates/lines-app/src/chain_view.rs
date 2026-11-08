@@ -69,10 +69,14 @@ const HEAD_H: f32 = 2.0 * ROW_H;
 /// Expiry chips in the header.
 const MAX_EXPIRIES: usize = 8;
 /// The widest thing the Pos column's text shows.
-const POS_SAMPLE: &str = "S 10 @ 13.10 + 9 ord";
+const POS_SAMPLE: &str = "+10 @ 13.10 · S 10 +9";
+/// A narrow row's mark beside the quotes: `+10`, `S10`.
+const MARK_W: f32 = 22.0;
 /// Below this the header leaves out its title, so the account and One-click stay.
 const NARROW_HEADER: f32 = 560.0;
-/// How long to wait for the core's answer before saying there was none.
+/// Commands whose answers a pane waits for.
+const MAX_ASKED: usize = 64;
+/// How long to wait for the core's answer before saying it hasn't come.
 const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// A control's smallest height (`docs/design.md`).
 const MIN_HIT: f32 = 20.0;
@@ -238,11 +242,17 @@ pub fn write_dte(
 }
 
 /// `Nov 9`: an expiry as its chip and the title name it.
-fn chip_date(e: CivilDate) -> String {
+fn write_chip_date(out: &mut impl std::fmt::Write, e: CivilDate) -> std::fmt::Result {
     let month = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][usize::from(e.month.clamp(1, 12)) - 1];
-    format!("{month} {}", e.day)
+    write!(out, "{month} {}", e.day)
+}
+
+fn chip_date(e: CivilDate) -> String {
+    let mut s = String::new();
+    let _ = write_chip_date(&mut s, e);
+    s
 }
 
 /// A cell's text for a quote field (`—` when missing).
@@ -313,8 +323,17 @@ pub struct ChainView {
     ticket: Option<Ticket>,
     /// A click on a bid or ask sends: off in every new pane, never saved.
     one_click: bool,
-    /// Commands waiting for the core's answer, with when they went.
-    asked: Vec<(CommandId, std::time::Instant)>,
+    /// Commands waiting for the core's answer (the newest [`MAX_ASKED`]).
+    asked: Vec<CommandId>,
+    /// Focused in an active window as of the last frame: what a click found. Input's capture
+    /// phase moves the focus before the pane hears the click, so now can't say.
+    aimed: bool,
+    /// A quote older than this is stale (the account's guard, as of the last frame).
+    stale_after_ms: i64,
+    /// The market clock as of the last frame.
+    now: Option<lines_core::UtcMillis>,
+    /// No quote in view is fresh.
+    quotes_stale: bool,
     /// When the ticket's order went.
     sent_at: Option<std::time::Instant>,
     /// Orders the core accepted: the broker can still reject them on arrival.
@@ -533,8 +552,12 @@ impl Pane for ChainView {
         self.feed = feed;
         self.expiry = None;
         self.selected = None;
-        // A ticket or a One-click press belongs to the symbol it was opened on.
+        // A ticket or a One-click press belongs to the symbol it was opened on, and so do the
+        // rows the last frame drew.
         self.leave_ticket();
+        self.frame.rows.clear();
+        self.frame.marks.clear();
+        self.layout = Layout::default();
         self.one_click = false;
         self.note = None;
         self.trade.feed_changed(&self.store, follow, cx);
@@ -581,6 +604,10 @@ impl ChainView {
             ticket: None,
             one_click: false,
             asked: Vec::new(),
+            aimed: false,
+            stale_after_ms: lines_trading::risk::OptionGuard::default().stale_after_ms,
+            now: None,
+            quotes_stale: false,
             sent_at: None,
             watching: Vec::new(),
             shot,
@@ -618,7 +645,12 @@ impl ChainView {
             self.trade.account = next;
             self.leave_ticket();
             self.one_click = false;
-            self.note = None;
+            self.note = self
+                .trade
+                .account
+                .as_ref()
+                .and_then(|a| t.account(a))
+                .map(|i| format!("Account: {}", i.name));
             self.seen_revision = u64::MAX;
             cx.notify();
         }
@@ -627,14 +659,23 @@ impl ChainView {
     /// Close the ticket; an order on its way still gets its answer shown (in the footer).
     fn leave_ticket(&mut self) {
         if let Some(id) = self.ticket.take().and_then(|t| t.sent) {
-            self.asked.push((id, std::time::Instant::now()));
+            self.remember(id);
         }
         self.sent_at = None;
     }
 
+    /// Wait for a command's answer; the answers kept are finite, so only the newest are.
+    fn remember(&mut self, id: CommandId) {
+        if self.asked.len() >= MAX_ASKED {
+            self.asked.remove(0);
+        }
+        self.asked.push(id);
+    }
+
     /// The market or trading state is mid-update this instant: say so rather than act on a guess.
-    fn busy(&mut self) -> bool {
-        let busy = self.store.try_read().is_none() || self.trade.try_cache().is_none();
+    fn busy(&mut self, cx: &App) -> bool {
+        let trading = Trading::try_global(cx).is_some();
+        let busy = self.store.try_read().is_none() || (trading && self.trade.try_cache().is_none());
         if busy {
             self.note = Some("Market data busy; try again".to_owned());
         }
@@ -679,6 +720,10 @@ impl ChainView {
     }
 
     fn set_size(&mut self, q: i64, cx: &mut Context<Self>) {
+        // An unavailable pane's product may be a stand-in: never change a real symbol's size.
+        if pane::unavailable_title(&self.feed).is_some() {
+            return;
+        }
         let key = ticket::size_key(self.product.symbol);
         crate::picker_view::update_settings(cx, |s| {
             s.order_sizes.insert(key, q);
@@ -745,24 +790,35 @@ impl ChainView {
             .map(|t| t.submit(lines_trading::Source::Dom, std::time::Instant::now(), cmd))
     }
 
+    /// The quote, unless it's past the guard's limit: a stale one prices nothing.
+    fn live_quote(&self, key: OptionKey) -> Option<OptionQuote> {
+        let q = self.quote(key)?;
+        let guard = lines_trading::risk::OptionGuard {
+            stale_after_ms: self.stale_after_ms,
+            ..Default::default()
+        };
+        let stale = self.now.is_some_and(|n| ticket::quote_stale(&q, &guard, n));
+        (!stale).then_some(q)
+    }
+
     /// Open the ticket on a cell of a series.
-    fn open_ticket(&mut self, key: OptionKey, cell: Cell) {
+    fn open_ticket(&mut self, key: OptionKey, cell: Cell, cx: &App) {
         let Some(rules) = self.rules() else {
             return;
         };
         self.note = None;
-        if self.busy() {
+        if self.busy(cx) {
             return;
         }
         self.leave_ticket();
-        let q = self.quote(key);
+        let q = self.live_quote(key);
         self.ticket = Some(Ticket::new(key, cell.side(), q.as_ref(), rules));
     }
 
     /// A click on a quote cell with One-click on: a limit at that side, at once.
     fn send_click(&mut self, key: OptionKey, cell: Cell, cx: &mut Context<Self>) {
         self.note = None;
-        if self.busy() {
+        if self.busy(cx) {
             return;
         }
         {
@@ -784,12 +840,15 @@ impl ChainView {
 
     fn ask(&mut self, cmd: lines_trading::Command, cx: &App) {
         if let Some(id) = self.submit(cmd, cx) {
-            self.asked.push((id, std::time::Instant::now()));
+            self.remember(id);
         }
     }
 
     /// Enter on the ticket: send what the button says, once.
     fn send_ticket(&mut self, cx: &mut Context<Self>) {
+        if self.busy(cx) {
+            return;
+        }
         let Some(t) = self.ticket.as_ref() else {
             return;
         };
@@ -837,7 +896,7 @@ impl ChainView {
             return;
         };
         self.note = None;
-        if self.busy() {
+        if self.busy(cx) {
             return;
         }
         let position = self.position(key);
@@ -885,7 +944,7 @@ impl ChainView {
         let mut accepted: Vec<OrderId> = Vec::new();
         let asked = &mut self.asked;
         let before = asked.len();
-        asked.retain(|(id, at)| match st.result(*id) {
+        asked.retain(|id| match st.result(*id) {
             Some(Err(e)) => {
                 note = Some(format!("Refused: {}", e.message));
                 false
@@ -894,8 +953,7 @@ impl ChainView {
                 accepted.extend_from_slice(ids);
                 false
             }
-            // The answers kept are finite: an old one that never came stops being waited for.
-            None => at.elapsed() < ANSWER_WAIT,
+            None => true,
         });
         let mut changed = asked.len() != before;
         if let Some(Ok(ids)) = &answer {
@@ -931,14 +989,16 @@ impl ChainView {
                 self.sent_at = None;
                 changed = true;
             }
+            // Still on its way, however long: forgetting it would let Enter send it twice. The
+            // ticket says so after a while, and Esc leaves it with the answer still expected.
             None => {
-                if self.sent_at.is_some_and(|at| at.elapsed() >= ANSWER_WAIT) {
-                    if let Some(t) = self.ticket.as_mut() {
-                        t.sent = None;
-                        t.refused = Some("no answer from the trading core".to_owned());
+                let late = self.sent_at.is_some_and(|at| at.elapsed() >= ANSWER_WAIT);
+                if late && let Some(t) = self.ticket.as_mut() {
+                    let waiting = "no answer yet from the trading core; Esc leaves it on its way";
+                    if t.refused.as_deref() != Some(waiting) {
+                        t.refused = Some(waiting.to_owned());
+                        changed = true;
                     }
-                    self.sent_at = None;
-                    changed = true;
                 }
             }
         }
@@ -954,6 +1014,7 @@ impl ChainView {
         let shift = k.modifiers.shift;
         match k.key.as_str() {
             "escape" => self.leave_ticket(),
+            "enter" if self.ticket.as_ref().is_some_and(|t| t.sent.is_some()) => {}
             // A held key never sends an order.
             "enter" if ev.is_held => {}
             "enter" => self.send_ticket(cx),
@@ -1022,9 +1083,9 @@ impl ChainView {
         let Some(expiry) = expiry else {
             return;
         };
-        self.shot = None;
         self.one_click = shot.one_click;
         let Some((cell, strike, right)) = shot.open else {
+            self.shot = None;
             return;
         };
         let Ok(units) = self.product.price.scale.parse_decimal(&strike) else {
@@ -1035,10 +1096,15 @@ impl ChainView {
             strike: Price(units),
             right,
         };
+        // A Close needs the scripted position, which arrives after the first frames.
+        if shot.close && self.position(key) == 0 {
+            return;
+        }
+        self.shot = None;
         self.selected = Some(key.strike);
         self.side = right;
         self.cell = cell;
-        self.open_ticket(key, cell);
+        self.open_ticket(key, cell, cx);
         if shot.close {
             self.toggle_close(cx);
         }
@@ -1149,7 +1215,8 @@ impl ChainView {
         }
         self.note = None;
         match k.key.as_str() {
-            "up" | "down" if m.shift => {
+            // With One-click on the size shows on its switch; otherwise it shows on the ticket.
+            "up" | "down" if m.shift && self.one_click => {
                 let q = crate::dom_trade::step_qty(self.size(cx), k.key == "up");
                 self.set_size(q, cx);
             }
@@ -1161,6 +1228,8 @@ impl ChainView {
             "left" => self.step_expiry(-1),
             "right" => self.step_expiry(1),
             "tab" if m.shift => self.cell = self.cell.other(),
+            // A held key cancels one order, not all of them.
+            "delete" if ev.is_held => {}
             "delete" => {
                 // The selected series' first working order: pressed again, the next.
                 let first = self.selected_key().and_then(|key| {
@@ -1181,7 +1250,7 @@ impl ChainView {
             // A held key never opens or sends: one press, one ticket.
             "enter" if ev.is_held => {}
             "enter" => match self.selected_key() {
-                Some(key) => self.open_ticket(key, self.cell),
+                Some(key) => self.open_ticket(key, self.cell, cx),
                 // Nothing selected yet: the first press selects the money.
                 None => self.move_strike(0),
             },
@@ -1226,12 +1295,17 @@ impl ChainView {
 
     /// A click in the table: select the row's strike, and the side by which half was hit.
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // The click that only brings the pane forward aims at nothing: One-click waits for the next.
-        let focused = self.focus.is_focused(window);
+        // The click that only brings the pane forward aims at nothing: One-click waits for the
+        // next. As of the last frame: the workspace has already focused the pane by now.
+        let focused = self.aimed;
         self.focus.focus(window, cx);
         // A click that closes the picker does only that: never a press on what's under it.
         if self.picker.close() {
             cx.notify();
+            return;
+        }
+        // Nothing is drawn there: an unavailable pane acts on nothing.
+        if pane::unavailable_title(&self.feed).is_some() {
             return;
         }
         let x = f(ev.position.x);
@@ -1282,11 +1356,12 @@ impl ChainView {
                 if ticket::click_sends(self.one_click, focused, ev.click_count) {
                     self.send_click(key, cell, cx);
                 } else if !self.one_click {
-                    self.open_ticket(key, cell);
+                    self.open_ticket(key, cell, cx);
                 } else if !focused {
                     self.note = Some("Pane focused: click again to send".to_owned());
                 }
             } else if let Some(a) = self.layout.actions.map(|a| a[side])
+                && ev.click_count <= 1
                 && x >= a.0
                 && x < a.1
                 && let Some(m) = self.frame.mark(strike, right).copied()
@@ -1316,6 +1391,7 @@ impl ChainView {
         self.common.paints += 1;
         self.bounds = bounds;
         let t = self.theme;
+        self.now = Trading::try_global(cx).and_then(|tr| tr.now(&self.store));
         window.paint_quad(fill(bounds, t.bg));
         let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
         let (w, h) = (f(bounds.size.width), f(bounds.size.height));
@@ -1367,11 +1443,15 @@ impl ChainView {
         let action_w = self.glyphs.width("Cancel", t.text_main, false, window) + PAD;
         let pos_full =
             self.glyphs.width(POS_SAMPLE, t.text_main, false, window) + action_w + 2.0 * PAD;
-        let pos_w = if w >= strike_w + 2.0 * (cols[5] + cols[6] + pos_full) {
+        let quotes_w = strike_w + 2.0 * (cols[5] + cols[6]);
+        let pos_w = if w >= quotes_w + 2.0 * pos_full {
             pos_full
+        } else if w >= quotes_w + 2.0 * MARK_W {
+            MARK_W
         } else {
             0.0
         };
+        let compact = pos_w > 0.0 && pos_w < pos_full;
         let shown = fit_columns(w - 2.0 * pos_w, strike_w, cols);
         let table_w = strike_w
             + 2.0
@@ -1414,6 +1494,23 @@ impl ChainView {
             Bounds::new(point(px(ox), px(top)), size(px(w), px(HEAD_H))),
             t.panel,
         ));
+        // A narrow header has no room for the expiry: it stays in view here.
+        if w < NARROW_HEADER
+            && let Some(e) = self.frame.expiry
+        {
+            let mut date = FixedStr::<24>::new();
+            let _ = write_chip_date(&mut date, e);
+            self.glyphs.paint(
+                date.as_str(),
+                ox + PAD,
+                top,
+                ROW_H,
+                t.text_main,
+                false,
+                window,
+                cx,
+            );
+        }
         self.glyphs.paint_right(
             "CALLS",
             calls_end - PAD,
@@ -1453,7 +1550,7 @@ impl ChainView {
                 );
             }
         }
-        if pos_w > 0.0 {
+        if !compact && pos_w > 0.0 {
             self.glyphs.paint(
                 "Pos",
                 x0 + PAD,
@@ -1492,6 +1589,23 @@ impl ChainView {
             ),
             t.axis_line,
         ));
+        // No quote in view is fresh: a word in the header, on the next render.
+        let newest = self
+            .frame
+            .rows
+            .iter()
+            .flat_map(|r| [r.call, r.put])
+            .flatten()
+            .map(|q| q.time.0)
+            .max();
+        let quotes_stale = self
+            .now
+            .zip(newest)
+            .is_some_and(|(n, q)| n.0 - q > self.stale_after_ms);
+        if quotes_stale != self.quotes_stale {
+            self.quotes_stale = quotes_stale;
+            self.seen_revision = u64::MAX;
+        }
         // Rows: around the selection, else the money (copied in `frame`).
         let line_at = self.frame.line_at;
         let quotes = |at: &[f32; 7]| Quotes {
@@ -1506,7 +1620,7 @@ impl ChainView {
             strike_x: (calls_end, puts_start),
             calls: quotes(&call_x),
             puts: quotes(&put_x),
-            actions: (pos_w > 0.0).then(|| [action_at(x0), action_at(put_pos_x)]),
+            actions: (pos_w > 0.0 && !compact).then(|| [action_at(x0), action_at(put_pos_x)]),
             first_row: self.frame.first_row,
             rows: self.frame.rows.len() + usize::from(line_at.is_some()),
             line_at,
@@ -1544,12 +1658,17 @@ impl ChainView {
                 let c = Col::CALLS[i];
                 for (side_x, q) in [(call_x[i], row.call.as_ref()), (put_x[i], row.put.as_ref())] {
                     cell(&mut s, &self.product, q, c);
+                    // A stale quote doesn't read as live (the header says so in a word).
+                    let stale = q.is_some_and(|q| {
+                        self.now
+                            .is_some_and(|n| n.0 - q.time.0 > self.stale_after_ms)
+                    });
                     self.glyphs.paint_right(
                         s.as_str(),
                         side_x + cols[i] - PAD,
                         y,
                         ROW_H,
-                        t.text_main,
+                        if stale { t.text_dim } else { t.text_main },
                         false,
                         window,
                         cx,
@@ -1568,7 +1687,8 @@ impl ChainView {
                 window,
                 cx,
             );
-            // What the account has here: in the Pos column, else a mark beside the strike.
+            // What the account has here: in the Pos column, a short mark in a narrow pane's, and
+            // with no room for even that a dot beside the strike.
             for (right, cell_x, dot_x) in [
                 (Right::Call, x0, strike_x + 1.0),
                 (Right::Put, put_pos_x, strike_x + strike_w - PAD + 1.0),
@@ -1582,18 +1702,35 @@ impl ChainView {
                     continue;
                 }
                 let mut pos = FixedStr::<48>::new();
+                if compact {
+                    let order = m.order.map(|(_, side, open, _)| (side, open));
+                    let _ = ticket::write_compact(&mut pos, m.position, order);
+                    self.glyphs.paint(
+                        pos.as_str(),
+                        cell_x + 2.0,
+                        y,
+                        ROW_H,
+                        t.text_main,
+                        false,
+                        window,
+                        cx,
+                    );
+                    continue;
+                }
                 if m.position != 0 {
                     let _ = ticket::write_position(&mut pos, &self.product, m.position, m.avg);
+                    if let Some((_, side, open, _)) = m.order {
+                        let more = m.orders.saturating_sub(1);
+                        let _ = ticket::write_with_orders(&mut pos, side, open, more);
+                    }
                 } else if let Some((_, side, open, price)) = m.order {
                     let _ = ticket::write_order(&mut pos, &self.product, side, open, price);
-                }
-                let extra = if m.position != 0 {
-                    m.orders
-                } else {
-                    m.orders.saturating_sub(1)
-                };
-                if extra > 0 {
-                    let _ = std::fmt::Write::write_fmt(&mut pos, format_args!(" + {extra} ord"));
+                    if m.orders > 1 {
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut pos,
+                            format_args!(" +{}", m.orders - 1),
+                        );
+                    }
                 }
                 self.glyphs.paint(
                     pos.as_str(),
@@ -1738,7 +1875,7 @@ impl ChainView {
             left.push_str("  Option chain");
         }
         // The shown expiry, named even where its chip doesn't fit.
-        if let Some(e) = shown {
+        if let Some(e) = shown.filter(|_| !narrow) {
             left.push_str(&format!("  {}", chip_date(e)));
         }
         let held = self.held_expiries();
@@ -1813,6 +1950,17 @@ impl ChainView {
                             word.map(|w| div().flex_shrink_0().text_color(t.text_main).child(w)),
                         )
                         .children(pane::stale_badge(&self.store, &t))
+                        .when(self.quotes_stale, |d| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_1()
+                                    .bg(t.warn)
+                                    .text_color(t.on_warn)
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("QUOTES STALE"),
+                            )
+                        })
                         .child(
                             // Whole chips only: those that don't fit wrap onto a second line,
                             // which the fixed height hides.
@@ -1824,7 +1972,8 @@ impl ChainView {
                                 .h(px(18.0))
                                 .overflow_hidden()
                                 .min_w_0()
-                                .children(chips),
+                                // Narrow: not even a whole one fits beside the switch.
+                                .when(!narrow, |d| d.children(chips)),
                         ),
                 ),
             )
@@ -1864,8 +2013,10 @@ impl ChainView {
                             .border_1()
                             .rounded_sm()
                             .border_color(if one_click { t.accent } else { t.control_edge })
-                            .text_color(t.text_main)
-                            .when(one_click, |d| d.font_weight(gpui::FontWeight::BOLD))
+                            .text_color(if one_click { t.bg } else { t.text_main })
+                            .when(one_click, |d| {
+                                d.bg(t.accent).font_weight(gpui::FontWeight::BOLD)
+                            })
                             .child(if one_click {
                                 format!("One-click: ON · {size}")
                             } else {
@@ -1973,16 +2124,26 @@ impl ChainView {
         for (id, side, open, price) in orders {
             let mut s = String::new();
             let _ = ticket::write_order(&mut s, &self.product, side, open, price);
-            row = row.child(s).child(
-                button(format!("chain-cancel-{}", id.0).into(), "Cancel").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.focus.focus(window, cx);
-                        this.press_cancel(id, cx);
-                        cx.notify();
-                    }),
-                ),
+            // An order and its Cancel wrap as one.
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_2()
+                    .child(s)
+                    .child(
+                        button(format!("chain-cancel-{}", id.0).into(), "Cancel").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.focus.focus(window, cx);
+                                this.press_cancel(id, cx);
+                                cx.notify();
+                            }),
+                        ),
+                    ),
             );
         }
         Some(row.into_any_element())
@@ -1995,7 +2156,7 @@ impl ChainView {
         let product = self.product.clone();
         let contract = self.contract(tk.key);
         let rules = self.rules()?;
-        let q = self.quote(tk.key);
+        let q = self.live_quote(tk.key);
         let (bid, ask) = ticket::sides(q.as_ref());
         let mid = match (bid, ask) {
             (Some(b), Some(a)) => Some(ticket::mid_limit(tk.side, b, a, rules)),
@@ -2026,8 +2187,10 @@ impl ChainView {
                 .cursor_pointer()
                 .px_1()
                 .h(px(MIN_HIT))
+                .min_w(px(MIN_HIT))
                 .flex()
                 .items_center()
+                .justify_center()
                 .border_1()
                 .rounded_sm()
                 .border_color(if on { t.accent } else { t.control_edge })
@@ -2094,6 +2257,12 @@ impl ChainView {
             Side::Buy => t.up,
             Side::Sell => t.down,
         };
+        let account_name = self
+            .trade
+            .account
+            .as_ref()
+            .and_then(|a| Trading::try_global(cx).and_then(|t| t.account(a)))
+            .map(|i| i.name);
         let top = div()
             .flex()
             .flex_row()
@@ -2129,7 +2298,8 @@ impl ChainView {
                         this.toggle_close(cx);
                     }),
                 )
-            }));
+            }))
+            .children(account_name.map(|n| div().text_color(t.text_dim).child(n)));
         let mut controls = div().flex().flex_row().flex_wrap().items_center().gap_2();
         if let Some(chips) = qty_chips {
             controls = controls.child(
@@ -2170,7 +2340,14 @@ impl ChainView {
                     .text_color(t.text_main)
                     .child(price_text),
             )
-            .children(premium.map(|c| div().flex_shrink_0().text_color(t.text_main).child(c)))
+            // A slot of its own width, so the buttons after it hold still as the price moves.
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .min_w(px(92.0))
+                    .text_color(t.text_main)
+                    .children(premium),
+            )
             .child(
                 chip("ticket-esc".into(), false, "Esc".to_owned()).on_mouse_down(
                     MouseButton::Left,
@@ -2199,7 +2376,12 @@ impl ChainView {
                             .border_color(t.control_edge)
                             .text_color(t.text_dim)
                     })
-                    .child(format!("{send} ⏎"))
+                    // Enter's glyph only where Enter sends.
+                    .child(if can_send {
+                        format!("{send} ⏎")
+                    } else {
+                        send
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -2211,12 +2393,12 @@ impl ChainView {
                     ),
             );
         let flagged = |word: &'static str, text: String| {
+            // The reason wraps beside its word, whole at any width.
             div()
                 .flex()
                 .flex_row()
-                .flex_wrap()
                 .gap_2()
-                .items_center()
+                .items_start()
                 .child(
                     div()
                         .flex_shrink_0()
@@ -2226,7 +2408,7 @@ impl ChainView {
                         .font_weight(gpui::FontWeight::BOLD)
                         .child(word),
                 )
-                .child(div().text_color(t.text_main).child(text))
+                .child(div().flex_1().min_w_0().text_color(t.text_main).child(text))
         };
         let line = match (reason, stale) {
             (Some(why), _) => flagged("Can't send", why),
@@ -2238,7 +2420,11 @@ impl ChainView {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_color(t.text_dim)
-                .child("↑↓ price by tick  ·  Shift ↑↓ quantity  ·  Tab close  ·  Enter send  ·  Esc cancel"),
+                .child(if closable.is_some() {
+                    "↑↓ price by tick  ·  Shift ↑↓ quantity  ·  Tab close  ·  Enter send  ·  Esc cancel"
+                } else {
+                    "↑↓ price by tick  ·  Shift ↑↓ quantity  ·  Enter send  ·  Esc cancel"
+                }),
         };
         Some(
             div()
@@ -2318,9 +2504,18 @@ fn order_price(cmd: &lines_trading::Command) -> Option<Price> {
 }
 
 impl Render for ChainView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let t = self.theme;
+        self.aimed = self.focus.is_focused(window) && window.is_window_active();
+        if let Some(i) = self
+            .trade
+            .account
+            .as_ref()
+            .and_then(|a| Trading::try_global(cx).and_then(|t| t.account(a)))
+        {
+            self.stale_after_ms = i.option_guard.stale_after_ms;
+        }
         self.apply_shot(cx);
         let size = self.size(cx);
         let strip = self.row_strip(cx);
@@ -2360,7 +2555,10 @@ impl Render for ChainView {
             )
             .children(strip)
             .children(dock)
-            .child(self.footer(size))
+            // The ticket has its own hints; a message still shows.
+            .when(self.ticket.is_none() || self.note.is_some(), |d| {
+                d.child(self.footer(size))
+            })
     }
 }
 
