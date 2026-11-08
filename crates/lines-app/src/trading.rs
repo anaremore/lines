@@ -147,6 +147,9 @@ struct Note {
     account: AccountId,
     contract: Option<ContractKey>,
     price: Option<Price>,
+    /// Its refusal isn't a DENIED flash: the pane that sent it shows the answer itself (the
+    /// bracket mode: a confirmation, or its own message).
+    silent: bool,
 }
 
 /// The UI's copy of the trading state, built from events only.
@@ -186,7 +189,7 @@ impl TradeState {
         match e {
             Event::Command { id, result, .. } => {
                 let note = self.notes.remove(&id);
-                if let (Err(r), Some(n)) = (&result, &note) {
+                if let (Err(r), Some(n)) = (&result, note.as_ref().filter(|n| !n.silent)) {
                     self.flashes.push_back(Flash {
                         kind: FlashKind::Denied,
                         account: n.account.clone(),
@@ -302,14 +305,16 @@ impl TradeState {
     /// A command refused before it was sent (a read-only account): its result and a DENIED
     /// flash, as if the core had refused it.
     fn deny(&mut self, id: CommandId, n: Note, message: String, now: Instant) {
-        self.flashes.push_back(Flash {
-            kind: FlashKind::Denied,
-            account: n.account,
-            contract: n.contract,
-            price: n.price,
-            message: message.clone(),
-            at: now,
-        });
+        if !n.silent {
+            self.flashes.push_back(Flash {
+                kind: FlashKind::Denied,
+                account: n.account,
+                contract: n.contract,
+                price: n.price,
+                message: message.clone(),
+                at: now,
+            });
+        }
         self.results
             .push_back((id, Err(Reject::new(RejectCode::Invalid, message))));
         while self.results.len() > KEEP_RESULTS {
@@ -321,6 +326,7 @@ impl TradeState {
     /// race) and was a refusal, it flashes now. Returns whether it did.
     fn note(&mut self, id: CommandId, n: Note, now: Instant) -> bool {
         match self.result(id) {
+            Some(Err(_)) if n.silent => false,
             Some(Err(r)) => {
                 let message = r.message.clone();
                 self.flashes.push_back(Flash {
@@ -637,6 +643,11 @@ pub struct Trading {
     pub start_account_menu: bool,
     /// Screenshot fixture (`--bracket-editor`): DOMs open their bracket-preset editor.
     pub start_editor: bool,
+    /// Screenshot fixture: panes switch to one bracket for the whole position, once the
+    /// fixture's script has run (`settled`).
+    pub start_bracket_switch: bool,
+    /// Screenshot fixture: `settle` has run (the script's events reached the cache).
+    pub settled: std::sync::atomic::AtomicBool,
     /// The paper broker refuses orders while the product's session is closed (the switch's
     /// "market closed" badge follows it; off for the mock).
     pub check_sessions: bool,
@@ -1247,6 +1258,8 @@ impl Trading {
             start_hotkeys: false,
             start_account_menu: false,
             start_editor: false,
+            start_bracket_switch: false,
+            settled: std::sync::atomic::AtomicBool::new(false),
             check_sessions,
             start_account: None,
             journal,
@@ -1411,6 +1424,8 @@ impl Trading {
         }
         // The journal applied every event the core sent before the sync above.
         self.journal.sync();
+        self.settled
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Wait (bounded, 5 s) until every venue's accounts are listed and its core has rebuilt
@@ -1475,7 +1490,8 @@ impl Trading {
 }
 
 /// The note for a command: its account, contract and price (`None`: strategy controls, which
-/// name an instance and show in the strategy panel, decision 0025).
+/// name an instance and show in the strategy panel, decision 0025). It routes the command to
+/// its account's core and refuses it on a read-only account.
 fn note_for(cmd: &TradeCommand) -> Option<Note> {
     let (account, contract, price) = match cmd {
         TradeCommand::PlaceOrder(o) | TradeCommand::PlaceExit(o) => {
@@ -1495,7 +1511,14 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         }
         TradeCommand::SetBracketMode {
             account, contract, ..
-        } => (account.clone(), Some(*contract), None),
+        } => {
+            return Some(Note {
+                account: account.clone(),
+                contract: Some(*contract),
+                price: None,
+                silent: true,
+            });
+        }
         TradeCommand::AddStrategy(_)
         | TradeCommand::RemoveStrategy { .. }
         | TradeCommand::ArmStrategy { .. }
@@ -1506,6 +1529,7 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         account,
         contract,
         price,
+        silent: false,
     })
 }
 
@@ -1911,6 +1935,31 @@ impl Trading {
 
 #[cfg(test)]
 mod tests {
+    /// The bracket mode names its account and contract (so it goes to that account's core and
+    /// is refused on a read-only one) but flashes no DENIED: the trade panel shows its answer.
+    #[test]
+    fn the_bracket_mode_is_routed_like_an_order_but_answered_by_the_panel() {
+        use lines_core::{ContractKey, Month};
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let n = note_for(&TradeCommand::SetBracketMode {
+            account: AccountId::new("venue-1"),
+            contract: k,
+            mode: lines_trading::BracketMode::PerEntry,
+            replace: false,
+        })
+        .expect("routed by its account");
+        assert_eq!(n.account, AccountId::new("venue-1"));
+        assert_eq!(n.contract, Some(k));
+        assert!(n.silent);
+        let mut s = TradeState::default();
+        s.deny(CommandId(9), n, "read-only".into(), Instant::now());
+        assert!(s.flashes.is_empty(), "no DENIED flash");
+        assert!(
+            matches!(s.result(CommandId(9)), Some(Err(_))),
+            "the panel reads it"
+        );
+    }
+
     #[test]
     fn venue_command_ids_keep_internal_ones_apart() {
         let tag = 1u64 << VENUE_TAG_SHIFT;

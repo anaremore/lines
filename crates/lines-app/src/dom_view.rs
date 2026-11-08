@@ -254,6 +254,7 @@ impl DomView {
         self.trade = PaneTrade::new(doc, cx);
         if let Some(t) = Trading::try_global(cx) {
             let (on, editor) = (t.start_armed, t.start_editor);
+            self.trade.switch_pending = t.start_bracket_switch;
             if on && !self.trade.arming.is_armed() {
                 self.trade.arm_event(crate::dom_trade::ArmEvent::Toggle, cx);
             }

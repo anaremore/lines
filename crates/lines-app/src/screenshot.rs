@@ -65,6 +65,8 @@ pub struct Shot {
     pub bracket_units: Option<crate::brackets::BracketUnits>,
     /// DOMs open their bracket-preset editor (`--bracket-editor`).
     pub bracket_editor: bool,
+    /// One bracket for the whole position (`--bracket-position on|ask`).
+    pub bracket_position: Option<crate::BracketPositionArg>,
     /// The focused pane's header controls show (`--hover-header`).
     pub hover_header: bool,
     /// Record the frame's layout and write the layout lint's findings beside each PNG
@@ -139,6 +141,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         drawings: seed,
         bracket_units,
         bracket_editor,
+        bracket_position,
         hover_header,
         layout_report,
         settings: settings_shot,
@@ -173,6 +176,16 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     }
     trading.start_account_menu = account_menu;
     trading.start_editor = bracket_editor;
+    trading.start_bracket_switch = bracket_position == Some(crate::BracketPositionArg::Ask);
+    let position_symbols: Vec<&'static str> =
+        if bracket_position == Some(crate::BracketPositionArg::On) {
+            feeds
+                .iter()
+                .map(|f| f.store().read().product.symbol)
+                .collect()
+        } else {
+            Vec::new()
+        };
     let strategies = if strategies_demo {
         let d = feeds
             .iter()
@@ -231,6 +244,17 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         let mut settings = AppSettings::ephemeral();
         if let Some(m) = pnl {
             settings.settings.pnl_display = m;
+        }
+        for a in &account_ids {
+            for s in &position_symbols {
+                settings
+                    .settings
+                    .bracket_presets
+                    .entry(a.clone())
+                    .or_default()
+                    .position
+                    .insert((*s).to_owned());
+            }
         }
         if let Some(u) = bracket_units {
             for a in &account_ids {

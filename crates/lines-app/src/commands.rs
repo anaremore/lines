@@ -229,6 +229,8 @@ pub enum TradeCmd {
     BracketUnits,
     /// Edit the bracket presets in the DOM's panel.
     EditBrackets,
+    /// One bracket for the whole position, or a bracket per entry (per account and product).
+    BracketMode,
     /// Trade on the next account.
     NextAccount,
     QtyUp,
@@ -271,11 +273,12 @@ impl TradeCmd {
     ];
 
     /// Trading commands with no key of their own (palette and the DOM's panel).
-    pub const PALETTE_ONLY: [TradeCmd; 4] = [
+    pub const PALETTE_ONLY: [TradeCmd; 5] = [
         TradeCmd::Enable,
         TradeCmd::Disable,
         TradeCmd::BracketUnits,
         TradeCmd::EditBrackets,
+        TradeCmd::BracketMode,
     ];
 
     /// The order a header button sends, for the order commands.
@@ -694,6 +697,7 @@ pub fn label(c: Command) -> String {
             TradeCmd::Breakeven => "Trade: move the stop to breakeven",
             TradeCmd::BracketUnits => "Trade: bracket units (ticks / points)",
             TradeCmd::EditBrackets => "Trade: edit bracket presets…",
+            TradeCmd::BracketMode => "Trade: bracket for the whole position / per entry (switch)",
             TradeCmd::NextAccount => "Trade: Next account",
             TradeCmd::QtyUp => "Trade: Quantity up",
             TradeCmd::QtyDown => "Trade: Quantity down",
