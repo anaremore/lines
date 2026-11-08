@@ -2,6 +2,9 @@
 //! there, and an × for that order), and Cancel all, which takes a second press. A group never
 //! hides a working order: every one is here, and zooming in gives each its own tag back.
 //!
+//! A row's × comes first, so it is pressable at any width; only in a window under about 280 px
+//! can the end of a long row's words be clipped.
+//!
 //! Rows never move while the list is open (design.md: nothing the trader aims at shifts under
 //! the cursor): an order that finishes stays in its row, marked done and inert. Presses act on
 //! the click, on the element pressed.
@@ -29,8 +32,8 @@ const MIN_WIDTH: f32 = 320.0;
 /// Kept from the plot's and the window's edges.
 const MARGIN: f32 = 4.0;
 
-/// Whether a row (list `width` wide) has room for its P&L beside the order's words. The order's
-/// price is never cut: its P&L gives way (a price is what the × is aimed by).
+/// Whether a row (list `width` wide) has room for its P&L beside the order's words: the P&L gives
+/// way before a price does (a price is what the × is aimed by).
 pub fn pnl_fits(text: &str, pnl: &str, width: f32) -> bool {
     // The list's border and padding, the row's two gaps and the × take 56 px; 7.5 px a character
     // (bold digits, the panel's own fit tests).
@@ -50,7 +53,7 @@ pub fn cancel_all_label(n: usize, armed: bool) -> String {
 
 /// The list's width and its left edge from the plot's: right-aligned in the plot where it fits
 /// (a narrow plot's list may cover the axis, as the style editor does), and always inside the
-/// window, so every row's × can be pressed. `plot_x` and `viewport_w` are in window coordinates.
+/// window. `plot_x` and `viewport_w` are in window coordinates.
 pub fn list_x(plot_x: f32, plot_w: f32, viewport_w: f32) -> (f32, f32) {
     let width = WIDTH
         .min(plot_w - 2.0 * MARGIN)
@@ -114,13 +117,51 @@ pub fn layer(
                 crate::pnl::Tone::Down => t.down,
                 crate::pnl::Tone::Flat => t.text_main,
             });
-            let row = div()
+            // The × first: a long row's words can never push it out of the list.
+            let press = if r.open {
+                div()
+                    .id(("group-cancel", id))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .border_1()
+                    .border_color(t.axis_line)
+                    .text_color(t.text_main)
+                    .cursor_pointer()
+                    .child("×")
+                    // A double-click's second press never cancels: the list may have opened
+                    // under the pointer on its first.
+                    .on_click(cx.listener(move |v, ev: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        if ev.click_count() > 1 {
+                            return;
+                        }
+                        v.cancel_listed(id, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .w(px(36.0))
+                    .text_color(t.text_dim)
+                    .child("done")
+                    .into_any_element()
+            };
+            div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
                 .h(px(ROW_H))
                 .flex_shrink_0()
+                .child(press)
                 .child(
                     div()
                         .flex_1()
@@ -133,36 +174,7 @@ pub fn layer(
                         .flex_shrink_0()
                         .text_color(c)
                         .child(pnl.as_str().to_owned())
-                }));
-            if r.open {
-                row.child(
-                    div()
-                        .id(("group-cancel", id))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .flex_shrink_0()
-                        .w(px(22.0))
-                        .h(px(22.0))
-                        .border_1()
-                        .border_color(t.axis_line)
-                        .text_color(t.text_main)
-                        .cursor_pointer()
-                        .child("×")
-                        // A double-click's second press never cancels: the list may have opened
-                        // under the pointer on its first.
-                        .on_click(cx.listener(move |v, ev: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            if ev.click_count() > 1 {
-                                return;
-                            }
-                            v.cancel_listed(id, cx);
-                            cx.notify();
-                        })),
-                )
-            } else {
-                row.child(div().flex_shrink_0().text_color(t.text_dim).child("done"))
-            }
+                }))
         })
         .collect::<Vec<_>>();
     let n = menu.open_count();
@@ -275,7 +287,7 @@ mod tests {
         assert!(pnl_fits("Target 1200 @ 104523.50 · held", "", MIN_WIDTH));
     }
 
-    /// The list and every row's × stay inside the window, wherever the chart is: a narrow chart
+    /// The list stays inside the window, wherever the chart is: a narrow chart
     /// at the window's right edge moves its list left; a window narrower than the list narrows it.
     #[test]
     fn the_list_stays_inside_the_window_sideways() {
