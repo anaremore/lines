@@ -865,5 +865,5 @@ fn replay_prices_never_reach_venue_trades_in_the_journal() {
     }));
     let snap = t.journal.snapshot().unwrap();
     let tr = snap.trades.iter().find(|tr| tr.account == sim).unwrap();
-    assert_eq!(tr.mae_ticks(25), Some(0.0));
+    assert_eq!(tr.mae, lines_trading::Money::ZERO);
 }

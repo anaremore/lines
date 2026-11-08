@@ -159,26 +159,19 @@ impl Trade {
         Some((self.avg_exit()? - self.avg_entry()?) * self.dir() / tick.max(1) as f64)
     }
 
-    /// Ticks the price went against the average entry while open (≥ 0).
-    pub fn mae_ticks(&self, tick: i64) -> Option<f64> {
-        let e = self.avg_entry()?;
-        let worst = if self.side == Side::Buy {
-            e - self.low.0 as f64
-        } else {
-            self.high.0 as f64 - e
-        };
-        Some((worst / tick.max(1) as f64).max(0.0))
-    }
-
-    /// Ticks the price went in favor of the average entry while open (≥ 0).
-    pub fn mfe_ticks(&self, tick: i64) -> Option<f64> {
-        let e = self.avg_entry()?;
-        let best = if self.side == Side::Buy {
-            self.high.0 as f64 - e
-        } else {
-            e - self.low.0 as f64
-        };
-        Some((best / tick.max(1) as f64).max(0.0))
+    /// MAE and MFE in ticks per contract at the trade's largest size: the position's dollars over
+    /// what one tick was worth at `max_qty`, so dollars = ticks × quantity × tick value on every
+    /// trade. Not a price excursion: `low` and `high` include prices from before a later add, and
+    /// a contract held for only part of the move would make them disagree with the dollars.
+    pub fn excursion_ticks(&self, product: &lines_core::Product) -> Option<(f64, f64)> {
+        let spec = ContractSpec::new(product.clone(), self.contract, Money::ZERO)?;
+        let per_tick = spec.money(i128::from(spec.tick()), i128::from(self.max_qty));
+        (per_tick.0 > 0).then(|| {
+            (
+                self.mae.0 as f64 / per_tick.0 as f64,
+                self.mfe.0 as f64 / per_tick.0 as f64,
+            )
+        })
     }
 
     pub fn duration_ms(&self) -> i64 {
@@ -667,8 +660,8 @@ fn add_fill(o: &mut Open, f: TradeFill) {
 
 /// Journal CSV: one row per trade (closed trades, in order), US number format, quoted where
 /// needed. Prices are in price units converted with the product's display format. Money is the
-/// whole position; `ticks`, `mae_ticks` and `mfe_ticks` are per contract, by price (the two
-/// excursions as magnitudes: ≥ 0).
+/// whole position; `ticks`, `mae_ticks` and `mfe_ticks` are per contract, the pane's numbers
+/// (`Trade::ticks`, `Trade::excursion_ticks`; the two excursions as magnitudes: ≥ 0).
 pub fn csv(trades: &[Trade]) -> String {
     let mut out = String::from(
         "id,account,contract,side,entry_time,exit_time,trade_date,max_qty,avg_entry,avg_exit,realized,fees,net,ticks,duration_s,mae,mfe,mae_ticks,mfe_ticks,fills,tags,note\n",
@@ -685,6 +678,7 @@ pub fn csv(trades: &[Trade]) -> String {
             _ => String::new(),
         };
         let num = |v: Option<f64>| v.map(|v| format!("{v:.2}")).unwrap_or_default();
+        let excursion = product.as_ref().and_then(|p| t.excursion_ticks(p));
         let _ = writeln!(
             out,
             "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
@@ -705,8 +699,8 @@ pub fn csv(trades: &[Trade]) -> String {
             t.duration_ms() / 1000,
             t.mae,
             t.mfe,
-            num(t.mae_ticks(tick)),
-            num(t.mfe_ticks(tick)),
+            num(excursion.map(|e| e.0.abs())),
+            num(excursion.map(|e| e.1)),
             t.fills.len(),
             quote(&t.tags.join(";")),
             quote(&t.note),
