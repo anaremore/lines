@@ -717,6 +717,15 @@ const VENUE_POLL: Duration = Duration::from_millis(250);
 const VENUE_REBUILD: Duration = Duration::from_millis(500);
 /// Why a broker account the broker doesn't list right now (disconnected, or not yet
 /// connected after a start) can't be used.
+/// Moves whenever a venue's watcher rewrites the account list (a broker joins, an account's
+/// name or kind changes, one stops being listed), so panes that show account kinds repaint.
+static ACCOUNTS_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// The account list's generation ([`ACCOUNTS_EPOCH`]).
+pub fn accounts_epoch() -> u64 {
+    ACCOUNTS_EPOCH.load(Ordering::Acquire)
+}
+
 pub const NOT_LISTED: &str = "not listed by its broker now (disconnected?)";
 
 /// A connected venue that sent nothing for this long is shown stale.
@@ -941,6 +950,7 @@ fn spawn_watcher(
                         known = infos.iter().map(|a| a.id.clone()).collect();
                         all.retain(|a| a.venue != Some(index));
                         all.extend(infos);
+                        ACCOUNTS_EPOCH.fetch_add(1, Ordering::AcqRel);
                     }
                     if let Some(j) = &unmarked {
                         j.add_unmarked(known.clone());
