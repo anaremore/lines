@@ -149,6 +149,59 @@ pub fn opens_or_adds(side: Side, position: i64) -> bool {
 /// The header's quantity presets (custom values are typed).
 pub const QTY_PRESETS: [i64; 5] = [1, 2, 3, 5, 10];
 
+/// The order size for a symbol: its shared size, else Settings' default, else 1.
+pub fn order_size(
+    sizes: &std::collections::BTreeMap<String, i64>,
+    symbol: &str,
+    default: Option<u32>,
+) -> i64 {
+    sizes
+        .get(symbol)
+        .copied()
+        .filter(|&q| q > 0)
+        .or(default.map(i64::from))
+        .unwrap_or(1)
+}
+
+/// What the UI says when a size is over the account's order maximum: before the click, and
+/// as the click's refusal.
+pub fn over_max(qty: i64, max: Option<i64>) -> Option<String> {
+    max.filter(|&m| qty > m).map(|m| format!("max {m}"))
+}
+
+/// [`over_max`] for a built order (the core would deny it; this says so in the same words as
+/// the size control). Anything else passes.
+pub fn command_over_max(cmd: &TradeCommand, max: Option<i64>) -> Option<String> {
+    let qty = match cmd {
+        TradeCommand::PlaceOrder(o) => o.qty,
+        TradeCommand::PlaceBracket(b) => b.entry.qty,
+        _ => return None,
+    };
+    over_max(qty.0, max)
+}
+
+/// One step of the size per this much wheel travel (logical px), so a trackpad's many small
+/// events don't race through the presets.
+pub const QTY_SCROLL_STEP: f32 = 24.0;
+
+/// Add wheel travel `dy` to `acc`: `Some(up)` when it makes a step (up: wheel away from the
+/// trader, positive `dy`). A reversal starts over.
+pub fn scroll_qty(acc: &mut f32, dy: f32) -> Option<bool> {
+    if dy == 0.0 {
+        return None;
+    }
+    if (*acc > 0.0) != (dy > 0.0) {
+        *acc = 0.0;
+    }
+    *acc += dy;
+    if acc.abs() < QTY_SCROLL_STEP {
+        return None;
+    }
+    let up = *acc > 0.0;
+    *acc = 0.0;
+    Some(up)
+}
+
 /// The next (or previous) preset from `q`; custom values rejoin the presets.
 pub fn step_qty(q: i64, up: bool) -> i64 {
     if up {
@@ -1386,6 +1439,76 @@ mod tests {
             order_mark(&order(OrderState::Working, OrderKind::Market)),
             None
         );
+    }
+
+    #[test]
+    fn the_size_is_per_symbol_then_the_default_then_one() {
+        let mut sizes = std::collections::BTreeMap::new();
+        assert_eq!(order_size(&sizes, "ES", None), 1);
+        assert_eq!(order_size(&sizes, "ES", Some(3)), 3);
+        sizes.insert("ES".to_owned(), 5);
+        assert_eq!(order_size(&sizes, "ES", Some(3)), 5);
+        assert_eq!(
+            order_size(&sizes, "NQ", Some(3)),
+            3,
+            "another symbol's is its own"
+        );
+        sizes.insert("NQ".to_owned(), 0);
+        assert_eq!(
+            order_size(&sizes, "NQ", None),
+            1,
+            "a bad saved size never trades 0"
+        );
+    }
+
+    #[test]
+    fn a_size_over_the_maximum_says_so_and_its_order_is_refused() {
+        assert_eq!(over_max(3, None), None);
+        assert_eq!(over_max(3, Some(3)), None, "at the maximum is fine");
+        assert_eq!(over_max(4, Some(3)).as_deref(), Some("max 3"));
+        let spec = |q| OrderSpec {
+            account: AccountId::new("paper-1"),
+            contract: esz6(),
+            side: Side::Buy,
+            qty: Qty(q),
+            kind: OrderKind::Market,
+        };
+        let place = TradeCommand::PlaceOrder(spec(4));
+        assert_eq!(command_over_max(&place, Some(3)).as_deref(), Some("max 3"));
+        assert_eq!(command_over_max(&place, Some(4)), None);
+        let bracket = TradeCommand::PlaceBracket(BracketSpec {
+            entry: spec(4),
+            take_profit: Some(Price(600_000)),
+            stop_loss: Some(Price(599_000)),
+        });
+        assert_eq!(
+            command_over_max(&bracket, Some(3)).as_deref(),
+            Some("max 3")
+        );
+        // Ways out are never capped here.
+        let flatten = TradeCommand::Flatten {
+            account: AccountId::new("paper-1"),
+            contract: None,
+        };
+        assert_eq!(command_over_max(&flatten, Some(0)), None);
+    }
+
+    #[test]
+    fn wheel_travel_steps_the_size_once_per_step() {
+        let mut acc = 0.0;
+        assert_eq!(scroll_qty(&mut acc, 0.0), None);
+        assert_eq!(scroll_qty(&mut acc, 10.0), None, "a trackpad's small event");
+        assert_eq!(scroll_qty(&mut acc, 10.0), None);
+        assert_eq!(scroll_qty(&mut acc, 10.0), Some(true));
+        assert_eq!(acc, 0.0, "the step used it up");
+        assert_eq!(
+            scroll_qty(&mut acc, -QTY_SCROLL_STEP),
+            Some(false),
+            "a wheel notch"
+        );
+        assert_eq!(scroll_qty(&mut acc, 20.0), None);
+        assert_eq!(scroll_qty(&mut acc, -20.0), None, "a reversal starts over");
+        assert_eq!(scroll_qty(&mut acc, 20.0), None);
     }
 
     #[test]

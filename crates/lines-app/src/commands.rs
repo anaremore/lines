@@ -235,6 +235,10 @@ pub enum TradeCmd {
     NextAccount,
     QtyUp,
     QtyDown,
+    /// Pick a size preset (`dom_trade::QTY_PRESETS`, by index).
+    QtyPreset(u8),
+    /// Type a size: digits, then Enter; Esc cancels.
+    TypeQty,
     /// Cycle the bracket preset (none, 8/16, 12/24, 20/40 ticks).
     NextBracket,
     /// The DOM header's order buttons (`dom_trade::QuickOrder`): gated by arming like ladder
@@ -253,13 +257,19 @@ pub enum TradeCmd {
 }
 
 impl TradeCmd {
-    pub const ALL: [TradeCmd; 16] = [
+    pub const ALL: [TradeCmd; 22] = [
         TradeCmd::Flatten,
         TradeCmd::CancelAll,
         TradeCmd::ToggleArm,
         TradeCmd::NextAccount,
         TradeCmd::QtyUp,
         TradeCmd::QtyDown,
+        TradeCmd::QtyPreset(0),
+        TradeCmd::QtyPreset(1),
+        TradeCmd::QtyPreset(2),
+        TradeCmd::QtyPreset(3),
+        TradeCmd::QtyPreset(4),
+        TradeCmd::TypeQty,
         TradeCmd::NextBracket,
         TradeCmd::BuyMarket,
         TradeCmd::SellMarket,
@@ -468,6 +478,45 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Trade(TradeCmd::Breakeven), true, false, true, "e"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
+    // The size: Ctrl+Alt as every trading key (Alt alone is focus movement and types characters
+    // on macOS; Cmd+Shift+3/4/5 are macOS screenshots). T for type: Cmd+Option+Q would be one
+    // slipped modifier from Cmd+Q, a slip on T only opens a tab.
+    b(
+        Command::Trade(TradeCmd::QtyPreset(0)),
+        true,
+        false,
+        true,
+        "1",
+    ),
+    b(
+        Command::Trade(TradeCmd::QtyPreset(1)),
+        true,
+        false,
+        true,
+        "2",
+    ),
+    b(
+        Command::Trade(TradeCmd::QtyPreset(2)),
+        true,
+        false,
+        true,
+        "3",
+    ),
+    b(
+        Command::Trade(TradeCmd::QtyPreset(3)),
+        true,
+        false,
+        true,
+        "4",
+    ),
+    b(
+        Command::Trade(TradeCmd::QtyPreset(4)),
+        true,
+        false,
+        true,
+        "5",
+    ),
+    b(Command::Trade(TradeCmd::TypeQty), true, false, true, "t"),
     b(
         Command::Trade(TradeCmd::NextBracket),
         true,
@@ -701,6 +750,12 @@ pub fn label(c: Command) -> String {
             TradeCmd::NextAccount => "Trade: Next account",
             TradeCmd::QtyUp => "Trade: Quantity up",
             TradeCmd::QtyDown => "Trade: Quantity down",
+            TradeCmd::QtyPreset(0) => "Trade: Quantity preset 1",
+            TradeCmd::QtyPreset(1) => "Trade: Quantity preset 2",
+            TradeCmd::QtyPreset(2) => "Trade: Quantity preset 3",
+            TradeCmd::QtyPreset(3) => "Trade: Quantity preset 4",
+            TradeCmd::QtyPreset(_) => "Trade: Quantity preset 5",
+            TradeCmd::TypeQty => "Trade: Type a quantity",
             TradeCmd::NextBracket => "Trade: Next bracket preset",
             TradeCmd::BuyMarket => "Trade: Buy market (selected quantity)",
             TradeCmd::SellMarket => "Trade: Sell market (selected quantity)",
@@ -867,6 +922,42 @@ mod tests {
     }
 
     /// Review round 3: key repeat must never repeat an order (or flip arming back and forth).
+    /// The size keys: Ctrl+Alt, as every trading key. AltGr (Ctrl+Alt on European layouts) that
+    /// types a character stays text; Alt alone stays focus movement and never sets a size.
+    #[test]
+    fn the_size_keys_are_ctrl_alt_and_altgr_text_never_sets_a_size() {
+        let chord = |key: &'static str, ctrl, alt, key_char: Option<&str>| {
+            let mut k = Keystroke::parse(key).unwrap();
+            k.modifiers.control = ctrl;
+            k.modifiers.alt = alt;
+            k.key_char = key_char.map(str::to_owned);
+            command_for(&k)
+        };
+        for (i, key) in ["1", "2", "3", "4", "5"].into_iter().enumerate() {
+            assert_eq!(
+                chord(key, true, true, None),
+                Some(Command::Trade(TradeCmd::QtyPreset(i as u8))),
+                "{key}"
+            );
+            assert_ne!(
+                chord(key, false, true, None),
+                Some(Command::Trade(TradeCmd::QtyPreset(i as u8))),
+                "Alt alone: {key}"
+            );
+        }
+        assert_eq!(
+            chord("t", true, true, None),
+            Some(Command::Trade(TradeCmd::TypeQty))
+        );
+        // AltGr+2 on a German layout types "²", AltGr+T nothing special but with a character.
+        assert_eq!(chord("2", true, true, Some("²")), None);
+        assert_eq!(chord("t", true, true, Some("ŧ")), None);
+        for cmd in [TradeCmd::QtyUp, TradeCmd::QtyPreset(0), TradeCmd::TypeQty] {
+            assert!(crate::trade_bar::chart_runs(cmd), "{cmd:?}");
+            assert!(!cmd.needs_hotkeys(), "{cmd:?}: no order is sent");
+        }
+    }
+
     #[test]
     fn trading_keys_never_repeat() {
         for tc in [

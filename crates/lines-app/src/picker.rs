@@ -93,6 +93,10 @@ pub struct Settings {
     /// (`crate::pnl`). Optional: absent (and the default, both) isn't written.
     #[serde(default, skip_serializing_if = "crate::pnl::PnlDisplay::is_default")]
     pub pnl_display: crate::pnl::PnlDisplay,
+    /// The order size per product symbol, shared by every DOM and chart on it. Optional: a
+    /// symbol without one uses `new_panes.default_qty`, else 1.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub order_sizes: std::collections::BTreeMap<String, i64>,
     /// Bracket presets and their display unit per account and product (`crate::brackets`;
     /// trade panel v2). Optional: absent means the default presets, in ticks.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -580,6 +584,19 @@ mod tests {
         assert!(s.is_favourite(ES));
         assert!(!s.toggle_favourite(ES));
         assert!(!s.is_favourite(ES));
+    }
+
+    #[test]
+    fn order_sizes_are_an_optional_setting() {
+        let empty = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!empty.contains("order_sizes"), "{empty}");
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.order_sizes.is_empty());
+        let mut s = Settings::default();
+        s.order_sizes.insert("ES".to_owned(), 5);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""order_sizes":{"ES":5}"#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
     }
 
     #[test]

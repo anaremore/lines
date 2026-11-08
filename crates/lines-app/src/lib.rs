@@ -449,6 +449,14 @@ struct Cli {
     /// pane).
     #[arg(long = "enable-hotkeys", requires = "screenshot")]
     hotkeys: bool,
+    /// Screenshot: the order size every symbol starts with (the Qty control, the Buy/Sell
+    /// buttons).
+    #[arg(long, requires = "screenshot")]
+    order_size: Option<u32>,
+    /// Screenshot: the paper accounts' largest allowed order (risk limits): a larger size
+    /// shows "max N".
+    #[arg(long, requires = "screenshot")]
+    max_order_qty: Option<i64>,
     /// Screenshot: DOMs show bracket distances in ticks or points.
     #[arg(long, value_enum, requires = "screenshot")]
     bracket_units: Option<BracketUnitsArg>,
@@ -1445,6 +1453,8 @@ where
                 paper: cli.paper.clone(),
                 arm: cli.arm,
                 hotkeys: cli.hotkeys,
+                order_size: cli.order_size,
+                max_order_qty: cli.max_order_qty,
                 demo_broker: cli.demo_broker,
                 strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,

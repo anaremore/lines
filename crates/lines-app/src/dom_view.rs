@@ -130,6 +130,9 @@ impl TradePane for DomView {
     fn trade_store(&self) -> &Arc<ChartStore> {
         &self.store
     }
+    fn trade_product(&self) -> &lines_core::Product {
+        &self.product
+    }
     fn trade_unavailable(&self) -> bool {
         self.feed.unavailable.is_some()
     }
@@ -455,11 +458,14 @@ impl DomView {
             Err(why) => self.trade.flash(why),
             Ok(ctx) => {
                 match dom_trade::click(col, price, ev.modifiers.shift, self.trade.arming, &ctx) {
-                    Ok(cmd) => {
-                        if let Some(t) = Trading::try_global(cx) {
-                            t.submit(lines_trading::Source::Dom, issued, cmd);
+                    Ok(cmd) => match trade_bar::size_refusal(self, &cmd, cx) {
+                        Some(why) => self.trade.flash(why),
+                        None => {
+                            if let Some(t) = Trading::try_global(cx) {
+                                t.submit(lines_trading::Source::Dom, issued, cmd);
+                            }
                         }
-                    }
+                    },
                     Err(Refusal(why)) => self.trade.flash(why),
                 }
             }

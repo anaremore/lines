@@ -2108,6 +2108,7 @@ impl TradingCore {
                 rules_pending: a.pending_rules.clone(),
                 guardrails_in_force: a.guard.active.clone(),
                 guardrails_pending: a.guard.pending.clone(),
+                max_order_qty: a.cfg.limits.max_order_qty,
             }),
         }
     }
