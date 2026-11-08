@@ -380,7 +380,6 @@ pub struct ChainView {
     /// The option chart's underlying (decision 0029), while that mode is on.
     chart: Option<gpui::Entity<crate::chart_view::ChartView>>,
     _chart_feed: Option<gpui::Subscription>,
-    /// The pointer is on the chain beside the chart.
     /// The pane's width as of the last frame.
     pane_w: f32,
 }
@@ -724,7 +723,8 @@ impl Pane for ChainView {
         &self.focus
     }
 
-    /// The account. No view state: an expiry passes, and the view starts on the money.
+    /// The account, and whether the chart is beside the chain. No other view state: an expiry
+    /// passes, and the view starts on the money.
     fn save_state(&self, doc: &mut PaneDoc) {
         doc.trade = self.trade.doc();
         doc.chain_chart = self.chart.is_some();
@@ -2401,14 +2401,26 @@ impl ChainView {
         let line_y = match (&scale, last) {
             // At its price on the chart, when that is in the chain's view.
             (Some(s), Some(l)) => {
-                Some(s.y(l)).filter(|y| *y >= top + HEAD_H + 8.0 && *y < s.bottom() - 8.0)
+                let bottom = s.bottom().min(f(bounds.origin.y + bounds.size.height));
+                Some(s.y(l)).filter(|y| *y >= top + HEAD_H + 8.0 && *y < bottom - 8.0)
             }
             _ => line_at.map(|v| top + HEAD_H + v as f32 * ROW_H + ROW_H / 2.0),
         };
         if let (Some(l), Some(y)) = (last, line_y) {
+            let tag_h = 15.0;
+            // On the chart's scale a row can be at this price: it keeps its cells.
+            let (show_line, show_tag) = if scale.is_some() {
+                crate::chain_lock::price_mark(y, &self.frame.ys, ROW_H, tag_h)
+            } else {
+                (true, true)
+            };
             // Dashes by count, never by adding to a float (which a far-off origin can make
             // stand still).
-            let dashes = ((x - x0) / 10.0).ceil().clamp(0.0, 1_000.0) as usize;
+            let dashes = if show_line {
+                ((x - x0) / 10.0).ceil().clamp(0.0, 1_000.0) as usize
+            } else {
+                0
+            };
             for k in 0..dashes {
                 let dx = x0 + k as f32 * 10.0;
                 window.paint_quad(fill(
@@ -2416,27 +2428,28 @@ impl ChainView {
                     t.last,
                 ));
             }
-            s.clear();
-            let _ = std::fmt::Write::write_str(&mut s, self.product.symbol);
-            let _ = std::fmt::Write::write_char(&mut s, ' ');
-            let _ = self.product.price.write(l, &mut s);
-            let tw = self.glyphs.width(s.as_str(), t.on_last, true, window) + 2.0 * PAD;
-            let tx = strike_x + (strike_w - tw) / 2.0;
-            let tag_h = 15.0;
-            window.paint_quad(fill(
-                Bounds::new(point(px(tx), px(y - tag_h / 2.0)), size(px(tw), px(tag_h))),
-                t.last,
-            ));
-            self.glyphs.paint(
-                s.as_str(),
-                tx + PAD,
-                y - tag_h / 2.0,
-                tag_h,
-                t.on_last,
-                true,
-                window,
-                cx,
-            );
+            if show_tag {
+                s.clear();
+                let _ = std::fmt::Write::write_str(&mut s, self.product.symbol);
+                let _ = std::fmt::Write::write_char(&mut s, ' ');
+                let _ = self.product.price.write(l, &mut s);
+                let tw = self.glyphs.width(s.as_str(), t.on_last, true, window) + 2.0 * PAD;
+                let tx = strike_x + (strike_w - tw) / 2.0;
+                window.paint_quad(fill(
+                    Bounds::new(point(px(tx), px(y - tag_h / 2.0)), size(px(tw), px(tag_h))),
+                    t.last,
+                ));
+                self.glyphs.paint(
+                    s.as_str(),
+                    tx + PAD,
+                    y - tag_h / 2.0,
+                    tag_h,
+                    t.on_last,
+                    true,
+                    window,
+                    cx,
+                );
+            }
         }
         pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
     }
@@ -3661,8 +3674,6 @@ mod tests {
 
     /// Held (the pointer on the chain, or One-click): the same strikes in the same places while
     /// the scale is the same, whatever the price does. The trader's own zoom moves them.
-    /// A press never lands on a strike that moved: the rows hold while the selection is among
-    /// them, and follow it once it leaves.
     #[test]
     fn locked_rows_hold_under_the_pointer_until_the_scale_changes() {
         let day = CivilDate::new(2026, 11, 9).unwrap();
@@ -3711,6 +3722,8 @@ mod tests {
         }
     }
 
+    /// A press never lands on a strike that moved: the rows hold while the selection is among
+    /// them, and follow it once it leaves.
     #[test]
     fn rows_hold_still_under_the_pointer() {
         // Selected row 14 in view: the rows stay, whatever the center says.

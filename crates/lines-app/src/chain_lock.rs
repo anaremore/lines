@@ -70,11 +70,33 @@ pub fn pick_rows(candidates: &mut [Candidate], row_h: f32, out: &mut Vec<Candida
     out.sort_unstable_by(|a, b| a.top.total_cmp(&b.top));
 }
 
+/// What of the underlying's price mark can show at `y` without covering a row: the line (not on
+/// a row: that row is the money, and the chart's own line and axis tag still say where), and its
+/// tag (clear of every row). `row_tops` are the rows on screen.
+pub fn price_mark(y: f32, row_tops: &[f32], row_h: f32, tag_h: f32) -> (bool, bool) {
+    let line = row_tops.iter().all(|t| y < *t || y >= *t + row_h);
+    let tag = row_tops
+        .iter()
+        .all(|t| y + tag_h / 2.0 <= *t || y - tag_h / 2.0 >= *t + row_h);
+    (line, tag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const ROW: f32 = 18.0;
+
+    /// The tag never covers a strike or a quote: near a row it goes, on a row the line does too.
+    #[test]
+    fn the_price_mark_stays_off_the_rows() {
+        let rows = [100.0, 150.0];
+        assert_eq!(price_mark(130.0, &rows, ROW, 15.0), (true, true), "between");
+        assert_eq!(price_mark(120.0, &rows, ROW, 15.0), (true, false), "near");
+        assert_eq!(price_mark(109.0, &rows, ROW, 15.0), (false, false), "on");
+        assert_eq!(price_mark(145.0, &rows, ROW, 15.0), (true, false), "near");
+        assert_eq!(price_mark(130.0, &[], ROW, 15.0), (true, true), "no rows");
+    }
 
     fn scale(lo: f64, hi: f64, height: f64) -> LockedScale {
         let mut vp = Viewport::default();
