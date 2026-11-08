@@ -775,7 +775,7 @@ fn a_close_can_never_flip_or_open() {
     );
     let wrong = r.cmd(Command::PlaceExit(Rig::spec(Side::Buy, 1, limit(240))));
     assert_eq!(wrong.unwrap_err().code, RejectCode::Invalid, "its own side");
-    // Two closes for the whole position: when one closes it, the other is cancelled.
+    // Two closes for the whole position: the first takes all of it, so the second is cancelled.
     let a = r
         .cmd(Command::PlaceExit(Rig::spec(Side::Sell, 2, limit(245))))
         .unwrap()[0];
@@ -789,6 +789,41 @@ fn a_close_can_never_flip_or_open() {
     assert_eq!(r.fills(a), [(245, 2)]);
     assert!(r.fills(b).is_empty());
     assert!(matches!(r.state(b), OrderState::Cancelled));
+}
+
+/// A bad vendor stamp from the future neither stays fresh forever nor freezes the series.
+#[test]
+fn a_future_stamped_quote_goes_stale_and_blocks_nothing() {
+    let mut r = Rig::new();
+    let ahead = UtcMillis(r.t + 24 * 3_600_000);
+    r.market(
+        call(),
+        MarketInput::OptionQuote {
+            bid: Some(Price(500)),
+            ask: Some(Price(600)),
+            last: None,
+            time: ahead,
+        },
+    );
+    // A real quote stamped just after still counts.
+    r.t += 1_000;
+    r.quote(Some(240), Some(242));
+    let id = r.limit(Side::Buy, 1, 242);
+    assert_eq!(r.fills(id), [(242, 1)]);
+    // Another bad stamp, then nothing for longer than the stale limit: it fills nothing.
+    r.t += 1_000;
+    let ahead = UtcMillis(r.t + 24 * 3_600_000);
+    r.market(
+        call(),
+        MarketInput::OptionQuote {
+            bid: Some(Price(240)),
+            ask: Some(Price(242)),
+            last: None,
+            time: ahead,
+        },
+    );
+    r.t += 16 * 60_000;
+    assert_eq!(r.try_limit(Side::Buy, 1, 242), Err(RejectCode::Risk));
 }
 
 /// Option orders are paper only until a live broker is enabled (decision 0028, phase 4).

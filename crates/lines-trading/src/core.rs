@@ -2180,6 +2180,8 @@ impl TradingCore {
                 } => {
                     // An option marks at its mid; a last trade only without a two-sided quote.
                     let (b, a) = crate::market::quote_sides(bid, ask);
+                    // A stamp from the future counts as now, as in the paper broker.
+                    let time = time.min(now);
                     // A late or re-seeded quote never replaces a newer one.
                     if m.quoted_at.is_some_and(|t| time < t) {
                         continue;

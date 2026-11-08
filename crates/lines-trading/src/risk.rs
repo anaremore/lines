@@ -91,7 +91,7 @@ pub fn check_option(
         OrderKind::Market if guard.allow_market => return Ok(()),
         OrderKind::Market => {
             return Err(risk(
-                "market orders on options are off: send a limit (Close prices one for you)".into(),
+                "market orders on options are off: send a limit".into(),
             ));
         }
         OrderKind::Stop { .. } | OrderKind::StopLimit { .. } => {

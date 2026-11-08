@@ -870,6 +870,8 @@ impl PaperBroker {
         let Some(m) = self.markets.get_mut(&contract) else {
             return;
         };
+        // A stamp from the future counts as now, so it still goes stale and blocks no real quote.
+        let time = time.min(now);
         // A late or re-seeded quote never replaces a newer one.
         if m.quoted_at.is_some_and(|t| time < t) {
             return;
