@@ -101,6 +101,8 @@ pub enum Command {
     DomTrailHalfLife,
     /// Show the trade journal: focus its pane, else open one in a new tab (roadmap 8c).
     OpenJournal,
+    /// Show an option chain: focus one, else open one in a new tab (decision 0028).
+    OpenChain,
     /// Write the journal's trades as CSV to the config folder.
     ExportJournal,
     /// The focused journal: edit the selected trade's tags and note.
@@ -565,6 +567,7 @@ pub fn label(c: Command) -> String {
         Command::Toggle(PaneKind::Chart) => "Hide/show chart".into(),
         Command::Toggle(PaneKind::Journal) => "Hide/show journal".into(),
         Command::Toggle(PaneKind::Strategies) => "Hide/show strategies".into(),
+        Command::Toggle(PaneKind::Chain) => "Hide/show option chain".into(),
         Command::ChartOnly => "Chart only (hide/restore linked DOM and T&S)".into(),
         Command::ShowHidden => "Show hidden panes".into(),
         Command::PopOut => "Pop out pane into its own window".into(),
@@ -612,6 +615,7 @@ pub fn label(c: Command) -> String {
         Command::DomTrail => "DOM: price trail on/off".into(),
         Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
         Command::OpenJournal => "Open journal".into(),
+        Command::OpenChain => "Open option chain".into(),
         Command::ExportJournal => "Export journal (CSV)".into(),
         Command::JournalEdit => "Journal: edit tags and note".into(),
         Command::JournalAllDates => "Journal: stats for all dates / today".into(),
@@ -703,6 +707,7 @@ pub fn palette() -> Vec<Command> {
             PaneKind::Tape,
             PaneKind::Journal,
             PaneKind::Strategies,
+            PaneKind::Chain,
         ]
         .map(Command::SetKind),
     );
@@ -723,6 +728,7 @@ pub fn palette() -> Vec<Command> {
         Command::DomTrail,
         Command::DomTrailHalfLife,
         Command::OpenJournal,
+        Command::OpenChain,
         Command::ExportJournal,
         Command::JournalEdit,
         Command::JournalAllDates,

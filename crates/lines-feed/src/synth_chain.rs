@@ -120,8 +120,13 @@ fn quote(key: OptionKey, spot: i64, now: i64, close_ms: i64) -> OptionQuote {
     // interest is fixed per series.
     let dist = ((k - 684.0).abs() as i64).max(1);
     let elapsed = ((now - (close_ms - 390 * 60_000)) / 60_000).max(1);
-    let volume = elapsed * 200 / dist;
-    let open_interest = 40_000 / dist + (key.strike.0 / 100 % 7) * 900;
+    // Puts trade a little less and carry other open interest, so the two sides differ.
+    let (vol_k, oi_k) = match key.right {
+        Right::Call => (200, 40_000),
+        Right::Put => (150, 31_000),
+    };
+    let volume = elapsed * vol_k / dist;
+    let open_interest = oi_k / dist + (key.strike.0 / 100 % 7) * 900;
     OptionQuote {
         bid,
         ask,
