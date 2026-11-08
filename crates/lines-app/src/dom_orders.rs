@@ -109,6 +109,10 @@ fn resize_zone(
     x: f32,
     cell_w: f32,
 ) -> Option<(OrderId, ResizeHit)> {
+    // Only inside the cell: a press in another column is that column's.
+    if x < 0.0 || x >= cell_w {
+        return None;
+    }
     let MarkPress::One(id) = mark_press(slots, n, x, cell_w) else {
         return None;
     };
@@ -830,6 +834,10 @@ mod tests {
             assert_eq!(resize_zone(&group, 1, x, 100.0), None, "{x}");
         }
         assert_eq!(resize_zone(&single, 0, 5.0, 100.0), None);
+        // Beside the cell, on the same row: another column's press, never this order's.
+        assert_eq!(resize_zone(&single, 1, -1.0, 100.0), None);
+        assert_eq!(resize_zone(&single, 1, 100.0, 100.0), None);
+        assert_eq!(resize_zone(&single, 1, 150.0, 100.0), None);
     }
 
     /// A press counts only the orders on its own row.

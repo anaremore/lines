@@ -145,7 +145,9 @@ impl TradePane for DomView {
             && !self.picker.is_open()
     }
     fn resize_drawn(&self, order: lines_trading::OrderId) -> bool {
-        self.orders.drawn_alone(order, &self.rows, self.row_units())
+        // A narrow pane can shed the orders column.
+        self.cols.cell(DomCol::Orders.index(), 0.0).is_some()
+            && self.orders.drawn_alone(order, &self.rows, self.row_units())
     }
     fn send_resize(
         &mut self,
