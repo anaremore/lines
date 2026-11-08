@@ -262,6 +262,8 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
+            // No UI yet (decision 0029's build order): nothing keeps these.
+            Event::Trigger(t) => Some(t.account),
             Event::Strategy {
                 id,
                 account,
@@ -1081,6 +1083,8 @@ impl Trading {
                 core.set_next_order_id(f.next_order_id);
                 // Sent before the app stopped, no answer: unresolved until the broker says.
                 core.restore_in_flight(f.in_flight);
+                // A position's Stop and Target come back armed, and say so (decision 0029).
+                core.restore_triggers(f.triggers);
                 (core, f.paper)
             }
             None => {
@@ -1605,6 +1609,8 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
             (account.clone(), None, None)
         }
+        TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
+        TradeCommand::CancelTrigger { account, .. } => (account.clone(), None, None),
         TradeCommand::SetBracketMode {
             account, contract, ..
         } => {

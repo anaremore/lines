@@ -51,6 +51,11 @@ pub struct OptionGuard {
     pub allow_market: bool,
     /// A quote older than this has no mid to check against.
     pub stale_after_ms: i64,
+    /// A trigger's underlying with no trade for this long is stale: it can't fire (decision
+    /// 0029).
+    pub trigger_stale_ms: i64,
+    /// A fired Target re-prices to the bid this often (decision 0029).
+    pub target_chase_ms: i64,
 }
 
 impl Default for OptionGuard {
@@ -60,6 +65,8 @@ impl Default for OptionGuard {
             min_band_ticks: 10,
             allow_market: false,
             stale_after_ms: DEFAULT_QUOTE_STALE_MS,
+            trigger_stale_ms: DEFAULT_TRIGGER_STALE_MS,
+            target_chase_ms: DEFAULT_TARGET_CHASE_MS,
         }
     }
 }
@@ -67,6 +74,13 @@ impl Default for OptionGuard {
 /// How old an option quote may be before it counts as stale, by default: 15 minutes. A quiet
 /// series quotes rarely, and its quote stays good until it changes.
 pub const DEFAULT_QUOTE_STALE_MS: i64 = 15 * 60_000;
+
+/// How long an underlying can go without a trade before a trigger counts it as stale, by default.
+/// Twice the feed's own stale limit: SPY trades many times a second in regular hours.
+pub const DEFAULT_TRIGGER_STALE_MS: i64 = 10_000;
+
+/// How often a fired Target re-prices, by default (decision 0029: every few seconds).
+pub const DEFAULT_TARGET_CHASE_MS: i64 = 3_000;
 
 /// An option's quote as the guard sees it.
 #[derive(Copy, Clone, Debug, Default)]
@@ -149,6 +163,34 @@ pub fn check_option(
         guard.max_from_mid_pct,
         guard.min_band_ticks,
     )))
+}
+
+/// The guard on a reduce-only option order on its `side` (decision 0029). A limit at the side of
+/// a fresh quote that closes it (a sell at the bid, a buy at the ask) passes however wide the
+/// quote, and needs no other side: a wide quote must never trap an exit. Anything else is
+/// [`check_option`].
+pub fn check_option_exit(
+    guard: &OptionGuard,
+    spec: &ContractSpec,
+    side: Side,
+    kind: &OrderKind,
+    quote: OptionQuoteView,
+    now: UtcMillis,
+) -> Result<(), Reject> {
+    if let OrderKind::Limit { price } = *kind
+        && quote
+            .at
+            .is_some_and(|t| now.0 - t.0 <= guard.stale_after_ms)
+    {
+        let touch = match side {
+            Side::Sell => quote.bid,
+            Side::Buy => quote.ask,
+        };
+        if touch == Some(price) {
+            return Ok(());
+        }
+    }
+    check_option(guard, spec, kind, quote, now)
 }
 
 /// What the check needs to know about the account and market.

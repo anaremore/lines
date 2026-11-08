@@ -277,6 +277,7 @@ pub fn trading_file(core: &TradingCore, paper: &PaperConfig) -> Option<TradingFi
             .collect(),
         next_order_id: core.next_order_id(),
         in_flight: core.in_flight().cloned().collect(),
+        triggers: core.saved_triggers(),
     })
 }
 
