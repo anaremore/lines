@@ -1654,18 +1654,18 @@ pub fn panel_height(width: f32) -> f32 {
 /// Below this width the disabled panel's line drops to its short form (the long one would be
 /// cut: 50 characters at the width test's 7.5 px).
 pub const LOCKED_HINT_FULL: f32 = 400.0;
-/// From this width that line, with strategies armed, says "DOM locked" and "still armed".
-pub const LOCKED_HINT_DOM: f32 = 320.0;
 /// From this width that line, with strategies armed, also says how to enable.
-pub const LOCKED_HINT_ARMED_FULL: f32 = 560.0;
+pub const LOCKED_HINT_ARMED_FULL: f32 = 520.0;
 
 /// What a disabled panel says in the joins' place: the lock that binds. With nothing else
 /// in the way, how to enable; with a lockout or another blocker too, that first (enabling
 /// alone would not unlock entries).
 ///
-/// With strategies armed on the account it says so, because "entries locked" alone would read
-/// as if nothing can enter. It says they aren't locked only when this switch is the only lock:
-/// a blocker (a closed market, a blackout, a lockout) may bind them too, and the core decides.
+/// With strategies armed on the account the count leads, because "entries locked" alone would
+/// read as if nothing can enter: `2 strategies still armed · DOM locked`. "Still" only when
+/// this switch is the only lock: a blocker (a closed market, a blackout, a lockout) may bind
+/// them too, and the core decides. Laid out by [`whole_items`], so a narrow panel leaves out
+/// what follows the count, whole, and never cuts the number.
 pub fn locked_hint(blocker: Option<&str>, armed: usize, width: f32) -> String {
     let key = crate::commands::hint(crate::commands::Command::Trade(TradeCmd::ToggleArm));
     let at = |w: f32| width == 0.0 || width >= w;
@@ -1673,17 +1673,17 @@ pub fn locked_hint(blocker: Option<&str>, armed: usize, width: f32) -> String {
         let strategies = strategies_armed_text(armed);
         return match blocker {
             Some(b) if at(LOCKED_HINT_ARMED_FULL) => {
-                format!("Entries locked: {b} · {strategies}")
+                format!("{strategies} · Entries locked: {b}")
             }
-            Some(b) => format!("{b} · {armed} armed"),
-            None if at(LOCKED_HINT_ARMED_FULL) => {
-                format!("DOM entries locked ({key}) · {strategies}, not locked")
+            Some(b) => format!("{strategies} · {}", capitalized(b)),
+            None => {
+                let still = format!("{armed} strateg{} still armed", plural_y(armed));
+                if at(LOCKED_HINT_ARMED_FULL) {
+                    format!("{still} · DOM entries locked ({key})")
+                } else {
+                    format!("{still} · DOM locked")
+                }
             }
-            None if width < LOCKED_HINT_DOM => format!("Locked · {strategies}"),
-            None => format!(
-                "DOM locked · {armed} strateg{} still armed",
-                plural_y(armed)
-            ),
         };
     }
     match (blocker, at(LOCKED_HINT_FULL)) {
@@ -1691,6 +1691,15 @@ pub fn locked_hint(blocker: Option<&str>, armed: usize, width: f32) -> String {
         (None, true) => format!("Entries locked: enable trading ({key})"),
         (Some(b), false) => format!("Locked: {b}"),
         (None, false) => format!("Locked: {key}"),
+    }
+}
+
+/// First letter upper case (a blocker's words start lower case).
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
     }
 }
 
@@ -1957,7 +1966,7 @@ pub fn dom_bar<V: TradePane>(
                 t,
             )),
             // The calendar: a blackout (or a calendar that can't answer) as a strip; a
-            // release coming as a quiet line, unless a narrow panel needs the line for why
+            // release coming as a quiet line, unless the panel needs the line for why
             // orders are denied.
             (None, None, None)
                 if d.news.as_ref().is_some_and(|(warns, _)| {
@@ -2759,10 +2768,8 @@ fn order_grid<V: TradePane>(
                 .text_color(t.text_main)
                 .min_w_0()
                 .overflow_hidden()
-                .child(
-                    // Starts with its number's words; any cut is at its end, with "…".
-                    div().min_w_0().truncate().child(locked),
-                ),
+                // Whole items, the count first: what doesn't fit is left out, never cut.
+                .child(whole_items(&locked, t.text_main, false)),
         );
     }
     grid
@@ -4261,31 +4268,35 @@ mod tests {
         // A narrow panel's short form (the long one would be cut).
         assert!(locked_hint(None, 0, 240.0).starts_with("Locked: "));
         assert_eq!(locked_hint(Some("cooldown"), 0, 240.0), "Locked: cooldown");
-        // Strategies armed, and this switch the only lock: they aren't locked.
+        // Strategies armed, and this switch the only lock: the count first, "still armed".
         let wide = locked_hint(None, 2, 800.0);
-        assert!(wide.starts_with("DOM entries locked ("), "{wide}");
-        assert!(wide.ends_with("· 2 strategies armed, not locked"), "{wide}");
+        assert!(
+            wide.starts_with("2 strategies still armed · DOM entries locked ("),
+            "{wide}"
+        );
         assert_eq!(
             locked_hint(None, 1, 420.0),
-            "DOM locked · 1 strategy still armed"
+            "1 strategy still armed · DOM locked"
         );
-        assert_eq!(locked_hint(None, 2, 240.0), "Locked · 2 strategies armed");
-        // Another lock binds too: the reason first, and never "not locked" (the core may be
-        // refusing their entries as well).
+        assert_eq!(
+            locked_hint(None, 2, 240.0),
+            "2 strategies still armed · DOM locked"
+        );
+        // Another lock binds too: never "still" (the core may be refusing their entries as
+        // well), and the count stays first.
         for width in [240.0, 420.0, 800.0] {
             let line = locked_hint(Some("news blackout"), 2, width);
-            assert!(line.contains("news blackout"), "{line}");
-            assert!(line.contains('2'), "{line}");
-            assert!(!line.contains("not locked"), "{line}");
+            assert!(line.starts_with("2 strategies armed · "), "{line}");
+            assert!(line.to_lowercase().contains("news blackout"), "{line}");
             assert!(!line.contains("still"), "{line}");
         }
         assert_eq!(
             locked_hint(Some("market closed"), 2, 800.0),
-            "Entries locked: market closed · 2 strategies armed"
+            "2 strategies armed · Entries locked: market closed"
         );
         assert_eq!(
-            locked_hint(Some("market closed"), 2, 240.0),
-            "market closed · 2 armed"
+            locked_hint(Some("market closed"), 1, 240.0),
+            "1 strategy armed · Market closed"
         );
     }
 
@@ -4497,8 +4508,9 @@ mod tests {
             account_left(SWITCH_STRATEGIES, 0.0) >= MIN_HIT,
             "380 px with a count"
         );
-        // The disabled panel's line, whole at each width's form, with a two-digit count and
-        // the longest reason (it starts at its own width's `room`: px_2 on each side).
+        // The disabled panel's line: whole at each width's form, and with strategies armed its
+        // first item (the count) is always whole, with a two-digit count, at the narrowest
+        // (`whole_items` leaves out whatever follows it, whole).
         let line = |s: &str| s.chars().count() as f32 * CHAR;
         let long = Some("feed stale 1234 s");
         for (hint, w, what) in [
@@ -4512,39 +4524,33 @@ mod tests {
                 MIN_DOM_WIDTH,
                 "no count, reason",
             ),
-            (locked_hint(None, 12, MIN_DOM_WIDTH), MIN_DOM_WIDTH, "count"),
-            (
-                locked_hint(long, 12, MIN_DOM_WIDTH),
-                MIN_DOM_WIDTH,
-                "count, reason",
-            ),
-            (
-                locked_hint(None, 12, NARROW_BELOW),
-                NARROW_BELOW,
-                "count at 300",
-            ),
-            (
-                locked_hint(None, 12, LOCKED_HINT_DOM),
-                LOCKED_HINT_DOM,
-                "count at 320",
-            ),
             (
                 locked_hint(None, 0, LOCKED_HINT_FULL),
                 LOCKED_HINT_FULL,
                 "no count at 400",
             ),
+            (locked_hint(None, 12, 320.0), 320.0, "count at 320"),
+            (locked_hint(long, 12, 340.0), 340.0, "count, reason at 340"),
             (
                 locked_hint(None, 12, LOCKED_HINT_ARMED_FULL),
                 LOCKED_HINT_ARMED_FULL,
-                "count at 560",
+                "count at 520",
             ),
             (
                 locked_hint(long, 12, LOCKED_HINT_ARMED_FULL),
                 LOCKED_HINT_ARMED_FULL,
-                "count, reason at 560",
+                "count, reason at 520",
             ),
         ] {
             assert!(line(&hint) <= w - 16.0, "{what}: {hint}");
+        }
+        for hint in [
+            locked_hint(None, 12, MIN_DOM_WIDTH),
+            locked_hint(long, 12, MIN_DOM_WIDTH),
+        ] {
+            let first = status_parts(&hint).next().expect("items").0;
+            assert!(first.contains("12 strateg"), "{hint}");
+            assert!(line(first) <= room, "{first}");
         }
         // The denied line keeps its longest reason, whole (with the Keys chip on the line too,
         // a long reason is left out whole: the switch's tooltip has it).
