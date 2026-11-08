@@ -137,9 +137,45 @@ impl TradePane for DomView {
         &self.focus
     }
     fn shows_size(&self) -> bool {
-        self.trade.bracket_confirm.is_none()
-            && self.trade.editor.is_none()
-            && !self.picker.is_open()
+        self.trade.bracket_confirm.is_none() && self.trade.editor.is_none() && self.keys_free()
+    }
+    fn keys_free(&self) -> bool {
+        !self.picker.is_open()
+    }
+    fn send_resize(
+        &mut self,
+        order: lines_trading::OrderId,
+        step: crate::order_resize::SizeStep,
+        one_leg: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let issued = std::time::Instant::now();
+        let plan = trade_bar::resize_plan(order, step, one_leg, cx);
+        let (plan, Some(t)) = (plan, Trading::try_global(cx)) else {
+            return;
+        };
+        match plan {
+            Err(why) => self.trade.flash(why),
+            // More quantity is more exposure: the switch, as for a new order.
+            Ok(p) if p.grows && !self.trade.arming.is_armed() => {
+                self.trade.flash(dom_trade::ENABLE_TO_TRADE);
+            }
+            Ok(p) => {
+                for leg in p.commands {
+                    let command = t.submit(lines_trading::Source::Dom, issued, leg.command);
+                    self.orders
+                        .ghosts
+                        .retain(|g| g.order != leg.order || g.qty.is_none());
+                    self.orders.ghosts.push(Ghost {
+                        order: leg.order,
+                        price: leg.price,
+                        command,
+                        qty: Some(leg.qty),
+                    });
+                }
+            }
+        }
+        cx.notify();
     }
     fn trade_unavailable(&self) -> bool {
         self.feed.unavailable.is_some()
@@ -449,6 +485,18 @@ impl DomView {
             .press_at(price, self.row_units(), f(p.x) - cx, w)
     }
 
+    /// The resize control's piece under a point on a row of the orders column.
+    fn zone_pressed(
+        &self,
+        price: lines_core::Price,
+        p: Point<Pixels>,
+    ) -> Option<(lines_trading::OrderId, crate::order_resize::ResizeHit)> {
+        let (cx, w) = self
+            .cols
+            .cell(DomCol::Orders.index(), f(self.bounds.origin.x))?;
+        self.orders.zone_at(price, self.row_units(), f(p.x) - cx, w)
+    }
+
     /// What a click needs (`trade_bar::entry_ctx`, shared with the header's buttons).
     fn entry_ctx(&self, cx: &App) -> Result<EntryCtx, &'static str> {
         trade_bar::entry_ctx(self, cx)
@@ -460,7 +508,8 @@ impl DomView {
         let issued = std::time::Instant::now();
         // A press on the ladder leaves a size being typed (not entered, so the buttons' size is
         // what a click sends).
-        if self.trade.qty_edit.take().is_some() {
+        let typing = self.trade.resize_edit.take().is_some();
+        if self.trade.qty_edit.take().is_some() || typing {
             cx.notify();
         }
         let (Some(price), Some(col)) = (self.row_at(ev.position), self.column_at(ev.position))
@@ -468,6 +517,21 @@ impl DomView {
             return;
         };
         if col == DomColumn::Orders {
+            // The hovered mark's − and +.
+            let step = match self.zone_pressed(price, ev.position) {
+                Some((id, crate::order_resize::ResizeHit::Down)) => {
+                    Some((id, crate::order_resize::SizeStep::Down))
+                }
+                Some((id, crate::order_resize::ResizeHit::Up)) => {
+                    Some((id, crate::order_resize::SizeStep::Up))
+                }
+                _ => None,
+            };
+            if let Some((id, step)) = step {
+                self.send_resize(id, step, ev.modifiers.alt, cx);
+                cx.stop_propagation();
+                return;
+            }
             let width = f(self.bounds.size.width);
             match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
@@ -531,11 +595,22 @@ impl DomView {
                 order: o.id,
                 price: d.to,
                 command: id,
+                qty: None,
             });
         }
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.trade.resize_armed = true;
+        let hover = (self.column_at(ev.position) == Some(DomColumn::Orders))
+            .then(|| self.row_at(ev.position))
+            .flatten()
+            .and_then(|price| self.zone_pressed(price, ev.position))
+            .map(|(id, _)| id);
+        if hover != self.orders.hover {
+            self.orders.hover = hover;
+            cx.notify();
+        }
         if let Some(d) = self.orders.drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.orders.drag = None;
@@ -565,9 +640,14 @@ impl DomView {
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(d) = self.orders.drag.take() {
-            // Released on a ladder row: move there. Anywhere else in the pane: abort.
-            if self.row_at(ev.position).is_some() {
-                self.drop_order(d, cx);
+            // Released on a ladder row: move there; on its own row, a click: type its size.
+            // Anywhere else in the pane: abort.
+            if let Some(at) = self.row_at(ev.position) {
+                if self.orders.on_row(d.order, at, self.row_units()) {
+                    trade_bar::open_resize_field(self, d.order);
+                } else {
+                    self.drop_order(d, cx);
+                }
             }
             cx.notify();
         }
@@ -621,6 +701,14 @@ impl DomView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let hovered = self.orders.hover;
+        if trade_bar::wheel_resize(self, hovered, ev, window, cx) {
+            return;
+        }
+        // The ladder moves under the pointer: the next mark isn't hovered until it moves.
+        if self.orders.hover.take().is_some() {
+            cx.notify();
+        }
         let dy = f(ev.delta.pixel_delta(window.line_height()).y);
         // Wheel up shows higher prices.
         self.scroll_rows += dy / ROW_H;
@@ -659,6 +747,13 @@ impl DomView {
             self.picked(outcome, cx);
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        // A working order's size being typed (Alt+Enter: one leg of a linked pair).
+        if !(k.modifiers.control || k.modifiers.platform)
+            && trade_bar::resize_key(self, k.key.as_str(), k.modifiers.alt, cx)
+        {
+            cx.stop_propagation();
             return;
         }
         // A size being typed takes the plain keys (digits, Enter, Esc), only while its field is
@@ -962,6 +1057,10 @@ impl DomView {
                     .flash(format!("{}: {why}", fmt.format::<32>(p).as_str()));
             }
             let units = self.row_units();
+            if tr.start_order_controls && self.orders.hover.is_none() {
+                self.orders.hover = self.orders.first_single(units);
+                window.refresh();
+            }
             self.orders.paint(
                 &mut self.glyphs,
                 &t,
@@ -974,6 +1073,10 @@ impl DomView {
                 ROW_H,
                 hair,
                 &self.product.price,
+                self.trade
+                    .resize_edit
+                    .as_ref()
+                    .map(|(id, digits)| (*id, digits.as_str())),
                 window,
                 cx,
             );
@@ -1141,6 +1244,11 @@ impl Render for DomView {
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
+                    .on_mouse_exit(cx.listener(|v, _, _, cx| {
+                        if v.orders.hover.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(body)
                     .when_some(overlay, |d, o| d.child(o)),

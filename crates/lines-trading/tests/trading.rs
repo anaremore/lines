@@ -1758,7 +1758,7 @@ fn reduce_only_orders_cant_grow() {
         })
         .unwrap_err();
     assert_eq!(e.code, RejectCode::Invalid);
-    assert!(e.message.contains("can't grow"), "{}", e.message);
+    assert_eq!(e.message, "exits can't exceed the position (2)");
     // Smaller, or a price change, is fine.
     assert!(
         r.cmd(Command::ModifyOrder {
@@ -2231,4 +2231,136 @@ fn the_account_reports_its_order_maximum() {
     r.place(Side::Buy, 1, OrderKind::Market);
     r.wait(LAT);
     assert_eq!(last_limit(&r), None);
+}
+
+// ---- resizing working orders (the DOM's marks, the chart's tags) ----------------------------
+
+fn resize(r: &mut Rig, order: OrderId, qty: i64) -> Result<Vec<OrderId>, lines_trading::Reject> {
+    r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order,
+        qty: Some(Qty(qty)),
+        price: None,
+    })
+}
+
+/// A linked stop and target shrink and grow back together, never past the position, and either
+/// one still closes the position exactly.
+#[test]
+fn a_linked_pair_resizes_within_the_position() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    let (tp, sl) = filled_bracket(&mut r, 6005.00, 5995.00);
+    resize(&mut r, sl, 1).unwrap();
+    resize(&mut r, tp, 1).unwrap();
+    r.wait(LAT);
+    assert_eq!(r.core.order(sl).unwrap().qty, Qty(1));
+    assert_eq!(r.core.order(tp).unwrap().qty, Qty(1));
+    // Back up, one leg at a time: the pair counts once, so neither blocks the other.
+    resize(&mut r, sl, 2).expect("up to the position");
+    r.wait(LAT);
+    resize(&mut r, tp, 2).expect("the other leg too");
+    r.wait(LAT);
+    assert_eq!(r.core.order(sl).unwrap().qty, Qty(2));
+    assert_eq!(r.core.order(tp).unwrap().qty, Qty(2));
+    let e = resize(&mut r, sl, 3).unwrap_err();
+    assert_eq!(e.message, "exits can't exceed the position (2)");
+    // The stop fires for all of it; the target goes; flat, never short.
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(tp), OrderState::Cancelled);
+}
+
+/// What else closes the position counts: an exit grows only into what is left.
+#[test]
+fn an_exit_grows_only_into_what_other_orders_leave() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 3, OrderKind::Market);
+    r.wait(LAT);
+    let a = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: limit(6005.00),
+        }))
+        .unwrap()[0];
+    r.wait(LAT);
+    let plain = r.place(Side::Sell, 1, limit(6006.00));
+    r.wait(LAT);
+    let e = resize(&mut r, a, 3).unwrap_err();
+    assert_eq!(e.message, "exits can't exceed the position (3)");
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: plain,
+    })
+    .unwrap();
+    r.wait(LAT);
+    resize(&mut r, a, 3).expect("nothing else closes it now");
+}
+
+/// A bracket's exits follow its entry until it is filled: resizing them then is refused.
+#[test]
+fn an_exit_of_a_working_entry_cant_be_resized() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let (_, _, sl) = bracket(&mut r);
+    r.wait(LAT);
+    let e = resize(&mut r, sl, 1).unwrap_err();
+    assert!(e.message.contains("follows its entry"), "{}", e.message);
+}
+
+/// Growing an order past a risk limit is refused, and it stays as it was.
+#[test]
+fn growing_a_working_order_over_a_risk_limit_is_refused() {
+    let mut cfg = AccountConfig::paper("paper-1", 50_000);
+    cfg.limits = RiskLimits {
+        max_order_qty: Some(3),
+        ..Default::default()
+    };
+    let mut r = Rig::with(FillModel::TradeThrough, cfg);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.trade(6000.00, 1);
+    let buy = r.place(Side::Buy, 2, limit(5990.00));
+    r.wait(LAT);
+    let e = resize(&mut r, buy, 4).unwrap_err();
+    assert_eq!(e.code, RejectCode::Risk, "{}", e.message);
+    assert_eq!(r.core.order(buy).unwrap().qty, Qty(2));
+    resize(&mut r, buy, 3).expect("at the limit");
+}
+
+/// Part filled, then a shrink: its fills stay, and below them is refused.
+#[test]
+fn a_shrink_keeps_the_fills_and_never_goes_below_them() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let buy = r.place(Side::Buy, 5, limit(5999.00));
+    r.wait(LAT);
+    r.trade(5998.75, 2); // 2 of 5
+    assert_eq!(r.core.order(buy).unwrap().filled, Qty(2));
+    resize(&mut r, buy, 3).expect("1 left");
+    r.wait(LAT);
+    assert_eq!(r.core.order(buy).unwrap().remaining(), Qty(1));
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert!(resize(&mut r, buy, 2).is_err(), "not above what filled");
+}
+
+/// A shrink on its way to the broker when a fill overtakes it: the fill stands and counts, and
+/// the order never ends below its fills.
+#[test]
+fn a_modify_racing_a_fill_never_undoes_it() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    let buy = r.place(Side::Buy, 5, limit(5999.00));
+    r.wait(LAT);
+    resize(&mut r, buy, 2).expect("sent, on its way to the broker");
+    r.trade(5998.75, 3); // fills 3 before the modify's latency passes
+    r.wait(LAT);
+    let o = r.core.order(buy).unwrap();
+    assert_eq!(o.filled, Qty(3), "the fill stands");
+    assert!(o.qty.0 >= o.filled.0, "{o:?}");
+    assert_eq!(r.core.position(&acct(), es()), 3);
 }

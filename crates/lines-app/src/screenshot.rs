@@ -51,6 +51,8 @@ pub struct Shot {
     pub arm: bool,
     /// DOMs start with order hotkeys on (`--enable-hotkeys`).
     pub hotkeys: bool,
+    /// The first single-order mark and tag show their resize control (`--order-controls`).
+    pub order_controls: bool,
     /// The order size symbols start with (`--order-size`).
     pub order_size: Option<u32>,
     /// The paper accounts' largest allowed order (`--max-order-qty`).
@@ -142,6 +144,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         paper,
         arm,
         hotkeys,
+        order_controls,
         order_size,
         max_order_qty,
         demo_broker,
@@ -198,6 +201,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     let mut trading = Trading::start(setup, registry.clone(), ws.env.base.clone());
     trading.start_armed = arm;
     trading.start_hotkeys = hotkeys;
+    trading.start_order_controls = order_controls;
     if demo_broker {
         trading.wait_for_venues();
         trading.start_account = Some(lines_trading::AccountId::new(crate::demo_broker::SIM));

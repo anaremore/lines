@@ -25,6 +25,8 @@ use lines_core::ladder::LadderRow;
 use lines_core::{ContractKey, Price};
 use lines_trading::{AccountId, OrderId, Side};
 
+use crate::order_resize::ResizeHit;
+
 use crate::dom_trade::{
     Ghost, MarkRole, MarkStyle, OrderMark, group_key, mark_group_text, mark_text, order_mark,
     position_row, row_of,
@@ -51,6 +53,10 @@ pub struct DragOrder {
     pub order: OrderId,
     pub to: Price,
 }
+
+/// The narrowest mark that draws its − and + (each at least 20 px, with room for its size).
+pub const RESIZE_MARK_W: f32 = 60.0;
+const RESIZE_BTN_W: f32 = 20.0;
 
 /// What a press on a row of the orders column is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +101,36 @@ fn mark_press(slots: &[(OrderMark, i64, usize); 2], n: usize, x: f32, cell_w: f3
     }
 }
 
+/// The piece of the resize control at `x` px into a single-order mark: a mark for several orders
+/// has none (no action on it may touch only one of them), and a narrow mark is all value.
+fn resize_zone(
+    slots: &[(OrderMark, i64, usize); 2],
+    n: usize,
+    x: f32,
+    cell_w: f32,
+) -> Option<(OrderId, ResizeHit)> {
+    let MarkPress::One(id) = mark_press(slots, n, x, cell_w) else {
+        return None;
+    };
+    let w = ((cell_w - 2.0) / n as f32).max(1.0);
+    let k = (((x - 1.0) / w).floor().max(0.0) as usize).min(n - 1);
+    let into = x - 1.0 - k as f32 * w;
+    let hit = if w < RESIZE_MARK_W {
+        ResizeHit::Value
+    } else if into < RESIZE_BTN_W {
+        ResizeHit::Down
+    } else if into >= w - RESIZE_BTN_W - 1.0 {
+        ResizeHit::Up
+    } else {
+        ResizeHit::Value
+    };
+    Some((id, hit))
+}
+
 pub struct OrdersLayer {
+    /// The single-order mark under the pointer, and whether its + can do anything.
+    pub hover: Option<OrderId>,
+    hover_grows: bool,
     marks: Vec<OrderMark>,
     flashes: Vec<RowFlash>,
     text: String,
@@ -109,6 +144,8 @@ pub struct OrdersLayer {
 impl Default for OrdersLayer {
     fn default() -> Self {
         OrdersLayer {
+            hover: None,
+            hover_grows: false,
             marks: Vec::with_capacity(64),
             flashes: Vec::with_capacity(8),
             text: String::with_capacity(512),
@@ -172,6 +209,14 @@ impl OrdersLayer {
                 });
             }
         }
+        self.hover_grows = self.hover.and_then(|id| s.order(id)).is_some_and(|o| {
+            let working = o
+                .parent
+                .and_then(|p| s.order(p))
+                .is_some_and(lines_trading::Order::is_open);
+            let position = s.position(account, contract).map_or(0, |p| p.qty);
+            crate::order_resize::can_grow(o, working, position)
+        });
         self.ghosts.retain(|g| {
             match crate::dom_trade::ghost_outcome(g, s.order(g.order), s.result(g.command)) {
                 crate::dom_trade::GhostOutcome::Pending => true,
@@ -193,6 +238,39 @@ impl OrdersLayer {
         mark_press(&slots, n, x, cell_w)
     }
 
+    /// The resize control's piece under a press (`resize_zone`), on the row containing `price`.
+    pub fn zone_at(
+        &self,
+        price: Price,
+        units: i64,
+        x: f32,
+        cell_w: f32,
+    ) -> Option<(OrderId, ResizeHit)> {
+        let row = row_of(price.0, units);
+        let (slots, n, _) = row_marks(&self.marks, |m| row_of(m.price.0, units) == row);
+        resize_zone(&slots, n, x, cell_w)
+    }
+
+    /// The newest mark that stands for one order (`--order-controls`).
+    pub fn first_single(&self, units: i64) -> Option<OrderId> {
+        self.marks
+            .iter()
+            .rev()
+            .find(|m| {
+                let row = row_of(m.price.0, units);
+                let (slots, n, _) = row_marks(&self.marks, |o| row_of(o.price.0, units) == row);
+                slots.iter().take(n).any(|s| s.0.id == m.id && s.2 == 1)
+            })
+            .map(|m| m.id)
+    }
+
+    /// Whether order `id`'s mark is on the row containing `price`.
+    pub fn on_row(&self, id: OrderId, price: Price, units: i64) -> bool {
+        self.marks
+            .iter()
+            .any(|m| m.id == id && row_of(m.price.0, units) == row_of(price.0, units))
+    }
+
     /// Paint over the ladder. `orders`: the orders column's cell (x, w), if shown; `price`:
     /// the price column's cell. Nothing here draws outside those two cells, and refusal tags
     /// stay inside the orders cell (clipped): the price column is never covered.
@@ -210,6 +288,7 @@ impl OrdersLayer {
         row_h: f32,
         hair: f32,
         price_fmt: &lines_core::PriceFormat,
+        typing: Option<(OrderId, &str)>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -304,6 +383,9 @@ impl OrdersLayer {
                         buf.clear();
                         let _ = mark_group_text(m, left, count, true, &mut buf);
                     }
+                } else if let Some((_, digits)) = typing.filter(|(id, _)| *id == m.id) {
+                    // Its size being typed, in the mark.
+                    let _ = std::fmt::Write::write_fmt(&mut buf, format_args!("{digits}_"));
                 } else {
                     let _ = mark_text(m, &mut buf);
                 }
@@ -327,6 +409,27 @@ impl OrdersLayer {
                     window,
                     cx,
                 );
+                // − and + on the hovered mark for one order (never on a group's).
+                if count == 1 && self.hover == Some(m.id) && w >= RESIZE_MARK_W {
+                    let ends = [
+                        (x, "−", t.text_main),
+                        (
+                            x + w - 1.0 - RESIZE_BTN_W,
+                            "+",
+                            if self.hover_grows {
+                                t.text_main
+                            } else {
+                                t.text_dim
+                            },
+                        ),
+                    ];
+                    for (bx, sign, colour) in ends {
+                        let b = rect(bx, yy, RESIZE_BTN_W, h);
+                        window.paint_quad(fill(b, t.panel));
+                        outline(window, b, t.control_edge, hair, false);
+                        glyphs.paint(sign, bx + 6.0, y, row_h, colour, true, window, cx);
+                    }
+                }
             }
             if n == 0
                 && pos_row == Some(row)
@@ -349,7 +452,10 @@ impl OrdersLayer {
                 );
             }
             // Ghosts and the order being dragged: a dashed accent outline at the new price.
-            let ghost_here = self.ghosts.iter().any(|g| row_of(g.price.0, units) == row)
+            let ghost_here = self
+                .ghosts
+                .iter()
+                .any(|g| g.qty.is_none() && row_of(g.price.0, units) == row)
                 || self.drag.is_some_and(|d| row_of(d.to.0, units) == row);
             if ghost_here {
                 outline(
@@ -671,6 +777,39 @@ mod tests {
         // The cell's edges stay on a mark.
         assert_eq!(mark_press(&s, n, -3.0, 78.0), MarkPress::Many(20));
         assert_eq!(mark_press(&s, n, 500.0, 78.0), MarkPress::One(OrderId(50)));
+    }
+
+    /// − and + only on a mark for one order: a group mark has no resize control, so it can't
+    /// resize just one of its orders (#67's refusal stays what a press on it gets).
+    #[test]
+    fn a_group_mark_has_no_resize_control_and_a_single_one_has_three_parts() {
+        let exit = |id, qty| mark(id, Side::Sell, qty, false, true, MarkStyle::Working);
+        let one = |id, qty| (exit(id, qty), qty, 1usize);
+        let single = [one(1, 2), one(2, 2)];
+        // One mark across a 100 px cell.
+        assert_eq!(
+            resize_zone(&single, 1, 5.0, 100.0),
+            Some((OrderId(1), ResizeHit::Down))
+        );
+        assert_eq!(
+            resize_zone(&single, 1, 50.0, 100.0),
+            Some((OrderId(1), ResizeHit::Value))
+        );
+        assert_eq!(
+            resize_zone(&single, 1, 95.0, 100.0),
+            Some((OrderId(1), ResizeHit::Up))
+        );
+        // Two marks in that cell are too narrow for buttons, and each press is its own order's.
+        assert_eq!(
+            resize_zone(&single, 2, 75.0, 100.0),
+            Some((OrderId(2), ResizeHit::Value))
+        );
+        // A mark for several orders: nothing, wherever the press is.
+        let group = [(exit(1, 2), 40, 20usize), one(2, 2)];
+        for x in [5.0, 50.0, 95.0] {
+            assert_eq!(resize_zone(&group, 1, x, 100.0), None, "{x}");
+        }
+        assert_eq!(resize_zone(&single, 0, 5.0, 100.0), None);
     }
 
     /// A press counts only the orders on its own row.

@@ -17,10 +17,14 @@ use lines_core::{ContractKey, FixedStr, Price, PriceFormat, Product};
 use lines_trading::{AccountId, Command as TradeCommand, Money, OrderKind, OrderSpec, Side};
 
 use crate::dom_trade::{MarkRole, MarkStyle, OrderMark, Refusal};
+use crate::order_resize::ResizeHit;
 use crate::pnl::PnlDisplay;
 
 /// Shown when a handle is dragged with no linked DOM enabled (a chart shows no switch).
 pub const ENABLE_TO_ADD: &str = "Enable trading on the linked DOM to add a stop or target";
+
+/// A chart's resize upward with no linked DOM enabled.
+pub const ENABLE_TO_GROW: &str = "Enable trading on the linked DOM to add to an order";
 
 /// Whether a chart exit may go out: a DOM in the chart's link group (not unlinked), on the
 /// same account and contract, has trading enabled. `doms`: (link, account, contract, enabled).
@@ -402,6 +406,10 @@ pub struct ChartTradeState {
     pub adding: Option<AddExit>,
     /// A press on a tag's ×: cancels on release if still there.
     pub closing: Option<u64>,
+    /// The single-order tag under the pointer, or whose − / size / + is, and whether its + can
+    /// do anything.
+    pub resize_hover: Option<u64>,
+    pub resize_grows: bool,
     /// A tag drag's grab offset (order price − the price under the press), so the order moves
     /// by how far the pointer moved, never to the pointer's price (tags may sit off their line).
     pub grab: i64,
@@ -418,6 +426,32 @@ pub struct ChartTradeState {
     /// A strip limit button pressed: the next click on the plot is its price (the crosshair's
     /// there). Esc, the same button again, or another symbol drops it.
     pub strip_pick: Option<StripOrder>,
+}
+
+/// The resize control left of a tag: −, the size, + (each at least 20 px, a tag's height).
+pub const RESIZE_BTN_W: f32 = 20.0;
+pub const RESIZE_VALUE_W: f32 = 40.0;
+pub const RESIZE_W: f32 = 2.0 * RESIZE_BTN_W + RESIZE_VALUE_W;
+
+/// The piece of the resize control of tag `b` at plot-local (`x`, `y`); `None` off it, or when
+/// the tag sits too near the plot's left edge to have one.
+pub fn resize_hit(b: &TagBox, x: f32, y: f32) -> Option<ResizeHit> {
+    let left = b.left - RESIZE_W;
+    if left < 0.0
+        || y < b.top
+        || y >= b.top + lines_core::geometry::order_tags::TAG_H
+        || x < left
+        || x >= b.left
+    {
+        return None;
+    }
+    Some(if x < left + RESIZE_BTN_W {
+        ResizeHit::Down
+    } else if x < left + RESIZE_BTN_W + RESIZE_VALUE_W {
+        ResizeHit::Value
+    } else {
+        ResizeHit::Up
+    })
 }
 
 /// An add drag shorter than this (px) is a click and places nothing.
@@ -591,6 +625,8 @@ impl Default for ChartTradeState {
             press_y: 0.0,
             moved: 0.0,
             strip_pick: None,
+            resize_hover: None,
+            resize_grows: false,
         }
     }
 }
@@ -621,6 +657,17 @@ impl ChartTradeState {
             .position(account, contract)
             .and_then(|p| p.avg_price.map(|a| (p.qty, a)))
             .filter(|p| p.0 != 0);
+        self.resize_grows = self
+            .resize_hover
+            .and_then(|id| s.order(lines_trading::OrderId(id)))
+            .is_some_and(|o| {
+                let working = o
+                    .parent
+                    .and_then(|p| s.order(p))
+                    .is_some_and(lines_trading::Order::is_open);
+                let position = s.position(account, contract).map_or(0, |p| p.qty);
+                crate::order_resize::can_grow(o, working, position)
+            });
         self.ghosts.retain(
             |g| match ghost_outcome(g, s.order(g.order), s.result(g.command)) {
                 GhostOutcome::Pending => true,
@@ -669,6 +716,25 @@ impl ChartTradeState {
     /// The orders behind a tag (`on_plot` is sorted, a group is one run of it).
     pub fn members(&self, g: &TagGroup) -> &[GroupIn] {
         &self.on_plot[g.first..g.first + g.n]
+    }
+
+    /// The single-order tag under plot-local (`x`, `y`) for the resize control, and the control's
+    /// piece if the point is on it: the hovered tag's control first (it sits left of the tag,
+    /// over whatever is there). A group's tag has none: no action on it may touch only one of
+    /// its orders.
+    pub fn resize_target(&self, x: f32, y: f32) -> Option<(u64, Option<ResizeHit>)> {
+        let tags = &self.tags[..self.n_tags];
+        if let Some(b) = self
+            .resize_hover
+            .and_then(|h| tags.iter().find(|b| b.id == h))
+            && let Some(hit) = resize_hit(b, x, y)
+        {
+            return Some((b.id, Some(hit)));
+        }
+        tags.iter()
+            .find(|b| b.contains(x, y))
+            .filter(|b| self.group_of(b.id).is_none() && self.mark(b.id).is_some())
+            .map(|b| (b.id, None))
     }
 
     /// The order behind a tag id (open, as of this frame).
@@ -1103,6 +1169,27 @@ mod tests {
             strip_command(StripOrder::BuyMarket, at, &c).is_err(),
             "no quantity"
         );
+    }
+
+    #[test]
+    fn the_resize_control_sits_left_of_its_tag() {
+        let b = TagBox {
+            id: 7,
+            price: Price(600_000),
+            line_y: 110.0,
+            left: 200.0,
+            top: 100.0,
+            w: 150.0,
+            close_left: 330.0,
+        };
+        assert_eq!(resize_hit(&b, 121.0, 105.0), Some(ResizeHit::Down));
+        assert_eq!(resize_hit(&b, 160.0, 105.0), Some(ResizeHit::Value));
+        assert_eq!(resize_hit(&b, 199.0, 105.0), Some(ResizeHit::Up));
+        assert_eq!(resize_hit(&b, 119.0, 105.0), None, "left of it");
+        assert_eq!(resize_hit(&b, 200.0, 105.0), None, "the tag's own");
+        assert_eq!(resize_hit(&b, 160.0, 99.0), None, "above it");
+        let edge = TagBox { left: 60.0, ..b };
+        assert_eq!(resize_hit(&edge, 30.0, 105.0), None, "no room: none");
     }
 
     #[test]

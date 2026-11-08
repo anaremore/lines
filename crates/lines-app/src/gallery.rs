@@ -211,6 +211,12 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         s(name, quick, end, a)
     };
     v.push(paper("orders-armed", true, ORDERS, "--arm"));
+    v.push(paper(
+        "order-controls",
+        true,
+        ORDERS,
+        "--arm --order-controls",
+    ));
     v.push(paper("orders-disarmed", false, ORDERS, ""));
     // A strategy armed on the account: the switch says so (decision 0025).
     v.push(paper(

@@ -911,15 +911,16 @@ impl TradingCore {
                         "new quantity is not above the filled quantity",
                     ));
                 }
-                // A reduce-only order never grows: a larger exit could flip the position (a
-                // stop sell 2 on a long 2 grown to 5 leaves a short 3). Place another exit.
-                if let Some(q) = qty
-                    && q.0 > o.qty.0
-                    && o.reduce_only
+                // A bracket exit's size follows its entry's fills until the entry is done.
+                if qty.is_some_and(|q| q != o.qty)
+                    && matches!(o.role, Role::TakeProfit | Role::StopLoss)
+                    && o.parent
+                        .and_then(|p| self.orders.get(&p))
+                        .is_some_and(Order::is_open)
                 {
                     return Err(Reject::new(
                         RejectCode::Invalid,
-                        "reduce-only orders can't grow; place another exit",
+                        "this exit's size follows its entry until the entry is filled",
                     ));
                 }
                 // More quantity is more exposure: the increase is checked as a new order of
@@ -929,16 +930,41 @@ impl TradingCore {
                 if let Some(q) = qty
                     && q.0 > o.qty.0
                 {
-                    self.check_new(
-                        now,
-                        &OrderSpec {
-                            account: account.clone(),
-                            contract: o.contract,
-                            side: o.side,
-                            qty: Qty(q.0 - o.qty.0),
-                            kind: o.kind,
-                        },
-                    )?;
+                    let added = OrderSpec {
+                        account: account.clone(),
+                        contract: o.contract,
+                        side: o.side,
+                        qty: Qty(q.0 - o.qty.0),
+                        kind: o.kind,
+                    };
+                    if o.reduce_only {
+                        // An exit may grow back up to the position, never past it (a stop sell 2
+                        // on a long 2 grown to 5 would leave a short 3), counting what else
+                        // closes it (`open_qty`: a linked pair once). It closes, so it takes an
+                        // exit's checks, not an entry's.
+                        let position = self.position(&account, o.contract).abs();
+                        let (open_buy, open_sell) = self.open_qty(&account, o.contract);
+                        let open = if o.side == Side::Buy {
+                            open_buy
+                        } else {
+                            open_sell
+                        };
+                        let pair = o
+                            .oco
+                            .and_then(|s| self.orders.get(&s))
+                            .filter(|s| s.is_open() && s.side == o.side)
+                            .map_or(0, |s| s.remaining().0);
+                        let others = open - o.remaining().0.max(pair);
+                        if q.0 - o.filled.0 + others > position {
+                            return Err(Reject::new(
+                                RejectCode::Invalid,
+                                format!("exits can't exceed the position ({position})"),
+                            ));
+                        }
+                        self.check_exit(now, &added)?;
+                    } else {
+                        self.check_new(now, &added)?;
+                    }
                     if let Some(max) = self.accounts[&account].cfg.limits.max_order_qty
                         && q.0 > max
                     {

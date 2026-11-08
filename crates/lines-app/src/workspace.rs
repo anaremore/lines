@@ -849,7 +849,13 @@ impl WindowView {
         );
         match crate::trading::Trading::try_global(cx) {
             Some(t) if ok => {
-                t.submit(lines_trading::Source::Chart, ev.issued, ev.command.clone());
+                let id = t.submit(lines_trading::Source::Chart, ev.issued, ev.command.clone());
+                if let Some((order, price, qty)) = ev.resize {
+                    chart.update(cx, |c, cx| {
+                        c.track_resize(order, price, qty, id);
+                        cx.notify();
+                    });
+                }
             }
             _ => chart.update(cx, |c, cx| c.exit_refused(ev.refused, cx)),
         }
