@@ -2204,7 +2204,11 @@ impl ChartView {
         match h {
             // A group tag lists its orders (no one order to drag, no × for many at one press).
             TagHit::Body(id) | TagHit::Close(id) if self.ct.group_of(id).is_some() => {
-                self.open_order_group(id, y as f32, cx);
+                let top = self.ct.tags[..n]
+                    .iter()
+                    .find(|b| b.id == id)
+                    .map_or(y as f32, |b| b.top);
+                self.open_order_group(id, top, cx);
             }
             // Moving and cancelling need no arming, as on the DOM.
             TagHit::Body(id) => {
@@ -2529,17 +2533,6 @@ impl ChartView {
 
     fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let t0 = Instant::now();
-        // A group's list follows its orders: finished ones are marked (disarming Cancel all),
-        // and it closes when none is left.
-        if let Some(menu) = &mut self.ct.group_menu {
-            let marks = &self.ct.marks;
-            if menu.refresh(|o| marks.iter().any(|m| m.id == o)) {
-                cx.notify();
-            }
-            if menu.open_count() == 0 {
-                self.close_popover(Kind::OrderGroup, cx);
-            }
-        }
         // Screenshot fixture: the first group tag's list, once a frame has laid tags out.
         if self.pending_group_menu {
             if let Some(g) = self.ct.groups[..self.ct.n_groups]
@@ -5509,8 +5502,17 @@ impl Pane for ChartView {
     /// New indicator values (they arrive from the indicator thread after the store's), or new
     /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
+        // A group's list follows its orders, on this tick, from the cache itself (a busy cache
+        // waits for the next one; a frame's marks can be briefly empty).
+        let group = match (&mut self.ct.group_menu, self.trade.try_cache()) {
+            (Some(menu), Some(s)) => {
+                menu.refresh(|o| s.order(o).and_then(crate::dom_trade::order_mark).is_some())
+            }
+            _ => false,
+        };
         // Drawings changed on any chart of this product (shown here).
-        let rates = std::mem::take(&mut self.rates_changed)
+        let rates = group
+            | std::mem::take(&mut self.rates_changed)
             | self.trade.changed()
             | (self.drawings.changed() && !self.drawings.hidden);
         if !self.visibility.draws_studies() {
@@ -6049,6 +6051,15 @@ pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel o
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A group's list closes when none of its orders is left.
+        if self
+            .ct
+            .group_menu
+            .as_ref()
+            .is_some_and(|m| m.open_count() == 0)
+        {
+            self.close_popover(Kind::OrderGroup, cx);
+        }
         let t = self.theme;
         let entity = cx.entity();
         // The workspace refreshes every window when this preference changes.

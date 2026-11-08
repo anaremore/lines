@@ -151,7 +151,7 @@ pub struct GroupMenu {
     pub rows: Vec<GroupRow>,
     /// `Target: 200 in 20 orders, 5822.75–5823.00`.
     pub title: String,
-    /// Plot-local y of the tag pressed (the list opens under it).
+    /// Plot-local top of the tag pressed (the list opens under it).
     pub top: f32,
     /// Cancel all pressed once, with this many orders open.
     pub confirm: Option<usize>,
@@ -162,16 +162,15 @@ impl GroupMenu {
         self.rows.iter().filter(|r| r.open).count()
     }
 
-    /// Mark the orders that finished (`is_open` false): they keep their row, inert. Any change
-    /// disarms Cancel all, so the second press always answers the count on screen. Returns
-    /// whether anything changed.
+    /// Each row's state from the trading cache (`is_open`, a successful read): an order that
+    /// finished keeps its row, inert. Any change disarms Cancel all, so the second press always
+    /// answers the count on screen. Returns whether anything changed.
     pub fn refresh(&mut self, is_open: impl Fn(lines_trading::OrderId) -> bool) -> bool {
         let mut changed = false;
-        for r in self.rows.iter_mut().filter(|r| r.open) {
-            if !is_open(r.mark.id) {
-                r.open = false;
-                changed = true;
-            }
+        for r in &mut self.rows {
+            let open = is_open(r.mark.id);
+            changed |= open != r.open;
+            r.open = open;
         }
         if changed {
             self.confirm = None;

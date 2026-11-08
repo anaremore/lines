@@ -21,8 +21,8 @@ const WIDTH: f32 = 330.0;
 const ROW_H: f32 = 24.0;
 /// Rows shown before the list scrolls.
 const ROWS_SHOWN: usize = 12;
-/// The list's header, its gaps and padding, and Cancel all.
-const CHROME_H: f32 = 86.0;
+/// The list's title, its scroll line, its gaps and padding, and Cancel all.
+const CHROME_H: f32 = 108.0;
 /// Past the plot's right edge: the price axis stays clear.
 const MARGIN: f32 = 4.0;
 
@@ -117,8 +117,13 @@ pub fn layer(
                         .text_color(t.text_main)
                         .cursor_pointer()
                         .child("×")
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                        // A double-click's second press never cancels: the list may have opened
+                        // under the pointer on its first.
+                        .on_click(cx.listener(move |v, ev: &ClickEvent, _, cx| {
                             cx.stop_propagation();
+                            if ev.click_count() > 1 {
+                                return;
+                            }
                             v.cancel_order(id, cx);
                             cx.notify();
                         })),
@@ -138,11 +143,13 @@ pub fn layer(
         .max(120.0);
     // The list's left edge from the pane's, keeping it inside the plot (never over the axis).
     let left = (f32::from(plot.size.width) - width - MARGIN).max(MARGIN);
-    let scroll = if menu.rows.len() as f32 * ROW_H > list_h {
-        " · scroll for all"
-    } else {
-        ""
-    };
+    let shown = (list_h / ROW_H).floor() as usize;
+    let scroll = (menu.rows.len() > shown).then(|| {
+        div().flex_shrink_0().text_color(t.text_dim).child(format!(
+            "Showing {shown} of {}: scroll for all",
+            menu.rows.len()
+        ))
+    });
     let cancel = div()
         .id("group-cancel-all")
         .flex()
@@ -186,6 +193,7 @@ pub fn layer(
         .border_color(t.axis_line)
         .rounded_md()
         .text_size(px(12.0))
+        .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
             cx.stop_propagation()
         })
@@ -196,7 +204,7 @@ pub fn layer(
                 .overflow_hidden()
                 .font_weight(FontWeight::BOLD)
                 .text_color(t.text_main)
-                .child(format!("{}{scroll}", menu.title)),
+                .child(menu.title.clone()),
         )
         .child(
             div()
@@ -207,6 +215,7 @@ pub fn layer(
                 .overflow_y_scroll()
                 .children(rows),
         )
+        .children(scroll)
         .child(cancel);
     let dismiss: popover::OnDismiss =
         Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::OrderGroup, cx)));

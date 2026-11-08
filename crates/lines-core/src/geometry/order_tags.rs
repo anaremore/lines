@@ -256,7 +256,7 @@ pub fn layout_tags(
     let mut ceiling = hi;
     for t in tags.iter_mut().rev() {
         if t.top + TAG_H > ceiling {
-            t.top = ceiling - TAG_H;
+            t.top = (ceiling - TAG_H).max(0.0);
         }
         ceiling = t.top - TAG_GAP;
     }

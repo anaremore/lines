@@ -189,6 +189,11 @@ impl PaneTrade {
         (d != TradeDoc::default()).then_some(d)
     }
 
+    /// Read the trading cache without waiting (`None`: not trading, or busy this tick).
+    pub fn try_cache(&self) -> Option<std::sync::MutexGuard<'_, crate::trading::TradeState>> {
+        self.cache.as_ref()?.try_read()
+    }
+
     /// The trading state moved for this pane's account (or a local flash expired).
     pub fn changed(&mut self) -> bool {
         let mut changed = false;
