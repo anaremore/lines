@@ -587,7 +587,11 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
         }
         PaneKind::Chain => {
             let frozen = env.frozen;
-            PaneHandle::Chain(cx.new(|cx| ChainView::new(feed, theme, frozen, cx)))
+            PaneHandle::Chain(cx.new(|cx| {
+                let mut v = ChainView::new(feed, theme, frozen, cx);
+                v.restore_trade(doc.trade.as_ref(), cx);
+                v
+            }))
         }
     };
     handle.set_link(doc.link, cx);
@@ -1133,6 +1137,10 @@ impl WindowView {
             }
             Command::OpenJournal => self.open_panel(PaneKind::Journal, window, cx),
             Command::OpenChain => self.open_panel(PaneKind::Chain, window, cx),
+            Command::ChainOneClick => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_one_click(cx)),
+                _ => self.refuse("One-click acts on the focused option chain", cx),
+            },
             Command::Strategy(StrategyCmd::Open) => {
                 self.open_panel(PaneKind::Strategies, window, cx)
             }
@@ -3290,7 +3298,7 @@ impl Render for WindowView {
                 "Journal: click or Up/Down to select, Enter: tags and note, Snapshot column: view, click the stats: today / all dates"
             }
             Some(PaneHandle::Chain(_)) => {
-                "Option chain: Up/Down strike, Left/Right expiry, Tab calls / puts, type a symbol or Ctrl+K: switch"
+                "Option chain: click an ask to buy or a bid to sell, or Enter on the selected cell; Up/Down strike, Left/Right expiry, Tab calls / puts, Shift+Tab bid / ask, type a symbol or Ctrl+K: switch"
             }
             _ => chart_view::HINTS_SHORT,
         };

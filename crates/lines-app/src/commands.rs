@@ -103,6 +103,8 @@ pub enum Command {
     OpenJournal,
     /// Show an option chain: focus one, else open one in a new tab (decision 0028).
     OpenChain,
+    /// The focused chain's One-click switch: a click on a bid or ask sends a limit there.
+    ChainOneClick,
     /// Write the journal's trades as CSV to the config folder.
     ExportJournal,
     /// The focused journal: edit the selected trade's tags and note.
@@ -705,6 +707,7 @@ pub fn label(c: Command) -> String {
         Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
         Command::OpenJournal => "Open journal".into(),
         Command::OpenChain => "Open option chain".into(),
+        Command::ChainOneClick => "Option chain: One-click on/off".into(),
         Command::ExportJournal => "Export journal (CSV)".into(),
         Command::JournalEdit => "Journal: edit tags and note".into(),
         Command::JournalAllDates => "Journal: stats for all dates / today".into(),
@@ -836,6 +839,7 @@ pub fn palette() -> Vec<Command> {
         Command::DomTrailHalfLife,
         Command::OpenJournal,
         Command::OpenChain,
+        Command::ChainOneClick,
         Command::ExportJournal,
         Command::JournalEdit,
         Command::JournalAllDates,

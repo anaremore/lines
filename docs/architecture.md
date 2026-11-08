@@ -144,6 +144,8 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # Header dropdowns open (screenshots): --order-group-menu (the first chart's first group tag's list of orders), --timeframe-menu (the first chart's timeframe list), --account-menu (every
 #   chart's and DOM's account list; needs an account chip, i.e. trading running, as in screenshot mode).
 # Studies menu (screenshots): --studies-menu open | edit:STUDY | style:STUDY[:TAB] (the style editor on its parts), STUDY = vwap:N | delta:N | profile | footprint | levels:ID; --study-set FILE (a StudySet JSON).
+# The chain's ticket (screenshots): --chain-ticket "buy|sell STRIKE call|put [at PRICE] [close] [one-click]", with
+# --paper "option 2026-11-09 682 call; buy 2 @ 1.89; ack" for orders on a series.
 # Paper trading evidence (in-memory core, manual clock): --paper "account paper-eval; buy 2 mkt; ack; buy 1 @ 5807.00;
 #   buy 1 @ 5808.00 bracket 4/8; ack; buy 1 @ 5806.50" (orders after the last `ack` stay pending), --enable-trading (DOMs start with trading enabled; `--arm` is the old name), --enable-hotkeys (DOMs start with order hotkeys on). --pnl off|ticks|currency|both.
 #   --bracket-units ticks|points (every account), --bracket-editor (DOMs open their bracket-preset editor), --hover-header (the focused pane's header controls show as if hovered).

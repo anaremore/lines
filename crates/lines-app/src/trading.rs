@@ -78,6 +78,8 @@ pub struct AccountInfo {
     pub paper: bool,
     /// The prop preset, for the rule strip's limits.
     pub rules: Option<RulePreset>,
+    /// The option guard the core applies (the chain's ticket asks it before sending).
+    pub option_guard: lines_trading::risk::OptionGuard,
     /// The broker extension the account belongs to (index into the venues; `None`: paper).
     pub venue: Option<usize>,
     /// The badge beside its name: PAPER, SIM (the venue's simulation) or LIVE (real money, or a
@@ -94,6 +96,7 @@ impl AccountInfo {
             name,
             paper: true,
             rules,
+            option_guard: Default::default(),
             venue: None,
             badge: "PAPER",
             read_only: None,
@@ -370,6 +373,25 @@ impl TradeState {
         {
             self.flashes.pop_front();
         }
+    }
+
+    /// The account's open positions, on every contract.
+    pub fn positions_of<'a>(
+        &'a self,
+        account: &'a AccountId,
+    ) -> impl Iterator<Item = &'a PositionView> + 'a {
+        self.positions
+            .iter()
+            .filter(move |((a, _), p)| a == account && p.qty != 0)
+            .map(|(_, p)| p)
+    }
+
+    /// The account's open orders, on every contract.
+    pub fn open_orders_of<'a>(
+        &'a self,
+        account: &'a AccountId,
+    ) -> impl Iterator<Item = &'a Order> + 'a {
+        self.orders.values().filter(move |o| &o.account == account)
     }
 
     pub fn open_orders<'a>(
@@ -670,6 +692,8 @@ pub struct Trading {
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
+    /// Screenshot fixture: chain panes open this ticket (`--chain-ticket`).
+    pub start_chain_ticket: Option<crate::chain_ticket::ShotTicket>,
     /// Screenshot fixture (`--bracket-editor`): DOMs open their bracket-preset editor.
     pub start_editor: bool,
     /// Screenshot fixture: panes switch to one bracket for the whole position, once the
@@ -898,6 +922,7 @@ fn venue_accounts(index: usize, source: &dyn AccountSource) -> Vec<AccountInfo> 
             name: a.label,
             paper: false,
             rules: None,
+            option_guard: Default::default(),
             venue: Some(index),
             badge: badge(a.kind),
             read_only: a.tradable.err(),
@@ -1154,7 +1179,10 @@ impl Trading {
         }
         let accounts: Vec<AccountInfo> = core
             .accounts()
-            .map(|(c, _)| AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone()))
+            .map(|(c, _)| AccountInfo {
+                option_guard: c.limits.option_guard.clone().unwrap_or_default(),
+                ..AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone())
+            })
             .collect();
         let brokers = std::mem::take(&mut setup.brokers);
         let venue_marks = setup.venue_marks_always
@@ -1317,6 +1345,7 @@ impl Trading {
             start_armed: false,
             start_hotkeys: false,
             start_account_menu: false,
+            start_chain_ticket: None,
             start_editor: false,
             start_bracket_switch: false,
             settled: std::sync::atomic::AtomicBool::new(false),
@@ -1780,6 +1809,7 @@ pub enum Step {
 /// - `buy 2 mkt`, `sell 1 @ 6000.25`, `buy 1 stop 6010.00`, with an optional
 ///   `bracket STOP/TARGET` (ticks) after a limit or stop;
 /// - `ack` (acks arrive; orders sent after the last `ack` stay pending);
+/// - `option YYYY-MM-DD STRIKE call|put`: the orders that follow are on that option series;
 /// - `flatten`, `cancelall` (the contract), `account ID`, `tag A,B` (the newest closed trade's
 ///   tags in the journal);
 /// - `guard trades N | streak LOSSES/MINUTES | loss MONEY | position N | close MINUTES`: one
@@ -1798,6 +1828,7 @@ pub fn parse_script(
     use anyhow::{anyhow, bail};
     use lines_trading::{BracketSpec, OrderSpec, Side};
     let mut account = first_account.clone();
+    let mut contract = contract;
     let mut out = Vec::new();
     let mut guards: HashMap<AccountId, Guardrails> = HashMap::new();
     for raw in s.split(';') {
@@ -1816,6 +1847,25 @@ pub fn parse_script(
         match w.as_slice() {
             [] => {}
             ["ack"] => out.push(Step::Ack),
+            ["option", date, strike, right] => {
+                let bad = || anyhow!("option expiry {date:?}: YYYY-MM-DD");
+                let d: Vec<&str> = date.split('-').collect();
+                let [y, m, dd] = d.as_slice() else {
+                    return Err(bad());
+                };
+                let expiry = lines_core::CivilDate::new(
+                    y.parse().map_err(|_| bad())?,
+                    m.parse().map_err(|_| bad())?,
+                    dd.parse().map_err(|_| bad())?,
+                )
+                .ok_or_else(bad)?;
+                let right = match *right {
+                    "call" => lines_core::Right::Call,
+                    "put" => lines_core::Right::Put,
+                    _ => bail!("{raw:?}: call or put"),
+                };
+                contract = ContractKey::option(contract.product, expiry, price(strike)?, right);
+            }
             ["wait", s] => out.push(Step::Wait(
                 (s.parse::<f64>()
                     .map_err(|_| anyhow!("wait {s:?}: seconds"))?
