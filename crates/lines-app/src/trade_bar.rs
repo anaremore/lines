@@ -1241,42 +1241,42 @@ pub fn switch_text(enabled: bool, blocker: Option<&str>, narrow: bool) -> String
     }
 }
 
-/// From this width the switch says "2 strategies armed"; narrower, "2 armed".
+/// From this width the switch says "2 strategies armed"; narrower, "2 strat".
 pub const SWITCH_STRATEGIES: f32 = 380.0;
 /// From this width it leads with "Trading:" too.
 pub const SWITCH_WORDS: f32 = 600.0;
 
 /// The switch's text with strategies armed on its account (a switch that says "Disabled"
 /// doesn't stop them, decision 0025), as whole items that fit its row at each width: the state
-/// always, and the count always (with a count the switch doesn't shrink: the account chip
-/// gives way, so the number is never cut). A reason orders would be denied goes to the status
-/// line ([`reason_on_status`]). No strategies armed: [`switch_text`].
+/// always, and the count with its noun always (with a count the switch doesn't shrink: the
+/// account chip gives way, so the number is never cut). A reason orders would be denied goes
+/// to the status line ([`reason_on_status`]). No strategies armed: [`switch_text`].
 pub fn switch_text_armed(enabled: bool, blocker: Option<&str>, armed: usize, width: f32) -> String {
-    let narrow = is_narrow(width);
     if armed == 0 {
-        return switch_text(enabled, blocker, narrow);
+        return switch_text(enabled, blocker, is_narrow(width));
     }
-    let alert = enabled && blocker.is_some();
-    if narrow {
+    let alert = if enabled && blocker.is_some() {
+        "!"
+    } else {
+        ""
+    };
+    if is_narrow(width) {
         let state = if enabled { "On" } else { "Off" };
-        let alert = if alert { "!" } else { "" };
-        return format!("{state}{alert} · {armed} armed");
+        return format!("{state}{alert} · {armed} strat");
     }
     let state = if enabled { "Enabled" } else { "Disabled" };
-    let alert = if alert { " !" } else { "" };
     let full = width == 0.0 || width >= SWITCH_WORDS;
     if full || width >= SWITCH_STRATEGIES {
         let lead = if full { "Trading: " } else { "" };
         format!("{lead}{state}{alert} · {}", strategies_armed_text(armed))
     } else {
-        format!("{state}{alert} · {armed} armed")
+        format!("{state}{alert} · {armed} strat")
     }
 }
 
 /// `1 strategy armed`, `2 strategies armed`.
 fn strategies_armed_text(armed: usize) -> String {
-    let what = if armed == 1 { "strategy" } else { "strategies" };
-    format!("{armed} {what} armed")
+    format!("{armed} strateg{} armed", plural_y(armed))
 }
 
 /// Whether why orders would be denied shows on the status line, not the switch: narrow panels,
@@ -1654,28 +1654,49 @@ pub fn panel_height(width: f32) -> f32 {
 /// Below this width the disabled panel's line drops to its short form (the long one would be
 /// cut: 50 characters at the width test's 7.5 px).
 pub const LOCKED_HINT_FULL: f32 = 400.0;
+/// From this width that line, with strategies armed, says "DOM locked" and "still armed".
+pub const LOCKED_HINT_DOM: f32 = 320.0;
+/// From this width that line, with strategies armed, also says how to enable.
+pub const LOCKED_HINT_ARMED_FULL: f32 = 540.0;
 
 /// What a disabled panel says in the joins' place: the lock that binds. With nothing else
 /// in the way, how to enable; with a lockout or another blocker too, that first (enabling
-/// alone would not unlock entries). With strategies armed on the account it says the lock is
-/// this DOM's, not theirs: "entries locked" alone would read as if nothing can enter.
+/// alone would not unlock entries).
+///
+/// With strategies armed on the account it says so, because "entries locked" alone would read
+/// as if nothing can enter. It says they aren't locked only when this switch is the only lock:
+/// a blocker (a closed market, a blackout, a lockout) may bind them too, and the core decides.
 pub fn locked_hint(blocker: Option<&str>, armed: usize, width: f32) -> String {
     let key = crate::commands::hint(crate::commands::Command::Trade(TradeCmd::ToggleArm));
-    let full = width == 0.0 || width >= LOCKED_HINT_FULL;
+    let at = |w: f32| width == 0.0 || width >= w;
     if armed > 0 {
         let strategies = strategies_armed_text(armed);
-        return match (blocker, width == 0.0 || width >= SWITCH_WORDS) {
-            (Some(b), true) => format!("DOM entries locked: {b} · {strategies}, not locked"),
-            (None, true) => format!("DOM entries locked ({key}) · {strategies}, not locked"),
-            _ => format!("DOM locked: {strategies}"),
+        return match blocker {
+            Some(b) if at(LOCKED_HINT_ARMED_FULL) => {
+                format!("Entries locked: {b} · {strategies}")
+            }
+            Some(b) => format!("{b} · {armed} armed"),
+            None if at(LOCKED_HINT_ARMED_FULL) => {
+                format!("DOM entries locked ({key}) · {strategies}, not locked")
+            }
+            None if width < LOCKED_HINT_DOM => format!("Locked · {strategies}"),
+            None => format!(
+                "DOM locked · {armed} strateg{} still armed",
+                plural_y(armed)
+            ),
         };
     }
-    match (blocker, full) {
+    match (blocker, at(LOCKED_HINT_FULL)) {
         (Some(b), true) => format!("Entries locked: {b} · trading off"),
         (None, true) => format!("Entries locked: enable trading ({key})"),
         (Some(b), false) => format!("Locked: {b}"),
         (None, false) => format!("Locked: {key}"),
     }
+}
+
+/// `strategy`/`strategies`'s ending.
+fn plural_y(n: usize) -> &'static str {
+    if n == 1 { "y" } else { "ies" }
 }
 
 /// The utility row's labels: words, short in a narrow panel ("Cancel all" keeps its object
@@ -1854,7 +1875,7 @@ pub fn dom_bar<V: TradePane>(
         } else {
             "Enable trading"
         };
-        let name = match (strategies_armed, blocker.filter(|_| enabled)) {
+        let name = match (strategies_armed, blocker) {
             (0, _) => verb.to_owned(),
             (n, why) => {
                 let it = if n == 1 { "it" } else { "them" };
@@ -4240,18 +4261,31 @@ mod tests {
         // A narrow panel's short form (the long one would be cut).
         assert!(locked_hint(None, 0, 240.0).starts_with("Locked: "));
         assert_eq!(locked_hint(Some("cooldown"), 0, 240.0), "Locked: cooldown");
-        // Strategies armed: the lock is this DOM's, and they aren't locked.
+        // Strategies armed, and this switch the only lock: they aren't locked.
         let wide = locked_hint(None, 2, 800.0);
         assert!(wide.starts_with("DOM entries locked ("), "{wide}");
         assert!(wide.ends_with("· 2 strategies armed, not locked"), "{wide}");
-        assert_eq!(locked_hint(None, 1, 420.0), "DOM locked: 1 strategy armed");
         assert_eq!(
-            locked_hint(None, 2, 240.0),
-            "DOM locked: 2 strategies armed"
+            locked_hint(None, 1, 420.0),
+            "DOM locked · 1 strategy still armed"
+        );
+        assert_eq!(locked_hint(None, 2, 240.0), "Locked · 2 strategies armed");
+        // Another lock binds too: the reason first, and never "not locked" (the core may be
+        // refusing their entries as well).
+        for width in [240.0, 420.0, 800.0] {
+            let line = locked_hint(Some("news blackout"), 2, width);
+            assert!(line.contains("news blackout"), "{line}");
+            assert!(line.contains('2'), "{line}");
+            assert!(!line.contains("not locked"), "{line}");
+            assert!(!line.contains("still"), "{line}");
+        }
+        assert_eq!(
+            locked_hint(Some("market closed"), 2, 800.0),
+            "Entries locked: market closed · 2 strategies armed"
         );
         assert_eq!(
             locked_hint(Some("market closed"), 2, 240.0),
-            "DOM locked: 2 strategies armed"
+            "market closed · 2 armed"
         );
     }
 
@@ -4348,15 +4382,15 @@ mod tests {
         // Strategies armed on the account: the state and the count at every width.
         let closed = Some("market closed");
         assert_eq!(switch_text_armed(false, None, 0, 240.0), "Disabled");
-        assert_eq!(switch_text_armed(false, None, 1, 240.0), "Off · 1 armed");
-        assert_eq!(switch_text_armed(true, closed, 2, 240.0), "On! · 2 armed");
+        assert_eq!(switch_text_armed(false, None, 1, 240.0), "Off · 1 strat");
+        assert_eq!(switch_text_armed(true, closed, 2, 240.0), "On! · 2 strat");
         assert_eq!(
             switch_text_armed(false, None, 2, 320.0),
-            "Disabled · 2 armed"
+            "Disabled · 2 strat"
         );
         assert_eq!(
             switch_text_armed(true, closed, 2, 320.0),
-            "Enabled ! · 2 armed"
+            "Enabled! · 2 strat"
         );
         assert_eq!(
             switch_text_armed(false, None, 1, 420.0),
@@ -4364,7 +4398,7 @@ mod tests {
         );
         assert_eq!(
             switch_text_armed(true, closed, 2, 420.0),
-            "Enabled ! · 2 strategies armed"
+            "Enabled! · 2 strategies armed"
         );
         assert_eq!(
             switch_text_armed(false, None, 1, 800.0),
@@ -4376,7 +4410,7 @@ mod tests {
         );
         assert_eq!(
             switch_text_armed(true, closed, 2, 800.0),
-            "Trading: Enabled ! · 2 strategies armed"
+            "Trading: Enabled! · 2 strategies armed"
         );
         // Not laid out yet: the full layout.
         assert_eq!(
@@ -4463,16 +4497,58 @@ mod tests {
             account_left(SWITCH_STRATEGIES, 0.0) >= MIN_HIT,
             "380 px with a count"
         );
-        // The disabled panel's line, whole in its short forms at the narrowest (a two-digit
-        // count at this glyph width leaves only "armed" to its "…", never the number).
+        // The disabled panel's line, whole at each width's form, with a two-digit count and
+        // the longest reason (it starts at its own width's `room`: px_2 on each side).
         let line = |s: &str| s.chars().count() as f32 * CHAR;
+        let long = Some("feed stale 1234 s");
+        for (hint, w, what) in [
+            (
+                locked_hint(None, 0, MIN_DOM_WIDTH),
+                MIN_DOM_WIDTH,
+                "no count",
+            ),
+            (
+                locked_hint(long, 0, MIN_DOM_WIDTH),
+                MIN_DOM_WIDTH,
+                "no count, reason",
+            ),
+            (locked_hint(None, 12, MIN_DOM_WIDTH), MIN_DOM_WIDTH, "count"),
+            (
+                locked_hint(long, 12, MIN_DOM_WIDTH),
+                MIN_DOM_WIDTH,
+                "count, reason",
+            ),
+            (
+                locked_hint(None, 12, NARROW_BELOW),
+                NARROW_BELOW,
+                "count at 300",
+            ),
+            (
+                locked_hint(None, 12, LOCKED_HINT_DOM),
+                LOCKED_HINT_DOM,
+                "count at 320",
+            ),
+            (
+                locked_hint(None, 0, LOCKED_HINT_FULL),
+                LOCKED_HINT_FULL,
+                "no count at 400",
+            ),
+            (
+                locked_hint(None, 12, LOCKED_HINT_ARMED_FULL),
+                LOCKED_HINT_ARMED_FULL,
+                "count at 540",
+            ),
+            (
+                locked_hint(long, 12, LOCKED_HINT_ARMED_FULL),
+                LOCKED_HINT_ARMED_FULL,
+                "count, reason at 540",
+            ),
+        ] {
+            assert!(line(&hint) <= w - 16.0, "{what}: {hint}");
+        }
         // The denied line keeps its longest reason, whole (with the Keys chip on the line too,
         // a long reason is left out whole: the switch's tooltip has it).
         assert!(line(&blocked_line("feed stale 1234 s", true)) + 12.0 <= room);
-        assert!(line(&locked_hint(None, 0, MIN_DOM_WIDTH)) <= room);
-        assert!(line(&locked_hint(None, 1, MIN_DOM_WIDTH)) <= room);
-        assert!(line("DOM locked: 12") <= room);
-        assert!(line(&locked_hint(None, 0, LOCKED_HINT_FULL)) <= LOCKED_HINT_FULL - 16.0);
         // From KEYS_IN_HEADER: the account, the Keys chip (knob and px_2 on top of `w`) and
         // the widest wide switch text fit one row.
         let room_k = KEYS_IN_HEADER - 2.0 * 8.0;
