@@ -125,6 +125,33 @@ pub enum Command {
         id: Option<StrategyId>,
         flatten: bool,
     },
+    /// How manual trades on one account and contract get their exits: per entry (each entry
+    /// its own bracket, the default) or one bracket for the whole position (see
+    /// [`BracketMode::Position`]). Switching to `Position` with exits already working is refused
+    /// unless `replace` (the person confirmed cancelling them), except when they already are
+    /// one stop and one target (adopted, as after a restart).
+    SetBracketMode {
+        account: AccountId,
+        #[serde(with = "contract_serde")]
+        contract: ContractKey,
+        mode: BracketMode,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replace: bool,
+    },
+}
+
+/// Exits for manual trades on an account and contract.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum BracketMode {
+    /// Each entry carries its own bracket (if any).
+    #[default]
+    PerEntry,
+    /// One stop and one target (one-cancels-other, reduce-only) for the whole position: placed
+    /// when it opens, at these offsets from the average fill price (rounded onto the tick grid
+    /// toward the entry); resized to the position as it grows or shrinks, prices kept (a person
+    /// may move them); cancelled when it is flat. Entries carry no exits of their own.
+    Position { stop_ticks: u32, target_ticks: u32 },
 }
 
 impl Command {
@@ -138,7 +165,8 @@ impl Command {
             | Command::CancelAll { account, .. }
             | Command::Flatten { account, .. }
             | Command::SetGuardrails { account, .. }
-            | Command::SetRules { account, .. } => Some(account),
+            | Command::SetRules { account, .. }
+            | Command::SetBracketMode { account, .. } => Some(account),
             Command::AddStrategy(c) => Some(&c.account),
             Command::RemoveStrategy { .. }
             | Command::ArmStrategy { .. }
