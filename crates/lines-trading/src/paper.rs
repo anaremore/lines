@@ -20,6 +20,22 @@
 //!   With no book on that side they fill at the last trade price; with neither they reject.
 //! - **Stops trigger on trades** at or through the trigger.
 //! - **Fees** per contract (per quantity unit), per side, from the account's balance.
+//! - **Options** (decision 0028) trade on their own quote, never the underlying's price:
+//!   - each `MarketInput::OptionQuote` replaces the series' book with its bid and ask, one level
+//!     each, of unlimited size (quotes carry no size: a known gap);
+//!   - an order that crosses the quote takes it at once, at the quote's price (a buy limit
+//!     above the ask fills at the ask);
+//!   - a resting limit fills only when a later quote goes **through** it, at its limit
+//!     (trade-through; *touch* also fills at the limit, and queue estimate, which needs depth,
+//!     behaves as trade-through);
+//!   - prints, on the option or its underlying, never fill an option order;
+//!   - **a missing side never fills**: no bid, a zero bid or a crossed quote leaves that side
+//!     empty, so nothing can fill against it, and a market order (Flatten) is cancelled rather
+//!     than filling at a last price;
+//!   - **a stale quote never fills**: older than `option_quote_stale_ms`, an order that would
+//!     cross it rests instead and a market order is cancelled, until a fresh quote comes;
+//!   - orders and fills only in the regular session (options don't trade extended hours);
+//!   - expiry: [`Broker::settle`], asked by the core at the close.
 //! - **Brackets / OCO are server-side**: the broker holds the exits (acked, inactive) until the
 //!   entry fills, sizes them to the filled quantity, and cancels or shrinks the sibling when
 //!   one exit fills. They are part of the broker's saved state, so they survive the app
@@ -27,7 +43,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use lines_core::{ContractKey, OrderBook, Price, ProductId, Qty, Side as BookSide, UtcMillis};
+use lines_core::{ContractKey, OrderBook, Price, Qty, SessionKind, Side as BookSide, UtcMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::{
@@ -57,7 +73,17 @@ pub struct PaperConfig {
     pub default_fee: Money,
     /// Reject orders while the product's market is closed (sessions calendar).
     pub check_sessions: bool,
+    /// An option quote older than this fills nothing.
+    #[serde(default = "default_quote_stale_ms")]
+    pub option_quote_stale_ms: i64,
 }
+
+fn default_quote_stale_ms() -> i64 {
+    crate::risk::DEFAULT_QUOTE_STALE_MS
+}
+
+/// A quote side's size in the one-level book: quotes carry none, so it never runs out.
+const QUOTE_SIZE: i64 = 1 << 40;
 
 impl Default for PaperConfig {
     fn default() -> Self {
@@ -67,6 +93,7 @@ impl Default for PaperConfig {
             fees: BTreeMap::new(),
             default_fee: Money::ZERO,
             check_sessions: true,
+            option_quote_stale_ms: default_quote_stale_ms(),
         }
     }
 }
@@ -108,6 +135,8 @@ struct Market {
     last: Option<Price>,
     /// Liquidity taken by our market orders since the book last updated each level.
     taken: HashMap<(bool, i64), i64>,
+    /// When an option's book was last quoted.
+    quoted_at: Option<UtcMillis>,
 }
 
 pub struct PaperBroker {
@@ -195,9 +224,28 @@ impl PaperBroker {
         Some(s)
     }
 
-    fn market_open(&self, product: ProductId, now: UtcMillis) -> bool {
-        !self.cfg.check_sessions
-            || lines_feed::catalog::sessions(product).is_none_or(|c| c.is_open(now))
+    /// The contract's market is open: an option's only in the regular session.
+    fn market_open(&self, contract: ContractKey, now: UtcMillis) -> bool {
+        if !self.cfg.check_sessions {
+            return true;
+        }
+        let Some(cal) = lines_feed::catalog::sessions(contract.product) else {
+            return true;
+        };
+        match contract.option_key() {
+            Some(_) => cal.session_at(now, SessionKind::Rth).is_some(),
+            None => cal.is_open(now),
+        }
+    }
+
+    /// An option whose quote is missing or too old: nothing fills on it.
+    fn quote_stale(&self, contract: ContractKey, now: UtcMillis) -> bool {
+        contract.option_key().is_some()
+            && self
+                .markets
+                .get(&contract)
+                .and_then(|m| m.quoted_at)
+                .is_none_or(|t| now.0 - t.0 > self.cfg.option_quote_stale_ms)
     }
 
     fn reject(&mut self, id: OrderId, reason: impl Into<String>, at: UtcMillis) {
@@ -226,7 +274,7 @@ impl PaperBroker {
                 spec.product.symbol
             ));
         }
-        if !self.market_open(o.contract.product, now) {
+        if !self.market_open(o.contract, now) {
             return Err(format!("{} market is closed", spec.product.symbol));
         }
         Ok(())
@@ -366,6 +414,9 @@ impl PaperBroker {
             return;
         };
         let (contract, side) = (po.order.contract, po.order.side);
+        if self.quote_stale(contract, now) {
+            return; // it rests (a market order is cancelled) until a fresh quote
+        }
         let mut left = po.order.remaining().0;
         let mut fills: Vec<(Price, i64)> = Vec::new();
         {
@@ -397,9 +448,11 @@ impl PaperBroker {
                 left -= q;
                 fills.push((p, q));
             }
-            // No book on that side: fill at the last trade (market orders only).
+            // No book on that side: fill at the last trade (market orders only; an option
+            // never fills on a missing side).
             if fills.is_empty()
                 && limit.is_none()
+                && contract.option_key().is_none()
                 && m.book.levels(opp).next().is_none()
                 && let Some(last) = m.last
             {
@@ -412,6 +465,10 @@ impl PaperBroker {
     }
 
     fn fill(&mut self, now: UtcMillis, id: OrderId, price: Price, qty: Qty) {
+        self.fill_with_fee(now, id, price, qty, true);
+    }
+
+    fn fill_with_fee(&mut self, now: UtcMillis, id: OrderId, price: Price, qty: Qty, charge: bool) {
         let Some(po) = self.orders.get_mut(&id) else {
             return;
         };
@@ -430,7 +487,7 @@ impl PaperBroker {
         let Some(spec) = self.spec(o.contract) else {
             return;
         };
-        let fee = spec.fee(qty);
+        let fee = if charge { spec.fee(qty) } else { Money::ZERO };
         let acct = self.accounts.entry(o.account.clone()).or_default();
         let pos = match acct.positions.iter_mut().find(|p| p.contract == o.contract) {
             Some(p) => &mut p.position,
@@ -795,6 +852,56 @@ impl PaperBroker {
         }
     }
 
+    /// An option's quote: its book becomes the quote's usable sides, then resting limits it
+    /// went through fill at their limits. Outside the regular session, or stamped too old to
+    /// count, it fills nothing (but stays the book).
+    fn on_option_quote(
+        &mut self,
+        now: UtcMillis,
+        contract: ContractKey,
+        bid: Option<Price>,
+        ask: Option<Price>,
+        last: Option<Price>,
+        time: UtcMillis,
+    ) {
+        let (bid, ask) = crate::market::quote_sides(bid, ask);
+        let Some(m) = self.markets.get_mut(&contract) else {
+            return;
+        };
+        m.book.clear();
+        m.taken.clear();
+        m.quoted_at = Some(time);
+        m.last = last.or(m.last);
+        if let Some(p) = bid {
+            m.book.set(BookSide::Bid, p, Qty(QUOTE_SIZE), 0);
+        }
+        if let Some(p) = ask {
+            m.book.set(BookSide::Ask, p, Qty(QUOTE_SIZE), 0);
+        }
+        if !self.market_open(contract, now) || self.quote_stale(contract, now) {
+            return;
+        }
+        let touch = self.cfg.fill_model == FillModel::Touch;
+        let resting: Vec<(OrderId, Price)> = self
+            .orders
+            .values()
+            .filter(|p| p.order.contract == contract && !p.held && p.order.is_open())
+            .filter_map(|p| match p.order.kind {
+                OrderKind::Limit { price } => {
+                    let through = match p.order.side {
+                        Side::Buy => ask.is_some_and(|a| a < price || (touch && a == price)),
+                        Side::Sell => bid.is_some_and(|b| b > price || (touch && b == price)),
+                    };
+                    through.then_some((p.order.id, price))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, limit) in resting {
+            self.fill(now, id, limit, Qty(i64::MAX));
+        }
+    }
+
     fn on_book(&mut self, contract: ContractKey, side: BookSide, price: Price, qty: Qty) {
         let Some(m) = self.markets.get_mut(&contract) else {
             return;
@@ -846,8 +953,17 @@ impl Broker for PaperBroker {
                 if let Some(m) = self.markets.get_mut(&contract) {
                     m.last = Some(price);
                 }
-                self.on_trade(now, contract, price, qty);
+                // An option fills on its own quote, never on a print.
+                if contract.option_key().is_none() {
+                    self.on_trade(now, contract, price, qty);
+                }
             }
+            MarketInput::OptionQuote {
+                bid,
+                ask,
+                last,
+                time,
+            } => self.on_option_quote(now, contract, bid, ask, last, time),
             MarketInput::Book { side, price, qty } => self.on_book(contract, side, price, qty),
             MarketInput::BookClear => {
                 if let Some(m) = self.markets.get_mut(&contract) {
@@ -874,6 +990,37 @@ impl Broker for PaperBroker {
 
     fn next_wake(&self) -> Option<UtcMillis> {
         self.pending.front().map(|(due, _)| *due)
+    }
+
+    fn settle(&mut self, now: UtcMillis, mut order: Order, price: Price) {
+        // Nothing else works on an expired series.
+        let working: Vec<OrderId> = self
+            .orders
+            .values()
+            .filter(|p| p.order.account == order.account && p.order.contract == order.contract)
+            .map(|p| p.order.id)
+            .collect();
+        for id in working {
+            self.cancel(now, id, "the option expired");
+        }
+        let position = self.position_of(&order.account, order.contract);
+        if position == 0 || order.side.sign() == position.signum() {
+            self.reject(order.id, "no position to settle", now);
+            return;
+        }
+        order.qty = Qty(order.qty.0.min(position.abs()));
+        order.state = OrderState::Acked;
+        let (id, qty) = (order.id, order.qty);
+        self.out.push(BrokerEvent::Acked { id, at: now });
+        self.orders.insert(
+            id,
+            PaperOrder {
+                order,
+                queue_ahead: 0,
+                held: false,
+            },
+        );
+        self.fill_with_fee(now, id, price, qty, false);
     }
 
     fn saved_state(&self) -> Option<serde_json::Value> {

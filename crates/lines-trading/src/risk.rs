@@ -2,7 +2,7 @@
 //! maximum order size, maximum position, a fat-finger price band around the market, and a
 //! daily loss limit. Flatten, Cancel All and cancels never pass through here.
 
-use lines_core::{Price, Qty};
+use lines_core::{Price, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::command::{Reject, RejectCode};
@@ -32,6 +32,125 @@ pub struct RiskLimits {
     /// Modifies per second, counted separately (dragging an order sends many).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_modifies_per_sec: Option<u32>,
+    /// The guard on option orders (decision 0028). `None`: [`OptionGuard::default`]; it is
+    /// never off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_guard: Option<OptionGuard>,
+}
+
+/// One more guard on option orders (decision 0028): a limit far from the mid is refused (a
+/// fat finger on an option is often the whole premium), and so are market orders by default.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionGuard {
+    /// A limit may be this far from the mid, as a percentage of the mid ...
+    pub max_from_mid_pct: u32,
+    /// ... or this many ticks, whichever is wider (a percentage of a cheap option is nothing).
+    pub min_band_ticks: i64,
+    /// Allow market orders (Flatten always may).
+    #[serde(default)]
+    pub allow_market: bool,
+    /// A quote older than this has no mid to check against.
+    pub stale_after_ms: i64,
+}
+
+impl Default for OptionGuard {
+    fn default() -> Self {
+        OptionGuard {
+            max_from_mid_pct: 25,
+            min_band_ticks: 10,
+            allow_market: false,
+            stale_after_ms: DEFAULT_QUOTE_STALE_MS,
+        }
+    }
+}
+
+/// How old an option quote may be before it counts as stale, by default: 15 minutes. A quiet
+/// series quotes rarely, and its quote stays good until it changes.
+pub const DEFAULT_QUOTE_STALE_MS: i64 = 15 * 60_000;
+
+/// An option's quote as the guard sees it.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct OptionQuoteView {
+    pub bid: Option<Price>,
+    pub ask: Option<Price>,
+    /// When it was quoted (`None`: never).
+    pub at: Option<UtcMillis>,
+}
+
+/// The guard on one option order. `closing`: it only closes a position (reduce-only). With no
+/// two-sided fresh quote there is no mid: an opening order is refused, a closing limit may
+/// still rest (it never fills on a missing side, and a trader must be able to offer out of a
+/// position whose bid is gone).
+pub fn check_option(
+    guard: &OptionGuard,
+    spec: &ContractSpec,
+    kind: &OrderKind,
+    closing: bool,
+    quote: OptionQuoteView,
+    now: UtcMillis,
+) -> Result<(), Reject> {
+    let price = match *kind {
+        OrderKind::Market if guard.allow_market => return Ok(()),
+        OrderKind::Market => {
+            return Err(risk(
+                "market orders on options are off: send a limit (Close prices one for you)".into(),
+            ));
+        }
+        OrderKind::Stop { .. } | OrderKind::StopLimit { .. } => {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                "no stop orders on option prices",
+            ));
+        }
+        OrderKind::Limit { price } => price,
+    };
+    if price.0 <= 0 {
+        return Err(Reject::new(
+            RejectCode::Invalid,
+            "an option limit must be above zero",
+        ));
+    }
+    if let Some(rules) = spec.product.options() {
+        let tick = rules.tick.at(price);
+        if price.0.rem_euclid(tick.max(1)) != 0 {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                format!(
+                    "price {} is not on the option's tick grid",
+                    spec.product.price.format::<32>(price)
+                ),
+            ));
+        }
+    }
+    let fresh = quote
+        .at
+        .is_some_and(|t| now.0 - t.0 <= guard.stale_after_ms);
+    let (Some(bid), Some(ask), true) = (quote.bid, quote.ask, fresh) else {
+        if closing {
+            return Ok(());
+        }
+        return Err(risk(if quote.at.is_some() && !fresh {
+            "this option's quote is stale: no mid to check the limit against".into()
+        } else {
+            "this option has no two-sided quote: no mid to check the limit against".into()
+        }));
+    };
+    // In doubled price units, so a half-tick mid stays exact.
+    let sum = i128::from(bid.0) + i128::from(ask.0);
+    let off = (2 * i128::from(price.0) - sum).abs();
+    let by_pct = off * 100 <= i128::from(guard.max_from_mid_pct) * sum;
+    let by_ticks = off <= 2 * i128::from(guard.min_band_ticks) * i128::from(spec.tick());
+    if by_pct || by_ticks {
+        return Ok(());
+    }
+    Err(risk(format!(
+        "limit {} is too far from the mid (bid {}, ask {}; within {}% or {} ticks)",
+        spec.product.price.format::<32>(price),
+        spec.product.price.format::<32>(bid),
+        spec.product.price.format::<32>(ask),
+        guard.max_from_mid_pct,
+        guard.min_band_ticks,
+    )))
 }
 
 /// What the check needs to know about the account and market.
