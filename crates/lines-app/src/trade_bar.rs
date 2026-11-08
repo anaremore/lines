@@ -22,6 +22,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -53,8 +54,6 @@ pub struct TradeDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub qty: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bracket: Option<BracketPreset>,
     /// Order hotkeys on for this pane ("Keys on"; sticky, written only when on).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -64,7 +63,6 @@ pub struct TradeDoc {
 /// One pane's trading state.
 pub struct PaneTrade {
     pub account: Option<AccountId>,
-    pub qty: i64,
     pub bracket: Option<BracketPreset>,
     pub arming: Arming,
     /// Order hotkeys ("Keys on / off", `TradeCmd::ToggleHotkeys`): order keys need it on top
@@ -72,6 +70,10 @@ pub struct PaneTrade {
     pub hotkeys: bool,
     /// Typing a custom quantity (digits so far).
     pub qty_edit: Option<String>,
+    /// Wheel travel over the size control, not yet a step.
+    pub qty_scroll: f32,
+    /// `SIZE_EPOCH` last drawn.
+    seen_size: u64,
     pub account_menu: bool,
     /// A refusal made in the UI (not by the core), with when.
     local_flash: Option<(String, Instant)>,
@@ -146,21 +148,13 @@ impl PaneTrade {
             .or_else(|| trading.and_then(Trading::default_account));
         PaneTrade {
             account,
-            // A new pane: Settings › Trading's default quantity.
-            qty: saved
-                .and_then(|s| s.qty)
-                .filter(|&q| q > 0)
-                .unwrap_or_else(|| {
-                    crate::picker_view::settings(cx)
-                        .new_panes
-                        .default_qty
-                        .map_or(1, i64::from)
-                }),
             bracket: saved.and_then(|s| s.bracket),
             // Sticky: restored as saved (new panes: disabled).
             arming: Arming::new(saved.is_some_and(|s| s.enabled)),
             hotkeys: saved.is_some_and(|s| s.hotkeys),
             qty_edit: None,
+            qty_scroll: 0.0,
+            seen_size: SIZE_EPOCH.load(Ordering::Relaxed),
             account_menu: trading.is_some_and(|t| t.start_account_menu),
             local_flash: None,
             cache: trading.map(|t| t.cache.clone()),
@@ -182,7 +176,6 @@ impl PaneTrade {
         let d = TradeDoc {
             enabled: self.arming.is_armed(),
             account: self.account.as_ref().map(|a| a.0.clone()),
-            qty: (self.qty != 1).then_some(self.qty),
             bracket: self.bracket,
             hotkeys: self.hotkeys,
         };
@@ -200,6 +193,11 @@ impl PaneTrade {
         let e = crate::pnl::display_epoch();
         if e != self.seen_display {
             self.seen_display = e;
+            changed = true;
+        }
+        let e = SIZE_EPOCH.load(Ordering::Relaxed);
+        if e != self.seen_size {
+            self.seen_size = e;
             changed = true;
         }
         if let (Some(c), Some(a)) = (&self.cache, &self.account) {
@@ -250,6 +248,8 @@ impl PaneTrade {
     pub fn feed_changed(&mut self, store: &Arc<ChartStore>, follow: bool, cx: &App) {
         self.arm_event(ArmEvent::ContractChanged, cx);
         self.editor = None;
+        // A size being typed was for the old symbol: it never lands on this one.
+        self.qty_edit = None;
         self.bracket_forget();
         self.account_menu = false;
         if follow && let Some(t) = Trading::try_global(cx) {
@@ -266,11 +266,21 @@ impl PaneTrade {
         window: &mut Window,
         cx: &mut Context<V>,
     ) {
+        // The rule for a size being typed, on every path to a frame: it is drawn only while its
+        // control shows and the pane holds the keys, so a drawn field is always a live one.
+        if view.trade_ref().qty_edit.is_some() && (!view.shows_size() || !focus.is_focused(window))
+        {
+            view.trade().qty_edit = None;
+        }
         let id = window.window_handle().window_id();
         if view.trade_ref().watched.as_ref().is_some_and(|w| w.0 == id) {
             return;
         }
         let blur = cx.on_focus_out(focus, window, |v: &mut V, _, _, cx| {
+            // A size being typed needs the pane's keys: a drawn field always has them.
+            if v.trade().qty_edit.take().is_some() {
+                cx.notify();
+            }
             if v.trade().arm_event(ArmEvent::FocusLost, cx) {
                 cx.notify();
             }
@@ -289,8 +299,85 @@ pub trait TradePane: Sized + 'static {
     fn trade(&mut self) -> &mut PaneTrade;
     fn trade_ref(&self) -> &PaneTrade;
     fn trade_store(&self) -> &Arc<ChartStore>;
+    /// The product the pane shows: its order size is that symbol's.
+    fn trade_product(&self) -> &Product;
+    /// The pane's focus: a size being typed needs its keys.
+    fn trade_focus(&self) -> &gpui::FocusHandle;
+    /// Whether the size control shows and could take keys now: not while something else holds
+    /// them (a picker, a menu), and a DOM's panel shows other things in its place during the
+    /// bracket editor or confirmation; a chart also needs its strip.
+    fn shows_size(&self) -> bool;
     /// The pane's feed can't serve its target (nothing to trade).
     fn trade_unavailable(&self) -> bool;
+}
+
+/// Bumped when a shared order size changes: every pane redraws its size and buttons.
+static SIZE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// An order size changed outside `set_size` (Settings' default): panes redraw.
+pub fn size_changed() {
+    SIZE_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The pane's order size (the size of its product, shared by every DOM and chart on it).
+pub fn pane_size<V: TradePane>(v: &V, cx: &App) -> i64 {
+    let s = crate::picker_view::settings(cx);
+    dom_trade::order_size(
+        &s.order_sizes,
+        v.trade_product().symbol,
+        s.new_panes.default_qty,
+    )
+}
+
+/// Set the order size of the pane's product, for every pane on it (saved).
+pub fn set_size<V: TradePane>(v: &mut V, q: i64, cx: &mut Context<V>) {
+    // An unavailable pane's product may be a stand-in: never change a real symbol's size for it.
+    if v.trade_unavailable() {
+        v.trade().qty_edit = None;
+        cx.notify();
+        return;
+    }
+    let symbol = v.trade_product().symbol.to_owned();
+    crate::picker_view::update_settings(cx, |s| {
+        s.order_sizes.insert(symbol, q);
+    });
+    size_changed();
+    v.trade().qty_edit = None;
+    cx.notify();
+}
+
+/// Step the size through the presets (`up`: larger).
+pub fn step_size<V: TradePane>(v: &mut V, up: bool, cx: &mut Context<V>) {
+    let q = step_qty(pane_size(v, cx), up);
+    set_size(v, q, cx);
+}
+
+/// Wheel travel over a size control: step it (see `dom_trade::scroll_qty`).
+pub fn scroll_size<V: TradePane>(
+    v: &mut V,
+    ev: &gpui::ScrollEvent,
+    w: &Window,
+    cx: &mut Context<V>,
+) {
+    let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
+    if let Some(up) = dom_trade::scroll_qty(&mut v.trade().qty_scroll, dy) {
+        step_size(v, up, cx);
+    }
+    cx.stop_propagation();
+}
+
+/// The largest order the pane's account allows, as the core last reported (`None`: no limit,
+/// or the cache is busy: the core still refuses).
+pub fn max_order_qty<V: TradePane>(v: &V, cx: &App) -> Option<i64> {
+    let t = Trading::try_global(cx)?;
+    let account = v.trade_ref().account.as_ref()?;
+    let s = t.cache.try_read()?;
+    s.account(account)?.limits.max_order_qty
+}
+
+/// Why a built order is refused for its size, in the size control's words.
+pub fn size_refusal<V: TradePane>(v: &V, cmd: &lines_trading::Command, cx: &App) -> Option<String> {
+    dom_trade::command_over_max(cmd, max_order_qty(v, cx))
 }
 
 /// The contract a pane trades: its store's (a product's front month, or the contract shown).
@@ -372,7 +459,7 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
             s.open_orders(&account, contract).count(),
         )
     };
-    let (best_bid, best_ask, last, tick) = v
+    let (best_bid, best_ask, last, tick, symbol) = v
         .trade_store()
         .try_read()
         .map(|d| {
@@ -381,13 +468,20 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
                 d.book.best_ask().map(|a| a.0).or(d.ask),
                 d.last_trade,
                 d.product.price.tick,
+                d.product.symbol,
             )
         })
         .ok_or("market data busy; try again")?;
+    let settings = crate::picker_view::settings(cx);
     Ok(dom_trade::EntryCtx {
         account,
         contract,
-        qty: qty(pt),
+        // The traded contract's own product, read with its market.
+        qty: Qty(dom_trade::order_size(
+            &settings.order_sizes,
+            symbol,
+            settings.new_panes.default_qty,
+        )),
         position,
         working,
         bracket: pt.bracket,
@@ -457,11 +551,14 @@ fn run_with<V: TradePane>(
             ctx().and_then(|ctx| dom_trade::quick(q, arming, &ctx))
         };
         match built {
-            Ok(c) => {
-                if let Some(t) = Trading::try_global(cx) {
-                    t.submit(source, issued, c);
+            Ok(c) => match size_refusal(v, &c, cx) {
+                Some(why) => v.trade().flash(why),
+                None => {
+                    if let Some(t) = Trading::try_global(cx) {
+                        t.submit(source, issued, c);
+                    }
                 }
-            }
+            },
             Err(dom_trade::Refusal(why)) => v.trade().flash(why),
         }
         cx.notify();
@@ -587,10 +684,16 @@ fn run_with<V: TradePane>(
             set_account(v, next, cx);
         }
         TradeCmd::QtyUp | TradeCmd::QtyDown => {
-            let q = v.trade_ref().qty;
-            v.trade().qty = step_qty(q, cmd == TradeCmd::QtyUp);
-            v.trade().qty_edit = None;
+            step_size(v, cmd == TradeCmd::QtyUp, cx);
+            say_size(v, cx);
         }
+        TradeCmd::QtyPreset(i) => {
+            if let Some(&q) = dom_trade::QTY_PRESETS.get(i as usize) {
+                set_size(v, q, cx);
+                say_size(v, cx);
+            }
+        }
+        TradeCmd::TypeQty => open_size_field(v),
         TradeCmd::NextBracket => {
             let b = v.trade_ref().bracket;
             let presets = match (v.trade_ref().account.as_ref(), v.trade_store().try_read()) {
@@ -838,18 +941,41 @@ pub fn editor_key<V: TradePane>(v: &mut V, ev: &gpui::KeyDownEvent, cx: &mut Con
     true
 }
 
-/// Keys while a custom quantity is being typed. Returns whether the key was used.
+/// Open the field to type a size, or say why not.
+pub fn open_size_field<V: TradePane>(v: &mut V) {
+    if v.trade_unavailable() {
+        v.trade().flash("this pane has no market data");
+    } else if v.shows_size() {
+        v.trade().qty_edit = Some(String::new());
+    } else {
+        v.trade().flash("Can't type a size now");
+    }
+}
+
+/// A size changed by a key on a pane that doesn't show it (a chart without its strip): say so.
+fn say_size<V: TradePane>(v: &mut V, cx: &App) {
+    if !v.shows_size() && !v.trade_unavailable() {
+        let q = pane_size(v, cx);
+        let symbol = v.trade_product().symbol;
+        v.trade().flash(format!("{symbol} order size {q}"));
+    }
+}
+
+/// Keys while a custom quantity is being typed. Returns whether the key was used. A field
+/// with nothing drawing it (`shows_size`) is dropped here, so a pane's keys never go dead with
+/// nothing showing why.
 pub fn qty_key<V: TradePane>(v: &mut V, key: &str, cx: &mut Context<V>) -> bool {
+    if !v.shows_size() {
+        v.trade().qty_edit = None;
+        return false;
+    }
     let t = v.trade();
     let Some(edit) = t.qty_edit.as_mut() else {
         return false;
     };
     match key {
         "enter" => match parse_qty(edit) {
-            Some(q) => {
-                t.qty = q;
-                t.qty_edit = None;
-            }
+            Some(q) => set_size(v, q, cx),
             None => t.flash("quantity: whole number 1–9999"),
         },
         "escape" => t.qty_edit = None,
@@ -2184,6 +2310,18 @@ fn qty_row<V: TradePane>(
     cx: &mut Context<V>,
 ) -> gpui::Stateful<gpui::Div> {
     let pt = v.trade_ref();
+    let size = pane_size(v, cx);
+    // Over the account's maximum: said here, before the click (shape: the words, not color).
+    let over = dom_trade::over_max(size, max_order_qty(v, cx));
+    let label_w = if narrow { LABEL_NARROW_W } else { LABEL_W };
+    let label = div().min_w(px(label_w)).flex_shrink_0().whitespace_nowrap();
+    let label = match over {
+        Some(text) => label
+            .text_color(t.warn)
+            .font_weight(FontWeight::BOLD)
+            .child(text),
+        None => label.text_color(t.text_dim).child("Qty"),
+    };
     let mut row = div()
         .id("qty-row")
         .flex()
@@ -2191,41 +2329,38 @@ fn qty_row<V: TradePane>(
         .items_center()
         .gap_1()
         .h(px(SEG_H))
-        .child(
-            div()
-                .w(px(if narrow { LABEL_NARROW_W } else { LABEL_W }))
-                .flex_shrink_0()
-                .text_color(t.text_dim)
-                .child("Qty"),
-        );
+        .on_scroll(
+            cx.listener(|v: &mut V, ev: &gpui::ScrollEvent, w, cx| scroll_size(v, ev, w, cx)),
+        )
+        .child(label);
     for q in dom_trade::QTY_PRESETS {
-        let on = pt.qty == q && pt.qty_edit.is_none();
+        let on = size == q && pt.qty_edit.is_none();
         let s = segment(("qty", q as u64), q.to_string(), on, t).flex_1();
         let s = tip(s, &format!("Quantity {q}"), None, t);
         row = row.child(s.on_mouse_down(
             MouseButton::Left,
             cx.listener(move |v: &mut V, _, _, cx| {
                 cx.stop_propagation();
-                v.trade().qty = q;
-                v.trade().qty_edit = None;
-                cx.notify();
+                set_size(v, q, cx);
             }),
         ));
     }
     // Custom: the current value if it's not a preset, or the field being typed.
     let custom = match &pt.qty_edit {
         Some(s) => format!("{s}_"),
-        None if !dom_trade::QTY_PRESETS.contains(&pt.qty) => pt.qty.to_string(),
+        None if !dom_trade::QTY_PRESETS.contains(&size) => size.to_string(),
         None => "…".into(),
     };
-    let on = pt.qty_edit.is_some() || !dom_trade::QTY_PRESETS.contains(&pt.qty);
+    let on = pt.qty_edit.is_some() || !dom_trade::QTY_PRESETS.contains(&size);
     let s = segment("qty-custom", custom, on, t).flex_1();
     let s = tip(s, "Type a quantity", None, t);
     row.child(s.on_mouse_down(
         MouseButton::Left,
-        cx.listener(|v: &mut V, _, _, cx| {
+        cx.listener(|v: &mut V, _, window, cx| {
             cx.stop_propagation();
-            v.trade().qty_edit = Some(String::new());
+            // The keys must reach the pane: in a popped-out window focus may sit on its root.
+            v.trade_focus().clone().focus(window, cx);
+            open_size_field(v);
             cx.notify();
         }),
     ))
@@ -2423,8 +2558,9 @@ fn order_grid<V: TradePane>(
         )
     };
     let dim = !enabled || guarded;
+    let size = pane_size(v, cx);
     let button = |id: &'static str,
-                  title: &'static str,
+                  title: String,
                   p: Option<Price>,
                   fill: Option<gpui::Hsla>,
                   line: gpui::Hsla| {
@@ -2451,13 +2587,19 @@ fn order_grid<V: TradePane>(
     };
     let row = || div().flex().flex_row().gap_1();
     let buy = tip(
-        button("buy-mkt", "BUY MKT", ask, Some(t.up), t.up),
+        button("buy-mkt", format!("BUY {size} MKT"), ask, Some(t.up), t.up),
         "Buy market",
         Some(TradeCmd::BuyMarket),
         t,
     );
     let sell = tip(
-        button("sell-mkt", "SELL MKT", bid, Some(t.down), t.down),
+        button(
+            "sell-mkt",
+            format!("SELL {size} MKT"),
+            bid,
+            Some(t.down),
+            t.down,
+        ),
         "Sell market",
         Some(TradeCmd::SellMarket),
         t,
@@ -2475,13 +2617,13 @@ fn order_grid<V: TradePane>(
         );
     if enabled {
         let jb = tip(
-            button("join-bid", "Join bid", bid, None, t.up),
+            button("join-bid", format!("Join bid {size}"), bid, None, t.up),
             "Join bid (buy limit at the best bid)",
             Some(TradeCmd::JoinBid),
             t,
         );
         let ja = tip(
-            button("join-ask", "Join ask", ask, None, t.down),
+            button("join-ask", format!("Join ask {size}"), ask, None, t.down),
             "Join ask (sell limit at the best ask)",
             Some(TradeCmd::JoinAsk),
             t,
@@ -3002,11 +3144,6 @@ pub fn chart_chip<V: TradePane>(
             .child(account_chip(v, Some(&data), t, cx))
             .into_any_element(),
     )
-}
-
-/// The quantity the pane trades.
-pub fn qty(v: &PaneTrade) -> Qty {
-    Qty(v.qty)
 }
 
 // ---- position bracket (one stop and one target for the whole position) ---------------------
@@ -3975,7 +4112,6 @@ mod tests {
         let doc = TradeDoc {
             enabled: true,
             account: Some("paper".into()),
-            qty: Some(3),
             bracket: None,
             hotkeys: true,
         };
@@ -3984,7 +4120,7 @@ mod tests {
             !c.enabled && !c.hotkeys,
             "a split starts with trading and keys off"
         );
-        assert_eq!((c.account, c.qty), (doc.account, doc.qty));
+        assert_eq!(c.account, doc.account);
     }
 
     /// Review: the panel said "S1" for a stop the chart tag called "Stop 2": one grammar for
@@ -4193,7 +4329,6 @@ mod tests {
         let d = TradeDoc {
             enabled: true,
             account: Some("paper".into()),
-            qty: Some(3),
             bracket: Some(BracketPreset {
                 stop_ticks: 8,
                 target_ticks: 16,
@@ -4204,7 +4339,8 @@ mod tests {
         assert!(json.starts_with(r#"{"enabled":true"#), "{json}");
         let back: TradeDoc = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
-        // A file from before the switch was saved: disabled.
+        // A file from before the switch was saved: disabled. Its per-pane `qty` (from before
+        // the shared size) still loads and is ignored.
         let old: TradeDoc = serde_json::from_str(r#"{"qty":2}"#).unwrap();
         assert!(!old.enabled);
         assert!(

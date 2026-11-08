@@ -411,6 +411,11 @@ fn commit(
         app.appearance = saved_look;
         update_settings(cx, move |s| *s = app);
     }
+    // The size an open pane shows and sends: every pane redraws its buttons now, so none says
+    // an old size while a click would send the new one.
+    if after.app.new_panes.default_qty != before.app.new_panes.default_qty {
+        crate::trade_bar::size_changed();
+    }
     if let Some(w) = cx.try_global::<Workspace>() {
         w.env.look_flags.set(flags);
     }

@@ -2201,3 +2201,34 @@ fn a_held_bracket_stop_moves_before_its_entry_fills() {
     })
     .expect("a held stop isn't in the market");
 }
+
+/// The order maximum reaches the app with the account's limits, so the size control can say
+/// "max N" before a click; an account without one reports none.
+#[test]
+fn the_account_reports_its_order_maximum() {
+    let last_limit = |r: &Rig| {
+        r.events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Event::Account(a) => Some(a.limits.max_order_qty),
+                _ => None,
+            })
+            .expect("an account event")
+    };
+    let mut cfg = AccountConfig::paper("paper-1", 50_000);
+    cfg.limits = RiskLimits {
+        max_order_qty: Some(3),
+        ..Default::default()
+    };
+    let mut r = Rig::with(FillModel::TradeThrough, cfg);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 1, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(last_limit(&r), Some(3));
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.place(Side::Buy, 1, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(last_limit(&r), None);
+}

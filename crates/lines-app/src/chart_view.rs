@@ -461,6 +461,18 @@ impl crate::trade_bar::TradePane for ChartView {
     fn trade_store(&self) -> &Arc<ChartStore> {
         &self.store
     }
+    fn trade_product(&self) -> &Product {
+        &self.instrument
+    }
+    fn trade_focus(&self) -> &FocusHandle {
+        &self.focus
+    }
+    fn shows_size(&self) -> bool {
+        self.strip_box().is_some()
+            && !self.picker.is_open()
+            && self.study_menu.is_none()
+            && !self.drawings.editing()
+    }
     fn trade_unavailable(&self) -> bool {
         self.feed.unavailable.is_some()
     }
@@ -1222,6 +1234,8 @@ impl ChartView {
             return;
         }
         self.focus.focus(window, cx);
+        // A press on the chart leaves a size being typed.
+        self.trade.qty_edit = None;
         if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
             cx.notify();
@@ -1399,6 +1413,14 @@ impl ChartView {
             cx.notify();
             return;
         }
+        // A size being typed takes the plain keys (digits, Enter, Esc), only while its field is
+        // on screen (`qty_key`).
+        if !(m.control || m.alt || m.platform)
+            && crate::trade_bar::qty_key(self, k.key.as_str(), cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
         // go to them when they have a use for it (a tool, a measure, a selection).
         // A note takes what the layout types: AltGr arrives as Ctrl+Alt on Windows, Option
@@ -1513,8 +1535,9 @@ impl ChartView {
         self.seen_revision = u64::MAX;
         self.cross = None;
         self.cross_bar = None;
-        // A limit pick belongs to the symbol it was armed on.
+        // A limit pick belongs to the symbol it was armed on; so does a size being typed.
         self.ct.feed_changed();
+        self.trade.qty_edit = None;
         self.readout = None;
         self.labels.clear();
         // The same timeframe on the new market.
@@ -1687,7 +1710,8 @@ impl ChartView {
 
     /// The order strip's box this frame (plot-local), if shown and it fits.
     fn strip_box(&self) -> Option<crate::chart_trade::StripBox> {
-        if !self.order_strip {
+        // An unavailable pane draws its notice instead of the chart.
+        if !self.order_strip || self.feed.unavailable.is_some() {
             return None;
         }
         crate::chart_trade::strip_box(
@@ -1696,7 +1720,7 @@ impl ChartView {
         )
     }
 
-    /// The order strip over the plot's bottom-left corner: the chart's quantity, BUY/SELL MKT
+    /// The order strip over the plot's bottom-left corner: the shared size, BUY/SELL MKT
     /// filled in the side's color, BUY/SELL LMT outlined (as the DOM's buttons; filled while
     /// its price pick is armed). Dimmed while the chart is in no link group (no DOM's switch
     /// can send).
@@ -1707,17 +1731,84 @@ impl ChartView {
         let b = self.strip_box()?;
         let dim = self.common.link.is_none();
         let pick = self.ct.strip_pick;
+        let size = crate::trade_bar::pane_size(self, cx);
+        let over = crate::dom_trade::over_max(size, crate::trade_bar::max_order_qty(self, cx));
+        // − value +: the value is the field while typing, and "max N" over the maximum (the
+        // buttons still say the size). The wheel steps it anywhere on the control.
+        let step = |id: &'static str, text: &'static str, up: bool, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .w(px(crate::chart_trade::STRIP_STEP_W))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(t.control_edge)
+                .text_color(t.text_main)
+                .cursor_pointer()
+                .child(text)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, window, cx| {
+                        cx.stop_propagation();
+                        v.focus.focus(window, cx);
+                        crate::trade_bar::step_size(v, up, cx);
+                    }),
+                )
+        };
+        let value = match (&self.trade.qty_edit, &over) {
+            (Some(s), _) => format!("{s}_"),
+            (None, Some(text)) => text.clone(),
+            (None, None) => size.to_string(),
+        };
+        let size_control = div()
+            .id("strip-size")
+            .w(px(STRIP_QTY_W))
+            .h_full()
+            .flex()
+            .flex_row()
+            .gap(px(2.0))
+            .on_scroll(cx.listener(|v: &mut Self, ev: &ScrollEvent, w, cx| {
+                crate::trade_bar::scroll_size(v, ev, w, cx)
+            }))
+            .child(step("strip-size-down", "−", false, cx))
+            .child(
+                div()
+                    .id("strip-size-value")
+                    .w(px(crate::chart_trade::STRIP_VALUE_W))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .text_color(if over.is_some() { t.warn } else { t.text_main })
+                    .child(value)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v, _, window, cx| {
+                            cx.stop_propagation();
+                            v.focus.focus(window, cx);
+                            crate::trade_bar::open_size_field(v);
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(step("strip-size-up", "+", true, cx));
         let mut buttons = vec![
             (
                 StripOrder::BuyMarket,
-                "BUY MKT".to_owned(),
+                format!("BUY {size} MKT"),
                 STRIP_MKT_W,
                 Some(t.up),
                 t.up,
             ),
             (
                 StripOrder::SellMarket,
-                "SELL MKT".to_owned(),
+                format!("SELL {size} MKT"),
                 STRIP_MKT_W,
                 Some(t.down),
                 t.down,
@@ -1726,14 +1817,14 @@ impl ChartView {
         if b.limits {
             buttons.push((
                 StripOrder::BuyLimit,
-                "BUY LMT".to_owned(),
+                format!("BUY {size} LMT"),
                 STRIP_LMT_W,
                 (pick == Some(StripOrder::BuyLimit)).then_some(t.up),
                 t.up,
             ));
             buttons.push((
                 StripOrder::SellLimit,
-                "SELL LMT".to_owned(),
+                format!("SELL {size} LMT"),
                 STRIP_LMT_W,
                 (pick == Some(StripOrder::SellLimit)).then_some(t.down),
                 t.down,
@@ -1754,16 +1845,7 @@ impl ChartView {
             .bg(t.panel)
             .rounded_sm()
             .text_size(px(11.0))
-            .child(
-                div()
-                    .w(px(STRIP_QTY_W))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(t.text_main)
-                    .child(format!("Qty {}", crate::trade_bar::qty(&self.trade).0)),
-            );
+            .child(size_control);
         for (o, label, w, fill, line) in buttons {
             let el = div()
                 .id(("strip", o as u64))
@@ -1803,6 +1885,7 @@ impl ChartView {
     pub fn toggle_order_strip(&mut self, cx: &mut Context<Self>) {
         self.order_strip = !self.order_strip;
         self.ct.strip_pick = None;
+        self.trade.qty_edit = None;
         cx.notify();
     }
 
@@ -2460,14 +2543,17 @@ impl ChartView {
             })
         };
         match built {
-            Ok((command, ctx)) => cx.emit(ChartOrder {
-                command,
-                refused: ENABLE_TO_ORDER,
-                account: ctx.account,
-                contract: ctx.contract,
-                link: self.common.link,
-                issued,
-            }),
+            Ok((command, ctx)) => match crate::trade_bar::size_refusal(self, &command, cx) {
+                Some(why) => self.trade.flash(why),
+                None => cx.emit(ChartOrder {
+                    command,
+                    refused: ENABLE_TO_ORDER,
+                    account: ctx.account,
+                    contract: ctx.contract,
+                    link: self.common.link,
+                    issued,
+                }),
+            },
             Err(why) => self.trade.flash(why),
         }
         cx.notify();
@@ -6079,6 +6165,9 @@ impl Render for ChartView {
         {
             self.close_popover(Kind::OrderGroup, cx);
         }
+        // A size being typed closes when the chart loses focus (a chart has no switch to drop).
+        let focus = self.focus.clone();
+        crate::trade_bar::PaneTrade::watch_focus(self, &focus, window, cx);
         let t = self.theme;
         let entity = cx.entity();
         // The workspace refreshes every window when this preference changes.

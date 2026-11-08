@@ -51,6 +51,10 @@ pub struct Shot {
     pub arm: bool,
     /// DOMs start with order hotkeys on (`--enable-hotkeys`).
     pub hotkeys: bool,
+    /// The order size symbols start with (`--order-size`).
+    pub order_size: Option<u32>,
+    /// The paper accounts' largest allowed order (`--max-order-qty`).
+    pub max_order_qty: Option<i64>,
     /// A synthetic read-only broker; the panes trade its SIM account (`--demo-broker`).
     pub demo_broker: bool,
     /// Synthetic strategy instances for the strategy panel (`--strategies-demo`).
@@ -134,6 +138,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         paper,
         arm,
         hotkeys,
+        order_size,
+        max_order_qty,
         demo_broker,
         strategies_demo,
         account_menu,
@@ -152,6 +158,17 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     }
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut setup = TradingSetup::manual();
+    if let Some(max) = max_order_qty {
+        setup.accounts = Some(
+            crate::trading::default_accounts()
+                .into_iter()
+                .map(|(mut c, _)| {
+                    c.limits.max_order_qty = Some(max);
+                    c
+                })
+                .collect(),
+        );
+    }
     if demo_broker {
         let d = feeds
             .iter()
@@ -242,6 +259,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             cx.set_global(crate::strategy_panel::Strategies(std::sync::Arc::new(s)));
         }
         let mut settings = AppSettings::ephemeral();
+        settings.settings.new_panes.default_qty = order_size;
         if let Some(m) = pnl {
             settings.settings.pnl_display = m;
         }

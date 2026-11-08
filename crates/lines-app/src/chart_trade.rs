@@ -515,9 +515,12 @@ pub const STRIP_H: f32 = 26.0;
 pub const STRIP_MARGIN: f32 = 8.0;
 pub const STRIP_PAD: f32 = 3.0;
 pub const STRIP_GAP: f32 = 4.0;
-pub const STRIP_QTY_W: f32 = 56.0;
-pub const STRIP_MKT_W: f32 = 76.0;
-pub const STRIP_LMT_W: f32 = 136.0;
+/// The size control: − (hit target at least 20 px), the value, +.
+pub const STRIP_STEP_W: f32 = 20.0;
+pub const STRIP_VALUE_W: f32 = 44.0;
+pub const STRIP_QTY_W: f32 = 2.0 * STRIP_STEP_W + STRIP_VALUE_W + 4.0;
+pub const STRIP_MKT_W: f32 = 96.0;
+pub const STRIP_LMT_W: f32 = 96.0;
 
 /// Where the strip sits in the plot (plot-local).
 #[derive(Copy, Clone, Debug, PartialEq)]

@@ -150,4 +150,8 @@ pub struct AccountLimits {
     pub guardrails_in_force: crate::guardrails::Guardrails,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails_pending: Option<crate::guardrails::Guardrails>,
+    /// The largest order the account's risk limits allow (`RiskLimits::max_order_qty`), so the
+    /// UI can say so before a click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_order_qty: Option<i64>,
 }

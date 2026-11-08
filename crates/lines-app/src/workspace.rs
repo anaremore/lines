@@ -1413,7 +1413,10 @@ impl WindowView {
                 s.set_pnl_display(m);
                 cx.notify();
             }
-            Command::Trade(tc) => self.run_trade(tc, false, cx),
+            Command::Trade(tc) => {
+                self.focus_for_size(tc, window, cx);
+                self.run_trade(tc, false, cx)
+            }
             Command::Menu => {
                 let area = self.content_area(window, cx);
                 let bar = self.bar_h();
@@ -2413,6 +2416,19 @@ impl WindowView {
 
     /// A trading command on the focused pane's account and contract (decision 0016). `key`:
     /// from its key, run in the key-down handler (order keys need the DOM's order hotkeys).
+    /// A size being typed needs its keys: focus may sit on this window's root.
+    fn focus_for_size(
+        &mut self,
+        tc: crate::commands::TradeCmd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if tc == crate::commands::TradeCmd::TypeQty && !self.tabs.is_empty() {
+            let id = self.tab().focused;
+            self.focus_pane(id, window, cx);
+        }
+    }
+
     fn run_trade(&mut self, tc: crate::commands::TradeCmd, key: bool, cx: &mut Context<Self>) {
         let issued = std::time::Instant::now();
         let run = if key {
@@ -2461,7 +2477,10 @@ impl WindowView {
             // A held key repeats only commands that may repeat: never an order or arming.
             if !ev.is_held || commands::repeats(cmd) {
                 match cmd {
-                    Command::Trade(tc) => self.run_trade(tc, true, cx),
+                    Command::Trade(tc) => {
+                        self.focus_for_size(tc, window, cx);
+                        self.run_trade(tc, true, cx)
+                    }
                     _ => self.run(cmd, window, cx),
                 }
             }

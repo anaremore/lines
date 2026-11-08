@@ -96,7 +96,7 @@ impl PaneWindow {
         }
     }
 
-    fn run(&mut self, cmd: Command, _: &mut Window, cx: &mut Context<Self>) {
+    fn run(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         let id = self.id;
         match command(cmd) {
@@ -116,6 +116,10 @@ impl PaneWindow {
             // Only keys reach here with a trading command (the window's menu has none).
             Some(Command::Trade(tc)) => {
                 let issued = std::time::Instant::now();
+                // A size being typed needs its keys; focus may sit on this window's root.
+                if tc == crate::commands::TradeCmd::TypeQty {
+                    self.handle.focus(window, cx);
+                }
                 match &self.handle {
                     PaneHandle::Dom(d) => {
                         d.update(cx, |v, cx| crate::trade_bar::run_key(v, tc, issued, cx));

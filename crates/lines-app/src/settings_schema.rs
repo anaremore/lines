@@ -424,7 +424,8 @@ pub struct NewPanes {
     /// A new DOM starts with the price trail on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dom_trail: bool,
-    /// A new DOM's order quantity; absent: 1.
+    /// The order size of a product with no size of its own (`Settings::order_sizes`), in every
+    /// pane; absent: 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_qty: Option<u32>,
 }
@@ -992,8 +993,8 @@ fn table() -> Vec<Setting> {
                 "trading.default_qty",
                 Sec::Trading,
                 "Default quantity",
-                "A new DOM's order size.",
-                Scope::NewPanes,
+                "The order size of a product you haven't set one for, in every open pane.",
+                Scope::App,
                 Trading,
                 Number {
                     min: 1,
@@ -1930,6 +1931,7 @@ mod tests {
         assert_eq!(parse_number(""), Ok(None));
         assert!(parse_number("1.5").is_err());
         let qty = by_key("trading.default_qty").unwrap();
+        assert_eq!(qty.scope, Scope::App, "it changes open panes' sizes");
         assert_eq!(
             qty.apply(&mut p, &t, Value::Number(None)),
             Err("a value is needed")
