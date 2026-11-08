@@ -11,8 +11,11 @@
 //! - **Timeframe**: the shortest of 1, 2, 5, 15, 30 minutes, 1 or 4 hours that fits the trade in
 //!   [`MAX_TRADE_BARS`] bars, with [`CONTEXT_BARS`] before the entry, up to the exit.
 //! - **No data** (no pane of the contract open): the file is still written, saying so.
+//! - **Bars that stop early**: a trade is placed by its times, so it stands in a labeled gap
+//!   past the last bar, never on the nearest bar.
 //! - **No account, anywhere**: the request's trade has it blanked, and [`render`] writes the
-//!   contract, side, times, prices and (as the display allows) the P&L only.
+//!   account's kind in words (PAPER, SIM, LIVE or UNLISTED), the contract, side, times, prices
+//!   and (as the display allows) the P&L only.
 //!
 //! SVG because nothing can render the app's own chart off the UI thread (GPUI paints in a
 //! window, its image readback is test-only), and SVG needs no new dependency, opens in any
@@ -22,28 +25,36 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use lines_core::bars::{Bar, BarSeries};
 use lines_core::timeframe::Derived;
 use lines_core::{CivilDate, Price, Product, Qty, Timeframe, UtcMillis};
 use lines_feed::store::ChartStore;
-use lines_trading::Side;
 use lines_trading::journal::{ShotMsg, Trade, is_shot_file_name, price_value};
+use lines_trading::{AccountId, Side};
 
 use crate::pnl::{self, PnlDisplay};
 use crate::theme::{Palette, Theme};
+use crate::trading::AccountInfo;
 
 /// The stores whose bars chart files may use: every running feed a pane trades from
 /// (`Trading::follow`).
 pub type Stores = Arc<Mutex<Vec<Weak<ChartStore>>>>;
 
+/// The accounts now listed: only their kinds reach a chart file.
+pub type Kinds = Arc<RwLock<Vec<AccountInfo>>>;
+
 /// At most this many bars span the trade itself (the timeframe grows until it fits).
 pub const MAX_TRADE_BARS: i64 = 60;
 /// Bars shown before the entry.
 pub const CONTEXT_BARS: i64 = 40;
-/// Empty slots right of the last bar.
-const RIGHT_SLOTS: usize = 6;
+/// Width kept right of the last slot for the averages' labels.
+const LABEL_ROOM: f32 = 120.0;
+/// A time past the last bar stands at most this many slots beyond it.
+const MAX_GAP_SLOTS: i64 = CONTEXT_BARS + MAX_TRADE_BARS + 2;
+/// Triangles of a buy and a sell closer than this, and overlapping in height, stand apart.
+const MARK_W: f32 = 15.0;
 
 const W: f32 = 1280.0;
 const H: f32 = 720.0;
@@ -98,7 +109,7 @@ pub fn remember(stores: &Stores, store: &Arc<ChartStore>) {
 }
 
 /// Start the drawing thread, writing into `dir`. It ends when the journal's thread does.
-pub fn spawn(stores: Stores, dir: PathBuf) -> Option<Sender<ShotMsg>> {
+pub fn spawn(stores: Stores, kinds: Kinds, dir: PathBuf) -> Option<Sender<ShotMsg>> {
     let (tx, rx) = mpsc::channel::<ShotMsg>();
     let spawned = std::thread::Builder::new()
         .name("lines-shots".into())
@@ -107,7 +118,8 @@ pub fn spawn(stores: Stores, dir: PathBuf) -> Option<Sender<ShotMsg>> {
                 match msg {
                     ShotMsg::Take(req) => {
                         let data = chart_data(&stores, &req.trade);
-                        let svg = render(&req.trade, data.as_ref(), look());
+                        let kind = kind_word(&kinds, &req.account);
+                        let svg = render(&req.trade, kind, data.as_ref(), look());
                         // Logged by name only: the folder would hold the OS user name. The
                         // viewer's missing-file notice covers it.
                         if let Err(e) = write_atomic(&dir.join(&req.file), &svg) {
@@ -127,6 +139,16 @@ pub fn spawn(stores: Stores, dir: PathBuf) -> Option<Sender<ShotMsg>> {
             None
         }
     }
+}
+
+/// The account's kind in words, as the Journal pane says it (an account no list has: UNLISTED,
+/// never assumed to be paper).
+fn kind_word(kinds: &Kinds, account: &AccountId) -> &'static str {
+    let list = kinds.read().unwrap_or_else(|e| e.into_inner());
+    crate::journal_view::account_badges(&list)
+        .get(&account.0)
+        .copied()
+        .unwrap_or(crate::journal_view::UNLISTED)
 }
 
 /// Write to a temporary file beside `path`, then rename: a reader never sees half a file.
@@ -355,9 +377,9 @@ fn grid_step(range: i64, tick: i64, lines: i64) -> i64 {
     }
 }
 
-/// The chart file as SVG text. `data`: the bars (`None`: no chart data was open). Takes no
-/// account and writes none.
-pub fn render(t: &Trade, data: Option<&ChartBars>, look: Look) -> String {
+/// The chart file as SVG text. `kind`: the account's kind in words. `data`: the bars (`None`:
+/// no chart data was open). Takes no account and writes none.
+pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> String {
     let th = look.theme;
     let product = data
         .map(|d| d.product.clone())
@@ -381,12 +403,14 @@ pub fn render(t: &Trade, data: Option<&ChartBars>, look: Look) -> String {
     let qty = qty_text(product.as_ref(), Qty(t.max_qty));
     let _ = writeln!(
         s,
-        "<text x=\"{PLOT_L}\" y=\"28\" font-size=\"18\" font-weight=\"600\" {}>{}  ·  {side} {qty}</text>",
+        "<text x=\"{PLOT_L}\" y=\"28\" font-size=\"18\" font-weight=\"600\" {}>{}  ·  {}  ·  {side} {qty}</text>",
         paint("fill", th.text_main),
+        esc(kind),
         esc(&contract),
     );
     let mut when = format!(
-        "Entry {}  →  exit {}  ·  {} UTC",
+        "Entry {}-{}  →  exit {} UTC  ·  held {}",
+        CivilDate::from_utc(t.entry_time).year,
         crate::journal_view::clock_text(t.entry_time),
         crate::journal_view::clock_text(t.exit_time),
         crate::journal_view::duration_text(t.duration_ms())
@@ -443,6 +467,30 @@ pub fn render(t: &Trade, data: Option<&ChartBars>, look: Look) -> String {
     s
 }
 
+/// The slot a time stands in: the last bar starting at or before it, or past the last bar by
+/// how many bars' time it is beyond it (a trade the bars stop short of keeps its true place).
+fn slot_index(bars: &[Bar], tf_ms: i64, at: UtcMillis) -> usize {
+    let last = bars.len().saturating_sub(1);
+    let i = bars.iter().rposition(|b| b.time <= at).unwrap_or(0);
+    match bars.get(i) {
+        Some(b) if i == last => {
+            last + ((at.0 - b.time.0) / tf_ms.max(1)).clamp(0, MAX_GAP_SLOTS) as usize
+        }
+        _ => i,
+    }
+}
+
+/// A slot's width, with `slots` slots and room for the averages' labels after them.
+fn slot_width(slots: usize) -> f32 {
+    (PLOT_R - PLOT_L - LABEL_ROOM) / slots.max(34) as f32
+}
+
+/// `HH:MM`, UTC.
+fn hhmm(t: UtcMillis) -> String {
+    let secs = t.0.rem_euclid(86_400_000) / 1000;
+    format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
+}
+
 /// Candles, axes, the trade's span, fills and averages.
 fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) {
     let bars = &d.bars;
@@ -457,11 +505,9 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
     let (lo, hi) = (lo - pad, hi + pad);
     let span = (hi - lo).max(1) as f32;
     let y = |p: f64| PLOT_T + (PLOT_B - PLOT_T) * (1.0 - ((p - lo as f64) as f32 / span));
-    let slots = (bars.len() + RIGHT_SLOTS).max(40);
-    let slot = (PLOT_R - PLOT_L) / slots as f32;
+    let slot_of = |at: UtcMillis| slot_index(bars, d.tf.nominal_ms(), at);
+    let slot = slot_width(slot_of(t.exit_time).max(bars.len() - 1) + 1);
     let x = |i: usize| PLOT_L + slot * (i as f32 + 0.5);
-    // The bar holding a time (the last one starting at or before it).
-    let bar_of = |at: UtcMillis| bars.iter().rposition(|b| b.time <= at).unwrap_or(0);
     // Grid and price axis.
     let step = grid_step(hi - lo, tick, 6);
     let mut g = (lo + step - 1).div_euclid(step) * step;
@@ -524,7 +570,7 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
         );
     }
     // The trade's span, behind the candles.
-    let (e0, e1) = (bar_of(t.entry_time), bar_of(t.exit_time));
+    let (e0, e1) = (slot_of(t.entry_time), slot_of(t.exit_time));
     let _ = writeln!(
         s,
         "<rect x=\"{:.1}\" y=\"{PLOT_T}\" width=\"{:.1}\" height=\"{}\" {}/>",
@@ -575,7 +621,7 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
         let _ = writeln!(
             s,
             "<text x=\"{:.1}\" y=\"{ty:.1}\" font-size=\"12\" {} paint-order=\"stroke\" stroke-width=\"3\" {}>{}</text>",
-            // Right of the span, clear of the fills' triangles (the empty slots hold it).
+            // Right of the span, clear of the fills' triangles (`LABEL_ROOM` holds it).
             x(e1) + slot / 2.0 + 4.0,
             paint("fill", th.text_main),
             paint("stroke", th.bg),
@@ -588,10 +634,24 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
     avg(entry_avg, "avg entry", entry_below);
     avg(exit_avg, "avg exit", !entry_below);
     // Fills: a triangle at the price, pointing up for a buy (below it) and down for a sell
-    // (above it), outlined in the background color so it reads over candles.
+    // (above it), outlined in the background color so it reads over candles. A buy and a sell
+    // that would cover each other stand side by side, the earlier one in place.
+    let mut placed: Vec<(Side, f32, f32, f32)> = Vec::with_capacity(t.fills.len());
     for f in &t.fills {
-        let fx = x(bar_of(f.at));
+        let mut fx = x(slot_of(f.at));
         let fy = y(f.price.0 as f64);
+        let (top, bot) = if f.side == Side::Buy {
+            (fy, fy + 12.0)
+        } else {
+            (fy - 12.0, fy)
+        };
+        while placed
+            .iter()
+            .any(|&(s, px, a, b)| s != f.side && (fx - px).abs() < MARK_W && top < b && a < bot)
+        {
+            fx += MARK_W;
+        }
+        placed.push((f.side, fx, top, bot));
         let (dy, c, word) = if f.side == Side::Buy {
             (12.0, th.up, "Buy")
         } else {
@@ -610,14 +670,39 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
             esc(&price_text(product, f.price))
         );
     }
-    // Legend, top left above the plot: the shapes' meaning in words.
+    // Legend, top left above the plot: the shapes' meaning in words, and what this isn't.
     let _ = writeln!(
         s,
-        "<text x=\"{}\" y=\"{}\" font-size=\"12\" {}>▲ buy fill  ·  ▼ sell fill  ·  dashed: average price  ·  shaded: the trade</text>",
-        PLOT_L + 4.0,
+        "<text x=\"{PLOT_L}\" y=\"{}\" font-size=\"12\" {}>▲ buy fill  ·  ▼ sell fill  ·  dashed: average price  ·  shaded: the trade  ·  drawn from the bars: no studies or drawings</text>",
         PLOT_T - 6.0,
         paint("fill", th.text_dim)
     );
+    // Missing data shows as missing (docs/design.md §7).
+    let mut missing = String::new();
+    if let Some(b) = bars.first().filter(|b| t.entry_time < b.time) {
+        let _ = write!(
+            missing,
+            "No bars before {}: earlier fills stand at the first bar.  ",
+            hhmm(b.time)
+        );
+    }
+    if let Some(b) = bars.last().filter(|_| e1 >= bars.len()) {
+        let _ = write!(
+            missing,
+            "No bars after {}: the trade stands by its times in the gap.",
+            hhmm(b.time)
+        );
+    }
+    if !missing.is_empty() {
+        let _ = writeln!(
+            s,
+            "<text x=\"{}\" y=\"{}\" font-size=\"13\" {} paint-order=\"stroke\" stroke-width=\"3\" {}>{missing}</text>",
+            PLOT_L + 4.0,
+            PLOT_T + 16.0,
+            paint("fill", th.text_main),
+            paint("stroke", th.bg)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -641,12 +726,14 @@ mod tests {
     /// Long 2 ES at 6000.00, out at 6002.00 four minutes later, on an account with a
     /// distinctive id (in its fill ids too): the request a journal with shots on makes.
     fn request() -> ShotRequest {
+        request_of(&[(Side::Buy, 600_000, 0), (Side::Sell, 600_200, 240)])
+    }
+
+    /// A round trip of these fills (side, price, seconds after the entry), 2 lots each.
+    fn request_of(fills: &[(Side, i64, i64)]) -> ShotRequest {
         let mut j = Journal::new();
         j.set_shots(true);
-        for (i, (side, p, s)) in [(Side::Buy, 600_000, 0), (Side::Sell, 600_200, 240)]
-            .into_iter()
-            .enumerate()
-        {
+        for (i, &(side, p, s)) in fills.iter().enumerate() {
             j.on_event(&Event::Fill(FillEvent {
                 account: AccountId::new(ACCOUNT),
                 order: OrderId(i as u64),
@@ -704,11 +791,11 @@ mod tests {
     fn marks_every_fill_with_averages_axes_and_the_result() {
         let r = request();
         let d = data(&r.trade);
-        let svg = render(&r.trade, Some(&d), look(PnlDisplay::Both));
+        let svg = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Both));
         assert!(svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"));
-        assert!(svg.contains("ESZ26  ·  Long 2<"), "{svg}");
+        assert!(svg.contains(">PAPER  ·  ESZ26  ·  Long 2<"), "{svg}");
         assert!(svg.contains(
-            "Entry 11-05 14:31:07  →  exit 11-05 14:35:07  ·  4m 00s UTC  ·  1-minute bars"
+            "Entry 2026-11-05 14:31:07  →  exit 11-05 14:35:07 UTC  ·  held 4m 00s  ·  1-minute bars"
         ));
         // +2 points × 2 × $50 = $200, less $2.48 of fees; and in ticks.
         assert!(svg.contains("net +$197.52  (+8.0 t)"), "{svg}");
@@ -729,7 +816,7 @@ mod tests {
     fn fills_are_marked_by_shape_for_both_sides() {
         let r = request();
         let d = data(&r.trade);
-        let svg = render(&r.trade, Some(&d), look(PnlDisplay::Off));
+        let svg = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off));
         assert_eq!(svg.matches("<polygon").count(), 2);
         let triangle = |word: &str| {
             let line = svg
@@ -750,6 +837,213 @@ mod tests {
         );
     }
 
+    /// The x of each fill's triangle, in order.
+    fn mark_xs(svg: &str) -> Vec<f32> {
+        svg.lines()
+            .filter(|l| l.starts_with("<polygon"))
+            .map(|l| {
+                let pts = l.split('"').nth(1).unwrap();
+                pts.split(',').next().unwrap().parse().unwrap()
+            })
+            .collect()
+    }
+
+    /// A buy just above a sell in one bar would cover each other: they stand side by side. At
+    /// a distance they stay on their bar.
+    #[test]
+    fn a_buy_and_a_sell_never_cover_each_other() {
+        // A wide price range, so one tick is about a pixel.
+        let wide = |t: &Trade| {
+            let mut d = data(t);
+            d.bars[0].high = Price(610_000);
+            d
+        };
+        let r = request_of(&[(Side::Buy, 600_025, 0), (Side::Sell, 600_000, 2)]);
+        let d = wide(&r.trade);
+        let xs = mark_xs(&render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off)));
+        assert!(xs[1] - xs[0] >= MARK_W, "{xs:?}");
+        let r = request_of(&[(Side::Buy, 600_000, 0), (Side::Sell, 600_500, 2)]);
+        let d = wide(&r.trade);
+        let xs = mark_xs(&render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off)));
+        assert_eq!(xs[0], xs[1], "{xs:?}");
+    }
+
+    /// Bars that stop before the trade does: the fills keep their times and a label says so,
+    /// never the nearest bar; bars that start after the entry say that too.
+    #[test]
+    fn missing_bars_show_as_missing() {
+        let r = request();
+        let mut d = data(&r.trade);
+        assert!(
+            !render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off)).contains("No bars"),
+            "bars through the trade"
+        );
+        let entry_bar = d.bars.iter().rposition(|b| b.time <= r.trade.entry_time);
+        d.bars.truncate(entry_bar.unwrap() + 1);
+        let svg = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off));
+        assert!(svg.contains("No bars after 14:31"), "{svg}");
+        let xs = mark_xs(&svg);
+        let n = d.bars.len();
+        assert_eq!(slot_index(&d.bars, 60_000, r.trade.exit_time), n - 1 + 4);
+        assert!(xs[1] - xs[0] >= 3.0 * slot_width(n + 4), "{xs:?}");
+        // A gap can't run the plot off the page.
+        assert_eq!(
+            slot_index(&d.bars, 60_000, UtcMillis(r.trade.exit_time.0 + 86_400_000)),
+            n - 1 + MAX_GAP_SLOTS as usize
+        );
+
+        let mut late = data(&r.trade);
+        late.bars.retain(|b| b.time > r.trade.entry_time);
+        let svg = render(&r.trade, "PAPER", Some(&late), look(PnlDisplay::Off));
+        assert!(svg.contains("No bars before 14:32"), "{svg}");
+    }
+
+    /// The labels' room holds at every bar count the file can draw.
+    #[test]
+    fn the_averages_labels_stay_off_the_price_axis() {
+        for slots in [1, 34, 40, 100, 102, 300] {
+            let after_last = PLOT_L + slot_width(slots) * slots as f32;
+            assert!(after_last + LABEL_ROOM <= PLOT_R + 0.5, "{slots}");
+        }
+    }
+
+    /// A store of `contract` with 1-minute bars from `first` to `last` minutes after the entry.
+    fn store_of(contract: ContractKey, first: i64, last: i64) -> Arc<ChartStore> {
+        let store = Arc::new(ChartStore::new(
+            catalog::get(catalog::ES).unwrap(),
+            Some(contract),
+            lines_core::Capabilities::default(),
+            "test",
+            60_000,
+            300,
+        ));
+        for m in first..=last {
+            store
+                .read()
+                .apply(&[lines_feed::provider::MarketEvent::Trade {
+                    time: UtcMillis(t0() + m * 60_000),
+                    price: Price(600_000 + m * 25),
+                    qty: Qty(1),
+                    aggressor: None,
+                }]);
+        }
+        store
+    }
+
+    /// From a feed's store to the file, with real bars: the contract's store is used however
+    /// many bars another contract's holds; the window starts before the entry and ends at the
+    /// exit; a feed is remembered once and a gone one is dropped.
+    #[test]
+    fn a_followed_stores_bars_reach_the_file() {
+        let r = request();
+        let other_contract = ContractKey::monthly(catalog::ES, 2027, Month::new(3).unwrap());
+        let (mine, other) = (store_of(es(), -50, 10), store_of(other_contract, -200, 10));
+        let stores = Stores::default();
+        remember(&stores, &other);
+        assert!(chart_data(&stores, &r.trade).is_none(), "another contract");
+        remember(&stores, &mine);
+        remember(&stores, &mine);
+        let gone = store_of(es(), 0, 1);
+        remember(&stores, &gone);
+        drop(gone);
+        let d = chart_data(&stores, &r.trade).expect("the contract's bars");
+        assert_eq!(stores.lock().unwrap().len(), 2, "once each, gone ones out");
+        assert_eq!(d.tf, Timeframe::Minutes(1));
+        assert!(d.bars.iter().all(|b| b.time <= r.trade.exit_time));
+        // Bars starting within 42 minutes before the entry, its minute, 4 more to the exit.
+        assert_eq!(d.bars.len(), 41 + 1 + 4, "{:?}", d.bars.first());
+        assert!(d.bars[0].time < r.trade.entry_time);
+        assert_eq!(d.bars.last().unwrap().close, Price(600_100), "mine, at +4");
+
+        let dir = temp("real-bars");
+        let kinds = Kinds::default();
+        *kinds.write().unwrap() = vec![AccountInfo::paper(
+            AccountId::new(ACCOUNT),
+            "Name".into(),
+            None,
+        )];
+        assert_eq!(kind_word(&kinds, &AccountId::new("elsewhere")), "UNLISTED");
+        let tx = spawn(stores, kinds, dir.clone()).unwrap();
+        let file = r.file.clone();
+        tx.send(ShotMsg::Take(Box::new(r))).unwrap();
+        let (done, wait) = mpsc::channel();
+        tx.send(ShotMsg::Flush(done)).unwrap();
+        wait.recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        let svg = std::fs::read_to_string(dir.join(file)).unwrap();
+        assert!(
+            !svg.contains("No chart data") && !svg.contains("No bars"),
+            "{svg}"
+        );
+        assert_eq!(
+            svg.matches("<rect").count(),
+            2 + 46,
+            "background, span, candles"
+        );
+        assert!(svg.contains(">PAPER  ·  ESZ26"), "{svg}");
+        assert!(
+            !svg.contains("DISTINCTIVE") && !svg.contains("Name"),
+            "{svg}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Writes evidence files to `LINES_EVIDENCE_DIR`: a scale-out with bars through the trade,
+    /// in each theme (`cargo test -p lines-app --lib evidence_files -- --ignored`).
+    #[test]
+    #[ignore = "writes evidence files when asked"]
+    fn evidence_files() {
+        let dir = PathBuf::from(std::env::var("LINES_EVIDENCE_DIR").unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = request_of(&[
+            (Side::Buy, 600_000, 0),
+            (Side::Buy, 599_950, 95),
+            (Side::Sell, 600_275, 480),
+            (Side::Sell, 600_325, 720),
+        ]);
+        let d = ChartBars {
+            product: catalog::get(catalog::ES).unwrap(),
+            tf: Timeframe::Minutes(1),
+            bars: minute_bars()
+                .into_iter()
+                .chain((0..16).map(|i| {
+                    let o = 600_000 + i * 20;
+                    Bar {
+                        time: UtcMillis(UtcMillis(t0()).floor_to(60_000).0 + i * 60_000),
+                        open: Price(o),
+                        high: Price(o + 75),
+                        low: Price(o - 75),
+                        close: Price(o + if i % 3 == 0 { -25 } else { 25 }),
+                        volume: Qty(100),
+                    }
+                }))
+                .filter(|b| b.time <= r.trade.exit_time)
+                .fold(Vec::<Bar>::new(), |mut v, b| {
+                    v.retain(|o| o.time != b.time);
+                    v.push(b);
+                    v
+                }),
+        };
+        for (name, theme, pnl) in [
+            ("dark", Theme::dark(Palette::Standard), PnlDisplay::Both),
+            ("light", Theme::light(Palette::Standard), PnlDisplay::Both),
+            (
+                "dark-cb",
+                Theme::dark(Palette::Colorblind),
+                PnlDisplay::Both,
+            ),
+            (
+                "light-cb",
+                Theme::light(Palette::Colorblind),
+                PnlDisplay::Both,
+            ),
+            ("pnl-off", Theme::dark(Palette::Standard), PnlDisplay::Off),
+        ] {
+            let svg = render(&r.trade, "PAPER", Some(&d), Look { theme, pnl });
+            std::fs::write(dir.join(format!("bars-{name}.svg")), svg).unwrap();
+        }
+    }
+
     /// The account appears in no form: not in the file name, not in the SVG.
     #[test]
     fn no_account_in_the_name_or_the_file() {
@@ -757,7 +1051,7 @@ mod tests {
         assert!(!r.file.contains(ACCOUNT) && !r.file.contains("DISTINCTIVE"));
         for d in [Some(data(&r.trade)), None] {
             for mode in PnlDisplay::ALL {
-                let svg = render(&r.trade, d.as_ref(), look(mode));
+                let svg = render(&r.trade, "PAPER", d.as_ref(), look(mode));
                 assert!(!svg.contains("DISTINCTIVE"), "{svg}");
                 assert!(!svg.contains("ACCT"), "{svg}");
             }
@@ -769,18 +1063,18 @@ mod tests {
     fn follows_the_pnl_display() {
         let r = request();
         let d = data(&r.trade);
-        let off = render(&r.trade, Some(&d), look(PnlDisplay::Off));
+        let off = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off));
         assert!(
             !off.contains('$') && !off.contains(" t<") && !off.contains("net "),
             "{off}"
         );
         assert!(off.contains("avg entry 6000.00"), "prices stay");
-        let ticks = render(&r.trade, Some(&d), look(PnlDisplay::Ticks));
+        let ticks = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Ticks));
         assert!(
             ticks.contains(">+8.0 t<") && !ticks.contains('$'),
             "{ticks}"
         );
-        let none = render(&r.trade, None, look(PnlDisplay::Off));
+        let none = render(&r.trade, "PAPER", None, look(PnlDisplay::Off));
         assert!(!none.contains('$') && !none.contains("net "), "{none}");
     }
 
@@ -792,6 +1086,7 @@ mod tests {
         let svg = |theme| {
             render(
                 &r.trade,
+                "PAPER",
                 Some(&d),
                 Look {
                     theme,
@@ -809,7 +1104,7 @@ mod tests {
     #[test]
     fn no_chart_data_says_so() {
         let r = request();
-        let svg = render(&r.trade, None, look(PnlDisplay::Both));
+        let svg = render(&r.trade, "PAPER", None, look(PnlDisplay::Both));
         assert!(svg.contains("No chart data for ESZ26 when this was taken."));
         assert!(!svg.contains("<polygon"));
         let empty = ChartBars {
@@ -817,7 +1112,7 @@ mod tests {
             tf: Timeframe::Minutes(1),
             bars: Vec::new(),
         };
-        let svg = render(&r.trade, Some(&empty), look(PnlDisplay::Both));
+        let svg = render(&r.trade, "PAPER", Some(&empty), look(PnlDisplay::Both));
         assert!(svg.contains("No chart data"));
         assert_eq!(esc("<A&B>"), "&lt;A&amp;B&gt;");
     }
@@ -855,7 +1150,7 @@ mod tests {
     #[test]
     fn the_thread_writes_the_named_file_and_a_flush_waits_for_it() {
         let dir = temp("thread");
-        let tx = spawn(Stores::default(), dir.clone()).unwrap();
+        let tx = spawn(Stores::default(), Kinds::default(), dir.clone()).unwrap();
         let r = request();
         let file = r.file.clone();
         tx.send(ShotMsg::Take(Box::new(r))).unwrap();
@@ -876,7 +1171,7 @@ mod tests {
         let dir = temp("blocked");
         std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
         std::fs::write(&dir, "a file where the folder should be").unwrap();
-        let tx = spawn(Stores::default(), dir.clone()).unwrap();
+        let tx = spawn(Stores::default(), Kinds::default(), dir.clone()).unwrap();
         tx.send(ShotMsg::Take(Box::new(request()))).unwrap();
         let (done, wait) = mpsc::channel();
         tx.send(ShotMsg::Flush(done)).unwrap();
@@ -909,13 +1204,7 @@ mod tests {
     fn file_urls_encode_what_a_home_folder_can_hold() {
         assert_eq!(
             file_url(Path::new(r"C:\Users\A B\é\x.svg")),
-            if cfg!(windows) {
-                "file:///C:/Users/A%20B/%C3%A9/x.svg"
-            } else {
-                "file:///C%3A%5CUsers%5CA%20B%5C%C3%A9%5Cx.svg"
-            }
-            .replace("%5C", "/")
-            .replace("C%3A", "C:")
+            "file:///C:/Users/A%20B/%C3%A9/x.svg"
         );
         assert_eq!(
             file_url(Path::new("/home/a b/x.svg")),

@@ -12,7 +12,7 @@
 //!   and all dates.
 //! - **Editing**: click a row (or Up/Down) to select it, Enter to edit its tags and note
 //!   inline (Tab switches field, Enter saves, Esc cancels). Edits are saved as journal records.
-//! - **Chart** (`crate::journal_shots`): a trade with a chart file shows "open" in the Chart
+//! - **Chart** (`crate::journal_shots`): a trade with a chart file shows "view" in the Chart
 //!   column (click it, or the palette's command on the selected trade: the OS's default app);
 //!   without one, a dash. A file that isn't there says so in a notice.
 //! - **By account / by tag** (phase 2; header tabs, palette, pane menu, saved with the pane):
@@ -157,7 +157,7 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
             if t.screenshots.is_empty() {
                 dash()
             } else {
-                "open".to_owned()
+                "view".to_owned()
             },
             t.tags.join(", "),
         ],
@@ -331,7 +331,7 @@ pub fn group_headers(g: JournalGroup) -> [&'static str; GROUP_COLS] {
 
 /// The word for an account no current list has (a broker not connected yet or gone, an
 /// account removed): never assumed to be paper.
-const UNLISTED: &str = "UNLISTED";
+pub(crate) const UNLISTED: &str = "UNLISTED";
 
 /// How real a badge's money is, most real first (so a clip or an id clash never favors paper).
 fn realness(badge: &str) -> u8 {
@@ -362,7 +362,7 @@ fn account_labels(
 }
 
 /// Each account's badge (the most real of a clashing id).
-fn account_badges(
+pub(crate) fn account_badges(
     accounts: &[crate::trading::AccountInfo],
 ) -> std::collections::HashMap<String, &'static str> {
     least_real_first(accounts)
@@ -1075,9 +1075,8 @@ impl JournalView {
                 self.cols.need(c, tw, PAD);
             }
         }
-        self.cols.layout(w);
-        // A narrow pane leaves out columns it can't hold whole (never half a number).
-        self.cols.drop_overflow(w);
+        // A narrow pane gives up the least needed columns first (never half a number).
+        self.cols.layout_journal(w);
         let left: [bool; 13] = JournalCol::ALL.map(JournalCol::left_aligned);
         self.cols
             .paint_header(&mut self.glyphs, &t, bounds, PAD, &left, window, cx);
@@ -1633,7 +1632,7 @@ mod tests {
         assert_eq!(decimal(0.5, 1), "0.5");
     }
 
-    /// The Chart cell: "open" with a file, a dash without (the reverse state).
+    /// The Chart cell: "view" with a file, a dash without (the reverse state).
     #[test]
     fn the_chart_cell_says_whether_there_is_a_file() {
         let mut t = trade();
@@ -1642,7 +1641,7 @@ mod tests {
         assert_eq!(r.shot, None);
         t.screenshots = vec!["2026-11-05-0123456789abcdef.svg".into()];
         let r = row(&t, PnlDisplay::Off);
-        assert_eq!(r.cells[JournalCol::Chart.index()], "open");
+        assert_eq!(r.cells[JournalCol::Chart.index()], "view");
         assert_eq!(r.shot.as_deref(), Some(t.screenshots[0].as_str()));
     }
 

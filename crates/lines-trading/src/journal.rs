@@ -207,12 +207,14 @@ pub enum Record {
 }
 
 /// A chart screenshot to draw now: its file name, and the trade as it closed with its ids,
-/// account, tags and note blanked (a broker's ids can hold the account; nothing downstream can
-/// write what it was never given).
+/// account, tags and note blanked (a broker's ids can hold the account; the drawing can't write
+/// what it was never given). `account` is for looking up the account's kind only (the file says
+/// PAPER or LIVE in words); it is never drawn.
 #[derive(Clone, Debug)]
 pub struct ShotRequest {
     pub file: String,
     pub trade: Trade,
+    pub account: AccountId,
 }
 
 /// What the journal thread sends the thread that draws screenshots.
@@ -224,8 +226,8 @@ pub enum ShotMsg {
 }
 
 /// A screenshot's file name: the trade date and a 64-bit FNV-1a of the trade id (stable across
-/// builds and platforms; the name is saved). The id itself can hold an account (`seed-…`, a
-/// broker's fill ids), so it never appears.
+/// builds and platforms; the name is saved). The id itself can hold an account (a broker's
+/// fill ids), so it never appears.
 pub fn shot_file_name(trade_date: CivilDate, id: &str) -> String {
     let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -383,14 +385,18 @@ impl Journal {
             let file = shot_file_name(kept.trade_date, &kept.id);
             kept.screenshots = vec![file.clone()];
             let mut trade = kept.clone();
+            let account = std::mem::replace(&mut trade.account, AccountId::new(""));
             trade.id.clear();
-            trade.account = AccountId::new("");
             trade.tags.clear();
             trade.note.clear();
             for f in &mut trade.fills {
                 f.trade_id.clear();
             }
-            self.shot_requests.push(ShotRequest { file, trade });
+            self.shot_requests.push(ShotRequest {
+                file,
+                trade,
+                account,
+            });
         }
         self.closed.last().cloned().expect("just pushed")
     }

@@ -88,7 +88,7 @@ pub struct AccountInfo {
 }
 
 impl AccountInfo {
-    fn paper(id: AccountId, name: String, rules: Option<RulePreset>) -> AccountInfo {
+    pub(crate) fn paper(id: AccountId, name: String, rules: Option<RulePreset>) -> AccountInfo {
         AccountInfo {
             id,
             name,
@@ -1022,7 +1022,10 @@ impl Trading {
             .and_then(|(p, _)| p.parent())
             .map(|d| d.join("shots"));
         let shot_stores = crate::journal_shots::Stores::default();
-        let (journal, journal_report) = open_journal(journal_file.as_ref(), &shot_stores);
+        // Filled below: no trade can close before the service starts.
+        let shot_kinds = crate::journal_shots::Kinds::default();
+        let (journal, journal_report) =
+            open_journal(journal_file.as_ref(), &shot_stores, &shot_kinds);
         let loaded = match &setup.file {
             Some(path) => match persist::load(path) {
                 Ok(f) => f,
@@ -1185,7 +1188,8 @@ impl Trading {
         );
         // The full state as the first events.
         handle.rebuild();
-        let accounts = Arc::new(RwLock::new(accounts));
+        *shot_kinds.write().unwrap_or_else(|e| e.into_inner()) = accounts;
+        let accounts = shot_kinds;
         let mut venues = Vec::new();
         for ext in brokers {
             let broker = match ext.open() {
@@ -1602,6 +1606,7 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 fn open_journal(
     file: Option<&(PathBuf, String)>,
     stores: &crate::journal_shots::Stores,
+    kinds: &crate::journal_shots::Kinds,
 ) -> (Arc<JournalShared>, Option<String>) {
     use lines_trading::journal::store::{self, JournalWriter};
     let Some((path, source)) = file else {
@@ -1624,10 +1629,9 @@ fn open_journal(
                 }
             };
             let journal = Journal::from_records(loaded.map(|l| l.records).unwrap_or_default());
-            let shots = path
-                .parent()
-                .filter(|_| writer.is_some())
-                .and_then(|d| crate::journal_shots::spawn(stores.clone(), d.join("shots")));
+            let shots = path.parent().filter(|_| writer.is_some()).and_then(|d| {
+                crate::journal_shots::spawn(stores.clone(), kinds.clone(), d.join("shots"))
+            });
             (
                 JournalShared::start_with_shots(journal, writer, shots),
                 report,
@@ -2844,7 +2848,6 @@ mod tests {
         assert_eq!(snap.open, 0);
     }
 
-    /// Review round 2: the core reports positions on every market batch while one is open.
     /// A saved journal through the real service: a scripted round trip leaves one chart file in
     /// `shots/` beside the journal, named in the saved line, with no account in either. An
     /// in-memory journal has no folder and takes none.
@@ -2891,6 +2894,7 @@ mod tests {
         let svg = std::fs::read_to_string(dir.join("shots").join(name)).unwrap();
         assert!(svg.contains("No chart data"), "no pane followed: {svg}");
         assert!(!svg.contains("DISTINCTIVE"), "{svg}");
+        assert!(svg.contains(">PAPER  ·  "), "the kind, in words: {svg}");
         let line = std::fs::read_to_string(dir.join("mock.jsonl")).unwrap();
         assert!(
             line.contains(&format!("\"screenshots\":[\"{name}\"]")),
@@ -2903,6 +2907,7 @@ mod tests {
         assert_eq!(memory.shots_dir, None);
     }
 
+    /// Review round 2: the core reports positions on every market batch while one is open.
     /// Those must not republish the journal (the pane would re-format every row per batch);
     /// only opening, closing or editing a trade does.
     #[test]

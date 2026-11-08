@@ -439,6 +439,23 @@ impl Columns {
         self.drop_overflow(total);
     }
 
+    /// The journal's table in `total` px: a narrow pane keeps the time, side, quantity, P&L and
+    /// the way to the chart longest, then the account (it says PAPER or LIVE) and contract.
+    pub fn layout_journal(&mut self, total: f32) {
+        self.layout_fitting(
+            total,
+            &[
+                JournalCol::Tags.index(),
+                JournalCol::MaeMfe.index(),
+                JournalCol::Duration.index(),
+                JournalCol::Ticks.index(),
+                JournalCol::Exit.index(),
+                JournalCol::Entry.index(),
+            ],
+            &[JournalCol::Contract.index(), JournalCol::Account.index()],
+        );
+    }
+
     /// This frame only: leave out columns that don't fit entirely in `total` px (header and
     /// rows alike), so a narrow pane never shows half a number. Saved choices are untouched.
     pub fn drop_overflow(&mut self, total: f32) {
@@ -865,6 +882,25 @@ mod tests {
     /// numbers need: working orders, bid, price and ask all stay whole.
     #[test]
     fn a_narrow_dom_keeps_the_book_whole() {
+        // The journal's narrow pane keeps the P&L and the way to the chart.
+        let mut j = Columns::new(Table::Journal);
+        let saved = j.set;
+        j.layout_journal(420.0);
+        for col in [
+            JournalCol::Time,
+            JournalCol::Side,
+            JournalCol::Qty,
+            JournalCol::Pnl,
+            JournalCol::Chart,
+        ] {
+            let cell = j.cells[col.index()];
+            assert!(cell.shown && cell.right() <= 420.5, "{col:?} {:?}", j.cells);
+        }
+        assert!(!j.cells[JournalCol::MaeMfe.index()].shown);
+        assert_eq!(j.set, saved, "saved columns untouched by narrowing");
+        j.layout_journal(3000.0);
+        assert!(j.cells[JournalCol::MaeMfe.index()].shown, "wide: all shown");
+
         let mut c = Columns::new(Table::Dom);
         // About what the panel's DOM font needs: two order marks, sizes, a price.
         for (col, w) in [
