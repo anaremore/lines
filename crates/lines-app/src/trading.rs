@@ -480,6 +480,7 @@ impl TradeState {
     }
 
     /// The triggers the core has alive, as last reported.
+    #[cfg(test)]
     pub fn triggers(&self) -> impl Iterator<Item = &lines_trading::trigger::TriggerView> {
         self.triggers.values()
     }

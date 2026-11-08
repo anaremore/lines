@@ -13,6 +13,7 @@ use crate::command::{Command, Envelope, OrderSpec, Reject, RejectCode, Source};
 use crate::event::Event;
 use crate::order::{OrderState, Role};
 use crate::risk::OptionGuard;
+use crate::strategy::StrategyState;
 use crate::trigger::{
     Direction, SavedTrigger, TriggerId, TriggerKind, TriggerSpec, TriggerState, TriggerView,
     closing_side,
@@ -66,6 +67,16 @@ impl Mark {
 }
 
 impl TradingCore {
+    /// A strategy instance is running on this contract: armed, or paused and owning its position.
+    /// One merely added, or stopped, trades nothing.
+    fn strategy_running(&self, account: &AccountId, contract: ContractKey) -> bool {
+        self.strategies.values().any(|i| {
+            &i.cfg.account == account
+                && i.cfg.contract == contract
+                && matches!(i.state, StrategyState::Armed | StrategyState::Paused)
+        })
+    }
+
     fn guard_of(&self, account: &AccountId) -> OptionGuard {
         self.accounts
             .get(account)
@@ -93,7 +104,7 @@ impl TradingCore {
             ));
         };
         // Firing would trade under the strategy: its book would miss the fills.
-        if self.strategy_trades(&spec.account, spec.contract) {
+        if self.strategy_running(&spec.account, spec.contract) {
             return Err(Reject::new(
                 RejectCode::Strategy,
                 "a strategy trades this option: no triggers on it",
@@ -471,7 +482,7 @@ impl TradingCore {
                 continue; // its partner fired just now
             };
             // A strategy started on it since: it fires nothing under one.
-            if self.strategy_trades(&l.view.account, l.view.contract) {
+            if self.strategy_running(&l.view.account, l.view.contract) {
                 self.trigger_end(id, "a strategy trades this option now");
                 continue;
             }
@@ -610,11 +621,10 @@ impl TradingCore {
                 self.trigger_end(id, "the option expired");
                 continue;
             }
-            // A strategy started on it: it trades nothing under one, and the trader hears at once.
-            if self.strategy_trades(&account, contract) {
-                let order = self.triggers.live.get(&id).and_then(|l| l.order);
+            // A strategy started on it: an armed one ends, and says so at once, since it couldn't
+            // fire. One already closing the position carries on: nothing blocks an exit.
+            if state == TriggerState::Armed && self.strategy_running(&account, contract) {
                 self.trigger_end(id, "a strategy trades this option now");
-                self.trigger_cancel_order(now, &account, order);
                 continue;
             }
             if kind.is_exit() {

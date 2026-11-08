@@ -1031,40 +1031,71 @@ fn a_fired_exit_ends_the_entry_on_its_series() {
     assert_eq!(r.position(call()), 0, "flat, not long 1");
 }
 
-/// A strategy's contract takes no trigger, and a strategy starting on one ends it unfired: a fill
-/// under the strategy would be missing from its book.
+/// A strategy running on an option takes no trigger, and one armed there ends when it starts: a
+/// fill under the strategy would be missing from its book. An instance merely added trades
+/// nothing, so it ends nothing; and an exit already closing the position carries on.
 #[test]
-fn no_triggers_under_a_strategy() {
+fn no_triggers_under_a_running_strategy() {
     use lines_trading::strategy::{
         HoursWindow, StrategyConfig, StrategyId, StrategyLimits, TradingHours,
     };
+    let add = |r: &mut Rig, contract: ContractKey| {
+        let id = StrategyId(7);
+        r.cmd(Command::AddStrategy(StrategyConfig {
+            id,
+            label: "example".into(),
+            account: acct(),
+            contract,
+            limits: StrategyLimits {
+                max_position: 1,
+                max_daily_loss: 1_000,
+                max_orders_per_min: 5,
+                hours: TradingHours {
+                    tz: "America/New_York".into(),
+                    windows: vec![HoursWindow::new("09:30", "16:00")],
+                },
+            },
+        }))
+        .unwrap();
+        id
+    };
+    // Added, not running: the position's Stop stays, and still fires.
     let mut r = Rig::long_call(1);
     let stop = r.arm(call(), TriggerKind::Stop, 68_000);
-    let id = StrategyId(7);
-    r.cmd(Command::AddStrategy(StrategyConfig {
-        id,
-        label: "example".into(),
-        account: acct(),
-        contract: call(),
-        limits: StrategyLimits {
-            max_position: 1,
-            max_daily_loss: 1_000,
-            max_orders_per_min: 5,
-            hours: TradingHours {
-                tz: "America/New_York".into(),
-                windows: vec![HoursWindow::new("09:30", "16:00")],
-            },
-        },
-    }))
-    .unwrap();
-    let e = r.try_arm(call(), TriggerKind::Target, 68_500).unwrap_err();
-    assert_eq!(e.code, RejectCode::Strategy);
-    // At once, not when it would have fired: the trader knows it's unprotected.
-    assert_eq!(r.state(stop), TriggerState::Ended);
-    assert_eq!(r.reason(stop), "a strategy trades this option now");
+    add(&mut r, call());
+    r.wait(1);
+    assert_eq!(r.state(stop), TriggerState::Armed);
     r.print(68_000);
     r.wait(LAT + 1);
-    assert_eq!(r.position(call()), 1, "nothing sold under it");
+    assert_eq!(r.position(call()), 0, "it closed");
+
+    // A chasing Target carries on through one being added.
+    let mut r = Rig::long_call(1);
+    let target = r.arm(call(), TriggerKind::Target, 68_500);
+    r.quote(Some(300), Some(900));
+    r.print(68_500);
+    r.quote(Some(280), Some(900));
+    add(&mut r, call());
+    r.wait(LAT + 1);
+    r.wait(CHASE);
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+    assert_eq!(r.reason(target), "closed");
+
+    // Running: an armed entry ends at once, and nothing new arms.
+    let mut r = Rig::new();
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let armed = r.arm(call(), entry(1, 300), 68_350);
+    let id = add(&mut r, call());
+    r.cmd(Command::ArmStrategy { id }).unwrap();
+    r.wait(1);
+    assert_eq!(r.state(armed), TriggerState::Ended);
+    assert_eq!(r.reason(armed), "a strategy trades this option now");
+    let e = r.try_arm(call(), entry(1, 300), 68_350).unwrap_err();
+    assert_eq!(e.code, RejectCode::Strategy);
+    r.print(68_350);
+    assert!(r.orders(call()).is_empty(), "nothing went under it");
 }
 
 /// A Stop the broker couldn't fill on a quote says so, and tries on the next quote.

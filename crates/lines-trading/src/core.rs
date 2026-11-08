@@ -2558,6 +2558,8 @@ impl TradingCore {
             open_orders: open,
         });
         self.triggers_restore();
+        // What the rebuilt positions say first (flat, flipped), then the full state.
+        self.triggers_step(now);
         self.triggers_publish();
         let ids: Vec<AccountId> = self.accounts.keys().cloned().collect();
         for a in ids {
