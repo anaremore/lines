@@ -1,5 +1,5 @@
-//! The journal pane (roadmap 8c, phase 1): every closed trade, newest first, with a stats
-//! strip for the current trade date (or all dates) on top.
+//! The journal pane (roadmap 8c): every closed trade, newest first, with a stats strip for the
+//! current trade date (or all dates) on top; or P&L by account or by tag (phase 2).
 //!
 //! - **Table**: time, contract, side, quantity, average entry and exit, net P&L, ticks,
 //!   duration, MAE/MFE, tags; resizable, hideable columns (`lines_core::columns`, saved with
@@ -12,6 +12,9 @@
 //!   and all dates.
 //! - **Editing**: click a row (or Up/Down) to select it, Enter to edit its tags and note
 //!   inline (Tab switches field, Enter saves, Esc cancels). Edits are saved as journal records.
+//! - **By account / by tag** (phase 2; header tabs, palette, pane menu, saved with the pane):
+//!   trades, win rate, net, average trade, profit factor and max drawdown per account or tag
+//!   (a trade with several tags counts in each), over the same dates as the strip.
 //!
 //! The pane reads `lines_trading::JournalShared`'s published snapshots (the journal runs on its
 //! own thread): it polls the journal's lock-free revision (like a store's), takes the newest
@@ -29,7 +32,7 @@ use gpui::{
 };
 use lines_core::{CivilDate, UtcMillis};
 use lines_feed::store::ChartStore;
-use lines_trading::journal::stats::Stats;
+use lines_trading::journal::stats::{self, GroupBy, Stats};
 use lines_trading::journal::{Edit, Trade, price_value};
 use lines_trading::types::ContractSpec;
 use lines_trading::{JournalShared, Money, Side};
@@ -43,7 +46,7 @@ use crate::pnl::{self, PnlDisplay};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
 use crate::trading::Trading;
-use crate::wsdoc::{JournalState, PaneDoc};
+use crate::wsdoc::{JournalGroup, JournalState, PaneDoc};
 
 const ROW_H: f32 = 18.0;
 const TEXT_PX: f32 = 12.0;
@@ -286,6 +289,112 @@ pub fn stats_text(label: &str, s: &Stats, open: usize, mode: PnlDisplay) -> Stri
         .join("  ·  ")
 }
 
+/// Columns of the by-account and by-tag tables.
+pub const GROUP_COLS: usize = 7;
+
+/// One account's or tag's line (formatted once per journal change).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupRow {
+    /// Name, trades, win rate, net, average trade, profit factor, max drawdown.
+    pub cells: [String; GROUP_COLS],
+    /// Net P&L sign, for its color (its text is signed too); 0 when money isn't shown.
+    pub sign: i8,
+}
+
+/// The header of a group table.
+pub fn group_headers(g: JournalGroup) -> [&'static str; GROUP_COLS] {
+    [
+        if g == JournalGroup::Tags {
+            "Tag"
+        } else {
+            "Account"
+        },
+        "Trades",
+        "Win",
+        "Net",
+        "Avg trade",
+        "Profit factor",
+        "Max drawdown",
+    ]
+}
+
+/// Each account's label: its name and its badge in words (PAPER, SIM or LIVE, as the trading
+/// header shows it).
+fn account_labels(
+    accounts: &[crate::trading::AccountInfo],
+) -> std::collections::HashMap<String, String> {
+    accounts
+        .iter()
+        .map(|a| (a.id.0.clone(), format!("{} · {}", a.name, a.badge)))
+        .collect()
+}
+
+/// P&L per account or per tag: best net first (then by name), untagged last; by name alone
+/// when `mode` shows no money (the order would tell the P&L). Money only when `mode` shows
+/// currency, like the strip.
+pub fn group_rows<'a>(
+    trades: impl IntoIterator<Item = &'a Trade>,
+    g: JournalGroup,
+    names: &std::collections::HashMap<String, String>,
+    mode: PnlDisplay,
+) -> Vec<GroupRow> {
+    let by = match g {
+        JournalGroup::Trades => return Vec::new(),
+        JournalGroup::Accounts => GroupBy::Account,
+        JournalGroup::Tags => GroupBy::Tag,
+    };
+    let money = |m: Option<Money>| match m {
+        Some(m) if mode.money() => money_text(m),
+        _ => "—".to_owned(),
+    };
+    let mut rows: Vec<(bool, Money, GroupRow)> = stats::grouped(trades, by)
+        .into_iter()
+        .map(|(key, s)| {
+            let untagged = g == JournalGroup::Tags && key == stats::UNTAGGED;
+            let name = match g {
+                _ if untagged => "untagged".to_owned(),
+                JournalGroup::Accounts => names.get(&key).cloned().unwrap_or(key),
+                _ => key,
+            };
+            let row = GroupRow {
+                cells: [
+                    name,
+                    s.count.to_string(),
+                    format!("{:.0}%", s.win_rate().unwrap_or(0.0) * 100.0),
+                    money(Some(s.net)),
+                    money(s.expectancy()),
+                    match s.profit_factor() {
+                        Some(p) if mode.money() => format!("{p:.2}"),
+                        _ => "—".to_owned(),
+                    },
+                    money(Some(-s.max_drawdown)),
+                ],
+                sign: if mode.money() {
+                    s.net.0.signum() as i8
+                } else {
+                    0
+                },
+            };
+            (untagged, s.net, row)
+        })
+        .collect();
+    let by_net = mode.money();
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(if by_net {
+                b.1.cmp(&a.1)
+            } else {
+                std::cmp::Ordering::Equal
+            })
+            .then_with(|| {
+                a.2.cells[0]
+                    .to_lowercase()
+                    .cmp(&b.2.cells[0].to_lowercase())
+            })
+    });
+    rows.into_iter().map(|(_, _, r)| r).collect()
+}
+
 /// Which field of the inline editor has the cursor.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -388,12 +497,21 @@ pub struct JournalView {
     /// The P&L display setting (read at render).
     mode: PnlDisplay,
     rows: Vec<Row>,
+    /// What the table lists, and the group lines when not the trades.
+    group: JournalGroup,
+    groups: Vec<GroupRow>,
+    /// First group line shown.
+    group_scroll: usize,
     stats_today: Vec<StatItem>,
     stats_all: Vec<StatItem>,
-    /// Account names by id (the trading core's accounts).
+    /// Account labels by id (the trading core's accounts): the name and, in words, PAPER or
+    /// LIVE (paper vs live is always visible, never by color alone; docs/design.md).
     names: std::collections::HashMap<String, String>,
     /// Every account is a paper account (the header's PAPER badge).
     paper: bool,
+    /// How many accounts `names` and `paper` were read from: brokers join after the pane
+    /// opens, so they are read again whenever the count changes.
+    accounts_seen: usize,
     all_dates: bool,
     selected: Option<String>,
     /// First row shown.
@@ -426,10 +544,13 @@ impl Pane for JournalView {
 
     fn save_state(&self, doc: &mut PaneDoc) {
         let columns = self.cols.save(&JournalCol::ALL);
-        doc.journal = (self.all_dates || !columns.is_empty()).then_some(JournalState {
-            all_dates: self.all_dates,
-            columns,
-        });
+        doc.journal = (self.all_dates || !columns.is_empty() || !self.group.is_trades()).then_some(
+            JournalState {
+                all_dates: self.all_dates,
+                columns,
+                group: self.group,
+            },
+        );
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -488,17 +609,14 @@ impl JournalView {
             date_checked: None,
             mode: PnlDisplay::default(),
             rows: Vec::new(),
+            group: JournalGroup::Trades,
+            groups: Vec::new(),
+            group_scroll: 0,
             stats_today: Vec::new(),
             stats_all: Vec::new(),
-            names: Trading::try_global(cx)
-                .map(|t| {
-                    t.accounts()
-                        .iter()
-                        .map(|a| (a.id.0.clone(), a.name.clone()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            paper: Trading::try_global(cx).is_some_and(|t| t.accounts().iter().all(|a| a.paper)),
+            names: Default::default(),
+            paper: false,
+            accounts_seen: usize::MAX,
             all_dates: false,
             selected: None,
             scroll: 0,
@@ -511,7 +629,23 @@ impl JournalView {
 
     pub fn restore(&mut self, state: &JournalState) {
         self.all_dates = state.all_dates;
+        self.group = state.group;
         self.cols.load(&JournalCol::ALL, &state.columns);
+    }
+
+    pub fn group(&self) -> JournalGroup {
+        self.group
+    }
+
+    /// List trades, or P&L by account or by tag.
+    pub fn set_group(&mut self, g: JournalGroup, cx: &mut Context<Self>) {
+        if self.group != g {
+            self.group = g;
+            self.group_scroll = 0;
+            self.editor = None;
+            self.built = None;
+            cx.notify();
+        }
     }
 
     pub fn column_command(
@@ -535,11 +669,16 @@ impl JournalView {
     /// Stats over all dates, or the current trade date.
     pub fn toggle_all_dates(&mut self, cx: &mut Context<Self>) {
         self.all_dates = !self.all_dates;
+        // The group lines cover the same dates.
+        self.built = None;
         cx.notify();
     }
 
     /// Edit the selected trade's tags and note (else the newest trade's).
     pub fn start_edit(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
+        if !self.group.is_trades() {
+            return Err("switch the journal to Trades to edit a trade");
+        }
         let i = self
             .selected_index()
             .or((!self.rows.is_empty()).then_some(0));
@@ -577,6 +716,22 @@ impl JournalView {
 
     /// Rebuild rows and stats if the journal moved. Returns false if the journal was busy
     /// this instant (try again on the next poll).
+    /// Read the accounts' labels and the header's PAPER badge again when accounts joined or
+    /// left (a broker connects after the pane opens): never a stale paper label on live P&L.
+    fn refresh_accounts(&mut self, cx: &App) {
+        let Some(t) = Trading::try_global(cx) else {
+            return;
+        };
+        let accounts = t.accounts();
+        if accounts.len() == self.accounts_seen {
+            return;
+        }
+        self.accounts_seen = accounts.len();
+        self.names = account_labels(&accounts);
+        self.paper = !accounts.is_empty() && accounts.iter().all(|a| a.paper);
+        self.built = None; // rows carry the labels
+    }
+
     fn rebuild(&mut self) -> bool {
         let Some(j) = self.journal.clone() else {
             return true;
@@ -619,6 +774,15 @@ impl JournalView {
             mode,
         );
         self.stats_all = stats_items("All dates", &Stats::of(&snap.trades), snap.open, mode);
+        let all = self.all_dates;
+        self.groups = group_rows(
+            snap.trades.iter().filter(|t| all || t.trade_date == today),
+            self.group,
+            names,
+            mode,
+        );
+        // Fewer lines than before (another date range, a tag gone): keep the first in view.
+        self.group_scroll = self.group_scroll.min(self.groups.len().saturating_sub(1));
         self.built = Some(rev);
         true
     }
@@ -629,6 +793,9 @@ impl JournalView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        if !self.group.is_trades() {
+            return;
+        }
         let (x, y) = self.table_xy(ev.position);
         match self.cols.hit(x, y, ev.click_count) {
             HeaderHit::Divider(d) => {
@@ -678,6 +845,9 @@ impl JournalView {
     }
 
     fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.group.is_trades() {
+            return;
+        }
         let (x, y) = self.table_xy(ev.position);
         if self.cols.hit(x, y, 1) != HeaderHit::Outside {
             cx.emit(ColumnMenu(ev.position));
@@ -710,7 +880,7 @@ impl JournalView {
             cx.notify();
             return;
         }
-        if m.control || m.alt || m.platform {
+        if m.control || m.alt || m.platform || !self.group.is_trades() {
             return;
         }
         let n = self.rows.len();
@@ -743,8 +913,13 @@ impl JournalView {
         let dy = f(ev.delta.pixel_delta(window.line_height()).y);
         let rows = (dy / ROW_H).round() as i64;
         if rows != 0 {
-            let max = self.rows.len().saturating_sub(1) as i64;
-            self.scroll = (self.scroll as i64 - rows).clamp(0, max) as usize;
+            let (scroll, n) = if self.group.is_trades() {
+                (&mut self.scroll, self.rows.len())
+            } else {
+                (&mut self.group_scroll, self.groups.len())
+            };
+            let max = n.saturating_sub(1) as i64;
+            *scroll = (*scroll as i64 - rows).clamp(0, max) as usize;
             cx.notify();
         }
     }
@@ -761,6 +936,10 @@ impl JournalView {
         let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
         let (w, h) = (f(bounds.size.width), f(bounds.size.height));
         window.paint_quad(fill(bounds, t.bg));
+        if !self.group.is_trades() {
+            self.paint_groups(bounds, hair, window, cx);
+            return;
+        }
         self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
         let rows = self.visible_rows();
         let end = (self.scroll + rows).min(self.rows.len());
@@ -860,7 +1039,186 @@ impl JournalView {
         self.cols.paint_rules(&t, body, window);
     }
 
-    fn header(&self) -> impl IntoElement {
+    /// The by-account or by-tag table: the name left, numbers right; columns that don't fit
+    /// whole are left out from the right (never part of a number).
+    fn paint_groups(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        hair: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
+        let (w, h) = (f(bounds.size.width), f(bounds.size.height));
+        let heads = group_headers(self.group);
+        let mut widths = [0.0f32; GROUP_COLS];
+        for (c, head) in heads.iter().enumerate() {
+            widths[c] = self.glyphs.width(head, t.text_dim, false, window);
+        }
+        for r in &self.groups {
+            for (c, (wc, cell)) in widths.iter_mut().zip(&r.cells).enumerate() {
+                *wc = wc.max(self.glyphs.width(cell, t.text_main, c == 3, window));
+            }
+        }
+        for wc in &mut widths {
+            *wc += PAD * 4.0;
+        }
+        // The name column always shows (cut to fit if it must, at least 80 px); number
+        // columns that don't fit whole are left out from the right.
+        let numbers: f32 = widths[1..].iter().sum();
+        widths[0] = widths[0].min((w - numbers).max(80.0)).min(w);
+        let mut shown = 1;
+        let mut used = widths[0];
+        for wc in &widths[1..] {
+            if used + wc > w {
+                break;
+            }
+            used += wc;
+            shown += 1;
+        }
+        window.paint_quad(fill(
+            Bounds::new(point(px(ox), px(top)), size(px(w), px(HEADER_ROW_H))),
+            t.panel,
+        ));
+        let mut x = ox;
+        for (c, (head, &cw)) in heads.iter().zip(&widths).enumerate().take(shown) {
+            if c == 0 {
+                self.glyphs.paint(
+                    head,
+                    x + PAD,
+                    top,
+                    HEADER_ROW_H,
+                    t.text_dim,
+                    false,
+                    window,
+                    cx,
+                );
+            } else {
+                self.glyphs.paint_right(
+                    head,
+                    x + cw - PAD,
+                    top,
+                    HEADER_ROW_H,
+                    t.text_dim,
+                    false,
+                    window,
+                    cx,
+                );
+            }
+            x += cw;
+        }
+        let oy = top + HEADER_ROW_H;
+        if self.groups.is_empty() {
+            let msg = if self.journal.is_some() {
+                "No closed trades in these dates."
+            } else {
+                "Trading isn't running."
+            };
+            self.glyphs.paint(
+                msg,
+                ox + PAD,
+                oy + 4.0,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
+            return;
+        }
+        let start = self.group_scroll.min(self.groups.len() - 1);
+        let mut end_y = oy;
+        for (n, r) in self.groups[start..].iter().enumerate() {
+            let y = oy + n as f32 * ROW_H;
+            if y + ROW_H > top + h + 0.5 {
+                break;
+            }
+            end_y = y + ROW_H;
+            let mut x = ox;
+            for (c, (cell, &cw)) in r.cells.iter().zip(&widths).enumerate().take(shown) {
+                let color = match c {
+                    3 if r.sign > 0 => t.up,
+                    3 if r.sign < 0 => t.down,
+                    _ => t.text_main,
+                };
+                if c == 0 {
+                    // A long name is cut at its column, never over the numbers.
+                    let cell_b = Bounds::new(point(px(x), px(y)), size(px(cw), px(ROW_H)));
+                    window.with_content_mask(
+                        Some(gpui::ContentMask { bounds: cell_b }),
+                        |window| {
+                            self.glyphs
+                                .paint(cell, x + PAD, y, ROW_H, color, false, window, cx);
+                        },
+                    );
+                } else {
+                    self.glyphs.paint_right(
+                        cell,
+                        x + cw - PAD,
+                        y,
+                        ROW_H,
+                        color,
+                        c == 3,
+                        window,
+                        cx,
+                    );
+                }
+                x += cw;
+            }
+            window.paint_quad(fill(
+                Bounds::new(point(px(ox), px(y + ROW_H - hair)), size(px(w), px(hair))),
+                t.grid,
+            ));
+        }
+        // By tag: say why the lines can add up to more than the strip.
+        if self.group == JournalGroup::Tags && end_y + ROW_H <= top + h + 0.5 {
+            self.glyphs.paint(
+                "A trade with several tags counts under each of them.",
+                ox + PAD,
+                end_y + 2.0,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Trades / By account / By tag: the current one underlined and bold (never color alone).
+    fn group_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .children(JournalGroup::ALL.into_iter().map(|g| {
+                let on = g == self.group;
+                div()
+                    .id(g.label())
+                    .px_1()
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(if on {
+                        t.accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .text_color(if on { t.text_main } else { t.text_dim })
+                    .when(on, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(g.label())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.set_group(g, cx);
+                        }),
+                    )
+            }))
+    }
+
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let right = match &self.journal {
             Some(j) if j.persistent() => "saved",
@@ -894,7 +1252,8 @@ impl JournalView {
                             .children(pane::link_chip(self.common.link, &t))
                             .child(div().text_color(t.text_main).child("Journal"))
                             // Paper trades say so, as everywhere else (docs/design.md §3).
-                            .when(paper, |d| d.child(crate::trade_bar::paper_badge(&t))),
+                            .when(paper, |d| d.child(crate::trade_bar::paper_badge(&t)))
+                            .child(self.group_tabs(cx)),
                     )
                     .child(div().text_color(t.text_dim).child(right)),
             )
@@ -1011,6 +1370,7 @@ impl JournalView {
 
 impl Render for JournalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_accounts(cx);
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
@@ -1039,7 +1399,7 @@ impl Render for JournalView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header())
+            .child(self.header(cx))
             .child(self.strip(cx))
             .child(
                 div()
@@ -1175,6 +1535,78 @@ mod tests {
             stats_text("All dates", &Stats::default(), 0, PnlDisplay::Both),
             "All dates: 0 trades"
         );
+    }
+
+    /// P&L by account and by tag (best net first, untagged last; a trade with two
+    /// tags counts in each); money only in a currency mode.
+    #[test]
+    fn groups_by_account_and_tag() {
+        let win = trade(); // +$310.02, tags breakout and A+, account "paper"
+        let mut loss = win.clone();
+        loss.id = "l".into();
+        loss.realized = Money::ZERO; // −$2.48 of fees
+        loss.tags = vec!["fade".into()];
+        loss.account = lines_trading::AccountId::new("eval");
+        let mut plain = loss.clone();
+        plain.id = "p".into();
+        plain.tags.clear();
+        let all = [win, loss, plain];
+        let names: std::collections::HashMap<String, String> =
+            [("eval".to_owned(), "Paper 50K eval".to_owned())].into();
+        let by_account = group_rows(&all, JournalGroup::Accounts, &names, PnlDisplay::Both);
+        let cells = |r: &GroupRow| r.cells.clone();
+        assert_eq!(
+            cells(&by_account[1]),
+            [
+                "Paper 50K eval",
+                "2",
+                "0%",
+                "-$4.96",
+                "-$2.48",
+                "0.00",
+                "-$4.96"
+            ]
+            .map(String::from)
+        );
+        assert_eq!(by_account[1].sign, -1);
+        assert_eq!(
+            cells(&by_account[0]),
+            ["paper", "1", "100%", "+$310.02", "+$310.02", "—", "$0.00"].map(String::from),
+            "an account without a name shows its id"
+        );
+        let by_tag = group_rows(&all, JournalGroup::Tags, &names, PnlDisplay::Both);
+        let order: Vec<&str> = by_tag.iter().map(|r| r.cells[0].as_str()).collect();
+        assert_eq!(order, ["A+", "breakout", "fade", "untagged"]);
+        assert_eq!(by_tag[0].cells[3], "+$310.02");
+        let off = group_rows(&all, JournalGroup::Tags, &names, PnlDisplay::Off);
+        assert!(off.iter().all(|r| r.sign == 0));
+        assert!(
+            off.iter().all(|r| r.cells[3..].iter().all(|c| c == "—")),
+            "no money"
+        );
+        assert_eq!(off[0].cells[1..3], ["1".to_owned(), "100%".to_owned()]);
+        // With money hidden the order is by name, so it doesn't tell the P&L either.
+        let off_accounts = group_rows(&all, JournalGroup::Accounts, &names, PnlDisplay::Off);
+        let order: Vec<&str> = off_accounts.iter().map(|r| r.cells[0].as_str()).collect();
+        assert_eq!(order, ["paper", "Paper 50K eval"]);
+        assert!(group_rows(&all, JournalGroup::Trades, &names, PnlDisplay::Both).is_empty());
+        // Each account says paper or live in words (a broker account next to paper ones).
+        let account = |id: &str, name: &str, paper: bool, badge| crate::trading::AccountInfo {
+            id: AccountId::new(id),
+            name: name.into(),
+            paper,
+            rules: None,
+            venue: (!paper).then_some(0),
+            badge,
+            read_only: None,
+        };
+        let labels = account_labels(&[
+            account("sim", "Paper 50K eval", true, "PAPER"),
+            account("ext", "Eval", false, "LIVE"),
+        ]);
+        assert_eq!(labels["sim"], "Paper 50K eval · PAPER");
+        assert_eq!(labels["ext"], "Eval · LIVE");
+        assert_eq!(group_headers(JournalGroup::Tags)[0], "Tag");
     }
 
     #[test]

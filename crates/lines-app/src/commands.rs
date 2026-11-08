@@ -109,6 +109,8 @@ pub enum Command {
     JournalEdit,
     /// The focused journal: stats for all dates or the current trade date.
     JournalAllDates,
+    /// The focused journal: list trades, or P&L by account or by tag.
+    JournalGroup(crate::wsdoc::JournalGroup),
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
     Studies,
     /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
@@ -652,6 +654,12 @@ pub fn label(c: Command) -> String {
         Command::ExportJournal => "Export journal (CSV)".into(),
         Command::JournalEdit => "Journal: edit tags and note".into(),
         Command::JournalAllDates => "Journal: stats for all dates / today".into(),
+        Command::JournalGroup(g) => match g {
+            crate::wsdoc::JournalGroup::Trades => "Journal: list trades",
+            crate::wsdoc::JournalGroup::Accounts => "Journal: P&L by account",
+            crate::wsdoc::JournalGroup::Tags => "Journal: P&L by tag",
+        }
+        .into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
@@ -769,6 +777,9 @@ pub fn palette() -> Vec<Command> {
         Command::ExportJournal,
         Command::JournalEdit,
         Command::JournalAllDates,
+        Command::JournalGroup(crate::wsdoc::JournalGroup::Trades),
+        Command::JournalGroup(crate::wsdoc::JournalGroup::Accounts),
+        Command::JournalGroup(crate::wsdoc::JournalGroup::Tags),
         Command::Studies,
         Command::TimeframeMenu,
         Command::TickBarsContinuous,

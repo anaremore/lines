@@ -1138,12 +1138,14 @@ impl WindowView {
             }
             Command::Strategy(c) => self.strategy_command(c, window, cx),
             Command::ExportJournal => export_journal(cx),
-            Command::JournalEdit | Command::JournalAllDates => {
+            Command::JournalEdit | Command::JournalAllDates | Command::JournalGroup(_) => {
                 let Some(PaneHandle::Journal(j)) = self.tab().focused_handle().cloned() else {
                     self.refuse("focus the journal first (Open journal)", cx);
                     return;
                 };
-                if cmd == Command::JournalAllDates {
+                if let Command::JournalGroup(g) = cmd {
+                    j.update(cx, |v, cx| v.set_group(g, cx));
+                } else if cmd == Command::JournalAllDates {
                     j.update(cx, |v, cx| v.toggle_all_dates(cx));
                 } else if let Err(e) = j.update(cx, |v, cx| v.start_edit(cx)) {
                     self.refuse(e, cx);
@@ -2162,6 +2164,14 @@ impl WindowView {
             }
             if let PaneHandle::Journal(j) = &h {
                 let all = j.read(cx).all_dates();
+                let group = j.read(cx).group();
+                for g in crate::wsdoc::JournalGroup::ALL {
+                    items.push(MenuItem::named(
+                        &format!("Show: {}", g.label().to_lowercase()),
+                        Command::JournalGroup(g),
+                        g == group,
+                    ));
+                }
                 items.push(MenuItem::named(
                     "Edit tags and note",
                     Command::JournalEdit,
