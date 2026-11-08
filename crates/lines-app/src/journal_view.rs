@@ -318,15 +318,81 @@ pub fn group_headers(g: JournalGroup) -> [&'static str; GROUP_COLS] {
     ]
 }
 
-/// Each account's label: its name and its badge in words (PAPER, SIM or LIVE, as the trading
-/// header shows it).
+/// The word for an account no current list has (a broker not connected yet or gone, an
+/// account removed): never assumed to be paper.
+const UNLISTED: &str = "UNLISTED";
+
+/// How real a badge's money is, most real first (so a clip or an id clash never favors paper).
+fn realness(badge: &str) -> u8 {
+    match badge {
+        "LIVE" => 0,
+        "PAPER" => 3,
+        "SIM" => 2,
+        _ => 1, // UNLISTED: treated as real until a list says otherwise
+    }
+}
+
+/// Accounts, least real first: collected into a map, the most real of a clashing id wins.
+fn least_real_first(accounts: &[crate::trading::AccountInfo]) -> Vec<&crate::trading::AccountInfo> {
+    let mut v: Vec<_> = accounts.iter().collect();
+    v.sort_by_key(|a| std::cmp::Reverse(realness(a.badge)));
+    v
+}
+
+/// Each account's label: its badge in words (PAPER, SIM or LIVE, as the trading header shows
+/// it), first so a narrow column cuts the name and never the kind; then its name.
 fn account_labels(
     accounts: &[crate::trading::AccountInfo],
 ) -> std::collections::HashMap<String, String> {
-    accounts
-        .iter()
-        .map(|a| (a.id.0.clone(), format!("{} · {}", a.name, a.badge)))
+    least_real_first(accounts)
+        .into_iter()
+        .map(|a| (a.id.0.clone(), format!("{} · {}", a.badge, a.name)))
         .collect()
+}
+
+/// Each account's badge (the most real of a clashing id).
+fn account_badges(
+    accounts: &[crate::trading::AccountInfo],
+) -> std::collections::HashMap<String, &'static str> {
+    least_real_first(accounts)
+        .into_iter()
+        .map(|a| (a.id.0.clone(), a.badge))
+        .collect()
+}
+
+/// An account's label, marked when no current list has it.
+fn account_label(names: &std::collections::HashMap<String, String>, id: &str) -> String {
+    names
+        .get(id)
+        .cloned()
+        .unwrap_or_else(|| format!("{UNLISTED} · {id}"))
+}
+
+/// What the header says the pane's money is: the kinds of the accounts that have trades in
+/// the journal (with none yet, of the accounts listed), as words, most real first so a narrow
+/// header clips the paper word and never the live one: "PAPER", "LIVE", "LIVE + PAPER",
+/// "UNLISTED + PAPER". A PAPER mark means every trade is on a listed paper account: real money
+/// never sits under it, and a mixed journal says it is mixed.
+fn view_mark<'a>(
+    traded: impl Iterator<Item = &'a str>,
+    badges: &std::collections::HashMap<String, &'static str>,
+) -> Option<String> {
+    let mut words: Vec<&str> = traded
+        .map(|id| badges.get(id).copied().unwrap_or(UNLISTED))
+        .collect();
+    if words.is_empty() {
+        words = badges.values().copied().collect();
+    }
+    words.sort_by_key(|w| realness(w));
+    words.dedup();
+    (!words.is_empty()).then(|| words.join(" + "))
+}
+
+/// The pane's change detector: a trade, the display setting or the account list.
+fn revision_of(journal: u64, display: u64, accounts: u64) -> u64 {
+    journal
+        .wrapping_add(display << 32)
+        .wrapping_add(accounts << 48)
 }
 
 /// P&L per account or per tag: best net first (then by name), untagged last; by name alone
@@ -353,7 +419,7 @@ pub fn group_rows<'a>(
             let untagged = g == JournalGroup::Tags && key == stats::UNTAGGED;
             let name = match g {
                 _ if untagged => "untagged".to_owned(),
-                JournalGroup::Accounts => names.get(&key).cloned().unwrap_or(key),
+                JournalGroup::Accounts => account_label(names, &key),
                 _ => key,
             };
             let row = GroupRow {
@@ -487,9 +553,9 @@ pub struct JournalView {
     frozen: bool,
     journal: Option<Arc<JournalShared>>,
     seen_revision: u64,
-    /// The journal revision, P&L display epoch and trade date the rows and stats were built
-    /// from.
-    built: Option<(u64, u64, CivilDate)>,
+    /// The journal revision, P&L display epoch, account generation and trade date the rows
+    /// and stats were built from.
+    built: Option<(u64, u64, u64, CivilDate)>,
     /// The current trade date as last known (kept while the store is busy).
     today: Option<CivilDate>,
     /// When `today` was last checked by the poll (about once a second).
@@ -504,14 +570,16 @@ pub struct JournalView {
     group_scroll: usize,
     stats_today: Vec<StatItem>,
     stats_all: Vec<StatItem>,
-    /// Account labels by id (the trading core's accounts): the name and, in words, PAPER or
-    /// LIVE (paper vs live is always visible, never by color alone; docs/design.md).
+    /// Account labels by id (the trading core's accounts): PAPER, SIM or LIVE in words, then
+    /// the name (paper vs live is always visible, never by color alone; docs/design.md).
     names: std::collections::HashMap<String, String>,
-    /// Every account is a paper account (the header's PAPER badge).
-    paper: bool,
-    /// How many accounts `names` and `paper` were read from: brokers join after the pane
-    /// opens, so they are read again whenever the count changes.
-    accounts_seen: usize,
+    /// Each listed account's badge, for the header's mark.
+    badges: std::collections::HashMap<String, &'static str>,
+    /// What the header says the pane's money is ([`view_mark`]).
+    mark: Option<String>,
+    /// The account list's generation `names` and `badges` were read at: read again on any
+    /// change (a broker joins, a kind or name changes).
+    accounts_seen: u64,
     all_dates: bool,
     selected: Option<String>,
     /// First row shown.
@@ -570,13 +638,14 @@ impl Pane for JournalView {
         before.is_some() && self.today() != before
     }
 
-    /// The journal's revision (and the P&L display setting's), not the market's: the pane
-    /// repaints when a trade or the display changes.
+    /// The journal's revision (with the P&L display setting's and the account list's), not
+    /// the market's: the pane repaints when a trade, the display or an account changes.
     fn revision(&self) -> u64 {
-        self.journal
-            .as_ref()
-            .map_or(0, |j| j.revision())
-            .wrapping_add(pnl::display_epoch() << 32)
+        revision_of(
+            self.journal.as_ref().map_or(0, |j| j.revision()),
+            pnl::display_epoch(),
+            crate::trading::accounts_epoch(),
+        )
     }
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
@@ -615,8 +684,9 @@ impl JournalView {
             stats_today: Vec::new(),
             stats_all: Vec::new(),
             names: Default::default(),
-            paper: false,
-            accounts_seen: usize::MAX,
+            badges: Default::default(),
+            mark: None,
+            accounts_seen: u64::MAX,
             all_dates: false,
             selected: None,
             scroll: 0,
@@ -714,24 +784,25 @@ impl JournalView {
         self.today
     }
 
-    /// Rebuild rows and stats if the journal moved. Returns false if the journal was busy
-    /// this instant (try again on the next poll).
-    /// Read the accounts' labels and the header's PAPER badge again when accounts joined or
-    /// left (a broker connects after the pane opens): never a stale paper label on live P&L.
+    /// Read the accounts' labels and badges again when the account list changed (a broker
+    /// connects after the pane opens, a kind or name changes): never a stale label on P&L.
+    /// The tick repaints on the same generation ([`Self::revision`]).
     fn refresh_accounts(&mut self, cx: &App) {
+        let epoch = crate::trading::accounts_epoch();
+        if epoch == self.accounts_seen {
+            return;
+        }
         let Some(t) = Trading::try_global(cx) else {
             return;
         };
+        self.accounts_seen = epoch;
         let accounts = t.accounts();
-        if accounts.len() == self.accounts_seen {
-            return;
-        }
-        self.accounts_seen = accounts.len();
         self.names = account_labels(&accounts);
-        self.paper = !accounts.is_empty() && accounts.iter().all(|a| a.paper);
-        self.built = None; // rows carry the labels
+        self.badges = account_badges(&accounts);
     }
 
+    /// Rebuild rows and stats if the journal moved. Returns false if the journal was busy
+    /// this instant (try again on the next poll).
     fn rebuild(&mut self) -> bool {
         let Some(j) = self.journal.clone() else {
             return true;
@@ -739,7 +810,12 @@ impl JournalView {
         let Some(today) = self.today() else {
             return false; // the store hasn't been readable yet
         };
-        let rev = (j.revision(), pnl::display_epoch(), today);
+        let rev = (
+            j.revision(),
+            pnl::display_epoch(),
+            self.accounts_seen,
+            today,
+        );
         if self.built == Some(rev) {
             return true;
         }
@@ -761,12 +837,14 @@ impl JournalView {
             .rev()
             .map(|t| {
                 let mut r = row(t, mode);
-                if let Some(n) = names.get(&t.account.0) {
-                    r.cells[JournalCol::Account.index()] = n.clone();
-                }
+                r.cells[JournalCol::Account.index()] = account_label(names, &t.account.0);
                 r
             })
             .collect();
+        self.mark = view_mark(
+            snap.trades.iter().map(|t| t.account.0.as_str()),
+            &self.badges,
+        );
         self.stats_today = stats_items(
             &format!("Today {today}"),
             &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
@@ -1225,7 +1303,7 @@ impl JournalView {
             Some(_) => "not saved: this run only",
             None => "",
         };
-        let paper = self.paper && self.journal.is_some();
+        let mark = self.mark.as_deref().filter(|_| self.journal.is_some());
         div()
             .flex()
             .flex_row()
@@ -1251,8 +1329,30 @@ impl JournalView {
                             .items_center()
                             .children(pane::link_chip(self.common.link, &t))
                             .child(div().text_color(t.text_main).child("Journal"))
-                            // Paper trades say so, as everywhere else (docs/design.md §3).
-                            .when(paper, |d| d.child(crate::trade_bar::paper_badge(&t)))
+                            // What the money here is, in words, as everywhere else
+                            // (docs/design.md §3): the PAPER chip only when every trade is on a
+                            // paper account.
+                            .children(mark.map(|m| {
+                                let one = |w| crate::trade_bar::account_badge(w, &t);
+                                match m {
+                                    "PAPER" => one("PAPER").into_any_element(),
+                                    "SIM" => one("SIM").into_any_element(),
+                                    "LIVE" => one("LIVE").into_any_element(),
+                                    // Mixed or unlisted: outlined like LIVE, never the paper chip.
+                                    _ => div()
+                                        .flex_shrink_0()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(t.text_main)
+                                        .text_color(t.text_main)
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .relative()
+                                        .children(crate::layout_rec::text_marker(m))
+                                        .child(m.to_owned())
+                                        .into_any_element(),
+                                }
+                            }))
                             .child(self.group_tabs(cx)),
                     )
                     .child(div().text_color(t.text_dim).child(right)),
@@ -1571,8 +1671,17 @@ mod tests {
         assert_eq!(by_account[1].sign, -1);
         assert_eq!(
             cells(&by_account[0]),
-            ["paper", "1", "100%", "+$310.02", "+$310.02", "—", "$0.00"].map(String::from),
-            "an account without a name shows its id"
+            [
+                "UNLISTED · paper",
+                "1",
+                "100%",
+                "+$310.02",
+                "+$310.02",
+                "—",
+                "$0.00"
+            ]
+            .map(String::from),
+            "an account no list has says so, with its id"
         );
         let by_tag = group_rows(&all, JournalGroup::Tags, &names, PnlDisplay::Both);
         let order: Vec<&str> = by_tag.iter().map(|r| r.cells[0].as_str()).collect();
@@ -1588,7 +1697,7 @@ mod tests {
         // With money hidden the order is by name, so it doesn't tell the P&L either.
         let off_accounts = group_rows(&all, JournalGroup::Accounts, &names, PnlDisplay::Off);
         let order: Vec<&str> = off_accounts.iter().map(|r| r.cells[0].as_str()).collect();
-        assert_eq!(order, ["paper", "Paper 50K eval"]);
+        assert_eq!(order, ["Paper 50K eval", "UNLISTED · paper"]);
         assert!(group_rows(&all, JournalGroup::Trades, &names, PnlDisplay::Both).is_empty());
         // Each account says paper or live in words (a broker account next to paper ones).
         let account = |id: &str, name: &str, paper: bool, badge| crate::trading::AccountInfo {
@@ -1604,8 +1713,55 @@ mod tests {
             account("sim", "Paper 50K eval", true, "PAPER"),
             account("ext", "Eval", false, "LIVE"),
         ]);
-        assert_eq!(labels["sim"], "Paper 50K eval · PAPER");
-        assert_eq!(labels["ext"], "Eval · LIVE");
+        assert_eq!(labels["sim"], "PAPER · Paper 50K eval");
+        assert_eq!(labels["ext"], "LIVE · Eval");
+        assert_eq!(account_label(&labels, "gone"), "UNLISTED · gone");
+        // The header's mark: PAPER only when every trade is on a listed paper account.
+        let badges: std::collections::HashMap<String, &'static str> = [
+            ("sim".to_owned(), "PAPER"),
+            ("ext".to_owned(), "LIVE"),
+            ("demo".to_owned(), "SIM"),
+        ]
+        .into();
+        let mark = |ids: &[&'static str]| view_mark(ids.iter().copied(), &badges);
+        assert_eq!(mark(&["sim", "sim"]).as_deref(), Some("PAPER"));
+        assert_eq!(mark(&["ext"]).as_deref(), Some("LIVE"));
+        // Most real first: a narrow header clips the paper word, never the live one.
+        assert_eq!(mark(&["sim", "ext"]).as_deref(), Some("LIVE + PAPER"));
+        assert_eq!(mark(&["sim", "demo"]).as_deref(), Some("SIM + PAPER"));
+        assert_eq!(
+            mark(&["sim", "demo", "ext"]).as_deref(),
+            Some("LIVE + SIM + PAPER")
+        );
+        // After a restart the list is paper only, while the file holds a broker's trades.
+        let paper_only: std::collections::HashMap<String, &'static str> =
+            [("sim".to_owned(), "PAPER")].into();
+        assert_eq!(
+            view_mark(["sim", "venue-01"].into_iter(), &paper_only).as_deref(),
+            Some("UNLISTED + PAPER"),
+            "real money never under a PAPER mark"
+        );
+        assert_eq!(
+            view_mark(["venue-01"].into_iter(), &paper_only).as_deref(),
+            Some("UNLISTED")
+        );
+        // No trades yet: what's listed; nothing listed: no mark.
+        assert_eq!(
+            view_mark(std::iter::empty(), &paper_only).as_deref(),
+            Some("PAPER")
+        );
+        assert_eq!(view_mark(std::iter::empty(), &Default::default()), None);
+        // Any change to the account list repaints the pane, even with the count unchanged.
+        assert_ne!(revision_of(7, 1, 0), revision_of(7, 1, 1));
+        // An id two venues share reads as the more real of the two, whatever the list's order.
+        let clash = [
+            account("same", "A", false, "LIVE"),
+            account("same", "B", false, "SIM"),
+        ];
+        assert_eq!(account_badges(&clash)["same"], "LIVE");
+        assert_eq!(account_labels(&clash)["same"], "LIVE · A");
+        let clash = [clash[1].clone(), clash[0].clone()];
+        assert_eq!(account_badges(&clash)["same"], "LIVE");
         assert_eq!(group_headers(JournalGroup::Tags)[0], "Tag");
     }
 
