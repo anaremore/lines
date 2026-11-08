@@ -4715,11 +4715,16 @@ impl ChartView {
 
     /// The hovered strategy marker's text, beside it.
     fn strategy_mark_tip(&self, t: &Theme) -> Option<AnyElement> {
-        // Never over what the trader is aiming at: a drag or a drawing in progress.
-        if self.ct.drag.is_some()
+        // Never over what the trader is aiming at or typing in: any drag, a drawing in
+        // progress, a price or bar being picked, the picker or an editor.
+        if self.drag.is_some()
+            || self.ct.drag.is_some()
             || self.ct.adding.is_some()
             || self.ct.pos_drag
-            || self.drawings.tool().is_some()
+            || self.ct.strip_pick.is_some()
+            || self.anchoring.is_some()
+            || self.drawings.active()
+            || self.takes_text()
         {
             return None;
         }

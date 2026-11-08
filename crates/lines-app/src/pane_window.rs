@@ -106,18 +106,26 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
-            Some(Command::Strategy(crate::commands::StrategyCmd::ToggleMarks)) => {
-                if let PaneHandle::Chart(chart) = &self.handle {
-                    chart.update(cx, |c, cx| c.toggle_strategy_marks(cx));
-                }
-            }
+            // Every strategy command by name: hiding markers must never fall through to a stop.
             Some(Command::Strategy(c)) => {
-                if let Some(t) = crate::trading::Trading::try_global(cx) {
-                    crate::strategy_panel::submit_stop_all(
-                        t,
-                        c == crate::commands::StrategyCmd::StopAll,
-                        lines_trading::Source::Hotkey,
-                    );
+                use crate::commands::StrategyCmd as S;
+                match c {
+                    S::ToggleMarks => {
+                        if let PaneHandle::Chart(chart) = &self.handle {
+                            chart.update(cx, |c, cx| c.toggle_strategy_marks(cx));
+                        }
+                    }
+                    S::StopAll | S::StopAllKeep => {
+                        if let Some(t) = crate::trading::Trading::try_global(cx) {
+                            crate::strategy_panel::submit_stop_all(
+                                t,
+                                c == S::StopAll,
+                                lines_trading::Source::Hotkey,
+                            );
+                        }
+                    }
+                    // `command` lets none of these through to a pane window.
+                    S::Open | S::Start | S::Stop => {}
                 }
             }
             // Only keys reach here with a trading command (the window's menu has none).
