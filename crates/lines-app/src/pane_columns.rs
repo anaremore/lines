@@ -168,7 +168,7 @@ pub enum JournalCol {
     Duration,
     /// Maximum adverse / favorable excursion.
     MaeMfe,
-    /// "open" when the trade has a chart file, else a dash.
+    /// "view" when the trade has a snapshot, else a dash. Saved as `chart`.
     Chart,
     Tags,
 }
@@ -214,7 +214,7 @@ impl JournalCol {
             JournalCol::Ticks => "Ticks",
             JournalCol::Duration => "Duration",
             JournalCol::MaeMfe => "MAE/MFE",
-            JournalCol::Chart => "Chart",
+            JournalCol::Chart => "Snapshot",
             JournalCol::Tags => "Tags",
         }
     }
@@ -878,11 +878,9 @@ mod tests {
         }
     }
 
-    /// A narrow DOM gives up volume and the trail, then narrows the rest to what their
-    /// numbers need: working orders, bid, price and ask all stay whole.
+    /// The journal's narrow pane keeps the P&L and the way to the snapshot.
     #[test]
-    fn a_narrow_dom_keeps_the_book_whole() {
-        // The journal's narrow pane keeps the P&L and the way to the chart.
+    fn a_narrow_journal_keeps_the_pnl_and_the_snapshot() {
         let mut j = Columns::new(Table::Journal);
         let saved = j.set;
         j.layout_journal(420.0);
@@ -900,7 +898,12 @@ mod tests {
         assert_eq!(j.set, saved, "saved columns untouched by narrowing");
         j.layout_journal(3000.0);
         assert!(j.cells[JournalCol::MaeMfe.index()].shown, "wide: all shown");
+    }
 
+    /// A narrow DOM gives up volume and the trail, then narrows the rest to what their
+    /// numbers need: working orders, bid, price and ask all stay whole.
+    #[test]
+    fn a_narrow_dom_keeps_the_book_whole() {
         let mut c = Columns::new(Table::Dom);
         // About what the panel's DOM font needs: two order marks, sizes, a price.
         for (col, w) in [

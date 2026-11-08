@@ -34,7 +34,7 @@
 //! `<config dir>/journal/<source>.jsonl` beside the paper file, under the same rule: replays
 //! and screenshots keep it in memory. A journal this build can't read (newer, damaged
 //! header) is left as it is and nothing is written to it this run. A saved journal's trades
-//! also get a chart file in `<config dir>/journal/shots/` (`crate::journal_shots`).
+//! also get a trade snapshot in `<config dir>/journal/shots/` (`crate::journal_shots`).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -684,9 +684,9 @@ pub struct Trading {
     pub start_account: Option<AccountId>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
     pub journal: Arc<JournalShared>,
-    /// The folder of the journal's chart files (`None`: the journal has no file).
+    /// The folder of the journal's trade snapshots (`None`: the journal has no file).
     pub shots_dir: Option<PathBuf>,
-    /// The feeds panes trade from, for the journal's chart files.
+    /// The feeds panes trade from, for the journal's trade snapshots.
     shot_stores: crate::journal_shots::Stores,
     /// The core's clock kind, so the UI reads time the way the core does (`now`).
     clock: Clock,
@@ -1602,7 +1602,7 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 
 /// The journal from its file (if any): its trades and edits, and a writer appending to it.
 /// A file this build can't read is left alone and not written this run (reported). Only a
-/// journal being saved takes chart files, in `shots/` beside its file, from `stores`' bars.
+/// journal being saved takes trade snapshots, in `shots/` beside its file, from `stores`' bars.
 fn open_journal(
     file: Option<&(PathBuf, String)>,
     stores: &crate::journal_shots::Stores,
@@ -2848,7 +2848,7 @@ mod tests {
         assert_eq!(snap.open, 0);
     }
 
-    /// A saved journal through the real service: a scripted round trip leaves one chart file in
+    /// A saved journal through the real service: a scripted round trip leaves one trade snapshot in
     /// `shots/` beside the journal, named in the saved line, with no account in either. An
     /// in-memory journal has no folder and takes none.
     #[test]

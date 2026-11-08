@@ -1,4 +1,4 @@
-//! Chart files of journal trades (roadmap 8c, phase 2).
+//! Trade snapshots of journal trades (roadmap 8c, phase 2).
 //!
 //! As a trade of a saved journal closes, the journal names one file and asks for it
 //! (`lines_trading::journal::ShotRequest`). A drawing thread (`lines-shots`) takes each request,
@@ -38,11 +38,11 @@ use crate::pnl::{self, PnlDisplay};
 use crate::theme::{Palette, Theme};
 use crate::trading::AccountInfo;
 
-/// The stores whose bars chart files may use: every running feed a pane trades from
+/// The stores whose bars trade snapshots may use: every running feed a pane trades from
 /// (`Trading::follow`).
 pub type Stores = Arc<Mutex<Vec<Weak<ChartStore>>>>;
 
-/// The accounts now listed: only their kinds reach a chart file.
+/// The accounts now listed: only their kinds reach a trade snapshot.
 pub type Kinds = Arc<RwLock<Vec<AccountInfo>>>;
 
 /// At most this many bars span the trade itself (the timeframe grows until it fits).
@@ -64,7 +64,7 @@ const PLOT_T: f32 = 72.0;
 const PLOT_B: f32 = H - 36.0;
 const FONT: &str = "Inter, 'Segoe UI', system-ui, -apple-system, sans-serif";
 
-/// The app's look as chart files use it (set by the UI as it changes).
+/// The app's look as trade snapshots use it (set by the UI as it changes).
 #[derive(Copy, Clone, Debug)]
 pub struct Look {
     pub theme: Theme,
@@ -82,14 +82,14 @@ fn look() -> Look {
         })
 }
 
-/// Chart files from now on use this theme.
+/// Trade snapshots from now on use this theme.
 pub fn set_theme(theme: Theme) {
     let mut l = LOOK.lock().unwrap_or_else(|e| e.into_inner());
     let pnl = l.map_or_else(PnlDisplay::default, |l| l.pnl);
     *l = Some(Look { theme, pnl });
 }
 
-/// Chart files from now on show P&L as `pnl` allows.
+/// Trade snapshots from now on show P&L as `pnl` allows.
 pub fn set_pnl(pnl: PnlDisplay) {
     let mut l = LOOK.lock().unwrap_or_else(|e| e.into_inner());
     let theme = l.map_or_else(|| Theme::dark(Palette::Standard), |l| l.theme);
@@ -161,19 +161,19 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// The chart file a row names, if it is there. `Err` says why not, for a notice.
+/// The trade snapshot a row names, if it is there. `Err` says why not, for a notice.
 pub fn locate(dir: Option<&Path>, file: Option<&str>) -> Result<PathBuf, &'static str> {
-    let file = file.ok_or("this trade has no chart")?;
-    let dir = dir.ok_or("this journal has no chart folder")?;
+    let file = file.ok_or("this trade has no snapshot")?;
+    let dir = dir.ok_or("this journal has no snapshot folder")?;
     // A saved name is data: only a plain name inside the folder is ever opened.
     if !is_shot_file_name(file) {
-        return Err("this trade's chart name isn't valid");
+        return Err("this trade's snapshot name isn't valid");
     }
     let path = dir.join(file);
     if path.is_file() {
         Ok(path)
     } else {
-        Err("this trade's chart file is missing: still being written, not written, or deleted")
+        Err("this trade's snapshot is missing: still being written, not written, or deleted")
     }
 }
 
@@ -196,7 +196,7 @@ pub fn file_url(path: &Path) -> String {
     url
 }
 
-/// The bars a chart file draws, at its timeframe.
+/// The bars a trade snapshot draws, at its timeframe.
 #[derive(Clone, Debug)]
 pub struct ChartBars {
     pub product: Product,
@@ -377,7 +377,7 @@ fn grid_step(range: i64, tick: i64, lines: i64) -> i64 {
     }
 }
 
-/// The chart file as SVG text. `kind`: the account's kind in words. `data`: the bars (`None`:
+/// The trade snapshot as SVG text. `kind`: the account's kind in words. `data`: the bars (`None`:
 /// no chart data was open). Takes no account and writes none.
 pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> String {
     let th = look.theme;
@@ -408,16 +408,14 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         esc(kind),
         esc(&contract),
     );
-    let mut when = format!(
-        "Entry {}-{}  →  exit {} UTC  ·  held {}",
+    let when = format!(
+        "Entry {}-{}  →  exit {}-{} UTC  ·  held {}",
         CivilDate::from_utc(t.entry_time).year,
         crate::journal_view::clock_text(t.entry_time),
+        CivilDate::from_utc(t.exit_time).year,
         crate::journal_view::clock_text(t.exit_time),
         crate::journal_view::duration_text(t.duration_ms())
     );
-    if let Some(d) = data {
-        let _ = write!(when, "  ·  {}", tf_text(d.tf));
-    }
     let _ = writeln!(
         s,
         "<text x=\"{PLOT_L}\" y=\"52\" font-size=\"13\" {}>{}</text>",
@@ -454,7 +452,7 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         );
         let _ = writeln!(
             s,
-            "<text x=\"{}\" y=\"{}\" font-size=\"13\" text-anchor=\"middle\" {}>Chart files use the bars of an open chart or DOM of the contract.</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"13\" text-anchor=\"middle\" {}>Trade snapshots use the bars of an open chart or DOM of the contract.</text>",
             W / 2.0,
             H / 2.0 + 14.0,
             paint("fill", th.text_dim)
@@ -569,13 +567,28 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
             paint("fill", th.text_dim)
         );
     }
+    // On through a gap past the last bar, so the trade keeps a time under it.
+    let last = bars.len() - 1;
+    for i in (last + 1)..=slot_of(t.exit_time) {
+        if i % every == 0 {
+            let at = UtcMillis(bars[last].time.0 + (i - last) as i64 * d.tf.nominal_ms());
+            let _ = writeln!(
+                s,
+                "<text x=\"{:.1}\" y=\"{}\" font-size=\"12\" text-anchor=\"middle\" {}>{}</text>",
+                x(i),
+                PLOT_B + 18.0,
+                paint("fill", th.text_dim),
+                hhmm(at)
+            );
+        }
+    }
     // The trade's span, behind the candles.
     let (e0, e1) = (slot_of(t.entry_time), slot_of(t.exit_time));
     let _ = writeln!(
         s,
         "<rect x=\"{:.1}\" y=\"{PLOT_T}\" width=\"{:.1}\" height=\"{}\" {}/>",
         x(e0) - slot / 2.0,
-        slot * (e1 - e0 + 1) as f32,
+        slot * (e1.saturating_sub(e0) + 1) as f32,
         PLOT_B - PLOT_T,
         paint("fill", th.accent.opacity(0.10))
     );
@@ -673,23 +686,24 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
     // Legend, top left above the plot: the shapes' meaning in words, and what this isn't.
     let _ = writeln!(
         s,
-        "<text x=\"{PLOT_L}\" y=\"{}\" font-size=\"12\" {}>▲ buy fill  ·  ▼ sell fill  ·  dashed: average price  ·  shaded: the trade  ·  drawn from the bars: no studies or drawings</text>",
+        "<text x=\"{PLOT_L}\" y=\"{}\" font-size=\"12\" {}>▲ buy fill  ·  ▼ sell fill  ·  dashed: average price  ·  shaded: the trade  ·  Trade snapshot: {} picked to fit the trade, no studies or drawings</text>",
         PLOT_T - 6.0,
-        paint("fill", th.text_dim)
+        paint("fill", th.text_dim),
+        tf_text(d.tf)
     );
     // Missing data shows as missing (docs/design.md §7).
     let mut missing = String::new();
     if let Some(b) = bars.first().filter(|b| t.entry_time < b.time) {
         let _ = write!(
             missing,
-            "No bars before {}: earlier fills stand at the first bar.  ",
+            "No bars before {} UTC. Earlier fills are placed at the first bar.  ",
             hhmm(b.time)
         );
     }
     if let Some(b) = bars.last().filter(|_| e1 >= bars.len()) {
         let _ = write!(
             missing,
-            "No bars after {}: the trade stands by its times in the gap.",
+            "No bars after {} UTC. Later fills are placed by their times.",
             hhmm(b.time)
         );
     }
@@ -697,7 +711,7 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
         let _ = writeln!(
             s,
             "<text x=\"{}\" y=\"{}\" font-size=\"13\" {} paint-order=\"stroke\" stroke-width=\"3\" {}>{missing}</text>",
-            PLOT_L + 4.0,
+            PLOT_L,
             PLOT_T + 16.0,
             paint("fill", th.text_main),
             paint("stroke", th.bg)
@@ -794,8 +808,14 @@ mod tests {
         let svg = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Both));
         assert!(svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"));
         assert!(svg.contains(">PAPER  ·  ESZ26  ·  Long 2<"), "{svg}");
+        assert!(
+            svg.contains(
+                "Trade snapshot: 1-minute bars picked to fit the trade, no studies or drawings"
+            ),
+            "the legend says what this is: {svg}"
+        );
         assert!(svg.contains(
-            "Entry 2026-11-05 14:31:07  →  exit 11-05 14:35:07 UTC  ·  held 4m 00s  ·  1-minute bars"
+            "Entry 2026-11-05 14:31:07  →  exit 2026-11-05 14:35:07 UTC  ·  held 4m 00s<"
         ));
         // +2 points × 2 × $50 = $200, less $2.48 of fees; and in ticks.
         assert!(svg.contains("net +$197.52  (+8.0 t)"), "{svg}");
@@ -881,7 +901,11 @@ mod tests {
         let entry_bar = d.bars.iter().rposition(|b| b.time <= r.trade.entry_time);
         d.bars.truncate(entry_bar.unwrap() + 1);
         let svg = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off));
-        assert!(svg.contains("No bars after 14:31"), "{svg}");
+        assert!(svg.contains("No bars after 14:31 UTC"), "{svg}");
+        assert!(
+            svg.contains(">14:3"),
+            "the axis runs on under the gap: {svg}"
+        );
         let xs = mark_xs(&svg);
         let n = d.bars.len();
         assert_eq!(slot_index(&d.bars, 60_000, r.trade.exit_time), n - 1 + 4);
@@ -895,7 +919,17 @@ mod tests {
         let mut late = data(&r.trade);
         late.bars.retain(|b| b.time > r.trade.entry_time);
         let svg = render(&r.trade, "PAPER", Some(&late), look(PnlDisplay::Off));
-        assert!(svg.contains("No bars before 14:32"), "{svg}");
+        assert!(svg.contains("No bars before 14:32 UTC"), "{svg}");
+    }
+
+    /// A broker's closing fill stamped before the entry: a one-slot span, not a panic (the
+    /// thread would die and every later trade keep a name with no file).
+    #[test]
+    fn a_fill_stamped_before_the_entry_keeps_the_thread_alive() {
+        let r = request_of(&[(Side::Buy, 600_000, 0), (Side::Sell, 600_200, -300)]);
+        let d = data(&r.trade);
+        let svg = render(&r.trade, "PAPER", Some(&d), look(PnlDisplay::Off));
+        assert_eq!(svg.matches("<polygon").count(), 2, "{svg}");
     }
 
     /// The labels' room holds at every bar count the file can draw.
@@ -1185,7 +1219,7 @@ mod tests {
         let dir = temp("locate");
         std::fs::create_dir_all(&dir).unwrap();
         let name = "2026-11-05-0123456789abcdef.svg";
-        assert_eq!(locate(Some(&dir), None), Err("this trade has no chart"));
+        assert_eq!(locate(Some(&dir), None), Err("this trade has no snapshot"));
         assert!(locate(None, Some(name)).is_err());
         let missing = locate(Some(&dir), Some(name)).unwrap_err();
         assert!(missing.contains("missing"), "{missing}");

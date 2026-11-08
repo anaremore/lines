@@ -12,7 +12,7 @@
 //!   and all dates.
 //! - **Editing**: click a row (or Up/Down) to select it, Enter to edit its tags and note
 //!   inline (Tab switches field, Enter saves, Esc cancels). Edits are saved as journal records.
-//! - **Chart** (`crate::journal_shots`): a trade with a chart file shows "view" in the Chart
+//! - **Chart** (`crate::journal_shots`): a trade with a trade snapshot shows "view" in the Snapshot
 //!   column (click it, or the palette's command on the selected trade: the OS's default app);
 //!   without one, a dash. A file that isn't there says so in a notice.
 //! - **By account / by tag** (phase 2; header tabs, palette, pane menu, saved with the pane):
@@ -65,7 +65,7 @@ pub struct Row {
     pub sign: i8,
     pub note: String,
     pub tags: Vec<String>,
-    /// The chart file's name (in the journal's `shots/` folder), if the trade has one.
+    /// The trade snapshot's name (in the journal's `shots/` folder), if the trade has one.
     pub shot: Option<String>,
 }
 
@@ -772,10 +772,10 @@ impl JournalView {
         Ok(())
     }
 
-    /// Open the selected trade's chart file in the OS's default app.
+    /// Open the selected trade's trade snapshot in the OS's default app.
     pub fn open_selected_chart(&self, cx: &mut Context<Self>) -> Result<(), &'static str> {
         if !self.group.is_trades() {
-            return Err("switch the journal to Trades to open a trade's chart");
+            return Err("switch the journal to Trades to open a trade's snapshot");
         }
         let r = self
             .selected_index()

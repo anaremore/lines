@@ -475,7 +475,7 @@ struct Cli {
     #[arg(long, requires = "screenshot")]
     hover_header: bool,
     /// Screenshot: keep the journal in DIR (`screenshot.jsonl`) instead of in memory, so trades
-    /// a `--paper` script closes get their chart files in DIR/shots/. Evidence only: nothing of
+    /// a `--paper` script closes get their trade snapshots in DIR/shots/. Evidence only: nothing of
     /// the user's is read or written unless DIR is theirs.
     #[arg(long, value_name = "DIR", requires = "screenshot")]
     journal_dir: Option<PathBuf>,
@@ -1542,7 +1542,7 @@ where
     ws.env.theme.set(settings_schema::theme_for(
         &settings.settings.appearance.with_flags(look_flags),
     ));
-    // The journal's chart screenshots take the same look.
+    // The journal's trade snapshots take the same look.
     journal_shots::set_theme(ws.env.theme.get());
     journal_shots::set_pnl(settings.settings.pnl_display);
     // The paper trading core (roadmap 7): its own thread, state per data source.

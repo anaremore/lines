@@ -25,7 +25,7 @@
 //! - **Open trades** live only in memory. After a restart a position the journal didn't see
 //!   open is seeded from the core's position report and its trade is marked `incomplete`.
 //!
-//! **Chart screenshots** (phase 2): a saved journal names one file per trade as it closes and
+//! **Trade snapshots** (phase 2): a saved journal names one file per trade as it closes and
 //! asks for it ([`ShotRequest`]). The name goes into [`Trade::screenshots`] and so is saved with
 //! the trade (an optional field: no format change). The journal only names and asks; the app
 //! draws the file on its own thread. A trade loaded from the file or seeded from a position
@@ -124,7 +124,7 @@ pub struct Trade {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
-    /// The chart screenshot's file name in the `shots/` folder beside the journal (roadmap 8c
+    /// The trade snapshot's file name in the `shots/` folder beside the journal (roadmap 8c
     /// phase 2): a name, never a path (a path would hold the OS user name). Named when asked
     /// for: the file can be missing if drawing it failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -206,7 +206,7 @@ pub enum Record {
     Edit(Edit),
 }
 
-/// A chart screenshot to draw now: its file name, and the trade as it closed with its ids,
+/// A trade snapshot to draw now: its file name, and the trade as it closed with its ids,
 /// account, tags and note blanked (a broker's ids can hold the account; the drawing can't write
 /// what it was never given). `account` is for looking up the account's kind only (the file says
 /// PAPER or LIVE in words); it is never drawn.
@@ -217,7 +217,7 @@ pub struct ShotRequest {
     pub account: AccountId,
 }
 
-/// What the journal thread sends the thread that draws screenshots.
+/// What the journal thread sends the thread that draws trade snapshots.
 #[derive(Debug)]
 pub enum ShotMsg {
     Take(Box<ShotRequest>),
@@ -225,7 +225,7 @@ pub enum ShotMsg {
     Flush(Sender<()>),
 }
 
-/// A screenshot's file name: the trade date and a 64-bit FNV-1a of the trade id (stable across
+/// A trade snapshot's file name: the trade date and a 64-bit FNV-1a of the trade id (stable across
 /// builds and platforms; the name is saved). The id itself can hold an account (a broker's
 /// fill ids), so it never appears.
 pub fn shot_file_name(trade_date: CivilDate, id: &str) -> String {
@@ -235,7 +235,7 @@ pub fn shot_file_name(trade_date: CivilDate, id: &str) -> String {
     format!("{trade_date}-{hash:016x}.svg")
 }
 
-/// Whether a saved name is a plain screenshot file name: a damaged or edited journal line must
+/// Whether a saved name is a plain trade snapshot file name: a damaged or edited journal line must
 /// not name a file elsewhere for the app to open.
 pub fn is_shot_file_name(name: &str) -> bool {
     name.strip_suffix(".svg").is_some_and(|stem| {
@@ -288,7 +288,7 @@ pub struct Journal {
     /// Accounts whose trades take no MAE/MFE from market batches (a broker venue's accounts
     /// while the app's prices aren't that venue's market: a replay or the mock).
     unmarked: HashSet<AccountId>,
-    /// Whether trades closing from now on get a chart screenshot.
+    /// Whether trades closing from now on get a trade snapshot.
     shots: bool,
     /// Screenshots asked for and not yet taken by [`Journal::take_shot_requests`].
     shot_requests: Vec<ShotRequest>,
@@ -318,7 +318,7 @@ impl Journal {
         }
     }
 
-    /// Trades closing from now on get a chart screenshot (or not).
+    /// Trades closing from now on get a trade snapshot (or not).
     pub fn set_shots(&mut self, on: bool) {
         self.shots = on;
     }
@@ -777,7 +777,7 @@ impl JournalShared {
         JournalShared::start_with_shots(journal, writer, None)
     }
 
-    /// [`JournalShared::start`], asking `shots` for a chart screenshot of each trade that
+    /// [`JournalShared::start`], asking `shots` for a trade snapshot of each trade that
     /// closes. Only a saved journal takes them: without a writer, none are asked for.
     pub fn start_with_shots(
         mut journal: Journal,
@@ -848,7 +848,7 @@ impl JournalShared {
         }
     }
 
-    /// Wait (up to `timeout`) until everything sent so far is on disk, chart screenshots
+    /// Wait (up to `timeout`) until everything sent so far is on disk, trade snapshots
     /// included. For quitting.
     pub fn flush(&self, timeout: Duration) -> bool {
         let (tx, rx) = mpsc::channel();

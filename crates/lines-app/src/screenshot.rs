@@ -73,7 +73,7 @@ pub struct Shot {
     pub bracket_position: Option<crate::BracketPositionArg>,
     /// The focused pane's header controls show (`--hover-header`).
     pub hover_header: bool,
-    /// Keep the journal in this folder, so a script's trades get chart files (`--journal-dir`).
+    /// Keep the journal in this folder, so a script's trades get trade snapshots (`--journal-dir`).
     pub journal_dir: Option<PathBuf>,
     /// Record the frame's layout and write the layout lint's findings beside each PNG
     /// (`<stem>.lint.txt`, empty when clean): `--layout-report`.
@@ -409,7 +409,7 @@ fn capture(
                 Err(e) => fail(&e),
             }
         }
-        // `--journal-dir`: the script's chart files and journal lines reach the disk.
+        // `--journal-dir`: the script's trade snapshots and journal lines reach the disk.
         cx.update(|cx| {
             cx.global::<Trading>()
                 .journal

@@ -2201,7 +2201,7 @@ impl WindowView {
                     false,
                 ));
                 items.push(MenuItem::named(
-                    "Open chart of the selected trade",
+                    "Open the selected trade's snapshot",
                     Command::JournalOpenChart,
                     false,
                 ));
@@ -3287,7 +3287,7 @@ impl Render for WindowView {
             }
             Some(PaneHandle::Tape(_)) => "Time & sales: type a symbol or Ctrl+K: switch",
             Some(PaneHandle::Journal(_)) => {
-                "Journal: click or Up/Down to select, Enter: tags and note, Chart column: view, click the stats: today / all dates"
+                "Journal: click or Up/Down to select, Enter: tags and note, Snapshot column: view, click the stats: today / all dates"
             }
             Some(PaneHandle::Chain(_)) => {
                 "Option chain: Up/Down strike, Left/Right expiry, Tab calls / puts, type a symbol or Ctrl+K: switch"
