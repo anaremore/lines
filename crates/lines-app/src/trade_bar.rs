@@ -271,6 +271,10 @@ impl PaneTrade {
             return;
         }
         let blur = cx.on_focus_out(focus, window, |v: &mut V, _, _, cx| {
+            // A size being typed needs the pane's keys: a drawn field always has them.
+            if v.trade().qty_edit.take().is_some() {
+                cx.notify();
+            }
             if v.trade().arm_event(ArmEvent::FocusLost, cx) {
                 cx.notify();
             }
@@ -326,6 +330,7 @@ pub fn set_size<V: TradePane>(v: &mut V, q: i64, cx: &mut Context<V>) {
     // An unavailable pane's product may be a stand-in: never change a real symbol's size for it.
     if v.trade_unavailable() {
         v.trade().qty_edit = None;
+        cx.notify();
         return;
     }
     let symbol = v.trade_product().symbol.to_owned();
@@ -684,14 +689,7 @@ fn run_with<V: TradePane>(
                 say_size(v, cx);
             }
         }
-        TradeCmd::TypeQty => {
-            if v.shows_size() {
-                v.trade().qty_edit = Some(String::new());
-            } else {
-                v.trade()
-                    .flash("The size control isn't showing: can't type a size now");
-            }
-        }
+        TradeCmd::TypeQty => open_size_field(v),
         TradeCmd::NextBracket => {
             let b = v.trade_ref().bracket;
             let presets = match (v.trade_ref().account.as_ref(), v.trade_store().try_read()) {
@@ -939,9 +937,21 @@ pub fn editor_key<V: TradePane>(v: &mut V, ev: &gpui::KeyDownEvent, cx: &mut Con
     true
 }
 
+/// Open the field to type a size, or say why not.
+pub fn open_size_field<V: TradePane>(v: &mut V) {
+    if v.trade_unavailable() {
+        v.trade().flash("this pane has no market data");
+    } else if v.shows_size() {
+        v.trade().qty_edit = Some(String::new());
+    } else {
+        v.trade()
+            .flash("The size control isn't showing: can't type a size now");
+    }
+}
+
 /// A size changed by a key on a pane that doesn't show it (a chart without its strip): say so.
 fn say_size<V: TradePane>(v: &mut V, cx: &App) {
-    if !v.shows_size() {
+    if !v.shows_size() && !v.trade_unavailable() {
         let q = pane_size(v, cx);
         let symbol = v.trade_product().symbol;
         v.trade().flash(format!("{symbol} order size {q}"));
@@ -2347,7 +2357,7 @@ fn qty_row<V: TradePane>(
             cx.stop_propagation();
             // The keys must reach the pane: in a popped-out window focus may sit on its root.
             v.trade_focus().clone().focus(window, cx);
-            v.trade().qty_edit = Some(String::new());
+            open_size_field(v);
             cx.notify();
         }),
     ))

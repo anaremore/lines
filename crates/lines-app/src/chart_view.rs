@@ -1789,7 +1789,7 @@ impl ChartView {
                         cx.listener(|v, _, window, cx| {
                             cx.stop_propagation();
                             v.focus.focus(window, cx);
-                            v.trade.qty_edit = Some(String::new());
+                            crate::trade_bar::open_size_field(v);
                             cx.notify();
                         }),
                     ),
@@ -6162,6 +6162,9 @@ impl Render for ChartView {
         {
             self.close_popover(Kind::OrderGroup, cx);
         }
+        // A size being typed closes when the chart loses focus (a chart has no switch to drop).
+        let focus = self.focus.clone();
+        crate::trade_bar::PaneTrade::watch_focus(self, &focus, window, cx);
         let t = self.theme;
         let entity = cx.entity();
         // The workspace refreshes every window when this preference changes.
