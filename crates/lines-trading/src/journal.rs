@@ -668,9 +668,9 @@ pub fn csv(trades: &[Trade]) -> String {
     );
     for t in trades {
         let product = lines_feed::catalog::get(t.contract.product);
-        let (label, tick) = match &product {
-            Some(p) => (t.contract.label(p).as_str().to_owned(), p.price.tick),
-            None => (format!("{:?}", t.contract), 1),
+        let label = match &product {
+            Some(p) => t.contract.label(p).as_str().to_owned(),
+            None => format!("{:?}", t.contract),
         };
         let price = |v: Option<f64>| match (v, &product) {
             (Some(v), Some(p)) => decimal(price_value(p, v)),
@@ -695,7 +695,7 @@ pub fn csv(trades: &[Trade]) -> String {
             t.realized,
             t.fees,
             t.net(),
-            num(t.ticks(tick)),
+            num(product.as_ref().and_then(|p| t.ticks(p.price.tick))),
             t.duration_ms() / 1000,
             t.mae,
             t.mfe,

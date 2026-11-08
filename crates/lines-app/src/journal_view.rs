@@ -99,7 +99,8 @@ pub(crate) fn per_contract_text(t: f64) -> String {
 /// Format a trade for the table, showing P&L as `mode` allows.
 pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
     let product = lines_feed::catalog::get(t.contract.product);
-    let tick = product.as_ref().map_or(1, |p| p.price.tick);
+    // An unlisted product has no tick to state, rather than raw price units called ticks.
+    let ticks = product.as_ref().and_then(|p| t.ticks(p.price.tick));
     let price = |v: Option<f64>| match (v, &product) {
         (Some(v), Some(p)) => decimal(price_value(p, v), p.price.scale.den()),
         _ => "—".to_owned(),
@@ -129,12 +130,12 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
     let pnl = if mode.money() {
         money_text(net)
     } else if mode.ticks() {
-        t.ticks(tick).map_or_else(dash, per_contract_text)
+        ticks.map_or_else(dash, per_contract_text)
     } else {
         dash()
     };
     // The whole position's worst/best P&L while open, and the same dollars per contract (like the
-    // Ticks column and the CSV) at the trade's largest size. An unlisted product: no tick to say.
+    // Ticks column and the CSV) at the trade's largest size.
     let excursion_ticks = match product.as_ref().and_then(|p| t.excursion_ticks(p)) {
         Some((mae, mfe)) => format!("{} / {}", tick_number(mae), per_contract_text(mfe)),
         None => "— / —".to_owned(),
@@ -160,7 +161,7 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
             price(t.avg_entry()),
             price(t.avg_exit()),
             pnl,
-            tk(t.ticks(tick)),
+            tk(ticks),
             duration_text(t.duration_ms()),
             excursions,
             if t.screenshots.is_empty() {
@@ -178,8 +179,7 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
                 pnl::Tone::Flat => 0,
             }
         } else if mode.ticks() {
-            t.ticks(tick)
-                .map_or(0, |v| ((v * 10.0).round() as i64).signum() as i8)
+            ticks.map_or(0, |v| ((v * 10.0).round() as i64).signum() as i8)
         } else {
             0
         },
@@ -1645,10 +1645,10 @@ mod tests {
         assert_eq!(decimal(0.5, 1), "0.5");
     }
 
-    /// A product not in the catalog has no tick to state: dashes for its excursions' ticks, not
-    /// raw price units called ticks.
+    /// A product not in the catalog has no tick to state: dashes and empty fields, not raw price
+    /// units called ticks. Its dollars stay.
     #[test]
-    fn an_unlisted_product_states_no_excursion_ticks() {
+    fn an_unlisted_product_states_no_ticks() {
         let mut t = trade();
         t.contract.product = lines_core::ProductId(u32::MAX);
         let cells = row(&t, PnlDisplay::Both).cells;
@@ -1656,6 +1656,20 @@ mod tests {
             cells[JournalCol::MaeMfe.index()],
             "-$87.50 / +$412.50  (— / —)"
         );
+        assert_eq!(cells[JournalCol::Ticks.index()], "—");
+        assert_eq!(
+            row(&t, PnlDisplay::Ticks).cells[JournalCol::Pnl.index()],
+            "—"
+        );
+        let export = lines_trading::journal::csv(std::slice::from_ref(&t));
+        let mut lines = export.lines();
+        let names: Vec<&str> = lines.next().unwrap().split(',').collect();
+        // From the end: the unlisted contract's label is quoted and holds commas.
+        let from_end: Vec<&str> = lines.next().unwrap().rsplit(',').collect();
+        for name in ["ticks", "mae_ticks", "mfe_ticks"] {
+            let i = names.iter().position(|n| *n == name).unwrap();
+            assert_eq!(from_end[names.len() - 1 - i], "", "{name}");
+        }
     }
 
     /// One basis in the pane and the export: the cells' ticks are the CSV's numbers (its

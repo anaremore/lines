@@ -341,8 +341,9 @@ fn tf_text(tf: Timeframe) -> String {
 
 /// The net P&L as the display allows (`None`: off).
 fn pnl_text(t: &Trade, product: Option<&Product>, mode: PnlDisplay) -> Option<String> {
-    let tick = product.map_or(1, |p| p.price.tick);
-    let ticks = t.ticks(tick).map(crate::journal_view::per_contract_text);
+    let ticks = product
+        .and_then(|p| t.ticks(p.price.tick))
+        .map(crate::journal_view::per_contract_text);
     let mut money = String::new();
     let _ = pnl::write_money(&mut money, t.net());
     match (mode.money(), mode.ticks(), ticks) {
