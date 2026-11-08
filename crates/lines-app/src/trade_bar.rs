@@ -248,6 +248,8 @@ impl PaneTrade {
     pub fn feed_changed(&mut self, store: &Arc<ChartStore>, follow: bool, cx: &App) {
         self.arm_event(ArmEvent::ContractChanged, cx);
         self.editor = None;
+        // A size being typed was for the old symbol: it never lands on this one.
+        self.qty_edit = None;
         self.bracket_forget();
         self.account_menu = false;
         if follow && let Some(t) = Trading::try_global(cx) {
@@ -300,6 +302,11 @@ pub trait TradePane: Sized + 'static {
 /// Bumped when a shared order size changes: every pane redraws its size and buttons.
 static SIZE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
+/// An order size changed outside `set_size` (Settings' default): panes redraw.
+pub fn size_changed() {
+    SIZE_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
 /// The pane's order size (the size of its product, shared by every DOM and chart on it).
 pub fn pane_size<V: TradePane>(v: &V, cx: &App) -> i64 {
     let s = crate::picker_view::settings(cx);
@@ -316,7 +323,7 @@ pub fn set_size<V: TradePane>(v: &mut V, q: i64, cx: &mut Context<V>) {
     crate::picker_view::update_settings(cx, |s| {
         s.order_sizes.insert(symbol, q);
     });
-    SIZE_EPOCH.fetch_add(1, Ordering::Relaxed);
+    size_changed();
     v.trade().qty_edit = None;
     cx.notify();
 }

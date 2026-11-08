@@ -1228,6 +1228,8 @@ impl ChartView {
             return;
         }
         self.focus.focus(window, cx);
+        // A press on the chart leaves a size being typed.
+        self.trade.qty_edit = None;
         if self.picker.close() {
             // Clicking the chart dismisses the picker (rows handle their own clicks).
             cx.notify();
@@ -1381,11 +1383,6 @@ impl ChartView {
                 EditorKey::Pass => {}
             }
         }
-        // A size being typed takes the keys (digits, Enter, Esc).
-        if crate::trade_bar::qty_key(self, k.key.as_str(), cx) {
-            cx.stop_propagation();
-            return;
-        }
         // Escape aborts an order drag: a tag, a handle or the position line (nothing sent).
         if (self.ct.drag.is_some() || self.ct.adding.is_some() || self.ct.pos_drag)
             && k.key == "escape"
@@ -1408,6 +1405,18 @@ impl ChartView {
             self.ct.strip_pick = None;
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        // A size being typed takes the plain keys (digits, Enter, Esc), only while its field is
+        // on screen: a strip that went away (hidden, a narrow plot) drops it, so the chart's own
+        // keys never go dead with nothing showing why.
+        if self.trade.qty_edit.is_some() && self.strip_box().is_none() {
+            self.trade.qty_edit = None;
+        }
+        if !(m.control || m.alt || m.platform)
+            && crate::trade_bar::qty_key(self, k.key.as_str(), cx)
+        {
+            cx.stop_propagation();
             return;
         }
         // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
@@ -1524,8 +1533,9 @@ impl ChartView {
         self.seen_revision = u64::MAX;
         self.cross = None;
         self.cross_bar = None;
-        // A limit pick belongs to the symbol it was armed on.
+        // A limit pick belongs to the symbol it was armed on; so does a size being typed.
         self.ct.feed_changed();
+        self.trade.qty_edit = None;
         self.readout = None;
         self.labels.clear();
         // The same timeframe on the new market.
@@ -1707,7 +1717,7 @@ impl ChartView {
         )
     }
 
-    /// The order strip over the plot's bottom-left corner: the chart's quantity, BUY/SELL MKT
+    /// The order strip over the plot's bottom-left corner: the shared size, BUY/SELL MKT
     /// filled in the side's color, BUY/SELL LMT outlined (as the DOM's buttons; filled while
     /// its price pick is armed). Dimmed while the chart is in no link group (no DOM's switch
     /// can send).
@@ -1872,6 +1882,7 @@ impl ChartView {
     pub fn toggle_order_strip(&mut self, cx: &mut Context<Self>) {
         self.order_strip = !self.order_strip;
         self.ct.strip_pick = None;
+        self.trade.qty_edit = None;
         cx.notify();
     }
 
