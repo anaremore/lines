@@ -30,8 +30,8 @@
 //! - **Flatten and Cancel** (decision 0028, `docs/design.md` §3), shown while the account has
 //!   something on the underlying's options: the DOM's commands and keys, never gated by the
 //!   feed, the quote or One-click. A DOM's act on its contract; these act on every series of the
-//!   underlying, every expiry, and their labels say so. In the header, or the footer when
-//!   narrow. Growing leftward from the account, they move nothing else.
+//!   underlying, every expiry, and their labels say so. In a reserved slot in the header, or the
+//!   footer when narrow, so they move nothing and never appear under a pointer.
 //! - **One-click** (off in every new pane, never saved, off again on another symbol or account):
 //!   a single click in the focused pane sends a limit at the clicked side, still under the guard,
 //!   for the size the switch shows (Shift+Up/Down, or the ticket's chips). While it's on the
@@ -80,7 +80,9 @@ const MARK_W: f32 = 22.0;
 /// Below this the header leaves out its title, so the account and One-click stay.
 const NARROW_HEADER: f32 = 560.0;
 /// Below this the exits sit in the footer: the header can't hold them with its other words.
-const EXITS_IN_HEADER: f32 = 860.0;
+const EXITS_IN_HEADER: f32 = 940.0;
+/// Their slot in the header: both buttons, for any listed symbol.
+const EXITS_SLOT: f32 = 244.0;
 /// The ticket's slots, so its buttons hold still as prices and modes change.
 const QTY_SLOT: f32 = 158.0;
 const PRICE_CHIP: f32 = 72.0;
@@ -2256,7 +2258,22 @@ impl ChainView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_2()
-                    .children(exits)
+                    // A slot of their own, there before anything is held: they never appear
+                    // under a pointer aimed at an expiry chip.
+                    .when(
+                        self.exits_in_header() && self.trade.account.is_some(),
+                        |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_shrink_0()
+                                    .justify_end()
+                                    .w(px(EXITS_SLOT))
+                                    .children(exits),
+                            )
+                        },
+                    )
                     .children(account.map(|(name, badge)| {
                         // A click goes to the next account, on the badge alone when narrow.
                         div()
