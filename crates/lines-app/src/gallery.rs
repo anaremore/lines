@@ -23,7 +23,12 @@ pub struct Scene {
     /// Replays the sessions recorded only from mid-session on ([`LATE_FROM`]): a feed opened
     /// late.
     pub late: bool,
+    /// Replays the synthetic SPY option chain instead.
+    pub chain: bool,
 }
+
+/// A half hour into the synthetic SPY chain's session.
+const CHAIN_AT: &str = "2026-11-09T15:00:00Z";
 
 /// Where the late replay starts: mid-session on 2026-11-04.
 pub const LATE_FROM: &str = "2026-11-04T09:30:00Z";
@@ -62,6 +67,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         args: a,
         windows: 1,
         late: false,
+        chain: false,
     };
     let mut v = vec![
         // Every pane kind, both themes and palettes.
@@ -272,6 +278,125 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     if let Some(p) = v.iter_mut().find(|s| s.name == "popout") {
         p.windows = 2;
     }
+    // The option chain's ticket (decision 0028), on the synthetic SPY chain: positions and
+    // orders on their rows, and each way it says no.
+    let held = "option 2026-11-09 682 call; buy 2 @ 1.89; ack; option 2026-11-09 686 put; sell 1 @ 3.00; ack; option 2026-11-09 683 call; buy 3 @ 1.18; ack; sell 2 @ 1.40; ack";
+    for (name, quick, size, theme, paper, ticket) in [
+        (
+            "chain-ticket",
+            true,
+            "1600x700",
+            "dark",
+            held,
+            "sell 683 call",
+        ),
+        (
+            "chain-ticket-narrow",
+            true,
+            "340x640",
+            "dark",
+            held,
+            "sell 683 call close",
+        ),
+        (
+            "chain-ticket-light",
+            false,
+            "1400x600",
+            "light",
+            held,
+            "buy 684 call",
+        ),
+        (
+            "chain-far-from-mid",
+            false,
+            "1000x520",
+            "dark",
+            "",
+            "buy 684 call at 3.00",
+        ),
+        (
+            "chain-one-sided",
+            false,
+            "1000x520",
+            "light",
+            "",
+            "buy 696 call",
+        ),
+        (
+            "chain-stale-quote",
+            false,
+            "1000x520",
+            "dark",
+            "wait 1200; ack",
+            "buy 684 call",
+        ),
+        (
+            "chain-prop-account",
+            false,
+            "1000x520",
+            "dark",
+            "account paper-eval; ack",
+            "buy 684 call",
+        ),
+        (
+            "chain-one-click",
+            false,
+            "1000x520",
+            "dark",
+            held,
+            "one-click",
+        ),
+    ] {
+        let mut a = vec![
+            "--workspace".to_owned(),
+            ws("chain.json"),
+            "--size".to_owned(),
+            size.to_owned(),
+            "--theme".to_owned(),
+            theme.to_owned(),
+            "--chain-ticket".to_owned(),
+            ticket.to_owned(),
+        ];
+        if !paper.is_empty() {
+            a.extend(["--paper".to_owned(), paper.to_owned()]);
+        }
+        let mut sc = s(name, quick, CHAIN_AT, a);
+        sc.chain = true;
+        v.push(sc);
+    }
+    let mut cb = s(
+        "chain-ticket-dark-cb",
+        false,
+        CHAIN_AT,
+        vec![
+            "--workspace".to_owned(),
+            ws("chain.json"),
+            "--size".to_owned(),
+            "1400x600".to_owned(),
+            "--palette".to_owned(),
+            "cb".to_owned(),
+            "--chain-ticket".to_owned(),
+            "buy 684 put".to_owned(),
+        ],
+    );
+    cb.chain = true;
+    v.push(cb);
+    let mut pop = s(
+        "chain-popout",
+        false,
+        CHAIN_AT,
+        vec![
+            "--workspace".to_owned(),
+            ws("chain-popout.json"),
+            "--size".to_owned(),
+            "900x600".to_owned(),
+            "--chain-ticket".to_owned(),
+            "buy 684 call".to_owned(),
+        ],
+    );
+    pop.chain = true;
+    pop.windows = 2;
+    v.push(pop);
     // Every drawing tool, with a pinned measure and a note.
     let mut d = args("--layout chart --size 1400x800 --theme dark --timeframe 5m --drawings");
     d.push(ws("drawings.json"));
@@ -678,6 +803,24 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ),
         pane("dom", "")
     );
+    let chain = r#"{ "pane": { "kind": "chain", "link": 0, "state": "shown", "target": { "product": 2001, "symbol": "SPY" } } }"#;
+    std::fs::write(
+        dir.join("chain.json"),
+        format!(
+            r#"{{ "version": 6, "name": "gallery", "crosshair_sync": false,
+  "windows": [ {{ "active_tab": 0, "tabs": [ {{ "focused": 0, "layout": {chain} }} ] }} ] }}"#
+        ),
+    )
+    .context("chain.json")?;
+    let spy = r#"{ "product": 2001, "symbol": "SPY" }"#;
+    std::fs::write(
+        dir.join("chain-popout.json"),
+        format!(
+            r#"{{ "version": 6, "name": "gallery", "crosshair_sync": false,
+  "windows": [ {{ "active_tab": 0, "tabs": [ {{ "focused": 0, "layout": {{ "split": {{ "axis": "row", "ratio": 0.6, "first": {{ "pane": {{ "kind": "tape", "link": 0, "state": "shown", "target": {spy} }} }}, "second": {{ "pane": {{ "kind": "chain", "link": 0, "state": "detached", "target": {spy}, "window": {{ "x": 100, "y": 100, "w": 760, "h": 560 }} }} }} }} }} }} ] }} ] }}"#
+        ),
+    )
+    .context("chain-popout.json")?;
     for (f, layout) in [
         ("chart-over-dom.json", chart_over_dom),
         ("popout.json", popout),
@@ -702,6 +845,8 @@ pub fn run(dir: &Path, full: bool) -> Result<i32> {
     let from = lines_core::UtcMillis::parse_iso(LATE_FROM).context("late start")?;
     lines_feed::synth::write_es_sessions_from(&late, true, false, Some(from))
         .context("synthetic late replay")?;
+    let chain = dir.join("synth-spy-chain.lfr");
+    lines_feed::synth_chain::write_spy_chain(&chain).context("synthetic chain")?;
     write_workspaces(dir)?;
     let exe = std::env::current_exe().context("current exe")?;
     let mut summary = String::new();
@@ -714,7 +859,13 @@ pub fn run(dir: &Path, full: bool) -> Result<i32> {
         }
         let out = Command::new(&exe)
             .arg("--replay")
-            .arg(if scene.late { &late } else { &replay })
+            .arg(if scene.chain {
+                &chain
+            } else if scene.late {
+                &late
+            } else {
+                &replay
+            })
             .args(["--at", scene.at, "--layout-report", "--screenshot"])
             .arg(&png)
             .args(&scene.args)

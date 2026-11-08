@@ -14,10 +14,29 @@
 //! - **Expiry chips** (the soonest 8) are whole: those that don't fit drop off the end
 //!   entirely (onto a hidden second line), never cut.
 //! - **Keys** (the pane focused): Up/Down move by strike, Page Up/Down by a page, Home goes
-//!   back to the money, Left/Right change the expiry, Tab switches calls and puts. Enter will
-//!   open an order ticket with paper options (decision 0028, phase 3); until then it says so.
-//!   Clicking a cell selects its strike and side; clicking an expiry chip selects it. Typing
-//!   a symbol (or Ctrl+K) opens the symbol picker, as in the other panes.
+//!   back to the money, Left/Right change the expiry, Tab switches calls and puts, Shift+Tab
+//!   the selected cell's bid and ask, Enter opens the ticket on it. Enter always opens the ticket, and a held Enter sends nothing.
+//!   Clicking a cell selects its
+//!   strike and side; clicking an expiry chip selects it. Typing a symbol (or Ctrl+K) opens the
+//!   symbol picker, as in the other panes.
+//! - **The ticket** (decision 0028, `chain_ticket.rs`): a click on an ask buys and on a bid
+//!   sells, docked at the bottom. Up/Down move the price by tick, Shift+Up/Down the quantity,
+//!   digits type a price, Tab closes the position instead, Enter sends, Esc leaves. What the
+//!   guard would refuse says so there, in the core's words, and Enter sends nothing.
+//! - **Positions and working orders** sit on their strike rows, in a Pos column at each outer
+//!   edge, with Close and Cancel; a narrow pane leaves the column out and marks the strike. The
+//!   selected series lists its own above the ticket, at any width, in a one-line slot that is
+//!   always there. An expiry holding any carries a dot on its chip.
+//! - **Flatten and Cancel** (decision 0028, `docs/design.md` §3), shown while the account has
+//!   something on the underlying's options: the DOM's commands and keys, never gated by the
+//!   feed, the quote or One-click. A DOM's act on its contract; these act on every series of the
+//!   underlying, every expiry, and their labels say so. In a reserved slot in the header, or the
+//!   footer when narrow, so they move nothing and never appear under a pointer.
+//! - **One-click** (off in every new pane, never saved, off again on another symbol or account):
+//!   a single click in the focused pane sends a limit at the clicked side, still under the guard,
+//!   for the size the switch shows (Shift+Up/Down, or the ticket's chips). While it's on the same
+//!   strikes stay in the same places, and keys move only among them; Home or another expiry let
+//!   go.
 //!
 //! Paint reads the store's chains under a `try_lock` and formats every cell into a stack
 //! string: no allocation. The pane repaints on the store's revision (chain quotes don't move
@@ -30,15 +49,21 @@ use gpui::{
     MouseDownEvent, ParentElement, Pixels, Render, Styled, Window, canvas, div, fill, point,
     prelude::*, px, size,
 };
-use lines_core::{CivilDate, FixedStr, OptionChain, OptionQuote, Price, Product, Right};
+use lines_core::{
+    CivilDate, ContractKey, FixedStr, OptionChain, OptionKey, OptionQuote, Price, Product, Right,
+};
 use lines_feed::catalog::Target;
 use lines_feed::store::ChartStore;
+use lines_trading::{AccountId, CommandId, OrderId, Side};
 
+use crate::chain_ticket::{self as ticket, Cell, ShotTicket, Ticket};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
+use crate::trade_bar::{self, PaneTrade, TradeDoc};
+use crate::trading::Trading;
 use crate::wsdoc::PaneDoc;
 
 const ROW_H: f32 = 18.0;
@@ -48,6 +73,28 @@ const PAD: f32 = 8.0;
 const HEAD_H: f32 = 2.0 * ROW_H;
 /// Expiry chips in the header.
 const MAX_EXPIRIES: usize = 8;
+/// The widest thing the Pos column's text shows.
+const POS_SAMPLE: &str = "+10 @ 13.10 · S 10 +9";
+/// A narrow row's mark beside the quotes: `+10`, `S10`.
+const MARK_W: f32 = 22.0;
+/// Below this the header leaves out its title, so the account and One-click stay.
+const NARROW_HEADER: f32 = 560.0;
+/// Below this the exits sit in the footer: the header can't hold them with its other words.
+const EXITS_IN_HEADER: f32 = 940.0;
+/// Their slot in the header: both buttons, for any listed symbol.
+const EXITS_SLOT: f32 = 244.0;
+/// The ticket's slots, so its buttons hold still as prices and modes change.
+const QTY_SLOT: f32 = 158.0;
+const PRICE_CHIP: f32 = 72.0;
+const SEND_W: f32 = 126.0;
+/// Commands whose answers a pane waits for.
+const MAX_ASKED: usize = 64;
+/// How long to wait for the core's answer before saying it hasn't come.
+const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The selected series' strip: one line of controls, always the same.
+const STRIP_H: f32 = MIN_HIT + 9.0;
+/// A control's smallest height (`docs/design.md`).
+const MIN_HIT: f32 = 20.0;
 
 /// One table column: a quote field of one side, or the strike.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -210,11 +257,17 @@ pub fn write_dte(
 }
 
 /// `Nov 9`: an expiry as its chip and the title name it.
-fn chip_date(e: CivilDate) -> String {
+fn write_chip_date(out: &mut impl std::fmt::Write, e: CivilDate) -> std::fmt::Result {
     let month = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][usize::from(e.month.clamp(1, 12)) - 1];
-    format!("{month} {}", e.day)
+    write!(out, "{month} {}", e.day)
+}
+
+fn chip_date(e: CivilDate) -> String {
+    let mut s = String::new();
+    let _ = write_chip_date(&mut s, e);
+    s
 }
 
 /// A cell's text for a quote field (`—` when missing).
@@ -269,15 +322,41 @@ pub struct ChainView {
     product: Product,
     /// The expiry asked for (`None`: the soonest).
     expiry: Option<CivilDate>,
+    /// `expiry` is One-click's pin, not the trader's choice.
+    expiry_pinned: bool,
     /// The expiries shown in the header, as of the last render.
     expiries: Vec<CivilDate>,
     /// The selected strike and side (`None`: none yet; the view centers on the money).
     selected: Option<Price>,
     side: Right,
+    /// The selected cell of that side: Enter takes it.
+    cell: Cell,
     /// Rows shown last frame: Page Up/Down move by it.
     page: usize,
-    /// A one-line message in the footer (Enter before tickets exist).
-    note: Option<&'static str>,
+    /// A one-line message in the footer (a refusal of a press with no ticket open).
+    note: Option<String>,
+    /// The account, the trade cache's revision (`PaneTrade`; quantity is `chain_ticket::size_key`).
+    trade: PaneTrade,
+    ticket: Option<Ticket>,
+    /// A click on a bid or ask sends: off in every new pane, never saved.
+    one_click: bool,
+    /// Commands waiting for the core's answer (the newest [`MAX_ASKED`]).
+    asked: Vec<CommandId>,
+    /// Focused in an active window as of the last frame: what a click found. Input's capture
+    /// phase moves the focus before the pane hears the click, so now can't say.
+    aimed: bool,
+    /// A quote older than this is stale (the account's guard, as of the last frame).
+    stale_after_ms: i64,
+    /// The market clock as of the last frame.
+    now: Option<lines_core::UtcMillis>,
+    /// No quote in view is fresh.
+    quotes_stale: bool,
+    /// When the ticket's order went.
+    sent_at: Option<std::time::Instant>,
+    /// Orders the core accepted: the broker can still reject them on arrival.
+    watching: Vec<OrderId>,
+    /// Screenshot fixture, until the chain has data.
+    shot: Option<ShotTicket>,
     glyphs: Glyphs,
     bounds: Bounds<Pixels>,
     /// Column x ranges last frame, for clicks: (call cell start, put cell start, row top).
@@ -298,6 +377,92 @@ struct Frame {
     line_at: Option<usize>,
     last: Option<Price>,
     has_chain: bool,
+    expiry: Option<CivilDate>,
+    /// The account's positions and working orders on this expiry (capacity kept).
+    marks: Vec<Mark>,
+    /// One-click is on: a press sends, so the rows don't move at all.
+    hold: bool,
+    /// Holding `held` now.
+    holding: bool,
+    /// The strikes held in their places (capacity kept), and the price row's slot.
+    held: Vec<Price>,
+    held_line: Option<usize>,
+    /// The selection last frame.
+    last_selected: Option<Price>,
+}
+
+/// What the account has on one option series.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Mark {
+    strike: Price,
+    right: Right,
+    position: i64,
+    avg: Option<f64>,
+    order: Option<(OrderId, Side, i64, Option<Price>)>,
+    /// Working orders on it.
+    orders: u32,
+}
+
+impl Frame {
+    fn mark(&self, strike: Price, right: Right) -> Option<&Mark> {
+        self.marks
+            .iter()
+            .find(|m| m.strike == strike && m.right == right)
+    }
+
+    fn refresh_marks(
+        &mut self,
+        st: &crate::trading::TradeState,
+        account: &AccountId,
+        product: lines_core::ProductId,
+    ) {
+        self.marks.clear();
+        let Some(expiry) = self.expiry else {
+            return;
+        };
+        for p in st.positions_of(account) {
+            if p.contract.product != product {
+                continue;
+            }
+            if let Some(k) = p.contract.option_key().filter(|k| k.expiry == expiry) {
+                self.marks.push(Mark {
+                    strike: k.strike,
+                    right: k.right,
+                    position: p.qty,
+                    avg: p.avg_price,
+                    order: None,
+                    orders: 0,
+                });
+            }
+        }
+        for o in st.open_orders_of(account) {
+            if o.contract.product != product {
+                continue;
+            }
+            let Some(k) = o.contract.option_key().filter(|k| k.expiry == expiry) else {
+                continue;
+            };
+            let first = (o.id, o.side, o.qty.0 - o.filled.0, o.kind.prices().next());
+            match self
+                .marks
+                .iter_mut()
+                .find(|m| m.strike == k.strike && m.right == k.right)
+            {
+                Some(m) => {
+                    m.order = m.order.or(Some(first));
+                    m.orders += 1;
+                }
+                None => self.marks.push(Mark {
+                    strike: k.strike,
+                    right: k.right,
+                    position: 0,
+                    avg: None,
+                    order: Some(first),
+                    orders: 1,
+                }),
+            }
+        }
+    }
 }
 
 impl Frame {
@@ -309,24 +474,92 @@ impl Frame {
         fit: usize,
     ) {
         self.last = last;
+        // The rows on screen, before they're replaced: they stay put while the selection is
+        // among them, so a press never lands on a strike that moved under the pointer.
+        // By the strike on top, not its index: a strike listed since moves the indices, not them.
+        let top = self.rows.first().map(|r| r.strike);
+        let shown = self.rows.len();
         self.rows.clear();
         let Some(chain) = chain else {
             self.has_chain = false;
             return;
         };
         self.has_chain = true;
+        let fit_rows = fit.saturating_sub(1).clamp(1, MAX_ROWS);
+        // One-click: the same strikes in the same places, whatever is listed or priced, until the
+        // trader moves the selection off them.
+        let keep = self.hold
+            && self.holding
+            && (selected == self.last_selected
+                || selected
+                    .is_none_or(|s| self.held[..fit_rows.min(self.held.len())].contains(&s)));
+        self.last_selected = selected;
+        if keep {
+            // More room: the next strikes go below, moving nothing.
+            while self.held.len() < fit_rows {
+                let after = self.held.last().copied();
+                let next = chain
+                    .rows
+                    .iter()
+                    .find(|r| after.is_none_or(|a| r.strike > a));
+                match next {
+                    Some(r) => self.held.push(r.strike),
+                    None => break,
+                }
+            }
+            for &strike in self.held.iter().take(fit_rows) {
+                self.rows.push(match chain.find(strike) {
+                    Ok(i) => chain.rows[i],
+                    Err(_) => lines_core::ChainRow {
+                        strike,
+                        call: None,
+                        put: None,
+                    },
+                });
+            }
+            // The price row keeps its slot (its tag and the in-the-money shading read the live
+            // price); kept apart, so a frame with less room doesn't lose it.
+            self.line_at = self.held_line.filter(|l| *l <= self.rows.len());
+            return;
+        }
         let center = selected
             .and_then(|s| chain.find(s).ok())
             .or_else(|| last.and_then(|l| chain.atm(l)))
             .unwrap_or(chain.rows.len() / 2);
+        let was = top
+            .and_then(|t| chain.find(t).ok())
+            .map_or(0..0, |start| start..start + shown);
         // One row is the underlying's price when it falls in view.
-        let range = window_rows(chain, fit.saturating_sub(1).clamp(1, MAX_ROWS), center);
+        let selected_at = selected.and_then(|s| chain.find(s).ok());
+        let range = window_held(chain.rows.len(), fit_rows, center, selected_at, was);
         self.first_row = range.start;
         self.line_at = last
             .map(|l| chain.split_at(l))
             .filter(|si| *si >= range.start && *si <= range.end)
             .map(|si| si - range.start);
         self.rows.extend_from_slice(&chain.rows[range]);
+        self.holding = self.hold;
+        if self.hold {
+            self.held.clear();
+            self.held.extend(self.rows.iter().map(|r| r.strike));
+            self.held_line = self.line_at;
+        }
+    }
+
+    /// The selection `delta` strikes on, among the rows on screen; the middle one to start.
+    fn step_held(&self, selected: Option<Price>, delta: i64) -> Option<Price> {
+        let last = self.rows.len().checked_sub(1)? as i64;
+        let to = match selected.and_then(|s| self.rows.iter().position(|r| r.strike == s)) {
+            Some(i) => (i as i64 + delta).clamp(0, last),
+            None => last / 2,
+        };
+        Some(self.rows[to as usize].strike)
+    }
+
+    /// The trader moved the rows: nothing is held, and the next frame centers.
+    fn release(&mut self) {
+        self.rows.clear();
+        self.holding = false;
     }
 }
 
@@ -334,11 +567,36 @@ impl Frame {
 #[derive(Copy, Clone, Debug, Default)]
 struct Layout {
     strike_x: (f32, f32),
+    /// Each side's bid and ask cells: [start, end] (calls, then puts).
+    calls: Quotes,
+    puts: Quotes,
+    /// The Pos cell's action word, per side (`None`: no Pos column).
+    actions: Option<[(f32, f32); 2]>,
     first_row: usize,
     /// Visual rows drawn (chain rows plus the price row).
     rows: usize,
     /// The price row's visual index.
     line_at: Option<usize>,
+}
+
+/// Where one side's bid and ask cells are.
+#[derive(Copy, Clone, Debug, Default)]
+struct Quotes {
+    bid: (f32, f32),
+    ask: (f32, f32),
+}
+
+impl Quotes {
+    /// The quote cell at `x`, if it's on one.
+    fn at(&self, x: f32) -> Option<Cell> {
+        if x >= self.bid.0 && x < self.bid.1 {
+            Some(Cell::Bid)
+        } else if x >= self.ask.0 && x < self.ask.1 {
+            Some(Cell::Ask)
+        } else {
+            None
+        }
+    }
 }
 
 impl EventEmitter<FeedChanged> for ChainView {}
@@ -360,8 +618,16 @@ impl Pane for ChainView {
         &self.focus
     }
 
-    /// Nothing to save: an expiry passes, and the view starts on the money.
-    fn save_state(&self, _doc: &mut PaneDoc) {}
+    /// The account. No view state: an expiry passes, and the view starts on the money.
+    fn save_state(&self, doc: &mut PaneDoc) {
+        doc.trade = self.trade.doc();
+    }
+
+    /// The account's orders and positions moved, or the core answered.
+    fn changed(&mut self) -> bool {
+        let moved = self.trade.changed();
+        self.take_answers() || moved
+    }
 
     fn seen_revision(&mut self) -> &mut u64 {
         &mut self.seen_revision
@@ -371,9 +637,22 @@ impl Pane for ChainView {
         self.picker.close();
         self.store = feed.store().clone();
         self.product = self.store.read().product.clone();
+        let follow = feed.sub.is_some();
         self.feed = feed;
         self.expiry = None;
+        self.expiry_pinned = false;
         self.selected = None;
+        // A ticket or a One-click press belongs to the symbol it was opened on, and so do the
+        // rows the last frame drew.
+        self.leave_ticket();
+        self.frame.release();
+        self.frame.marks.clear();
+        self.frame.has_chain = false;
+        self.layout = Layout::default();
+        self.quotes_stale = false;
+        self.one_click = false;
+        self.note = None;
+        self.trade.feed_changed(&self.store, follow, cx);
         self.seen_revision = u64::MAX;
         cx.notify();
     }
@@ -389,6 +668,13 @@ impl ChainView {
         let store = feed.store().clone();
         let product = store.read().product.clone();
         pane::watch_store(cx);
+        // Paper fills see this pane's own feed, its option quotes included.
+        if feed.sub.is_some()
+            && let Some(t) = Trading::try_global(cx)
+        {
+            t.follow(&store);
+        }
+        let shot = Trading::try_global(cx).and_then(|t| t.start_chain_ticket.clone());
         ChainView {
             feed,
             common: PaneCommon::default(),
@@ -400,28 +686,738 @@ impl ChainView {
             seen_revision: u64::MAX,
             product,
             expiry: None,
+            expiry_pinned: false,
             expiries: Vec::with_capacity(MAX_EXPIRIES),
             selected: None,
             side: Right::Call,
+            cell: Cell::Ask,
             page: 10,
             note: None,
+            trade: PaneTrade::new(None, cx),
+            ticket: None,
+            one_click: false,
+            asked: Vec::new(),
+            aimed: false,
+            stale_after_ms: lines_trading::risk::OptionGuard::default().stale_after_ms,
+            now: None,
+            quotes_stale: false,
+            sent_at: None,
+            watching: Vec::new(),
+            shot,
             glyphs: Glyphs::new(TEXT_PX),
             bounds: Bounds::default(),
             layout: Layout::default(),
             frame: Frame {
                 rows: Vec::with_capacity(MAX_ROWS),
+                // Past any real count of series on one expiry (it would grow once, and keep it).
+                marks: Vec::with_capacity(512),
+                held: Vec::with_capacity(MAX_ROWS),
                 ..Frame::default()
             },
         }
     }
 
-    /// Taking typed text now (the symbol picker).
+    /// Taking typed text now (the symbol picker, the ticket's keys).
     pub fn takes_text(&self) -> bool {
-        self.picker.is_open()
+        self.picker.is_open() || self.ticket.is_some()
+    }
+
+    /// The pane's saved account, as the other trading panes restore it.
+    pub fn restore_trade(&mut self, doc: Option<&TradeDoc>, cx: &mut Context<Self>) {
+        self.trade = PaneTrade::new(doc, cx);
+    }
+
+    /// The One-click switch.
+    pub fn toggle_one_click(&mut self, cx: &mut Context<Self>) {
+        self.one_click = !self.one_click;
+        // Its pin ends with it: the pane follows the soonest expiry again.
+        if !self.one_click && std::mem::take(&mut self.expiry_pinned) {
+            self.expiry = None;
+        }
+        cx.notify();
+    }
+
+    /// The next account: a ticket on the last one doesn't carry over.
+    pub fn next_account(&mut self, cx: &mut Context<Self>) {
+        if let Some(t) = Trading::try_global(cx) {
+            let next = t.next_account(self.trade.account.as_ref());
+            self.trade.account = next;
+            self.leave_ticket();
+            self.one_click = false;
+            self.note = self
+                .trade
+                .account
+                .as_ref()
+                .and_then(|a| t.account(a))
+                .map(|i| format!("Account: {}", i.name));
+            self.seen_revision = u64::MAX;
+            cx.notify();
+        }
+    }
+
+    /// Close the ticket; an order on its way still gets its answer shown (in the footer).
+    fn leave_ticket(&mut self) {
+        if let Some(id) = self.ticket.take().and_then(|t| t.sent) {
+            self.remember(id);
+        }
+        self.sent_at = None;
+    }
+
+    /// Wait for a command's answer; the answers kept are finite, so only the newest are.
+    fn remember(&mut self, id: CommandId) {
+        if self.asked.len() >= MAX_ASKED {
+            self.asked.remove(0);
+        }
+        self.asked.push(id);
+    }
+
+    /// The market or trading state is mid-update this instant: say so rather than act on a guess.
+    fn busy(&mut self, cx: &App) -> bool {
+        let trading = Trading::try_global(cx).is_some();
+        let busy = self.store.try_read().is_none() || (trading && self.trade.try_cache().is_none());
+        if busy {
+            self.note = Some("Market data busy; try again".to_owned());
+        }
+        busy
+    }
+
+    /// Contracts of plain working orders on `side` of this series: a close doesn't touch them.
+    fn other_working(&self, key: OptionKey, side: Side) -> i64 {
+        self.working_on(key, side, false)
+    }
+
+    /// Contracts working on `side` of this series, a close's too if asked.
+    fn working_on(&self, key: OptionKey, side: Side, closes: bool) -> i64 {
+        let Some(a) = self.trade.account.as_ref() else {
+            return 0;
+        };
+        self.trade.try_cache().map_or(0, |st| {
+            st.open_orders(a, self.contract(key))
+                .filter(|o| o.side == side && (closes || !o.reduce_only))
+                .map(|o| o.qty.0 - o.filled.0)
+                .sum()
+        })
+    }
+
+    /// A close is already working on this series.
+    fn closing(&self, account: &AccountId, key: OptionKey) -> bool {
+        self.trade.try_cache().is_some_and(|st| {
+            st.open_orders(account, self.contract(key))
+                .any(|o| o.reduce_only)
+        })
+    }
+
+    fn rules(&self) -> Option<lines_core::OptionRules> {
+        self.product.options()
+    }
+
+    fn contract(&self, key: OptionKey) -> ContractKey {
+        ContractKey::option(self.product.id, key.expiry, key.strike, key.right)
+    }
+
+    /// A series' quote in the store right now.
+    fn quote(&self, key: OptionKey) -> Option<OptionQuote> {
+        let d = self.store.try_read()?;
+        let chain = d.chains.chain(key.expiry)?;
+        let row = chain.rows.iter().find(|r| r.strike == key.strike)?;
+        match key.right {
+            Right::Call => row.call,
+            Right::Put => row.put,
+        }
+    }
+
+    /// The option order size of this underlying: shared by its chain panes, not its shares.
+    fn size(&self, cx: &App) -> i64 {
+        let s = crate::picker_view::settings(cx);
+        crate::dom_trade::order_size(
+            &s.order_sizes,
+            &ticket::size_key(self.product.symbol),
+            s.new_panes.default_qty,
+        )
+    }
+
+    fn set_size(&mut self, q: i64, cx: &mut Context<Self>) {
+        // An unavailable pane's product may be a stand-in: never change a real symbol's size.
+        if pane::unavailable_title(&self.feed).is_some() {
+            return;
+        }
+        let key = ticket::size_key(self.product.symbol);
+        crate::picker_view::update_settings(cx, |s| {
+            s.order_sizes.insert(key, q);
+        });
+        trade_bar::size_changed();
+        if let Some(t) = self.ticket.as_mut() {
+            t.refused = None;
+        }
+        cx.notify();
+    }
+
+    /// The position on a series.
+    fn position(&self, key: OptionKey) -> i64 {
+        let Some(a) = self.trade.account.as_ref() else {
+            return 0;
+        };
+        self.trade
+            .try_cache()
+            .and_then(|st| st.position(a, self.contract(key)).map(|p| p.qty))
+            .unwrap_or(0)
+    }
+
+    /// Why the core wouldn't take this limit on the pane's account, as far as the UI can tell.
+    fn refusal_of(
+        &self,
+        key: OptionKey,
+        side: Side,
+        price: Option<Price>,
+        close: bool,
+        cx: &App,
+    ) -> Option<String> {
+        let Some(t) = Trading::try_global(cx) else {
+            return Some("trading is not running".to_owned());
+        };
+        let Some(id) = self.trade.account.as_ref() else {
+            return Some("no account".to_owned());
+        };
+        let info = t.account(id);
+        // A venue account is never traded here in options: the core's words, before the press.
+        let read_only = t.read_only_reason(id).or_else(|| {
+            let venue = info.as_ref().filter(|i| !i.paper)?.venue?;
+            Some(ticket::paper_only(&t.venue_status(venue)?.0))
+        });
+        let now = t.now(&self.store);
+        let at_start = info.as_ref().is_some_and(|i| i.rules.is_some());
+        // Only an order that opens: exits always pass a guardrail.
+        // As the core counts it: the position less what's already working to close it.
+        let opens = !close
+            && ticket::order_opens(
+                self.size(cx),
+                self.position(key),
+                side,
+                self.working_on(key, side, true),
+            );
+        let (prop, locked) = match self.trade.try_cache() {
+            Some(st) => (
+                ticket::has_rules(&st, id, at_start),
+                st.guard(id).filter(|_| opens).and_then(|g| {
+                    let money = crate::picker_view::settings(cx).pnl_display.money();
+                    trade_bar::guard_line(
+                        g.state,
+                        g.reason.as_deref().unwrap_or(""),
+                        g.until,
+                        now,
+                        money,
+                    )
+                }),
+            ),
+            None => (at_start, None),
+        };
+        let guard = info
+            .as_ref()
+            .map(|i| i.option_guard.clone())
+            .unwrap_or_default();
+        let q = self.quote(key);
+        ticket::refusal(
+            &ticket::Check {
+                product: &self.product,
+                contract: self.contract(key),
+                guard: &guard,
+                quote: q.as_ref(),
+                now,
+                prop,
+                closed: t.check_sessions
+                    && now.is_some_and(|n| {
+                        !lines_trading::paper::option_session_open(self.product.id, n)
+                    }),
+                locked: locked.as_deref(),
+                read_only: read_only.as_deref(),
+            },
+            price,
+            close,
+        )
+    }
+
+    fn submit(&self, cmd: lines_trading::Command, cx: &App) -> Option<CommandId> {
+        Trading::try_global(cx)
+            .map(|t| t.submit(lines_trading::Source::Dom, std::time::Instant::now(), cmd))
+    }
+
+    /// The quote, unless it's past the guard's limit: a stale one prices nothing.
+    fn live_quote(&self, key: OptionKey) -> Option<OptionQuote> {
+        let q = self.quote(key)?;
+        let guard = lines_trading::risk::OptionGuard {
+            stale_after_ms: self.stale_after_ms,
+            ..Default::default()
+        };
+        let stale = self.now.is_some_and(|n| ticket::quote_stale(&q, &guard, n));
+        (!stale).then_some(q)
+    }
+
+    /// Open the ticket on a cell of a series.
+    fn open_ticket(&mut self, key: OptionKey, cell: Cell, cx: &App) {
+        let Some(rules) = self.rules() else {
+            return;
+        };
+        self.note = None;
+        if self.busy(cx) {
+            return;
+        }
+        self.leave_ticket();
+        let q = self.live_quote(key);
+        self.ticket = Some(Ticket::new(key, cell.side(), q.as_ref(), rules));
+    }
+
+    /// A click on a quote cell with One-click on: a limit at that side, at once.
+    fn send_click(&mut self, key: OptionKey, cell: Cell, cx: &mut Context<Self>) {
+        self.note = None;
+        if self.busy(cx) {
+            return;
+        }
+        {
+            self.leave_ticket();
+            let q = self.quote(key);
+            let price = ticket::click_limit(cell, q.as_ref());
+            if let Some(why) = self.refusal_of(key, cell.side(), price, false, cx) {
+                self.note = Some(format!("Not sent: {why}"));
+                return;
+            }
+            let Some(account) = self.trade.account.clone() else {
+                return;
+            };
+            let qty = self.size(cx);
+            let contract = self.contract(key);
+            if let Some(cmd) = ticket::click_order(account, contract, cell, q.as_ref(), qty) {
+                self.ask(cmd, cx);
+            }
+        }
+    }
+
+    /// Flatten or Cancel: for every series of the underlying the account has anything on. Only
+    /// a read-only account refuses them: never the feed, the quote, One-click or the guard.
+    pub fn run_exit(
+        &mut self,
+        flatten: bool,
+        source: lines_trading::Source,
+        cx: &mut Context<Self>,
+    ) {
+        let what = if flatten { "Flatten" } else { "Cancel all" };
+        self.note = None;
+        let Some(t) = Trading::try_global(cx) else {
+            self.note = Some("trading is not running".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(account) = self.trade.account.clone() else {
+            self.note = Some("no account".to_owned());
+            cx.notify();
+            return;
+        };
+        if let Some(why) = t.read_only_reason(&account) {
+            self.note = Some(format!("{what} off: {why}"));
+            cx.notify();
+            return;
+        }
+        // The UI never blocks on the trading core: if its state is mid-update this instant, say
+        // so and let the press be repeated (the lock is held only for an update).
+        let Some(contracts) = self
+            .trade
+            .try_cache()
+            .map(|st| ticket::held_contracts(&st, &account, self.product.id))
+        else {
+            self.note = Some(format!("{what}: trading state busy; press again"));
+            cx.notify();
+            return;
+        };
+        if contracts.is_empty() {
+            self.note = Some(format!(
+                "{what}: nothing on {} options",
+                self.product.symbol
+            ));
+        }
+        for cmd in ticket::exit_commands(&account, &contracts, flatten) {
+            let id = t.submit(source, std::time::Instant::now(), cmd);
+            self.remember(id);
+        }
+        cx.notify();
+    }
+
+    /// Flatten and Cancel for the header or footer, while there's anything to act on. Cancel to
+    /// the left: it goes first, and Flatten doesn't move when it does.
+    fn exit_buttons(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let t = self.theme;
+        let account = self.trade.account.as_ref()?;
+        let (orders, held) = {
+            let st = self.trade.try_cache()?;
+            let held = ticket::held_contracts(&st, account, self.product.id);
+            let orders = held
+                .iter()
+                .any(|c| st.open_orders(account, *c).next().is_some());
+            (orders, !held.is_empty())
+        };
+        if !held {
+            return None;
+        }
+        let symbol = self.product.symbol;
+        let button = |flatten: bool, cx: &mut Context<Self>| {
+            let label = ticket::exit_label(symbol, flatten);
+            let cmd = if flatten {
+                crate::commands::TradeCmd::Flatten
+            } else {
+                crate::commands::TradeCmd::CancelAll
+            };
+            let el = div()
+                .id(if flatten {
+                    "chain-flatten"
+                } else {
+                    "chain-cancel-all"
+                })
+                .flex_shrink_0()
+                .cursor_pointer()
+                .px_1()
+                .h(px(MIN_HIT))
+                .flex()
+                .items_center()
+                .border_1()
+                .rounded_sm()
+                .border_color(t.text_dim)
+                .text_color(t.text_main)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(label.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.focus.focus(window, cx);
+                        this.run_exit(flatten, lines_trading::Source::Dom, cx);
+                    }),
+                );
+            crate::tooltip::tip_div(el, &label, Some(crate::commands::Command::Trade(cmd)), &t)
+        };
+        let cancel = orders.then(|| button(false, cx));
+        let flatten = button(true, cx);
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_shrink_0()
+                .items_center()
+                .gap_1()
+                .children(cancel)
+                .child(flatten),
+        )
+    }
+
+    fn ask(&mut self, cmd: lines_trading::Command, cx: &App) {
+        if let Some(id) = self.submit(cmd, cx) {
+            self.remember(id);
+        }
+    }
+
+    /// Enter on the ticket: send what the button says, once.
+    fn send_ticket(&mut self, cx: &mut Context<Self>) {
+        self.note = None;
+        if self.busy(cx) {
+            return;
+        }
+        let Some(t) = self.ticket.as_ref() else {
+            return;
+        };
+        if t.sent.is_some() {
+            return;
+        }
+        let (key, side, close, price) = (t.key, t.side, t.close, t.price);
+        if self.refusal_of(key, side, price, close, cx).is_some() {
+            return; // already on the ticket, in the core's words
+        }
+        let Some(account) = self.trade.account.clone() else {
+            return;
+        };
+        let built = self.ticket.as_ref().map(|t| {
+            ticket::ticket_order(
+                t,
+                account.clone(),
+                self.contract(key),
+                self.size(cx),
+                self.position(key),
+                close && self.closing(&account, key),
+            )
+        });
+        let cmd = match built {
+            Some(Ok(cmd)) => cmd,
+            Some(Err(why)) => {
+                if let Some(t) = self.ticket.as_mut() {
+                    t.refused = Some(why);
+                }
+                return;
+            }
+            None => return,
+        };
+        let id = self.submit(cmd, cx);
+        self.sent_at = Some(std::time::Instant::now());
+        if let Some(t) = self.ticket.as_mut() {
+            t.sent = id;
+            t.refused = None;
+        }
+    }
+
+    /// The row's Close: reduce-only, the whole position, at the mid.
+    fn press_close(&mut self, key: OptionKey, cx: &mut Context<Self>) {
+        let (Some(rules), Some(account)) = (self.rules(), self.trade.account.clone()) else {
+            return;
+        };
+        self.note = None;
+        if self.busy(cx) {
+            return;
+        }
+        let position = self.position(key);
+        // A close already working: another would only sit behind it, so it says so.
+        if self.closing(&account, key) {
+            self.note = Some("Not sent: a close is already working; Cancel it first".to_owned());
+            return;
+        }
+        let q = self.quote(key);
+        match ticket::close_command(account, self.contract(key), position, q.as_ref(), rules) {
+            Some(cmd) => match self.refusal_of(key, Side::Sell, order_price(&cmd), true, cx) {
+                Some(why) => self.note = Some(format!("Not sent: {why}")),
+                None => {
+                    let side = if position > 0 { Side::Sell } else { Side::Buy };
+                    let others = self.other_working(key, side);
+                    self.ask(cmd, cx);
+                    if others > 0 {
+                        self.note = Some(format!("Close sent. {}", leaves_working(others)));
+                    }
+                }
+            },
+            None if position != 0 => {
+                let why = self
+                    .refusal_of(key, Side::Sell, None, true, cx)
+                    .unwrap_or_else(|| "no mid to close at".to_owned());
+                self.note = Some(format!("Not sent: {why}"));
+            }
+            None => {}
+        }
+    }
+
+    fn press_cancel(&mut self, order: OrderId, cx: &mut Context<Self>) {
+        let Some(account) = self.trade.account.clone() else {
+            return;
+        };
+        self.note = None;
+        let cmd = lines_trading::Command::CancelOrder { account, order };
+        self.ask(cmd, cx);
+    }
+
+    /// The core's answers to what this pane sent. Returns whether anything changed.
+    fn take_answers(&mut self) -> bool {
+        let sent = self.ticket.as_ref().and_then(|t| t.sent);
+        if sent.is_none() && self.asked.is_empty() && self.watching.is_empty() {
+            return false;
+        }
+        let Some(st) = self.trade.try_cache() else {
+            return false;
+        };
+        let answer = sent.and_then(|id| st.result(id).cloned());
+        let mut note = None;
+        let mut accepted: Vec<OrderId> = Vec::new();
+        let asked = &mut self.asked;
+        let before = asked.len();
+        asked.retain(|id| match st.result(*id) {
+            Some(Err(e)) => {
+                note = Some(format!("Refused: {}", e.message));
+                false
+            }
+            Some(Ok(ids)) => {
+                accepted.extend_from_slice(ids);
+                false
+            }
+            None => true,
+        });
+        let mut changed = asked.len() != before;
+        if let Some(Ok(ids)) = &answer {
+            accepted.extend_from_slice(ids);
+        }
+        self.watching.extend(accepted);
+        let excess = self.watching.len().saturating_sub(MAX_ASKED);
+        self.watching.drain(..excess);
+        // Accepted isn't filled: the broker can still reject an order on arrival, and a Flatten
+        // has no fill on a stale quote or a missing side, so it says the position stayed.
+        self.watching.retain(|id| {
+            use lines_trading::{OrderState, Role};
+            let Some(o) = st.order(*id) else {
+                return true;
+            };
+            let flatten = o.role == Role::Flatten;
+            match &o.state {
+                OrderState::Rejected { reason } => {
+                    note = Some(format!("Rejected: {reason}"));
+                    false
+                }
+                OrderState::Cancelled if flatten => {
+                    note = Some(
+                        "Flatten found no usable quote on its side: the position is still open"
+                            .to_owned(),
+                    );
+                    false
+                }
+                OrderState::Submitted => true,
+                s => flatten && !s.is_terminal(),
+            }
+        });
+        drop(st);
+        if let Some(n) = note {
+            self.note = Some(n);
+            changed = true;
+        }
+        match answer {
+            Some(Ok(_)) => {
+                self.ticket = None;
+                self.sent_at = None;
+                changed = true;
+            }
+            Some(Err(e)) => {
+                if let Some(t) = self.ticket.as_mut() {
+                    t.sent = None;
+                    t.refused = Some(e.message);
+                }
+                self.sent_at = None;
+                changed = true;
+            }
+            // Still on its way, however long: forgetting it would let Enter send it twice. The
+            // ticket says so after a while, and Esc leaves it with the answer still expected.
+            None => {
+                let late = self.sent_at.is_some_and(|at| at.elapsed() >= ANSWER_WAIT);
+                if late && let Some(t) = self.ticket.as_mut() {
+                    let waiting = "no answer yet from the trading core; Esc leaves it on its way";
+                    if t.refused.as_deref() != Some(waiting) {
+                        t.refused = Some(waiting.to_owned());
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// Keys while the ticket is open: `true` when one was taken.
+    fn ticket_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(rules) = self.rules() else {
+            return false;
+        };
+        let k = &ev.keystroke;
+        let shift = k.modifiers.shift;
+        match k.key.as_str() {
+            "escape" => self.leave_ticket(),
+            "enter" if self.ticket.as_ref().is_some_and(|t| t.sent.is_some()) => {}
+            // A held key never sends an order.
+            "enter" if ev.is_held => {}
+            "enter" => self.send_ticket(cx),
+            "up" | "down" if shift => {
+                let closing = self.ticket.as_ref().is_some_and(|t| t.close);
+                if !closing {
+                    let q = crate::dom_trade::step_qty(self.size(cx), k.key == "up");
+                    self.set_size(q, cx);
+                }
+            }
+            "up" | "down" => {
+                if let Some(t) = self.ticket.as_mut() {
+                    t.step(k.key == "up", rules);
+                }
+            }
+            "tab" => self.toggle_close(cx),
+            "backspace" => {
+                let product = self.product.clone();
+                if let Some(t) = self.ticket.as_mut() {
+                    t.backspace(&product);
+                }
+            }
+            _ => {
+                let c = k.key_char.as_deref().and_then(|c| c.chars().next());
+                let product = self.product.clone();
+                let took = match (c, self.ticket.as_mut()) {
+                    (Some(c), Some(t)) => t.type_char(c, &product),
+                    _ => false,
+                };
+                if !took {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// The ticket closes the position instead (when its side is against one), or back.
+    fn toggle_close(&mut self, cx: &mut Context<Self>) {
+        let Some(rules) = self.rules() else {
+            return;
+        };
+        let Some((key, side, close)) = self.ticket.as_ref().map(|t| (t.key, t.side, t.close))
+        else {
+            return;
+        };
+        if !close && ticket::closes(self.position(key), side).is_none() {
+            return;
+        }
+        let q = self.live_quote(key);
+        if let Some(t) = self.ticket.as_mut() {
+            t.set_close(!close, q.as_ref(), rules);
+        }
+        cx.notify();
+    }
+
+    /// The screenshot fixture, once the chain has data.
+    fn apply_shot(&mut self, cx: &mut Context<Self>) {
+        let Some(shot) = self.shot.clone() else {
+            return;
+        };
+        let expiry = match self.store.try_read() {
+            Some(d) => d.chains.expiries().next(),
+            None => return,
+        };
+        let Some(expiry) = expiry else {
+            return;
+        };
+        self.one_click = shot.one_click;
+        let Some((cell, strike, right)) = shot.open else {
+            self.shot = None;
+            return;
+        };
+        let Ok(units) = self.product.price.scale.parse_decimal(&strike) else {
+            return;
+        };
+        let key = OptionKey {
+            expiry,
+            strike: Price(units),
+            right,
+        };
+        // A Close needs the scripted position, which arrives after the first frames.
+        if shot.close && self.position(key) == 0 {
+            return;
+        }
+        self.shot = None;
+        self.selected = Some(key.strike);
+        self.side = right;
+        self.cell = cell;
+        self.open_ticket(key, cell, cx);
+        if shot.close {
+            self.toggle_close(cx);
+        }
+        if let Some(at) = shot.at
+            && let Ok(units) = self.product.price.scale.parse_decimal(&at)
+            && let Some(t) = self.ticket.as_mut()
+        {
+            t.set_price(Price(units));
+        }
     }
 
     /// Move the selection by `delta` strikes (from the money if nothing is selected yet).
     fn move_strike(&mut self, delta: i64) {
+        // One-click holds the rows: keys move only among the strikes on screen, never onto one
+        // the hold keeps out or below them.
+        if self.frame.holding {
+            if let Some(s) = self.frame.step_held(self.selected, delta) {
+                self.selected = Some(s);
+            }
+            return;
+        }
         let Some(d) = self.store.try_read() else {
             return;
         };
@@ -468,8 +1464,12 @@ impl ChainView {
         let i = all.iter().position(|e| *e == cur).unwrap_or(0) as i64;
         let j = (i + delta).clamp(0, all.len() as i64 - 1) as usize;
         if all[j] != cur {
+            drop(d);
             self.expiry = Some(all[j]);
+            self.expiry_pinned = false;
             self.selected = None; // that strike may not exist there: back to the money
+            self.frame.release();
+            self.leave_ticket();
         }
     }
 
@@ -496,24 +1496,56 @@ impl ChainView {
         if m.control || m.alt || m.platform {
             return;
         }
+        if self.ticket.is_some() {
+            if self.ticket_key(ev, cx) {
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            // Keys the ticket doesn't use do nothing behind it, but a letter still opens the
+            // symbol picker, as in every pane.
+            if let Some(letter) = k
+                .key_char
+                .as_deref()
+                .filter(|c| c.len() == 1 && c.as_bytes()[0].is_ascii_alphabetic())
+            {
+                self.picker.open(letter, cx);
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
         self.note = None;
         match k.key.as_str() {
+            // With One-click on the size shows on its switch; otherwise it shows on the ticket.
+            "up" | "down" if m.shift && self.one_click => {
+                let q = crate::dom_trade::step_qty(self.size(cx), k.key == "up");
+                self.set_size(q, cx);
+            }
             "up" => self.move_strike(-1),
             "down" => self.move_strike(1),
             "pageup" => self.move_strike(-(self.page.max(1) as i64)),
             "pagedown" => self.move_strike(self.page.max(1) as i64),
-            "home" => self.selected = None,
+            "home" => {
+                self.selected = None;
+                self.frame.release();
+            }
             "left" => self.step_expiry(-1),
             "right" => self.step_expiry(1),
+            "tab" if m.shift => self.cell = self.cell.other(),
             "tab" => {
                 self.side = match self.side {
                     Right::Call => Right::Put,
                     Right::Put => Right::Call,
                 }
             }
-            "enter" => {
-                self.note = Some("Order tickets come with paper options trading (not yet)");
-            }
+            // A held key never opens or sends: one press, one ticket.
+            "enter" if ev.is_held => {}
+            "enter" => match self.selected_key() {
+                Some(key) => self.open_ticket(key, self.cell, cx),
+                // Nothing selected yet: the first press selects the money.
+                None => self.move_strike(0),
+            },
             _ => {
                 if let Some(letter) = k
                     .key_char
@@ -555,9 +1587,18 @@ impl ChainView {
 
     /// A click in the table: select the row's strike, and the side by which half was hit.
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The click that only brings the pane forward aims at nothing: One-click waits for the
+        // next. As of the last frame: the workspace has already focused the pane by now.
+        let focused = self.aimed;
         self.focus.focus(window, cx);
+        // A click that closes the picker does only that: never a press on what's under it.
         if self.picker.close() {
             cx.notify();
+            return;
+        }
+        // Nothing is drawn there: an unavailable pane acts on nothing.
+        if pane::unavailable_title(&self.feed).is_some() {
+            return;
         }
         let x = f(ev.position.x);
         let y = f(ev.position.y - self.bounds.origin.y);
@@ -568,30 +1609,81 @@ impl ChainView {
         if i >= self.layout.rows {
             return;
         }
-        let Some(d) = self.store.try_read() else {
-            return;
-        };
-        let Some(chain) = self.shown_expiry(&d.chains).and_then(|e| d.chains.chain(e)) else {
-            return;
-        };
         let Some(ri) = row_at(i, self.layout.first_row, self.layout.line_at) else {
             return;
         };
-        if let Some(r) = chain.rows.get(ri) {
-            self.selected = Some(r.strike);
-            if x < self.layout.strike_x.0 {
-                self.side = Right::Call;
-            } else if x > self.layout.strike_x.1 {
-                self.side = Right::Put;
+        // The row as painted: a series arriving since can't shift the press onto another strike.
+        let Some(strike) = ri
+            .checked_sub(self.frame.first_row)
+            .and_then(|n| self.frame.rows.get(n))
+            .map(|r| r.strike)
+        else {
+            return;
+        };
+        let Some(expiry) = self.frame.expiry else {
+            return;
+        };
+        self.selected = Some(strike);
+        let right = if x < self.layout.strike_x.0 {
+            self.side = Right::Call;
+            Some(Right::Call)
+        } else if x > self.layout.strike_x.1 {
+            self.side = Right::Put;
+            Some(Right::Put)
+        } else {
+            None
+        };
+        if let Some(right) = right {
+            let key = OptionKey {
+                expiry,
+                strike,
+                right,
+            };
+            let (quotes, side) = match right {
+                Right::Call => (self.layout.calls, 0),
+                Right::Put => (self.layout.puts, 1),
+            };
+            if let Some(cell) = quotes.at(x) {
+                self.cell = cell;
+                if ticket::click_sends(self.one_click, focused, ev.click_count) {
+                    self.send_click(key, cell, cx);
+                } else if !self.one_click && ev.click_count <= 1 {
+                    self.open_ticket(key, cell, cx);
+                } else if !focused {
+                    self.note = Some("Pane focused: click again to send".to_owned());
+                }
+            } else if let Some(a) = self.layout.actions.map(|a| a[side])
+                && ev.click_count <= 1
+                && x >= a.0
+                && x < a.1
+                && let Some(m) = self.frame.mark(strike, right).copied()
+            {
+                if m.position != 0 {
+                    self.press_close(key, cx);
+                } else if let Some((id, ..)) = m.order {
+                    self.press_cancel(id, cx);
+                }
             }
-            cx.notify();
         }
+        cx.notify();
+    }
+
+    /// The selected strike and side as a series on the shown expiry.
+    fn selected_key(&self) -> Option<OptionKey> {
+        let strike = self.selected?;
+        let d = self.store.try_read()?;
+        Some(OptionKey {
+            expiry: self.shown_expiry(&d.chains)?,
+            strike,
+            right: self.side,
+        })
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         self.common.paints += 1;
         self.bounds = bounds;
         let t = self.theme;
+        self.now = Trading::try_global(cx).and_then(|tr| tr.now(&self.store));
         window.paint_quad(fill(bounds, t.bg));
         let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
         let (w, h) = (f(bounds.size.width), f(bounds.size.height));
@@ -604,7 +1696,19 @@ impl ChainView {
         // Copy what's in view and let go of the store; busy this instant: last frame's rows.
         match self.store.try_read() {
             Some(d) => {
-                let chain = self.shown_expiry(&d.chains).and_then(|e| d.chains.chain(e));
+                // One-click pins the expiry it shows: a sooner one arriving replaces no rows.
+                if self.one_click && self.expiry.is_none() {
+                    self.expiry = self.shown_expiry(&d.chains);
+                    self.expiry_pinned = true;
+                }
+                let expiry = self.shown_expiry(&d.chains);
+                // Another expiry is other rows (a sooner one can arrive while following it).
+                if expiry != self.frame.expiry {
+                    self.frame.release();
+                }
+                self.frame.expiry = expiry;
+                self.frame.hold = self.one_click;
+                let chain = self.frame.expiry.and_then(|e| d.chains.chain(e));
                 self.frame.refresh(chain, d.last_trade, self.selected, fit);
             }
             None => self.seen_revision = u64::MAX,
@@ -636,19 +1740,43 @@ impl ChainView {
             cols[i] = a.max(b) + 2.0 * PAD;
         }
         let strike_w = self.glyphs.width("8888.88", t.text_main, true, window) + 2.0 * PAD;
-        let shown = fit_columns(w, strike_w, cols);
+        // The Pos column: fixed, so the columns never shift under the pointer when an order
+        // lands. It takes the room of the columns that only inform, but a pane too narrow for
+        // it and the quotes leaves it out (the strike is marked, the selected row lists them).
+        let action_w = self.glyphs.width("Cancel", t.text_main, false, window) + PAD;
+        let pos_full =
+            self.glyphs.width(POS_SAMPLE, t.text_main, false, window) + action_w + 2.0 * PAD;
+        let quotes_w = strike_w + 2.0 * (cols[5] + cols[6]);
+        let pos_w = if w >= quotes_w + 2.0 * pos_full {
+            pos_full
+        } else if w >= quotes_w + 2.0 * MARK_W {
+            MARK_W
+        } else {
+            0.0
+        };
+        let compact = pos_w > 0.0 && pos_w < pos_full;
+        let shown = fit_columns(w - 2.0 * pos_w, strike_w, cols);
         let table_w = strike_w
             + 2.0
-                * cols
-                    .iter()
-                    .zip(&shown)
-                    .filter(|(_, s)| **s)
-                    .map(|(c, _)| c)
-                    .sum::<f32>();
+                * (pos_w
+                    + cols
+                        .iter()
+                        .zip(&shown)
+                        .filter(|(_, s)| **s)
+                        .map(|(c, _)| c)
+                        .sum::<f32>());
         let x0 = ox + ((w - table_w) / 2.0).max(0.0);
+        match (self.trade.account.as_ref(), self.trade.try_cache()) {
+            (Some(a), Some(st)) => self.frame.refresh_marks(&st, a, self.product.id),
+            // Busy this instant: last frame's marks, and another look next frame.
+            (Some(_), None) if Trading::try_global(cx).is_some() => {
+                self.seen_revision = u64::MAX;
+            }
+            _ => self.frame.marks.clear(),
+        }
         // Calls: left to right in CALLS order; strike; puts: CALLS reversed.
         let mut call_x = [0.0f32; 7];
-        let mut x = x0;
+        let mut x = x0 + pos_w;
         for i in 0..7 {
             if shown[i] {
                 call_x[i] = x;
@@ -665,6 +1793,8 @@ impl ChainView {
                 x += cols[i];
             }
         }
+        let put_pos_x = x;
+        x += pos_w;
         let calls_end = strike_x;
         let puts_start = strike_x + strike_w;
         // Header rows: CALLS / PUTS, then the titles.
@@ -672,6 +1802,23 @@ impl ChainView {
             Bounds::new(point(px(ox), px(top)), size(px(w), px(HEAD_H))),
             t.panel,
         ));
+        // A narrow header has no room for the expiry: it stays in view here.
+        if w < NARROW_HEADER
+            && let Some(e) = self.frame.expiry
+        {
+            let mut date = FixedStr::<24>::new();
+            let _ = write_chip_date(&mut date, e);
+            self.glyphs.paint(
+                date.as_str(),
+                ox + PAD,
+                top,
+                ROW_H,
+                t.text_main,
+                false,
+                window,
+                cx,
+            );
+        }
         self.glyphs.paint_right(
             "CALLS",
             calls_end - PAD,
@@ -711,6 +1858,28 @@ impl ChainView {
                 );
             }
         }
+        if !compact && pos_w > 0.0 {
+            self.glyphs.paint(
+                "Pos / Orders",
+                x0 + PAD,
+                title_y,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
+            self.glyphs.paint(
+                "Pos / Orders",
+                put_pos_x + PAD,
+                title_y,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
+        }
         self.glyphs.paint_right(
             "Strike",
             strike_x + strike_w - PAD,
@@ -728,10 +1897,40 @@ impl ChainView {
             ),
             t.axis_line,
         ));
+        // No quote in view is fresh: a word in the header, on the next render.
+        let newest = self
+            .frame
+            .rows
+            .iter()
+            .flat_map(|r| [r.call, r.put])
+            .flatten()
+            .map(|q| q.time.0)
+            .max();
+        let quotes_stale = self
+            .now
+            .zip(newest)
+            .is_some_and(|(n, q)| n.0 - q > self.stale_after_ms);
+        if quotes_stale != self.quotes_stale {
+            self.quotes_stale = quotes_stale;
+            self.seen_revision = u64::MAX;
+        }
         // Rows: around the selection, else the money (copied in `frame`).
         let line_at = self.frame.line_at;
+        let quotes = |at: &[f32; 7]| Quotes {
+            bid: (at[5], at[5] + cols[5]),
+            ask: (at[6], at[6] + cols[6]),
+        };
+        let action_at = |cell_x: f32| {
+            let end = cell_x + pos_w - PAD / 2.0;
+            (end - action_w, end)
+        };
         self.layout = Layout {
             strike_x: (calls_end, puts_start),
+            calls: quotes(&call_x),
+            puts: quotes(&put_x),
+            // As large as the row allows: its height, and out to the cell's edge.
+            actions: (pos_w > 0.0 && !compact)
+                .then(|| [x0, put_pos_x].map(|cell_x| (action_at(cell_x).0 - 2.0, cell_x + pos_w))),
             first_row: self.frame.first_row,
             rows: self.frame.rows.len() + usize::from(line_at.is_some()),
             line_at,
@@ -769,12 +1968,17 @@ impl ChainView {
                 let c = Col::CALLS[i];
                 for (side_x, q) in [(call_x[i], row.call.as_ref()), (put_x[i], row.put.as_ref())] {
                     cell(&mut s, &self.product, q, c);
+                    // A stale quote doesn't read as live (the header says so in a word).
+                    let stale = q.is_some_and(|q| {
+                        self.now
+                            .is_some_and(|n| n.0 - q.time.0 > self.stale_after_ms)
+                    });
                     self.glyphs.paint_right(
                         s.as_str(),
                         side_x + cols[i] - PAD,
                         y,
                         ROW_H,
-                        t.text_main,
+                        if stale { t.text_dim } else { t.text_main },
                         false,
                         window,
                         cx,
@@ -793,6 +1997,116 @@ impl ChainView {
                 window,
                 cx,
             );
+            // What the account has here: in the Pos column, a short mark in a narrow pane's, and
+            // with no room for even that a dot beside the strike.
+            for (right, cell_x, dot_x) in [
+                (Right::Call, x0, strike_x + 1.0),
+                (Right::Put, put_pos_x, strike_x + strike_w - PAD + 1.0),
+            ] {
+                let Some(m) = self.frame.mark(row.strike, right).copied() else {
+                    continue;
+                };
+                if pos_w <= 0.0 {
+                    self.glyphs
+                        .paint("•", dot_x, y, ROW_H, t.text_main, true, window, cx);
+                    continue;
+                }
+                let mut pos = FixedStr::<48>::new();
+                let more = m.orders.saturating_sub(1);
+                if compact {
+                    if m.position != 0 {
+                        let _ = ticket::write_compact(&mut pos, m.position, None);
+                        let tw = self.glyphs.width(pos.as_str(), t.text_main, false, window);
+                        self.glyphs.paint(
+                            pos.as_str(),
+                            cell_x + 2.0,
+                            y,
+                            ROW_H,
+                            t.text_main,
+                            false,
+                            window,
+                            cx,
+                        );
+                        // No room for the order's words: its filled mark (the strip has them).
+                        if m.orders > 0 {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(px(cell_x + 3.0 + tw), px(y + ROW_H / 2.0 - 2.0)),
+                                    size(px(4.0), px(4.0)),
+                                ),
+                                t.text_dim,
+                            ));
+                        }
+                    } else {
+                        let order = m.order.map(|(_, side, open, _)| (side, open));
+                        let _ = ticket::write_compact(&mut pos, 0, order);
+                        let tw = self.glyphs.width(pos.as_str(), t.bg, false, window);
+                        paint_order_chip(cell_x, y, tw + 4.0, &t, window);
+                        self.glyphs.paint(
+                            pos.as_str(),
+                            cell_x + 2.0,
+                            y,
+                            ROW_H,
+                            t.bg,
+                            false,
+                            window,
+                            cx,
+                        );
+                    }
+                    continue;
+                }
+                let mut order_x = cell_x + PAD;
+                if m.position != 0 {
+                    let _ = ticket::write_position(&mut pos, &self.product, m.position, m.avg);
+                    order_x += self.glyphs.width(pos.as_str(), t.text_main, false, window) + 6.0;
+                    self.glyphs.paint(
+                        pos.as_str(),
+                        cell_x + PAD,
+                        y,
+                        ROW_H,
+                        t.text_main,
+                        false,
+                        window,
+                        cx,
+                    );
+                }
+                // A working order is filled (`docs/design.md` §3), never a position's plain text.
+                if let Some((_, side, open, price)) = m.order {
+                    pos.clear();
+                    let _ = if m.position != 0 {
+                        ticket::write_order_short(&mut pos, side, open, more)
+                    } else {
+                        ticket::write_order(&mut pos, &self.product, side, open, price)
+                    };
+                    if m.position == 0 && more > 0 {
+                        let _ = std::fmt::Write::write_fmt(&mut pos, format_args!(" +{more}"));
+                    }
+                    let tw = self.glyphs.width(pos.as_str(), t.bg, false, window);
+                    paint_order_chip(order_x - 3.0, y, tw + 6.0, &t, window);
+                    self.glyphs
+                        .paint(pos.as_str(), order_x, y, ROW_H, t.bg, false, window, cx);
+                }
+                let (ax, end) = action_at(cell_x);
+                let word = if m.position != 0 { "Close" } else { "Cancel" };
+                window.paint_quad(gpui::outline(
+                    Bounds::new(
+                        point(px(ax), px(y + 1.0)),
+                        size(px(end - ax), px(ROW_H - 2.0)),
+                    ),
+                    t.control_edge,
+                    gpui::BorderStyle::Solid,
+                ));
+                self.glyphs.paint_right(
+                    word,
+                    end - PAD / 2.0,
+                    y,
+                    ROW_H,
+                    t.text_main,
+                    false,
+                    window,
+                    cx,
+                );
+            }
             window.paint_quad(fill(
                 Bounds::new(
                     point(px(x0), px(y + ROW_H - hair)),
@@ -816,6 +2130,20 @@ impl ChainView {
                 window.paint_quad(fill(
                     Bounds::new(point(px(bar_x), px(y)), size(px(4.0), px(ROW_H))),
                     t.accent,
+                ));
+                // The selected cell: what Enter takes.
+                let side_x = match self.side {
+                    Right::Call => &call_x,
+                    Right::Put => &put_x,
+                };
+                let i = match self.cell {
+                    Cell::Bid => 5,
+                    Cell::Ask => 6,
+                };
+                window.paint_quad(gpui::outline(
+                    Bounds::new(point(px(side_x[i]), px(y)), size(px(cols[i]), px(ROW_H))),
+                    t.accent,
+                    gpui::BorderStyle::Solid,
                 ));
             }
         }
@@ -860,6 +2188,8 @@ impl ChainView {
     fn header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(48);
+        // Narrow: the price stays on its row, so the expiry and feed word fit whole.
+        let narrow = f(self.bounds.size.width) < NARROW_HEADER;
         let today = pane::today(self.frozen, &self.store);
         self.expiries.clear();
         let mut shown = None;
@@ -868,7 +2198,7 @@ impl ChainView {
             left.push_str(&title);
         } else if let Some(d) = self.store.try_read() {
             left.push_str(self.product.symbol);
-            if let Some(l) = d.last_trade {
+            if let Some(l) = d.last_trade.filter(|_| !narrow) {
                 left.push(' ');
                 let mut s = FixedStr::<24>::new();
                 let _ = self.product.price.write(l, &mut s);
@@ -885,16 +2215,35 @@ impl ChainView {
             // Every state but live is a word that never gives way (as on the chart).
             word = pane::status_word(&d.status);
         }
-        left.push_str("  Option chain");
+        if !narrow {
+            left.push_str("  Option chain");
+        }
         // The shown expiry, named even where its chip doesn't fit.
-        if let Some(e) = shown {
+        if let Some(e) = shown.filter(|_| !narrow) {
             left.push_str(&format!("  {}", chip_date(e)));
         }
+        let held = self.held_expiries();
+        let account = self.trade.account.as_ref().and_then(|a| {
+            Trading::try_global(cx)
+                .and_then(|t| t.account(a))
+                .map(|i| (i.name, i.badge))
+        });
+        let one_click = self.one_click;
+        let size = self.size(cx);
+        let exits = if self.exits_in_header() {
+            self.exit_buttons(cx)
+        } else {
+            None
+        };
         let chips = self.expiries.clone().into_iter().map(|e| {
             let on = Some(e) == shown;
             let mut label = chip_date(e);
             label.push_str(" · ");
             let _ = write_dte(&mut label, today, e);
+            // Something held or working on another expiry never goes unseen.
+            if held.contains(&e) {
+                label.push_str(" •");
+            }
             div()
                 .id(gpui::SharedString::from(format!("expiry-{e}")))
                 .flex_shrink_0()
@@ -915,7 +2264,10 @@ impl ChainView {
                         cx.stop_propagation();
                         if this.expiry != Some(e) {
                             this.expiry = Some(e);
+                            this.expiry_pinned = false;
                             this.selected = None;
+                            this.frame.release();
+                            this.leave_ticket();
                         }
                         cx.notify();
                     }),
@@ -930,7 +2282,9 @@ impl ChainView {
             .overflow_hidden()
             .px_2()
             .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chain)))
-            .py_1()
+            // Fixed: the exits' buttons appearing never push the rows down.
+            .h(px(pane::header_height(crate::layout::PaneKind::Chain)))
+            .items_center()
             .bg(t.panel)
             .border_b_1()
             .border_t_1()
@@ -949,6 +2303,17 @@ impl ChainView {
                             word.map(|w| div().flex_shrink_0().text_color(t.text_main).child(w)),
                         )
                         .children(pane::stale_badge(&self.store, &t))
+                        .when(self.quotes_stale, |d| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_1()
+                                    .bg(t.warn)
+                                    .text_color(t.on_warn)
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("QUOTES STALE"),
+                            )
+                        })
                         .child(
                             // Whole chips only: those that don't fit wrap onto a second line,
                             // which the fixed height hides.
@@ -960,39 +2325,704 @@ impl ChainView {
                                 .h(px(18.0))
                                 .overflow_hidden()
                                 .min_w_0()
-                                .children(chips),
+                                // Narrow: not even a whole one fits beside the switch.
+                                .when(!narrow, |d| d.children(chips)),
                         ),
                 ),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_2()
+                    // A slot of their own, there before anything is held: they never appear
+                    // under a pointer aimed at an expiry chip.
+                    .when(
+                        self.exits_in_header() && self.trade.account.is_some(),
+                        |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_shrink_0()
+                                    .justify_end()
+                                    .w(px(EXITS_SLOT))
+                                    .children(exits),
+                            )
+                        },
+                    )
+                    .children(account.map(|(name, badge)| {
+                        // A click goes to the next account, on the badge alone when narrow.
+                        div()
+                            .id("chain-account")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_color(t.text_main)
+                            .when(!narrow, |d| d.child(format!("{name} ▸")))
+                            .child(trade_bar::account_badge(badge, &t))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.next_account(cx);
+                                }),
+                            )
+                    }))
+                    .child(
+                        div()
+                            .id("chain-one-click")
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .px_1()
+                            .border_1()
+                            .rounded_sm()
+                            .border_color(if one_click { t.accent } else { t.control_edge })
+                            .text_color(if one_click { t.bg } else { t.text_main })
+                            .when(one_click, |d| {
+                                d.bg(t.accent).font_weight(gpui::FontWeight::BOLD)
+                            })
+                            .child(if one_click && narrow {
+                                format!("1-click ON · {size}")
+                            } else if one_click {
+                                format!("One-click: ON · Qty {size}")
+                            } else {
+                                "One-click: off".to_owned()
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_one_click(cx);
+                                }),
+                            ),
+                    ),
+            )
     }
 
-    fn footer(&self) -> impl IntoElement {
+    /// The header has room for the exits (below this they're in the footer).
+    fn exits_in_header(&self) -> bool {
+        f(self.bounds.size.width) >= EXITS_IN_HEADER
+    }
+
+    /// Expiries where the account holds or works something.
+    fn held_expiries(&self) -> Vec<CivilDate> {
+        let mut out = Vec::new();
+        let (Some(a), Some(st)) = (self.trade.account.as_ref(), self.trade.try_cache()) else {
+            return out;
+        };
+        for k in ticket::held_contracts(&st, a, self.product.id)
+            .iter()
+            .filter_map(|c| c.option_key())
+        {
+            if !out.contains(&k.expiry) {
+                out.push(k.expiry);
+            }
+        }
+        out
+    }
+
+    /// The selected series' position and orders with Close and Cancel, in a slot of its own
+    /// that is always there while the pane trades: nothing moves when a first order lands.
+    fn row_strip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = self.theme;
+        let account = self.trade.account.as_ref()?;
+        if !self.frame.has_chain {
+            return None;
+        }
+        let key = self.selected_key();
+        let (position, orders) = match (key, self.trade.try_cache()) {
+            (Some(key), Some(st)) => {
+                let contract = self.contract(key);
+                let position = st.position(account, contract).map(|p| (p.qty, p.avg_price));
+                let orders: Vec<(OrderId, Side, i64, Option<Price>)> = st
+                    .open_orders(account, contract)
+                    .map(|o| (o.id, o.side, o.qty.0 - o.filled.0, o.kind.prices().next()))
+                    .collect();
+                (position, orders)
+            }
+            _ => (None, Vec::new()),
+        };
+        let button = |id: gpui::SharedString, word: &'static str| {
+            div()
+                .id(id)
+                .flex_shrink_0()
+                .cursor_pointer()
+                .px_1()
+                .h(px(MIN_HIT))
+                .flex()
+                .items_center()
+                .border_1()
+                .rounded_sm()
+                .border_color(t.control_edge)
+                .text_color(t.text_main)
+                .child(word)
+        };
+        let width = f(self.bounds.size.width);
+        let narrow = width < NARROW_HEADER;
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_shrink_0()
+            .h(px(STRIP_H))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .bg(t.panel)
+            .border_t_1()
+            .border_color(t.axis_line)
+            .text_size(px(12.0))
+            .text_color(t.text_main);
+        // Narrow: the row's own place in the table names it; the room goes to its actions.
+        if let Some(key) = key.filter(|_| !narrow) {
+            row = row.child(ticket::contract_name(
+                &self.product,
+                key,
+                &chip_date(key.expiry),
+            ));
+        }
+        if position.is_none() && orders.is_empty() {
+            row = row.child(div().text_color(t.text_dim).child(if key.is_some() {
+                "No position or orders here"
+            } else {
+                "Select a strike for its position and orders"
+            }));
+        }
+        let key = key.unwrap_or(OptionKey {
+            expiry: self.frame.expiry?,
+            strike: Price(0),
+            right: self.side,
+        });
+        let shown = strip_orders_fit(width, narrow, position.is_some(), orders.len());
+        let hidden = orders.len() - shown;
+        let orders = orders.into_iter().take(shown);
+        if let Some((qty, avg)) = position {
+            let mut s = String::new();
+            let _ = ticket::write_position(&mut s, &self.product, qty, avg);
+            row = row
+                .child(s)
+                .child(button("chain-close".into(), "Close").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        if ev.click_count > 1 {
+                            return;
+                        }
+                        this.focus.focus(window, cx);
+                        this.press_close(key, cx);
+                        cx.notify();
+                    }),
+                ));
+        }
+        for (id, side, open, price) in orders {
+            let mut s = String::new();
+            let _ = ticket::write_order(&mut s, &self.product, side, open, price);
+            // An order and its Cancel wrap as one.
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(t.text_dim)
+                            .text_color(t.bg)
+                            .child(s),
+                    )
+                    .child(
+                        button(format!("chain-cancel-{}", id.0).into(), "Cancel").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                // The next order's Cancel slides under a double-click's second press.
+                                if ev.click_count > 1 {
+                                    return;
+                                }
+                                this.focus.focus(window, cx);
+                                this.press_cancel(id, cx);
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            );
+        }
+        // The rest stay reachable: the row's mark, and Cancel for all of them.
+        if hidden > 0 {
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(t.text_dim)
+                    .child(format!("+{hidden} more")),
+            );
+        }
+        Some(row.into_any_element())
+    }
+
+    /// The ticket, docked at the bottom of the pane.
+    fn ticket_dock(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = self.theme;
+        let tk = self.ticket.clone()?;
+        let product = self.product.clone();
+        let contract = self.contract(tk.key);
+        let rules = self.rules()?;
+        let q = self.live_quote(tk.key);
+        let (bid, ask) = ticket::sides(q.as_ref());
+        let mid = match (bid, ask) {
+            (Some(b), Some(a)) => Some(ticket::mid_limit(tk.side, b, a, rules)),
+            _ => None,
+        };
+        let position = self.position(tk.key);
+        let closable = ticket::closes(position, tk.side);
+        let qty = if tk.close {
+            closable.unwrap_or(0)
+        } else {
+            self.size(cx)
+        };
+        // What's true now decides the button; the core's last refusal stays in view until the
+        // ticket changes or Enter tries again.
+        let closing_now = tk.close
+            && self
+                .trade
+                .account
+                .as_ref()
+                .is_some_and(|a| self.closing(a, tk.key));
+        let live = if tk.close && closable.is_none() {
+            Some("no position to close".to_owned())
+        } else if closing_now {
+            Some("a close is already working; Cancel it first".to_owned())
+        } else {
+            self.refusal_of(tk.key, tk.side, tk.price, tk.close, cx)
+        };
+        let can_send_now = live.is_none();
+        let reason = live.or_else(|| tk.refused.clone());
+        let stale = self.store.stale_for().is_some();
+        let can_send = can_send_now && tk.sent.is_none() && qty > 0;
+        let chip = |id: gpui::SharedString, on: bool, label: String| {
+            div()
+                .id(id)
+                .flex_shrink_0()
+                .cursor_pointer()
+                .px_1()
+                .h(px(MIN_HIT))
+                .min_w(px(MIN_HIT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .rounded_sm()
+                .border_color(if on { t.accent } else { t.control_edge })
+                .text_color(t.text_main)
+                .when(on, |d| d.font_weight(gpui::FontWeight::BOLD))
+                .child(label)
+        };
+        let price_chips = [("Bid", bid), ("Mid", mid), ("Ask", ask)].map(|(word, p)| {
+            let label = match p {
+                Some(p) => format!("{word} {}", product.price.format::<32>(p).as_str()),
+                None => format!("{word} —"),
+            };
+            chip(
+                format!("ticket-{word}").into(),
+                p.is_some() && p == tk.price && tk.typed.is_none(),
+                label,
+            )
+            .min_w(px(PRICE_CHIP))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.focus.focus(window, cx);
+                    if let (Some(p), Some(t)) = (p, this.ticket.as_mut()) {
+                        t.set_price(p);
+                    }
+                    cx.notify();
+                }),
+            )
+        });
+        let size = self.size(cx);
+        let narrow = f(self.bounds.size.width) < NARROW_HEADER;
+        let qty_chips = (!tk.close).then(|| {
+            crate::dom_trade::QTY_PRESETS.map(|n| {
+                chip(format!("ticket-qty-{n}").into(), n == size, n.to_string()).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.focus.focus(window, cx);
+                        this.set_size(n, cx);
+                    }),
+                )
+            })
+        });
+        // A size set elsewhere that isn't a preset still reads.
+        let custom = (!tk.close && !crate::dom_trade::QTY_PRESETS.contains(&size))
+            .then(|| chip("ticket-qty-own".into(), true, size.to_string()));
+        let price_text = match (&tk.typed, tk.price) {
+            (Some(s), _) => s.clone(),
+            (None, Some(p)) => product.price.format::<32>(p).as_str().to_owned(),
+            (None, None) => "—".to_owned(),
+        };
+        let premium = tk
+            .price
+            .filter(|_| qty > 0)
+            .and_then(|p| ticket::premium(&product, contract, qty, p))
+            .map(|m| {
+                let word = match tk.side {
+                    Side::Buy => "Cost",
+                    Side::Sell => "Credit",
+                };
+                format!("{word} {}", trade_bar::money_grouped(m))
+            });
+        let send = ticket::send_label(&product, tk.side, tk.close, qty, tk.price);
+        let side_color = match tk.side {
+            Side::Buy => t.up,
+            Side::Sell => t.down,
+        };
+        let account_name = self
+            .trade
+            .account
+            .as_ref()
+            .and_then(|a| Trading::try_global(cx).and_then(|t| t.account(a)))
+            .map(|i| i.name);
+        let top = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(side_color)
+                    .child(ticket::side_word(tk.side)),
+            )
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(ticket::contract_name(
+                        &product,
+                        tk.key,
+                        &chip_date(tk.key.expiry),
+                    )),
+            )
+            .children((closable.is_some() || tk.close).then(|| {
+                let label = match closable {
+                    Some(n) => format!("Close {n}"),
+                    None => "Close".to_owned(),
+                };
+                chip("ticket-close".into(), tk.close, label).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.focus.focus(window, cx);
+                        this.toggle_close(cx);
+                    }),
+                )
+            }))
+            .children(account_name.map(|n| div().text_color(t.text_dim).child(n)));
+        let mut controls = div().flex().flex_row().flex_wrap().items_center().gap_2();
+        if let Some(chips) = qty_chips {
+            controls = controls.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .min_w(px(QTY_SLOT))
+                    .items_center()
+                    .gap_1()
+                    .child(div().text_color(t.text_dim).child("Qty"))
+                    .children(chips)
+                    .children(custom),
+            );
+        } else if !narrow {
+            // Close mode: the size is the position, and the slot stays so nothing moves.
+            controls = controls.child(
+                div()
+                    .flex_shrink_0()
+                    .min_w(px(QTY_SLOT))
+                    .text_color(t.text_dim)
+                    .child(format!("Qty {qty}")),
+            );
+        }
+        let controls = controls
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .child(div().text_color(t.text_dim).child("Limit"))
+                    .children(price_chips),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .min_w(px(56.0))
+                    .h(px(MIN_HIT))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .border_1()
+                    .rounded_sm()
+                    .border_color(t.text_dim)
+                    .text_color(t.text_main)
+                    .child(price_text),
+            )
+            // A slot of its own width, so the buttons after it hold still as the price moves.
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .min_w(px(92.0))
+                    .text_color(t.text_main)
+                    .children(premium),
+            )
+            .child(
+                chip("ticket-esc".into(), false, "Esc".to_owned()).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.leave_ticket();
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                div()
+                    .id("ticket-send")
+                    .flex_shrink_0()
+                    .ml_2()
+                    .min_w(px(SEND_W))
+                    .justify_center()
+                    .px_2()
+                    .h(px(MIN_HIT))
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .when(can_send, |d| {
+                        d.cursor_pointer().bg(t.accent).text_color(t.bg)
+                    })
+                    .when(!can_send, |d| {
+                        d.border_1()
+                            .border_color(t.control_edge)
+                            .text_color(t.text_dim)
+                    })
+                    // Enter's glyph only where Enter sends.
+                    .child(if can_send {
+                        format!("{send} ⏎")
+                    } else {
+                        send
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.focus.focus(window, cx);
+                            this.send_ticket(cx);
+                            cx.notify();
+                        }),
+                    ),
+            );
+        let flagged = |word: &'static str, text: String| {
+            // The reason wraps beside its word, whole at any width.
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .items_start()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .px_1()
+                        .bg(t.warn)
+                        .text_color(t.on_warn)
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(word),
+                )
+                .child(div().flex_1().min_w_0().text_color(t.text_main).child(text))
+        };
+        let others = if tk.close {
+            self.other_working(tk.key, tk.side)
+        } else {
+            0
+        };
+        let line = match (reason, stale) {
+            (Some(why), _) => flagged("Can't send", why),
+            (None, _) if others > 0 => flagged("Still working", leaves_working(others)),
+            (None, true) => flagged(
+                "Stale feed",
+                "no new data: this quote may be old".to_owned(),
+            ),
+            (None, false) => div()
+                .text_color(t.text_dim)
+                .child(if tk.close {
+                    "↑↓ price by tick  ·  Tab: back to the order  ·  Enter send  ·  Esc dismiss"
+                } else if closable.is_some() {
+                    "↑↓ price by tick  ·  Shift ↑↓ quantity  ·  Tab: close the position  ·  Enter send  ·  Esc dismiss"
+                } else {
+                    "↑↓ price by tick  ·  Shift ↑↓ quantity  ·  Enter send  ·  Esc dismiss"
+                }),
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .bg(t.panel)
+                .border_t_1()
+                .border_color(t.accent)
+                .text_size(px(12.0))
+                .text_color(t.text_main)
+                .child(top)
+                .child(controls)
+                .child(line)
+                .into_any_element(),
+        )
+    }
+
+    fn footer(&self, size: i64, exits: Option<gpui::Div>) -> impl IntoElement {
         let t = self.theme;
         div()
+            .flex()
+            .flex_row()
+            .flex_shrink_0()
+            // The exits' height whether they show or not.
+            .min_h(px(STRIP_H))
+            .items_center()
+            .gap_2()
             .px_2()
             .py_1()
             .bg(t.panel)
             .border_t_1()
             .border_color(t.axis_line)
             .text_size(px(12.0))
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .text_color(t.text_dim)
-            .child(self.note.unwrap_or(
-                "Up/Down: strike  ·  Left/Right: expiry  ·  Tab: calls / puts  ·  Home: the money  ·  Shaded: in the money",
-            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    // A reason wraps, whole; the hints give way at the edge.
+                    .when(self.note.is_none(), |d| {
+                        d.whitespace_nowrap().overflow_hidden()
+                    })
+                    .text_color(if self.note.is_some() {
+                        t.text_main
+                    } else {
+                        t.text_dim
+                    })
+                    // Narrow beside the exits there's no room for hints: only a message shows.
+                    .when(
+                        self.note.is_some()
+                            || (self.ticket.is_none()
+                                && !(exits.is_some() && f(self.bounds.size.width) < NARROW_HEADER)),
+                        |d| d.child(self.footer_text(size)),
+                    ),
+            )
+            .children(exits)
+    }
+
+    fn footer_text(&self, size: i64) -> String {
+        self.note.clone().unwrap_or_else(|| {
+                if self.one_click {
+                    return format!(
+                        "One-click ON: a click on a bid or ask sends {size} at once  ·  Shift+Up/Down: quantity"
+                    );
+                }
+                "Click an ask to buy, a bid to sell, or Enter  ·  Up/Down: strike  ·  Left/Right: expiry  ·  Tab: calls / puts  ·  Shift+Tab: bid / ask  ·  Home: the money  ·  Shaded: in the money".to_owned()
+        })
     }
 }
 
-/// [`window`] over a chain's rows.
-fn window_rows(chain: &OptionChain, fit: usize, center: usize) -> std::ops::Range<usize> {
-    window(chain.rows.len(), fit, center)
+/// How many of a series' orders the strip's one line holds; at least one (at the narrowest its
+/// Cancel can clip: Cancel for all of them stays).
+pub fn strip_orders_fit(width: f32, narrow: bool, has_position: bool, orders: usize) -> usize {
+    const ORDER_W: f32 = 150.0;
+    let mut room = width - 2.0 * PAD;
+    if !narrow {
+        room -= 150.0; // the contract's name
+    }
+    if has_position {
+        room -= 130.0;
+    }
+    (((room / ORDER_W).floor().max(1.0)) as usize).min(orders)
+}
+
+/// The rows to show: those on screen while the selected row is still among them and they still
+/// fit, else [`window`] around `center`.
+pub fn window_held(
+    n: usize,
+    fit: usize,
+    center: usize,
+    selected: Option<usize>,
+    was: std::ops::Range<usize>,
+) -> std::ops::Range<usize> {
+    if let Some(s) = selected
+        && !was.is_empty()
+    {
+        let start = was.start.min(n.saturating_sub(fit));
+        if s >= start && s < start + fit && s < n {
+            return start..(start + fit).min(n);
+        }
+    }
+    window(n, fit, center)
+}
+
+/// What a close leaves behind: the close itself can't flip, but an order left working can.
+fn leaves_working(n: i64) -> String {
+    format!("{n} more on this side stay working and could open a new position; Cancel them")
+}
+
+/// A working order's mark behind its text (`t.bg` on it): filled, as `docs/design.md` §3 has it.
+fn paint_order_chip(x: f32, y: f32, w: f32, t: &Theme, window: &mut Window) {
+    let b = Bounds::new(point(px(x), px(y + 1.0)), size(px(w), px(ROW_H - 2.0)));
+    window.paint_quad(fill(b, t.text_dim));
+}
+
+/// A limit command's price.
+fn order_price(cmd: &lines_trading::Command) -> Option<Price> {
+    match cmd {
+        lines_trading::Command::PlaceExit(o) | lines_trading::Command::PlaceOrder(o) => {
+            o.kind.prices().next()
+        }
+        _ => None,
+    }
 }
 
 impl Render for ChainView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let t = self.theme;
+        self.aimed = self.focus.is_focused(window) && window.is_window_active();
+        if let Some(i) = self
+            .trade
+            .account
+            .as_ref()
+            .and_then(|a| Trading::try_global(cx).and_then(|t| t.account(a)))
+        {
+            self.stale_after_ms = i.option_guard.stale_after_ms;
+        }
+        self.apply_shot(cx);
+        let size = self.size(cx);
+        let strip = self.row_strip(cx);
+        let dock = self.ticket_dock(cx);
+        let footer_exits = if self.exits_in_header() {
+            None
+        } else {
+            self.exit_buttons(cx)
+        };
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
@@ -1026,7 +3056,13 @@ impl Render for ChainView {
                     .child(body)
                     .when_some(overlay, |d, o| d.child(o)),
             )
-            .child(self.footer())
+            .children(strip)
+            .children(dock)
+            // The ticket has its own hints; a message still shows.
+            .when(
+                self.ticket.is_none() || self.note.is_some() || footer_exits.is_some(),
+                |d| d.child(self.footer(size, footer_exits)),
+            )
     }
 }
 
@@ -1193,6 +3229,211 @@ mod tests {
         let mut f = Frame::default();
         f.refresh(None, None, None, 10);
         assert!(!f.has_chain && f.rows.is_empty());
+    }
+
+    /// A press never lands on a strike that moved: the rows hold while the selection is among
+    /// them, and follow it once it leaves.
+    #[test]
+    fn rows_hold_still_under_the_pointer() {
+        // Selected row 14 in view: the rows stay, whatever the center says.
+        assert_eq!(window_held(41, 10, 14, Some(14), 10..20), 10..20);
+        // Nothing selected: they follow the center.
+        assert_eq!(window_held(41, 10, 30, None, 10..20), 25..35);
+        // The selection left the rows: around it.
+        assert_eq!(window_held(41, 10, 30, Some(30), 10..20), 25..35);
+        // First frame: around it.
+        assert_eq!(window_held(41, 10, 14, Some(14), 0..0), 9..19);
+        // The ticket opened and fewer rows fit, with the selection still among them.
+        assert_eq!(window_held(41, 6, 14, Some(14), 10..20), 10..16);
+        // Fewer rows, the selection now below them: around it (with One-click on, `Frame` holds).
+        assert_eq!(window_held(41, 3, 14, Some(14), 10..20), 13..16);
+        // A shorter chain.
+        assert_eq!(window_held(5, 10, 2, Some(2), 3..8), 0..5);
+    }
+
+    /// A frame holding through less room doesn't jump on the next frame, when the selected row
+    /// is cut off and no longer among the rows drawn.
+    #[test]
+    fn holding_lasts_past_the_first_frame() {
+        let mut c = lines_core::OptionChains::default();
+        let exp = CivilDate::new(2026, 11, 9).unwrap();
+        for k in 664..=704 {
+            c.apply(
+                lines_core::OptionKey {
+                    expiry: exp,
+                    strike: Price(k * 100),
+                    right: Right::Call,
+                },
+                OptionQuote::default(),
+            );
+        }
+        let chain = c.chain(exp).unwrap();
+        let mut f = Frame::default();
+        let sel = Some(Price(68_400));
+        f.refresh(Some(chain), None, sel, 21);
+        let start = f.first_row;
+        let at = chain.find(Price(68_400)).unwrap();
+        assert!(at > start && at < start + f.rows.len());
+        // One-click goes on: the next frame takes hold of what's on screen.
+        f.hold = true;
+        f.refresh(Some(chain), None, sel, 21);
+        assert_eq!(f.first_row, start);
+        // The strip takes its height: fewer rows, the selection now below them.
+        let fit = at - start;
+        for _ in 0..3 {
+            f.refresh(Some(chain), None, sel, fit);
+            assert_eq!(f.first_row, start, "no row moved");
+        }
+        // Not holding, the rows follow the selection.
+        f.hold = false;
+        f.refresh(Some(chain), None, sel, fit);
+        assert_ne!(f.first_row, start);
+    }
+
+    fn key_chain(exp: CivilDate, low: i64, high: i64) -> lines_core::OptionChains {
+        let mut c = lines_core::OptionChains::default();
+        for k in low..=high {
+            c.apply(
+                lines_core::OptionKey {
+                    expiry: exp,
+                    strike: Price(k * 100),
+                    right: Right::Call,
+                },
+                OptionQuote::default(),
+            );
+        }
+        c
+    }
+
+    /// With One-click on the same strikes stay in the same places: when a new strike is listed
+    /// below them, and when the underlying's price crosses a strike.
+    #[test]
+    fn holding_keeps_strikes_in_place() {
+        let exp = CivilDate::new(2026, 11, 9).unwrap();
+        let build = |low: i64| {
+            let mut c = lines_core::OptionChains::default();
+            for k in low..=704 {
+                c.apply(
+                    lines_core::OptionKey {
+                        expiry: exp,
+                        strike: Price(k * 100),
+                        right: Right::Call,
+                    },
+                    OptionQuote::default(),
+                );
+            }
+            c
+        };
+        let drawn = |f: &Frame| -> Vec<(usize, Price)> {
+            f.rows
+                .iter()
+                .enumerate()
+                .map(|(n, r)| (visual_row(n, f.line_at), r.strike))
+                .collect()
+        };
+        let before = build(664);
+        let after = build(650);
+        let last = Some(Price(68_350));
+        let sel = Some(Price(68_400));
+        let mut f = Frame::default();
+        f.refresh(before.chain(exp), last, sel, 21);
+        f.hold = true;
+        let want = drawn(&f);
+        let line = f.line_at;
+        // Fourteen new strikes below the rows: their indices move, they don't.
+        f.refresh(after.chain(exp), last, sel, 21);
+        assert_eq!(drawn(&f), want, "a new strike below");
+        // A strike listed among the rows stays out of them until the hold ends.
+        let mut among = build(650);
+        among.apply(
+            lines_core::OptionKey {
+                expiry: exp,
+                strike: Price(68_750),
+                right: Right::Call,
+            },
+            OptionQuote::default(),
+        );
+        f.refresh(among.chain(exp), last, sel, 21);
+        assert_eq!(drawn(&f), want, "a new strike among them");
+        // Less room, then the room back: the price row's slot and every strike return.
+        f.refresh(among.chain(exp), last, sel, 6);
+        f.refresh(among.chain(exp), last, sel, 21);
+        assert_eq!(drawn(&f), want, "less room and back");
+        // More room than ever: the next strikes go below, nothing above moves.
+        f.refresh(among.chain(exp), last, sel, 24);
+        assert_eq!(drawn(&f)[..want.len()], want[..], "more room");
+        f.refresh(among.chain(exp), last, sel, 21);
+        // The price crosses two strikes: the price row keeps its slot, and so does every strike.
+        f.refresh(after.chain(exp), Some(Price(68_650)), sel, 21);
+        assert_eq!(drawn(&f), want, "the price moved");
+        assert_eq!(f.line_at, line);
+        assert_eq!(f.last, Some(Price(68_650)), "its tag reads the live price");
+        // Keys move only among the strikes on screen: never onto the one listed among them.
+        let on = |p: i64| Some(Price(p));
+        assert_eq!(f.step_held(sel, 3), on(68_700));
+        assert_eq!(
+            f.step_held(on(68_700), 1),
+            on(68_800),
+            "past the hidden 687.50"
+        );
+        let (top, bottom) = (f.rows[0].strike, f.rows[f.rows.len() - 1].strike);
+        assert_eq!(f.step_held(on(68_700), -1_000), Some(top));
+        assert_eq!(f.step_held(on(68_700), 1_000), Some(bottom));
+        assert_eq!(
+            f.step_held(None, 1),
+            Some(f.rows[(f.rows.len() - 1) / 2].strike)
+        );
+        // Home or another expiry: released, the next frame centers again and holds from there.
+        f.release();
+        f.refresh(among.chain(exp), Some(Price(68_650)), None, 21);
+        assert!(
+            f.rows.iter().any(|r| r.strike == Price(68_750)),
+            "shown now"
+        );
+        assert!(f.holding);
+        // At the chain's end, more room adds nothing and moves nothing.
+        let end = key_chain(exp, 700, 704);
+        let mut g = Frame {
+            hold: true,
+            ..Frame::default()
+        };
+        g.refresh(end.chain(exp), None, None, 4);
+        let was = drawn(&g);
+        g.refresh(end.chain(exp), None, None, 30);
+        assert_eq!(drawn(&g)[..was.len()], was[..]);
+        assert_eq!(
+            g.rows.len(),
+            4,
+            "held from 701: to the chain's own end, blank below"
+        );
+        // Let go, it goes back between the strikes it falls between.
+        f.hold = false;
+        f.refresh(after.chain(exp), Some(Price(68_650)), sel, 21);
+        assert_ne!(f.line_at, line);
+    }
+
+    #[test]
+    fn the_strip_holds_at_least_one_order() {
+        assert_eq!(strip_orders_fit(340.0, true, true, 3), 1);
+        assert_eq!(strip_orders_fit(340.0, true, false, 3), 2);
+        assert_eq!(strip_orders_fit(1600.0, false, true, 3), 3);
+        assert_eq!(strip_orders_fit(1000.0, false, true, 9), 4);
+        assert_eq!(strip_orders_fit(100.0, true, true, 2), 1);
+        assert_eq!(strip_orders_fit(1000.0, false, false, 0), 0);
+    }
+
+    #[test]
+    fn the_quote_cells_are_where_clicks_land() {
+        let q = Quotes {
+            bid: (100.0, 160.0),
+            ask: (160.0, 220.0),
+        };
+        assert_eq!(q.at(100.0), Some(Cell::Bid));
+        assert_eq!(q.at(159.9), Some(Cell::Bid));
+        assert_eq!(q.at(160.0), Some(Cell::Ask));
+        assert_eq!(q.at(219.9), Some(Cell::Ask));
+        assert_eq!(q.at(99.9), None);
+        assert_eq!(q.at(220.0), None);
     }
 
     #[test]

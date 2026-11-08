@@ -1761,6 +1761,7 @@ mod tests {
             name: name.into(),
             paper,
             rules: None,
+            option_guard: Default::default(),
             venue: (!paper).then_some(0),
             badge,
             read_only: None,

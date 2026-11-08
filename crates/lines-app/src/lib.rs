@@ -4,6 +4,7 @@
 
 mod bench;
 mod brackets;
+mod chain_ticket;
 mod chain_view;
 mod chart_draw;
 mod chart_trade;
@@ -609,6 +610,10 @@ struct Cli {
     /// Screenshot: charts and DOMs with their account list open (the header's account chip).
     #[arg(long, requires = "screenshot")]
     account_menu: bool,
+    /// Screenshot: chain panes with a ticket open (`buy|sell STRIKE call|put [at PRICE] [close]`)
+    /// on the soonest expiry, and/or the One-click switch on (`one-click`).
+    #[arg(long, requires = "screenshot")]
+    chain_ticket: Option<String>,
     /// Screenshot: draw these drawings (a drawings file, as saved in
     /// `<config dir>/drawings/<PRODUCT>.json`; it names its product). Screenshots never read
     /// the saved drawings.
@@ -1465,6 +1470,12 @@ where
                 demo_broker: cli.demo_broker,
                 strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
+                chain_ticket: cli
+                    .chain_ticket
+                    .as_deref()
+                    .map(chain_ticket::parse_shot)
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!(e))?,
                 pnl: cli.pnl.map(PnlArg::mode),
                 drawings,
                 bracket_units: cli.bracket_units.map(BracketUnitsArg::units),

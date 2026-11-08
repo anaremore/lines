@@ -1387,7 +1387,7 @@ impl TradingCore {
             if self.accounts[&spec.account].cfg.rules.is_some() {
                 return Err(Reject::new(
                     RejectCode::PropRule,
-                    "a prop-rule account can't open options",
+                    crate::risk::PROP_OPTIONS_REFUSAL,
                 ));
             }
             self.check_option_kind(now, &spec.account, spec.contract, &spec.kind)?;

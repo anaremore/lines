@@ -77,6 +77,9 @@ pub struct OptionQuoteView {
     pub at: Option<UtcMillis>,
 }
 
+/// Why a prop-rule account places no option orders (the core's refusal, shown first by the UI).
+pub const PROP_OPTIONS_REFUSAL: &str = "a prop-rule account can't open options";
+
 /// The guard on one option order. With no two-sided fresh quote there is no mid to check a limit
 /// against, so it is refused, opening or closing: a limit typed blind could fill far from the
 /// market on the next quote. (Flatten doesn't pass here, and never fills on a missing side.)

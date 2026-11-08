@@ -587,7 +587,11 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
         }
         PaneKind::Chain => {
             let frozen = env.frozen;
-            PaneHandle::Chain(cx.new(|cx| ChainView::new(feed, theme, frozen, cx)))
+            PaneHandle::Chain(cx.new(|cx| {
+                let mut v = ChainView::new(feed, theme, frozen, cx);
+                v.restore_trade(doc.trade.as_ref(), cx);
+                v
+            }))
         }
     };
     handle.set_link(doc.link, cx);
@@ -1133,6 +1137,10 @@ impl WindowView {
             }
             Command::OpenJournal => self.open_panel(PaneKind::Journal, window, cx),
             Command::OpenChain => self.open_panel(PaneKind::Chain, window, cx),
+            Command::ChainOneClick => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_one_click(cx)),
+                _ => self.refuse("One-click acts on the focused option chain", cx),
+            },
             Command::Strategy(StrategyCmd::Open) => {
                 self.open_panel(PaneKind::Strategies, window, cx)
             }
@@ -2486,6 +2494,24 @@ impl WindowView {
             Some(PaneHandle::Chart(_)) => {
                 self.refuse("arming and orders act on a DOM: focus one first", cx);
             }
+            // The chain's exits, as on a DOM: for the underlying's options (their labels say so).
+            Some(PaneHandle::Chain(c))
+                if matches!(
+                    tc,
+                    crate::commands::TradeCmd::Flatten | crate::commands::TradeCmd::CancelAll
+                ) =>
+            {
+                let source = if key {
+                    lines_trading::Source::Hotkey
+                } else {
+                    lines_trading::Source::Palette
+                };
+                let flatten = tc == crate::commands::TradeCmd::Flatten;
+                c.update(cx, |v, cx| v.run_exit(flatten, source, cx));
+            }
+            Some(PaneHandle::Chain(c)) if tc == crate::commands::TradeCmd::NextAccount => {
+                c.update(cx, |v, cx| v.next_account(cx));
+            }
             _ => self.refuse("trading commands act on the focused DOM or chart", cx),
         }
     }
@@ -3290,7 +3316,7 @@ impl Render for WindowView {
                 "Journal: click or Up/Down to select, Enter: tags and note, Snapshot column: view, click the stats: today / all dates"
             }
             Some(PaneHandle::Chain(_)) => {
-                "Option chain: Up/Down strike, Left/Right expiry, Tab calls / puts, type a symbol or Ctrl+K: switch"
+                "Option chain: click an ask to buy or a bid to sell, or Enter on the selected cell; Up/Down strike, Left/Right expiry, Tab calls / puts, Shift+Tab bid / ask, type a symbol or Ctrl+K: switch"
             }
             _ => chart_view::HINTS_SHORT,
         };

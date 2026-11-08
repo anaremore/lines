@@ -142,6 +142,21 @@ impl PaneWindow {
                     PaneHandle::Chart(c) if crate::trade_bar::chart_runs(tc) => {
                         c.update(cx, |v, cx| crate::trade_bar::run_key(v, tc, issued, cx));
                     }
+                    PaneHandle::Chain(c) if tc == crate::commands::TradeCmd::NextAccount => {
+                        c.update(cx, |v, cx| v.next_account(cx));
+                    }
+                    PaneHandle::Chain(c)
+                        if matches!(
+                            tc,
+                            crate::commands::TradeCmd::Flatten
+                                | crate::commands::TradeCmd::CancelAll
+                        ) =>
+                    {
+                        let flatten = tc == crate::commands::TradeCmd::Flatten;
+                        c.update(cx, |v, cx| {
+                            v.run_exit(flatten, lines_trading::Source::Hotkey, cx)
+                        });
+                    }
                     _ => {}
                 }
             }
