@@ -149,6 +149,8 @@ pub struct GroupRow {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GroupMenu {
     pub rows: Vec<GroupRow>,
+    /// The account they are on: cancels go there, and the list closes if the chart's changes.
+    pub account: Option<AccountId>,
     /// `Target: 200 in 20 orders, 5822.75–5823.00`.
     pub title: String,
     /// Plot-local top of the tag pressed (the list opens under it).
@@ -635,9 +637,23 @@ impl ChartTradeState {
     }
 
     /// The chart shows another symbol or contract: a pick armed on the old one is dropped, so
-    /// its click never sends at a price read on another product's scale.
+    /// its click never sends at a price read on another product's scale, and a group's list
+    /// closes (its orders and money are the old contract's).
     pub fn feed_changed(&mut self) {
         self.strip_pick = None;
+        self.group_menu = None;
+    }
+
+    /// The chart's account, each poll: a group's list on another account closes. Whether it did.
+    pub fn account_changed(&mut self, account: Option<&AccountId>) -> bool {
+        let stale = self
+            .group_menu
+            .as_ref()
+            .is_some_and(|m| m.account.as_ref() != account);
+        if stale {
+            self.group_menu = None;
+        }
+        stale
     }
 
     /// The group a tag id stands for, if that tag holds several orders.
@@ -789,6 +805,29 @@ mod tests {
         m.refresh(|_| false);
         assert_eq!(m.cancel_all(), None, "nothing to cancel");
         assert_eq!(m.cancel_all(), None);
+    }
+
+    /// A list belongs to its account and contract: another symbol or account closes it, so no
+    /// button acts on orders the chart no longer shows.
+    #[test]
+    fn the_list_closes_on_another_symbol_or_account() {
+        let (a, b) = (AccountId::new("a"), AccountId::new("b"));
+        let open = || GroupMenu {
+            account: Some(a.clone()),
+            ..GroupMenu::default()
+        };
+        let mut s = ChartTradeState {
+            group_menu: Some(open()),
+            ..ChartTradeState::default()
+        };
+        assert!(!s.account_changed(Some(&a)));
+        assert!(s.group_menu.is_some(), "the same account: still open");
+        assert!(s.account_changed(Some(&b)));
+        assert!(s.group_menu.is_none());
+        assert!(!s.account_changed(Some(&b)), "already closed");
+        s.group_menu = Some(open());
+        s.feed_changed();
+        assert!(s.group_menu.is_none());
     }
 
     #[test]

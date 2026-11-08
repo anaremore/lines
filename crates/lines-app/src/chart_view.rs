@@ -2289,6 +2289,7 @@ impl ChartView {
         self.close_popover(Kind::Studies, cx);
         self.ct.group_menu = Some(crate::chart_trade::GroupMenu {
             rows,
+            account: self.trade.account.clone(),
             title,
             top,
             confirm: None,
@@ -2298,8 +2299,25 @@ impl ChartView {
         });
     }
 
+    /// Cancel one order of a group's list, by its row: never through this frame's marks (a busy
+    /// feed can leave them empty for a frame, and a press must not be swallowed). The core
+    /// answers for an order that has finished.
+    pub(crate) fn cancel_listed(&mut self, id: u64, cx: &mut Context<Self>) {
+        let account = self.ct.group_menu.as_ref().and_then(|m| m.account.clone());
+        if let (Some(account), Some(t)) = (account, crate::trading::Trading::try_global(cx)) {
+            t.submit(
+                lines_trading::Source::Chart,
+                std::time::Instant::now(),
+                lines_trading::Command::CancelOrder {
+                    account,
+                    order: lines_trading::OrderId(id),
+                },
+            );
+        }
+    }
+
     /// Cancel one of the chart's orders (its tag's ×): no switch needed, as on the DOM.
-    pub(crate) fn cancel_order(&mut self, id: u64, cx: &mut Context<Self>) {
+    fn cancel_order(&mut self, id: u64, cx: &mut Context<Self>) {
         if let (Some(m), Some(account), Some(t)) = (
             self.ct.mark(id).copied(),
             self.trade.account.clone(),
@@ -5503,13 +5521,14 @@ impl Pane for ChartView {
     /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
         // A group's list follows its orders, on this tick, from the cache itself (a busy cache
-        // waits for the next one; a frame's marks can be briefly empty).
-        let group = match (&mut self.ct.group_menu, self.trade.try_cache()) {
-            (Some(menu), Some(s)) => {
-                menu.refresh(|o| s.order(o).and_then(crate::dom_trade::order_mark).is_some())
-            }
-            _ => false,
-        };
+        // waits for the next one; a frame's marks can be briefly empty), and closes if the
+        // chart's account changed.
+        let mut group = self.ct.account_changed(self.trade.account.as_ref());
+        if let Some(menu) = &mut self.ct.group_menu
+            && let Some(s) = self.trade.try_cache()
+        {
+            group |= menu.refresh(|o| s.order(o).and_then(crate::dom_trade::order_mark).is_some());
+        }
         // Drawings changed on any chart of this product (shown here).
         let rates = group
             | std::mem::take(&mut self.rates_changed)

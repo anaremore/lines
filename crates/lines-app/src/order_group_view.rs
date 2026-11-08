@@ -92,6 +92,7 @@ pub fn layer(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .whitespace_nowrap()
                         .text_color(if r.open { t.text_main } else { t.text_dim })
                         .child(text.as_str().to_owned()),
@@ -124,7 +125,7 @@ pub fn layer(
                             if ev.click_count() > 1 {
                                 return;
                             }
-                            v.cancel_order(id, cx);
+                            v.cancel_listed(id, cx);
                             cx.notify();
                         })),
                 )
@@ -170,7 +171,7 @@ pub fn layer(
             }
             let ids = v.ct.group_menu.as_mut().and_then(|m| m.cancel_all());
             for id in ids.into_iter().flatten() {
-                v.cancel_order(id.0, cx);
+                v.cancel_listed(id.0, cx);
             }
             cx.notify();
         }));
