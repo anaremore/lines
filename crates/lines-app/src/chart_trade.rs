@@ -726,6 +726,7 @@ impl ChartTradeState {
         let tags = &self.tags[..self.n_tags];
         if let Some(b) = self
             .resize_hover
+            .filter(|h| self.group_of(*h).is_none())
             .and_then(|h| tags.iter().find(|b| b.id == h))
             && let Some(hit) = resize_hit(b, x, y)
         {

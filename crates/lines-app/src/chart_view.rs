@@ -479,6 +479,12 @@ impl crate::trade_bar::TradePane for ChartView {
     fn keys_free(&self) -> bool {
         !self.picker.is_open() && self.study_menu.is_none() && !self.drawings.editing()
     }
+    fn resize_drawn(&self, order: lines_trading::OrderId) -> bool {
+        self.ct.group_of(order.0).is_none()
+            && self.ct.tags[..self.ct.n_tags]
+                .iter()
+                .any(|b| b.id == order.0 && b.left >= crate::chart_trade::RESIZE_W)
+    }
     fn send_resize(
         &mut self,
         order: lines_trading::OrderId,
@@ -1336,6 +1342,14 @@ impl ChartView {
             }
             return;
         }
+        // The − / size / + first: quick clicks on them are steps, never a double click.
+        if region == Region::Plot
+            && !ev.modifiers.control
+            && self.resize_pressed(x, y, ev.modifiers.alt, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         // Drawings take a press only in drawing mode or on a drawing, never with Ctrl (chart
         // trading's); otherwise the chart pans and scales as usual.
         if region == Region::Plot {
@@ -1365,13 +1379,6 @@ impl ChartView {
                 Region::SubAxis => return,
             }
             cx.notify();
-            return;
-        }
-        if region == Region::Plot
-            && !ev.modifiers.control
-            && self.resize_pressed(x, y, ev.modifiers.alt, cx)
-        {
-            cx.stop_propagation();
             return;
         }
         if region == Region::Plot && !ev.modifiers.control && self.order_pressed(x, y, cx) {
@@ -2178,9 +2185,7 @@ impl ChartView {
         let tag = self
             .ct
             .resize_target(tx as f32, ty as f32)
-            .map(|(id, _)| id)
-            // Its field stays up while its size is typed.
-            .or(self.trade.resize_edit.as_ref().map(|(id, _)| id.0));
+            .map(|(id, _)| id);
         if tag != self.ct.resize_hover {
             self.ct.resize_hover = tag;
             cx.notify();
@@ -2339,8 +2344,6 @@ impl ChartView {
         }
     }
 
-    /// A press in the plot at plot-local (`x`, `y`) on an order tag, its `×`, a position
-    /// handle or an edge marker (last frame's layout). Returns whether it was one of those.
     /// A press on the hovered tag's − / size / +. Returns whether it was on one.
     fn resize_pressed(&mut self, x: f64, y: f64, alt: bool, cx: &mut Context<Self>) -> bool {
         use crate::order_resize::{ResizeHit, SizeStep};
@@ -2360,6 +2363,8 @@ impl ChartView {
         true
     }
 
+    /// A press in the plot at plot-local (`x`, `y`) on an order tag, its `×`, a position
+    /// handle or an edge marker (last frame's layout). Returns whether it was one of those.
     fn order_pressed(&mut self, x: f64, y: f64, cx: &mut Context<Self>) -> bool {
         use lines_core::geometry::order_tags::{TagHit, centre_on, handle_is_target, hit};
         let n = self.ct.n_tags;
@@ -2669,7 +2674,14 @@ impl ChartView {
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.set_hover(ev.position, cx);
-        let hovered = self.ct.resize_hover.map(lines_trading::OrderId);
+        // Under the pointer now, and hovered since the pointer last moved.
+        let (tx, ty) = self.local(ev.position);
+        let hovered = self
+            .ct
+            .resize_target(tx as f32, ty as f32)
+            .map(|(id, _)| id)
+            .filter(|id| self.ct.resize_hover == Some(*id))
+            .map(lines_trading::OrderId);
         if crate::trade_bar::wheel_resize(self, hovered, ev, window, cx) {
             return;
         }
@@ -3556,9 +3568,15 @@ impl ChartView {
             window.refresh();
         }
         // The hovered tag's − / size / +, left of it (a tag's height, each at least 20 px).
-        if let Some(b) = self
-            .ct
-            .resize_hover
+        // While its size is typed the field stays up, wherever the pointer is.
+        let shown = self
+            .trade
+            .resize_edit
+            .as_ref()
+            .map(|(id, _)| id.0)
+            .or(self.ct.resize_hover)
+            .filter(|h| self.ct.group_of(*h).is_none());
+        if let Some(b) = shown
             .and_then(|h| self.ct.tags[..self.ct.n_tags].iter().find(|b| b.id == h))
             .copied()
             .filter(|b| b.left >= crate::chart_trade::RESIZE_W)

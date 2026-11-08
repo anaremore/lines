@@ -137,10 +137,15 @@ impl TradePane for DomView {
         &self.focus
     }
     fn shows_size(&self) -> bool {
-        self.trade.bracket_confirm.is_none() && self.trade.editor.is_none() && self.keys_free()
+        self.keys_free()
     }
     fn keys_free(&self) -> bool {
-        !self.picker.is_open()
+        self.trade.bracket_confirm.is_none()
+            && self.trade.editor.is_none()
+            && !self.picker.is_open()
+    }
+    fn resize_drawn(&self, order: lines_trading::OrderId) -> bool {
+        self.orders.drawn_alone(order, &self.rows, self.row_units())
     }
     fn send_resize(
         &mut self,
@@ -485,6 +490,31 @@ impl DomView {
             .press_at(price, self.row_units(), f(p.x) - cx, w)
     }
 
+    /// The step of the hovered mark's − or + under a point, if it is on one.
+    fn hover_step(
+        &self,
+        p: Point<Pixels>,
+    ) -> Option<(lines_trading::OrderId, crate::order_resize::SizeStep)> {
+        use crate::order_resize::{ResizeHit, SizeStep};
+        let id = self.orders.hover?;
+        let price = self.orders.price_of(id)?;
+        let units = self.row_units();
+        let row = self.rows.iter().position(|r| {
+            dom_trade::row_of(r.price.0, units) == dom_trade::row_of(price.0, units)
+        })?;
+        let (_, y) = self.table_xy(p);
+        let top = HEADER_ROW_H + row as f32 * ROW_H;
+        if y < top - 1.0 || y >= top + ROW_H + 1.0 {
+            return None;
+        }
+        let (found, hit) = self.zone_pressed(price, p)?;
+        match hit {
+            ResizeHit::Down if found == id => Some((id, SizeStep::Down)),
+            ResizeHit::Up if found == id => Some((id, SizeStep::Up)),
+            _ => None,
+        }
+    }
+
     /// The resize control's piece under a point on a row of the orders column.
     fn zone_pressed(
         &self,
@@ -512,26 +542,17 @@ impl DomView {
         if self.trade.qty_edit.take().is_some() || typing {
             cx.notify();
         }
+        // The hovered mark's − and +: only what is drawn, and it reaches a pixel past its row.
+        if let Some((id, step)) = self.hover_step(ev.position) {
+            self.send_resize(id, step, ev.modifiers.alt, cx);
+            cx.stop_propagation();
+            return;
+        }
         let (Some(price), Some(col)) = (self.row_at(ev.position), self.column_at(ev.position))
         else {
             return;
         };
         if col == DomColumn::Orders {
-            // The hovered mark's − and +.
-            let step = match self.zone_pressed(price, ev.position) {
-                Some((id, crate::order_resize::ResizeHit::Down)) => {
-                    Some((id, crate::order_resize::SizeStep::Down))
-                }
-                Some((id, crate::order_resize::ResizeHit::Up)) => {
-                    Some((id, crate::order_resize::SizeStep::Up))
-                }
-                _ => None,
-            };
-            if let Some((id, step)) = step {
-                self.send_resize(id, step, ev.modifiers.alt, cx);
-                cx.stop_propagation();
-                return;
-            }
             let width = f(self.bounds.size.width);
             match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
@@ -701,7 +722,13 @@ impl DomView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let hovered = self.orders.hover;
+        // Under the pointer now, and hovered since the pointer last moved.
+        let hovered = (self.column_at(ev.position) == Some(DomColumn::Orders))
+            .then(|| self.row_at(ev.position))
+            .flatten()
+            .and_then(|price| self.zone_pressed(price, ev.position))
+            .map(|(id, _)| id)
+            .filter(|id| self.orders.hover == Some(*id));
         if trade_bar::wheel_resize(self, hovered, ev, window, cx) {
             return;
         }

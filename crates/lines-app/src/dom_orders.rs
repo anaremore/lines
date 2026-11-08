@@ -264,6 +264,22 @@ impl OrdersLayer {
             .map(|m| m.id)
     }
 
+    /// Where order `id` rests, if it has a mark.
+    pub fn price_of(&self, id: OrderId) -> Option<Price> {
+        self.marks.iter().find(|m| m.id == id).map(|m| m.price)
+    }
+
+    /// Whether order `id` has its own mark (not one for several orders) on one of `rows`.
+    pub fn drawn_alone(&self, id: OrderId, rows: &[LadderRow], units: i64) -> bool {
+        self.price_of(id).is_some_and(|p| {
+            let row = row_of(p.0, units);
+            rows.iter().any(|r| row_of(r.price.0, units) == row) && {
+                let (slots, n, _) = row_marks(&self.marks, |m| row_of(m.price.0, units) == row);
+                slots.iter().take(n).any(|s| s.0.id == id && s.2 == 1)
+            }
+        })
+    }
+
     /// Whether order `id`'s mark is on the row containing `price`.
     pub fn on_row(&self, id: OrderId, price: Price, units: i64) -> bool {
         self.marks
@@ -375,6 +391,10 @@ impl OrdersLayer {
                     };
                     window.paint_quad(fill(rect(x + 2.0, ny, w - 5.0, notch), cut));
                 }
+                // − and + show on the hovered mark for one order (never on a group's); its size
+                // sits clear of the +.
+                let controls = count == 1 && self.hover == Some(m.id) && w >= RESIZE_MARK_W;
+                let text_w = if controls { w - RESIZE_BTN_W - 1.0 } else { w };
                 buf.clear();
                 if count > 1 {
                     let _ = mark_group_text(m, left, count, false, &mut buf);
@@ -395,13 +415,13 @@ impl OrdersLayer {
                 // A partial fill's label on an opaque pill: readable over the fill (AA).
                 if style == MarkStyle::Partial {
                     let tw = glyphs.width(buf.as_str(), text_colour, true, window);
-                    let (l, top, pw, ph) = label_pill(x, yy, w, h, tw, hair, role);
+                    let (l, top, pw, ph) = label_pill(x, yy, text_w, h, tw, hair, role);
                     window.paint_quad(fill(rect(l, top, pw, ph), t.mark_label().1));
                 }
                 // Inset past the outline (dashed when held) so the label never sits on it.
                 glyphs.paint_right(
                     buf.as_str(),
-                    x + w - 5.0,
+                    x + text_w - 5.0,
                     y,
                     row_h,
                     text_colour,
@@ -409,8 +429,7 @@ impl OrdersLayer {
                     window,
                     cx,
                 );
-                // − and + on the hovered mark for one order (never on a group's).
-                if count == 1 && self.hover == Some(m.id) && w >= RESIZE_MARK_W {
+                if controls {
                     let ends = [
                         (x, "−", t.text_main),
                         (
@@ -424,7 +443,8 @@ impl OrdersLayer {
                         ),
                     ];
                     for (bx, sign, colour) in ends {
-                        let b = rect(bx, yy, RESIZE_BTN_W, h);
+                        // 20 px each way: the row and a pixel past it on each side.
+                        let b = rect(bx, y - 1.0, RESIZE_BTN_W, row_h + 2.0);
                         window.paint_quad(fill(b, t.panel));
                         outline(window, b, t.control_edge, hair, false);
                         glyphs.paint(sign, bx + 6.0, y, row_h, colour, true, window, cx);

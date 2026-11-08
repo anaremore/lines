@@ -2364,3 +2364,41 @@ fn a_modify_racing_a_fill_never_undoes_it() {
     assert!(o.qty.0 >= o.filled.0, "{o:?}");
     assert_eq!(r.core.position(&acct(), es()), 3);
 }
+
+/// One leg sized alone, then the other fills: the smaller stop stays (never cancelled while a
+/// position remains), and either way the position closes exactly.
+#[test]
+fn unequal_legs_keep_protecting_what_remains() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    let (tp, sl) = filled_bracket(&mut r, 6005.00, 5995.00);
+    resize(&mut r, sl, 1).unwrap();
+    r.wait(LAT);
+    // The target fills 1 of 2: long 1, and the stop of 1 still covers it.
+    r.trade(6005.25, 1);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(r.state(sl), OrderState::Working, "not cancelled");
+    assert_eq!(r.core.order(sl).unwrap().remaining(), Qty(1));
+    assert_eq!(r.core.order(tp).unwrap().remaining(), Qty(1));
+    // The stop closes it; the target goes.
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0, "flat, never short");
+    assert_eq!(r.state(tp), OrderState::Cancelled);
+}
+
+/// The smaller leg fills all it has: the larger covers what is left of the position.
+#[test]
+fn the_smaller_leg_filling_shrinks_the_larger_to_what_remains() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    let (tp, sl) = filled_bracket(&mut r, 6005.00, 5995.00);
+    resize(&mut r, sl, 1).unwrap();
+    r.wait(LAT);
+    r.book(&[(5994.75, 50)], &[(5995.00, 50)]);
+    r.trade(5994.75, 10);
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(r.state(sl), OrderState::Filled);
+    assert_eq!(r.core.order(tp).unwrap().remaining(), Qty(1));
+}

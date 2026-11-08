@@ -283,6 +283,7 @@ impl PaneTrade {
         // The same for an order's size, while its order is open.
         if let Some((id, _)) = view.trade_ref().resize_edit
             && (!view.keys_free()
+                || !view.resize_drawn(id)
                 || !focus.is_focused(window)
                 || !resize_order_open(view.trade_ref(), id))
         {
@@ -316,8 +317,10 @@ pub trait TradePane: Sized + 'static {
     fn trade(&mut self) -> &mut PaneTrade;
     fn trade_ref(&self) -> &PaneTrade;
     fn trade_store(&self) -> &Arc<ChartStore>;
-    /// Nothing else holds the pane's keys (a picker, a menu).
+    /// Nothing else holds the pane's keys (a picker, a menu, a bracket editor).
     fn keys_free(&self) -> bool;
+    /// Whether this order's own mark or tag is on screen, standing for it alone.
+    fn resize_drawn(&self, order: lines_trading::OrderId) -> bool;
     /// Resize a working order from this pane, or say why not (`order_resize`).
     fn send_resize(
         &mut self,
@@ -759,6 +762,7 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
     let t = v.trade();
     if account.is_some() && account != t.account {
         t.account = account;
+        t.resize_edit = None;
         t.seen = u64::MAX;
         v.trade().arm_event(ArmEvent::AccountChanged, cx);
         v.trade().editor = None;
@@ -994,6 +998,16 @@ pub fn resize_plan(
         .and_then(|p| s.order(p))
         .is_some_and(lines_trading::Order::is_open);
     let position = s.position(&o.account, o.contract).map_or(0, |p| p.qty);
+    // A position bracket sizes its exits to the position itself: a change would bounce back.
+    let symbol = lines_feed::catalog::get(o.contract.product).map(|p| p.symbol);
+    if o.reduce_only
+        && symbol.is_some_and(|sym| {
+            let brackets = &crate::picker_view::settings(cx).bracket_presets;
+            crate::brackets::position_mode(brackets, &o.account.0, sym)
+        })
+    {
+        return Err("the position bracket sizes its exits to the position".to_owned());
+    }
     crate::order_resize::plan(o, sibling, entry_working, position, step, one_leg)
 }
 
@@ -1006,6 +1020,16 @@ pub fn open_resize_field<V: TradePane>(v: &mut V, id: lines_trading::OrderId) {
 /// Keys while a working order's size is being typed. Enter sends it (Alt: one leg of a linked
 /// pair). Returns whether the key was used.
 pub fn resize_key<V: TradePane>(v: &mut V, key: &str, alt: bool, cx: &mut Context<V>) -> bool {
+    if let Some((id, _)) = v.trade_ref().resize_edit
+        && !(v.keys_free() && v.resize_drawn(id))
+    {
+        v.trade().resize_edit = None;
+        return false;
+    }
+    // Alt only means something on Enter; other Alt keys are the pane's.
+    if alt && key != "enter" {
+        return false;
+    }
     let t = v.trade();
     let Some((id, edit)) = t.resize_edit.as_mut() else {
         return false;
@@ -1040,11 +1064,15 @@ pub fn wheel_resize<V: TradePane>(
     w: &Window,
     cx: &mut Context<V>,
 ) -> bool {
+    let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
+    // A sideways wheel never resizes (it pans).
+    if dy == 0.0 {
+        return false;
+    }
     let Some(id) = hovered.filter(|_| v.trade_ref().resize_armed && !ev.modifiers.control) else {
         v.trade().resize_armed = false;
         return false;
     };
-    let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
     if let Some(up) = dom_trade::scroll_qty(&mut v.trade().qty_scroll, dy) {
         let step = if up {
             crate::order_resize::SizeStep::Up

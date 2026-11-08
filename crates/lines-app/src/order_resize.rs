@@ -95,7 +95,13 @@ pub fn plan(
     let mut commands = Vec::with_capacity(2);
     let mut grows = false;
     for leg in legs {
-        if target == leg.remaining().0 {
+        // A step never moves a leg the other way: − on a larger leg never grows a smaller one.
+        let skip = match step {
+            SizeStep::Down => target >= leg.remaining().0,
+            SizeStep::Up => target <= leg.remaining().0,
+            SizeStep::To(_) => target == leg.remaining().0,
+        };
+        if skip {
             continue;
         }
         if target > leg.remaining().0 {
@@ -184,6 +190,11 @@ mod tests {
         let small = order(2, Role::TakeProfit, 2, 0);
         let meet = plan(&stop, Some(&small), false, 4, SizeStep::To(2), false).unwrap();
         assert_eq!((qtys(&meet), meet.grows), (vec![(1, 2)], false));
+        // − on the larger leg shrinks it and leaves a smaller one; + the same way up.
+        let down = plan(&stop, Some(&small), false, 4, SizeStep::Down, false).unwrap();
+        assert_eq!((qtys(&down), down.grows), (vec![(1, 3)], false));
+        let up = plan(&small, Some(&stop), false, 4, SizeStep::Up, false).unwrap();
+        assert_eq!((qtys(&up), up.grows), (vec![(2, 3)], true));
         // A sibling that finished isn't touched.
         let mut done = order(2, Role::TakeProfit, 4, 4);
         done.state = OrderState::Filled;

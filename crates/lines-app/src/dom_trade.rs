@@ -703,6 +703,9 @@ pub fn ghost_outcome(
         return GhostOutcome::Rejected(r.message.clone());
     }
     match order {
+        // A resize's order finished meanwhile: nothing was refused.
+        None if g.qty.is_some() => GhostOutcome::Acked,
+        Some(o) if g.qty.is_some() && !o.is_open() => GhostOutcome::Acked,
         None => GhostOutcome::Rejected("the order is gone".into()),
         Some(o) if !o.is_open() => GhostOutcome::Rejected(format!("order {}", o.state.label())),
         Some(o) if g.qty == Some(o.qty) => GhostOutcome::Acked,
