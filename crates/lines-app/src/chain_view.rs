@@ -28,6 +28,11 @@
 //!   edge, with Close and Cancel; a narrow pane leaves the column out and marks the strike. The
 //!   selected series lists all of its own above the ticket, at any width. An expiry holding any
 //!   carries a dot on its chip.
+//! - **Flatten and Cancel** (decision 0028, `docs/design.md` §3), shown while the account has
+//!   something on the underlying's options: the DOM's commands and keys, never gated by the
+//!   feed, the quote or One-click. A DOM's act on its contract; these act on every series of the
+//!   underlying, every expiry, and their labels say so. In the header, or the footer when
+//!   narrow. Growing leftward from the account, they move nothing else.
 //! - **One-click** (off in every new pane, never saved, off again on another symbol or account):
 //!   a single click in the focused pane sends a limit at the clicked side, still under the guard,
 //!   for the size the switch shows (Shift+Up/Down, or the ticket's chips). The rows stay put under
@@ -74,6 +79,8 @@ const POS_SAMPLE: &str = "+10 @ 13.10 · S 10 +9";
 const MARK_W: f32 = 22.0;
 /// Below this the header leaves out its title, so the account and One-click stay.
 const NARROW_HEADER: f32 = 560.0;
+/// Below this the exits sit in the footer: the header can't hold them with its other words.
+const EXITS_IN_HEADER: f32 = 860.0;
 /// The ticket's slots, so its buttons hold still as prices and modes change.
 const QTY_SLOT: f32 = 158.0;
 const PRICE_CHIP: f32 = 72.0;
@@ -847,13 +854,124 @@ impl ChainView {
                 self.note = Some(format!("Not sent: {why}"));
                 return;
             }
-            let (Some(price), Some(account)) = (price, self.trade.account.clone()) else {
+            let Some(account) = self.trade.account.clone() else {
                 return;
             };
             let qty = self.size(cx);
-            let cmd = ticket::command(account, self.contract(key), cell.side(), qty, price, false);
-            self.ask(cmd, cx);
+            let contract = self.contract(key);
+            if let Some(cmd) = ticket::click_order(account, contract, cell, q.as_ref(), qty) {
+                self.ask(cmd, cx);
+            }
         }
+    }
+
+    /// Flatten or Cancel: for every series of the underlying the account has anything on. Only
+    /// a read-only account refuses them: never the feed, the quote, One-click or the guard.
+    pub fn run_exit(
+        &mut self,
+        flatten: bool,
+        source: lines_trading::Source,
+        cx: &mut Context<Self>,
+    ) {
+        let what = if flatten { "Flatten" } else { "Cancel all" };
+        self.note = None;
+        let Some(t) = Trading::try_global(cx) else {
+            self.note = Some("trading is not running".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(account) = self.trade.account.clone() else {
+            self.note = Some("no account".to_owned());
+            cx.notify();
+            return;
+        };
+        if let Some(why) = t.read_only_reason(&account) {
+            self.note = Some(format!("{what} off: {why}"));
+            cx.notify();
+            return;
+        }
+        // The cache's lock is held only for updates: an emergency exit waits that moment.
+        let contracts = {
+            let st = t.cache.read();
+            ticket::held_contracts(&st, &account, self.product.id)
+        };
+        if contracts.is_empty() {
+            self.note = Some(format!(
+                "{what}: nothing on {} options",
+                self.product.symbol
+            ));
+        }
+        for cmd in ticket::exit_commands(&account, &contracts, flatten) {
+            let id = t.submit(source, std::time::Instant::now(), cmd);
+            self.remember(id);
+        }
+        cx.notify();
+    }
+
+    /// Flatten and Cancel for the header or footer, while there's anything to act on. Cancel to
+    /// the left: it goes first, and Flatten doesn't move when it does.
+    fn exit_buttons(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let t = self.theme;
+        let account = self.trade.account.as_ref()?;
+        let (orders, held) = {
+            let st = self.trade.try_cache()?;
+            let held = ticket::held_contracts(&st, account, self.product.id);
+            let orders = held
+                .iter()
+                .any(|c| st.open_orders(account, *c).next().is_some());
+            (orders, !held.is_empty())
+        };
+        if !held {
+            return None;
+        }
+        let symbol = self.product.symbol;
+        let button = |flatten: bool, cx: &mut Context<Self>| {
+            let label = ticket::exit_label(symbol, flatten);
+            let cmd = if flatten {
+                crate::commands::TradeCmd::Flatten
+            } else {
+                crate::commands::TradeCmd::CancelAll
+            };
+            let el = div()
+                .id(if flatten {
+                    "chain-flatten"
+                } else {
+                    "chain-cancel-all"
+                })
+                .flex_shrink_0()
+                .cursor_pointer()
+                .px_1()
+                .h(px(MIN_HIT))
+                .flex()
+                .items_center()
+                .border_1()
+                .rounded_sm()
+                .border_color(t.text_dim)
+                .text_color(t.text_main)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(label.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.focus.focus(window, cx);
+                        this.run_exit(flatten, lines_trading::Source::Dom, cx);
+                    }),
+                );
+            crate::tooltip::tip_div(el, &label, Some(crate::commands::Command::Trade(cmd)), &t)
+        };
+        let cancel = orders.then(|| button(false, cx));
+        let flatten = button(true, cx);
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_shrink_0()
+                .items_center()
+                .gap_1()
+                .children(cancel)
+                .child(flatten),
+        )
     }
 
     fn ask(&mut self, cmd: lines_trading::Command, cx: &App) {
@@ -874,33 +992,33 @@ impl ChainView {
         if t.sent.is_some() {
             return;
         }
-        let (key, side, close, price) = (t.key, t.side, t.close, t.price);
+        let (key, close, price) = (t.key, t.close, t.price);
         if self.refusal_of(key, price, close, cx).is_some() {
             return; // already on the ticket, in the core's words
         }
-        let (Some(price), Some(account)) = (price, self.trade.account.clone()) else {
+        let Some(account) = self.trade.account.clone() else {
             return;
         };
-        if close && self.closing(&account, key) {
-            if let Some(t) = self.ticket.as_mut() {
-                t.refused = Some("a close is already working; Cancel it first".to_owned());
-            }
-            return;
-        }
-        let qty = if close {
-            match ticket::closes(self.position(key), side) {
-                Some(q) => q,
-                None => {
-                    if let Some(t) = self.ticket.as_mut() {
-                        t.refused = Some("no position to close".to_owned());
-                    }
-                    return;
+        let built = self.ticket.as_ref().map(|t| {
+            ticket::ticket_order(
+                t,
+                account.clone(),
+                self.contract(key),
+                self.size(cx),
+                self.position(key),
+                close && self.closing(&account, key),
+            )
+        });
+        let cmd = match built {
+            Some(Ok(cmd)) => cmd,
+            Some(Err(why)) => {
+                if let Some(t) = self.ticket.as_mut() {
+                    t.refused = Some(why);
                 }
+                return;
             }
-        } else {
-            self.size(cx)
+            None => return,
         };
-        let cmd = ticket::command(account, self.contract(key), side, qty, price, close);
         let id = self.submit(cmd, cx);
         self.sent_at = Some(std::time::Instant::now());
         if let Some(t) = self.ticket.as_mut() {
@@ -986,16 +1104,32 @@ impl ChainView {
             accepted.extend_from_slice(ids);
         }
         self.watching.extend(accepted);
-        // Accepted isn't filled: the broker can still reject an order on arrival.
-        self.watching
-            .retain(|id| match st.order(*id).map(|o| &o.state) {
-                Some(lines_trading::OrderState::Rejected { reason }) => {
+        let excess = self.watching.len().saturating_sub(MAX_ASKED);
+        self.watching.drain(..excess);
+        // Accepted isn't filled: the broker can still reject an order on arrival, and a Flatten
+        // has no fill on a stale quote or a missing side, so it says the position stayed.
+        self.watching.retain(|id| {
+            use lines_trading::{OrderState, Role};
+            let Some(o) = st.order(*id) else {
+                return true;
+            };
+            let flatten = o.role == Role::Flatten;
+            match &o.state {
+                OrderState::Rejected { reason } => {
                     note = Some(format!("Rejected: {reason}"));
                     false
                 }
-                Some(lines_trading::OrderState::Submitted) | None => true,
-                Some(_) => false,
-            });
+                OrderState::Cancelled if flatten => {
+                    note = Some(
+                        "Flatten found no usable quote on its side: the position is still open"
+                            .to_owned(),
+                    );
+                    false
+                }
+                OrderState::Submitted => true,
+                s => flatten && !s.is_terminal(),
+            }
+        });
         drop(st);
         if let Some(n) = note {
             self.note = Some(n);
@@ -1925,6 +2059,11 @@ impl ChainView {
         });
         let one_click = self.one_click;
         let size = self.size(cx);
+        let exits = if self.exits_in_header() {
+            self.exit_buttons(cx)
+        } else {
+            None
+        };
         let chips = self.expiries.clone().into_iter().map(|e| {
             let on = Some(e) == shown;
             let mut label = chip_date(e);
@@ -2023,6 +2162,7 @@ impl ChainView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_2()
+                    .children(exits)
                     .children(account.map(|(name, badge)| {
                         // A click goes to the next account, on the badge alone when narrow.
                         div()
@@ -2072,21 +2212,22 @@ impl ChainView {
             )
     }
 
+    /// The header has room for the exits (below this they're in the footer).
+    fn exits_in_header(&self) -> bool {
+        f(self.bounds.size.width) >= EXITS_IN_HEADER
+    }
+
     /// Expiries where the account holds or works something.
     fn held_expiries(&self) -> Vec<CivilDate> {
         let mut out = Vec::new();
         let (Some(a), Some(st)) = (self.trade.account.as_ref(), self.trade.try_cache()) else {
             return out;
         };
-        let contracts = st
-            .positions_of(a)
-            .map(|p| p.contract)
-            .chain(st.open_orders_of(a).map(|o| o.contract));
-        for c in contracts {
-            if c.product == self.product.id
-                && let Some(k) = c.option_key()
-                && !out.contains(&k.expiry)
-            {
+        for k in ticket::held_contracts(&st, a, self.product.id)
+            .iter()
+            .filter_map(|c| c.option_key())
+        {
+            if !out.contains(&k.expiry) {
                 out.push(k.expiry);
             }
         }
@@ -2513,30 +2654,48 @@ impl ChainView {
         )
     }
 
-    fn footer(&self, size: i64) -> impl IntoElement {
+    fn footer(&self, size: i64, exits: Option<gpui::Div>) -> impl IntoElement {
         let t = self.theme;
         div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
             .px_2()
             .py_1()
             .bg(t.panel)
             .border_t_1()
             .border_color(t.axis_line)
             .text_size(px(12.0))
-            // A reason wraps, whole; the hints give way at the edge.
-            .when(self.note.is_none(), |d| d.whitespace_nowrap().overflow_hidden())
-            .text_color(if self.note.is_some() {
-                t.text_main
-            } else {
-                t.text_dim
-            })
-            .child(self.note.clone().unwrap_or_else(|| {
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    // A reason wraps, whole; the hints give way at the edge.
+                    .when(self.note.is_none(), |d| {
+                        d.whitespace_nowrap().overflow_hidden()
+                    })
+                    .text_color(if self.note.is_some() {
+                        t.text_main
+                    } else {
+                        t.text_dim
+                    })
+                    .when(self.note.is_some() || self.ticket.is_none(), |d| {
+                        d.child(self.footer_text(size))
+                    }),
+            )
+            .children(exits)
+    }
+
+    fn footer_text(&self, size: i64) -> String {
+        self.note.clone().unwrap_or_else(|| {
                 if self.one_click {
                     return format!(
                         "One-click ON: a click on an ask or bid sends a limit there for {size}, at once  ·  Shift+Up/Down: quantity  ·  Enter: ticket"
                     );
                 }
                 "Click an ask to buy, a bid to sell, or Enter  ·  Up/Down: strike  ·  Left/Right: expiry  ·  Tab: calls / puts  ·  Shift+Tab: bid / ask  ·  Delete: cancel  ·  Home: the money  ·  Shaded: in the money".to_owned()
-            }))
+        })
     }
 }
 
@@ -2599,6 +2758,11 @@ impl Render for ChainView {
         let size = self.size(cx);
         let strip = self.row_strip(cx);
         let dock = self.ticket_dock(cx);
+        let footer_exits = if self.exits_in_header() {
+            None
+        } else {
+            self.exit_buttons(cx)
+        };
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
@@ -2635,9 +2799,10 @@ impl Render for ChainView {
             .children(strip)
             .children(dock)
             // The ticket has its own hints; a message still shows.
-            .when(self.ticket.is_none() || self.note.is_some(), |d| {
-                d.child(self.footer(size))
-            })
+            .when(
+                self.ticket.is_none() || self.note.is_some() || footer_exits.is_some(),
+                |d| d.child(self.footer(size, footer_exits)),
+            )
     }
 }
 

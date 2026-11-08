@@ -2494,6 +2494,21 @@ impl WindowView {
             Some(PaneHandle::Chart(_)) => {
                 self.refuse("arming and orders act on a DOM: focus one first", cx);
             }
+            // The chain's exits, as on a DOM: for the underlying's options (their labels say so).
+            Some(PaneHandle::Chain(c))
+                if matches!(
+                    tc,
+                    crate::commands::TradeCmd::Flatten | crate::commands::TradeCmd::CancelAll
+                ) =>
+            {
+                let source = if key {
+                    lines_trading::Source::Hotkey
+                } else {
+                    lines_trading::Source::Palette
+                };
+                let flatten = tc == crate::commands::TradeCmd::Flatten;
+                c.update(cx, |v, cx| v.run_exit(flatten, source, cx));
+            }
             _ => self.refuse("trading commands act on the focused DOM or chart", cx),
         }
     }

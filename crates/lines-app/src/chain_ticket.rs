@@ -262,6 +262,85 @@ pub fn command(
     }
 }
 
+/// The order a ticket's send is: the shared size, or in Close mode the whole position, which the
+/// ticket's side must reduce. Its reason otherwise. The view adds the guard's check and the send.
+pub fn ticket_order(
+    t: &Ticket,
+    account: AccountId,
+    contract: ContractKey,
+    size: i64,
+    position: i64,
+    closing: bool,
+) -> Result<Command, String> {
+    let price = t.price.ok_or_else(|| "type a limit price".to_owned())?;
+    let qty = if t.close {
+        if closing {
+            return Err("a close is already working; Cancel it first".to_owned());
+        }
+        closes(position, t.side).ok_or_else(|| "no position to close".to_owned())?
+    } else {
+        size
+    };
+    Ok(command(account, contract, t.side, qty, price, t.close))
+}
+
+/// The order a One-click press is: the clicked side's own price; `None` on a missing side.
+pub fn click_order(
+    account: AccountId,
+    contract: ContractKey,
+    cell: Cell,
+    q: Option<&OptionQuote>,
+    qty: i64,
+) -> Option<Command> {
+    let price = click_limit(cell, q)?;
+    Some(command(account, contract, cell.side(), qty, price, false))
+}
+
+/// Every option series of an underlying the account holds or works, on every expiry.
+pub fn held_contracts(
+    st: &crate::trading::TradeState,
+    account: &AccountId,
+    product: lines_core::ProductId,
+) -> Vec<ContractKey> {
+    let mut out = Vec::new();
+    let contracts = st
+        .positions_of(account)
+        .map(|p| p.contract)
+        .chain(st.open_orders_of(account).map(|o| o.contract));
+    for c in contracts {
+        if c.product == product && c.option_key().is_some() && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Flatten (cancel the orders, close the position at market) or Cancel All for each series: the
+/// DOM's own commands, one per contract, because a chain shows many.
+pub fn exit_commands(
+    account: &AccountId,
+    contracts: &[ContractKey],
+    flatten: bool,
+) -> Vec<Command> {
+    contracts
+        .iter()
+        .map(|c| {
+            let (account, contract) = (account.clone(), Some(*c));
+            if flatten {
+                Command::Flatten { account, contract }
+            } else {
+                Command::CancelAll { account, contract }
+            }
+        })
+        .collect()
+}
+
+/// A DOM's exits act on its contract; these act on the underlying's options, and say so.
+pub fn exit_label(symbol: &str, flatten: bool) -> String {
+    let word = if flatten { "Flatten" } else { "Cancel" };
+    format!("{word} {symbol} options")
+}
+
 /// The row's one-press Close: reduce-only for the whole position, at the mid. Its side always
 /// reduces, and the core holds `PlaceExit` to the position, so it can't flip or open.
 pub fn close_command(
@@ -470,6 +549,10 @@ pub fn parse_shot(s: &str) -> Result<ShotTicket, String> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+#[path = "chain_ticket_tests.rs"]
+mod path_tests;
 
 #[cfg(test)]
 mod tests {
