@@ -366,6 +366,9 @@ impl OrdersLayer {
                             Some(gpui::ContentMask { bounds: cell }),
                             |window| {
                                 window.paint_quad(fill(cell, t.panel));
+                                // Opaque over the "Ord" title, in its whole cell: it replaces
+                                // the title, nothing shows half covered.
+                                crate::layout_rec::set_layer(1);
                                 glyphs.paint(
                                     s.as_str(),
                                     ox + 4.0,
@@ -376,6 +379,7 @@ impl OrdersLayer {
                                     window,
                                     cx,
                                 );
+                                crate::layout_rec::set_layer(0);
                             },
                         );
                     }
@@ -398,12 +402,18 @@ impl OrdersLayer {
                     }
                     crate::dom_trade::HiddenPlacement::None => None,
                 };
+                let instead = crate::dom_trade::hidden_placement(ow, title_w, w)
+                    == crate::dom_trade::HiddenPlacement::InsteadOfTitle;
                 if let Some(pill) = pill {
                     window.with_content_mask(Some(gpui::ContentMask { bounds: pill }), |window| {
                         window.paint_quad(fill(pill, t.panel));
                         outline(window, pill, t.warn, hair, false);
                         let x = f32::from(pill.origin.x) + 3.0;
+                        // In the title's place it covers "Ord" whole; beside it, the lint still
+                        // checks the two.
+                        crate::layout_rec::set_layer(u8::from(instead));
                         glyphs.paint(s.as_str(), x, ty, hh, t.text_main, true, window, cx);
+                        crate::layout_rec::set_layer(0);
                     });
                 }
             }
