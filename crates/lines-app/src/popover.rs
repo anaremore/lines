@@ -73,6 +73,8 @@ pub enum Kind {
     Menu,
     /// A chart's drawing style editor (`crate::style_editor`).
     StyleEditor,
+    /// The orders of a chart's group tag (`crate::order_group_view`).
+    OrderGroup,
 }
 
 /// The one open popover, as a pure value: `K` names a popover (owner and kind).

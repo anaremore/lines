@@ -729,7 +729,8 @@ fn latency_windows_do_not_allocate() {
 #[test]
 fn chart_order_tags_do_not_allocate() {
     use lines_core::geometry::order_tags::{
-        LineIn, MAX_TAGS, TagBox, edge_markers, handles, hit, layout_tags, tag_band,
+        GroupIn, LineIn, MAX_TAGS, TagBox, TagGroup, edge_markers, group_orders, handles, hit,
+        layout_tags, tag_band, tags_fit,
     };
     use lines_core::geometry::snap_price;
     let vp = Viewport {
@@ -748,10 +749,21 @@ fn chart_order_tags_do_not_allocate() {
         })
         .collect();
     let mut tags = [TagBox::default(); MAX_TAGS];
+    let mut orders: Vec<GroupIn> = (0..140)
+        .map(|i| GroupIn {
+            id: i,
+            price: Price(590_000 + (i as i64) * 100),
+            qty: 1,
+            key: (i % 4) as u16,
+        })
+        .collect();
+    let mut groups = [TagGroup::default(); MAX_TAGS];
     let n = allocs_during(|| {
         for frame in 0..200 {
             let m = edge_markers(&vp, &lines, 800.0, 400.0, [80.0, 80.0]);
             let band = tag_band(&m, 400.0);
+            let g = group_orders(&vp, &mut orders, 400.0, tags_fit(band), &mut groups);
+            let _ = groups[g.saturating_sub(1)].average();
             let k = layout_tags(&vp, &lines, 800.0, 400.0, band, 1.0, &mut tags);
             let h = handles(&tags[0], [true, true]);
             let y = frame as f32 % 400.0;

@@ -213,6 +213,9 @@ pub struct Fixture {
     pub timeframe: Timeframe,
     /// Start with the timeframe list open (screenshots: `--timeframe-menu`).
     pub timeframe_menu: bool,
+    /// Open the first group tag's list (screenshots:
+    /// `--order-group-menu`).
+    pub order_group_menu: bool,
     /// Open the style editor on this drawing (screenshots: `--style-editor
     /// ID[:TAB[:COL[:ROW]]]`), on tab `TAB` (0 = first), the focus on (row, col).
     pub style_editor: Option<StyleEditorAt>,
@@ -355,6 +358,8 @@ pub struct ChartView {
     reported: (Option<UtcMillis>, Option<Price>),
     /// Screenshot fixture: price zoom to apply once, after the first auto-fit.
     pending_price_zoom: Option<f64>,
+    /// Screenshot fixture: open the first group tag's list once tags are laid out.
+    pending_group_menu: bool,
     /// Pointer position in plot-local logical px, while it is over the plot.
     hover: Option<(f32, f32)>,
     /// This frame's crosshair (from `hover`), and a copy of the bar under it.
@@ -387,7 +392,7 @@ pub struct ChartView {
     /// The position tag's text (glyphs shaped once).
     pos_glyphs: crate::text::Glyphs,
     /// The chart's orders this frame: lines, tags, edge markers, handles, drags.
-    ct: crate::chart_trade::ChartTradeState,
+    pub(crate) ct: crate::chart_trade::ChartTradeState,
     /// Screenshot fixture: the position line held dragged to this plot-local y.
     drag_position: Option<f32>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
@@ -559,6 +564,7 @@ impl ChartView {
             reported: (None, None),
             hover: fixture.cursor,
             pending_price_zoom: fixture.price_zoom,
+            pending_group_menu: fixture.order_group_menu,
             cross: None,
             cross_bar: None,
             period_ms: 60_000,
@@ -767,6 +773,11 @@ impl ChartView {
                 let drawing = self.drawings.close_editor();
                 let study = self.study_style.take().is_some();
                 if !drawing && !study {
+                    return;
+                }
+            }
+            Kind::OrderGroup => {
+                if self.ct.group_menu.take().is_none() {
                     return;
                 }
             }
@@ -1195,8 +1206,14 @@ impl ChartView {
         // An open list or menu normally takes this press on its backdrop (`crate::popover`);
         // this is the fallback (a list whose chip is clipped away draws none). A press that
         // closes something does only that: no focus change, no pan.
-        if self.tf_menu || self.trade.account_menu || self.study_menu.is_some() || self.styling() {
+        if self.tf_menu
+            || self.trade.account_menu
+            || self.study_menu.is_some()
+            || self.styling()
+            || self.ct.group_menu.is_some()
+        {
             popover::mark_dismissing();
+            self.close_popover(Kind::OrderGroup, cx);
             self.close_popover(Kind::Timeframe, cx);
             self.close_popover(Kind::Account, cx);
             self.close_popover(Kind::Studies, cx);
@@ -1324,7 +1341,10 @@ impl ChartView {
             cx.stop_propagation();
             return;
         }
-        if (self.tf_menu || self.trade.account_menu) && popover::closes_on_key(&k.key) {
+        if (self.tf_menu || self.trade.account_menu || self.ct.group_menu.is_some())
+            && popover::closes_on_key(&k.key)
+        {
+            self.close_popover(Kind::OrderGroup, cx);
             self.close_popover(Kind::Timeframe, cx);
             self.close_popover(Kind::Account, cx);
             cx.stop_propagation();
@@ -2182,6 +2202,10 @@ impl ChartView {
             return false;
         };
         match h {
+            // A group tag lists its orders (no one order to drag, no × for many at one press).
+            TagHit::Body(id) | TagHit::Close(id) if self.ct.group_of(id).is_some() => {
+                self.open_order_group(id, y as f32, cx);
+            }
             // Moving and cancelling need no arming, as on the DOM.
             TagHit::Body(id) => {
                 if let Some(m) = self.ct.mark(id).copied() {
@@ -2225,8 +2249,42 @@ impl ChartView {
         true
     }
 
+    /// The chart's product (its price format, its money per unit).
+    pub(crate) fn instrument(&self) -> &lines_core::Product {
+        &self.instrument
+    }
+
+    /// The plot's height, as last drawn.
+    pub(crate) fn plot_height(&self) -> f32 {
+        self.vp.height as f32
+    }
+
+    /// Open the list of a group tag's orders (`crate::order_group_view`).
+    fn open_order_group(&mut self, id: u64, top: f32, cx: &mut Context<Self>) {
+        let Some(g) = self.ct.group_of(id).copied() else {
+            return;
+        };
+        let orders = self
+            .ct
+            .members(&g)
+            .iter()
+            .map(|o| lines_trading::OrderId(o.id))
+            .collect();
+        self.close_popover(Kind::Timeframe, cx);
+        self.close_popover(Kind::Account, cx);
+        self.close_popover(Kind::Studies, cx);
+        self.ct.group_menu = Some(crate::chart_trade::GroupMenu {
+            orders,
+            top,
+            confirm: None,
+        });
+        popover::opened(cx, Kind::OrderGroup, |v: &mut Self, cx| {
+            v.close_popover(Kind::OrderGroup, cx)
+        });
+    }
+
     /// Cancel one of the chart's orders (its tag's ×): no switch needed, as on the DOM.
-    fn cancel_order(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_order(&mut self, id: u64, cx: &mut Context<Self>) {
         if let (Some(m), Some(account), Some(t)) = (
             self.ct.mark(id).copied(),
             self.trade.account.clone(),
@@ -2460,6 +2518,22 @@ impl ChartView {
 
     fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let t0 = Instant::now();
+        // Screenshot fixture: the first group tag's list, once a frame has laid tags out.
+        if self.pending_group_menu {
+            if let Some(g) = self.ct.groups[..self.ct.n_groups]
+                .iter()
+                .find(|g| g.is_group())
+                .copied()
+            {
+                self.pending_group_menu = false;
+                let top = self.ct.tags[..self.ct.n_tags]
+                    .iter()
+                    .find(|b| b.id == g.id)
+                    .map_or(0.0, |b| b.top);
+                self.open_order_group(g.id, top, cx);
+            }
+            cx.notify();
+        }
         self.common.paints += 1;
         let scale = window.scale_factor();
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
@@ -2895,10 +2969,11 @@ impl ChartView {
         use crate::chart_trade::{
             TagText, money_per_unit, write_edge, write_exit_pnl, write_order_tag,
         };
+        use crate::dom_trade::group_key;
         use crate::dom_trade::{MarkRole, MarkStyle};
         use lines_core::geometry::order_tags::{
-            CLOSE_W, HANDLE_H, HANDLE_W, LineIn, edge_markers, handles, layout_tags, tag_band,
-            wanted_handles,
+            CLOSE_W, GroupIn, HANDLE_H, HANDLE_W, LineIn, MIXED_KEY, edge_markers, group_orders,
+            handles, layout_tags, tag_band, tags_fit, wanted_handles,
         };
         // The order tags' own height (their layout's), not the price labels'.
         const TAG_H: f32 = lines_core::geometry::order_tags::TAG_H;
@@ -2916,37 +2991,14 @@ impl ChartView {
                 x += dash * 2.0;
             }
         };
-        // Texts and widths.
-        self.ct.texts.clear();
+        // Every order, for the edge markers.
         self.ct.lines.clear();
         for i in 0..self.ct.marks.len() {
             let m = self.ct.marks[i];
-            let mut pnl = FixedStr::<48>::new();
-            let money = write_exit_pnl(&mut pnl, &m, self.ct.position, fmt.tick, mpu, mode)
-                .ok()
-                .flatten();
-            let mut text = FixedStr::<96>::new();
-            let _ = write_order_tag(&mut text, &m, &fmt);
-            let mut w = self
-                .pos_glyphs
-                .width(text.as_str(), t.text_main, true, window);
-            if money.is_some() {
-                w += 8.0
-                    + self
-                        .pos_glyphs
-                        .width(pnl.as_str(), t.text_main, true, window);
-            }
-            self.ct.texts.push(TagText {
-                id: m.id.0,
-                text,
-                pnl,
-                money,
-                mark: m,
-            });
             self.ct.lines.push(LineIn {
                 id: m.id.0,
                 price: m.price,
-                text_w: w,
+                text_w: 0.0,
             });
         }
         // Edge markers (measured from their text), then the tags between them.
@@ -2973,28 +3025,117 @@ impl ChartView {
         }
         self.ct.markers = edge_markers(&self.vp, &self.ct.lines, pw, ph, edge_w);
         let band = tag_band(&self.ct.markers, ph);
+        // The tags: orders of one kind that can't sit at their own levels share one (zooming in
+        // splits them back), and every order on the plot is in exactly one.
+        self.ct.on_plot.clear();
+        for i in 0..self.ct.marks.len() {
+            let m = self.ct.marks[i];
+            let y = self.vp.price_to_y(m.price.0 as f64);
+            if y.is_finite() && (0.0..=ph as f64).contains(&y) {
+                self.ct.on_plot.push(GroupIn {
+                    id: m.id.0,
+                    price: m.price,
+                    qty: m.qty.0 - m.filled.0,
+                    key: group_key(&m),
+                });
+            }
+        }
+        self.ct.n_groups = group_orders(
+            &self.vp,
+            &mut self.ct.on_plot,
+            ph,
+            tags_fit(band),
+            &mut self.ct.groups,
+        );
+        // Texts and widths, one per tag.
+        self.ct.texts.clear();
+        self.ct.tag_lines.clear();
+        for k in 0..self.ct.n_groups {
+            let g = self.ct.groups[k];
+            let Some(m) = self.ct.mark(g.id).copied() else {
+                continue;
+            };
+            let mut pnl = FixedStr::<48>::new();
+            let mut text = FixedStr::<96>::new();
+            let (money, at) = if g.is_group() {
+                let _ = crate::chart_trade::write_group_tag(&mut text, &m, &g, &fmt);
+                (None, g.average())
+            } else {
+                let _ = write_order_tag(&mut text, &m, &fmt);
+                let money = write_exit_pnl(&mut pnl, &m, self.ct.position, fmt.tick, mpu, mode)
+                    .ok()
+                    .flatten();
+                (money, m.price)
+            };
+            let mut w = self
+                .pos_glyphs
+                .width(text.as_str(), t.text_main, true, window);
+            if money.is_some() {
+                w += 8.0
+                    + self
+                        .pos_glyphs
+                        .width(pnl.as_str(), t.text_main, true, window);
+            }
+            self.ct.texts.push(TagText {
+                id: g.id,
+                text,
+                pnl,
+                money,
+                mark: m,
+            });
+            self.ct.tag_lines.push(LineIn {
+                id: g.id,
+                price: at,
+                text_w: w,
+            });
+        }
         self.ct.n_tags = layout_tags(
             &self.vp,
-            &self.ct.lines,
+            &self.ct.tag_lines,
             pw,
             ph,
             band,
             scale,
             &mut self.ct.tags,
         );
-        // Lines across the plot: solid working, dashed held or pending.
-        for i in 0..self.ct.texts.len() {
-            let m = self.ct.texts[i].mark;
-            let y = self.vp.price_to_y(m.price.0 as f64) as f32;
-            if !(0.0..=ph).contains(&y) {
-                continue;
-            }
-            let c = self.mark_colour(&m);
-            match m.style {
-                MarkStyle::Working | MarkStyle::Partial => {
-                    window.paint_quad(fill(rect(0.0, y, pw, hair), c.opacity(0.8)))
+        // Lines across the plot: solid working, dashed held or pending. A group of one kind:
+        // a band over its price range between two such lines (one line at one price).
+        for k in 0..self.ct.n_groups {
+            let g = self.ct.groups[k];
+            let line =
+                |window: &mut Window, m: &crate::dom_trade::OrderMark, p: Price, c: Colour| {
+                    let y = self.vp.price_to_y(p.0 as f64) as f32;
+                    if (0.0..=ph).contains(&y) {
+                        match m.style {
+                            MarkStyle::Working | MarkStyle::Partial => {
+                                window.paint_quad(fill(rect(0.0, y, pw, hair), c.opacity(0.8)))
+                            }
+                            _ => dashed(window, y, c.opacity(0.8), 3.0),
+                        }
+                    }
+                };
+            if g.is_group() && g.key != MIXED_KEY {
+                let Some(m) = self.ct.mark(g.id) else {
+                    continue;
+                };
+                let c = self.mark_colour(m);
+                let (top, bottom) = (
+                    self.vp.price_to_y(g.hi.0 as f64) as f32,
+                    self.vp.price_to_y(g.lo.0 as f64) as f32,
+                );
+                if bottom > top {
+                    window.paint_quad(fill(rect(0.0, top, pw, bottom - top), c.opacity(0.14)));
                 }
-                _ => dashed(window, y, c.opacity(0.8), 3.0),
+                line(window, m, g.hi, c);
+                if g.lo != g.hi {
+                    line(window, m, g.lo, c);
+                }
+            } else {
+                for o in self.ct.members(&g) {
+                    if let Some(m) = self.ct.mark(o.id) {
+                        line(window, m, o.price, self.mark_colour(m));
+                    }
+                }
             }
         }
         // The order being dragged, moves awaiting the broker: dashed accent.
@@ -3091,12 +3232,18 @@ impl ChartView {
                 continue;
             };
             let m = tt.mark;
-            let c = self.mark_colour(&m);
-            let pending = m.style == MarkStyle::Pending;
+            let group = self.ct.group_of(b.id).copied();
+            let mixed = group.is_some_and(|g| g.key == MIXED_KEY);
+            let c = if mixed {
+                t.text_dim
+            } else {
+                self.mark_colour(&m)
+            };
+            let pending = !mixed && m.style == MarkStyle::Pending;
             // Always on the label background (readable over candles); pending reads by its dim
             // text and outline only (no role bar), held by a dashed outline.
             window.paint_quad(fill(rect(b.left, b.top, b.w, TAG_H), t.label_bg));
-            if m.style == MarkStyle::Held {
+            if !mixed && m.style == MarkStyle::Held {
                 self.dashed_outline(rect(b.left, b.top, b.w, TAG_H), c, hair, window);
             } else {
                 self.outline(rect(b.left, b.top, b.w, TAG_H), c, hair, window);
@@ -3105,6 +3252,7 @@ impl ChartView {
             // bottom edge for a stop; entries plain. Never colour alone.
             window.paint_quad(fill(rect(b.left, b.top, 2.0, TAG_H), c));
             match MarkRole::of(&m) {
+                _ if mixed => {}
                 MarkRole::Target => window.paint_quad(fill(rect(b.left, b.top - 2.0, 8.0, 2.0), c)),
                 MarkRole::Stop => window.paint_quad(fill(rect(b.left, b.top + TAG_H, 8.0, 2.0), c)),
                 MarkRole::Entry => {}
@@ -3140,9 +3288,9 @@ impl ChartView {
                     cx,
                 );
             }
-            // × cancels.
+            // × cancels; a group's ▾ lists its orders.
             self.pos_glyphs.paint(
-                "×",
+                if group.is_some() { "▾" } else { "×" },
                 ox + b.close_left + CLOSE_W * 0.5 - 3.5,
                 oy + b.top,
                 TAG_H,
@@ -5955,6 +6103,9 @@ impl Render for ChartView {
                     )
                     .when_some(self.legend(&t), |d, l| d.child(l))
                     .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
+                    .when_some(crate::order_group_view::layer(self, &t, cx), |d, m| {
+                        d.child(m)
+                    })
                     .when_some(
                         self.study_menu.as_ref().map(|m| {
                             let items = self.menu_items(m, cx);
@@ -5995,11 +6146,12 @@ type PickPrice = Result<Option<Price>, &'static str>;
 
 /// The chart's popovers the symbol picker closes when it opens: all of them (their window-wide
 /// backdrops would take the picker's clicks). Pane menus belong to the window.
-const PICKER_CLOSES: [Kind; 4] = [
+const PICKER_CLOSES: [Kind; 5] = [
     Kind::Timeframe,
     Kind::Account,
     Kind::Studies,
     Kind::StyleEditor,
+    Kind::OrderGroup,
 ];
 
 #[cfg(test)]
@@ -6057,10 +6209,15 @@ mod tests {
             Kind::Account,
             Kind::Menu,
             Kind::StyleEditor,
+            Kind::OrderGroup,
         ] {
             // Exhaustive: a new kind fails to compile here until it's decided.
             let chart_owned = match kind {
-                Kind::Studies | Kind::Timeframe | Kind::Account | Kind::StyleEditor => true,
+                Kind::Studies
+                | Kind::Timeframe
+                | Kind::Account
+                | Kind::StyleEditor
+                | Kind::OrderGroup => true,
                 Kind::Menu => false,
             };
             assert_eq!(PICKER_CLOSES.contains(&kind), chart_owned, "{kind:?}");
