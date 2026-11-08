@@ -666,7 +666,9 @@ fn add_fill(o: &mut Open, f: TradeFill) {
 }
 
 /// Journal CSV: one row per trade (closed trades, in order), US number format, quoted where
-/// needed. Prices are in price units converted with the product's display format.
+/// needed. Prices are in price units converted with the product's display format. Money is the
+/// whole position; `ticks`, `mae_ticks` and `mfe_ticks` are per contract, by price (the two
+/// excursions as magnitudes: ≥ 0).
 pub fn csv(trades: &[Trade]) -> String {
     let mut out = String::from(
         "id,account,contract,side,entry_time,exit_time,trade_date,max_qty,avg_entry,avg_exit,realized,fees,net,ticks,duration_s,mae,mfe,mae_ticks,mfe_ticks,fills,tags,note\n",
