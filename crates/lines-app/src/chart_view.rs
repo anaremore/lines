@@ -2254,9 +2254,9 @@ impl ChartView {
         &self.instrument
     }
 
-    /// The plot's height, as last drawn.
-    pub(crate) fn plot_height(&self) -> f32 {
-        self.vp.height as f32
+    /// The plot, as last drawn (window coordinates).
+    pub(crate) fn plot_bounds(&self) -> Bounds<Pixels> {
+        self.plot
     }
 
     /// Open the list of a group tag's orders (`crate::order_group_view`).
@@ -2264,17 +2264,28 @@ impl ChartView {
         let Some(g) = self.ct.group_of(id).copied() else {
             return;
         };
-        let orders = self
+        let rows = self
             .ct
             .members(&g)
             .iter()
-            .map(|o| lines_trading::OrderId(o.id))
-            .collect();
+            .filter_map(|o| self.ct.mark(o.id).copied())
+            .map(|mark| crate::chart_trade::GroupRow { mark, open: true })
+            .collect::<Vec<_>>();
+        let mut title = String::new();
+        if let Some(r) = rows.first() {
+            let _ = crate::chart_trade::write_group_title(
+                &mut title,
+                &r.mark,
+                &g,
+                &self.instrument.price,
+            );
+        }
         self.close_popover(Kind::Timeframe, cx);
         self.close_popover(Kind::Account, cx);
         self.close_popover(Kind::Studies, cx);
         self.ct.group_menu = Some(crate::chart_trade::GroupMenu {
-            orders,
+            rows,
+            title,
             top,
             confirm: None,
         });
@@ -2518,6 +2529,17 @@ impl ChartView {
 
     fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let t0 = Instant::now();
+        // A group's list follows its orders: finished ones are marked (disarming Cancel all),
+        // and it closes when none is left.
+        if let Some(menu) = &mut self.ct.group_menu {
+            let marks = &self.ct.marks;
+            if menu.refresh(|o| marks.iter().any(|m| m.id == o)) {
+                cx.notify();
+            }
+            if menu.open_count() == 0 {
+                self.close_popover(Kind::OrderGroup, cx);
+            }
+        }
         // Screenshot fixture: the first group tag's list, once a frame has laid tags out.
         if self.pending_group_menu {
             if let Some(g) = self.ct.groups[..self.ct.n_groups]
@@ -3011,10 +3033,12 @@ impl ChartView {
             {
                 let _ = write_edge(&mut edge_text[k], &m, e.above, e.n, &fmt);
                 let mut pnl = FixedStr::<48>::new();
-                if write_exit_pnl(&mut pnl, &m, self.ct.position, fmt.tick, mpu, mode)
-                    .ok()
-                    .flatten()
-                    .is_some()
+                // One order's P&L, so only when it stands for one order.
+                if e.n == 1
+                    && write_exit_pnl(&mut pnl, &m, self.ct.position, fmt.tick, mpu, mode)
+                        .ok()
+                        .flatten()
+                        .is_some()
                 {
                     let _ = write!(edge_text[k], " · {}", pnl.as_str());
                 }
@@ -6103,9 +6127,10 @@ impl Render for ChartView {
                     )
                     .when_some(self.legend(&t), |d, l| d.child(l))
                     .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
-                    .when_some(crate::order_group_view::layer(self, &t, cx), |d, m| {
-                        d.child(m)
-                    })
+                    .when_some(
+                        crate::order_group_view::layer(self, window, &t, cx),
+                        |d, m| d.child(m),
+                    )
                     .when_some(
                         self.study_menu.as_ref().map(|m| {
                             let items = self.menu_items(m, cx);

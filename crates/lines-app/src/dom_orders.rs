@@ -254,7 +254,8 @@ impl OrdersLayer {
                 buf.clear();
                 if count > 1 {
                     let _ = mark_group_text(m, left, count, false, &mut buf);
-                    if glyphs.width(buf.as_str(), text_colour, true, window) > w - 7.0 {
+                    let plus = if more && k == 1 { 8.0 } else { 0.0 };
+                    if glyphs.width(buf.as_str(), text_colour, true, window) + plus > w - 7.0 {
                         buf.clear();
                         let _ = mark_group_text(m, left, count, true, &mut buf);
                     }

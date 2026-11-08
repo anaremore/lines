@@ -207,8 +207,7 @@ pub fn layout_tags(
     out: &mut [TagBox],
 ) -> usize {
     let (lo, hi) = band;
-    let fits = (((hi - lo) + TAG_GAP) / (TAG_H + TAG_GAP)).floor().max(0.0) as usize;
-    let cap = out.len().min(MAX_TAGS).min(fits);
+    let cap = out.len().min(tags_fit(band));
     let mut n = 0;
     for l in lines {
         if n == cap {
@@ -252,7 +251,8 @@ pub fn layout_tags(
         };
         tags[i].top = tags[i].top.max(floor);
     }
-    // (`cap` keeps the stack within the band, so the pull-up below never passes `lo`.)
+    // (`cap` keeps the stack within the band, so the pull-up below never passes `lo`, but for
+    // the one tag a band too short for it still gets.)
     let mut ceiling = hi;
     for t in tags.iter_mut().rev() {
         if t.top + TAG_H > ceiling {
@@ -401,12 +401,13 @@ pub fn round_average(notional: i128, qty: i64) -> Option<Price> {
     Some(Price(i64::try_from(rounded).ok()?))
 }
 
-/// How many tags the band holds, at most `MAX_TAGS` (what [`layout_tags`] lays out).
+/// How many tags the band holds (what [`layout_tags`] lays out): at least one, however short
+/// the plot, so orders on it always have a way in; at most `MAX_TAGS`.
 pub fn tags_fit(band: (f32, f32)) -> usize {
     let fits = (((band.1 - band.0) + TAG_GAP) / (TAG_H + TAG_GAP))
         .floor()
         .max(0.0) as usize;
-    fits.min(MAX_TAGS)
+    fits.clamp(1, MAX_TAGS)
 }
 
 /// The tags for the orders on the plot, at most `cap` (from [`tags_fit`]) and `out.len()`: every
@@ -809,7 +810,7 @@ mod tests {
     fn tags_fit_counts_the_band_and_the_limit() {
         assert_eq!(tags_fit((0.0, TAG_H)), 1);
         assert_eq!(tags_fit((0.0, 2.0 * TAG_H + TAG_GAP)), 2);
-        assert_eq!(tags_fit((0.0, 10.0)), 0);
+        assert_eq!(tags_fit((0.0, 10.0)), 1, "always a way in");
         assert_eq!(tags_fit((0.0, 100_000.0)), MAX_TAGS);
     }
 }

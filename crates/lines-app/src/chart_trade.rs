@@ -136,41 +136,98 @@ pub fn write_group_tag(
     Ok(())
 }
 
-/// The list a group tag opened: its orders as of the press, the ones still open as they finish.
+/// One row of a group's list: the order as of the press, and whether it is still open. Rows never
+/// move or leave while the list is open: what the trader aims at stays under the pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupRow {
+    pub mark: OrderMark,
+    pub open: bool,
+}
+
+/// The list a group tag opened, its orders as of the press.
 /// Cancel all takes two presses, the second for exactly the orders the first one counted.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GroupMenu {
-    pub orders: Vec<lines_trading::OrderId>,
-    /// Plot-local y of the tag pressed (the list opens beside it).
+    pub rows: Vec<GroupRow>,
+    /// `Target: 200 in 20 orders, 5822.75–5823.00`.
+    pub title: String,
+    /// Plot-local y of the tag pressed (the list opens under it).
     pub top: f32,
-    /// Cancel all pressed once, with this many orders listed.
+    /// Cancel all pressed once, with this many orders open.
     pub confirm: Option<usize>,
 }
 
 impl GroupMenu {
-    /// Keep the orders still open (`is_open`). A change disarms Cancel all: the second press
-    /// always answers the count on screen.
-    pub fn retain_open(&mut self, is_open: impl Fn(lines_trading::OrderId) -> bool) {
-        self.orders.retain(|o| is_open(*o));
-        if self.confirm != Some(self.orders.len()) {
+    pub fn open_count(&self) -> usize {
+        self.rows.iter().filter(|r| r.open).count()
+    }
+
+    /// Mark the orders that finished (`is_open` false): they keep their row, inert. Any change
+    /// disarms Cancel all, so the second press always answers the count on screen. Returns
+    /// whether anything changed.
+    pub fn refresh(&mut self, is_open: impl Fn(lines_trading::OrderId) -> bool) -> bool {
+        let mut changed = false;
+        for r in self.rows.iter_mut().filter(|r| r.open) {
+            if !is_open(r.mark.id) {
+                r.open = false;
+                changed = true;
+            }
+        }
+        if changed {
             self.confirm = None;
         }
+        changed
     }
 
     /// Cancel all pressed: the first press arms and returns nothing, the second returns the
     /// orders to cancel.
     pub fn cancel_all(&mut self) -> Option<Vec<lines_trading::OrderId>> {
-        if self.orders.is_empty() {
+        let n = self.open_count();
+        if n == 0 {
             return None;
         }
-        if self.confirm == Some(self.orders.len()) {
+        if self.confirm == Some(n) {
             self.confirm = None;
-            Some(self.orders.clone())
+            Some(
+                self.rows
+                    .iter()
+                    .filter(|r| r.open)
+                    .map(|r| r.mark.id)
+                    .collect(),
+            )
         } else {
-            self.confirm = Some(self.orders.len());
+            self.confirm = Some(n);
             None
         }
     }
+}
+
+/// The list's title: `Target: 200 in 20 orders, 5822.75–5823.00`. Says what `200 ×20` means.
+pub fn write_group_title(
+    out: &mut impl Write,
+    m: &OrderMark,
+    g: &TagGroup,
+    fmt: &PriceFormat,
+) -> fmt::Result {
+    if g.key == MIXED_KEY {
+        out.write_str("Orders")?;
+    } else {
+        match MarkRole::of(m) {
+            MarkRole::Target => out.write_str("Target")?,
+            MarkRole::Stop => out.write_str("Stop")?,
+            MarkRole::Entry => {
+                out.write_str(if m.side == Side::Buy { "Buy" } else { "Sell" })?;
+                out.write_str(if m.stop { " stp" } else { " lmt" })?;
+            }
+        }
+    }
+    write!(out, ": {} in {} orders, ", g.qty, g.n)?;
+    fmt.write(g.lo, out)?;
+    if g.lo != g.hi {
+        out.write_char('–')?;
+        fmt.write(g.hi, out)?;
+    }
+    Ok(())
 }
 
 /// An exit's P&L at its price as the P&L display shows it (ticks, currency, both; nothing when
@@ -208,7 +265,7 @@ pub fn write_edge(
     out.write_str(if above { "↑ " } else { "↓ " })?;
     write_order_tag(out, m, fmt)?;
     if n > 1 {
-        write!(out, " +{}", n - 1)?;
+        write!(out, " +{} more", n - 1)?;
     }
     Ok(())
 }
@@ -699,22 +756,49 @@ mod tests {
     /// finishing in between disarms it.
     #[test]
     fn cancel_all_needs_a_second_press_for_the_same_orders() {
+        let row = |id| GroupRow {
+            mark: OrderMark {
+                id: OrderId(id),
+                ..mark(Side::Sell, 5820.00, false, Role::TakeProfit, false)
+            },
+            open: true,
+        };
         let mut m = GroupMenu {
-            orders: vec![OrderId(1), OrderId(2), OrderId(3)],
+            rows: vec![row(1), row(2), row(3)],
             ..GroupMenu::default()
         };
         assert_eq!(m.cancel_all(), None, "the first press only arms");
         assert_eq!(m.confirm, Some(3));
-        m.retain_open(|_| true);
+        assert!(!m.refresh(|_| true));
         assert_eq!(m.confirm, Some(3), "nothing changed: still armed");
-        m.retain_open(|o| o != OrderId(2));
+        assert!(m.refresh(|o| o != OrderId(2)));
         assert_eq!(m.confirm, None, "the list changed: disarmed");
+        assert_eq!(
+            m.rows.len(),
+            3,
+            "a finished order keeps its row: nothing shifts"
+        );
+        assert!(!m.rows[1].open);
+        assert_eq!(m.open_count(), 2);
         assert_eq!(m.cancel_all(), None);
-        assert_eq!(m.cancel_all(), Some(vec![OrderId(1), OrderId(3)]));
+        assert_eq!(
+            m.cancel_all(),
+            Some(vec![OrderId(1), OrderId(3)]),
+            "only what is still open"
+        );
         assert_eq!(m.confirm, None);
-        m.orders.clear();
+        m.refresh(|_| false);
         assert_eq!(m.cancel_all(), None, "nothing to cancel");
         assert_eq!(m.cancel_all(), None);
+    }
+
+    #[test]
+    fn the_list_title_says_what_the_numbers_mean() {
+        let target = mark(Side::Sell, 5823.00, false, Role::TakeProfit, false);
+        let g = group(1, 200, 20, 5822.75, 5823.00, 0);
+        let mut s = String::new();
+        write_group_title(&mut s, &target, &g, &fmt()).unwrap();
+        assert_eq!(s, "Target: 200 in 20 orders, 5822.75–5823.00");
     }
 
     /// The owner's case: LONG 1 @ 5810.00 with a 20/40 bracket on ES: the stop and the target
@@ -765,7 +849,7 @@ mod tests {
         assert_eq!(s, "↑ Target 1 @ 5820.00");
         s.clear();
         write_edge(&mut s, &target, false, 3, &fmt()).unwrap();
-        assert_eq!(s, "↓ Target 1 @ 5820.00 +2");
+        assert_eq!(s, "↓ Target 1 @ 5820.00 +2 more");
         s.clear();
         write_edge_short(&mut s, &target, true).unwrap();
         assert_eq!(s, "↑Tgt", "no bare digit beside a role letter");
