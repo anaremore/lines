@@ -242,10 +242,16 @@ pub enum TradeCmd {
     JoinBid,
     JoinAsk,
     Reverse,
+    /// A buy limit at the best ask, and a sell limit at the best bid (order keys only).
+    BuyAsk,
+    SellBid,
+    /// The DOM's order hotkeys ("Keys on / off"): off by default, sticky, saved per pane.
+    /// Order keys need it as well as the trading switch; buttons and the palette don't.
+    ToggleHotkeys,
 }
 
 impl TradeCmd {
-    pub const ALL: [TradeCmd; 13] = [
+    pub const ALL: [TradeCmd; 16] = [
         TradeCmd::Flatten,
         TradeCmd::CancelAll,
         TradeCmd::ToggleArm,
@@ -259,6 +265,9 @@ impl TradeCmd {
         TradeCmd::JoinAsk,
         TradeCmd::Reverse,
         TradeCmd::Breakeven,
+        TradeCmd::BuyAsk,
+        TradeCmd::SellBid,
+        TradeCmd::ToggleHotkeys,
     ];
 
     /// Trading commands with no key of their own (palette and the DOM's panel).
@@ -278,8 +287,17 @@ impl TradeCmd {
             TradeCmd::JoinBid => Q::JoinBid,
             TradeCmd::JoinAsk => Q::JoinAsk,
             TradeCmd::Reverse => Q::Reverse,
+            TradeCmd::BuyAsk => Q::BuyAsk,
+            TradeCmd::SellBid => Q::SellBid,
             _ => return None,
         })
+    }
+
+    /// Whether this command, sent from a key, needs the DOM's order hotkeys on: every key that
+    /// places an order. Flatten and Cancel all never do (exits are never blocked), nor do
+    /// arming, quantity, bracket, account and BE keys (they place nothing new).
+    pub fn needs_hotkeys(self) -> bool {
+        self.quick().is_some()
     }
 }
 
@@ -432,6 +450,18 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Trade(TradeCmd::JoinBid), true, false, true, "j"),
     b(Command::Trade(TradeCmd::JoinAsk), true, false, true, "k"),
     b(Command::Trade(TradeCmd::Reverse), true, false, true, "r"),
+    // O for the offer; I left of it, as the bid column is left of the ask. Neither is one
+    // modifier from an emergency key (Cancel All Ctrl+Shift+A, Flatten Ctrl+Shift+F) or
+    // Undo, nor a macOS system chord with Cmd+Option.
+    b(Command::Trade(TradeCmd::BuyAsk), true, false, true, "o"),
+    b(Command::Trade(TradeCmd::SellBid), true, false, true, "i"),
+    b(
+        Command::Trade(TradeCmd::ToggleHotkeys),
+        true,
+        true,
+        false,
+        "y",
+    ),
     b(Command::Trade(TradeCmd::Breakeven), true, false, true, "e"),
     b(Command::Trade(TradeCmd::QtyUp), true, false, true, "up"),
     b(Command::Trade(TradeCmd::QtyDown), true, false, true, "down"),
@@ -673,6 +703,9 @@ pub fn label(c: Command) -> String {
             TradeCmd::JoinBid => "Trade: Join bid (buy limit at the best bid)",
             TradeCmd::JoinAsk => "Trade: Join ask (sell limit at the best ask)",
             TradeCmd::Reverse => "Trade: Reverse position (market, twice the size)",
+            TradeCmd::BuyAsk => "Trade: Buy at the ask (limit at the best ask)",
+            TradeCmd::SellBid => "Trade: Sell at the bid (limit at the best bid)",
+            TradeCmd::ToggleHotkeys => "Trade: toggle order hotkeys (Keys on/off)",
         }
         .into(),
     }
@@ -819,6 +852,14 @@ mod tests {
         let mut b = Keystroke::parse("ctrl-alt-b").unwrap();
         b.key_char = Some("{".into()); // any character other than the key: text
         assert_eq!(command_for(&b), None);
+        // Buy at the ask and sell at the bid: AltGr+O types ó (Polish Programmer), AltGr+I types í
+        // (layouts with acute vowels on AltGr).
+        for (key, ch) in [("ctrl-alt-o", "ó"), ("ctrl-alt-i", "í")] {
+            let mut k = Keystroke::parse(key).unwrap();
+            assert!(command_for(&k).is_some(), "{key}");
+            k.key_char = Some(ch.into());
+            assert_eq!(command_for(&k), None, "{key} typing {ch}");
+        }
     }
 
     /// Review round 3: key repeat must never repeat an order (or flip arming back and forth).
@@ -830,6 +871,9 @@ mod tests {
             TradeCmd::JoinBid,
             TradeCmd::JoinAsk,
             TradeCmd::Reverse,
+            TradeCmd::BuyAsk,
+            TradeCmd::SellBid,
+            TradeCmd::ToggleHotkeys,
             TradeCmd::ToggleArm,
             TradeCmd::Flatten,
             TradeCmd::CancelAll,

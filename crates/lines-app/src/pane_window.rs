@@ -50,6 +50,8 @@ fn command(cmd: Command) -> Option<Command> {
         Command::Strategy(
             crate::commands::StrategyCmd::StopAll | crate::commands::StrategyCmd::StopAllKeep,
         ) => Some(cmd),
+        // Trading keys act on this window's pane, as in main windows.
+        Command::Trade(_) => Some(cmd),
         _ => None,
     }
 }
@@ -109,6 +111,19 @@ impl PaneWindow {
                         c == crate::commands::StrategyCmd::StopAll,
                         lines_trading::Source::Hotkey,
                     );
+                }
+            }
+            // Only keys reach here with a trading command (the window's menu has none).
+            Some(Command::Trade(tc)) => {
+                let issued = std::time::Instant::now();
+                match &self.handle {
+                    PaneHandle::Dom(d) => {
+                        d.update(cx, |v, cx| crate::trade_bar::run_key(v, tc, issued, cx));
+                    }
+                    PaneHandle::Chart(c) if crate::trade_bar::chart_runs(tc) => {
+                        c.update(cx, |v, cx| crate::trade_bar::run_key(v, tc, issued, cx));
+                    }
+                    _ => {}
                 }
             }
             Some(Command::Draw(d)) => {

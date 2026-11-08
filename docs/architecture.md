@@ -144,7 +144,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 #   chart's and DOM's account list; needs an account chip, i.e. trading running, as in screenshot mode).
 # Studies menu (screenshots): --studies-menu open | edit:STUDY | style:STUDY[:TAB] (the style editor on its parts), STUDY = vwap:N | delta:N | profile | footprint | levels:ID; --study-set FILE (a StudySet JSON).
 # Paper trading evidence (in-memory core, manual clock): --paper "account paper-eval; buy 2 mkt; ack; buy 1 @ 5807.00;
-#   buy 1 @ 5808.00 bracket 4/8; ack; buy 1 @ 5806.50" (orders after the last `ack` stay pending), --enable-trading (DOMs start with trading enabled; `--arm` is the old name). --pnl off|ticks|currency|both.
+#   buy 1 @ 5808.00 bracket 4/8; ack; buy 1 @ 5806.50" (orders after the last `ack` stay pending), --enable-trading (DOMs start with trading enabled; `--arm` is the old name), --enable-hotkeys (DOMs start with order hotkeys on). --pnl off|ticks|currency|both.
 #   --bracket-units ticks|points (every account), --bracket-editor (DOMs open their bracket-preset editor), --hover-header (the focused pane's header controls show as if hovered).
 #   `wait SECONDS` and `print PRICE [QTY]` (a market trade only the trading core sees) make round trips on a finished
 #   replay, e.g. for the journal: --workspace FILE with a `journal` pane, --paper "buy 2 mkt; ack; print 6011.50; wait 20;
