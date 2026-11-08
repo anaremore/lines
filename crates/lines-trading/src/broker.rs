@@ -263,6 +263,12 @@ pub trait Broker: Send {
     fn simulated(&self) -> bool {
         false
     }
+    /// Settle an expired option position at `price` (its intrinsic value, per contract unit):
+    /// `order` closes it at once, without a fee, cancelling what else works on the contract.
+    /// Only simulated brokers are asked (a venue settles its own); the default refuses.
+    fn settle(&mut self, now: UtcMillis, order: Order, price: Price) {
+        let _ = (now, order, price);
+    }
     /// State to save locally (paper: its accounts and open orders; live brokers hold their
     /// own and return `None`).
     fn saved_state(&self) -> Option<serde_json::Value> {

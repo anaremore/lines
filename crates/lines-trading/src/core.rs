@@ -112,8 +112,12 @@ fn in_last_second(times: &mut VecDeque<UtcMillis>, now: UtcMillis) -> u32 {
 #[derive(Copy, Clone, Debug, Default)]
 struct Mark {
     last: Option<Price>,
+    /// When `last` was seen (an underlying's close, for settling its options).
+    last_at: Option<UtcMillis>,
     bid: Option<Price>,
     ask: Option<Price>,
+    /// When an option's quote was stamped.
+    quoted_at: Option<UtcMillis>,
 }
 
 impl Mark {
@@ -123,6 +127,16 @@ impl Mark {
             (b, a) => b.or(a),
         })
     }
+}
+
+/// When an option stops trading and settles: its expiry's regular close, or the end of that
+/// day for an expiry that isn't a trade date (`None`: not an option).
+fn option_close(contract: ContractKey) -> Option<UtcMillis> {
+    let key = contract.option_key()?;
+    let close = lines_feed::catalog::sessions(contract.product)
+        .and_then(|c| c.session(key.expiry, lines_core::SessionKind::Rth))
+        .map(|s| s.close);
+    Some(close.unwrap_or_else(|| key.expiry.add_days(1).start_utc()))
 }
 
 /// Order latency for the latency HUD (roadmap 6b) over the last 60 s of the core's clock:
@@ -197,6 +211,8 @@ pub struct TradingCore {
     finished: VecDeque<OrderId>,
     /// Orders with a cancel on its way (not sent twice).
     cancelling: HashSet<OrderId>,
+    /// Expired option positions already sent to settle (one try per run).
+    settled: HashSet<(AccountId, ContractKey)>,
     overfill: OverfillPolicy,
     /// Execution ids already applied, and their order (to forget the oldest).
     fill_ids: HashSet<String>,
@@ -268,6 +284,7 @@ impl TradingCore {
             broker_events: Vec::new(),
             finished: VecDeque::new(),
             cancelling: HashSet::new(),
+            settled: HashSet::new(),
             overfill: OverfillPolicy::default(),
             fill_ids: HashSet::new(),
             fill_order: VecDeque::new(),
@@ -801,6 +818,12 @@ impl TradingCore {
                 Ok(vec![id])
             }
             Command::PlaceBracket(b) => {
+                if b.entry.contract.option_key().is_some() {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "no brackets on options: single-leg limits only",
+                    ));
+                }
                 if !self.broker.capabilities().server_brackets {
                     return Err(Reject::new(
                         RejectCode::Broker,
@@ -996,6 +1019,9 @@ impl TradingCore {
                         ..Default::default()
                     };
                     risk::check(&band_only, &spec, o.side, Qty(0), &kind, &ctx)?;
+                    if o.contract.option_key().is_some() {
+                        self.check_option_kind(now, &account, o.contract, &kind)?;
+                    }
                 }
                 if let Some(a) = self.accounts.get_mut(&account) {
                     a.modifies.push_back(now);
@@ -1010,6 +1036,12 @@ impl TradingCore {
                     },
                 );
                 Ok(vec![order])
+            }
+            Command::SetBracketMode { contract, .. } if contract.option_key().is_some() => {
+                Err(Reject::new(
+                    RejectCode::Invalid,
+                    "no brackets on options: single-leg limits only",
+                ))
             }
             Command::SetBracketMode {
                 contract,
@@ -1046,6 +1078,21 @@ impl TradingCore {
                 Ok(Vec::new())
             }
             Command::SetRules { rules, .. } => {
+                // Prop rules stay out of options (decision 0028): their P&L would move the
+                // drawdown and a breach could liquidate them.
+                let options = self.accounts[&account]
+                    .positions
+                    .iter()
+                    .any(|(k, p)| k.option_key().is_some() && !p.is_flat())
+                    || self
+                        .open_orders(&account)
+                        .any(|o| o.contract.option_key().is_some());
+                if rules.is_some() && options {
+                    return Err(Reject::new(
+                        RejectCode::PropRule,
+                        "close the account's options before setting prop rules",
+                    ));
+                }
                 let unrealised = self.unrealised(&account);
                 let micros = self.micros_used(&account, None);
                 let a = self.accounts.get_mut(&account).expect("checked");
@@ -1112,10 +1159,13 @@ impl TradingCore {
             | Command::PauseStrategy { .. }
             | Command::StopStrategies { .. } => unreachable!("handled by strategy_control"),
             Command::Flatten { contract, .. } => {
+                let simulated = self.broker.simulated();
                 let positions: Vec<(ContractKey, i64)> = self.accounts[&account]
                     .positions
                     .iter()
                     .filter(|(k, _)| contract.is_none_or(|c| c == **k))
+                    // Paper only (decision 0028, phase 4): no option order reaches a live broker.
+                    .filter(|(k, _)| k.option_key().is_none() || simulated)
                     .map(|(k, p)| (*k, p.qty()))
                     .filter(|(_, q)| *q != 0)
                     .collect();
@@ -1205,11 +1255,143 @@ impl TradingCore {
         ids
     }
 
+    /// An option order's own checks (decision 0028): paper only until a live broker is enabled
+    /// (phase 4), the series not expired, and the guard.
+    fn check_option_kind(
+        &mut self,
+        now: UtcMillis,
+        account: &AccountId,
+        contract: ContractKey,
+        kind: &OrderKind,
+    ) -> Result<(), Reject> {
+        if !self.broker.simulated() {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                format!(
+                    "{} takes no option orders here: paper only",
+                    self.broker.name()
+                ),
+            ));
+        }
+        if option_close(contract).is_some_and(|c| now >= c) {
+            return Err(Reject::new(RejectCode::Invalid, "this option has expired"));
+        }
+        let cs = self
+            .spec(contract)
+            .ok_or_else(|| Reject::new(RejectCode::UnknownContract, "unknown contract"))?;
+        let guard = self.accounts[account]
+            .cfg
+            .limits
+            .option_guard
+            .clone()
+            .unwrap_or_default();
+        let m = self.marks.get(&contract);
+        let quote = risk::OptionQuoteView {
+            bid: m.and_then(|m| m.bid),
+            ask: m.and_then(|m| m.ask),
+            at: m.and_then(|m| m.quoted_at),
+        };
+        risk::check_option(&guard, &cs, kind, quote, now)
+    }
+
+    /// Expired option positions settle at their intrinsic value against the underlying's close
+    /// (paper only: a venue settles its own), and expired series' orders are cancelled.
+    ///
+    /// The tick runs before a batch's prices reach the marks, so at the first moment past the
+    /// close the underlying's mark is still its last price before it. No price from the last
+    /// day (the app wasn't running, or no pane follows the underlying): the position waits for
+    /// the next price and settles on that, approximately (`docs/known-gaps.md`). Returns
+    /// whether it asked the broker to settle anything.
+    fn settle_options(&mut self, now: UtcMillis) -> bool {
+        if !self.broker.simulated() {
+            return false;
+        }
+        // One try per position: a settled one is flat, so it may settle again if it reopens.
+        let accounts = &self.accounts;
+        self.settled.retain(|(a, k)| {
+            accounts
+                .get(a)
+                .and_then(|s| s.positions.get(k))
+                .is_some_and(|p| !p.is_flat())
+        });
+        let expired = |k: &ContractKey| option_close(*k).is_some_and(|c| now >= c);
+        let orders: Vec<(AccountId, OrderId)> = self
+            .orders
+            .values()
+            .filter(|o| o.is_open() && expired(&o.contract))
+            .filter(|o| !self.cancelling.contains(&o.id))
+            .map(|o| (o.account.clone(), o.id))
+            .collect();
+        for (account, order) in orders {
+            self.submit_internal(now, Source::Rule, Command::CancelOrder { account, order });
+        }
+        let positions: Vec<(AccountId, ContractKey, i64)> = self
+            .accounts
+            .iter()
+            .flat_map(|(a, s)| {
+                s.positions
+                    .iter()
+                    .filter(|(k, p)| expired(k) && !p.is_flat())
+                    .map(|(k, p)| (a.clone(), *k, p.qty()))
+            })
+            .filter(|(a, k, _)| !self.settled.contains(&(a.clone(), *k)))
+            .collect();
+        let mut asked = false;
+        for (account, contract, qty) in positions {
+            let (Some(key), Some(close)) = (contract.option_key(), option_close(contract)) else {
+                continue;
+            };
+            let underlying = self.marks.get(&ContractKey::equity(contract.product));
+            let (Some(price), Some(at)) = (
+                underlying.and_then(|m| m.last),
+                underlying.and_then(|m| m.last_at),
+            ) else {
+                continue;
+            };
+            if at.0 < close.0 - 86_400_000 {
+                continue;
+            }
+            if at > close {
+                tracing::warn!("option settled on the first underlying price after its close");
+            }
+            let intrinsic = match key.right {
+                lines_core::Right::Call => price.0 - key.strike.0,
+                lines_core::Right::Put => key.strike.0 - price.0,
+            }
+            .max(0);
+            let spec = OrderSpec {
+                account: account.clone(),
+                contract,
+                side: if qty > 0 { Side::Sell } else { Side::Buy },
+                qty: Qty(qty.abs()),
+                kind: OrderKind::Limit {
+                    price: Price(intrinsic),
+                },
+            };
+            let o = self.new_order(now, &spec, Role::Flatten, None);
+            self.settled.insert((account, contract));
+            self.broker.settle(now, o, Price(intrinsic));
+            asked = true;
+        }
+        asked
+    }
+
     /// Validation, prop rules and risk for a new order.
     fn check_new(&mut self, now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
         let cs = self
             .spec(spec.contract)
             .ok_or_else(|| Reject::new(RejectCode::UnknownContract, "unknown contract"))?;
+        if spec.contract.option_key().is_some() {
+            // Prop rules don't apply to options (decision 0028): a prop account trades none, so
+            // its drawdown and contract cap never see an option's P&L or size.
+            if self.accounts[&spec.account].cfg.rules.is_some() {
+                return Err(Reject::new(
+                    RejectCode::PropRule,
+                    "a prop-rule account can't open options",
+                ));
+            }
+            self.check_option_kind(now, &spec.account, spec.contract, &spec.kind)?;
+        }
         if spec.qty.0 <= 0 {
             return Err(Reject::new(
                 RejectCode::Invalid,
@@ -1308,6 +1490,9 @@ impl TradingCore {
         let cs = self
             .spec(spec.contract)
             .ok_or_else(|| Reject::new(RejectCode::UnknownContract, "unknown contract"))?;
+        if spec.contract.option_key().is_some() {
+            self.check_option_kind(now, &spec.account, spec.contract, &spec.kind)?;
+        }
         if let Some(p) = spec.kind.prices().find(|p| !cs.on_tick_grid(*p)) {
             return Err(Reject::new(
                 RejectCode::Invalid,
@@ -1365,8 +1550,13 @@ impl TradingCore {
         self.guard_report(&spec.account);
         let position = self.position(&spec.account, spec.contract);
         let (open_buy, open_sell) = self.open_qty(&spec.account, spec.contract);
+        // An option's market closes with the regular session, not the equity's extended hours.
+        let kind = match spec.contract.option_key() {
+            Some(_) => SessionKind::Rth,
+            None => SessionKind::Eth,
+        };
         let session_close = lines_feed::catalog::sessions(spec.contract.product)
-            .and_then(|cal| cal.session_at(now, SessionKind::Eth))
+            .and_then(|cal| cal.session_at(now, kind))
             .map(|s| s.close);
         let entry = Entry {
             side: spec.side,
@@ -1581,6 +1771,8 @@ impl TradingCore {
         }
         contracts.sort();
         contracts.dedup();
+        // Prop caps count futures: options are outside prop rules (decision 0028).
+        contracts.retain(|k| k.option_key().is_none());
         let mut total = 0u32;
         for k in contracts {
             let pos = acct.positions.get(&k).map_or(0, Position::qty);
@@ -1669,7 +1861,11 @@ impl TradingCore {
     /// Apply whatever the broker has due by `now` (acks after latency, fills, cancels).
     pub fn tick(&mut self, now: UtcMillis) {
         self.seen_now = self.seen_now.max(now);
+        // Orders due before now first: one reopening a series settles with the rest.
         self.poll(now);
+        if self.settle_options(now) {
+            self.poll(now);
+        }
         self.news_flatten(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
@@ -1968,7 +2164,40 @@ impl TradingCore {
         for i in inputs {
             let m = self.marks.entry(contract).or_default();
             match *i {
-                MarketInput::Trade { price, .. } | MarketInput::Last(price) => m.last = Some(price),
+                MarketInput::Trade { price, time, .. } => {
+                    m.last = Some(price);
+                    m.last_at = Some(time);
+                }
+                MarketInput::Last(price) => {
+                    m.last = Some(price);
+                    m.last_at = Some(now);
+                }
+                MarketInput::OptionQuote {
+                    bid,
+                    ask,
+                    last,
+                    time,
+                } => {
+                    // An option marks at its mid; a last trade only without a two-sided quote.
+                    let (b, a) = crate::market::quote_sides(bid, ask);
+                    // A stamp from the future counts as now, as in the paper broker.
+                    let time = time.min(now);
+                    // A late or re-seeded quote never replaces a newer one.
+                    if m.quoted_at.is_some_and(|t| time < t) {
+                        continue;
+                    }
+                    // Without both sides: its last, else the mark it had (an empty quote
+                    // never erases open P&L).
+                    let held = m.price();
+                    m.bid = b;
+                    m.ask = a;
+                    m.last = if b.is_some() && a.is_some() {
+                        None
+                    } else {
+                        last.or(held)
+                    };
+                    m.quoted_at = Some(time);
+                }
                 MarketInput::Bid(p) => m.bid = Some(p),
                 MarketInput::Ask(p) => m.ask = Some(p),
                 _ => {}

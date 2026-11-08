@@ -348,6 +348,15 @@ impl Journal {
         for i in inputs {
             let p = match *i {
                 MarketInput::Trade { price, .. } | MarketInput::Last(price) => price,
+                // An option has no prints here: its mid (the lower unit on a half), else its
+                // last.
+                MarketInput::OptionQuote { bid, ask, last, .. } => {
+                    match (crate::market::quote_sides(bid, ask), last) {
+                        ((Some(b), Some(a)), _) => Price((b.0 + a.0).div_euclid(2)),
+                        (_, Some(l)) => l,
+                        _ => continue,
+                    }
+                }
                 _ => continue,
             };
             for ((a, k), o) in self.open.iter_mut() {
@@ -841,11 +850,19 @@ pub struct JournalObserver {
 }
 
 impl Observer for JournalObserver {
-    /// Only trade and last prices (all MAE/MFE uses): a depth batch costs nothing here.
+    /// Only trade, last and option-quote prices (all MAE/MFE uses): a depth batch costs nothing
+    /// here.
     fn market(&mut self, contract: ContractKey, inputs: &[MarketInput]) {
         let prices: Vec<MarketInput> = inputs
             .iter()
-            .filter(|i| matches!(i, MarketInput::Trade { .. } | MarketInput::Last(_)))
+            .filter(|i| {
+                matches!(
+                    i,
+                    MarketInput::Trade { .. }
+                        | MarketInput::Last(_)
+                        | MarketInput::OptionQuote { .. }
+                )
+            })
             .copied()
             .collect();
         if !prices.is_empty() {

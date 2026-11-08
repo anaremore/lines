@@ -37,7 +37,7 @@ use crate::broker::PaneContext;
 use crate::command::{Command, Envelope, Source};
 use crate::core::TradingCore;
 use crate::event::Event;
-use crate::market::{MarketInput, from_events};
+use crate::market::{MarketInput, from_events, option_quotes, seed_option_quotes};
 use crate::paper::PaperConfig;
 use crate::persist::{SavedAccount, TradingFile, VERSION};
 use crate::types::CommandId;
@@ -547,6 +547,9 @@ impl FeedBridge {
             .spawn(move || {
                 for batch in rx {
                     h.market(contract, from_events(&batch));
+                    for (k, q) in option_quotes(contract.product, &batch) {
+                        h.market(k, vec![q]);
+                    }
                 }
             })?;
         subs.insert(contract, sub);
@@ -568,9 +571,14 @@ impl FeedBridge {
         }
         // Listen first, then snapshot: nothing between the two is lost.
         let rx = lines_feed::listen::listen(feed);
-        let (contract, seed, market_time) = {
+        let (contract, seed, options, market_time) = {
             let d = store.read();
-            (d.contract, seed_inputs(&d), d.market_time)
+            (
+                d.contract,
+                seed_inputs(&d),
+                seed_option_quotes(d.product.id, &d.chains),
+                d.market_time,
+            )
         };
         // Market clocks start at the feed's time (a finished replay has no trades to come).
         if let Some(t) = market_time {
@@ -578,6 +586,9 @@ impl FeedBridge {
         }
         if let Some(k) = contract {
             handle.market(k, seed);
+        }
+        for (k, q) in options {
+            handle.market(k, vec![q]);
         }
         let weak: Weak<ChartStore> = Arc::downgrade(store);
         let h = handle.clone();
@@ -596,6 +607,9 @@ impl FeedBridge {
                             }
                             if let Some(k) = contract {
                                 h.market(k, from_events(&batch));
+                                for (o, q) in option_quotes(k.product, &batch) {
+                                    h.market(o, vec![q]);
+                                }
                             }
                         }
                         Err(RecvTimeoutError::Timeout) if weak.strong_count() > 0 => {}

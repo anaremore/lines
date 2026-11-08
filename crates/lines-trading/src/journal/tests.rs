@@ -594,6 +594,55 @@ fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
 /// The journal on its own thread: the trading thread only sends messages, the UI reads
 /// snapshots. Market data moves MAE/MFE without publishing (open trades aren't shown); a
 /// close publishes; an edit is applied there and published.
+/// An option has no prints here: its excursions follow its quote's mid, with the multiplier.
+#[test]
+fn an_options_excursions_follow_its_quote() {
+    let opt = ContractKey::option(
+        catalog::SPY,
+        lines_core::CivilDate::new(2026, 11, 9).unwrap(),
+        Price(68_400),
+        lines_core::Right::Call,
+    );
+    let f = |id: &str, side, price, s| {
+        Event::Fill(FillEvent {
+            account: acct(),
+            order: OrderId(1),
+            contract: opt,
+            side,
+            price: Price(price),
+            qty: Qty(1),
+            fee: Money::ZERO,
+            realised: Money::ZERO,
+            trade_id: id.into(),
+            reconciled: false,
+            at: at(s),
+        })
+    };
+    let quote = |bid, ask| MarketInput::OptionQuote {
+        bid: Some(Price(bid)),
+        ask: Some(Price(ask)),
+        last: None,
+        time: at(1),
+    };
+    let mut j = Journal::new();
+    j.on_event(&f("a", Side::Buy, 300, 0));
+    j.on_market(opt, &[quote(248, 252), quote(350, 354)]);
+    // A quote without both sides moves nothing.
+    j.on_market(
+        opt,
+        &[MarketInput::OptionQuote {
+            bid: None,
+            ask: Some(Price(1)),
+            last: None,
+            time: at(2),
+        }],
+    );
+    let t = j.on_event(&f("b", Side::Sell, 320, 3)).pop().unwrap();
+    assert_eq!(t.realized, dollars(20.0), "0.20 × 100 shares");
+    assert_eq!(t.mae, dollars(-50.0), "the mid at 2.50");
+    assert_eq!(t.mfe, dollars(52.0), "the mid at 3.52");
+}
+
 #[test]
 fn shared_journal_runs_on_its_own_thread() {
     let shared = JournalShared::start(Journal::new(), None);

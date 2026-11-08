@@ -1,7 +1,9 @@
 //! Market data as the trading core needs it (paper fills, marks, risk bands), converted from
 //! the feed's normalized events. Tests script these directly.
 
-use lines_core::{Price, Qty, Side as BookSide, UtcMillis};
+use lines_core::{
+    ContractKey, Delivery, Price, ProductId, Qty, Right, Side as BookSide, UtcMillis,
+};
 use lines_feed::provider::MarketEvent;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -23,6 +25,78 @@ pub enum MarketInput {
     /// The last trade price without a trade (seeding a mark when following a running feed):
     /// moves marks, never fills an order.
     Last(Price),
+    /// A listed option's own quote (decision 0028): the whole quote, replacing the last. Paper
+    /// fills use it (see `paper`). `None`, zero or a crossed side count as missing
+    /// ([`quote_sides`]).
+    OptionQuote {
+        bid: Option<Price>,
+        ask: Option<Price>,
+        last: Option<Price>,
+        time: UtcMillis,
+    },
+}
+
+/// The usable sides of an option quote: a side at or under zero is no side, and a crossed quote
+/// has neither (nothing ever fills on it).
+pub fn quote_sides(bid: Option<Price>, ask: Option<Price>) -> (Option<Price>, Option<Price>) {
+    let bid = bid.filter(|p| p.0 > 0);
+    let ask = ask.filter(|p| p.0 > 0);
+    match (bid, ask) {
+        (Some(b), Some(a)) if b >= a => (None, None),
+        sides => sides,
+    }
+}
+
+fn option_input(q: &lines_core::OptionQuote) -> MarketInput {
+    MarketInput::OptionQuote {
+        bid: q.bid,
+        ask: q.ask,
+        last: q.last,
+        time: q.time,
+    }
+}
+
+/// The option quotes in one feed batch on `product`, each for its own series' contract.
+pub fn option_quotes(
+    product: ProductId,
+    events: &[MarketEvent],
+) -> Vec<(ContractKey, MarketInput)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            MarketEvent::OptionQuote { key, quote } => Some((
+                ContractKey {
+                    product,
+                    delivery: Delivery::Option(*key),
+                },
+                option_input(quote),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every series' quote a store holds now (seeding the core when it starts following a running
+/// feed: quotes that came before stay current until the series quotes again).
+pub fn seed_option_quotes(
+    product: ProductId,
+    chains: &lines_core::OptionChains,
+) -> Vec<(ContractKey, MarketInput)> {
+    let mut out = Vec::new();
+    for expiry in chains.expiries() {
+        let Some(chain) = chains.chain(expiry) else {
+            continue;
+        };
+        for row in &chain.rows {
+            for right in [Right::Call, Right::Put] {
+                if let Some(q) = row.side(right) {
+                    let key = ContractKey::option(product, expiry, row.strike, right);
+                    out.push((key, option_input(q)));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The inputs in one feed batch (other events are ignored).
