@@ -23,8 +23,20 @@ const ROW_H: f32 = 24.0;
 const ROWS_SHOWN: usize = 12;
 /// The list's title, its scroll line, its gaps and padding, and Cancel all.
 const CHROME_H: f32 = 108.0;
+/// A row's estimated character width, and the narrowest list: a long order's words and its ×.
+const CHAR_W: f32 = 7.5;
+const MIN_WIDTH: f32 = 320.0;
 /// Past the plot's right edge: the price axis stays clear.
 const MARGIN: f32 = 4.0;
+
+/// Whether a row (list `width` wide) has room for its P&L beside the order's words. The order's
+/// price is never cut: its P&L gives way (a price is what the × is aimed by).
+pub fn pnl_fits(text: &str, pnl: &str, width: f32) -> bool {
+    // The list's padding, the row's two gaps and the × take 54 px; 7.5 px a character (bold
+    // digits, the panel's own fit tests).
+    let chars = (text.chars().count() + pnl.chars().count()) as f32;
+    chars * CHAR_W + 54.0 <= width
+}
 
 /// Cancel all's words: how many, and that a second press is needed once armed.
 pub fn cancel_all_label(n: usize, armed: bool) -> String {
@@ -62,6 +74,10 @@ pub fn layer(
         .map(|a| a.settings.pnl_display)
         .unwrap_or_default();
     let position = v.ct.position;
+    let plot = v.plot_bounds();
+    let width = WIDTH
+        .min(f32::from(plot.size.width) - 2.0 * MARGIN)
+        .max(MIN_WIDTH);
     let rows = menu
         .rows
         .iter()
@@ -74,7 +90,7 @@ pub fn layer(
             let money = write_exit_pnl(&mut pnl, &m, position, fmt.tick, mpu, mode)
                 .ok()
                 .flatten()
-                .filter(|_| r.open);
+                .filter(|_| r.open && pnl_fits(text.as_str(), pnl.as_str(), width));
             let id = m.id.0;
             let tone = money.map(|money| match crate::pnl::tone(money) {
                 crate::pnl::Tone::Up => t.up,
@@ -91,8 +107,6 @@ pub fn layer(
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
                         .whitespace_nowrap()
                         .text_color(if r.open { t.text_main } else { t.text_dim })
                         .child(text.as_str().to_owned()),
@@ -136,12 +150,8 @@ pub fn layer(
         .collect::<Vec<_>>();
     let n = menu.open_count();
     let armed = menu.confirm == Some(n);
-    let plot = v.plot_bounds();
     let avail = f32::from(window.viewport_size().height) - f32::from(plot.origin.y);
     let (list_h, top) = list_place(menu.rows.len(), menu.top, avail);
-    let width = WIDTH
-        .min(f32::from(plot.size.width) - 2.0 * MARGIN)
-        .max(120.0);
     // The list's left edge from the pane's, keeping it inside the plot (never over the axis).
     let left = (f32::from(plot.size.width) - width - MARGIN).max(MARGIN);
     let shown = (list_h / ROW_H).floor() as usize;
@@ -235,6 +245,21 @@ mod tests {
             "Press again to cancel 20 orders"
         );
         assert_eq!(cancel_all_label(1, true), "Press again to cancel 1 order");
+    }
+
+    /// The price is never cut: a row without room drops its P&L, and the narrowest list holds
+    /// the longest order's words with its ×.
+    #[test]
+    fn a_row_drops_its_pnl_rather_than_cut_a_price() {
+        let (text, pnl) = ("Target 1 @ 5822.75", "+24.0 t  +$300.00");
+        assert!(pnl_fits(text, pnl, WIDTH));
+        assert!(!pnl_fits("Target 10 @ 104523.50 · held", pnl, WIDTH));
+        assert!(pnl_fits(text, "", MIN_WIDTH));
+        assert!(pnl_fits(
+            "Sell lmt 120/200 @ 104523.50 · held",
+            "",
+            MIN_WIDTH + 40.0
+        ));
     }
 
     /// Cancel all and at least one row stay in the window, on any pane.
