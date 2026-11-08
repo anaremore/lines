@@ -2263,7 +2263,9 @@ impl ChainView {
                             .when(one_click, |d| {
                                 d.bg(t.accent).font_weight(gpui::FontWeight::BOLD)
                             })
-                            .child(if one_click {
+                            .child(if one_click && narrow {
+                                format!("1-click ON · {size}")
+                            } else if one_click {
                                 format!("One-click: ON · Qty {size}")
                             } else {
                                 "One-click: off".to_owned()
@@ -2798,9 +2800,13 @@ impl ChainView {
                     } else {
                         t.text_dim
                     })
-                    .when(self.note.is_some() || self.ticket.is_none(), |d| {
-                        d.child(self.footer_text(size))
-                    }),
+                    // Narrow beside the exits there's no room for hints: only a message shows.
+                    .when(
+                        self.note.is_some()
+                            || (self.ticket.is_none()
+                                && !(exits.is_some() && f(self.bounds.size.width) < NARROW_HEADER)),
+                        |d| d.child(self.footer_text(size)),
+                    ),
             )
             .children(exits)
     }
