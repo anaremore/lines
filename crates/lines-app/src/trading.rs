@@ -405,7 +405,7 @@ impl TradeState {
     }
 
     /// The newest fills, oldest first.
-    pub fn fills(&self) -> impl Iterator<Item = &lines_trading::FillEvent> {
+    pub fn fills(&self) -> impl Iterator<Item = &lines_trading::FillEvent> + Clone {
         self.fills.iter()
     }
 

@@ -530,36 +530,70 @@ impl StrategyView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(r.label.clone()),
             )
-            .child(div().text_color(t.text_dim).child(r.strategy.clone()))
-            .child(div().text_color(t.text_main).child(r.scope.clone()));
+            // Narrow panes truncate these with "…": the symbol first in the scope, the version
+            // last on the line.
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_main)
+                    .child(r.scope.clone()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_dim)
+                    .child(r.strategy.clone()),
+            );
         let mut line2 = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_3()
             .min_w_0()
-            .child(div().text_color(t.text_main).child(r.position.clone()))
-            .child(div().text_color(t.text_main).child(r.trades.clone()));
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(t.text_main)
+                    .child(r.position.clone()),
+            );
         let limits = div()
             .truncate()
             .text_color(t.text_dim)
             .child(r.limits.clone());
         if let Some(p) = &r.pnl {
             // Labeled by scope: this instance's P&L today (closed trades plus open).
+            // The number is never cut: its label gives way first.
             line2 = line2.child(
                 div()
                     .flex()
                     .flex_row()
                     .gap_1()
-                    .child(div().text_color(t.text_dim).child("P&L today"))
+                    .min_w_0()
                     .child(
                         div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t.text_dim)
+                            .child("P&L today"),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
                             .text_color(pnl_color)
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(p.clone()),
                     ),
             );
         }
+        let line2 = line2.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(t.text_main)
+                .child(r.trades.clone()),
+        );
         // Every row has the same lines (blank when empty), so rows never change height and
         // nothing below moves.
         const BLANK: &str = "\u{a0}";

@@ -914,6 +914,15 @@ mod tests {
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(json.contains(r#""hide_drawings":true"#), "{json}");
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
+        // Strategy markers hidden on a chart (decision 0025): the same.
+        assert!(!json_has(&old, "hide_strategy_marks"));
+        let hidden = ChartState {
+            hide_strategy_marks: true,
+            ..old.clone()
+        };
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert!(json.contains(r#""hide_strategy_marks":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
         let future: ChartState =
             serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "3x"}"#).unwrap();
         assert_eq!(future.timeframe.0, Timeframe::ONE_MINUTE);

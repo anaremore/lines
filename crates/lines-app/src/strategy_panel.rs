@@ -120,7 +120,7 @@ pub struct Row {
     pub label: String,
     /// `level-touch 0.1.0`.
     pub strategy: String,
-    /// `Paper 1 · ESZ26`.
+    /// `ESZ26 · Paper 1`.
     pub scope: String,
     pub phase: Phase,
     /// Why it is paused, halted, faulted or stopped.
@@ -265,7 +265,7 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         id: info.id,
         label: info.label.clone(),
         strategy: format!("{} {}", info.strategy, info.version),
-        scope: format!("{} · {contract}", c.account_name),
+        scope: format!("{contract} · {}", c.account_name),
         phase,
         why,
         position,
@@ -372,7 +372,13 @@ impl DemoStrategies {
                         "Stop: Support broke".into()
                     },
                     levels: vec![level(f.price)],
-                    command: None,
+                    command: Some(Command::PlaceOrder(lines_trading::OrderSpec {
+                        account: f.account.clone(),
+                        contract: f.contract,
+                        side: f.side,
+                        qty: f.qty,
+                        kind: lines_trading::OrderKind::Market,
+                    })),
                 },
                 result: Some(Ok(vec![f.order])),
                 not_sent: None,
@@ -582,7 +588,7 @@ mod tests {
         assert_eq!(starts, [false, true, false, true]);
         let stops: Vec<bool> = rows.iter().map(|r| r.can_stop).collect();
         assert_eq!(stops, [true, true, true, false]);
-        assert_eq!(rows[0].scope, "Paper 1 · MESZ26");
+        assert_eq!(rows[0].scope, "MESZ26 · Paper 1");
         assert_eq!(
             rows[0].limits,
             "max 2 · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"

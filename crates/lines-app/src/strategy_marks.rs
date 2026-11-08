@@ -2,16 +2,19 @@
 //! skipped signals on the chart of its contract, with the reason on hover. A toggleable layer
 //! (per chart, saved as the optional `ChartState.hide_strategy_marks`).
 //!
-//! - **Entries and exits** are the instance's own fills: fills (from `TradeState`'s ring of
-//!   the core's `Event::Fill`s) of orders its decisions created (`DecisionRecord::result`
-//!   `Ok(ids)`), on its account and contract. Replaying them in time order on its own
-//!   position says which is which: a fill that grows the position is an entry, any other an
-//!   exit. Fills of orders the core made for it (a Stop's or the daily loss's flatten) aren't
-//!   its decisions' orders and get no marker.
-//! - **Skipped signals** are decisions with no command, and commands the core refused, at
-//!   their first level's price (a decision without a level has no price and no marker).
+//! - **Entries and exits** are the instance's own fills (from `TradeState`'s ring of the
+//!   core's `Event::Fill`s). Its own means what the core counts as its own
+//!   (`strategy_owns`): orders its Place, Bracket and Exit decisions created, its Flatten's
+//!   own orders (never what a Flatten or Cancel All merely cancelled) and their bracket exits.
+//!   Every fill on the account and contract moves the replayed position, so one the instance
+//!   didn't decide (a Stop's or the daily loss's flatten, a person's) keeps the next ones
+//!   right, though it gets no marker. A fill that grows the position is an entry, any other
+//!   an exit; one that reverses it is both.
+//! - **Skipped signals** are decisions with no command, and commands the core refused or that
+//!   were never sent, at their first level's price (a decision without a level has no price
+//!   and no marker).
 //! - **Shapes, not color alone:** a buy entry is an upward wedge under its price, a sell
-//!   entry a downward wedge over it (up/down colors), an exit a hollow square (text color), a
+//!   entry a downward wedge over it (up/down colors), an exit an X (text color), a
 //!   skip a small hollow circle (dim).
 //! - **No allocation in prepare or paint:** marks are rebuilt only when their inputs move, and
 //!   their positions go into a buffer reserved then.
@@ -21,7 +24,7 @@ use lines_core::drawings::TimeAxis;
 use lines_core::timeframe::BarsView;
 use lines_core::viewport::Viewport;
 use lines_core::{ContractKey, Price, Product, UtcMillis};
-use lines_trading::{FillEvent, Side};
+use lines_trading::{Command, FillEvent, Side};
 
 use crate::strategy_panel::StrategyInfo;
 use crate::theme::Theme;
@@ -43,71 +46,123 @@ pub struct Mark {
     pub at: UtcMillis,
     pub price: Price,
     pub kind: MarkKind,
-    /// The hover text: instance, what happened, why.
+    /// The hover text's first line: instance, what, when.
+    pub head: String,
+    /// Its second: the order, if any, and why.
     pub text: String,
 }
 
 /// Fills kept for markers (the newest; older ones lose their markers).
 pub const KEEP_FILLS: usize = 4096;
 
-/// Build the markers for `contract` from the instances and the recent fills.
-pub fn build(
+/// `level-touch #3 · Exit · 21:58:59 UTC` (UTC, like the chart's time axis).
+fn head(label: &str, what: &str, at: UtcMillis) -> String {
+    let clock = crate::journal_view::clock_text(at);
+    format!(
+        "{label} · {what} · {} UTC",
+        clock.get(6..).unwrap_or_default()
+    )
+}
+
+/// What the UI knows of an order (`TradeState::order`).
+pub type OrderInfo = (lines_trading::Role, Option<lines_trading::OrderId>);
+
+/// The orders the instance's decisions created, each with its decision's reason: the core's
+/// rule (`strategy_owns`), never an order a decision only cancelled or modified.
+fn owned<'a>(
+    info: &'a StrategyInfo,
+    order: &impl Fn(lines_trading::OrderId) -> Option<OrderInfo>,
+) -> Vec<(lines_trading::OrderId, &'a str)> {
+    let mut out = Vec::new();
+    for d in &info.decisions {
+        let Some(Ok(ids)) = &d.result else {
+            continue;
+        };
+        let reason = d.decision.reason.as_str();
+        match &d.decision.command {
+            Some(Command::PlaceOrder(_) | Command::PlaceExit(_) | Command::PlaceBracket(_)) => {
+                out.extend(ids.iter().map(|&o| (o, reason)));
+            }
+            Some(Command::Flatten { .. }) => out.extend(
+                ids.iter()
+                    .filter(|&&o| {
+                        order(o).is_some_and(|(role, _)| role == lines_trading::Role::Flatten)
+                    })
+                    .map(|&o| (o, reason)),
+            ),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Build the markers for `contract` from the instances and the recent fills (oldest first).
+pub fn build<'f>(
     infos: &[StrategyInfo],
-    fills: &[FillEvent],
+    fills: impl Iterator<Item = &'f FillEvent> + Clone,
     contract: ContractKey,
     product: &Product,
+    order: impl Fn(lines_trading::OrderId) -> Option<OrderInfo>,
 ) -> Vec<Mark> {
     let mut out = Vec::new();
     for info in infos.iter().filter(|i| i.contract == contract) {
-        // Order → the reason of the decision that created it.
-        let mut reasons: Vec<(lines_trading::OrderId, &str)> = Vec::new();
-        for d in &info.decisions {
-            if let Some(Ok(ids)) = &d.result {
-                reasons.extend(ids.iter().map(|&o| (o, d.decision.reason.as_str())));
-            }
-        }
+        let own = owned(info, &order);
+        // The account's position on the contract, from every fill.
         let mut pos: i64 = 0;
         for f in fills
-            .iter()
+            .clone()
             .filter(|f| f.account == info.account && f.contract == contract)
         {
-            let Some(&(_, why)) = reasons.iter().find(|(o, _)| *o == f.order) else {
-                continue;
-            };
             let delta = if f.side == Side::Buy {
                 f.qty.0
             } else {
                 -f.qty.0
             };
-            let grows = pos == 0 || (pos > 0) == (delta > 0);
+            let before = pos;
             pos += delta;
-            let side = if f.side == Side::Buy { "Buy" } else { "Sell" };
-            let (kind, what) = if grows {
-                (MarkKind::Entry(f.side), "entry")
-            } else {
-                (MarkKind::Exit, "exit")
+            // Its own, or a bracket exit of its own.
+            let parent = order(f.order).and_then(|(_, p)| p);
+            let Some(&(_, why)) = own
+                .iter()
+                .find(|(o, _)| *o == f.order || Some(*o) == parent)
+            else {
+                continue;
             };
-            out.push(Mark {
-                at: f.at,
-                price: f.price,
-                kind,
-                text: format!(
-                    "{}: {what}, {side} {} @ {}. {why}",
-                    info.label,
-                    f.qty.0,
-                    product.price.format::<32>(f.price).as_str()
-                ),
-            });
+            let side = if f.side == Side::Buy { "Buy" } else { "Sell" };
+            let mut mark = |what: &str, kind: MarkKind, qty: i64| {
+                out.push(Mark {
+                    at: f.at,
+                    price: f.price,
+                    kind,
+                    head: head(&info.label, what, f.at),
+                    text: format!(
+                        "{side} {qty} @ {} · {why}",
+                        product.price.format::<32>(f.price).as_str()
+                    ),
+                });
+            };
+            if before == 0 || (before > 0) == (delta > 0) {
+                mark("Entry", MarkKind::Entry(f.side), f.qty.0);
+            } else if pos != 0 && (pos > 0) != (before > 0) {
+                // Reverses: closes what was open and opens the other way.
+                mark("Exit", MarkKind::Exit, before.abs());
+                mark("Entry", MarkKind::Entry(f.side), pos.abs());
+            } else {
+                mark("Exit", MarkKind::Exit, f.qty.0);
+            }
         }
         for d in &info.decisions {
-            // Skipped: no orders came of it (no command, or the core refused it).
+            // Skipped: no orders came of it (no command, refused, or never sent).
             let skipped = match (&d.decision.command, &d.result) {
                 (_, Some(Ok(_))) => None,
                 (None, _) => Some(d.decision.reason.clone()),
                 (Some(_), Some(Err(r))) => {
                     Some(format!("{} (denied: {})", d.decision.reason, r.message))
                 }
-                _ => None,
+                (Some(_), None) => d
+                    .not_sent
+                    .as_ref()
+                    .map(|why| format!("{} (not sent: {why})", d.decision.reason)),
             };
             let (Some(text), Some(level)) = (skipped, d.decision.levels.first()) else {
                 continue;
@@ -116,7 +171,8 @@ pub fn build(
                 at: d.at,
                 price: level.price,
                 kind: MarkKind::Skip,
-                text: format!("{}: {text}", info.label),
+                head: head(&info.label, "Skipped", d.at),
+                text,
             });
         }
     }
@@ -124,10 +180,16 @@ pub fn build(
     out
 }
 
+/// Plot-local x of a mark at `at`: on the bar holding that time, not part-way to the next one
+/// (a fill at :59 is still that minute's bar).
+fn mark_x(axis: &TimeAxis<'_>, vp: &Viewport, at: UtcMillis) -> Option<f32> {
+    axis.index_of(at).map(|i| vp.index_to_x(i.floor()) as f32)
+}
+
 /// Marker size (logical px): a wedge's width and height, a square's and a circle's side.
 const SIZE: f32 = 9.0;
 /// How far (logical px) a hover may be from a marker's center to show its reason.
-pub const HIT: f32 = 8.0;
+pub const HIT: f32 = 12.0; // a wedge reaches 11 px from its price
 
 /// The layer: marks rebuilt on change, positions per frame.
 #[derive(Default)]
@@ -152,11 +214,13 @@ impl StrategyMarksLayer {
         }
         self.built = Some(key);
         let marks = build();
-        let changed = marks != self.marks;
+        if marks == self.marks {
+            return false; // what's shown (and a hover on it) stands
+        }
         self.marks = marks;
         // Reserved here, so `prepare` never grows it.
         self.shown = Vec::with_capacity(self.marks.len());
-        changed
+        true
     }
 
     /// Positions for this frame (allocation-free: within the reserved buffer).
@@ -167,7 +231,7 @@ impl StrategyMarksLayer {
         }
         let axis = TimeAxis::new(bars);
         for (i, m) in self.marks.iter().enumerate() {
-            let Some(x) = axis.x_of(vp, m.at) else {
+            let Some(x) = mark_x(&axis, vp, m.at) else {
                 continue;
             };
             let y = vp.price_to_y(m.price.0 as f64) as f32;
@@ -199,6 +263,23 @@ impl StrategyMarksLayer {
                     };
                     let rows = 4;
                     let step = SIZE / rows as f32;
+                    // A halo first, so it stands clear of a candle or line in its own color.
+                    for r in 0..rows {
+                        let w = 5.0 + 2.0 * r as f32;
+                        let dy = 2.0 + step * r as f32;
+                        let top = if side == Side::Buy {
+                            cy + dy
+                        } else {
+                            cy - dy - step
+                        };
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(
+                                point(px(cx - w / 2.0), px(top - 1.0)),
+                                size(px(w), px(step + 2.0)),
+                            ),
+                            theme.bg,
+                        ));
+                    }
                     for r in 0..rows {
                         let w = 3.0 + 2.0 * r as f32;
                         let dy = 2.0 + step * r as f32;
@@ -213,27 +294,39 @@ impl StrategyMarksLayer {
                         ));
                     }
                 }
-                MarkKind::Exit => window.paint_quad(quad(
-                    Bounds::new(
-                        point(px(cx - SIZE / 2.0), px(cy - SIZE / 2.0)),
-                        size(px(SIZE), px(SIZE)),
-                    ),
-                    px(0.0),
-                    gpui::transparent_black(),
-                    px(2.0),
-                    theme.text_main,
-                    BorderStyle::Solid,
-                )),
+                MarkKind::Exit => {
+                    // An X (no candle has that shape) on a halo.
+                    let back = SIZE + 3.0;
+                    window.paint_quad(gpui::fill(
+                        Bounds::new(
+                            point(px(cx - back / 2.0), px(cy - back / 2.0)),
+                            size(px(back), px(back)),
+                        ),
+                        theme.bg,
+                    ));
+                    for k in -2..=2 {
+                        let d = k as f32 * 2.0;
+                        for y in [cy + d, cy - d] {
+                            window.paint_quad(gpui::fill(
+                                Bounds::new(
+                                    point(px(cx + d - 1.0), px(y - 1.0)),
+                                    size(px(2.0), px(2.0)),
+                                ),
+                                theme.text_main,
+                            ));
+                        }
+                    }
+                }
                 MarkKind::Skip => {
-                    let s = SIZE * 0.8;
+                    let s = SIZE;
                     window.paint_quad(quad(
                         Bounds::new(
                             point(px(cx - s / 2.0), px(cy - s / 2.0)),
                             size(px(s), px(s)),
                         ),
                         px(s / 2.0),
-                        gpui::transparent_black(),
-                        px(1.5),
+                        theme.bg,
+                        px(2.0),
                         theme.text_dim,
                         BorderStyle::Solid,
                     ));
@@ -304,13 +397,22 @@ mod tests {
         i
     }
 
+    /// The commands a test decision can carry.
+    #[derive(Clone, Copy)]
+    enum Cmd {
+        None,
+        Place,
+        Flatten,
+    }
+
     fn rec(
         at: i64,
         reason: &str,
-        command: bool,
+        cmd: Cmd,
         result: Option<Result<Vec<OrderId>, Reject>>,
         level: Option<i64>,
     ) -> DecisionRecord {
+        let account = AccountId::new("paper");
         DecisionRecord {
             at: UtcMillis(at),
             decision: Decision {
@@ -325,14 +427,29 @@ mod tests {
                     })
                     .into_iter()
                     .collect(),
-                command: command.then(|| Command::CancelAll {
-                    account: AccountId::new("paper"),
-                    contract: None,
-                }),
+                command: match cmd {
+                    Cmd::None => None,
+                    Cmd::Place => Some(Command::PlaceOrder(lines_trading::OrderSpec {
+                        account,
+                        contract: es(),
+                        side: Side::Buy,
+                        qty: Qty(1),
+                        kind: lines_trading::OrderKind::Market,
+                    })),
+                    Cmd::Flatten => Some(Command::Flatten {
+                        account,
+                        contract: Some(es()),
+                    }),
+                },
             },
             result,
             not_sent: None,
         }
+    }
+
+    /// No order the UI knows (an order placed by a decision needs nothing from here).
+    fn unknown(_: OrderId) -> Option<OrderInfo> {
+        None
     }
 
     fn fill(order: u64, side: Side, qty: i64, price: i64, at: i64) -> FillEvent {
@@ -353,38 +470,45 @@ mod tests {
 
     #[test]
     fn its_fills_are_entries_then_exits_with_their_reasons() {
+        let mut never = rec(
+            27,
+            "Sell at Resistance again",
+            Cmd::Place,
+            None,
+            Some(602_100),
+        );
+        never.not_sent = Some("too many decisions at once".into());
         let i = info(vec![
             rec(
                 10,
                 "Buy at Support: touched from above",
-                true,
+                Cmd::Place,
                 Some(Ok(vec![OrderId(7), OrderId(8)])),
                 Some(601_200),
             ),
             rec(
                 20,
                 "Skipped: the target crosses the zone boundary",
-                false,
+                Cmd::None,
                 None,
                 Some(601_500),
             ),
             rec(
                 25,
                 "Sell at Resistance",
-                true,
+                Cmd::Place,
                 Some(Err(Reject::new(RejectCode::Strategy, "outside its hours"))),
                 Some(602_000),
             ),
-            rec(26, "A note without a level", false, None, None),
+            rec(26, "A note without a level", Cmd::None, None, None),
+            never,
         ]);
         let product = catalog::get(catalog::ES).unwrap();
         let fills = [
             fill(7, Side::Buy, 2, 601_200, 11),
-            // Someone else's order on the same contract: no marker.
-            fill(99, Side::Buy, 1, 601_300, 12),
             fill(8, Side::Sell, 2, 601_400, 30),
         ];
-        let m = build(&[i], &fills, es(), &product);
+        let m = build(&[i], fills.iter(), es(), &product, unknown);
         let kinds: Vec<MarkKind> = m.iter().map(|m| m.kind).collect();
         assert_eq!(
             kinds,
@@ -392,27 +516,121 @@ mod tests {
                 MarkKind::Entry(Side::Buy),
                 MarkKind::Skip,
                 MarkKind::Skip,
+                MarkKind::Skip,
                 MarkKind::Exit
             ]
         );
+        assert_eq!(m[0].head, "level-touch #3 · Entry · 00:00:00 UTC");
         assert_eq!(
             m[0].text,
-            "level-touch #3: entry, Buy 2 @ 6012.00. Buy at Support: touched from above"
+            "Buy 2 @ 6012.00 · Buy at Support: touched from above"
         );
         assert!(
             m[2].text.contains("denied: outside its hours"),
             "{}",
             m[2].text
         );
+        assert!(m[3].text.contains("not sent: too many"), "{}", m[3].text);
         assert_eq!(m[1].price, Price(601_500));
-        assert!(
-            m[3].text.contains("exit, Sell 2 @ 6014.00"),
-            "{}",
-            m[3].text
-        );
+        assert!(m[4].head.contains("Exit"), "{}", m[4].head);
+        assert!(m[4].text.contains("Sell 2 @ 6014.00"), "{}", m[4].text);
         // Another contract's chart shows none of them.
         let nq = ContractKey::monthly(catalog::NQ, 2026, Month::new(12).unwrap());
-        assert!(build(&[info(Vec::new())], &fills, nq, &product).is_empty());
+        assert!(build(&[info(Vec::new())], fills.iter(), nq, &product, unknown).is_empty());
+    }
+
+    /// A Stop's flatten is no decision of the instance's, but it moves the position: the next
+    /// short is an entry, its cover an exit. Reproduced from a review finding.
+    #[test]
+    fn a_flatten_it_did_not_decide_keeps_the_next_marks_right() {
+        let i = info(vec![
+            rec(10, "Long", Cmd::Place, Some(Ok(vec![OrderId(1)])), None),
+            rec(30, "Short", Cmd::Place, Some(Ok(vec![OrderId(3)])), None),
+            rec(40, "Cover", Cmd::Place, Some(Ok(vec![OrderId(4)])), None),
+        ]);
+        let product = catalog::get(catalog::ES).unwrap();
+        let fills = [
+            fill(1, Side::Buy, 2, 601_200, 11),
+            fill(2, Side::Sell, 2, 601_100, 20), // the core's flatten
+            fill(3, Side::Sell, 2, 601_000, 31),
+            fill(4, Side::Buy, 2, 600_900, 41),
+        ];
+        let m = build(&[i], fills.iter(), es(), &product, unknown);
+        let kinds: Vec<MarkKind> = m.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                MarkKind::Entry(Side::Buy),
+                MarkKind::Entry(Side::Sell),
+                MarkKind::Exit
+            ]
+        );
+    }
+
+    /// A Flatten's result lists the orders it cancelled too: a person's order is never its
+    /// own. A bracket exit is its parent's. Reproduced from a review finding.
+    #[test]
+    fn only_what_a_decision_created_is_its_own() {
+        let i = info(vec![
+            rec(10, "Long", Cmd::Place, Some(Ok(vec![OrderId(1)])), None),
+            rec(
+                30,
+                "Out",
+                Cmd::Flatten,
+                Some(Ok(vec![OrderId(9), OrderId(5)])),
+                None,
+            ),
+        ]);
+        let product = catalog::get(catalog::ES).unwrap();
+        let fills = [
+            fill(1, Side::Buy, 1, 601_200, 11),
+            fill(9, Side::Buy, 1, 601_250, 12), // a person's, cancelled by the Flatten
+            fill(2, Side::Sell, 1, 601_300, 20), // the bracket exit of order 1
+            fill(5, Side::Sell, 1, 601_350, 31), // the Flatten's own
+        ];
+        let order = |o: OrderId| match o.0 {
+            2 => Some((lines_trading::Role::StopLoss, Some(OrderId(1)))),
+            5 => Some((lines_trading::Role::Flatten, None)),
+            9 => Some((lines_trading::Role::Entry, None)),
+            _ => None,
+        };
+        let m = build(&[i], fills.iter(), es(), &product, order);
+        let texts: Vec<&str> = m.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Buy 1 @ 6012.00 · Long",
+                "Sell 1 @ 6013.00 · Long",
+                "Sell 1 @ 6013.50 · Out"
+            ]
+        );
+    }
+
+    /// A fill that reverses the position closes it and opens the other way: both show.
+    #[test]
+    fn a_reversal_is_an_exit_and_an_entry() {
+        let i = info(vec![rec(
+            10,
+            "Flip",
+            Cmd::Place,
+            Some(Ok(vec![OrderId(1), OrderId(2)])),
+            None,
+        )]);
+        let product = catalog::get(catalog::ES).unwrap();
+        let fills = [
+            fill(1, Side::Buy, 1, 601_200, 11),
+            fill(2, Side::Sell, 3, 601_100, 20),
+        ];
+        let m = build(&[i], fills.iter(), es(), &product, unknown);
+        let got: Vec<(MarkKind, &str)> = m.iter().map(|m| (m.kind, m.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (MarkKind::Entry(Side::Buy), "Buy 1 @ 6012.00 · Flip"),
+                (MarkKind::Exit, "Sell 1 @ 6011.00 · Flip"),
+                (MarkKind::Entry(Side::Sell), "Sell 2 @ 6011.00 · Flip"),
+            ]
+        );
     }
 
     /// The screenshot path: the demo source's decisions behind a script's fills give an
@@ -433,13 +651,34 @@ mod tests {
         );
         assert_ne!(demo.revision(), before);
         let product = catalog::get(catalog::ES).unwrap();
-        let m = build(&demo.snapshot(), &fills, es(), &product);
+        let m = build(&demo.snapshot(), fills.iter(), es(), &product, unknown);
         let kinds: Vec<MarkKind> = m.iter().map(|m| m.kind).collect();
         assert_eq!(
             kinds,
             [MarkKind::Entry(Side::Buy), MarkKind::Skip, MarkKind::Exit]
         );
         assert!(m[2].text.contains("Stop: Support broke"), "{}", m[2].text);
+    }
+
+    /// A fill at :59 of a minute sits on that minute's bar, not near the next one.
+    #[test]
+    fn a_mark_sits_on_the_bar_holding_its_time() {
+        use lines_core::Bar;
+        let bar = |m: i64| Bar {
+            time: UtcMillis(m * 60_000),
+            open: Price(600_000),
+            high: Price(600_000),
+            low: Price(600_000),
+            close: Price(600_000),
+            volume: Qty(1),
+        };
+        let bars = [bar(0), bar(1), bar(2)];
+        let view = BarsView::fixed(&bars, 60_000);
+        let vp = Viewport::default();
+        let axis = TimeAxis::new(view);
+        let at = UtcMillis(60_000 + 59_000);
+        assert_eq!(mark_x(&axis, &vp, at), Some(vp.index_to_x(1.0) as f32));
+        assert_ne!(axis.x_of(&vp, at), mark_x(&axis, &vp, at));
     }
 
     #[test]

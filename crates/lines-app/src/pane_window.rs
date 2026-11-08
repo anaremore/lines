@@ -48,7 +48,9 @@ fn command(cmd: Command) -> Option<Command> {
         Command::Draw(crate::commands::DrawCmd::Style) => Some(cmd),
         // Stop all strategies works from every window (decision 0025's kill switch).
         Command::Strategy(
-            crate::commands::StrategyCmd::StopAll | crate::commands::StrategyCmd::StopAllKeep,
+            crate::commands::StrategyCmd::StopAll
+            | crate::commands::StrategyCmd::StopAllKeep
+            | crate::commands::StrategyCmd::ToggleMarks,
         ) => Some(cmd),
         // Trading keys act on this window's pane, as in main windows.
         Command::Trade(_) => Some(cmd),
@@ -104,6 +106,11 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
+            Some(Command::Strategy(crate::commands::StrategyCmd::ToggleMarks)) => {
+                if let PaneHandle::Chart(chart) = &self.handle {
+                    chart.update(cx, |c, cx| c.toggle_strategy_marks(cx));
+                }
+            }
             Some(Command::Strategy(c)) => {
                 if let Some(t) = crate::trading::Trading::try_global(cx) {
                     crate::strategy_panel::submit_stop_all(

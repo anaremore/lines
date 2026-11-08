@@ -4685,7 +4685,6 @@ impl ChartView {
         self.instrument.symbol
     }
 
-    /// The banner for drawing mode, a temporary measure or the delete-all confirmation.
     /// Rebuild the strategy markers when the instances, the fills or the contract moved (the
     /// poll, never paint). True when they changed.
     fn poll_marks(&mut self) -> bool {
@@ -4702,10 +4701,15 @@ impl ChartView {
             return false; // busy this instant: the next poll
         };
         let key = (source.revision(), state.fills_seen, contract);
-        let product = self.instrument.clone();
+        let product = &self.instrument;
         self.marks.update(key, || {
-            let fills: Vec<lines_trading::FillEvent> = state.fills().cloned().collect();
-            crate::strategy_marks::build(&source.snapshot(), &fills, contract, &product)
+            crate::strategy_marks::build(
+                &source.snapshot(),
+                state.fills(),
+                contract,
+                product,
+                |o| state.order(o).map(|o| (o.role, o.parent)),
+            )
         })
     }
 
@@ -4733,6 +4737,7 @@ impl ChartView {
                 .border_color(t.axis_line)
                 .text_color(t.text_main)
                 .text_size(px(12.0))
+                .child(m.head.clone())
                 .child(m.text.clone())
                 .into_any_element(),
         )
@@ -4748,6 +4753,7 @@ impl ChartView {
         self.marks.hidden
     }
 
+    /// The banner for drawing mode, a temporary measure or the delete-all confirmation.
     fn drawing_banner(&self, t: &Theme) -> Option<AnyElement> {
         let d = &self.drawings;
         let text = if d.confirm_clear {
