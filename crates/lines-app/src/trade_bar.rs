@@ -1657,7 +1657,7 @@ pub const LOCKED_HINT_FULL: f32 = 400.0;
 /// From this width that line, with strategies armed, says "DOM locked" and "still armed".
 pub const LOCKED_HINT_DOM: f32 = 320.0;
 /// From this width that line, with strategies armed, also says how to enable.
-pub const LOCKED_HINT_ARMED_FULL: f32 = 540.0;
+pub const LOCKED_HINT_ARMED_FULL: f32 = 560.0;
 
 /// What a disabled panel says in the joins' place: the lock that binds. With nothing else
 /// in the way, how to enable; with a lockout or another blocker too, that first (enabling
@@ -4536,12 +4536,12 @@ mod tests {
             (
                 locked_hint(None, 12, LOCKED_HINT_ARMED_FULL),
                 LOCKED_HINT_ARMED_FULL,
-                "count at 540",
+                "count at 560",
             ),
             (
                 locked_hint(long, 12, LOCKED_HINT_ARMED_FULL),
                 LOCKED_HINT_ARMED_FULL,
-                "count, reason at 540",
+                "count, reason at 560",
             ),
         ] {
             assert!(line(&hint) <= w - 16.0, "{what}: {hint}");
