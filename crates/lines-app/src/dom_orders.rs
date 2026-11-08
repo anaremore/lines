@@ -676,14 +676,17 @@ mod tests {
     /// A press counts only the orders on its own row.
     #[test]
     fn a_press_reads_only_its_row() {
-        let mut layer = OrdersLayer::default();
-        layer.marks = (0..3)
+        let mut marks: Vec<_> = (0..3)
             .map(|i| mark(i, Side::Sell, 10, true, true, MarkStyle::Working))
             .collect();
-        layer.marks.push(OrderMark {
+        marks.push(OrderMark {
             price: Price(125),
             ..mark(9, Side::Sell, 10, true, true, MarkStyle::Working)
         });
+        let layer = OrdersLayer {
+            marks,
+            ..OrdersLayer::default()
+        };
         assert_eq!(
             layer.press_at(Price(100), 25, 30.0, 78.0),
             MarkPress::Many(3)
