@@ -2,8 +2,8 @@
 //! there, and an × for that order), and Cancel all, which takes a second press. A group never
 //! hides a working order: every one is here, and zooming in gives each its own tag back.
 //!
-//! A row's × comes first, so it is pressable at any width; only in a window under about 280 px
-//! can the end of a long row's words be clipped.
+//! A row's × comes first, so it is pressable at any width; only in a window under about 310 px
+//! can the end of a long row, which can be its price, be clipped.
 //!
 //! Rows never move while the list is open (design.md: nothing the trader aims at shifts under
 //! the cursor): an order that finishes stays in its row, marked done and inert. Presses act on
@@ -26,7 +26,8 @@ const ROW_H: f32 = 24.0;
 const ROWS_SHOWN: usize = 12;
 /// The list's title, its scroll line, its gaps and padding, and Cancel all.
 const CHROME_H: f32 = 108.0;
-/// A row's estimated character width, and the narrowest list: a long order's words and its ×.
+/// A row's estimated character width, and the narrowest list a window with room gets: a long
+/// order's words and its ×.
 const CHAR_W: f32 = 7.5;
 const MIN_WIDTH: f32 = 320.0;
 /// Kept from the plot's and the window's edges.
@@ -144,15 +145,8 @@ pub fn layer(
                     }))
                     .into_any_element()
             } else {
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_shrink_0()
-                    .w(px(36.0))
-                    .text_color(t.text_dim)
-                    .child("done")
-                    .into_any_element()
+                // An empty slot the ×'s size: the row's words never move.
+                div().flex_shrink_0().w(px(22.0)).into_any_element()
             };
             div()
                 .flex()
@@ -175,6 +169,10 @@ pub fn layer(
                         .text_color(c)
                         .child(pnl.as_str().to_owned())
                 }))
+                // A finished order has no P&L: its place says so.
+                .children(
+                    (!r.open).then(|| div().flex_shrink_0().text_color(t.text_dim).child("done")),
+                )
         })
         .collect::<Vec<_>>();
     let n = menu.open_count();
@@ -274,8 +272,8 @@ mod tests {
         assert_eq!(cancel_all_label(1, true), "Press again to cancel 1 order");
     }
 
-    /// The price is never cut: a row without room drops its P&L, and the narrowest list holds
-    /// the longest order's words with its ×.
+    /// At `MIN_WIDTH` and wider a price is never cut: a row without room drops its P&L, and the
+    /// list holds the longest order's words with its ×, and "done" on a finished one.
     #[test]
     fn a_row_drops_its_pnl_rather_than_cut_a_price() {
         let (text, pnl) = ("Target 1 @ 5822.75", "+24.0 t  +$300.00");
@@ -285,6 +283,11 @@ mod tests {
         // The longest rows, partly filled or held, hold their words at the narrowest list.
         assert!(pnl_fits("Sell lmt 120/200 @ 104523.50", "", MIN_WIDTH));
         assert!(pnl_fits("Target 1200 @ 104523.50 · held", "", MIN_WIDTH));
+        assert!(pnl_fits(
+            "Target 1200 @ 104523.50 · held",
+            "done",
+            MIN_WIDTH
+        ));
     }
 
     /// The list stays inside the window, wherever the chart is: a narrow chart
