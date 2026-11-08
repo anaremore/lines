@@ -709,9 +709,11 @@ impl PaperBroker {
                 return;
             }
         }
+        // Moved across the market: it takes what it now crosses (an option only in its session).
         if let OrderKind::Limit { price } = o.kind
             && !held
             && self.marketable(&o, price)
+            && (o.contract.option_key().is_none() || self.market_open(o.contract, now))
         {
             self.execute(now, id, Some(price));
         }
@@ -868,6 +870,10 @@ impl PaperBroker {
         let Some(m) = self.markets.get_mut(&contract) else {
             return;
         };
+        // A late or re-seeded quote never replaces a newer one.
+        if m.quoted_at.is_some_and(|t| time < t) {
+            return;
+        }
         m.book.clear();
         m.taken.clear();
         m.quoted_at = Some(time);

@@ -243,7 +243,7 @@ fn prints_never_fill_an_option() {
 }
 
 /// A missing side never fills: no ask (or bid), a zero side and a crossed quote all leave the
-/// side empty. Opening orders are refused without a two-sided quote; a closing limit may rest.
+/// side empty. With no two-sided quote there is no mid, so limits are refused, opening or closing.
 #[test]
 fn a_missing_side_never_fills() {
     let mut r = Rig::new();
@@ -271,18 +271,14 @@ fn a_missing_side_never_fills() {
     r.quote(None, None);
     assert_eq!(r.try_limit(Side::Sell, 1, 200), Err(RejectCode::Risk));
 
-    // A closing limit rests with no bid, and doesn't fill until a bid goes through it.
+    // A close too: a limit typed blind could fill far from the market on the next quote.
     let mut r = Rig::new();
     r.quote(Some(240), Some(242));
     let open = r.limit(Side::Buy, 2, 242);
     assert_eq!(r.fills(open), [(242, 2)]);
     r.quote(None, Some(5));
-    let close = r
-        .cmd(Command::PlaceExit(Rig::spec(Side::Sell, 2, limit(3))))
-        .expect("a closing limit may rest")[0];
-    r.wait(LAT + 1);
-    assert_eq!(r.state(close), OrderState::Working);
-    assert!(r.fills(close).is_empty());
+    let blind = r.cmd(Command::PlaceExit(Rig::spec(Side::Sell, 2, limit(3))));
+    assert_eq!(blind.unwrap_err().code, RejectCode::Risk);
     // Flatten is a market order: with no bid it is cancelled, never filled at a last price.
     let time = UtcMillis(r.t + 1);
     r.market(
@@ -311,16 +307,22 @@ fn a_missing_side_never_fills() {
 fn a_stale_quote_never_fills() {
     let mut r = Rig::new();
     r.quote(Some(240), Some(242));
+    let quoted = r.t;
     let open = r.limit(Side::Buy, 1, 242);
     assert_eq!(r.fills(open), [(242, 1)]);
-    r.t += 16 * 60_000;
-    assert_eq!(r.try_limit(Side::Buy, 1, 241), Err(RejectCode::Risk));
-    let close = r
+    // Sent just in time, it arrives after the quote went stale: it would cross, but rests.
+    r.t = quoted + 15 * 60_000 - 5;
+    let resting = r
         .cmd(Command::PlaceExit(Rig::spec(Side::Sell, 1, limit(240))))
         .unwrap()[0];
     r.wait(LAT + 1);
-    assert!(r.fills(close).is_empty(), "it would cross, but rests");
-    assert_eq!(r.state(close), OrderState::Working);
+    assert!(r.fills(resting).is_empty());
+    assert_eq!(r.state(resting), OrderState::Working);
+    // Past it: refused, opening or closing.
+    r.t += 60_000;
+    assert_eq!(r.try_limit(Side::Buy, 1, 241), Err(RejectCode::Risk));
+    let closing = r.cmd(Command::PlaceExit(Rig::spec(Side::Sell, 1, limit(240))));
+    assert_eq!(closing.unwrap_err().code, RejectCode::Risk);
     let flat = r
         .cmd(Command::Flatten {
             account: acct(),
@@ -343,13 +345,48 @@ fn a_stale_quote_never_fills() {
         },
     );
     assert_eq!(r.position(call()), 1);
-    // A fresh quote: a new close fills on it.
+    // A late quote older than the newest is ignored.
     r.quote(Some(250), Some(252));
+    let late = UtcMillis(r.t - 1_000);
+    r.market(
+        call(),
+        MarketInput::OptionQuote {
+            bid: Some(Price(100)),
+            ask: Some(Price(102)),
+            last: None,
+            time: late,
+        },
+    );
+    // A fresh quote: a new close fills on it.
     let close = r
         .cmd(Command::PlaceExit(Rig::spec(Side::Sell, 1, limit(250))))
         .unwrap()[0];
     r.wait(LAT + 1);
     assert_eq!(r.fills(close), [(250, 1)]);
+}
+
+/// An empty or crossed quote keeps the last mark: open P&L isn't erased.
+#[test]
+fn an_empty_quote_keeps_the_mark() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.limit(Side::Buy, 1, 242);
+    r.quote(Some(250), Some(252)); // mid 2.51: up $9
+    let open = |r: &Rig| {
+        r.events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Event::Position(p) if p.contract == call() => Some(p.unrealised),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(open(&r), Money::whole(9));
+    r.quote(None, None);
+    assert_eq!(open(&r), Money::whole(9));
+    r.quote(Some(300), Some(100));
+    assert_eq!(open(&r), Money::whole(9));
 }
 
 /// Money uses the multiplier, in exact types: 100 shares per contract, fees per contract.
@@ -481,6 +518,58 @@ fn options_trade_in_the_regular_session_only() {
     assert_eq!(r.core.position(&acct(), later), 0);
 }
 
+/// Moving a resting order across the quote after the close fills nothing.
+#[test]
+fn a_modify_never_fills_outside_the_session() {
+    let mut r = Rig::new();
+    let later = ContractKey::option(
+        catalog::SPY,
+        CivilDate::new(2026, 11, 13).unwrap(),
+        Price(68_400),
+        Right::Call,
+    );
+    let time = UtcMillis(r.t + 1);
+    r.market(
+        later,
+        MarketInput::OptionQuote {
+            bid: Some(Price(240)),
+            ask: Some(Price(242)),
+            last: None,
+            time,
+        },
+    );
+    let id = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            contract: later,
+            ..Rig::spec(Side::Buy, 1, limit(230))
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    // 16:05 ET, the quote stamped at 15:59:50.
+    r.t = UtcMillis::parse_iso("2026-11-09T20:59:50Z").unwrap().0;
+    let time = r.now();
+    r.market(
+        later,
+        MarketInput::OptionQuote {
+            bid: Some(Price(240)),
+            ask: Some(Price(242)),
+            last: None,
+            time,
+        },
+    );
+    r.t = UtcMillis::parse_iso("2026-11-09T21:05:00Z").unwrap().0;
+    r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order: id,
+        qty: None,
+        price: Some(Price(245)),
+    })
+    .unwrap();
+    r.wait(LAT + 1);
+    assert!(r.fills(id).is_empty());
+    assert_eq!(r.core.position(&acct(), later), 0);
+}
+
 fn at_close(r: &mut Rig) {
     r.t = UtcMillis::parse_iso("2026-11-09T21:00:00Z").unwrap().0;
     r.wait(0);
@@ -576,6 +665,17 @@ fn expiry_uses_the_close_and_waits_for_a_price() {
     assert_eq!(r.balance() - start, -Money::whole(42));
     assert_eq!(r.try_limit(Side::Buy, 1, 242), Err(RejectCode::Invalid));
 
+    // A price older than a day isn't that day's close: it waits for the next one.
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.limit(Side::Buy, 1, 242);
+    let then = r.t;
+    r.t -= 2 * 86_400_000;
+    r.underlying(60_000);
+    r.t = then;
+    at_close(&mut r);
+    assert_eq!(r.position(call()), 1);
+
     // No underlying price at all: nothing to settle against, so it waits.
     let mut r = Rig::new();
     r.quote(Some(240), Some(242));
@@ -626,6 +726,30 @@ fn guardrails_apply_and_prop_rules_do_not() {
     // A close still passes a lockout.
     let close = r.cmd(Command::PlaceExit(Rig::spec(Side::Sell, 1, limit(190))));
     assert!(close.is_ok(), "{close:?}");
+
+    // "No entries before the close" reads the option's own close (16:00 ET), not the equity's.
+    let mut r = Rig::new();
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: Guardrails {
+            no_entries_before_close_min: Some(10),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    r.t = UtcMillis::parse_iso("2026-11-09T20:55:00Z").unwrap().0;
+    r.quote(Some(240), Some(242));
+    assert_eq!(r.try_limit(Side::Buy, 1, 242), Err(RejectCode::Guardrail));
+
+    // Rules can't be set while the account holds options; no position bracket on an option.
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.limit(Side::Buy, 1, 242);
+    let set = r.cmd(Command::SetRules {
+        account: acct(),
+        rules: presets().into_iter().next(),
+    });
+    assert_eq!(set.unwrap_err().code, RejectCode::PropRule);
 
     let mut a = AccountConfig::paper("paper-1", 50_000);
     a.rules = presets().into_iter().next();

@@ -41,13 +41,13 @@ pub struct RiskLimits {
 /// One more guard on option orders (decision 0028): a limit far from the mid is refused (a
 /// fat finger on an option is often the whole premium), and so are market orders by default.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OptionGuard {
     /// A limit may be this far from the mid, as a percentage of the mid ...
     pub max_from_mid_pct: u32,
     /// ... or this many ticks, whichever is wider (a percentage of a cheap option is nothing).
     pub min_band_ticks: i64,
     /// Allow market orders (Flatten always may).
-    #[serde(default)]
     pub allow_market: bool,
     /// A quote older than this has no mid to check against.
     pub stale_after_ms: i64,
@@ -77,15 +77,13 @@ pub struct OptionQuoteView {
     pub at: Option<UtcMillis>,
 }
 
-/// The guard on one option order. `closing`: it only closes a position (reduce-only). With no
-/// two-sided fresh quote there is no mid: an opening order is refused, a closing limit may
-/// still rest (it never fills on a missing side, and a trader must be able to offer out of a
-/// position whose bid is gone).
+/// The guard on one option order. With no two-sided fresh quote there is no mid to check a limit
+/// against, so it is refused, opening or closing: a limit typed blind could fill far from the
+/// market on the next quote. (Flatten doesn't pass here, and never fills on a missing side.)
 pub fn check_option(
     guard: &OptionGuard,
     spec: &ContractSpec,
     kind: &OrderKind,
-    closing: bool,
     quote: OptionQuoteView,
     now: UtcMillis,
 ) -> Result<(), Reject> {
@@ -126,9 +124,6 @@ pub fn check_option(
         .at
         .is_some_and(|t| now.0 - t.0 <= guard.stale_after_ms);
     let (Some(bid), Some(ask), true) = (quote.bid, quote.ask, fresh) else {
-        if closing {
-            return Ok(());
-        }
         return Err(risk(if quote.at.is_some() && !fresh {
             "this option's quote is stale: no mid to check the limit against".into()
         } else {
