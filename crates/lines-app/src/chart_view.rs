@@ -360,6 +360,8 @@ pub struct ChartView {
     pending_price_zoom: Option<f64>,
     /// Screenshot fixture: open the first group tag's list once tags are laid out.
     pending_group_menu: bool,
+    /// The plot a group's list was last placed for (a resize re-renders it, placed anew).
+    group_plot: Bounds<Pixels>,
     /// Pointer position in plot-local logical px, while it is over the plot.
     hover: Option<(f32, f32)>,
     /// This frame's crosshair (from `hover`), and a copy of the bar under it.
@@ -581,6 +583,7 @@ impl ChartView {
             hover: fixture.cursor,
             pending_price_zoom: fixture.price_zoom,
             pending_group_menu: fixture.order_group_menu,
+            group_plot: Bounds::default(),
             cross: None,
             cross_bar: None,
             period_ms: 60_000,
@@ -5711,6 +5714,10 @@ impl Pane for ChartView {
         // waits for the next one; a frame's marks can be briefly empty), and closes if the
         // chart's account changed.
         let mut group = self.ct.account_changed(self.trade.account.as_ref());
+        if self.ct.group_menu.is_some() && self.group_plot != self.plot {
+            self.group_plot = self.plot;
+            group = true;
+        }
         if let Some(menu) = &mut self.ct.group_menu
             && let Some(s) = self.trade.try_cache()
         {
