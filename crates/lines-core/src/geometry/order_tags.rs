@@ -16,11 +16,13 @@
 //!   add), edge marker (scroll). Lines themselves are not targets: a 1 px line is too easy to
 //!   catch by accident while panning.
 //! - **Snapping** is the crosshair's ([`super::snap_price`]): the tick nearest the pointer.
+//! - **Groups** ([`group_orders`]): orders of one kind whose tags can't sit at their own levels
+//!   share one tag; zooming in splits them back. No order is ever left without a tag.
 
 use super::snap;
 use crate::{Price, Viewport};
 
-/// Most tags a chart lays out (orders + position); more are not drawn.
+/// Most tags a chart lays out; [`group_orders`] keeps every order within this (and the band).
 pub const MAX_TAGS: usize = 32;
 /// Tag height and the `×` box's width, logical px.
 pub const TAG_H: f32 = 20.0;
@@ -205,8 +207,7 @@ pub fn layout_tags(
     out: &mut [TagBox],
 ) -> usize {
     let (lo, hi) = band;
-    let fits = (((hi - lo) + TAG_GAP) / (TAG_H + TAG_GAP)).floor().max(0.0) as usize;
-    let cap = out.len().min(MAX_TAGS).min(fits);
+    let cap = out.len().min(tags_fit(band));
     let mut n = 0;
     for l in lines {
         if n == cap {
@@ -250,11 +251,12 @@ pub fn layout_tags(
         };
         tags[i].top = tags[i].top.max(floor);
     }
-    // (`cap` keeps the stack within the band, so the pull-up below never passes `lo`.)
+    // (`cap` keeps the stack within the band, so the pull-up below never passes `lo`, but for
+    // the one tag a band too short for it still gets.)
     let mut ceiling = hi;
     for t in tags.iter_mut().rev() {
         if t.top + TAG_H > ceiling {
-            t.top = ceiling - TAG_H;
+            t.top = (ceiling - TAG_H).max(0.0);
         }
         ceiling = t.top - TAG_GAP;
     }
@@ -341,6 +343,134 @@ pub fn centre_on(vp: &Viewport, price: Price) -> (f64, f64) {
     let half = (vp.price_hi - vp.price_lo) * 0.5;
     let p = price.0 as f64;
     (p - half, p + half)
+}
+
+// ---- grouped tags -------------------------------------------------------------------------
+
+/// A group that holds what no longer fits under its own kind (only on a plot too short for one
+/// tag per kind): orders of several kinds, shown by count and range, no average.
+pub const MIXED_KEY: u16 = u16::MAX;
+
+/// One order on the plot, for grouping: `key` is its kind (orders of one kind may share a tag),
+/// `qty` what is left of it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct GroupIn {
+    pub id: u64,
+    pub price: Price,
+    pub qty: i64,
+    pub key: u16,
+}
+
+/// One tag's orders: `orders[first..first + n]` of the slice given to [`group_orders`] (which it
+/// sorted). `n == 1` is an ordinary tag. The id is its highest-priced order's, so a tag id always
+/// names an order. Quantity and notional are exact.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct TagGroup {
+    pub id: u64,
+    pub key: u16,
+    pub first: usize,
+    pub n: usize,
+    pub qty: i64,
+    /// Sum of price × quantity, in price units × quantity units.
+    pub notional: i128,
+    pub lo: Price,
+    pub hi: Price,
+}
+
+impl TagGroup {
+    /// The average price rounded to a price unit, half away from zero, for the label and the
+    /// tag's place only: never an order's price. The exact value is `notional / qty`.
+    pub fn average(&self) -> Price {
+        round_average(self.notional, self.qty).unwrap_or(self.hi)
+    }
+
+    /// Whether this tag stands for several orders.
+    pub fn is_group(&self) -> bool {
+        self.n > 1
+    }
+}
+
+/// `notional / qty` rounded to the nearest integer, half away from zero; `None` without quantity.
+pub fn round_average(notional: i128, qty: i64) -> Option<Price> {
+    if qty <= 0 {
+        return None;
+    }
+    let q = qty as i128;
+    let half = if notional >= 0 { q / 2 } else { -(q / 2) };
+    let rounded = (notional + half) / q;
+    Some(Price(i64::try_from(rounded).ok()?))
+}
+
+/// How many tags the band holds (what [`layout_tags`] lays out): at least one, however short
+/// the plot, so orders on it always have a way in; at most `MAX_TAGS`.
+pub fn tags_fit(band: (f32, f32)) -> usize {
+    let fits = (((band.1 - band.0) + TAG_GAP) / (TAG_H + TAG_GAP))
+        .floor()
+        .max(0.0) as usize;
+    fits.clamp(1, MAX_TAGS)
+}
+
+/// The tags for the orders on the plot, at most `cap` (from [`tags_fit`]) and `out.len()`: every
+/// order is in exactly one, so none is hidden. Orders of one kind whose tags can't both sit at
+/// their own levels (`TAG_H + TAG_GAP` apart) share a tag; zooming in splits them back. When that
+/// leaves too many tags for the band, the distance grows until it fits; if one tag per kind
+/// still doesn't, the last tag takes everything left ([`MIXED_KEY`]). Sorts `orders` by kind,
+/// then highest price first. Allocation-free.
+pub fn group_orders(
+    vp: &Viewport,
+    orders: &mut [GroupIn],
+    plot_h: f32,
+    cap: usize,
+    out: &mut [TagGroup],
+) -> usize {
+    let cap = cap.min(out.len());
+    if cap == 0 || orders.is_empty() {
+        return 0;
+    }
+    orders.sort_unstable_by_key(|o| (o.key, std::cmp::Reverse(o.price.0), o.id));
+    let joins = |a: &GroupIn, b: &GroupIn, apart: f64| {
+        a.key == b.key
+            && (vp.price_to_y(a.price.0 as f64) - vp.price_to_y(b.price.0 as f64)).abs() < apart
+    };
+    let count = |apart: f64| {
+        1 + orders
+            .windows(2)
+            .filter(|w| !joins(&w[0], &w[1], apart))
+            .count()
+    };
+    let mut apart = (TAG_H + TAG_GAP) as f64;
+    while count(apart) > cap && apart <= plot_h as f64 {
+        apart *= 2.0;
+    }
+    let add = |g: &mut TagGroup, o: &GroupIn| {
+        g.n += 1;
+        g.qty += o.qty;
+        g.notional += o.price.0 as i128 * o.qty as i128;
+        g.lo = g.lo.min(o.price);
+        g.hi = g.hi.max(o.price);
+    };
+    let mut n = 0;
+    for (i, o) in orders.iter().enumerate() {
+        let same = i > 0 && joins(&orders[i - 1], o, apart);
+        if same || n == cap {
+            if !same {
+                out[n - 1].key = MIXED_KEY;
+            }
+            add(&mut out[n - 1], o);
+        } else {
+            out[n] = TagGroup {
+                id: o.id,
+                key: o.key,
+                first: i,
+                lo: o.price,
+                hi: o.price,
+                ..TagGroup::default()
+            };
+            add(&mut out[n], o);
+            n += 1;
+        }
+    }
+    n
 }
 
 #[cfg(test)]
@@ -566,5 +696,121 @@ mod tests {
         assert_eq!(snap_price(&v, y, 25), Some(Price(605_000)));
         let y = v.price_to_y(605_013.0);
         assert_eq!(snap_price(&v, y, 25), Some(Price(605_025)));
+    }
+
+    fn grp(id: u64, price: i64, qty: i64, key: u16) -> GroupIn {
+        GroupIn {
+            id,
+            price: Price(price),
+            qty,
+            key,
+        }
+    }
+
+    /// A viewport with `per_unit` px per price unit, the plot 400 px tall around 582_000.
+    fn zoom(per_unit: f64) -> Viewport {
+        let mut vp = Viewport::default();
+        vp.set_size(800.0, 400.0);
+        vp.price_lo = 582_000.0 - 200.0 / per_unit;
+        vp.price_hi = 582_000.0 + 200.0 / per_unit;
+        vp
+    }
+
+    /// Tags that can't sit at their own levels collapse; zooming in splits them back; kinds
+    /// never mix; every order stays in exactly one tag.
+    #[test]
+    fn orders_too_close_share_a_tag_and_zooming_in_splits_them() {
+        let orders = [
+            grp(1, 582_275, 10, 1),
+            grp(2, 582_300, 10, 1),
+            grp(3, 582_275, 5, 1),
+            grp(4, 582_300, 3, 2),
+        ];
+        let mut out = [TagGroup::default(); MAX_TAGS];
+        let mut a = orders;
+        // 25 units apart at 0.1 px per unit: 2.5 px, they can't both fit.
+        let n = group_orders(&zoom(0.1), &mut a, 400.0, MAX_TAGS, &mut out);
+        assert_eq!(n, 2, "{out:?}");
+        assert_eq!((out[0].key, out[0].n, out[0].qty), (1, 3, 25));
+        assert_eq!((out[0].lo, out[0].hi), (Price(582_275), Price(582_300)));
+        assert_eq!(
+            (out[1].key, out[1].n),
+            (2, 1),
+            "another kind keeps its own tag"
+        );
+        // 25 units apart at 2 px per unit: 50 px: their own levels, but the equal prices stay.
+        let mut b = orders;
+        let n = group_orders(&zoom(2.0), &mut b, 400.0, MAX_TAGS, &mut out);
+        assert_eq!(n, 3, "{out:?}");
+        assert_eq!((out[0].hi, out[0].n), (Price(582_300), 1));
+        assert_eq!((out[1].hi, out[1].n, out[1].qty), (Price(582_275), 2, 15));
+        let total: usize = out[..n].iter().map(|g| g.n).sum();
+        assert_eq!(total, orders.len(), "every order in exactly one tag");
+    }
+
+    /// The average is exact until the label: integers, rounded half away from zero only there.
+    #[test]
+    fn the_average_is_exact_and_rounded_only_for_the_label() {
+        let mut orders = [grp(1, 582_275, 1, 1), grp(2, 582_300, 2, 1)];
+        let mut out = [TagGroup::default(); 4];
+        let n = group_orders(&zoom(0.01), &mut orders, 400.0, 4, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0].notional, 582_275 + 2 * 582_300);
+        assert_eq!(out[0].average(), Price(582_292), "582291.67 rounds up");
+        assert_eq!(
+            round_average(5, 2),
+            Some(Price(3)),
+            "half rounds away from zero"
+        );
+        assert_eq!(round_average(-5, 2), Some(Price(-3)));
+        assert_eq!(round_average(7, 0), None);
+        // Past i64 × i64: no overflow on the way.
+        let big = TagGroup {
+            notional: i64::MAX as i128 * 1_000,
+            qty: 1_000,
+            hi: Price(1),
+            ..TagGroup::default()
+        };
+        assert_eq!(big.average(), Price(i64::MAX));
+    }
+
+    /// Too many kinds or tags for the band: the distance grows, then the last tag takes the
+    /// rest; never more tags than fit, and no order left out.
+    #[test]
+    fn nothing_is_dropped_when_the_band_is_short() {
+        let mut out = [TagGroup::default(); MAX_TAGS];
+        // 70 orders of one kind, 2 px apart at this zoom... spread enough to need growth.
+        let mut many: Vec<GroupIn> = (0..70)
+            .map(|i| grp(i as u64 + 1, 580_000 + i * 60, 2, 1))
+            .collect();
+        let vp = zoom(0.09);
+        let n = group_orders(&vp, &mut many, 400.0, 3, &mut out);
+        assert!((1..=3).contains(&n), "{n}");
+        assert_eq!(out[..n].iter().map(|g| g.n).sum::<usize>(), 70);
+        assert_eq!(out[..n].iter().map(|g| g.qty).sum::<i64>(), 140);
+        // Four kinds on a band for 2: the second tag is the mixed one.
+        let mut kinds = [
+            grp(1, 582_000, 1, 1),
+            grp(2, 582_000, 1, 2),
+            grp(3, 582_000, 1, 3),
+            grp(4, 582_000, 1, 4),
+        ];
+        let n = group_orders(&zoom(1.0), &mut kinds, 400.0, 2, &mut out);
+        assert_eq!(n, 2);
+        assert_eq!((out[0].key, out[0].n), (1, 1));
+        assert_eq!((out[1].key, out[1].n), (MIXED_KEY, 3));
+        // The tag's orders are a contiguous run of the sorted slice.
+        assert_eq!(kinds[out[1].first].key, 2);
+        // No room, no orders: nothing, no panic.
+        assert_eq!(group_orders(&zoom(1.0), &mut kinds, 400.0, 0, &mut out), 0);
+        assert_eq!(group_orders(&zoom(1.0), &mut [], 400.0, 3, &mut out), 0);
+    }
+
+    #[test]
+    fn tags_fit_counts_the_band_and_the_limit() {
+        assert_eq!(tags_fit((0.0, TAG_H)), 1);
+        assert_eq!(tags_fit((0.0, 2.0 * TAG_H + TAG_GAP)), 2);
+        assert_eq!(tags_fit((0.0, 10.0)), 1, "always a way in");
+        assert_eq!(tags_fit((0.0, 100_000.0)), MAX_TAGS);
     }
 }

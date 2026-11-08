@@ -26,7 +26,8 @@ use lines_core::{ContractKey, Price};
 use lines_trading::{AccountId, OrderId, Side};
 
 use crate::dom_trade::{
-    Ghost, MarkRole, MarkStyle, OrderMark, mark_text, order_mark, position_row, row_of,
+    Ghost, MarkRole, MarkStyle, OrderMark, group_key, mark_group_text, mark_text, order_mark,
+    position_row, row_of,
 };
 use crate::text::Glyphs;
 use crate::theme::Theme;
@@ -191,16 +192,11 @@ impl OrdersLayer {
             let Some((ox, ow)) = orders else {
                 continue;
             };
-            // Orders on this row: up to two, side by side.
-            let mut on_row = self
-                .marks
-                .iter()
-                .filter(|m| row_of(m.price.0, units) == row);
-            let first = on_row.next();
-            let second = on_row.next();
-            let more = on_row.next().is_some();
-            let n = first.is_some() as usize + second.is_some() as usize;
-            for (k, m) in [first, second].into_iter().flatten().enumerate() {
+            // Orders on this row: up to two kinds, side by side; several of one kind are one
+            // mark (`S 200 ×20`), so a row never shows part of its orders as if it were all.
+            let (slots, n, more) = row_marks(&self.marks, |m| row_of(m.price.0, units) == row);
+            for (k, slot) in slots.iter().take(n).enumerate() {
+                let (m, left, count) = (&slot.0, slot.1, slot.2);
                 let w = (ow - 2.0) / n as f32;
                 let (x, yy, h) = (ox + 1.0 + k as f32 * w, y + 2.0, row_h - 4.0);
                 // Colour by role: entries take their side's, exits their own.
@@ -210,7 +206,13 @@ impl OrdersLayer {
                     MarkRole::Target => t.order_target,
                     MarkRole::Stop => t.order_stop,
                 };
-                let text_colour = match m.style {
+                // Several orders: no one order's fill to show.
+                let style = if count > 1 && m.style == MarkStyle::Partial {
+                    MarkStyle::Working
+                } else {
+                    m.style
+                };
+                let text_colour = match style {
                     MarkStyle::Working => {
                         window.paint_quad(fill(rect(x, yy, w - 1.0, h), c));
                         t.bg
@@ -242,7 +244,7 @@ impl OrdersLayer {
                     MarkRole::Entry => None,
                 };
                 if let Some(ny) = notch_y {
-                    let cut = if m.style == MarkStyle::Working {
+                    let cut = if style == MarkStyle::Working {
                         t.panel
                     } else {
                         c
@@ -250,12 +252,21 @@ impl OrdersLayer {
                     window.paint_quad(fill(rect(x + 2.0, ny, w - 5.0, notch), cut));
                 }
                 buf.clear();
-                let _ = mark_text(m, &mut buf);
+                if count > 1 {
+                    let _ = mark_group_text(m, left, count, false, &mut buf);
+                    let plus = if more && k == 1 { 8.0 } else { 0.0 };
+                    if glyphs.width(buf.as_str(), text_colour, true, window) + plus > w - 7.0 {
+                        buf.clear();
+                        let _ = mark_group_text(m, left, count, true, &mut buf);
+                    }
+                } else {
+                    let _ = mark_text(m, &mut buf);
+                }
                 if more && k == 1 {
                     let _ = std::fmt::Write::write_str(&mut buf, "+");
                 }
                 // A partial fill's label on an opaque pill: readable over the fill (AA).
-                if m.style == MarkStyle::Partial {
+                if style == MarkStyle::Partial {
                     let tw = glyphs.width(buf.as_str(), text_colour, true, window);
                     let (l, top, pw, ph) = label_pill(x, yy, w, h, tw, hair, role);
                     window.paint_quad(fill(rect(l, top, pw, ph), t.mark_label().1));
@@ -439,6 +450,47 @@ impl OrdersLayer {
     }
 }
 
+/// The marks of the orders `on_row` picks: up to two kinds, each its first order, what is left
+/// across that kind and how many; how many kinds fit, and whether more kinds are there.
+fn row_marks(
+    marks: &[OrderMark],
+    on_row: impl Fn(&OrderMark) -> bool,
+) -> ([(OrderMark, i64, usize); 2], usize, bool) {
+    let blank = marks.first().copied().map(|m| (m, 0, 0));
+    let mut slots = [blank.unwrap_or((
+        OrderMark {
+            id: OrderId(0),
+            side: Side::Buy,
+            price: Price(0),
+            style: MarkStyle::Working,
+            qty: lines_core::Qty(0),
+            filled: lines_core::Qty(0),
+            stop: false,
+            role: lines_trading::order::Role::Single,
+            exit: false,
+        },
+        0,
+        0,
+    )); 2];
+    let (mut n, mut more) = (0, false);
+    for m in marks.iter().filter(|m| on_row(m)) {
+        let left = m.qty.0 - m.filled.0;
+        if let Some(s) = slots[..n]
+            .iter_mut()
+            .find(|s| group_key(&s.0) == group_key(m))
+        {
+            s.1 += left;
+            s.2 += 1;
+        } else if n < 2 {
+            slots[n] = (*m, left, 1);
+            n += 1;
+        } else {
+            more = true;
+        }
+    }
+    (slots, n, more)
+}
+
 /// A partial mark's label pill (left, top, width, height) in the mark at (`x`, `yy`, `w`,
 /// `h`) for a label `tw` wide, right-aligned like the label: inside the outline, and clear of
 /// a target's top notch or a stop's bottom notch, so the role's shape stays whole.
@@ -505,6 +557,50 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, c: Hsla, hair: f32, dashed: b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mark(id: u64, side: Side, qty: i64, stop: bool, exit: bool, style: MarkStyle) -> OrderMark {
+        OrderMark {
+            id: OrderId(id),
+            side,
+            price: Price(100),
+            style,
+            qty: lines_core::Qty(qty),
+            filled: lines_core::Qty(0),
+            stop,
+            role: if stop && exit {
+                lines_trading::order::Role::StopLoss
+            } else {
+                lines_trading::order::Role::Single
+            },
+            exit,
+        }
+    }
+
+    /// Twenty stops on a row are one mark saying so; another kind keeps its own; a third kind
+    /// shows as more; held never joins working.
+    #[test]
+    fn a_row_shows_each_kind_once_with_its_total() {
+        let stops: Vec<_> = (0..20)
+            .map(|i| mark(i, Side::Sell, 10, true, true, MarkStyle::Working))
+            .collect();
+        let (s, n, more) = row_marks(&stops, |_| true);
+        assert_eq!((n, more, s[0].1, s[0].2), (1, false, 200, 20));
+        let mut text = String::new();
+        mark_group_text(&s[0].0, s[0].1, s[0].2, false, &mut text).unwrap();
+        assert_eq!(text, "S 200 ×20");
+        text.clear();
+        mark_group_text(&s[0].0, s[0].1, s[0].2, true, &mut text).unwrap();
+        assert_eq!(text, "S ×20");
+        let mut mixed = stops.clone();
+        mixed.push(mark(30, Side::Buy, 1, false, false, MarkStyle::Working));
+        mixed.push(mark(31, Side::Sell, 1, true, true, MarkStyle::Held));
+        let (_, n, more) = row_marks(&mixed, |_| true);
+        assert_eq!((n, more), (2, true));
+        let (s, n, _) = row_marks(&mixed, |m| m.id.0 == 31 || m.id.0 == 0);
+        assert_eq!((n, s[0].2, s[1].2), (2, 1, 1), "held keeps its own mark");
+        let (_, n, more) = row_marks(&[], |_| true);
+        assert_eq!((n, more), (0, false));
+    }
 
     /// The pill stays inside the outline and off the role's notch, at DPI 1 and 2, with a
     /// label wider than the mark too.

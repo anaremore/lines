@@ -482,6 +482,45 @@ pub fn mark_text(m: &OrderMark, out: &mut impl std::fmt::Write) -> std::fmt::Res
     }
 }
 
+/// Which orders may share a tag or a DOM mark: same role, side and order type, and the same
+/// state class (working with partly filled; held and pending never mix with working).
+pub fn group_key(m: &OrderMark) -> u16 {
+    let role = match MarkRole::of(m) {
+        MarkRole::Target => 0,
+        MarkRole::Stop => 1,
+        MarkRole::Entry => 2,
+    };
+    let class = match m.style {
+        MarkStyle::Working | MarkStyle::Partial => 0,
+        MarkStyle::Held => 1,
+        MarkStyle::Pending => 2,
+    };
+    role | u16::from(m.side == Side::Sell) << 2 | u16::from(m.stop) << 3 | class << 4
+}
+
+/// A DOM mark for several orders of one kind on a row: `S 200 ×20` (what is left, how many), or
+/// with `short` just `S ×20` for a cell too narrow to say more (never a cut number).
+pub fn mark_group_text(
+    m: &OrderMark,
+    left: i64,
+    n: usize,
+    short: bool,
+    out: &mut impl std::fmt::Write,
+) -> std::fmt::Result {
+    let prefix = match MarkRole::of(m) {
+        MarkRole::Target => "T ",
+        MarkRole::Stop => "S ",
+        MarkRole::Entry if m.stop => "S ",
+        MarkRole::Entry => "",
+    };
+    out.write_str(prefix)?;
+    if short {
+        write!(out, "×{n}")
+    } else {
+        write!(out, "{left} ×{n}")
+    }
+}
+
 /// The price an order is shown (and dragged) at; `None` for market orders.
 pub fn order_price(o: &Order) -> Option<Price> {
     match o.kind {

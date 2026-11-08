@@ -33,6 +33,7 @@ mod levels_layer;
 mod logs;
 mod menu;
 mod notice;
+mod order_group_view;
 mod pane;
 mod pane_columns;
 mod pane_window;
@@ -582,6 +583,9 @@ struct Cli {
     /// Screenshot: the first chart with its timeframe list open (the header's "5m ▾" chip).
     #[arg(long, requires = "screenshot")]
     timeframe_menu: bool,
+    /// Screenshot: the first chart with its first group tag's list of orders open.
+    #[arg(long, requires = "screenshot")]
+    order_group_menu: bool,
     /// Tick, volume, range and seconds bars (`--timeframe 500t`) run across sessions instead of
     /// restarting at each session open. A mode saved with the chart wins. In the app: the palette or the pane
     /// menu ("Trade-built bars run continuously").
@@ -1354,6 +1358,7 @@ where
             }),
             timeframe: cli.timeframe.unwrap_or_default(),
             timeframe_menu: cli.timeframe_menu,
+            order_group_menu: cli.order_group_menu,
             style_editor: cli.style_editor,
             tick_continuous: cli.tick_continuous,
             cursor: cli.cursor,

@@ -96,6 +96,141 @@ pub fn write_order_tag(out: &mut impl Write, m: &OrderMark, fmt: &PriceFormat) -
     Ok(())
 }
 
+/// A tag for several orders of one kind (`g`; `m`: any of them): `Target 200 ×20 @ ~5822.86
+/// 5822.75–5823.00`, what is left and how many, the average (exact until here, rounded to a price
+/// unit for this label only) and the range; one price needs neither. Orders of several kinds
+/// read `Orders 200 ×20 @ 5820.00–5823.00`. No allocation.
+pub fn write_group_tag(
+    out: &mut impl Write,
+    m: &OrderMark,
+    g: &TagGroup,
+    fmt: &PriceFormat,
+) -> fmt::Result {
+    let mixed = g.key == MIXED_KEY;
+    if mixed {
+        out.write_str("Orders")?;
+    } else {
+        match MarkRole::of(m) {
+            MarkRole::Target => out.write_str("Target")?,
+            MarkRole::Stop => out.write_str("Stop")?,
+            MarkRole::Entry => {
+                out.write_str(if m.side == Side::Buy { "Buy" } else { "Sell" })?;
+                out.write_str(if m.stop { " stp" } else { " lmt" })?;
+            }
+        }
+    }
+    write!(out, " {} ×{} @ ", g.qty, g.n)?;
+    if g.lo != g.hi && !mixed {
+        out.write_char('~')?;
+        fmt.write(g.average(), out)?;
+        out.write_char(' ')?;
+    }
+    fmt.write(g.lo, out)?;
+    if g.lo != g.hi {
+        out.write_char('–')?;
+        fmt.write(g.hi, out)?;
+    }
+    if !mixed && m.style == MarkStyle::Held {
+        out.write_str(" · held")?;
+    }
+    Ok(())
+}
+
+/// One row of a group's list: the order as of the press, and whether it is still open. Rows never
+/// move or leave while the list is open: what the trader aims at stays under the pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupRow {
+    pub mark: OrderMark,
+    pub open: bool,
+}
+
+/// The list a group tag opened, its orders as of the press.
+/// Cancel all takes two presses, the second for exactly the orders the first one counted.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GroupMenu {
+    pub rows: Vec<GroupRow>,
+    /// The account they are on: cancels go there, and the list closes if the chart's changes.
+    pub account: Option<AccountId>,
+    /// `Target: 200 in 20 orders, 5822.75–5823.00`.
+    pub title: String,
+    /// Plot-local top of the tag pressed (the list opens under it).
+    pub top: f32,
+    /// Cancel all pressed once, with this many orders open.
+    pub confirm: Option<usize>,
+}
+
+impl GroupMenu {
+    pub fn open_count(&self) -> usize {
+        self.rows.iter().filter(|r| r.open).count()
+    }
+
+    /// Each row's state from the trading cache (`is_open`, a successful read): an order that
+    /// finished keeps its row, inert. Any change disarms Cancel all, so the second press always
+    /// answers the count on screen. Returns whether anything changed.
+    pub fn refresh(&mut self, is_open: impl Fn(lines_trading::OrderId) -> bool) -> bool {
+        let mut changed = false;
+        for r in &mut self.rows {
+            let open = is_open(r.mark.id);
+            changed |= open != r.open;
+            r.open = open;
+        }
+        if changed {
+            self.confirm = None;
+        }
+        changed
+    }
+
+    /// Cancel all pressed: the first press arms and returns nothing, the second returns the
+    /// orders to cancel.
+    pub fn cancel_all(&mut self) -> Option<Vec<lines_trading::OrderId>> {
+        let n = self.open_count();
+        if n == 0 {
+            return None;
+        }
+        if self.confirm == Some(n) {
+            self.confirm = None;
+            Some(
+                self.rows
+                    .iter()
+                    .filter(|r| r.open)
+                    .map(|r| r.mark.id)
+                    .collect(),
+            )
+        } else {
+            self.confirm = Some(n);
+            None
+        }
+    }
+}
+
+/// The list's title: `Target: 200 in 20 orders, 5822.75–5823.00`. Says what `200 ×20` means.
+pub fn write_group_title(
+    out: &mut impl Write,
+    m: &OrderMark,
+    g: &TagGroup,
+    fmt: &PriceFormat,
+) -> fmt::Result {
+    if g.key == MIXED_KEY {
+        out.write_str("Orders")?;
+    } else {
+        match MarkRole::of(m) {
+            MarkRole::Target => out.write_str("Target")?,
+            MarkRole::Stop => out.write_str("Stop")?,
+            MarkRole::Entry => {
+                out.write_str(if m.side == Side::Buy { "Buy" } else { "Sell" })?;
+                out.write_str(if m.stop { " stp" } else { " lmt" })?;
+            }
+        }
+    }
+    write!(out, ": {} in {} orders, ", g.qty, g.n)?;
+    fmt.write(g.lo, out)?;
+    if g.lo != g.hi {
+        out.write_char('–')?;
+        fmt.write(g.hi, out)?;
+    }
+    Ok(())
+}
+
 /// An exit's P&L at its price as the P&L display shows it (ticks, currency, both; nothing when
 /// off or for an order that doesn't close the position), and its money (for the tone).
 #[allow(clippy::too_many_arguments)]
@@ -131,7 +266,7 @@ pub fn write_edge(
     out.write_str(if above { "↑ " } else { "↓ " })?;
     write_order_tag(out, m, fmt)?;
     if n > 1 {
-        write!(out, " +{}", n - 1)?;
+        write!(out, " +{} more", n - 1)?;
     }
     Ok(())
 }
@@ -212,7 +347,9 @@ pub fn exit_command(
 
 // ---- the chart's per-frame trading state ------------------------------------------------
 
-use lines_core::geometry::order_tags::{EdgeMarker, Handle, LineIn, MAX_TAGS, TagBox};
+use lines_core::geometry::order_tags::{
+    EdgeMarker, GroupIn, Handle, LineIn, MAX_TAGS, MIXED_KEY, TagBox, TagGroup,
+};
 
 use crate::dom_orders::DragOrder;
 use crate::dom_trade::{Ghost, GhostOutcome, ghost_outcome, order_mark};
@@ -243,7 +380,16 @@ pub struct AddExit {
 pub struct ChartTradeState {
     pub marks: Vec<OrderMark>,
     pub texts: Vec<TagText>,
+    /// Every order, for the edge markers.
     pub lines: Vec<LineIn>,
+    /// The orders on the plot, sorted by kind and price, and the tags they make.
+    pub on_plot: Vec<GroupIn>,
+    pub groups: [TagGroup; MAX_TAGS],
+    pub n_groups: usize,
+    /// One line per tag, at its order's price or a group's average.
+    pub tag_lines: Vec<LineIn>,
+    /// The list a group tag opened.
+    pub group_menu: Option<GroupMenu>,
     pub tags: [TagBox; MAX_TAGS],
     pub n_tags: usize,
     pub markers: [Option<EdgeMarker>; 2],
@@ -411,12 +557,21 @@ pub fn strip_box(plot_w: f32, plot_h: f32) -> Option<StripBox> {
     })
 }
 
+/// Orders a chart holds without growing its buffers (more just grow them once): a chart never
+/// leaves an open order out.
+const RESERVED_ORDERS: usize = 256;
+
 impl Default for ChartTradeState {
     fn default() -> Self {
         ChartTradeState {
-            marks: Vec::with_capacity(MAX_TAGS),
+            marks: Vec::with_capacity(RESERVED_ORDERS),
             texts: Vec::with_capacity(MAX_TAGS),
-            lines: Vec::with_capacity(MAX_TAGS),
+            lines: Vec::with_capacity(RESERVED_ORDERS),
+            on_plot: Vec::with_capacity(RESERVED_ORDERS),
+            groups: [TagGroup::default(); MAX_TAGS],
+            n_groups: 0,
+            tag_lines: Vec::with_capacity(MAX_TAGS),
+            group_menu: None,
             tags: [TagBox::default(); MAX_TAGS],
             n_tags: 0,
             markers: [None, None],
@@ -457,11 +612,8 @@ impl ChartTradeState {
             return refused;
         };
         self.marks.clear();
-        self.marks.extend(
-            s.open_orders(account, contract)
-                .filter_map(order_mark)
-                .take(MAX_TAGS),
-        );
+        self.marks
+            .extend(s.open_orders(account, contract).filter_map(order_mark));
         self.position = s
             .position(account, contract)
             .and_then(|p| p.avg_price.map(|a| (p.qty, a)))
@@ -485,9 +637,35 @@ impl ChartTradeState {
     }
 
     /// The chart shows another symbol or contract: a pick armed on the old one is dropped, so
-    /// its click never sends at a price read on another product's scale.
+    /// its click never sends at a price read on another product's scale, and a group's list
+    /// closes (its orders and money are the old contract's).
     pub fn feed_changed(&mut self) {
         self.strip_pick = None;
+        self.group_menu = None;
+    }
+
+    /// The chart's account, each poll: a group's list on another account closes. Whether it did.
+    pub fn account_changed(&mut self, account: Option<&AccountId>) -> bool {
+        let stale = self
+            .group_menu
+            .as_ref()
+            .is_some_and(|m| m.account.as_ref() != account);
+        if stale {
+            self.group_menu = None;
+        }
+        stale
+    }
+
+    /// The group a tag id stands for, if that tag holds several orders.
+    pub fn group_of(&self, id: u64) -> Option<&TagGroup> {
+        self.groups[..self.n_groups]
+            .iter()
+            .find(|g| g.id == id && g.is_group())
+    }
+
+    /// The orders behind a tag (`on_plot` is sorted, a group is one run of it).
+    pub fn members(&self, g: &TagGroup) -> &[GroupIn] {
+        &self.on_plot[g.first..g.first + g.n]
     }
 
     /// The order behind a tag id (open, as of this frame).
@@ -547,6 +725,120 @@ mod tests {
         lines_feed::catalog::get(lines_feed::catalog::ES).unwrap()
     }
 
+    fn group(key: u16, qty: i64, n: usize, lo: f64, hi: f64, notional: i128) -> TagGroup {
+        TagGroup {
+            id: 7,
+            key,
+            first: 0,
+            n,
+            qty,
+            notional,
+            lo: Price((lo * 100.0).round() as i64),
+            hi: Price((hi * 100.0).round() as i64),
+        }
+    }
+
+    /// The owner's mock: what is left and how many, the average, the range; one price needs
+    /// neither; held says so; several kinds name no role and no average.
+    #[test]
+    fn group_tags_read_as_the_mock() {
+        let target = mark(Side::Sell, 5823.00, false, Role::TakeProfit, false);
+        let tag = |m: &OrderMark, g: &TagGroup| {
+            let mut s = String::new();
+            write_group_tag(&mut s, m, g, &fmt()).unwrap();
+            s
+        };
+        // 5823.00 × 171 + 5822.75 × 29 over 200: 5822.96375, rounded for the label.
+        let g = group(1, 200, 20, 5822.75, 5823.00, 582_300 * 171 + 582_275 * 29);
+        assert_eq!(
+            tag(&target, &g),
+            "Target 200 ×20 @ ~5822.96 5822.75–5823.00"
+        );
+        let one = group(1, 4, 2, 5820.00, 5820.00, 582_000 * 4);
+        assert_eq!(tag(&target, &one), "Target 4 ×2 @ 5820.00");
+        let mut held = mark(Side::Sell, 5800.00, true, Role::StopLoss, false);
+        held.style = MarkStyle::Held;
+        let g = group(1, 2, 2, 5800.00, 5800.00, 580_000 * 2);
+        assert_eq!(tag(&held, &g), "Stop 2 ×2 @ 5800.00 · held");
+        let entry = mark(Side::Buy, 5790.00, false, Role::Single, false);
+        let g = group(1, 3, 3, 5790.00, 5790.00, 579_000 * 3);
+        assert_eq!(tag(&entry, &g), "Buy lmt 3 ×3 @ 5790.00");
+        let g = group(MIXED_KEY, 5, 5, 5790.00, 5823.00, 0);
+        assert_eq!(tag(&target, &g), "Orders 5 ×5 @ 5790.00–5823.00");
+    }
+
+    /// Cancel all takes two presses, and the second answers the count on screen: an order
+    /// finishing in between disarms it.
+    #[test]
+    fn cancel_all_needs_a_second_press_for_the_same_orders() {
+        let row = |id| GroupRow {
+            mark: OrderMark {
+                id: OrderId(id),
+                ..mark(Side::Sell, 5820.00, false, Role::TakeProfit, false)
+            },
+            open: true,
+        };
+        let mut m = GroupMenu {
+            rows: vec![row(1), row(2), row(3)],
+            ..GroupMenu::default()
+        };
+        assert_eq!(m.cancel_all(), None, "the first press only arms");
+        assert_eq!(m.confirm, Some(3));
+        assert!(!m.refresh(|_| true));
+        assert_eq!(m.confirm, Some(3), "nothing changed: still armed");
+        assert!(m.refresh(|o| o != OrderId(2)));
+        assert_eq!(m.confirm, None, "the list changed: disarmed");
+        assert_eq!(
+            m.rows.len(),
+            3,
+            "a finished order keeps its row: nothing shifts"
+        );
+        assert!(!m.rows[1].open);
+        assert_eq!(m.open_count(), 2);
+        assert_eq!(m.cancel_all(), None);
+        assert_eq!(
+            m.cancel_all(),
+            Some(vec![OrderId(1), OrderId(3)]),
+            "only what is still open"
+        );
+        assert_eq!(m.confirm, None);
+        m.refresh(|_| false);
+        assert_eq!(m.cancel_all(), None, "nothing to cancel");
+        assert_eq!(m.cancel_all(), None);
+    }
+
+    /// A list belongs to its account and contract: another symbol or account closes it, so no
+    /// button acts on orders the chart no longer shows.
+    #[test]
+    fn the_list_closes_on_another_symbol_or_account() {
+        let (a, b) = (AccountId::new("a"), AccountId::new("b"));
+        let open = || GroupMenu {
+            account: Some(a.clone()),
+            ..GroupMenu::default()
+        };
+        let mut s = ChartTradeState {
+            group_menu: Some(open()),
+            ..ChartTradeState::default()
+        };
+        assert!(!s.account_changed(Some(&a)));
+        assert!(s.group_menu.is_some(), "the same account: still open");
+        assert!(s.account_changed(Some(&b)));
+        assert!(s.group_menu.is_none());
+        assert!(!s.account_changed(Some(&b)), "already closed");
+        s.group_menu = Some(open());
+        s.feed_changed();
+        assert!(s.group_menu.is_none());
+    }
+
+    #[test]
+    fn the_list_title_says_what_the_numbers_mean() {
+        let target = mark(Side::Sell, 5823.00, false, Role::TakeProfit, false);
+        let g = group(1, 200, 20, 5822.75, 5823.00, 0);
+        let mut s = String::new();
+        write_group_title(&mut s, &target, &g, &fmt()).unwrap();
+        assert_eq!(s, "Target: 200 in 20 orders, 5822.75–5823.00");
+    }
+
     /// The owner's case: LONG 1 @ 5810.00 with a 20/40 bracket on ES: the stop and the target
     /// say their role in words, their quantity apart from it, and what they make or lose there.
     #[test]
@@ -595,7 +887,7 @@ mod tests {
         assert_eq!(s, "↑ Target 1 @ 5820.00");
         s.clear();
         write_edge(&mut s, &target, false, 3, &fmt()).unwrap();
-        assert_eq!(s, "↓ Target 1 @ 5820.00 +2");
+        assert_eq!(s, "↓ Target 1 @ 5820.00 +2 more");
         s.clear();
         write_edge_short(&mut s, &target, true).unwrap();
         assert_eq!(s, "↑Tgt", "no bare digit beside a role letter");
