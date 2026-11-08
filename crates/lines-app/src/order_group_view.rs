@@ -26,16 +26,16 @@ const CHROME_H: f32 = 108.0;
 /// A row's estimated character width, and the narrowest list: a long order's words and its ×.
 const CHAR_W: f32 = 7.5;
 const MIN_WIDTH: f32 = 320.0;
-/// Past the plot's right edge: the price axis stays clear.
+/// Kept from the plot's and the window's edges.
 const MARGIN: f32 = 4.0;
 
 /// Whether a row (list `width` wide) has room for its P&L beside the order's words. The order's
 /// price is never cut: its P&L gives way (a price is what the × is aimed by).
 pub fn pnl_fits(text: &str, pnl: &str, width: f32) -> bool {
-    // The list's padding, the row's two gaps and the × take 54 px; 7.5 px a character (bold
-    // digits, the panel's own fit tests).
+    // The list's border and padding, the row's two gaps and the × take 56 px; 7.5 px a character
+    // (bold digits, the panel's own fit tests).
     let chars = (text.chars().count() + pnl.chars().count()) as f32;
-    chars * CHAR_W + 54.0 <= width
+    chars * CHAR_W + 56.0 <= width
 }
 
 /// Cancel all's words: how many, and that a second press is needed once armed.
@@ -46,6 +46,21 @@ pub fn cancel_all_label(n: usize, armed: bool) -> String {
     } else {
         format!("Cancel {n} {orders}")
     }
+}
+
+/// The list's width and its left edge from the plot's: right-aligned in the plot where it fits
+/// (a narrow plot's list may cover the axis, as the style editor does), and always inside the
+/// window, so every row's × can be pressed. `plot_x` and `viewport_w` are in window coordinates.
+pub fn list_x(plot_x: f32, plot_w: f32, viewport_w: f32) -> (f32, f32) {
+    let width = WIDTH
+        .min(plot_w - 2.0 * MARGIN)
+        .max(MIN_WIDTH)
+        .min(viewport_w - 2.0 * MARGIN)
+        .max(0.0);
+    let x = (plot_x + plot_w - width - MARGIN)
+        .min(viewport_w - width - MARGIN)
+        .max(MARGIN);
+    (width, x - plot_x)
 }
 
 /// The list's height for `rows` rows with `avail` px from the plot's top to the window's bottom:
@@ -75,9 +90,11 @@ pub fn layer(
         .unwrap_or_default();
     let position = v.ct.position;
     let plot = v.plot_bounds();
-    let width = WIDTH
-        .min(f32::from(plot.size.width) - 2.0 * MARGIN)
-        .max(MIN_WIDTH);
+    let (width, left) = list_x(
+        f32::from(plot.origin.x),
+        f32::from(plot.size.width),
+        f32::from(window.viewport_size().width),
+    );
     let rows = menu
         .rows
         .iter()
@@ -152,8 +169,6 @@ pub fn layer(
     let armed = menu.confirm == Some(n);
     let avail = f32::from(window.viewport_size().height) - f32::from(plot.origin.y);
     let (list_h, top) = list_place(menu.rows.len(), menu.top, avail);
-    // The list's left edge from the pane's, keeping it inside the plot (never over the axis).
-    let left = (f32::from(plot.size.width) - width - MARGIN).max(MARGIN);
     let shown = (list_h / ROW_H).floor() as usize;
     let scroll = (menu.rows.len() > shown).then(|| {
         div().flex_shrink_0().text_color(t.text_dim).child(format!(
@@ -255,11 +270,36 @@ mod tests {
         assert!(pnl_fits(text, pnl, WIDTH));
         assert!(!pnl_fits("Target 10 @ 104523.50 · held", pnl, WIDTH));
         assert!(pnl_fits(text, "", MIN_WIDTH));
-        assert!(pnl_fits(
-            "Sell lmt 120/200 @ 104523.50 · held",
-            "",
-            MIN_WIDTH + 40.0
-        ));
+        // The longest rows, partly filled or held, hold their words at the narrowest list.
+        assert!(pnl_fits("Sell lmt 120/200 @ 104523.50", "", MIN_WIDTH));
+        assert!(pnl_fits("Target 1200 @ 104523.50 · held", "", MIN_WIDTH));
+    }
+
+    /// The list and every row's × stay inside the window, wherever the chart is: a narrow chart
+    /// at the window's right edge moves its list left; a window narrower than the list narrows it.
+    #[test]
+    fn the_list_stays_inside_the_window_sideways() {
+        let inside = |plot_x: f32, plot_w: f32, viewport: f32| {
+            let (w, left) = list_x(plot_x, plot_w, viewport);
+            let x = plot_x + left;
+            assert!(x >= MARGIN && x + w <= viewport - MARGIN + 0.01, "{x} {w}");
+            (w, left)
+        };
+        // A wide plot: right-aligned inside it, off the axis.
+        assert_eq!(
+            inside(0.0, 1000.0, 1600.0),
+            (WIDTH, 1000.0 - WIDTH - MARGIN)
+        );
+        // A narrow chart flush with the window's right edge (the plot, then its 78 px axis):
+        // moved left of the plot's own left edge, whole.
+        let (w, left) = inside(1300.0, 222.0, 1600.0);
+        assert_eq!(w, MIN_WIDTH);
+        assert!(left < 0.0, "{left}");
+        // At the window's left edge: from the margin, over the axis if it must.
+        assert_eq!(inside(0.0, 222.0, 1600.0), (MIN_WIDTH, MARGIN));
+        // A popped-out window narrower than the list: the list narrows to it.
+        let (w, _) = inside(0.0, 222.0, 300.0);
+        assert_eq!(w, 300.0 - 2.0 * MARGIN);
     }
 
     /// Cancel all and at least one row stay in the window, on any pane.
