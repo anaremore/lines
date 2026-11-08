@@ -50,6 +50,12 @@ pub struct Viewport {
     /// A drag is in progress: new data must not move the time axis under the pointer.
     /// Set with [`Viewport::set_held`].
     pub held: bool,
+    /// New data doesn't refit the price range: something aligned to it is under the pointer (the
+    /// option chart's chain, decision 0029). The trader's own zoom and pan still apply.
+    pub price_held: bool,
+    /// The auto-fit's smallest price range (scaled units; 0: only the tick's own minimum). Lets
+    /// something aligned to the scale keep room: the option chart's chain needs several strikes.
+    pub min_price_span: f64,
 }
 
 impl Default for Viewport {
@@ -65,6 +71,8 @@ impl Default for Viewport {
             follow_live: true,
             live_margin: RIGHT_MARGIN_BARS,
             held: false,
+            price_held: false,
+            min_price_span: 0.0,
         }
     }
 }
@@ -216,7 +224,7 @@ impl Viewport {
         if self.follow_live && !self.held {
             self.snap_to_latest(bars.len());
         }
-        if self.auto_price {
+        if self.auto_price && !self.price_held {
             self.fit_prices(bars, tick);
         }
     }
@@ -235,7 +243,7 @@ impl Viewport {
             return; // nothing visible: keep the current range
         }
         let (lo, hi) = (lo as f64, hi as f64);
-        let min_span = (tick.max(1) * 10) as f64;
+        let min_span = ((tick.max(1) * 10) as f64).max(self.min_price_span);
         let span = (hi - lo).max(min_span);
         let mid = (hi + lo) / 2.0;
         let pad = span * PRICE_PAD_FRACTION;
@@ -382,6 +390,8 @@ mod tests {
             follow_live: true,
             live_margin: RIGHT_MARGIN_BARS,
             held: false,
+            price_held: false,
+            min_price_span: 0.0,
         }
     }
 
@@ -861,5 +871,39 @@ mod tests {
         bars.extend(series(1));
         v.on_data(&bars, 25);
         assert!(close(v.right_index, r + 1.0), "and live following resumes");
+    }
+
+    /// A minimum span widens the fit around the bars, for what's aligned to the scale; bars that
+    /// already span more are unchanged, and while the price is held nothing refits.
+    #[test]
+    fn the_fit_keeps_a_minimum_span_around_the_bars() {
+        let bar = |low: i64, high: i64| Bar {
+            time: UtcMillis(0),
+            open: Price(low),
+            high: Price(high),
+            low: Price(low),
+            close: Price(high),
+            volume: Qty(1),
+        };
+        let bars = [bar(68_300, 68_450)];
+        let mut v = Viewport::default();
+        v.set_size(800.0, 600.0);
+        v.right_index = 0.0;
+        v.fit_prices(&bars, 1);
+        let narrow = v.price_hi - v.price_lo;
+        v.min_price_span = 1_000.0;
+        v.fit_prices(&bars, 1);
+        let wide = v.price_hi - v.price_lo;
+        assert!(wide >= 1_000.0 && wide > narrow, "{narrow} {wide}");
+        let mid = (v.price_hi + v.price_lo) / 2.0;
+        assert_eq!(mid, (68_300.0 + 68_450.0) / 2.0, "around the bars");
+        v.min_price_span = 10.0;
+        v.fit_prices(&bars, 1);
+        assert_eq!(v.price_hi - v.price_lo, narrow, "bars span more: unchanged");
+        // Held: new data moves nothing.
+        v.price_held = true;
+        let before = (v.price_lo, v.price_hi);
+        v.on_data(&[bar(60_000, 70_000)], 1);
+        assert_eq!((v.price_lo, v.price_hi), before);
     }
 }

@@ -38,6 +38,14 @@
 //!   strikes stay in the same places, and keys move only among them; Home or another expiry let
 //!   go.
 //!
+//! - **The option chart** (decision 0029; the Chart chip or the palette, saved with the pane): a
+//!   mode of this pane, so the ticket, One-click, positions and exits are this pane's and there is
+//!   one trading path. The underlying's chart sits beside the chain, and a strike's row sits at
+//!   that strike's price on the chart's own scale (`chain_lock`). While the pointer is on the
+//!   chain, or One-click is on, new data doesn't move the scale, so no row moves under the
+//!   pointer; the trader's own zoom and pan move both together. The chart shows no orders and
+//!   sends none. Too narrow for both, the pane is the plain chain and says so.
+//!
 //! Paint reads the store's chains under a `try_lock` and formats every cell into a stack
 //! string: no allocation. The pane repaints on the store's revision (chain quotes don't move
 //! the chart revision).
@@ -67,6 +75,13 @@ use crate::trading::Trading;
 use crate::wsdoc::PaneDoc;
 
 const ROW_H: f32 = 18.0;
+/// Below this the option chart shows only the chain (the rows need the chart to read by).
+const CHART_MIN_W: f32 = 760.0;
+/// Strikes the chart's auto-fit keeps in view beside the chain, so there are rows to choose from
+/// even when the bars span less than one strike.
+const CHART_STRIKES: f64 = 10.0;
+/// The chain's share of the pane beside the chart.
+const CHART_CHAIN_SHARE: f32 = 0.45;
 const TEXT_PX: f32 = 12.0;
 const PAD: f32 = 8.0;
 /// The CALLS / PUTS row and the column titles.
@@ -362,6 +377,13 @@ pub struct ChainView {
     /// Column x ranges last frame, for clicks: (call cell start, put cell start, row top).
     layout: Layout,
     frame: Frame,
+    /// The option chart's underlying (decision 0029), while that mode is on.
+    chart: Option<gpui::Entity<crate::chart_view::ChartView>>,
+    _chart_feed: Option<gpui::Subscription>,
+    /// The pointer is on the chain beside the chart.
+    over_chain: bool,
+    /// The pane's width as of the last frame.
+    pane_w: f32,
 }
 
 /// Rows kept per frame (a pane taller than this shows this many).
@@ -389,6 +411,13 @@ struct Frame {
     held_line: Option<usize>,
     /// The selection last frame.
     last_selected: Option<Price>,
+    /// Rows sit at their prices on the chart's scale (`ys` holds their tops).
+    locked: bool,
+    ys: Vec<f32>,
+    /// The scale `ys` were placed for.
+    locked_key: Option<(f64, f64, f32, f64)>,
+    candidates: Vec<crate::chain_lock::Candidate>,
+    picked: Vec<crate::chain_lock::Candidate>,
 }
 
 /// What the account has on one option series.
@@ -546,6 +575,83 @@ impl Frame {
         }
     }
 
+    /// The rows at their prices on the chart's scale (`chain_lock`), in `[top, scale.bottom())`.
+    /// Held: the same strikes in the same places, until the scale itself changes (only the
+    /// trader's own zoom or pan can then).
+    fn refresh_locked(
+        &mut self,
+        chain: Option<&OptionChain>,
+        last: Option<Price>,
+        selected: Option<Price>,
+        scale: &crate::chain_lock::LockedScale,
+        top: f32,
+    ) {
+        use crate::chain_lock::{Candidate, pick_rows};
+        self.last = last;
+        self.first_row = 0;
+        self.line_at = None;
+        self.rows.clear();
+        let Some(chain) = chain else {
+            self.has_chain = false;
+            self.ys.clear();
+            return;
+        };
+        self.has_chain = true;
+        let key = scale.key();
+        if self.hold && self.holding && self.locked_key == Some(key) {
+            for &strike in &self.held {
+                self.rows.push(match chain.find(strike) {
+                    Ok(i) => chain.rows[i],
+                    Err(_) => lines_core::ChainRow {
+                        strike,
+                        call: None,
+                        put: None,
+                    },
+                });
+            }
+            return;
+        }
+        let money = last.map(|l| scale.y(l));
+        self.candidates.clear();
+        for (i, r) in chain.rows.iter().enumerate() {
+            let y = scale.y(r.strike);
+            let row_top = y - ROW_H / 2.0;
+            if row_top < top || row_top + ROW_H > scale.bottom() {
+                continue;
+            }
+            if self.candidates.len() == self.candidates.capacity() {
+                break;
+            }
+            self.candidates.push(Candidate {
+                top: row_top,
+                index: i as u32,
+                priority: selected == Some(r.strike)
+                    || self.marks.iter().any(|m| m.strike == r.strike),
+                distance: money.map_or(0.0, |m| (y - m).abs()),
+            });
+        }
+        pick_rows(&mut self.candidates, ROW_H, &mut self.picked);
+        self.ys.clear();
+        self.held.clear();
+        for c in &self.picked {
+            let row = chain.rows[c.index as usize];
+            self.rows.push(row);
+            self.ys.push(c.top);
+            self.held.push(row.strike);
+        }
+        self.locked_key = Some(key);
+        self.holding = self.hold;
+    }
+
+    /// The strike whose row is at window y, if any.
+    fn locked_at(&self, y: f32) -> Option<Price> {
+        self.ys
+            .iter()
+            .position(|t| y >= *t && y < *t + ROW_H)
+            .and_then(|n| self.rows.get(n))
+            .map(|r| r.strike)
+    }
+
     /// The selection `delta` strikes on, among the rows on screen; the middle one to start.
     fn step_held(&self, selected: Option<Price>, delta: i64) -> Option<Price> {
         let last = self.rows.len().checked_sub(1)? as i64;
@@ -621,6 +727,7 @@ impl Pane for ChainView {
     /// The account. No view state: an expiry passes, and the view starts on the money.
     fn save_state(&self, doc: &mut PaneDoc) {
         doc.trade = self.trade.doc();
+        doc.chain_chart = self.chart.is_some();
     }
 
     /// The account's orders and positions moved, or the core answered.
@@ -653,6 +760,15 @@ impl Pane for ChainView {
         self.one_click = false;
         self.note = None;
         self.trade.feed_changed(&self.store, follow, cx);
+        if let Some(chart) = self.chart.clone() {
+            let next = self.feed.clone();
+            chart.update(cx, |c, cx| {
+                if !Arc::ptr_eq(c.feed().store(), next.store()) {
+                    c.set_feed(next, cx);
+                }
+            });
+            self.sync_hold(cx);
+        }
         self.seen_revision = u64::MAX;
         cx.notify();
     }
@@ -707,7 +823,14 @@ impl ChainView {
             glyphs: Glyphs::new(TEXT_PX),
             bounds: Bounds::default(),
             layout: Layout::default(),
+            chart: None,
+            _chart_feed: None,
+            over_chain: false,
+            pane_w: 0.0,
             frame: Frame {
+                ys: Vec::with_capacity(MAX_ROWS),
+                candidates: Vec::with_capacity(4 * MAX_ROWS),
+                picked: Vec::with_capacity(MAX_ROWS),
                 rows: Vec::with_capacity(MAX_ROWS),
                 // Past any real count of series on one expiry (it would grow once, and keep it).
                 marks: Vec::with_capacity(512),
@@ -727,9 +850,94 @@ impl ChainView {
         self.trade = PaneTrade::new(doc, cx);
     }
 
+    /// The option chart (decision 0029): the underlying's chart beside the chain, on one price
+    /// scale, or the plain chain again.
+    pub fn toggle_chart(&mut self, cx: &mut Context<Self>) {
+        self.frame.release();
+        self.frame.locked = false;
+        self.frame.locked_key = None;
+        self.layout = Layout::default();
+        self.over_chain = false;
+        if self.chart.take().is_some() {
+            self._chart_feed = None;
+            cx.notify();
+            return;
+        }
+        let (feed, theme, frozen) = (self.feed.clone(), self.theme, self.frozen);
+        let chart = cx.new(|cx| {
+            let mut c = crate::chart_view::ChartView::new(
+                feed,
+                theme,
+                frozen,
+                crate::chart_view::Fixture::default(),
+                cx,
+            );
+            c.set_view_only();
+            c
+        });
+        // A symbol typed on the chart switches the pane: one symbol, one feed.
+        self._chart_feed = Some(cx.subscribe(&chart, |this, _, ev: &FeedChanged, cx| {
+            let feed = ev.0.clone();
+            this.set_feed(feed.clone(), cx);
+            cx.emit(FeedChanged(feed));
+        }));
+        self.chart = Some(chart);
+        self.sync_chart_visible(cx);
+        self.sync_hold(cx);
+        cx.notify();
+    }
+
+    /// The chart beside the chain is on and has room.
+    fn chart_shown(&self) -> bool {
+        self.chart.is_some() && self.pane_w >= CHART_MIN_W
+    }
+
+    /// A new look for the chart beside the chain.
+    pub fn set_chart_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |c, cx| {
+                c.set_theme(theme);
+                cx.notify();
+            });
+        }
+    }
+
+    /// The chart polls only while it is on screen: a hidden pane does no work.
+    pub fn sync_chart_visible(&mut self, cx: &mut Context<Self>) {
+        let visible = self.common.visible && self.chart_shown();
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |c, _| c.common().visible = visible);
+        }
+    }
+
+    /// Nothing moves the shared scale while a press could land on a row.
+    fn sync_hold(&mut self, cx: &mut Context<Self>) {
+        let on = self.over_chain || self.one_click;
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |c, _| c.hold_scale(on));
+        }
+    }
+
+    fn on_chain_move(&mut self, _: &gpui::MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.chart.is_some() && !self.over_chain {
+            self.over_chain = true;
+            self.sync_hold(cx);
+            cx.notify();
+        }
+    }
+
+    fn on_chain_exit(&mut self, _: &gpui::MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.over_chain {
+            self.over_chain = false;
+            self.sync_hold(cx);
+            cx.notify();
+        }
+    }
+
     /// The One-click switch.
     pub fn toggle_one_click(&mut self, cx: &mut Context<Self>) {
         self.one_click = !self.one_click;
+        self.sync_hold(cx);
         // Its pin ends with it: the pane follows the soonest expiry again.
         if !self.one_click && std::mem::take(&mut self.expiry_pinned) {
             self.expiry = None;
@@ -1412,8 +1620,9 @@ impl ChainView {
     /// Move the selection by `delta` strikes (from the money if nothing is selected yet).
     fn move_strike(&mut self, delta: i64) {
         // One-click holds the rows: keys move only among the strikes on screen, never onto one
-        // the hold keeps out or below them.
-        if self.frame.holding {
+        // the hold keeps out or below them. On the chart's scale that is always so: the rows are
+        // where the chart's prices put them.
+        if self.frame.holding || self.frame.locked {
             if let Some(s) = self.frame.step_held(self.selected, delta) {
                 self.selected = Some(s);
             }
@@ -1606,19 +1815,19 @@ impl ChainView {
         if y < HEAD_H {
             return;
         }
-        let i = ((y - HEAD_H) / ROW_H).floor() as usize;
-        if i >= self.layout.rows {
-            return;
-        }
-        let Some(ri) = row_at(i, self.layout.first_row, self.layout.line_at) else {
-            return;
-        };
         // The row as painted: a series arriving since can't shift the press onto another strike.
-        let Some(strike) = ri
-            .checked_sub(self.frame.first_row)
-            .and_then(|n| self.frame.rows.get(n))
-            .map(|r| r.strike)
-        else {
+        let strike = if self.frame.locked {
+            self.frame.locked_at(f(ev.position.y))
+        } else {
+            let i = ((y - HEAD_H) / ROW_H).floor() as usize;
+            (i < self.layout.rows)
+                .then(|| row_at(i, self.layout.first_row, self.layout.line_at))
+                .flatten()
+                .and_then(|ri| ri.checked_sub(self.frame.first_row))
+                .and_then(|n| self.frame.rows.get(n))
+                .map(|r| r.strike)
+        };
+        let Some(strike) = strike else {
             return;
         };
         let Some(expiry) = self.frame.expiry else {
@@ -1694,6 +1903,17 @@ impl ChainView {
         let hair = 1.0 / window.scale_factor();
         let fit = (((h - HEAD_H) / ROW_H).floor().max(1.0)) as usize;
         self.page = fit.saturating_sub(1).max(1);
+        // On the chart's scale, when the chart beside it has one.
+        let scale = if self.chart_shown() {
+            self.chart.as_ref().and_then(|c| c.read(cx).locked_scale())
+        } else {
+            None
+        };
+        if self.frame.locked != scale.is_some() {
+            self.frame.release();
+            self.frame.locked_key = None;
+        }
+        self.frame.locked = scale.is_some();
         // Copy what's in view and let go of the store; busy this instant: last frame's rows.
         match self.store.try_read() {
             Some(d) => {
@@ -1708,9 +1928,38 @@ impl ChainView {
                     self.frame.release();
                 }
                 self.frame.expiry = expiry;
-                self.frame.hold = self.one_click;
                 let chain = self.frame.expiry.and_then(|e| d.chains.chain(e));
-                self.frame.refresh(chain, d.last_trade, self.selected, fit);
+                // Strikes around the money set the chart's smallest range.
+                if let (Some(_), Some(chart), Some(c), Some(l)) =
+                    (&scale, &self.chart, chain, d.last_trade)
+                    && let Some(i) = c.atm(l)
+                {
+                    let (a, b) = (
+                        i.saturating_sub(1),
+                        (i + 1).min(c.rows.len().saturating_sub(1)),
+                    );
+                    if b > a {
+                        let step =
+                            (c.rows[b].strike.0 - c.rows[a].strike.0) as f64 / (b - a) as f64;
+                        let refit =
+                            chart.update(cx, |c, _| c.set_min_price_span(step * CHART_STRIKES));
+                        if refit {
+                            window.refresh();
+                        }
+                    }
+                }
+                match &scale {
+                    Some(s) => {
+                        self.frame.hold = self.one_click || self.over_chain;
+                        let band = top + HEAD_H;
+                        self.frame
+                            .refresh_locked(chain, d.last_trade, self.selected, s, band);
+                    }
+                    None => {
+                        self.frame.hold = self.one_click;
+                        self.frame.refresh(chain, d.last_trade, self.selected, fit);
+                    }
+                }
             }
             None => self.seen_revision = u64::MAX,
         }
@@ -1940,8 +2189,10 @@ impl ChainView {
         for n in 0..self.frame.rows.len() {
             let row = self.frame.rows[n];
             let row = &row;
-            let v = visual_row(n, line_at);
-            let y = top + HEAD_H + v as f32 * ROW_H;
+            let y = match self.frame.ys.get(n).filter(|_| self.frame.locked) {
+                Some(row_top) => *row_top,
+                None => top + HEAD_H + visual_row(n, line_at) as f32 * ROW_H,
+            };
             // In the money: calls below the underlying's price, puts above it.
             let (call_itm, put_itm) = match last {
                 Some(l) => (row.strike < l, row.strike > l),
@@ -2149,8 +2400,14 @@ impl ChainView {
             }
         }
         // The underlying's price line between the strikes it falls between.
-        if let (Some(l), Some(v)) = (last, line_at) {
-            let y = top + HEAD_H + v as f32 * ROW_H + ROW_H / 2.0;
+        let line_y = match (&scale, last) {
+            // At its price on the chart, when that is in the chain's view.
+            (Some(s), Some(l)) => {
+                Some(s.y(l)).filter(|y| *y >= top + HEAD_H + 8.0 && *y < s.bottom() - 8.0)
+            }
+            _ => line_at.map(|v| top + HEAD_H + v as f32 * ROW_H + ROW_H / 2.0),
+        };
+        if let (Some(l), Some(y)) = (last, line_y) {
             // Dashes by count, never by adding to a float (which a far-off origin can make
             // stand still).
             let dashes = ((x - x0) / 10.0).ceil().clamp(0.0, 1_000.0) as usize;
@@ -2374,6 +2631,26 @@ impl ChainView {
                                 }),
                             )
                     }))
+                    .child({
+                        let on = self.chart.is_some();
+                        div()
+                            .id("chain-chart")
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .px_1()
+                            .border_1()
+                            .rounded_sm()
+                            .border_color(if on { t.accent } else { t.control_edge })
+                            .text_color(t.text_main)
+                            .child(if on { "Chart: on" } else { "Chart: off" })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_chart(cx);
+                                }),
+                            )
+                    })
                     .child(
                         div()
                             .id("chain-one-click")
@@ -2937,6 +3214,9 @@ impl ChainView {
 
     fn footer_text(&self, size: i64) -> String {
         self.note.clone().unwrap_or_else(|| {
+                if self.chart.is_some() && !self.chart_shown() {
+                    return "Chart hidden: this pane is too narrow for both".to_owned();
+                }
                 if self.one_click {
                     return format!(
                         "One-click ON: a click on a bid or ask sends {size} at once  ·  Shift+Up/Down: quantity"
@@ -3007,6 +3287,7 @@ impl Render for ChainView {
         let entity = cx.entity();
         let t = self.theme;
         self.aimed = self.focus.is_focused(window) && window.is_window_active();
+        self.sync_chart_visible(cx);
         if let Some(i) = self
             .trade
             .account
@@ -3040,23 +3321,65 @@ impl Render for ChainView {
             .size_full()
             .into_any_element(),
         };
+        let shown_chart = self.chart.clone().filter(|_| self.chart_shown());
+        let table = div()
+            .relative()
+            .flex_1()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_chain_move))
+            .on_mouse_exit(cx.listener(Self::on_chain_exit))
+            .child(body)
+            .when_some(overlay, |d, o| d.child(o));
+        // The pane's width, for whether the chart fits beside the chain.
+        let measure = {
+            let entity = cx.entity();
+            canvas(
+                move |bounds, _, cx| {
+                    let w = f(bounds.size.width);
+                    entity.update(cx, |v, cx| {
+                        if (v.pane_w >= CHART_MIN_W) != (w >= CHART_MIN_W) {
+                            cx.notify();
+                        }
+                        v.pane_w = w;
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        };
+        let main = div()
+            .relative()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(measure);
+        let main = match shown_chart {
+            Some(chart) => main
+                .child(div().flex_1().min_w_0().h_full().child(chart))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .h_full()
+                        .w(gpui::relative(CHART_CHAIN_SHARE))
+                        .child(table),
+                ),
+            None => main.child(table),
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(t.bg)
             .child(self.header(cx))
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .size_full()
-                    .track_focus(&self.focus)
-                    .on_key_down(cx.listener(Self::on_key_down))
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .child(body)
-                    .when_some(overlay, |d, o| d.child(o)),
-            )
+            .child(main)
             .children(strip)
             .children(dock)
             // The ticket has its own hints; a message still shows.
@@ -3234,6 +3557,80 @@ mod tests {
 
     /// A press never lands on a strike that moved: the rows hold while the selection is among
     /// them, and follow it once it leaves.
+    fn locked_scale() -> crate::chain_lock::LockedScale {
+        let mut vp = lines_core::Viewport::default();
+        vp.set_size(800.0, 600.0);
+        vp.price_lo = 67_000.0;
+        vp.price_hi = 69_000.0;
+        crate::chain_lock::LockedScale { vp, plot_top: 40.0 }
+    }
+
+    fn locked_frame() -> Frame {
+        Frame {
+            ys: Vec::with_capacity(MAX_ROWS),
+            candidates: Vec::with_capacity(4 * MAX_ROWS),
+            picked: Vec::with_capacity(MAX_ROWS),
+            ..Frame::default()
+        }
+    }
+
+    /// On the chart's scale every row is at its strike's price, a press finds that strike, and
+    /// the price row takes no slot of its own.
+    #[test]
+    fn locked_rows_sit_at_their_prices_and_clicks_find_them() {
+        let chains = key_chain(CivilDate::new(2026, 11, 9).unwrap(), 670, 690);
+        let chain = chains.chain(CivilDate::new(2026, 11, 9).unwrap());
+        let s = locked_scale();
+        let mut f = locked_frame();
+        f.locked = true;
+        f.refresh_locked(chain, Some(Price(68_050)), None, &s, 76.0);
+        assert!(f.rows.len() > 5);
+        assert_eq!(f.rows.len(), f.ys.len());
+        assert_eq!(f.line_at, None);
+        for (r, top) in f.rows.iter().zip(&f.ys) {
+            assert_eq!(top + ROW_H / 2.0, s.y(r.strike), "{r:?}");
+            assert_eq!(f.locked_at(top + 1.0), Some(r.strike));
+            assert_eq!(f.locked_at(top + ROW_H - 1.0), Some(r.strike));
+        }
+        assert!(f.ys.windows(2).all(|t| t[1] - t[0] >= ROW_H));
+        assert_eq!(f.locked_at(f.ys[0] - 1.0), None, "above the rows: nothing");
+    }
+
+    /// Held (the pointer on the chain, or One-click): the same strikes in the same places while
+    /// the scale is the same, whatever the price does. The trader's own zoom moves them.
+    #[test]
+    fn locked_rows_hold_under_the_pointer_until_the_scale_changes() {
+        let day = CivilDate::new(2026, 11, 9).unwrap();
+        let chains = key_chain(day, 670, 690);
+        let s = locked_scale();
+        let mut f = locked_frame();
+        f.locked = true;
+        f.hold = true;
+        f.refresh_locked(chains.chain(day), Some(Price(68_050)), None, &s, 76.0);
+        let (rows, ys) = (f.rows.clone(), f.ys.clone());
+        // The money moves, and a selection appears: nothing moves.
+        f.refresh_locked(
+            chains.chain(day),
+            Some(Price(68_950)),
+            Some(Price(68_500)),
+            &s,
+            76.0,
+        );
+        assert_eq!(f.ys, ys);
+        assert_eq!(
+            f.rows.iter().map(|r| r.strike).collect::<Vec<_>>(),
+            rows.iter().map(|r| r.strike).collect::<Vec<_>>()
+        );
+        // The trader zooms the chart: they follow it.
+        let mut zoomed = s;
+        zoomed.vp.price_hi = 68_500.0;
+        f.refresh_locked(chains.chain(day), Some(Price(68_050)), None, &zoomed, 76.0);
+        assert_ne!(f.ys, ys);
+        for (r, top) in f.rows.iter().zip(&f.ys) {
+            assert_eq!(top + ROW_H / 2.0, zoomed.y(r.strike));
+        }
+    }
+
     #[test]
     fn rows_hold_still_under_the_pointer() {
         // Selected row 14 in view: the rows stay, whatever the center says.

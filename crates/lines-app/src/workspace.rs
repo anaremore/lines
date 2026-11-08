@@ -243,7 +243,10 @@ impl PaneHandle {
         each!(self, e => e.update(cx, |v, cx| {
             v.set_theme(theme);
             cx.notify();
-        }))
+        }));
+        if let PaneHandle::Chain(e) = self {
+            e.update(cx, |v, cx| v.set_chart_theme(theme, cx));
+        }
     }
 
     pub(crate) fn view(&self) -> AnyView {
@@ -298,7 +301,11 @@ impl PaneHandle {
     }
 
     pub(crate) fn set_visible(&self, visible: bool, cx: &mut App) {
-        each!(self, e => e.update(cx, |p, _| p.common().visible = visible))
+        each!(self, e => e.update(cx, |p, _| p.common().visible = visible));
+        // A chain's chart polls with it: a hidden pane does no work.
+        if let PaneHandle::Chain(e) = self {
+            e.update(cx, |v, cx| v.sync_chart_visible(cx));
+        }
     }
 
     /// Whether the pane can't be served (and the source has a symbol to offer instead).
@@ -590,6 +597,9 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             PaneHandle::Chain(cx.new(|cx| {
                 let mut v = ChainView::new(feed, theme, frozen, cx);
                 v.restore_trade(doc.trade.as_ref(), cx);
+                if doc.chain_chart {
+                    v.toggle_chart(cx);
+                }
                 v
             }))
         }
@@ -1143,6 +1153,10 @@ impl WindowView {
             }
             Command::OpenJournal => self.open_panel(PaneKind::Journal, window, cx),
             Command::OpenChain => self.open_panel(PaneKind::Chain, window, cx),
+            Command::ChainChart => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_chart(cx)),
+                _ => self.refuse("The chart acts on the focused option chain", cx),
+            },
             Command::ChainOneClick => match self.tab().focused_handle().cloned() {
                 Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_one_click(cx)),
                 _ => self.refuse("One-click acts on the focused option chain", cx),

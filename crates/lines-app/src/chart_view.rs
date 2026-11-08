@@ -352,6 +352,8 @@ pub struct ChartView {
     crosshair_mode: CrosshairMode,
     /// The order strip (phase 2b) is shown (saved).
     order_strip: bool,
+    /// Shows no orders and sends none (`set_view_only`).
+    view_only: bool,
     /// Axis label spacing has been measured with this window's font.
     space_measured: bool,
     /// The time this chart last reported under its own crosshair.
@@ -631,6 +633,7 @@ impl ChartView {
                 CrosshairMode::Normal
             },
             order_strip: fixture.order_strip || fixture.strip_pick.is_some(),
+            view_only: false,
             space_measured: false,
             reported: (None, None),
             hover: fixture.cursor,
@@ -1764,6 +1767,35 @@ impl ChartView {
             self.synced_price = price;
             cx.notify();
         }
+    }
+
+    /// View only: this chart shows no orders and sends none (the option chart's underlying,
+    /// decision 0029).
+    pub fn set_view_only(&mut self) {
+        self.view_only = true;
+        self.trade.account = None;
+    }
+
+    /// The auto-fit's smallest price range. Returns whether it changed.
+    pub fn set_min_price_span(&mut self, span: f64) -> bool {
+        let changed = self.vp.min_price_span != span;
+        self.vp.min_price_span = span;
+        changed
+    }
+
+    /// Its price scale, once laid out: what the option chart's chain lines up with.
+    pub fn locked_scale(&self) -> Option<crate::chain_lock::LockedScale> {
+        (f32::from(self.plot.size.height) > 1.0).then(|| crate::chain_lock::LockedScale {
+            vp: self.vp,
+            plot_top: f32::from(self.plot.origin.y),
+        })
+    }
+
+    /// Hold the view against new data while something aligned to it is under the pointer. The
+    /// trader's own zoom and pan still apply, and whatever is aligned follows them.
+    pub fn hold_scale(&mut self, on: bool) {
+        self.vp.price_held = on;
+        self.vp.set_held(on || self.drag.is_some(), self.series_len);
     }
 
     /// The product this chart shows.
@@ -3165,7 +3197,7 @@ impl ChartView {
     /// Copy this frame's orders and position for the chart's account and contract; refused
     /// moves become the chart's refusal tag.
     fn prepare_orders(&mut self, cx: &App) {
-        let Some(t) = crate::trading::Trading::try_global(cx) else {
+        let Some(t) = crate::trading::Trading::try_global(cx).filter(|_| !self.view_only) else {
             self.ct.n_tags = 0;
             return;
         };

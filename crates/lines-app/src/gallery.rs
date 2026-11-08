@@ -370,6 +370,32 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
+    // The option chart (decision 0029): rows on the chart's price scale; a pane too narrow for
+    // both is the plain chain, and says so.
+    for (name, quick, size, extra) in [
+        ("chain-chart", true, "1600x700", "--theme dark"),
+        ("chain-chart-light", false, "1600x700", "--theme light"),
+        (
+            "chain-chart-cb",
+            false,
+            "1600x700",
+            "--theme dark --palette cb",
+        ),
+        ("chain-chart-narrow", false, "700x520", "--theme dark"),
+    ] {
+        let mut a = vec![
+            "--workspace".to_owned(),
+            ws("chain-chart.json"),
+            "--size".to_owned(),
+            size.to_owned(),
+            "--paper".to_owned(),
+            held.to_owned(),
+        ];
+        a.extend(args(extra));
+        let mut sc = s(name, quick, CHAIN_AT, a);
+        sc.chain = true;
+        v.push(sc);
+    }
     let mut cb = s(
         "chain-ticket-dark-cb",
         false,
@@ -818,6 +844,24 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ),
     )
     .context("chain.json")?;
+    // The option chart (decision 0029): the same pane with its chart on.
+    let chain_chart = chain.replacen(
+        r#""kind": "chain""#,
+        r#""kind": "chain", "chain_chart": true"#,
+        1,
+    );
+    assert_ne!(
+        chain_chart, chain,
+        "the chain workspace names its pane kind"
+    );
+    std::fs::write(
+        dir.join("chain-chart.json"),
+        format!(
+            r#"{{ "version": 7, "name": "gallery", "crosshair_sync": false,
+  "windows": [ {{ "active_tab": 0, "tabs": [ {{ "focused": 0, "layout": {chain_chart} }} ] }} ] }}"#
+        ),
+    )
+    .context("chain-chart.json")?;
     let spy = r#"{ "product": 2001, "symbol": "SPY" }"#;
     std::fs::write(
         dir.join("chain-popout.json"),
