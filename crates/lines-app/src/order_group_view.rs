@@ -2,8 +2,9 @@
 //! there, and an × for that order), and Cancel all, which takes a second press. A group never
 //! hides a working order: every one is here, and zooming in gives each its own tag back.
 //!
-//! A row's × comes first, so it is pressable at any width; only in a window under about 310 px
-//! can the end of a long row, which can be its price, be clipped.
+//! A row's × comes first and a finished row's "done" never gives way, so both show at any width;
+//! only in a window under about 320 px can the end of a long row, which can be its price, be cut
+//! (with an ellipsis).
 //!
 //! Rows never move while the list is open (design.md: nothing the trader aims at shifts under
 //! the cursor): an order that finishes stays in its row, marked done and inert. Presses act on
@@ -159,7 +160,9 @@ pub fn layer(
                 .child(
                     div()
                         .flex_1()
-                        .whitespace_nowrap()
+                        // The words give way, marked, before "done" does.
+                        .min_w_0()
+                        .truncate()
                         .text_color(if r.open { t.text_main } else { t.text_dim })
                         .child(text.as_str().to_owned()),
                 )
@@ -273,7 +276,7 @@ mod tests {
     }
 
     /// At `MIN_WIDTH` and wider a price is never cut: a row without room drops its P&L, and the
-    /// list holds the longest order's words with its ×, and "done" on a finished one.
+    /// list holds a row ending in the longest price with its ×, and "done" on a finished one.
     #[test]
     fn a_row_drops_its_pnl_rather_than_cut_a_price() {
         let (text, pnl) = ("Target 1 @ 5822.75", "+24.0 t  +$300.00");
@@ -284,7 +287,7 @@ mod tests {
         assert!(pnl_fits("Sell lmt 120/200 @ 104523.50", "", MIN_WIDTH));
         assert!(pnl_fits("Target 1200 @ 104523.50 · held", "", MIN_WIDTH));
         assert!(pnl_fits(
-            "Target 1200 @ 104523.50 · held",
+            "Sell lmt 1200/2000 @ 104523.50",
             "done",
             MIN_WIDTH
         ));
