@@ -1339,9 +1339,15 @@ fn keys_chip<V: TradePane>(
     )
 }
 
-/// A narrow panel's status line for an enabled switch whose orders would be denied.
-pub fn blocked_line(blocker: &str) -> String {
-    format!("Enabled, but orders are denied: {blocker}")
+/// The status line for an enabled switch whose orders would be denied. `short` below
+/// [`KEYS_IN_HEADER`], where the line may share its row with the Keys chip: the reason is what
+/// matters, and the line's items are laid out whole, last ones left out.
+pub fn blocked_line(blocker: &str, short: bool) -> String {
+    if short {
+        format!("Denied: {blocker}")
+    } else {
+        format!("Enabled, but orders are denied: {blocker}")
+    }
 }
 
 /// The guardrail strip's text for a lockout: "Cooldown · 3 losses in a row · 12 min left",
@@ -1957,7 +1963,12 @@ pub fn dom_bar<V: TradePane>(
             }
             // Narrow, or a strategy count on the switch: it shows only "!", the reason is here.
             _ => match blocker.filter(|_| reason_below && enabled) {
-                Some(b) => status.child(lock_strip(&blocked_line(b), "", true, t)),
+                Some(b) => status.child(lock_strip(
+                    &blocked_line(b, !keys_in_header(width)),
+                    "",
+                    true,
+                    t,
+                )),
                 None => status,
             },
         },
@@ -4376,9 +4387,10 @@ mod tests {
         assert!(reason_on_status(true, 0) && reason_on_status(false, 1));
         assert!(!reason_on_status(false, 0));
         assert_eq!(
-            blocked_line("market closed"),
+            blocked_line("market closed", false),
             "Enabled, but orders are denied: market closed"
         );
+        assert_eq!(blocked_line("market closed", true), "Denied: market closed");
     }
 
     /// The panel's height is a function of its width only: no trading state can change it, so
@@ -4454,6 +4466,9 @@ mod tests {
         // The disabled panel's line, whole in its short forms at the narrowest (a two-digit
         // count at this glyph width leaves only "armed" to its "…", never the number).
         let line = |s: &str| s.chars().count() as f32 * CHAR;
+        // The denied line keeps its reason beside the Keys chip (the longest reason).
+        let chip = w(keys_text(true, true)) + 20.0;
+        assert!(line(&blocked_line("feed stale 1234 s", true)) + 8.0 + chip + 12.0 <= room);
         assert!(line(&locked_hint(None, 0, MIN_DOM_WIDTH)) <= room);
         assert!(line(&locked_hint(None, 1, MIN_DOM_WIDTH)) <= room);
         assert!(line("DOM locked: 12") <= room);
