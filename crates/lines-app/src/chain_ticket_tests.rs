@@ -421,6 +421,14 @@ fn a_saved_stop_comes_back_through_the_apps_start() {
 
     let mut r = start(now);
     assert_eq!(r.position(c), 2, "the position is back");
+    // The notice reaches the app, though it was raised before the app was listening.
+    {
+        let st = r.t.cache.read();
+        let back: Vec<_> = st.triggers().collect();
+        assert_eq!(back.len(), 1, "the Stop, not the entry");
+        assert_eq!(back[0].kind, TriggerKind::Stop);
+        assert!(back[0].restored, "with a notice");
+    }
     r.quote(k, 150, 152);
     print(&mut r, 67_900);
     r.wait(LATENCY_MS);

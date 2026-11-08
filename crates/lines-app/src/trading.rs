@@ -170,6 +170,8 @@ pub struct TradeState {
     flashes: VecDeque<Flash>,
     results: VecDeque<(CommandId, Result<Vec<OrderId>, Reject>)>,
     notes: HashMap<CommandId, Note>,
+    /// The triggers the core has alive (decision 0029).
+    triggers: BTreeMap<lines_trading::trigger::TriggerId, lines_trading::trigger::TriggerView>,
     /// Rebuilds seen (from the broker after a (re)connect).
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
@@ -262,8 +264,16 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
-            // No UI yet (decision 0029's build order): nothing keeps these.
-            Event::Trigger(t) => Some(t.account),
+            // No UI yet (decision 0029's build order), but kept for it: a restored one's notice.
+            Event::Trigger(t) => {
+                let account = t.account.clone();
+                if t.state == lines_trading::trigger::TriggerState::Ended {
+                    self.triggers.remove(&t.id);
+                } else {
+                    self.triggers.insert(t.id, t);
+                }
+                Some(account)
+            }
             Event::Strategy {
                 id,
                 account,
@@ -467,6 +477,11 @@ impl TradeState {
         self.guards
             .get(account)
             .filter(|g| g.state != GuardState::Active)
+    }
+
+    /// The triggers the core has alive, as last reported.
+    pub fn triggers(&self) -> impl Iterator<Item = &lines_trading::trigger::TriggerView> {
+        self.triggers.values()
     }
 
     pub fn result(&self, id: CommandId) -> Option<&Result<Vec<OrderId>, Reject>> {

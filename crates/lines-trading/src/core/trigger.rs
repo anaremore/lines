@@ -137,6 +137,19 @@ impl TradingCore {
             .get(&spec.contract.product)
             .filter(|(t, _)| now.0 - t.0 <= guard.trigger_stale_ms)
             .map(|(_, p)| *p);
+        // Once an exit is closing the position, there's nothing left to arm on the series: an
+        // entry would reopen it, or be sold by the exit.
+        let closing = self.triggers.live.values().any(|l| {
+            l.view.account == spec.account
+                && l.view.contract == spec.contract
+                && l.view.state == TriggerState::Working
+        });
+        if closing {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                "an exit is already closing this position",
+            ));
+        }
         let direction = match spec.kind {
             TriggerKind::Entry { qty, max_price } => {
                 if qty.0 <= 0 {
@@ -185,18 +198,6 @@ impl TradingCore {
                 }
             }
             kind => {
-                // Once one is closing the position, there's nothing left to arm.
-                let closing = self.triggers.live.values().any(|l| {
-                    l.view.account == spec.account
-                        && l.view.contract == spec.contract
-                        && l.view.state == TriggerState::Working
-                });
-                if closing {
-                    return Err(Reject::new(
-                        RejectCode::Invalid,
-                        "an exit is already closing this position",
-                    ));
-                }
                 let position = self.position(&spec.account, spec.contract);
                 if position == 0 {
                     return Err(Reject::new(
@@ -609,6 +610,13 @@ impl TradingCore {
                 self.trigger_end(id, "the option expired");
                 continue;
             }
+            // A strategy started on it: it trades nothing under one, and the trader hears at once.
+            if self.strategy_trades(&account, contract) {
+                let order = self.triggers.live.get(&id).and_then(|l| l.order);
+                self.trigger_end(id, "a strategy trades this option now");
+                self.trigger_cancel_order(now, &account, order);
+                continue;
+            }
             if kind.is_exit() {
                 let position = self.position(&account, contract);
                 if position == 0 {
@@ -913,6 +921,20 @@ impl TradingCore {
             });
         }
         self.triggers.next = next;
+    }
+
+    /// Say what's alive: a rebuild is the full state as a subscriber's first events, so a restored
+    /// exit's notice reaches one that wasn't listening yet.
+    pub(super) fn triggers_publish(&mut self) {
+        let views: Vec<TriggerView> = self
+            .triggers
+            .live
+            .values()
+            .map(|l| l.view.clone())
+            .collect();
+        for v in views {
+            self.events.push(Event::Trigger(v));
+        }
     }
 
     /// The triggers alive now.

@@ -978,7 +978,7 @@ fn a_fired_exit_stays_in_charge_until_told() {
     r.quote(None, Some(900));
     r.print(68_000);
     assert_eq!(r.state(id), TriggerState::Working);
-    for kind in [TriggerKind::Stop, TriggerKind::Target] {
+    for kind in [TriggerKind::Stop, TriggerKind::Target, entry(1, 300)] {
         let e = r.try_arm(call(), kind, 69_000).unwrap_err();
         assert!(e.message.contains("already closing"), "{}", e.message);
     }
@@ -1059,9 +1059,10 @@ fn no_triggers_under_a_strategy() {
     .unwrap();
     let e = r.try_arm(call(), TriggerKind::Target, 68_500).unwrap_err();
     assert_eq!(e.code, RejectCode::Strategy);
-    r.print(68_000);
+    // At once, not when it would have fired: the trader knows it's unprotected.
     assert_eq!(r.state(stop), TriggerState::Ended);
     assert_eq!(r.reason(stop), "a strategy trades this option now");
+    r.print(68_000);
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 1, "nothing sold under it");
 }
@@ -1102,7 +1103,56 @@ fn a_stop_the_broker_cannot_fill_says_so() {
     assert_eq!(r.note(id), None);
 }
 
-/// A short position's exits buy back: its Target chases the ask, and its Stop lifts it.
+/// A short position's Target chases the ask: at its own side, past the guard, however wide.
+#[test]
+fn a_short_positions_target_chases_the_ask() {
+    let mut r = Rig::new();
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    r.open(call(), Side::Sell, 2, 240);
+    assert_eq!(r.position(call()), -2);
+    let id = r.arm(call(), TriggerKind::Target, 68_100);
+    assert_eq!(r.view(id).unwrap().direction, Direction::AtOrBelow);
+    r.quote(Some(10), Some(200));
+    r.print(68_100);
+    assert_eq!(r.state(id), TriggerState::Working);
+    assert_eq!(r.note(id), None, "{:?}", r.note(id));
+    let o = r
+        .orders(call())
+        .into_iter()
+        .rfind(|o| o.side == Side::Buy)
+        .unwrap();
+    assert_eq!(
+        (o.kind, o.qty),
+        (OrderKind::Limit { price: Price(200) }, Qty(2))
+    );
+    assert!(o.reduce_only);
+    r.quote(Some(10), Some(210));
+    r.wait(LAT + 1);
+    r.wait(CHASE);
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+    assert_eq!(r.fills(call()).last(), Some(&(210, 2)));
+}
+
+/// Prop rules set after an entry was armed refuse it when it fires.
+#[test]
+fn an_entry_armed_before_prop_rules_is_refused_when_it_fires() {
+    let mut r = Rig::with(AccountConfig::paper("paper-1", 50_000));
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_350);
+    r.cmd(Command::SetRules {
+        account: acct(),
+        rules: presets().into_iter().nth(1),
+    })
+    .unwrap();
+    r.print(68_350);
+    assert_eq!(r.reason(id), lines_trading::risk::PROP_OPTIONS_REFUSAL);
+    assert!(r.orders(call()).is_empty());
+}
+
+/// A short position's exits buy back: its Stop lifts the ask.
 #[test]
 fn a_short_positions_exits_buy_back() {
     let mut r = Rig::new();

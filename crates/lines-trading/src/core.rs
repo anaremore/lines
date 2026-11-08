@@ -700,6 +700,8 @@ impl TradingCore {
                 (env, result)
             }
         };
+        // A fired exit's exemption was for its own command, not what follows it here.
+        self.triggers.exempt = false;
         self.bracket_note_cancel(&env, &result);
         if result.is_ok() {
             self.trigger_person_acted(&env);
@@ -2556,6 +2558,7 @@ impl TradingCore {
             open_orders: open,
         });
         self.triggers_restore();
+        self.triggers_publish();
         let ids: Vec<AccountId> = self.accounts.keys().cloned().collect();
         for a in ids {
             let mut contracts: Vec<ContractKey> =
