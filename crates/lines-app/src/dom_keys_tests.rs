@@ -154,7 +154,7 @@ fn press_exit(t: &Trading, keys: &str) -> CommandId {
 }
 
 const ORDER_KEYS: [&str; 7] = [
-    "alt-b", "alt-s", "alt-j", "alt-k", "alt-a", "alt-z", "alt-r",
+    "alt-b", "alt-s", "alt-j", "alt-k", "alt-o", "alt-i", "alt-r",
 ];
 
 #[test]
@@ -239,13 +239,13 @@ fn each_order_key_places_its_order() {
         assert_eq!(t.cache.read().open_orders(&account(), es()).count(), 0);
     }
     // Buy at the ask: a marketable limit, filled at the ask; sell at the bid closes it.
-    press(&t, "alt-a", true, armed()).unwrap();
+    press(&t, "alt-o", true, armed()).unwrap();
     step(&t);
     assert_eq!(
         t.cache.read().position(&account(), es()).map(|p| p.qty),
         Some(2)
     );
-    press(&t, "alt-z", true, armed()).unwrap();
+    press(&t, "alt-i", true, armed()).unwrap();
     step(&t);
     assert!(t.cache.read().position(&account(), es()).is_none(), "flat");
     // Market buy, reverse (one order for twice the size), market sell back to flat.

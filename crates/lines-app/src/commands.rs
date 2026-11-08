@@ -450,9 +450,11 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Trade(TradeCmd::JoinBid), true, false, true, "j"),
     b(Command::Trade(TradeCmd::JoinAsk), true, false, true, "k"),
     b(Command::Trade(TradeCmd::Reverse), true, false, true, "r"),
-    // A above Z as the ask is above the bid.
-    b(Command::Trade(TradeCmd::BuyAsk), true, false, true, "a"),
-    b(Command::Trade(TradeCmd::SellBid), true, false, true, "z"),
+    // O for the offer; I left of it, as the bid column is left of the ask. Neither is one
+    // modifier from an emergency key (Cancel All Ctrl+Shift+A, Flatten Ctrl+Shift+F) or
+    // Undo, nor a macOS system chord with Cmd+Option.
+    b(Command::Trade(TradeCmd::BuyAsk), true, false, true, "o"),
+    b(Command::Trade(TradeCmd::SellBid), true, false, true, "i"),
     b(
         Command::Trade(TradeCmd::ToggleHotkeys),
         true,
@@ -850,8 +852,9 @@ mod tests {
         let mut b = Keystroke::parse("ctrl-alt-b").unwrap();
         b.key_char = Some("{".into()); // any character other than the key: text
         assert_eq!(command_for(&b), None);
-        // Buy at the ask and sell at the bid: Polish Programmer's AltGr+A and AltGr+Z.
-        for (key, ch) in [("ctrl-alt-a", "ą"), ("ctrl-alt-z", "ż")] {
+        // Buy at the ask and sell at the bid: AltGr+O types ó (Polish Programmer), AltGr+I types í
+        // (layouts with acute vowels on AltGr).
+        for (key, ch) in [("ctrl-alt-o", "ó"), ("ctrl-alt-i", "í")] {
             let mut k = Keystroke::parse(key).unwrap();
             assert!(command_for(&k).is_some(), "{key}");
             k.key_char = Some(ch.into());
