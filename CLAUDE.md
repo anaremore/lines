@@ -50,7 +50,8 @@ Run on the exact HEAD you push. Report the SHA and each result.
 3. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 4. `cargo test --workspace --no-fail-fast`: sum the `test result:` lines (passed N, failed 0).
 5. `cargo test --workspace --no-fail-fast --features lines-app/vendor-cqg,lines-feed/vendor-cqg`
-6. UI or screenshot code touched: `cargo test -p lines-app --features screenshot --test screenshot_exit`,
+6. UI or screenshot code touched: `cargo test -p lines-app --features screenshot --test screenshot_exit`
+   and the quick gallery, `cargo test -p lines-app --features screenshot --test gallery`,
    plus before/after PNGs from one screenshot command (give the command and the paths).
 7. Cargo.toml / Cargo.lock / deny.toml touched: `cargo deny --locked check` (if it isn't
    installed locally, say that CI runs it).
