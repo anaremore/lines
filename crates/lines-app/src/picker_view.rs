@@ -67,6 +67,7 @@ impl AppSettings {
             self.settings.pnl_display = m;
             self.save();
             crate::pnl::display_changed();
+            crate::journal_shots::set_pnl(m);
         }
     }
 

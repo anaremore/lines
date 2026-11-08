@@ -600,6 +600,192 @@ fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A round trip of `account` whose fill ids hold the account, as a broker's can.
+fn round_trip(j: &mut Journal, account: &str) -> Vec<Trade> {
+    let mut events = vec![
+        fill(&format!("{account}-1"), 1, Side::Buy, 6000.0, 2, 0.0, 0),
+        fill(&format!("{account}-2"), 2, Side::Sell, 6001.0, 2, 0.0, 60),
+    ];
+    for e in &mut events {
+        if let Event::Fill(f) = e {
+            f.account = AccountId::new(account);
+        }
+    }
+    feed(j, &events)
+}
+
+#[test]
+fn a_closed_trade_names_one_file_without_its_account() {
+    const ACCOUNT: &str = "ACCT-DISTINCTIVE-42";
+    let mut j = Journal::new();
+    j.set_shots(true);
+    let closed = round_trip(&mut j, ACCOUNT);
+    let r = j.take_shot_requests();
+    assert_eq!(r.len(), 1, "one per trade, none as it opened");
+    assert!(j.take_shot_requests().is_empty(), "taken once");
+    let t = &closed[0];
+    assert!(t.id.contains(ACCOUNT), "this id holds the account");
+    assert_eq!(t.screenshots, [r[0].file.clone()], "saved with the trade");
+    let name = &r[0].file;
+    assert!(!name.contains(ACCOUNT) && !name.contains("DISTINCTIVE"));
+    assert!(name.starts_with(&format!("{}-", t.trade_date)) && name.ends_with(".svg"));
+    assert_eq!(
+        name.len(),
+        "2026-11-05-0123456789abcdef.svg".len(),
+        "{name}"
+    );
+    assert!(is_shot_file_name(name));
+    // Nothing downstream can write what it was never given.
+    let debug = format!("{:?}", r[0].trade);
+    assert!(!debug.contains("DISTINCTIVE"), "{debug}");
+    assert_eq!(r[0].trade.fills.len(), 2, "every fill, to mark");
+    assert_eq!(r[0].trade.net(), t.net());
+    // A reversal's closing trade asks too, once; the next one asks when it closes.
+    let mut rev = Journal::new();
+    rev.set_shots(true);
+    feed(
+        &mut rev,
+        &[
+            fill("a", 1, Side::Buy, 6000.0, 1, 0.0, 0),
+            fill("b", 2, Side::Sell, 6001.0, 2, 0.0, 10),
+        ],
+    );
+    assert_eq!(rev.take_shot_requests().len(), 1);
+    feed(&mut rev, &[fill("c", 3, Side::Buy, 6000.0, 1, 0.0, 20)]);
+    assert_eq!(rev.take_shot_requests().len(), 1);
+    let names: Vec<_> = rev.trades().iter().map(|t| &t.screenshots[0]).collect();
+    assert_ne!(names[0], names[1], "each trade its own file");
+}
+
+/// FNV-1a's published 64-bit test vectors: the name is saved, so it can never change.
+#[test]
+fn shot_names_hash_with_fnv1a_64() {
+    let date = CivilDate::new(2026, 11, 5).unwrap();
+    assert_eq!(shot_file_name(date, ""), "2026-11-05-cbf29ce484222325.svg");
+    assert_eq!(shot_file_name(date, "a"), "2026-11-05-af63dc4c8601ec8c.svg");
+    assert!(is_shot_file_name("2026-11-05-af63dc4c8601ec8c.svg"));
+    for bad in [
+        "",
+        ".svg",
+        "../x.svg",
+        "..\\x.svg",
+        "C:\\Users\\x.svg",
+        "/etc/x.svg",
+        "x.exe",
+        "a.b.svg",
+    ] {
+        assert!(!is_shot_file_name(bad), "{bad:?}");
+    }
+}
+
+/// Only a trade closing live asks: not one rebuilt from the file, not one seeded from a position
+/// after a restart, and not any without shots on.
+#[test]
+fn rebuilt_seeded_and_unasked_trades_take_no_shots() {
+    let mut first = Journal::new();
+    first.set_shots(true);
+    let saved = round_trip(&mut first, "paper");
+    let mut rebuilt = Journal::from_records([Record::Trade(Box::new(saved[0].clone()))]);
+    rebuilt.set_shots(true);
+    assert!(rebuilt.take_shot_requests().is_empty());
+    assert_eq!(
+        rebuilt.trades()[0].screenshots,
+        saved[0].screenshots,
+        "kept"
+    );
+    let mut seeded = Journal::new();
+    seeded.set_shots(true);
+    seeded.on_event(&Event::Position(PositionView {
+        account: acct(),
+        contract: es(),
+        qty: 1,
+        avg_price: Some(600_000.0),
+        unrealised: Money::ZERO,
+    }));
+    let t = feed(&mut seeded, &[fill("s", 1, Side::Sell, 6001.0, 1, 0.0, 30)]);
+    assert!(t[0].incomplete);
+    assert!(t[0].screenshots.is_empty() && seeded.take_shot_requests().is_empty());
+    let mut off = Journal::new();
+    let t = round_trip(&mut off, "paper");
+    assert!(t[0].screenshots.is_empty() && off.take_shot_requests().is_empty());
+}
+
+/// The optional field: older lines without it load, and a name round-trips as a plain string.
+#[test]
+fn screenshot_names_round_trip_and_older_lines_load() {
+    let mut j = Journal::new();
+    j.set_shots(true);
+    let t = round_trip(&mut j, "paper").remove(0);
+    let line = serde_json::to_string(&Record::Trade(Box::new(t.clone()))).unwrap();
+    assert!(
+        line.contains(&format!("\"screenshots\":[\"{}\"]", t.screenshots[0])),
+        "{line}"
+    );
+    let back: Record = serde_json::from_str(&line).unwrap();
+    assert_eq!(back, Record::Trade(Box::new(t.clone())));
+    // Written by an older build: no field at all. An empty list isn't written either.
+    let mut old = t.clone();
+    old.screenshots.clear();
+    let line = serde_json::to_string(&Record::Trade(Box::new(old.clone()))).unwrap();
+    assert!(!line.contains("screenshots"), "{line}");
+    assert_eq!(
+        serde_json::from_str::<Record>(&line).unwrap(),
+        Record::Trade(Box::new(old))
+    );
+    // The CSV export has no such column: it never names the file.
+    let csv = csv(std::slice::from_ref(&t));
+    assert!(
+        !csv.contains(".svg") && !csv.contains("screenshots"),
+        "{csv}"
+    );
+}
+
+/// The journal thread asks only when the journal is saved; a flush reaches the drawing thread.
+#[test]
+fn only_a_saved_journal_asks_and_a_flush_waits_for_the_drawing() {
+    let (tx, rx) = mpsc::channel();
+    let memory = JournalShared::start_with_shots(Journal::new(), None, Some(tx));
+    let mut obs = memory.observer();
+    obs.events(&[fill("m1", 1, Side::Buy, 6000.0, 1, 0.0, 0)]);
+    obs.events(&[fill("m2", 2, Side::Sell, 6001.0, 1, 0.0, 2)]);
+    memory.sync();
+    let snap = memory.snapshot().unwrap();
+    assert_eq!(snap.trades.len(), 1);
+    assert!(snap.trades[0].screenshots.is_empty());
+    assert!(rx.try_recv().is_err(), "nothing asked for");
+
+    let dir = std::env::temp_dir().join(format!("lines-journal-shots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let writer = JournalWriter::open(dir.join("t.jsonl"), "t", None).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let saved = JournalShared::start_with_shots(Journal::new(), Some(writer), Some(tx));
+    let drawer = thread::spawn(move || {
+        let mut taken = Vec::new();
+        while let Ok(m) = rx.recv() {
+            match m {
+                ShotMsg::Take(r) => taken.push(r.file),
+                ShotMsg::Flush(done) => {
+                    let _ = done.send(());
+                }
+            }
+        }
+        taken
+    });
+    let mut obs = saved.observer();
+    obs.events(&[fill("s1", 1, Side::Buy, 6000.0, 1, 0.0, 0)]);
+    obs.events(&[fill("s2", 2, Side::Sell, 6001.0, 1, 0.0, 2)]);
+    assert!(saved.flush(Duration::from_secs(10)));
+    let file = saved.snapshot().unwrap().trades[0].screenshots[0].clone();
+    drop(obs);
+    drop(saved);
+    assert_eq!(drawer.join().unwrap(), [file], "asked once, by that name");
+    // The saved line carries the name.
+    let on_disk = std::fs::read_to_string(dir.join("t.jsonl")).unwrap();
+    assert!(on_disk.contains("\"screenshots\":[\""), "{on_disk}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The journal on its own thread: the trading thread only sends messages, the UI reads
 /// snapshots. Market data moves MAE/MFE without publishing (open trades aren't shown); a
 /// close publishes; an edit is applied there and published.

@@ -109,6 +109,8 @@ pub enum Command {
     JournalEdit,
     /// The focused journal: stats for all dates or the current trade date.
     JournalAllDates,
+    /// The focused journal: open the selected trade's chart file in the OS's default app.
+    JournalOpenChart,
     /// The focused journal: list trades, or P&L by account or by tag.
     JournalGroup(crate::wsdoc::JournalGroup),
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
@@ -706,6 +708,7 @@ pub fn label(c: Command) -> String {
         Command::ExportJournal => "Export journal (CSV)".into(),
         Command::JournalEdit => "Journal: edit tags and note".into(),
         Command::JournalAllDates => "Journal: stats for all dates / today".into(),
+        Command::JournalOpenChart => "Journal: open the selected trade's chart".into(),
         Command::JournalGroup(g) => match g {
             crate::wsdoc::JournalGroup::Trades => "Journal: list trades",
             crate::wsdoc::JournalGroup::Accounts => "Journal: P&L by account",
@@ -836,6 +839,7 @@ pub fn palette() -> Vec<Command> {
         Command::ExportJournal,
         Command::JournalEdit,
         Command::JournalAllDates,
+        Command::JournalOpenChart,
         Command::JournalGroup(crate::wsdoc::JournalGroup::Trades),
         Command::JournalGroup(crate::wsdoc::JournalGroup::Accounts),
         Command::JournalGroup(crate::wsdoc::JournalGroup::Tags),
@@ -1127,6 +1131,17 @@ mod tests {
             "down" => TradeCmd::QtyDown,
             _ => TradeCmd::NextBracket,
         }
+    }
+
+    /// In the palette; no key of its own (pane letter keys stay unbound).
+    #[test]
+    fn opening_a_trades_chart_is_a_palette_command_without_a_key() {
+        let p = palette();
+        assert_eq!(
+            filter("open the selected trade's chart", &p),
+            vec![Command::JournalOpenChart]
+        );
+        assert!(!BINDINGS.iter().any(|b| b.cmd == Command::JournalOpenChart));
     }
 
     #[test]

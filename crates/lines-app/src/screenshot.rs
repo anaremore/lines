@@ -73,6 +73,8 @@ pub struct Shot {
     pub bracket_position: Option<crate::BracketPositionArg>,
     /// The focused pane's header controls show (`--hover-header`).
     pub hover_header: bool,
+    /// Keep the journal in this folder, so a script's trades get chart files (`--journal-dir`).
+    pub journal_dir: Option<PathBuf>,
     /// Record the frame's layout and write the layout lint's findings beside each PNG
     /// (`<stem>.lint.txt`, empty when clean): `--layout-report`.
     pub layout_report: bool,
@@ -149,6 +151,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         bracket_editor,
         bracket_position,
         hover_header,
+        journal_dir,
         layout_report,
         settings: settings_shot,
     } = shot;
@@ -158,6 +161,11 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     }
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut setup = TradingSetup::manual();
+    setup.journal = journal_dir.map(|d| (d.join("screenshot.jsonl"), "screenshot".to_owned()));
+    crate::journal_shots::set_theme(ws.env.theme.get());
+    if let Some(m) = pnl {
+        crate::journal_shots::set_pnl(m);
+    }
     if let Some(max) = max_order_qty {
         setup.accounts = Some(
             crate::trading::default_accounts()
@@ -401,6 +409,12 @@ fn capture(
                 Err(e) => fail(&e),
             }
         }
+        // `--journal-dir`: the script's chart files and journal lines reach the disk.
+        cx.update(|cx| {
+            cx.global::<Trading>()
+                .journal
+                .flush(Duration::from_secs(10))
+        });
         exit(0)
     })
     .detach();

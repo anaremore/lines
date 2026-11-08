@@ -25,6 +25,7 @@ mod footprint;
 #[cfg(feature = "screenshot")]
 mod gallery;
 mod icons;
+mod journal_shots;
 mod journal_view;
 mod latency_hud;
 mod layout;
@@ -473,6 +474,11 @@ struct Cli {
     /// pane (no OS pointer involved).
     #[arg(long, requires = "screenshot")]
     hover_header: bool,
+    /// Screenshot: keep the journal in DIR (`screenshot.jsonl`) instead of in memory, so trades
+    /// a `--paper` script closes get their chart files in DIR/shots/. Evidence only: nothing of
+    /// the user's is read or written unless DIR is theirs.
+    #[arg(long, value_name = "DIR", requires = "screenshot")]
+    journal_dir: Option<PathBuf>,
     /// Screenshot: also render the Settings window at this section (appearance, charts, dom,
     /// trading, accounts, data, keys, diagnostics) into `<out stem>-settings.png`.
     #[arg(long, requires = "screenshot")]
@@ -1465,6 +1471,7 @@ where
                 bracket_editor: cli.bracket_editor,
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
+                journal_dir: cli.journal_dir.clone(),
                 layout_report: cli.layout_report,
                 settings: cli
                     .settings
@@ -1535,6 +1542,9 @@ where
     ws.env.theme.set(settings_schema::theme_for(
         &settings.settings.appearance.with_flags(look_flags),
     ));
+    // The journal's chart screenshots take the same look.
+    journal_shots::set_theme(ws.env.theme.get());
+    journal_shots::set_pnl(settings.settings.pnl_display);
     // The paper trading core (roadmap 7): its own thread, state per data source.
     let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.

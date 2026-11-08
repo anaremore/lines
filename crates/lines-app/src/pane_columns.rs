@@ -168,11 +168,13 @@ pub enum JournalCol {
     Duration,
     /// Maximum adverse / favorable excursion.
     MaeMfe,
+    /// "open" when the trade has a chart file, else a dash.
+    Chart,
     Tags,
 }
 
 impl JournalCol {
-    pub const ALL: [JournalCol; 12] = [
+    pub const ALL: [JournalCol; 13] = [
         JournalCol::Time,
         JournalCol::Account,
         JournalCol::Contract,
@@ -184,6 +186,7 @@ impl JournalCol {
         JournalCol::Ticks,
         JournalCol::Duration,
         JournalCol::MaeMfe,
+        JournalCol::Chart,
         JournalCol::Tags,
     ];
 
@@ -211,6 +214,7 @@ impl JournalCol {
             JournalCol::Ticks => "Ticks",
             JournalCol::Duration => "Duration",
             JournalCol::MaeMfe => "MAE/MFE",
+            JournalCol::Chart => "Chart",
             JournalCol::Tags => "Tags",
         }
     }
@@ -227,12 +231,13 @@ impl JournalCol {
                 | JournalCol::Account
                 | JournalCol::Contract
                 | JournalCol::Side
+                | JournalCol::Chart
                 | JournalCol::Tags
         )
     }
 }
 
-pub const JOURNAL_SPECS: [ColumnSpec; 12] = [
+pub const JOURNAL_SPECS: [ColumnSpec; 13] = [
     spec(48.0, 96.0, false, true),
     spec(40.0, 72.0, true, true),
     spec(40.0, 64.0, true, true),
@@ -244,10 +249,11 @@ pub const JOURNAL_SPECS: [ColumnSpec; 12] = [
     spec(32.0, 52.0, true, true),
     spec(40.0, 60.0, true, true),
     spec(64.0, 130.0, true, true),
+    spec(36.0, 44.0, true, true),
     spec(40.0, 96.0, true, true),
 ];
 /// The tags column takes the journal's leftover width.
-pub const JOURNAL_FILL: usize = 11;
+pub const JOURNAL_FILL: usize = 12;
 
 /// A column of any table, for commands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -927,7 +933,7 @@ mod tests {
     fn auto_fit_all_fits_every_column_but_the_filler() {
         let mut c = Columns::new(Table::Tape);
         c.needed = [
-            70.0, 58.5, 30.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            70.0, 58.5, 30.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         c.apply(ColumnCmd::AutoFitAll).unwrap();
         assert_eq!(c.set.width(0), None, "time fills: not fitted");
@@ -935,6 +941,31 @@ mod tests {
             (c.set.width(1), c.set.width(2), c.set.width(3)),
             (Some(58.5), Some(30.0), Some(18.0))
         );
+    }
+
+    /// A workspace saved before the Chart column has no word about it: it loads, showing it.
+    /// Column widths saved then stay on their own columns (saved by name, not position).
+    #[test]
+    fn the_chart_column_is_optional_in_saved_columns() {
+        let mut c = Columns::new(Table::Journal);
+        let old = BTreeMap::from([(
+            JournalCol::Tags,
+            ColumnDoc {
+                width: Some(120.0),
+                shown: None,
+            },
+        )]);
+        c.load(&JournalCol::ALL, &old);
+        assert!(c.set.is_shown(JournalCol::Chart.index()));
+        assert_eq!(c.set.width(JournalCol::Tags.index()), Some(120.0));
+        assert_eq!(c.set.width(JournalCol::Chart.index()), None);
+        assert_eq!(JournalCol::ALL[JOURNAL_FILL], JournalCol::Tags);
+        // Untouched, it isn't saved at all.
+        assert!(!c.save(&JournalCol::ALL).contains_key(&JournalCol::Chart));
+        let text =
+            serde_json::to_string(&BTreeMap::from([(JournalCol::Chart, ColumnDoc::default())]))
+                .unwrap();
+        assert!(text.contains("\"chart\""), "{text}");
     }
 
     #[test]

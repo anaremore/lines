@@ -19,7 +19,7 @@
 //! columns past the table's edge.
 
 /// Most columns a table has.
-pub const MAX_COLS: usize = 12;
+pub const MAX_COLS: usize = 13;
 
 /// Widest a column can be dragged.
 pub const MAX_WIDTH: f32 = 800.0;

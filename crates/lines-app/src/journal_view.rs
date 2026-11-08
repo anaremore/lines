@@ -12,6 +12,9 @@
 //!   and all dates.
 //! - **Editing**: click a row (or Up/Down) to select it, Enter to edit its tags and note
 //!   inline (Tab switches field, Enter saves, Esc cancels). Edits are saved as journal records.
+//! - **Chart** (`crate::journal_shots`): a trade with a chart file shows "open" in the Chart
+//!   column (click it, or the palette's command on the selected trade: the OS's default app);
+//!   without one, a dash. A file that isn't there says so in a notice.
 //! - **By account / by tag** (phase 2; header tabs, palette, pane menu, saved with the pane):
 //!   trades, win rate, net, average trade, profit factor and max drawdown per account or tag
 //!   (a trade with several tags counts in each), over the same dates as the strip.
@@ -57,11 +60,13 @@ const PAD: f32 = 6.0;
 pub struct Row {
     pub id: String,
     /// Indexed by [`JournalCol`].
-    pub cells: [String; 12],
+    pub cells: [String; 13],
     /// Net P&L sign: colours the P&L cell (its text is signed too).
     pub sign: i8,
     pub note: String,
     pub tags: Vec<String>,
+    /// The chart file's name (in the journal's `shots/` folder), if the trade has one.
+    pub shot: Option<String>,
 }
 
 fn money_text(m: Money) -> String {
@@ -149,6 +154,11 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
             tk(t.ticks(tick)),
             duration_text(t.duration_ms()),
             excursions,
+            if t.screenshots.is_empty() {
+                dash()
+            } else {
+                "open".to_owned()
+            },
             t.tags.join(", "),
         ],
         // The color follows the value shown: net money, else the ticks as rounded.
@@ -166,12 +176,13 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
         },
         note: t.note.clone(),
         tags: t.tags.clone(),
+        shot: t.screenshots.first().cloned(),
     }
 }
 
 /// A price with the decimals its scale implies (`den` 100 → at least 2), more if the value
 /// has them (averages), at most 6, without trailing zeros past the minimum.
-fn decimal(v: f64, den: i64) -> String {
+pub(crate) fn decimal(v: f64, den: i64) -> String {
     let min = (den.max(1) as f64).log10().ceil() as usize;
     let s = format!("{v:.6}");
     let (int, frac) = s.split_once('.').unwrap_or((&s, ""));
@@ -761,6 +772,25 @@ impl JournalView {
         Ok(())
     }
 
+    /// Open the selected trade's chart file in the OS's default app.
+    pub fn open_selected_chart(&self, cx: &mut Context<Self>) -> Result<(), &'static str> {
+        if !self.group.is_trades() {
+            return Err("switch the journal to Trades to open a trade's chart");
+        }
+        let r = self
+            .selected_index()
+            .and_then(|i| self.rows.get(i))
+            .ok_or("select a trade in the journal first")?;
+        self.open_chart(r.shot.as_deref(), cx)
+    }
+
+    fn open_chart(&self, file: Option<&str>, cx: &mut Context<Self>) -> Result<(), &'static str> {
+        let dir = Trading::try_global(cx).and_then(|t| t.shots_dir.clone());
+        let path = crate::journal_shots::locate(dir.as_deref(), file)?;
+        cx.open_url(&crate::journal_shots::file_url(&path));
+        Ok(())
+    }
+
     fn selected_index(&self) -> Option<usize> {
         let id = self.selected.as_ref()?;
         self.rows.iter().position(|r| &r.id == id)
@@ -889,11 +919,24 @@ impl JournalView {
             HeaderHit::Outside => {
                 let i = ((y - HEADER_ROW_H) / ROW_H).floor();
                 if i >= 0.0
-                    && let Some(r) = self.rows.get(self.scroll + i as usize)
+                    && let Some(r) = self.rows.get(self.scroll + i as usize).cloned()
                 {
                     self.selected = Some(r.id.clone());
-                    if ev.click_count >= 2 {
-                        self.editor = Some(Editor::new(r));
+                    let on_chart = r.shot.is_some()
+                        && self
+                            .cols
+                            .cell(JournalCol::Chart.index(), 0.0)
+                            .is_some_and(|(cx0, cw)| x >= cx0 && x < cx0 + cw);
+                    if on_chart {
+                        // The first click of a double opens it, once; the editor stays shut.
+                        if ev.click_count == 1
+                            && let Err(e) = self.open_chart(r.shot.as_deref(), cx)
+                        {
+                            // Deferred: a notice redraws windows, this one being updated now.
+                            cx.defer(move |cx| crate::workspace::notice(e.to_owned(), cx));
+                        }
+                    } else if ev.click_count >= 2 {
+                        self.editor = Some(Editor::new(&r));
                     }
                     cx.notify();
                 }
@@ -1035,7 +1078,7 @@ impl JournalView {
         self.cols.layout(w);
         // A narrow pane leaves out columns it can't hold whole (never half a number).
         self.cols.drop_overflow(w);
-        let left: [bool; 12] = JournalCol::ALL.map(JournalCol::left_aligned);
+        let left: [bool; 13] = JournalCol::ALL.map(JournalCol::left_aligned);
         self.cols
             .paint_header(&mut self.glyphs, &t, bounds, PAD, &left, window, cx);
         let oy = top + HEADER_ROW_H;
@@ -1072,6 +1115,7 @@ impl JournalView {
                     JournalCol::Pnl if r.sign > 0 => t.up,
                     JournalCol::Pnl if r.sign < 0 => t.down,
                     JournalCol::Time | JournalCol::Duration | JournalCol::MaeMfe => t.text_dim,
+                    JournalCol::Chart if r.shot.is_none() => t.text_dim,
                     _ => t.text_main,
                 };
                 let text = r.cells[c].as_str();
@@ -1587,6 +1631,19 @@ mod tests {
         assert_eq!(duration_text(3_780_000), "1h 03m");
         assert_eq!(decimal(6001.0, 100), "6001.00");
         assert_eq!(decimal(0.5, 1), "0.5");
+    }
+
+    /// The Chart cell: "open" with a file, a dash without (the reverse state).
+    #[test]
+    fn the_chart_cell_says_whether_there_is_a_file() {
+        let mut t = trade();
+        let r = row(&t, PnlDisplay::Off);
+        assert_eq!(r.cells[JournalCol::Chart.index()], "—");
+        assert_eq!(r.shot, None);
+        t.screenshots = vec!["2026-11-05-0123456789abcdef.svg".into()];
+        let r = row(&t, PnlDisplay::Off);
+        assert_eq!(r.cells[JournalCol::Chart.index()], "open");
+        assert_eq!(r.shot.as_deref(), Some(t.screenshots[0].as_str()));
     }
 
     /// P&L display (`crate::pnl`): off shows no money or tick number anywhere; ticks or
