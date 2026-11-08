@@ -396,6 +396,24 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
+    // The ticket covers the chain's foot and moves no row.
+    let mut foot = s(
+        "chain-chart-ticket",
+        true,
+        CHAIN_AT,
+        vec![
+            "--workspace".to_owned(),
+            ws("chain-chart.json"),
+            "--size".to_owned(),
+            "1600x700".to_owned(),
+            "--paper".to_owned(),
+            held.to_owned(),
+            "--chain-ticket".to_owned(),
+            "buy 684 put".to_owned(),
+        ],
+    );
+    foot.chain = true;
+    v.push(foot);
     let mut cb = s(
         "chain-ticket-dark-cb",
         false,

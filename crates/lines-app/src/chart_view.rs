@@ -1795,7 +1795,6 @@ impl ChartView {
     /// trader's own zoom and pan still apply, and whatever is aligned follows them.
     pub fn hold_scale(&mut self, on: bool) {
         self.vp.price_held = on;
-        self.vp.set_held(on || self.drag.is_some(), self.series_len);
     }
 
     /// The product this chart shows.
@@ -2909,6 +2908,7 @@ impl ChartView {
             if self.visibility.draws_studies()
                 && self.footprint.config().shown()
                 && self.vp.auto_price
+                && !self.vp.price_held
                 && !self.vp.visible_range(bars.len()).is_empty()
             {
                 // (Only after a real fit: with nothing visible the range isn't refitted, and

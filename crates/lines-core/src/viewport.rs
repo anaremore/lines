@@ -873,6 +873,31 @@ mod tests {
         assert!(close(v.right_index, r + 1.0), "and live following resumes");
     }
 
+    /// Holding the price leaves time alone: the chart keeps following new bars.
+    #[test]
+    fn a_held_price_still_follows_the_bars() {
+        let bars = |n: i64| -> Vec<Bar> {
+            (0..n)
+                .map(|i| Bar {
+                    time: UtcMillis(i * 60_000),
+                    open: Price(100),
+                    high: Price(110 + i),
+                    low: Price(100),
+                    close: Price(110 + i),
+                    volume: Qty(1),
+                })
+                .collect()
+        };
+        let mut v = Viewport::default();
+        v.set_size(800.0, 600.0);
+        v.on_data(&bars(10), 1);
+        let (right, prices) = (v.right_index, (v.price_lo, v.price_hi));
+        v.price_held = true;
+        v.on_data(&bars(40), 1);
+        assert!(v.right_index > right, "time still follows");
+        assert_eq!((v.price_lo, v.price_hi), prices, "the price doesn't move");
+    }
+
     /// A minimum span widens the fit around the bars, for what's aligned to the scale; bars that
     /// already span more are unchanged, and while the price is held nothing refits.
     #[test]

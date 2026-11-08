@@ -381,7 +381,6 @@ pub struct ChainView {
     chart: Option<gpui::Entity<crate::chart_view::ChartView>>,
     _chart_feed: Option<gpui::Subscription>,
     /// The pointer is on the chain beside the chart.
-    over_chain: bool,
     /// The pane's width as of the last frame.
     pane_w: f32,
 }
@@ -585,6 +584,7 @@ impl Frame {
         selected: Option<Price>,
         scale: &crate::chain_lock::LockedScale,
         top: f32,
+        bottom: f32,
     ) {
         use crate::chain_lock::{Candidate, pick_rows};
         self.last = last;
@@ -616,7 +616,7 @@ impl Frame {
         for (i, r) in chain.rows.iter().enumerate() {
             let y = scale.y(r.strike);
             let row_top = y - ROW_H / 2.0;
-            if row_top < top || row_top + ROW_H > scale.bottom() {
+            if row_top < top || row_top + ROW_H > scale.bottom().min(bottom) {
                 continue;
             }
             if self.candidates.len() == self.candidates.capacity() {
@@ -767,7 +767,6 @@ impl Pane for ChainView {
                     c.set_feed(next, cx);
                 }
             });
-            self.sync_hold(cx);
         }
         self.seen_revision = u64::MAX;
         cx.notify();
@@ -825,7 +824,6 @@ impl ChainView {
             layout: Layout::default(),
             chart: None,
             _chart_feed: None,
-            over_chain: false,
             pane_w: 0.0,
             frame: Frame {
                 ys: Vec::with_capacity(MAX_ROWS),
@@ -857,7 +855,6 @@ impl ChainView {
         self.frame.locked = false;
         self.frame.locked_key = None;
         self.layout = Layout::default();
-        self.over_chain = false;
         if self.chart.take().is_some() {
             self._chart_feed = None;
             cx.notify();
@@ -883,7 +880,6 @@ impl ChainView {
         }));
         self.chart = Some(chart);
         self.sync_chart_visible(cx);
-        self.sync_hold(cx);
         cx.notify();
     }
 
@@ -902,6 +898,36 @@ impl ChainView {
         }
     }
 
+    /// Strikes around the money set the chart's smallest range. In `render`, before the chart
+    /// paints, so its fit this frame has it (a view notified later in a draw isn't redrawn). A
+    /// new range waits while the scale is held: the fit does.
+    fn sync_chart_span(&self, cx: &mut Context<Self>) {
+        let Some(chart) = self.chart.as_ref().filter(|_| self.chart_shown()) else {
+            return;
+        };
+        let Some(d) = self.store.try_read() else {
+            return;
+        };
+        let Some(rows) = self.shown_expiry(&d.chains).and_then(|e| d.chains.chain(e)) else {
+            return;
+        };
+        let Some(i) = d.last_trade.and_then(|l| rows.atm(l)) else {
+            return;
+        };
+        let (a, b) = (
+            i.saturating_sub(1),
+            (i + 1).min(rows.rows.len().saturating_sub(1)),
+        );
+        if b > a {
+            let step = (rows.rows[b].strike.0 - rows.rows[a].strike.0) as f64 / (b - a) as f64;
+            chart.update(cx, |c, cx| {
+                if c.set_min_price_span(step * CHART_STRIKES) {
+                    cx.notify();
+                }
+            });
+        }
+    }
+
     /// The chart polls only while it is on screen: a hidden pane does no work.
     pub fn sync_chart_visible(&mut self, cx: &mut Context<Self>) {
         let visible = self.common.visible && self.chart_shown();
@@ -910,34 +936,9 @@ impl ChainView {
         }
     }
 
-    /// Nothing moves the shared scale while a press could land on a row.
-    fn sync_hold(&mut self, cx: &mut Context<Self>) {
-        let on = self.over_chain || self.one_click;
-        if let Some(chart) = &self.chart {
-            chart.update(cx, |c, _| c.hold_scale(on));
-        }
-    }
-
-    fn on_chain_move(&mut self, _: &gpui::MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.chart.is_some() && !self.over_chain {
-            self.over_chain = true;
-            self.sync_hold(cx);
-            cx.notify();
-        }
-    }
-
-    fn on_chain_exit(&mut self, _: &gpui::MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.over_chain {
-            self.over_chain = false;
-            self.sync_hold(cx);
-            cx.notify();
-        }
-    }
-
     /// The One-click switch.
     pub fn toggle_one_click(&mut self, cx: &mut Context<Self>) {
         self.one_click = !self.one_click;
-        self.sync_hold(cx);
         // Its pin ends with it: the pane follows the soonest expiry again.
         if !self.one_click && std::mem::take(&mut self.expiry_pinned) {
             self.expiry = None;
@@ -1929,31 +1930,28 @@ impl ChainView {
                 }
                 self.frame.expiry = expiry;
                 let chain = self.frame.expiry.and_then(|e| d.chains.chain(e));
-                // Strikes around the money set the chart's smallest range.
-                if let (Some(_), Some(chart), Some(c), Some(l)) =
-                    (&scale, &self.chart, chain, d.last_trade)
-                    && let Some(i) = c.atm(l)
-                {
-                    let (a, b) = (
-                        i.saturating_sub(1),
-                        (i + 1).min(c.rows.len().saturating_sub(1)),
-                    );
-                    if b > a {
-                        let step =
-                            (c.rows[b].strike.0 - c.rows[a].strike.0) as f64 / (b - a) as f64;
-                        let refit =
-                            chart.update(cx, |c, _| c.set_min_price_span(step * CHART_STRIKES));
-                        if refit {
-                            window.refresh();
-                        }
-                    }
-                }
                 match &scale {
                     Some(s) => {
-                        self.frame.hold = self.one_click || self.over_chain;
+                        let hold = hold_rows(
+                            bounds,
+                            window.mouse_position(),
+                            window.is_window_hovered(),
+                            self.one_click,
+                        );
+                        self.frame.hold = hold;
+                        if let Some(chart) = &self.chart {
+                            chart.update(cx, |c, _| c.hold_scale(hold));
+                        }
                         let band = top + HEAD_H;
-                        self.frame
-                            .refresh_locked(chain, d.last_trade, self.selected, s, band);
+                        let bottom = f(bounds.origin.y + bounds.size.height);
+                        self.frame.refresh_locked(
+                            chain,
+                            d.last_trade,
+                            self.selected,
+                            s,
+                            band,
+                            bottom,
+                        );
                     }
                     None => {
                         self.frame.hold = self.one_click;
@@ -2447,7 +2445,7 @@ impl ChainView {
         let t = self.theme;
         let mut left = String::with_capacity(48);
         // Narrow: the price stays on its row, so the expiry and feed word fit whole.
-        let narrow = f(self.bounds.size.width) < NARROW_HEADER;
+        let narrow = self.header_width() < NARROW_HEADER;
         let today = pane::today(self.frozen, &self.store);
         self.expiries.clear();
         let mut shown = None;
@@ -2684,7 +2682,16 @@ impl ChainView {
 
     /// The header has room for the exits (below this they're in the footer).
     fn exits_in_header(&self) -> bool {
-        f(self.bounds.size.width) >= EXITS_IN_HEADER
+        self.header_width() >= EXITS_IN_HEADER
+    }
+
+    /// The header spans the pane; beside a chart the table is only part of it.
+    fn header_width(&self) -> f32 {
+        if self.chart_shown() {
+            self.pane_w
+        } else {
+            f(self.bounds.size.width)
+        }
     }
 
     /// Expiries where the account holds or works something.
@@ -3214,17 +3221,29 @@ impl ChainView {
 
     fn footer_text(&self, size: i64) -> String {
         self.note.clone().unwrap_or_else(|| {
-                if self.chart.is_some() && !self.chart_shown() {
-                    return "Chart hidden: this pane is too narrow for both".to_owned();
-                }
                 if self.one_click {
                     return format!(
                         "One-click ON: a click on a bid or ask sends {size} at once  ·  Shift+Up/Down: quantity"
                     );
                 }
+                if self.chart.is_some() && !self.chart_shown() {
+                    return "Chart hidden: this pane is too narrow for both".to_owned();
+                }
                 "Click an ask to buy, a bid to sell, or Enter  ·  Up/Down: strike  ·  Left/Right: expiry  ·  Tab: calls / puts  ·  Shift+Tab: bid / ask  ·  Home: the money  ·  Shaded: in the money".to_owned()
         })
     }
+}
+
+/// Whether new data must leave the option chart's rows where they are: a press could land on one.
+/// Worked out each paint from what is true now, so nothing can leave it stuck on. GPUI on Windows
+/// never reports a pointer leaving an element or the window by event, only this flag.
+fn hold_rows(
+    table: Bounds<gpui::Pixels>,
+    pointer: gpui::Point<gpui::Pixels>,
+    window_hovered: bool,
+    one_click: bool,
+) -> bool {
+    one_click || (window_hovered && table.contains(&pointer))
 }
 
 /// How many of a series' orders the strip's one line holds; at least one (at the narrowest its
@@ -3288,6 +3307,7 @@ impl Render for ChainView {
         let t = self.theme;
         self.aimed = self.focus.is_focused(window) && window.is_window_active();
         self.sync_chart_visible(cx);
+        self.sync_chart_span(cx);
         if let Some(i) = self
             .trade
             .account
@@ -3323,25 +3343,27 @@ impl Render for ChainView {
         };
         let shown_chart = self.chart.clone().filter(|_| self.chart_shown());
         let table = div()
+            .id("chain-table")
             .relative()
             .flex_1()
             .size_full()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_chain_move))
-            .on_mouse_exit(cx.listener(Self::on_chain_exit))
+            // A redraw when the pointer crosses the edge: the hold is worked out in paint.
+            .on_hover(cx.listener(|_, _: &bool, _, cx| cx.notify()))
             .child(body)
             .when_some(overlay, |d, o| d.child(o));
         // The pane's width, for whether the chart fits beside the chain.
         let measure = {
             let entity = cx.entity();
             canvas(
-                move |bounds, _, cx| {
+                move |bounds, window, cx| {
                     let w = f(bounds.size.width);
-                    entity.update(cx, |v, cx| {
+                    entity.update(cx, |v, _| {
+                        // (A notify during this draw wouldn't bring another.)
                         if (v.pane_w >= CHART_MIN_W) != (w >= CHART_MIN_W) {
-                            cx.notify();
+                            window.on_next_frame(|window, _| window.refresh());
                         }
                         v.pane_w = w;
                     });
@@ -3359,34 +3381,47 @@ impl Render for ChainView {
             .min_h_0()
             .w_full()
             .child(measure);
-        let main = match shown_chart {
-            Some(chart) => main
-                .child(div().flex_1().min_w_0().h_full().child(chart))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_shrink_0()
-                        .h_full()
-                        .w(gpui::relative(CHART_CHAIN_SHARE))
-                        .child(table),
-                ),
-            None => main.child(table),
-        };
-        div()
-            .size_full()
+        // The ticket has its own hints; a message still shows.
+        let footer = (self.ticket.is_none() || self.note.is_some() || footer_exits.is_some())
+            .then(|| self.footer(size, footer_exits));
+        let below = div()
             .flex()
             .flex_col()
-            .bg(t.bg)
-            .child(self.header(cx))
-            .child(main)
             .children(strip)
             .children(dock)
-            // The ticket has its own hints; a message still shows.
-            .when(
-                self.ticket.is_none() || self.note.is_some() || footer_exits.is_some(),
-                |d| d.child(self.footer(size, footer_exits)),
-            )
+            .children(footer);
+        let header = self.header(cx);
+        let root = div().size_full().flex().flex_col().bg(t.bg).child(header);
+        match shown_chart {
+            // The strip, the ticket and a long message cover the column's foot rather than push
+            // the plot up: a taller foot would move every row under the pointer. Its usual two lines are
+            // always kept clear of rows.
+            Some(chart) => root.child(
+                main.child(div().flex_1().min_w_0().h_full().child(chart))
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_col()
+                            .flex_shrink_0()
+                            .h_full()
+                            .w(gpui::relative(CHART_CHAIN_SHARE))
+                            .child(table)
+                            .child(div().flex_shrink_0().h(px(2.0 * STRIP_H)))
+                            .child(
+                                below
+                                    .id("chain-foot")
+                                    .absolute()
+                                    .bottom_0()
+                                    .left_0()
+                                    .right_0()
+                                    .occlude()
+                                    .on_hover(cx.listener(|_, _: &bool, _, cx| cx.notify())),
+                            ),
+                    ),
+            ),
+            None => root.child(main.child(table)).child(below.flex_shrink_0()),
+        }
     }
 }
 
@@ -3555,8 +3590,36 @@ mod tests {
         assert!(!f.has_chain && f.rows.is_empty());
     }
 
-    /// A press never lands on a strike that moved: the rows hold while the selection is among
-    /// them, and follow it once it leaves.
+    /// The hold is what's true now: the pointer on the table in a hovered window, or One-click.
+    /// Nothing is left on once the pointer has gone, whichever way it went.
+    #[test]
+    fn the_rows_hold_only_while_a_press_could_land() {
+        let table = Bounds::new(point(px(800.0), px(40.0)), size(px(700.0), px(600.0)));
+        let on = point(px(900.0), px(300.0));
+        let chart = point(px(300.0), px(300.0));
+        assert!(hold_rows(table, on, true, false), "on the table");
+        assert!(!hold_rows(table, chart, true, false), "moved to the chart");
+        assert!(!hold_rows(table, on, false, false), "left the window");
+        assert!(hold_rows(table, chart, true, true), "One-click, anywhere");
+        assert!(hold_rows(table, chart, false, true), "One-click, anywhere");
+    }
+
+    /// The chain's foot is below the table, so a strike behind it has no row to press.
+    #[test]
+    fn a_strike_below_the_table_has_no_row() {
+        let day = CivilDate::new(2026, 11, 9).unwrap();
+        let chains = key_chain(day, 670, 690);
+        let s = locked_scale();
+        let mut f = locked_frame();
+        f.locked = true;
+        f.refresh_locked(chains.chain(day), None, None, &s, 76.0, 10_000.0);
+        let all = f.rows.len();
+        let cut = 340.0;
+        f.refresh_locked(chains.chain(day), None, None, &s, 76.0, cut);
+        assert!(f.rows.len() < all && !f.rows.is_empty(), "{all}");
+        assert!(f.ys.iter().all(|y| y + ROW_H <= cut));
+    }
+
     fn locked_scale() -> crate::chain_lock::LockedScale {
         let mut vp = lines_core::Viewport::default();
         vp.set_size(800.0, 600.0);
@@ -3583,7 +3646,7 @@ mod tests {
         let s = locked_scale();
         let mut f = locked_frame();
         f.locked = true;
-        f.refresh_locked(chain, Some(Price(68_050)), None, &s, 76.0);
+        f.refresh_locked(chain, Some(Price(68_050)), None, &s, 76.0, 10_000.0);
         assert!(f.rows.len() > 5);
         assert_eq!(f.rows.len(), f.ys.len());
         assert_eq!(f.line_at, None);
@@ -3598,6 +3661,8 @@ mod tests {
 
     /// Held (the pointer on the chain, or One-click): the same strikes in the same places while
     /// the scale is the same, whatever the price does. The trader's own zoom moves them.
+    /// A press never lands on a strike that moved: the rows hold while the selection is among
+    /// them, and follow it once it leaves.
     #[test]
     fn locked_rows_hold_under_the_pointer_until_the_scale_changes() {
         let day = CivilDate::new(2026, 11, 9).unwrap();
@@ -3606,7 +3671,14 @@ mod tests {
         let mut f = locked_frame();
         f.locked = true;
         f.hold = true;
-        f.refresh_locked(chains.chain(day), Some(Price(68_050)), None, &s, 76.0);
+        f.refresh_locked(
+            chains.chain(day),
+            Some(Price(68_050)),
+            None,
+            &s,
+            76.0,
+            10_000.0,
+        );
         let (rows, ys) = (f.rows.clone(), f.ys.clone());
         // The money moves, and a selection appears: nothing moves.
         f.refresh_locked(
@@ -3615,6 +3687,7 @@ mod tests {
             Some(Price(68_500)),
             &s,
             76.0,
+            10_000.0,
         );
         assert_eq!(f.ys, ys);
         assert_eq!(
@@ -3624,7 +3697,14 @@ mod tests {
         // The trader zooms the chart: they follow it.
         let mut zoomed = s;
         zoomed.vp.price_hi = 68_500.0;
-        f.refresh_locked(chains.chain(day), Some(Price(68_050)), None, &zoomed, 76.0);
+        f.refresh_locked(
+            chains.chain(day),
+            Some(Price(68_050)),
+            None,
+            &zoomed,
+            76.0,
+            10_000.0,
+        );
         assert_ne!(f.ys, ys);
         for (r, top) in f.rows.iter().zip(&f.ys) {
             assert_eq!(top + ROW_H / 2.0, zoomed.y(r.strike));
