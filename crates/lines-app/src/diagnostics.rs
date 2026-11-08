@@ -683,6 +683,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The journal folder (its lines hold account ids and its charts show trades) stays out of
+    /// the bundle; a journal line that ever passed through redaction loses its account, and the
+    /// chart's file name in it isn't a path.
+    #[test]
+    fn journal_files_and_charts_stay_out_of_a_bundle() {
+        let dir = temp("journal");
+        let shots = dir.join("journal").join("shots");
+        std::fs::create_dir_all(&shots).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"version":1}"#).unwrap();
+        let name = "2026-11-05-0123456789abcdef.svg";
+        std::fs::write(shots.join(name), "<svg>FAKE-CHART</svg>").unwrap();
+        let line = serde_json::json!({
+            "trade": {"account": "FAKE-ACCT-0007", "screenshots": [name]}
+        });
+        std::fs::write(dir.join("journal").join("mock.jsonl"), line.to_string()).unwrap();
+        let inputs = Inputs {
+            config_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        let entries = zipw::read(&build(&inputs).unwrap());
+        for (entry, data) in &entries {
+            assert!(
+                !entry.contains("journal") && !entry.contains("shots"),
+                "{entry}"
+            );
+            let text = String::from_utf8_lossy(data);
+            for s in ["FAKE-CHART", "FAKE-ACCT-0007", name] {
+                assert!(!text.contains(s), "{s} in {entry}");
+            }
+        }
+        let red = redact::json(&line).to_string();
+        assert!(!red.contains("FAKE-ACCT-0007"), "{red}");
+        assert!(!red.contains('/') && !red.contains('\\'), "{red}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn feed_rates_over_the_window() {
         let s = |at_ms, updates_in, gaps, reconnects| FeedSample {

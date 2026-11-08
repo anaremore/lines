@@ -1146,7 +1146,10 @@ impl WindowView {
             }
             Command::Strategy(c) => self.strategy_command(c, window, cx),
             Command::ExportJournal => export_journal(cx),
-            Command::JournalEdit | Command::JournalAllDates | Command::JournalGroup(_) => {
+            Command::JournalEdit
+            | Command::JournalAllDates
+            | Command::JournalOpenChart
+            | Command::JournalGroup(_) => {
                 let Some(PaneHandle::Journal(j)) = self.tab().focused_handle().cloned() else {
                     self.refuse("focus the journal first (Open journal)", cx);
                     return;
@@ -1155,6 +1158,10 @@ impl WindowView {
                     j.update(cx, |v, cx| v.set_group(g, cx));
                 } else if cmd == Command::JournalAllDates {
                     j.update(cx, |v, cx| v.toggle_all_dates(cx));
+                } else if cmd == Command::JournalOpenChart {
+                    if let Err(e) = j.update(cx, |v, cx| v.open_selected_chart(cx)) {
+                        self.refuse(e, cx);
+                    }
                 } else if let Err(e) = j.update(cx, |v, cx| v.start_edit(cx)) {
                     self.refuse(e, cx);
                 }
@@ -2191,6 +2198,11 @@ impl WindowView {
                 items.push(MenuItem::named(
                     "Edit tags and note",
                     Command::JournalEdit,
+                    false,
+                ));
+                items.push(MenuItem::named(
+                    "Open the selected trade's snapshot",
+                    Command::JournalOpenChart,
                     false,
                 ));
                 items.push(MenuItem::named(
@@ -3275,7 +3287,7 @@ impl Render for WindowView {
             }
             Some(PaneHandle::Tape(_)) => "Time & sales: type a symbol or Ctrl+K: switch",
             Some(PaneHandle::Journal(_)) => {
-                "Journal: click or Up/Down to select, Enter: tags and note, click the stats: today / all dates"
+                "Journal: click or Up/Down to select, Enter: tags and note, Snapshot column: view, click the stats: today / all dates"
             }
             Some(PaneHandle::Chain(_)) => {
                 "Option chain: Up/Down strike, Left/Right expiry, Tab calls / puts, type a symbol or Ctrl+K: switch"
@@ -3674,6 +3686,7 @@ pub fn set_show_latency_hud(show: bool, cx: &mut App) {
 /// Change the look of every window and pane now (the Settings window's appearance), and of
 /// panes created from now on.
 pub fn set_theme(theme: Theme, cx: &mut App) {
+    crate::journal_shots::set_theme(theme);
     let Some(ws) = cx.try_global::<Workspace>() else {
         return;
     };

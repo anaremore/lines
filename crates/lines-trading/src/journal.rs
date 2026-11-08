@@ -25,6 +25,12 @@
 //! - **Open trades** live only in memory. After a restart a position the journal didn't see
 //!   open is seeded from the core's position report and its trade is marked `incomplete`.
 //!
+//! **Trade snapshots** (phase 2): a saved journal names one file per trade as it closes and
+//! asks for it ([`ShotRequest`]). The name goes into [`Trade::screenshots`] and so is saved with
+//! the trade (an optional field: no format change). The journal only names and asks; the app
+//! draws the file on its own thread. A trade loaded from the file or seeded from a position
+//! asks for nothing.
+//!
 //! [`Journal`] is pure: no I/O, no clock. It runs on its own thread ([`JournalShared`]): the
 //! trading thread only sends it messages ([`JournalObserver`]), and the UI reads a published
 //! snapshot (an `Arc` swapped in; no lock is held while formatting), so the journal never
@@ -118,9 +124,11 @@ pub struct Trade {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
-    /// Entry/exit chart screenshots (roadmap 8c phase 2).
+    /// The trade snapshot's file name in the `shots/` folder beside the journal (roadmap 8c
+    /// phase 2): a name, never a path (a path would hold the OS user name). Named when asked
+    /// for: the file can be missing if drawing it failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub screenshots: Vec<PathBuf>,
+    pub screenshots: Vec<String>,
     /// Opened before the journal saw it (seeded from a position after a restart): the entry
     /// side is approximate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -198,6 +206,43 @@ pub enum Record {
     Edit(Edit),
 }
 
+/// A trade snapshot to draw now: its file name, and the trade as it closed with its ids,
+/// account, tags and note blanked (a broker's ids can hold the account; the drawing can't write
+/// what it was never given). `account` is for looking up the account's kind only (the file says
+/// PAPER or LIVE in words); it is never drawn.
+#[derive(Clone, Debug)]
+pub struct ShotRequest {
+    pub file: String,
+    pub trade: Trade,
+    pub account: AccountId,
+}
+
+/// What the journal thread sends the thread that draws trade snapshots.
+#[derive(Debug)]
+pub enum ShotMsg {
+    Take(Box<ShotRequest>),
+    /// Reply once everything sent before is written or given up on (quitting).
+    Flush(Sender<()>),
+}
+
+/// A trade snapshot's file name: the trade date and a 64-bit FNV-1a of the trade id (stable across
+/// builds and platforms; the name is saved). The id itself can hold an account (a broker's
+/// fill ids), so it never appears.
+pub fn shot_file_name(trade_date: CivilDate, id: &str) -> String {
+    let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!("{trade_date}-{hash:016x}.svg")
+}
+
+/// Whether a saved name is a plain trade snapshot file name: a damaged or edited journal line must
+/// not name a file elsewhere for the app to open.
+pub fn is_shot_file_name(name: &str) -> bool {
+    name.strip_suffix(".svg").is_some_and(|stem| {
+        !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
 /// A trade in progress.
 #[derive(Clone, Debug)]
 struct Open {
@@ -243,6 +288,10 @@ pub struct Journal {
     /// Accounts whose trades take no MAE/MFE from market batches (a broker venue's accounts
     /// while the app's prices aren't that venue's market: a replay or the mock).
     unmarked: HashSet<AccountId>,
+    /// Whether trades closing from now on get a trade snapshot.
+    shots: bool,
+    /// Screenshots asked for and not yet taken by [`Journal::take_shot_requests`].
+    shot_requests: Vec<ShotRequest>,
 }
 
 impl Journal {
@@ -267,6 +316,16 @@ impl Journal {
                 let _ = self.edit(e);
             }
         }
+    }
+
+    /// Trades closing from now on get a trade snapshot (or not).
+    pub fn set_shots(&mut self, on: bool) {
+        self.shots = on;
+    }
+
+    /// The screenshots asked for since the last call, oldest first.
+    pub fn take_shot_requests(&mut self) -> Vec<ShotRequest> {
+        std::mem::take(&mut self.shot_requests)
     }
 
     /// Closed trades, in the order they closed.
@@ -319,6 +378,26 @@ impl Journal {
     fn close(&mut self, mut t: Trade) -> Trade {
         t.id = format!("{}@{}", t.id, t.entry_time.0);
         self.push_closed(t);
+        let shots = self.shots;
+        let kept = self.closed.last_mut().expect("just pushed");
+        // A seeded trade's entry is a guess from a position report: nothing to show it by.
+        if shots && !kept.incomplete {
+            let file = shot_file_name(kept.trade_date, &kept.id);
+            kept.screenshots = vec![file.clone()];
+            let mut trade = kept.clone();
+            let account = std::mem::replace(&mut trade.account, AccountId::new(""));
+            trade.id.clear();
+            trade.tags.clear();
+            trade.note.clear();
+            for f in &mut trade.fills {
+                f.trade_id.clear();
+            }
+            self.shot_requests.push(ShotRequest {
+                file,
+                trade,
+                account,
+            });
+        }
         self.closed.last().cloned().expect("just pushed")
     }
 
@@ -695,6 +774,18 @@ impl JournalShared {
     /// Start the journal thread with `journal` (loaded from its file) and its writer (`None`:
     /// in memory only).
     pub fn start(journal: Journal, writer: Option<store::JournalWriter>) -> Arc<JournalShared> {
+        JournalShared::start_with_shots(journal, writer, None)
+    }
+
+    /// [`JournalShared::start`], asking `shots` for a trade snapshot of each trade that
+    /// closes. Only a saved journal takes them: without a writer, none are asked for.
+    pub fn start_with_shots(
+        mut journal: Journal,
+        writer: Option<store::JournalWriter>,
+        shots: Option<Sender<ShotMsg>>,
+    ) -> Arc<JournalShared> {
+        let shots = shots.filter(|_| writer.is_some());
+        journal.set_shots(shots.is_some());
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(JournalShared {
             tx,
@@ -708,7 +799,7 @@ impl JournalShared {
         let s = Arc::downgrade(&shared);
         let spawned = thread::Builder::new()
             .name("lines-journal".into())
-            .spawn(move || run(journal, writer, rx, s));
+            .spawn(move || run(journal, writer, shots, rx, s));
         if let Err(e) = spawned {
             tracing::error!("journal thread failed to start: {e}");
         }
@@ -757,7 +848,8 @@ impl JournalShared {
         }
     }
 
-    /// Wait (up to `timeout`) until everything sent so far is on disk. For quitting.
+    /// Wait (up to `timeout`) until everything sent so far is on disk, trade snapshots
+    /// included. For quitting.
     pub fn flush(&self, timeout: Duration) -> bool {
         let (tx, rx) = mpsc::channel();
         self.tx.send(Msg::Flush(tx)).is_ok() && rx.recv_timeout(timeout).is_ok()
@@ -781,6 +873,7 @@ impl JournalShared {
 fn run(
     mut j: Journal,
     writer: Option<store::JournalWriter>,
+    shots: Option<Sender<ShotMsg>>,
     rx: Receiver<Msg>,
     shared: std::sync::Weak<JournalShared>,
 ) {
@@ -810,6 +903,11 @@ fn run(
                 if closed || j.open_trades().count() != open {
                     publish(&j);
                 }
+                for r in j.take_shot_requests() {
+                    if let Some(tx) = &shots {
+                        let _ = tx.send(ShotMsg::Take(Box::new(r)));
+                    }
+                }
             }
             Msg::Edit(e) => {
                 if let Some(e) = j.edit(e) {
@@ -836,6 +934,12 @@ fn run(
             Msg::Flush(tx) => {
                 if let Some(w) = &writer {
                     w.flush(Duration::from_secs(5));
+                }
+                if let Some(s) = &shots {
+                    let (done, wait) = mpsc::channel();
+                    if s.send(ShotMsg::Flush(done)).is_ok() {
+                        let _ = wait.recv_timeout(Duration::from_secs(5));
+                    }
                 }
                 let _ = tx.send(());
             }

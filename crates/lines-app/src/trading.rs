@@ -33,7 +33,8 @@
 //! trips from fills, MAE/MFE from the same market batches), saved append-only to
 //! `<config dir>/journal/<source>.jsonl` beside the paper file, under the same rule: replays
 //! and screenshots keep it in memory. A journal this build can't read (newer, damaged
-//! header) is left as it is and nothing is written to it this run.
+//! header) is left as it is and nothing is written to it this run. A saved journal's trades
+//! also get a trade snapshot in `<config dir>/journal/shots/` (`crate::journal_shots`).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -87,7 +88,7 @@ pub struct AccountInfo {
 }
 
 impl AccountInfo {
-    fn paper(id: AccountId, name: String, rules: Option<RulePreset>) -> AccountInfo {
+    pub(crate) fn paper(id: AccountId, name: String, rules: Option<RulePreset>) -> AccountInfo {
         AccountInfo {
             id,
             name,
@@ -683,6 +684,10 @@ pub struct Trading {
     pub start_account: Option<AccountId>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
     pub journal: Arc<JournalShared>,
+    /// The folder of the journal's trade snapshots (`None`: the journal has no file).
+    pub shots_dir: Option<PathBuf>,
+    /// The feeds panes trade from, for the journal's trade snapshots.
+    shot_stores: crate::journal_shots::Stores,
     /// The core's clock kind, so the UI reads time the way the core does (`now`).
     clock: Clock,
     /// Manual clock: the newest time a script advanced the core to (ms; `i64::MIN`: none).
@@ -1012,7 +1017,15 @@ impl Trading {
         let check_sessions = setup.check_sessions;
         let mut report = None;
         let journal_file = setup.journal.take();
-        let (journal, journal_report) = open_journal(journal_file.as_ref());
+        let shots_dir = journal_file
+            .as_ref()
+            .and_then(|(p, _)| p.parent())
+            .map(|d| d.join("shots"));
+        let shot_stores = crate::journal_shots::Stores::default();
+        // Filled below: no trade can close before the service starts.
+        let shot_kinds = crate::journal_shots::Kinds::default();
+        let (journal, journal_report) =
+            open_journal(journal_file.as_ref(), &shot_stores, &shot_kinds);
         let loaded = match &setup.file {
             Some(path) => match persist::load(path) {
                 Ok(f) => f,
@@ -1175,7 +1188,8 @@ impl Trading {
         );
         // The full state as the first events.
         handle.rebuild();
-        let accounts = Arc::new(RwLock::new(accounts));
+        *shot_kinds.write().unwrap_or_else(|e| e.into_inner()) = accounts;
+        let accounts = shot_kinds;
         let mut venues = Vec::new();
         for ext in brokers {
             let broker = match ext.open() {
@@ -1309,6 +1323,8 @@ impl Trading {
             check_sessions,
             start_account: None,
             journal,
+            shots_dir,
+            shot_stores,
             clock: setup.clock,
             advanced: std::sync::atomic::AtomicI64::new(i64::MIN),
         }
@@ -1433,6 +1449,7 @@ impl Trading {
     /// sees it too, to mark its positions (its broker gets the data but needs none); a replay's
     /// or the mock's prices never mark a real venue's positions.
     pub fn follow(&self, store: &Arc<ChartStore>) {
+        crate::journal_shots::remember(&self.shot_stores, store);
         self.bridge.follow_store(store, &self.handle);
         if self.venue_marks {
             for v in &self.venues {
@@ -1584,8 +1601,13 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 }
 
 /// The journal from its file (if any): its trades and edits, and a writer appending to it.
-/// A file this build can't read is left alone and not written this run (reported).
-fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option<String>) {
+/// A file this build can't read is left alone and not written this run (reported). Only a
+/// journal being saved takes trade snapshots, in `shots/` beside its file, from `stores`' bars.
+fn open_journal(
+    file: Option<&(PathBuf, String)>,
+    stores: &crate::journal_shots::Stores,
+    kinds: &crate::journal_shots::Kinds,
+) -> (Arc<JournalShared>, Option<String>) {
     use lines_trading::journal::store::{self, JournalWriter};
     let Some((path, source)) = file else {
         return (JournalShared::start(Journal::new(), None), None);
@@ -1607,7 +1629,13 @@ fn open_journal(file: Option<&(PathBuf, String)>) -> (Arc<JournalShared>, Option
                 }
             };
             let journal = Journal::from_records(loaded.map(|l| l.records).unwrap_or_default());
-            (JournalShared::start(journal, writer), report)
+            let shots = path.parent().filter(|_| writer.is_some()).and_then(|d| {
+                crate::journal_shots::spawn(stores.clone(), kinds.clone(), d.join("shots"))
+            });
+            (
+                JournalShared::start_with_shots(journal, writer, shots),
+                report,
+            )
         }
         Err(e) => (
             JournalShared::start(Journal::new(), None),
@@ -2818,6 +2846,65 @@ mod tests {
         assert_eq!(trades[1].side, lines_trading::Side::Sell);
         assert_eq!(trades[1].realized, lines_trading::Money::cents(-1250));
         assert_eq!(snap.open, 0);
+    }
+
+    /// A saved journal through the real service: a scripted round trip leaves one trade snapshot in
+    /// `shots/` beside the journal, named in the saved line, with no account in either. An
+    /// in-memory journal has no folder and takes none.
+    #[test]
+    fn a_saved_journals_trade_leaves_a_chart_file() {
+        let dir = std::env::temp_dir().join(format!("lines-trading-shots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut setup = paper_setup(vec![AccountConfig::paper("ACCT-DISTINCTIVE-42", 50_000)]);
+        setup.journal = Some((dir.join("mock.jsonl"), "mock".to_owned()));
+        let t = trading_with(setup);
+        assert_eq!(t.shots_dir.as_deref(), Some(dir.join("shots").as_path()));
+        let start = UtcMillis::parse_iso("2026-11-05T15:00:00Z").unwrap();
+        t.handle().advance_to(start);
+        t.handle().market(
+            es(),
+            vec![
+                MarketInput::BookClear,
+                MarketInput::Book {
+                    side: lines_core::Side::Bid,
+                    price: px(5999.75),
+                    qty: Qty(50),
+                },
+                MarketInput::Book {
+                    side: lines_core::Side::Ask,
+                    price: px(6000.00),
+                    qty: Qty(50),
+                },
+            ],
+        );
+        let product = catalog::get(catalog::ES).unwrap();
+        let a = AccountId::new("ACCT-DISTINCTIVE-42");
+        let steps = parse_script(
+            "buy 1 mkt; ack; wait 30; sell 1 mkt; ack",
+            &product,
+            es(),
+            &a,
+        )
+        .unwrap();
+        t.run_script(&steps, start, 25);
+        assert!(t.journal.flush(Duration::from_secs(30)));
+        let snap = t.journal.snapshot().unwrap();
+        let name = &snap.trades[0].screenshots[0];
+        assert!(!name.contains("DISTINCTIVE") && !name.contains('/') && !name.contains('\\'));
+        let svg = std::fs::read_to_string(dir.join("shots").join(name)).unwrap();
+        assert!(svg.contains("No chart data"), "no pane followed: {svg}");
+        assert!(!svg.contains("DISTINCTIVE"), "{svg}");
+        assert!(svg.contains(">PAPER  ·  "), "the kind, in words: {svg}");
+        let line = std::fs::read_to_string(dir.join("mock.jsonl")).unwrap();
+        assert!(
+            line.contains(&format!("\"screenshots\":[\"{name}\"]")),
+            "{line}"
+        );
+        drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+
+        let memory = trading(vec![AccountConfig::paper("paper", 50_000)]);
+        assert_eq!(memory.shots_dir, None);
     }
 
     /// Review round 2: the core reports positions on every market batch while one is open.

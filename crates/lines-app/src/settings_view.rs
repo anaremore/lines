@@ -435,6 +435,7 @@ fn commit(
     }
     if after.app.pnl_display != before.app.pnl_display {
         crate::pnl::display_changed();
+        crate::journal_shots::set_pnl(after.app.pnl_display);
         cx.refresh_windows();
     }
     if after.ws.hide_hints != before.ws.hide_hints {
