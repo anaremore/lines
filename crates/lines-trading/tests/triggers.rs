@@ -847,6 +847,42 @@ fn risk_limits_never_trap_a_fired_exit() {
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 0);
 
+    // The rate limits: a person's modify is refused, the chase's re-price isn't, and a submit a
+    // moment after a person's still goes.
+    let mut r = build(RiskLimits {
+        max_modifies_per_sec: Some(0),
+        max_submits_per_sec: Some(1),
+        ..Default::default()
+    });
+    r.open(call(), Side::Buy, 1, 242);
+    r.wait(2_000);
+    let id = r.arm(call(), TriggerKind::Target, 68_500);
+    let plain = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: call(),
+            side: Side::Sell,
+            qty: Qty(1),
+            kind: OrderKind::Limit { price: Price(245) },
+        }))
+        .unwrap()[0];
+    let refused = r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order: plain,
+        qty: None,
+        price: Some(Price(246)),
+    });
+    assert_eq!(refused.unwrap_err().code, RejectCode::Risk);
+    r.quote(Some(240), Some(242));
+    r.print(68_500);
+    assert_eq!(r.note(id), None, "{:?}", r.note(id));
+    r.quote(Some(230), Some(232));
+    r.wait(LAT + 1);
+    r.wait(CHASE);
+    assert_eq!(r.note(id), None, "{:?}", r.note(id));
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+
     // A real lockout: the day's trades used up by a round trip on another series. The entry
     // armed before it ends when it fires, with the lockout's reason; the exit goes.
     let mut r = Rig::long_call(1);
@@ -972,7 +1008,62 @@ fn a_fired_exit_stays_in_charge_until_told() {
     })
     .unwrap();
     assert_eq!(r.state(id), TriggerState::Ended);
-    assert_eq!(r.reason(id), "you cancelled its order");
+    assert_eq!(r.reason(id), "you canceled its order");
+}
+
+/// A fired exit ends the series' armed entry: it mustn't reopen what's being closed.
+#[test]
+fn a_fired_exit_ends_the_entry_on_its_series() {
+    let mut r = Rig::long_call(2);
+    let stop = r.arm(call(), TriggerKind::Stop, 68_000);
+    let again = r.arm(call(), entry(1, 300), 68_000);
+    let other = r.arm(put(), entry(1, 300), 68_000);
+    r.quote_on(put(), Some(100), Some(102));
+    r.print(68_000);
+    assert_eq!(r.state(stop), TriggerState::Working);
+    assert_eq!(r.state(again), TriggerState::Ended);
+    assert_eq!(r.reason(again), "the Stop fired");
+    assert!(
+        r.reason(other).starts_with("fired"),
+        "another series is its own"
+    );
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0, "flat, not long 1");
+}
+
+/// A strategy's contract takes no trigger, and a strategy starting on one ends it unfired: a fill
+/// under the strategy would be missing from its book.
+#[test]
+fn no_triggers_under_a_strategy() {
+    use lines_trading::strategy::{
+        HoursWindow, StrategyConfig, StrategyId, StrategyLimits, TradingHours,
+    };
+    let mut r = Rig::long_call(1);
+    let stop = r.arm(call(), TriggerKind::Stop, 68_000);
+    let id = StrategyId(7);
+    r.cmd(Command::AddStrategy(StrategyConfig {
+        id,
+        label: "example".into(),
+        account: acct(),
+        contract: call(),
+        limits: StrategyLimits {
+            max_position: 1,
+            max_daily_loss: 1_000,
+            max_orders_per_min: 5,
+            hours: TradingHours {
+                tz: "America/New_York".into(),
+                windows: vec![HoursWindow::new("09:30", "16:00")],
+            },
+        },
+    }))
+    .unwrap();
+    let e = r.try_arm(call(), TriggerKind::Target, 68_500).unwrap_err();
+    assert_eq!(e.code, RejectCode::Strategy);
+    r.print(68_000);
+    assert_eq!(r.state(stop), TriggerState::Ended);
+    assert_eq!(r.reason(stop), "a strategy trades this option now");
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 1, "nothing sold under it");
 }
 
 /// A Stop the broker couldn't fill on a quote says so, and tries on the next quote.
@@ -1527,7 +1618,7 @@ fn cancel_all_ends_the_triggers_it_covers() {
         contract: Some(call()),
     })
     .unwrap();
-    assert_eq!(r.reason(stop), "you cancelled all");
+    assert_eq!(r.reason(stop), "you canceled all");
     assert_eq!(r.state(other), TriggerState::Armed, "another series");
     r.cmd(Command::CancelAll {
         account: acct(),

@@ -92,6 +92,13 @@ impl TradingCore {
                 "triggers are on options, at a price of their underlying",
             ));
         };
+        // Firing would trade under the strategy: its book would miss the fills.
+        if self.strategy_trades(&spec.account, spec.contract) {
+            return Err(Reject::new(
+                RejectCode::Strategy,
+                "a strategy trades this option: no triggers on it",
+            ));
+        }
         if self.accounts[&spec.account].cfg.rules.is_some() {
             return Err(Reject::new(
                 RejectCode::PropRule,
@@ -327,7 +334,7 @@ impl TradingCore {
             ));
         };
         let order = l.order;
-        self.trigger_end(id, "cancelled");
+        self.trigger_end(id, "canceled");
         self.trigger_cancel_order(now, account, order);
         Ok(Vec::new())
     }
@@ -370,7 +377,7 @@ impl TradingCore {
                     .map(|l| l.view.id)
                     .collect();
                 for id in chased {
-                    self.trigger_end(id, "you cancelled its order");
+                    self.trigger_end(id, "you canceled its order");
                 }
                 return;
             }
@@ -385,7 +392,7 @@ impl TradingCore {
             .collect();
         let why = match env.command {
             Command::Flatten { .. } => "you flattened",
-            _ => "you cancelled all",
+            _ => "you canceled all",
         };
         for id in covered {
             self.trigger_end(id, why);
@@ -462,6 +469,11 @@ impl TradingCore {
             let Some(l) = self.triggers.live.get(&id) else {
                 continue; // its partner fired just now
             };
+            // A strategy started on it since: it fires nothing under one.
+            if self.strategy_trades(&l.view.account, l.view.contract) {
+                self.trigger_end(id, "a strategy trades this option now");
+                continue;
+            }
             match l.view.kind {
                 TriggerKind::Entry { .. } if gap => {
                     self.trigger_end(
@@ -538,10 +550,8 @@ impl TradingCore {
             .live
             .values()
             .filter(|p| {
-                p.view.id != id
-                    && p.view.account == account
-                    && p.view.contract == contract
-                    && p.view.kind.is_exit()
+                // Its partner, and an entry that would reopen what this is closing.
+                p.view.id != id && p.view.account == account && p.view.contract == contract
             })
             .map(|p| p.view.id)
             .collect();

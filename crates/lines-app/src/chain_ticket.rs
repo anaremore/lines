@@ -85,6 +85,18 @@ pub fn default_limit(side: Side, q: Option<&OptionQuote>, rules: OptionRules) ->
     }
 }
 
+/// The limit a close opens with: the mid, or with only its own side of the quote, that side,
+/// which the core takes with no mid (`risk::check_option_exit`).
+pub fn close_limit(side: Side, q: Option<&OptionQuote>, rules: OptionRules) -> Option<Price> {
+    default_limit(side, q, rules).or_else(|| {
+        let (bid, ask) = sides(q);
+        match side {
+            Side::Sell => bid,
+            Side::Buy => ask,
+        }
+    })
+}
+
 /// One tick up or down the option's grid, and never to zero.
 pub fn step_price(p: Price, up: bool, rules: OptionRules) -> Price {
     if up {
@@ -176,7 +188,11 @@ impl Ticket {
     /// Close the position instead of trading `side`, priced at the mid again (or back).
     pub fn set_close(&mut self, close: bool, q: Option<&OptionQuote>, rules: OptionRules) {
         self.close = close;
-        self.price = default_limit(self.side, q, rules);
+        self.price = if close {
+            close_limit(self.side, q, rules)
+        } else {
+            default_limit(self.side, q, rules)
+        };
         self.typed = None;
         self.refused = None;
     }
@@ -369,7 +385,7 @@ pub fn close_command(
         return None;
     }
     let side = if position > 0 { Side::Sell } else { Side::Buy };
-    let price = default_limit(side, q, rules)?;
+    let price = close_limit(side, q, rules)?;
     Some(command(
         account,
         contract,
@@ -776,7 +792,15 @@ mod tests {
         assert_eq!((s.side, s.qty), (Side::Buy, Qty(3)));
         assert!(close_command(a.clone(), contract(), 0, Some(&q), rules()).is_none());
         let one = quote(Some(240), None);
-        assert!(close_command(a.clone(), contract(), 2, Some(&one), rules()).is_none());
+        // Only its own side: that side, which the core takes with no mid.
+        let bid_only = close_command(a.clone(), contract(), 2, Some(&one), rules()).unwrap();
+        let Command::PlaceExit(s) = bid_only else {
+            panic!("{bid_only:?}");
+        };
+        assert_eq!(s.kind, OrderKind::Limit { price: Price(240) });
+        // Only the other side: nothing to close on.
+        assert!(close_command(a.clone(), contract(), -2, Some(&one), rules()).is_none());
+        assert!(close_command(a.clone(), contract(), 2, None, rules()).is_none());
         // A ticket's own order is reduce-only only in Close mode.
         let plain = command(a.clone(), contract(), Side::Sell, 1, Price(241), false);
         assert!(matches!(plain, Command::PlaceOrder(_)));

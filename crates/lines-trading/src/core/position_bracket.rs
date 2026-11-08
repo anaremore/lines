@@ -142,7 +142,7 @@ impl TradingCore {
     }
 
     /// Whether a strategy instance trades the account and contract (its exits are its own).
-    fn strategy_trades(&self, account: &AccountId, contract: ContractKey) -> bool {
+    pub(super) fn strategy_trades(&self, account: &AccountId, contract: ContractKey) -> bool {
         self.strategies
             .values()
             .any(|i| &i.cfg.account == account && i.cfg.contract == contract)
