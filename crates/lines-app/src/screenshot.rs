@@ -212,10 +212,12 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         let account = trading
             .default_account()
             .ok_or_else(|| anyhow!("--strategies-demo: no paper account"))?;
-        Some(crate::strategy_panel::DemoStrategies::sample(
-            &account,
-            d.contract.expect("checked"),
-            d.market_time.unwrap_or(lines_core::UtcMillis(0)),
+        Some(std::sync::Arc::new(
+            crate::strategy_panel::DemoStrategies::sample(
+                &account,
+                d.contract.expect("checked"),
+                d.market_time.unwrap_or(lines_core::UtcMillis(0)),
+            ),
         ))
     } else {
         None
@@ -255,8 +257,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         let _keep = &feeds;
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
-        if let Some(s) = strategies {
-            cx.set_global(crate::strategy_panel::Strategies(std::sync::Arc::new(s)));
+        if let Some(s) = &strategies {
+            cx.set_global(crate::strategy_panel::Strategies(s.clone()));
         }
         let mut settings = AppSettings::ephemeral();
         settings.settings.new_panes.default_qty = order_size;
@@ -299,6 +301,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             script,
             hover_header,
             settings_shot,
+            strategies,
         ) {
             fail(&e);
         }
@@ -330,6 +333,7 @@ fn capture(
     script: Option<(Vec<crate::trading::Step>, lines_core::UtcMillis)>,
     hover_header: bool,
     settings_shot: Option<SettingsShot>,
+    strategies: Option<std::sync::Arc<crate::strategy_panel::DemoStrategies>>,
 ) -> Result<()> {
     let handle = workspace::open_doc_window(
         &window,
@@ -346,6 +350,23 @@ fn capture(
         t.run_script(steps, *at, PaperConfig::default().latency_ms);
     } else {
         t.settle();
+    }
+    // `--strategies-demo` with a `strategy 3` script: instance #3's decisions behind its real
+    // fills (its markers' reasons), and a signal it skipped one point above its entry. Only
+    // then: without that script a fill here would be a person's.
+    let scripted = script.as_ref().is_some_and(|(steps, _)| {
+        steps.iter().any(|s| {
+            *s == crate::trading::Step::Source(lines_trading::Source::Strategy(
+                lines_trading::StrategyId(3),
+            ))
+        })
+    });
+    if let Some(demo) = strategies.as_ref().filter(|_| scripted) {
+        let fills: Vec<lines_trading::FillEvent> = t.cache.read().fills().cloned().collect();
+        let skip = fills
+            .first()
+            .map(|f| (f.at, lines_core::Price(f.price.0 + 100)));
+        demo.attach(lines_trading::StrategyId(3), &fills, skip);
     }
     let settings_window = settings_shot.map(|s| {
         crate::settings_view::open_for_screenshot(&s.section, s.search.as_deref(), &s.set, cx)

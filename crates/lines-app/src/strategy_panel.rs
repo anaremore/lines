@@ -120,8 +120,10 @@ pub struct Row {
     pub label: String,
     /// `level-touch 0.1.0`.
     pub strategy: String,
-    /// `Paper 1 · ESZ26`.
-    pub scope: String,
+    /// `ESZ26`.
+    pub contract: String,
+    /// `Paper 1`.
+    pub account: String,
     pub phase: Phase,
     /// Why it is paused, halted, faulted or stopped.
     pub why: Option<String>,
@@ -129,7 +131,7 @@ pub struct Row {
     pub position: String,
     /// `3 trades today`.
     pub trades: String,
-    /// Its own limits: `max 2 · loss $500 · 6 entries/min · 09:30-16:00 America/New_York`
+    /// Its own limits: `max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York`
     /// (no money while the P&L display hides it).
     pub limits: String,
     /// Today's net P&L as the P&L display allows (`None`: off, or nothing to show).
@@ -155,6 +157,13 @@ pub struct RowCtx<'a> {
     pub today: Option<CivilDate>,
     pub account_name: &'a str,
     pub mode: PnlDisplay,
+}
+
+/// A quantity (quantity units) as the product prints it: `2`, `0.5`.
+pub fn qty_text(product: &lines_core::Product, units: i64) -> String {
+    let mut s = String::new();
+    let _ = product.qty.write(lines_core::Qty(units), &mut s);
+    s
 }
 
 /// First letter upper case (the core's reasons start lower case).
@@ -211,7 +220,11 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
                 }
                 _ => String::new(),
             };
-            format!("{side} {}{avg}", p.qty.abs())
+            let qty = match &product {
+                Some(pr) => qty_text(pr, p.qty.abs()),
+                None => p.qty.abs().to_string(),
+            };
+            format!("{side} {qty}{avg}")
         }
         None => "Flat".to_owned(),
     };
@@ -244,7 +257,16 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         )
     });
     let l = &info.limits;
-    let mut limits = format!("max {}", l.max_position);
+    // Quantities in the product's own units (a crypto spot's aren't whole contracts).
+    let mut limits = match &product {
+        Some(pr) if pr.qty.decimals > 0 => format!("max {}", qty_text(pr, l.max_position)),
+        Some(pr) => format!(
+            "max {} contract{}",
+            qty_text(pr, l.max_position),
+            if l.max_position == 1 { "" } else { "s" }
+        ),
+        None => format!("max {}", l.max_position),
+    };
     // P&L display off shows no money: the limit is still named.
     if c.mode.money() {
         limits.push_str(&format!(" · daily loss ${}", l.max_daily_loss));
@@ -265,7 +287,8 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         id: info.id,
         label: info.label.clone(),
         strategy: format!("{} {}", info.strategy, info.version),
-        scope: format!("{} · {contract}", c.account_name),
+        contract,
+        account: c.account_name.to_owned(),
         phase,
         why,
         position,
@@ -325,7 +348,7 @@ pub fn submit_stop_all(trading: &crate::trading::Trading, flatten: bool, source:
 /// A fixed set of instances (tests and `--strategies-demo` screenshots).
 #[cfg(any(test, feature = "screenshot"))]
 pub struct DemoStrategies {
-    infos: Vec<StrategyInfo>,
+    infos: std::sync::Mutex<Vec<StrategyInfo>>,
     revision: AtomicU64,
 }
 
@@ -333,9 +356,73 @@ pub struct DemoStrategies {
 impl DemoStrategies {
     pub fn new(infos: Vec<StrategyInfo>) -> DemoStrategies {
         DemoStrategies {
-            infos,
+            infos: std::sync::Mutex::new(infos),
             revision: AtomicU64::new(1),
         }
+    }
+
+    /// Give instance `id` decisions behind its fills (screenshots: after a `strategy N`
+    /// script, so its markers have reasons): the first fill's order is an entry at a support
+    /// level, the others its stop; plus a signal it skipped at `skip_at`.
+    pub fn attach(
+        &self,
+        id: StrategyId,
+        fills: &[lines_trading::FillEvent],
+        skip_at: Option<(UtcMillis, lines_core::Price)>,
+    ) {
+        use lines_strategy::{Decision, LevelRef};
+        let level = |p: lines_core::Price| LevelRef {
+            source: "demo".into(),
+            kind: "support".into(),
+            label: Some("Support".into()),
+            price: p,
+        };
+        let mut out: Vec<DecisionRecord> = Vec::new();
+        let mut seen: Vec<lines_trading::OrderId> = Vec::new();
+        for f in fills {
+            if seen.contains(&f.order) {
+                continue;
+            }
+            let first = seen.is_empty();
+            seen.push(f.order);
+            out.push(DecisionRecord {
+                at: f.at,
+                decision: Decision {
+                    rule: if first { "touch-long" } else { "stop" }.into(),
+                    reason: if first {
+                        "Buy at Support: price touched it from above".into()
+                    } else {
+                        "Stop: Support broke".into()
+                    },
+                    levels: vec![level(f.price)],
+                    command: Some(Command::PlaceOrder(lines_trading::OrderSpec {
+                        account: f.account.clone(),
+                        contract: f.contract,
+                        side: f.side,
+                        qty: f.qty,
+                        kind: lines_trading::OrderKind::Market,
+                    })),
+                },
+                result: Some(Ok(vec![f.order])),
+                not_sent: None,
+            });
+        }
+        if let Some((at, price)) = skip_at {
+            let mut d = Decision::note("skip-wide", "The target crosses the zone boundary");
+            d.levels.push(level(price));
+            out.push(DecisionRecord {
+                at,
+                decision: d,
+                result: None,
+                not_sent: None,
+            });
+        }
+        out.sort_by_key(|d| d.at.0);
+        let mut infos = self.infos.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = infos.iter_mut().find(|i| i.id == id) {
+            i.decisions = out;
+        }
+        self.revision.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Four instances on `account`, one per interesting state, with decisions up to `now`:
@@ -367,8 +454,9 @@ impl DemoStrategies {
             contract.product,
             lines_feed::catalog::MNQ,
         ];
-        // #3's daily loss matches the screenshot script's (`strategy N`: 100).
+        // #3's limits match the screenshot script's (`strategy N`: 10 contracts, 100).
         let limit = |id: u32| StrategyLimits {
+            max_position: if id == 3 { 10 } else { 2 },
             max_daily_loss: if id == 3 { 100 } else { 500 },
             ..limits.clone()
         };
@@ -428,7 +516,7 @@ impl StrategySource for DemoStrategies {
     }
 
     fn snapshot(&self) -> Vec<StrategyInfo> {
-        self.infos.clone()
+        self.infos.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -523,10 +611,20 @@ mod tests {
         assert_eq!(starts, [false, true, false, true]);
         let stops: Vec<bool> = rows.iter().map(|r| r.can_stop).collect();
         assert_eq!(stops, [true, true, true, false]);
-        assert_eq!(rows[0].scope, "Paper 1 · MESZ26");
+        assert_eq!(
+            (rows[0].contract.as_str(), rows[0].account.as_str()),
+            ("MESZ26", "Paper 1")
+        );
         assert_eq!(
             rows[0].limits,
-            "max 2 · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
+            "max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
+        );
+        let mut one = i[0].clone();
+        one.limits.max_position = 1;
+        assert!(
+            row(&one, &ctx(&[], None, PnlDisplay::Both))
+                .limits
+                .starts_with("max 1 contract ·"),
         );
         let off = row(&i[0], &ctx(&[], None, PnlDisplay::Off));
         assert!(!off.limits.contains('$'), "{}", off.limits);

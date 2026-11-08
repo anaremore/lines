@@ -49,6 +49,7 @@ mod screenshot;
 mod settings_schema;
 mod settings_view;
 mod strategy_host;
+mod strategy_marks;
 mod strategy_panel;
 mod strategy_view;
 mod studies;

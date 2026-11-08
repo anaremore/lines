@@ -1136,6 +1136,14 @@ impl WindowView {
             Command::Strategy(StrategyCmd::Open) => {
                 self.open_panel(PaneKind::Strategies, window, cx)
             }
+            Command::Strategy(StrategyCmd::ToggleMarks) => {
+                match self.tab().focused_handle().cloned() {
+                    Some(PaneHandle::Chart(chart)) => {
+                        chart.update(cx, |c, cx| c.toggle_strategy_marks(cx));
+                    }
+                    _ => self.refuse("focus a chart first", cx),
+                }
+            }
             Command::Strategy(c) => self.strategy_command(c, window, cx),
             Command::ExportJournal => export_journal(cx),
             Command::JournalEdit | Command::JournalAllDates | Command::JournalGroup(_) => {
@@ -2094,6 +2102,11 @@ impl WindowView {
                     &format!("Delete all drawings for {symbol}…"),
                     Command::Draw(DrawCmd::DeleteAll),
                     false,
+                ));
+                items.push(MenuItem::named(
+                    "Hide strategy markers on this chart",
+                    Command::Strategy(StrategyCmd::ToggleMarks),
+                    chart.read(cx).strategy_marks_hidden(),
                 ));
                 items.push(MenuItem::named(
                     "Magnet crosshair (snap to OHLC)",

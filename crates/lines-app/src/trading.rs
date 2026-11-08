@@ -173,6 +173,10 @@ pub struct TradeState {
     /// Each strategy instance's state and reason, from `Event::Strategy` (decision 0025):
     /// the core enforces it, so the strategy panel shows this over the host's view.
     strategies: HashMap<StrategyId, (StrategyState, Option<String>)>,
+    /// The newest fills (`strategy_marks::KEEP_FILLS`), for the chart's strategy markers.
+    fills: VecDeque<lines_trading::FillEvent>,
+    /// Bumped on every fill (charts rebuild their strategy markers on it).
+    pub fills_seen: u64,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -233,7 +237,15 @@ impl TradeState {
                 }
                 Some(account)
             }
-            Event::Fill(f) => Some(f.account),
+            Event::Fill(f) => {
+                let account = f.account.clone();
+                if self.fills.len() == crate::strategy_marks::KEEP_FILLS {
+                    self.fills.pop_front();
+                }
+                self.fills.push_back(f);
+                self.fills_seen += 1;
+                Some(account)
+            }
             Event::Position(p) => {
                 let account = p.account.clone();
                 self.positions.insert((p.account.clone(), p.contract), p);
@@ -390,6 +402,11 @@ impl TradeState {
 
     pub fn account(&self, account: &AccountId) -> Option<&AccountView> {
         self.accounts.get(account)
+    }
+
+    /// The newest fills, oldest first.
+    pub fn fills(&self) -> impl Iterator<Item = &lines_trading::FillEvent> + Clone {
+        self.fills.iter()
     }
 
     /// Instances the core last reported Armed or Paused: they own their contract's position.

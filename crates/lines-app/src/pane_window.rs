@@ -48,7 +48,9 @@ fn command(cmd: Command) -> Option<Command> {
         Command::Draw(crate::commands::DrawCmd::Style) => Some(cmd),
         // Stop all strategies works from every window (decision 0025's kill switch).
         Command::Strategy(
-            crate::commands::StrategyCmd::StopAll | crate::commands::StrategyCmd::StopAllKeep,
+            crate::commands::StrategyCmd::StopAll
+            | crate::commands::StrategyCmd::StopAllKeep
+            | crate::commands::StrategyCmd::ToggleMarks,
         ) => Some(cmd),
         // Trading keys act on this window's pane, as in main windows.
         Command::Trade(_) => Some(cmd),
@@ -104,13 +106,26 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
+            // Every strategy command by name: hiding markers must never fall through to a stop.
             Some(Command::Strategy(c)) => {
-                if let Some(t) = crate::trading::Trading::try_global(cx) {
-                    crate::strategy_panel::submit_stop_all(
-                        t,
-                        c == crate::commands::StrategyCmd::StopAll,
-                        lines_trading::Source::Hotkey,
-                    );
+                use crate::commands::StrategyCmd as S;
+                match c {
+                    S::ToggleMarks => {
+                        if let PaneHandle::Chart(chart) = &self.handle {
+                            chart.update(cx, |c, cx| c.toggle_strategy_marks(cx));
+                        }
+                    }
+                    S::StopAll | S::StopAllKeep => {
+                        if let Some(t) = crate::trading::Trading::try_global(cx) {
+                            crate::strategy_panel::submit_stop_all(
+                                t,
+                                c == S::StopAll,
+                                lines_trading::Source::Hotkey,
+                            );
+                        }
+                    }
+                    // `command` lets none of these through to a pane window.
+                    S::Open | S::Start | S::Stop => {}
                 }
             }
             // Only keys reach here with a trading command (the window's menu has none).
@@ -156,6 +171,13 @@ impl PaneWindow {
             row.hint = commands::hint(style);
             items.push(row);
             items.push(MenuItem::sep());
+        }
+        if let PaneHandle::Chart(chart) = &self.handle {
+            items.push(MenuItem::named(
+                "Hide strategy markers on this chart",
+                Command::Strategy(commands::StrategyCmd::ToggleMarks),
+                chart.read(cx).strategy_marks_hidden(),
+            ));
         }
         items.push(MenuItem::named(
             "Re-attach to its previous spot",
@@ -337,6 +359,9 @@ mod tests {
         for c in [StrategyCmd::StopAll, StrategyCmd::StopAllKeep] {
             assert_eq!(command(Command::Strategy(c)), Some(Command::Strategy(c)));
         }
+        // A popped-out chart's menu toggles its markers.
+        let marks = Command::Strategy(StrategyCmd::ToggleMarks);
+        assert_eq!(command(marks), Some(marks));
         // Starting stays in main windows (the strategy panel).
         assert_eq!(command(Command::Strategy(StrategyCmd::Start)), None);
     }

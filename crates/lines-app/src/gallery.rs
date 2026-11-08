@@ -245,9 +245,23 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     // #3 trades a losing round trip as itself (its stop is hit), and the core halts it at
     // its daily loss.
     st.push(
-        "strategy 3; buy 10 mkt; ack; sell 10 stop 6018.00; ack; print 6018.00; ack; manual".into(),
+        "strategy 3; buy 10 mkt; ack; sell 10 stop 6018.75; ack; print 6018.75; ack; manual".into(),
     );
     v.push(s("strategies", true, end, st));
+    // The chart's strategy markers (decision 0025) beside the panel: #3's entry, its stop and a
+    // skipped signal, from the same script.
+    let mut mk = vec![
+        "--workspace".into(),
+        ws("strategy-marks.json"),
+        "--size".into(),
+        "1400x800".into(),
+        "--strategies-demo".into(),
+    ];
+    mk.push("--paper".into());
+    mk.push(
+        "strategy 3; buy 10 mkt; ack; sell 10 stop 6018.75; ack; print 6018.75; ack; manual".into(),
+    );
+    v.push(s("strategy-marks", false, end, mk));
     if let Some(p) = v.iter_mut().find(|s| s.name == "popout") {
         p.windows = 2;
     }
@@ -532,6 +546,11 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         pane("dom", ""),
         pane("strategies", "")
     );
+    let strategy_marks = format!(
+        r#"{{ "split": {{ "axis": "row", "ratio": 0.6, "first": {}, "second": {} }} }}"#,
+        pane("chart", r#", "chart": { "bar_px": 14.0 }"#),
+        pane("strategies", "")
+    );
     let anchor =
         |t: &str, p: i64| format!(r#"{{ "time": "2026-11-05T{t}:00.000Z", "price": {p} }}"#);
     let drawings = format!(
@@ -659,6 +678,7 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ("footprint-500t.json", footprint_500t),
         ("journal.json", journal),
         ("strategies.json", strategies),
+        ("strategy-marks.json", strategy_marks),
     ] {
         std::fs::write(dir.join(f), doc(layout)).with_context(|| f.to_owned())?;
     }

@@ -375,6 +375,10 @@ pub struct ChartState {
     /// in `drawings/<PRODUCT>.json`, never here). Optional: written only when set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_drawings: bool,
+    /// Strategy markers (entries, exits, skipped signals; decision 0025) hidden on this chart.
+    /// Optional: written only when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_strategy_marks: bool,
     /// Tick bars run across sessions (`true`) or restart at each session open (`false`)
     /// (roadmap 9b). Optional: written for tick charts and charts set to continuous; absent,
     /// the chart keeps the mode it started with (`--tick-continuous`).
@@ -904,10 +908,20 @@ mod tests {
         assert!(!json_has(&old, "hide_drawings"));
         let hidden = ChartState {
             hide_drawings: true,
+            hide_strategy_marks: false,
             ..old.clone()
         };
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(json.contains(r#""hide_drawings":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
+        // Strategy markers hidden on a chart (decision 0025): the same.
+        assert!(!json_has(&old, "hide_strategy_marks"));
+        let hidden = ChartState {
+            hide_strategy_marks: true,
+            ..old.clone()
+        };
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert!(json.contains(r#""hide_strategy_marks":true"#), "{json}");
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
         let future: ChartState =
             serde_json::from_str(r#"{"bar_px": 7.0, "timeframe": "3x"}"#).unwrap();
@@ -990,6 +1004,7 @@ mod tests {
         let state = ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
@@ -1017,6 +1032,7 @@ mod tests {
         let none = serde_json::to_string(&ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
@@ -1103,6 +1119,7 @@ mod tests {
                         chart: Some(ChartState {
                             timeframe: Default::default(),
                             hide_drawings: false,
+                            hide_strategy_marks: false,
                             tick_continuous: None,
                             bar_px: 9.5,
                             visibility: StudyVisibility::default(),
@@ -1180,6 +1197,7 @@ mod tests {
         let hidden = ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility {
@@ -1304,6 +1322,7 @@ mod tests {
             chart: Some(ChartState {
                 timeframe: Default::default(),
                 hide_drawings: false,
+                hide_strategy_marks: false,
                 tick_continuous: None,
                 bar_px: 7.0,
                 visibility: StudyVisibility::default(),
@@ -1338,6 +1357,7 @@ mod tests {
         let both = ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
             visibility: StudyVisibility::default(),
@@ -1419,6 +1439,7 @@ mod tests {
             Some(ChartState {
                 timeframe: Default::default(),
                 hide_drawings: false,
+                hide_strategy_marks: false,
                 tick_continuous: None,
                 bar_px: 6.0,
                 visibility: StudyVisibility::default(),

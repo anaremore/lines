@@ -291,6 +291,7 @@ impl StrategyView {
                 }
             }
             StrategyCmd::Open => return Ok(()),
+            StrategyCmd::ToggleMarks => return Err("focus a chart first"),
         };
         let sent = trading.submit(source, issued, c);
         if let Some(id) = id {
@@ -397,19 +398,7 @@ impl StrategyView {
                                     .text_color(t.text_main)
                                     .child("Strategies"),
                             )
-                            .child(crate::trade_bar::paper_badge(&t).flex_shrink_0())
-                            // Strategies don't use a DOM's trading switch: a chip of its own.
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .px_1()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(t.control_edge)
-                                    .text_color(t.text_main)
-                                    .child("Not gated by the DOM's trading switch"),
-                            ),
+                            .child(crate::trade_bar::paper_badge(&t).flex_shrink_0()),
                     )
                     // Always visible while any instance exists (decision 0025).
                     .when(any, |d| d.child(crate::popover::always_live(stop_all))),
@@ -522,43 +511,69 @@ impl StrategyView {
             .gap_2()
             .min_w_0()
             .child(self.chip(r.phase))
+            // The symbol first and whole; a narrow pane truncates the rest with "…".
             .child(
                 div()
                     .flex_shrink_0()
                     .text_color(t.text_main)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(r.label.clone()),
+                    .child(r.contract.clone()),
             )
-            .child(div().text_color(t.text_dim).child(r.strategy.clone()))
-            .child(div().text_color(t.text_main).child(r.scope.clone()));
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_main)
+                    .child(format!("{} · {} · {}", r.label, r.account, r.strategy)),
+            );
         let mut line2 = div()
             .flex()
             .flex_row()
             .items_center()
             .gap_3()
             .min_w_0()
-            .child(div().text_color(t.text_main).child(r.position.clone()))
-            .child(div().text_color(t.text_main).child(r.trades.clone()));
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(t.text_main)
+                    .child(r.position.clone()),
+            );
         let limits = div()
             .truncate()
             .text_color(t.text_dim)
             .child(r.limits.clone());
         if let Some(p) = &r.pnl {
             // Labeled by scope: this instance's P&L today (closed trades plus open).
+            // The number is never cut: its label gives way first.
             line2 = line2.child(
                 div()
                     .flex()
                     .flex_row()
                     .gap_1()
-                    .child(div().text_color(t.text_dim).child("P&L today"))
+                    .min_w_0()
                     .child(
                         div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(t.text_dim)
+                            .child("P&L today"),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
                             .text_color(pnl_color)
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(p.clone()),
                     ),
             );
         }
+        let line2 = line2.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(t.text_main)
+                .child(r.trades.clone()),
+        );
         // Every row has the same lines (blank when empty), so rows never change height and
         // nothing below moves.
         const BLANK: &str = "\u{a0}";
@@ -678,6 +693,19 @@ impl Render for StrategyView {
             .bg(t.bg)
             .text_size(px(12.0))
             .child(self.header(cx))
+            // Its own line, so a narrow pane can't reduce it to "…": a DOM's trading switch
+            // doesn't stop strategies, and nothing else on screen says so.
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .bg(t.panel)
+                    .border_b_1()
+                    .border_color(t.axis_line)
+                    .whitespace_normal()
+                    .text_color(t.text_main)
+                    .child("Not gated by a DOM's trading switch. Stop all stops them."),
+            )
             .child(
                 div()
                     .id("strategies")
