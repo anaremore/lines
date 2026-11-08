@@ -4715,6 +4715,14 @@ impl ChartView {
 
     /// The hovered strategy marker's text, beside it.
     fn strategy_mark_tip(&self, t: &Theme) -> Option<AnyElement> {
+        // Never over what the trader is aiming at: a drag or a drawing in progress.
+        if self.ct.drag.is_some()
+            || self.ct.adding.is_some()
+            || self.ct.pos_drag
+            || self.drawings.tool().is_some()
+        {
+            return None;
+        }
         let (x, y) = self.hover?;
         let m = self.marks.hit(x, y)?;
         let (left, top, w) = crate::strategy_marks::tip_place(
@@ -5703,8 +5711,9 @@ impl Pane for ChartView {
         {
             group |= menu.refresh(|o| s.order(o).and_then(crate::dom_trade::order_mark).is_some());
         }
-        let marks = self.poll_marks();
-                // Drawings changed on any chart of this product (shown here).
+        // Kept current while hidden, but only asks for a repaint while shown.
+        let marks = self.poll_marks() && !self.marks.hidden;
+        // Drawings changed on any chart of this product (shown here).
         let rates = group
             | marks
             | std::mem::take(&mut self.rates_changed)

@@ -352,8 +352,16 @@ fn capture(
         t.settle();
     }
     // `--strategies-demo` with a `strategy 3` script: instance #3's decisions behind its real
-    // fills (its markers' reasons), and a signal it skipped one point above its entry.
-    if let Some(demo) = &strategies {
+    // fills (its markers' reasons), and a signal it skipped one point above its entry. Only
+    // then: without that script a fill here would be a person's.
+    let scripted = script.as_ref().is_some_and(|(steps, _)| {
+        steps.iter().any(|s| {
+            *s == crate::trading::Step::Source(lines_trading::Source::Strategy(
+                lines_trading::StrategyId(3),
+            ))
+        })
+    });
+    if let Some(demo) = strategies.as_ref().filter(|_| scripted) {
         let fills: Vec<lines_trading::FillEvent> = t.cache.read().fills().cloned().collect();
         let skip = fills
             .first()

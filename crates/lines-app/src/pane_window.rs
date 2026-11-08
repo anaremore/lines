@@ -351,6 +351,9 @@ mod tests {
         for c in [StrategyCmd::StopAll, StrategyCmd::StopAllKeep] {
             assert_eq!(command(Command::Strategy(c)), Some(Command::Strategy(c)));
         }
+        // A popped-out chart's menu toggles its markers.
+        let marks = Command::Strategy(StrategyCmd::ToggleMarks);
+        assert_eq!(command(marks), Some(marks));
         // Starting stays in main windows (the strategy panel).
         assert_eq!(command(Command::Strategy(StrategyCmd::Start)), None);
     }

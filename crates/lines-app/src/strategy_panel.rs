@@ -260,7 +260,11 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
     // Quantities in the product's own units (a crypto spot's aren't whole contracts).
     let mut limits = match &product {
         Some(pr) if pr.qty.decimals > 0 => format!("max {}", qty_text(pr, l.max_position)),
-        Some(pr) => format!("max {} contracts", qty_text(pr, l.max_position)),
+        Some(pr) => format!(
+            "max {} contract{}",
+            qty_text(pr, l.max_position),
+            if l.max_position == 1 { "" } else { "s" }
+        ),
         None => format!("max {}", l.max_position),
     };
     // P&L display off shows no money: the limit is still named.
@@ -614,6 +618,13 @@ mod tests {
         assert_eq!(
             rows[0].limits,
             "max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
+        );
+        let mut one = i[0].clone();
+        one.limits.max_position = 1;
+        assert!(
+            row(&one, &ctx(&[], None, PnlDisplay::Both))
+                .limits
+                .starts_with("max 1 contract ·"),
         );
         let off = row(&i[0], &ctx(&[], None, PnlDisplay::Off));
         assert!(!off.limits.contains('$'), "{}", off.limits);
