@@ -95,8 +95,9 @@ pub struct OptionQuoteView {
 pub const PROP_OPTIONS_REFUSAL: &str = "a prop-rule account can't open options";
 
 /// The guard on one option order. With no two-sided fresh quote there is no mid to check a limit
-/// against, so it is refused, opening or closing: a limit typed blind could fill far from the
-/// market on the next quote. (Flatten doesn't pass here, and never fills on a missing side.)
+/// against, so it is refused: a limit typed blind could fill far from the market on the next
+/// quote. A reduce-only one at its own side of the quote has [`check_option_exit`]. (Flatten
+/// doesn't pass here, and never fills on a missing side.)
 pub fn check_option(
     guard: &OptionGuard,
     spec: &ContractSpec,

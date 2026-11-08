@@ -752,6 +752,265 @@ fn exits_shrink_with_the_position_and_never_flip() {
     assert_eq!(e.code, RejectCode::Invalid);
 }
 
+/// A fired exit ends if the position flips: it never buys back a short it wasn't armed for.
+#[test]
+fn a_fired_exit_ends_when_the_position_flips() {
+    let mut r = Rig::long_call(2);
+    let id = r.arm(call(), TriggerKind::Target, 68_500);
+    r.quote(Some(300), Some(900));
+    r.print(68_500);
+    r.quote(Some(280), Some(900));
+    r.wait(LAT + 1);
+    assert_eq!(r.state(id), TriggerState::Working);
+    // The trader sells through flat at the bid, on a narrower quote the guard allows.
+    r.quote(Some(280), Some(285));
+    r.open(call(), Side::Sell, 5, 280);
+    assert_eq!(r.position(call()), -3);
+    assert_eq!(r.state(id), TriggerState::Ended);
+    assert_eq!(r.reason(id), "the position flipped");
+    r.wait(CHASE * 3);
+    r.quote(Some(280), Some(285));
+    r.wait(CHASE);
+    assert_eq!(r.position(call()), -3, "the short is the trader's");
+    assert!(
+        !r.orders(call())
+            .iter()
+            .any(|o| o.side == Side::Buy && o.is_open()),
+        "nothing buys it back"
+    );
+}
+
+/// Risk limits block entries, never exits: a daily loss, a size limit or a price band can't trap
+/// a fired exit, and a real lockout (trades used up) stops an armed entry when it fires.
+#[test]
+fn risk_limits_never_trap_a_fired_exit() {
+    use lines_trading::RiskLimits;
+    let build = |limits: RiskLimits| {
+        let mut a = AccountConfig::paper("paper-1", 100_000);
+        a.limits = limits;
+        let mut r = Rig::with(a);
+        r.print(68_300);
+        r.quote(Some(240), Some(242));
+        r
+    };
+    // Bought in two lots of 2 under a limit of 2: a Target for all 4 is over it.
+    let mut r = build(RiskLimits {
+        max_order_qty: Some(2),
+        ..Default::default()
+    });
+    r.open(call(), Side::Buy, 2, 242);
+    r.open(call(), Side::Buy, 2, 242);
+    assert_eq!(r.position(call()), 4);
+    let id = r.arm(call(), TriggerKind::Target, 68_500);
+    r.quote(Some(300), Some(302));
+    r.print(68_500);
+    assert_eq!(r.note(id), None, "{:?}", r.note(id));
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+
+    // A price band tighter than a wide quote: the bid and its re-price stay allowed.
+    let mut r = build(RiskLimits {
+        price_band_ticks: Some(2),
+        ..Default::default()
+    });
+    r.open(call(), Side::Buy, 1, 242);
+    let id = r.arm(call(), TriggerKind::Target, 68_500);
+    r.quote(Some(100), Some(900));
+    r.print(68_500);
+    assert_eq!(r.note(id), None, "{:?}", r.note(id));
+    r.quote(Some(90), Some(900));
+    r.wait(LAT + 1);
+    r.wait(CHASE);
+    assert_eq!(r.note(id), None, "{:?}", r.note(id));
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+    assert_eq!(r.fills(call()).last(), Some(&(90, 1)));
+
+    // A daily loss already over its limit: a person's new order is refused, the Target isn't.
+    let mut r = build(RiskLimits {
+        daily_loss: Some(10),
+        ..Default::default()
+    });
+    r.open(call(), Side::Buy, 1, 242);
+    let id = r.arm(call(), TriggerKind::Target, 68_500);
+    r.quote(Some(100), Some(102));
+    let refused = r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: call(),
+        side: Side::Buy,
+        qty: Qty(1),
+        kind: OrderKind::Limit { price: Price(102) },
+    }));
+    assert_eq!(refused.unwrap_err().code, RejectCode::Risk);
+    r.print(68_500);
+    assert_eq!(r.note(id), None, "{:?}", r.note(id));
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+
+    // A real lockout: the day's trades used up by a round trip on another series. The entry
+    // armed before it ends when it fires, with the lockout's reason; the exit goes.
+    let mut r = Rig::long_call(1);
+    let stop = r.arm(call(), TriggerKind::Stop, 68_000);
+    r.quote_on(put(), Some(100), Some(102));
+    let later = r.arm(put(), entry(1, 300), 68_400);
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: Guardrails {
+            max_trades_per_day: Some(1),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let other = series(690, Right::Call);
+    r.quote_on(other, Some(50), Some(52));
+    r.open(other, Side::Buy, 1, 52);
+    r.open(other, Side::Sell, 1, 50);
+    assert_eq!(r.position(other), 0);
+    r.print(68_400);
+    assert_eq!(r.state(later), TriggerState::Ended);
+    assert!(!r.reason(later).starts_with("fired"), "{}", r.reason(later));
+    assert!(r.orders(put()).is_empty());
+    r.print(68_000);
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+    assert_eq!(r.state(stop), TriggerState::Ended);
+}
+
+/// A backlog of old prints isn't the feed coming back: the next print past a level is still a
+/// gap. And which way an entry fires comes from the newest print, not a late one.
+#[test]
+fn old_and_late_prints_prove_nothing() {
+    let mut r = Rig::new();
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_350);
+    let start = r.t;
+    r.wait(STALE * 6);
+    // Stamped 11 s ago: skipped, and it mustn't count as data.
+    let old = UtcMillis(r.t - STALE - 1);
+    r.market(
+        spy(),
+        MarketInput::Trade {
+            price: Price(68_300),
+            qty: Qty(1),
+            time: old,
+        },
+    );
+    // 5 s old and past the level: 6 s after the skipped print, but the feed never came back.
+    let recent = UtcMillis(r.t - 5_000);
+    r.market(
+        spy(),
+        MarketInput::Trade {
+            price: Price(68_350),
+            qty: Qty(1),
+            time: recent,
+        },
+    );
+    assert_eq!(r.state(id), TriggerState::Ended);
+    assert!(r.reason(id).contains("already past"), "{}", r.reason(id));
+    assert!(r.orders(call()).is_empty());
+    assert!(r.t > start);
+
+    let mut r = Rig::new();
+    r.print(68_400);
+    r.quote(Some(240), Some(242));
+    let late = UtcMillis(r.t - 500);
+    r.market(
+        spy(),
+        MarketInput::Trade {
+            price: Price(68_200),
+            qty: Qty(1),
+            time: late,
+        },
+    );
+    let id = r.arm(call(), entry(1, 300), 68_300);
+    assert_eq!(
+        r.view(id).unwrap().direction,
+        Direction::AtOrBelow,
+        "from 684.00, not the late 682.00"
+    );
+    r.print(68_400);
+    assert_eq!(r.state(id), TriggerState::Armed, "it didn't fire at once");
+}
+
+/// Once an exit is closing the position nothing more can be armed on it, and a person cancelling
+/// a fired Stop's market order, or the Stop, stops it like a Target.
+#[test]
+fn a_fired_exit_stays_in_charge_until_told() {
+    let mut r = Rig::long_call(1);
+    let id = r.arm(call(), TriggerKind::Stop, 68_000);
+    r.quote(None, Some(900));
+    r.print(68_000);
+    assert_eq!(r.state(id), TriggerState::Working);
+    for kind in [TriggerKind::Stop, TriggerKind::Target] {
+        let e = r.try_arm(call(), kind, 69_000).unwrap_err();
+        assert!(e.message.contains("already closing"), "{}", e.message);
+    }
+    // Cancelling the waiting Stop: nothing goes when a bid comes.
+    r.cmd(Command::CancelTrigger {
+        account: acct(),
+        id,
+    })
+    .unwrap();
+    r.quote(Some(240), Some(242));
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 1);
+
+    // Its market order on its way, cancelled by the person: it isn't sent again.
+    let mut r = Rig::long_call(1);
+    let id = r.arm(call(), TriggerKind::Stop, 68_000);
+    r.print(68_000);
+    let order = r
+        .orders(call())
+        .into_iter()
+        .rfind(|o| o.side == Side::Sell)
+        .unwrap()
+        .id;
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order,
+    })
+    .unwrap();
+    assert_eq!(r.state(id), TriggerState::Ended);
+    assert_eq!(r.reason(id), "you cancelled its order");
+}
+
+/// A Stop the broker couldn't fill on a quote says so, and tries on the next quote.
+#[test]
+fn a_stop_the_broker_cannot_fill_says_so() {
+    let (mut r, s) = scripted(true);
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let buy = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: call(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit { price: Price(242) },
+        }))
+        .unwrap()[0];
+    r.wait(1);
+    fill(&mut r, &s, buy, 242, 1);
+    let id = r.arm(call(), TriggerKind::Stop, 68_000);
+    r.print(68_000);
+    r.wait(1);
+    let first = s.lock().unwrap().placed.last().unwrap().id;
+    s.lock().unwrap().out.push(BrokerEvent::Cancelled {
+        id: first,
+        reason: "no liquidity".into(),
+        at: UtcMillis(r.t),
+    });
+    r.wait(1);
+    assert_eq!(
+        r.note(id).as_deref(),
+        Some("the bid couldn't fill it: waiting for a new quote")
+    );
+    r.quote(Some(230), Some(242));
+    r.wait(1);
+    assert_eq!(r.note(id), None);
+}
+
 /// A short position's exits buy back: its Target chases the ask, and its Stop lifts it.
 #[test]
 fn a_short_positions_exits_buy_back() {

@@ -24,8 +24,12 @@ use crate::types::{AccountId, OrderId, OrderKind};
 pub(super) struct Triggers {
     next: u64,
     live: BTreeMap<TriggerId, Live>,
-    /// The newest trade seen per underlying.
-    prints: HashMap<ProductId, UtcMillis>,
+    /// The newest usable trade seen per underlying: its stamp and price (`marks` takes any trade,
+    /// a late one too).
+    prints: HashMap<ProductId, (UtcMillis, Price)>,
+    /// A fired exit's own command is going through: past the account's risk limits, which block
+    /// entries, never exits.
+    pub(super) exempt: bool,
     /// Inside a step: commands it issues don't start another.
     stepping: bool,
     /// Saved exits waiting for the first rebuild.
@@ -34,7 +38,7 @@ pub(super) struct Triggers {
 
 struct Live {
     view: TriggerView,
-    /// A fired Target's working order.
+    /// A fired exit's working order.
     order: Option<OrderId>,
     /// When a fired Target next re-prices.
     next_try: UtcMillis,
@@ -124,9 +128,8 @@ impl TradingCore {
             .triggers
             .prints
             .get(&spec.contract.product)
-            .filter(|p| now.0 - p.0 <= guard.trigger_stale_ms)
-            .and_then(|_| self.marks.get(&under))
-            .and_then(|m| m.last);
+            .filter(|(t, _)| now.0 - t.0 <= guard.trigger_stale_ms)
+            .map(|(_, p)| *p);
         let direction = match spec.kind {
             TriggerKind::Entry { qty, max_price } => {
                 if qty.0 <= 0 {
@@ -175,6 +178,18 @@ impl TradingCore {
                 }
             }
             kind => {
+                // Once one is closing the position, there's nothing left to arm.
+                let closing = self.triggers.live.values().any(|l| {
+                    l.view.account == spec.account
+                        && l.view.contract == spec.contract
+                        && l.view.state == TriggerState::Working
+                });
+                if closing {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "an exit is already closing this position",
+                    ));
+                }
                 let position = self.position(&spec.account, spec.contract);
                 if position == 0 {
                     return Err(Reject::new(
@@ -391,12 +406,24 @@ impl TradingCore {
         }
         let product = contract.product;
         let time = time.min(now);
-        let prev = self.triggers.prints.get(&product).copied();
+        let prev = self.triggers.prints.get(&product).map(|(t, _)| *t);
         // A late print never replaces a newer one, nor fires.
         if prev.is_some_and(|p| time < p) {
             return;
         }
-        self.triggers.prints.insert(product, time);
+        // Too old to act on (a backlog arriving): no evidence the feed is back, so it doesn't
+        // close a gap either.
+        let limit = self
+            .triggers
+            .live
+            .values()
+            .map(|l| self.guard_of(&l.view.account).trigger_stale_ms)
+            .max()
+            .unwrap_or(crate::risk::DEFAULT_TRIGGER_STALE_MS);
+        if now.0 - time.0 > limit {
+            return;
+        }
+        self.triggers.prints.insert(product, (time, price));
         // Never in premarket or after hours.
         if !in_hours(product, time) {
             return;
@@ -524,6 +551,19 @@ impl TradingCore {
         self.trigger_step_exit(now, id);
     }
 
+    /// A fired exit's command: past the account's risk limits (a lockout, a daily loss, a size
+    /// limit or a price band blocks entries, never exits).
+    fn trigger_issue_exit(
+        &mut self,
+        now: UtcMillis,
+        command: Command,
+    ) -> Result<Vec<OrderId>, Reject> {
+        self.triggers.exempt = true;
+        let r = self.trigger_issue(now, command);
+        self.triggers.exempt = false;
+        r
+    }
+
     /// A command the core issues for a trigger, and its answer.
     fn trigger_issue(&mut self, now: UtcMillis, command: Command) -> Result<Vec<OrderId>, Reject> {
         let cmd = self.submit_internal(now, Source::Rule, command);
@@ -571,12 +611,15 @@ impl TradingCore {
                     continue;
                 }
                 let right = contract.option_key().map_or(Right::Call, |k| k.right);
-                let flipped = self.triggers.live.get(&id).is_some_and(|l| {
-                    state == TriggerState::Armed
-                        && Direction::of_exit(kind, right, position) != l.view.direction
-                });
+                let flipped =
+                    self.triggers.live.get(&id).is_some_and(|l| {
+                        Direction::of_exit(kind, right, position) != l.view.direction
+                    });
                 if flipped {
+                    // It was armed for the other side: it never closes this one.
+                    let order = self.triggers.live.get(&id).and_then(|l| l.order);
                     self.trigger_end(id, "the position flipped");
+                    self.trigger_cancel_order(now, &account, order);
                     continue;
                 }
                 if state == TriggerState::Working {
@@ -601,7 +644,7 @@ impl TradingCore {
                 .triggers
                 .prints
                 .get(&product)
-                .is_none_or(|p| now.0 - p.0 > limit);
+                .is_none_or(|(t, _)| now.0 - t.0 > limit);
         if let Some(l) = self.triggers.live.get_mut(&id)
             && l.view.stale != stale
         {
@@ -661,6 +704,12 @@ impl TradingCore {
                 // The broker couldn't fill on this quote: a new one, not a loop.
                 let tried = self.triggers.live.get(&id).and_then(|l| l.tried);
                 if tried.is_some() && tried == mark.quoted_at {
+                    self.trigger_note(
+                        id,
+                        Some(format!(
+                            "the {side_word} couldn't fill it: waiting for a new quote"
+                        )),
+                    );
                     return;
                 }
                 self.trigger_note(id, None);
@@ -671,8 +720,17 @@ impl TradingCore {
                     account: account.clone(),
                     contract: Some(contract),
                 };
-                if let Err(r) = self.trigger_issue(now, flatten) {
-                    self.trigger_note(id, Some(r.message));
+                match self.trigger_issue_exit(now, flatten) {
+                    Ok(ids) => {
+                        let market = ids
+                            .iter()
+                            .copied()
+                            .find(|o| self.orders.get(o).is_some_and(|o| o.role == Role::Flatten));
+                        if let Some(l) = self.triggers.live.get_mut(&id) {
+                            l.order = market;
+                        }
+                    }
+                    Err(r) => self.trigger_note(id, Some(r.message)),
                 }
             }
             TriggerKind::Target => {
@@ -719,7 +777,7 @@ impl TradingCore {
             }
             Some(o) => {
                 let order = o.id;
-                self.trigger_issue(
+                self.trigger_issue_exit(
                     now,
                     Command::ModifyOrder {
                         account: account.clone(),
@@ -741,7 +799,7 @@ impl TradingCore {
                         },
                     );
                 }
-                self.trigger_issue(
+                self.trigger_issue_exit(
                     now,
                     Command::PlaceExit(OrderSpec {
                         account: account.clone(),
@@ -783,7 +841,7 @@ impl TradingCore {
                         .triggers
                         .prints
                         .get(&product)
-                        .map(|p| UtcMillis(p.0 + limit + 1)),
+                        .map(|(t, _)| UtcMillis(t.0 + limit + 1)),
                     _ => None,
                 }
             })

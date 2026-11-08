@@ -898,8 +898,9 @@ impl TradingCore {
                 order, qty, price, ..
             } => {
                 let o = self.open_order(&account, order)?;
+                let exempt = self.triggers.exempt;
                 let a = self.accounts.get_mut(&account).expect("checked");
-                if let Some(max) = a.cfg.limits.max_modifies_per_sec
+                if let Some(max) = a.cfg.limits.max_modifies_per_sec.filter(|_| !exempt)
                     && in_last_second(&mut a.modifies, now) >= max
                 {
                     return Err(Reject::new(
@@ -1054,7 +1055,9 @@ impl TradingCore {
                         price_band_ticks: limits.price_band_ticks,
                         ..Default::default()
                     };
-                    risk::check(&band_only, &spec, o.side, Qty(0), &kind, &ctx)?;
+                    if !self.triggers.exempt {
+                        risk::check(&band_only, &spec, o.side, Qty(0), &kind, &ctx)?;
+                    }
                     if o.contract.option_key().is_some() {
                         let reducing = o.reduce_only.then_some(o.side);
                         self.check_option_kind(now, &account, o.contract, &kind, reducing)?;
@@ -1582,6 +1585,10 @@ impl TradingCore {
                     preset.name
                 ),
             ));
+        }
+        // A fired trigger's exit: risk limits block entries, never exits (decision 0029).
+        if self.triggers.exempt {
+            return Ok(());
         }
         self.check_risk(now, spec, &cs)
     }

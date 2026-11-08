@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(f.accounts[0].guardrails.state(), GuardState::Locked);
         // Written back: v3 (decision 0028: contracts may be options), the same content.
         let again = serde_json::to_value(&f).unwrap();
-        assert_eq!(again["version"], json!(3));
+        assert_eq!(again["version"], json!(VERSION));
         assert_eq!(read(&again.to_string()), f);
     }
 
