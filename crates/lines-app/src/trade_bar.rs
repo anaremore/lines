@@ -1028,6 +1028,8 @@ struct BarData {
     flashes: Vec<(&'static str, String)>,
     unresolved: usize,
     working: usize,
+    /// Strategy instances armed on this account (the switch says so: it doesn't stop them).
+    strategies_armed: usize,
 }
 
 fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
@@ -1050,6 +1052,7 @@ fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
         flashes: Vec::new(),
         unresolved: 0,
         working: 0,
+        strategies_armed: 0,
     }
 }
 
@@ -1148,6 +1151,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
             };
         }
         let now = Instant::now();
+        data.strategies_armed = s.strategies_armed(account);
         data.flashes = s
             .flashes(account, contract, now)
             .map(|f| {
@@ -1237,6 +1241,50 @@ pub fn switch_text(enabled: bool, blocker: Option<&str>, narrow: bool) -> String
     }
 }
 
+/// From this width the switch says "2 strategies armed"; narrower, "2 strat".
+pub const SWITCH_STRATEGIES: f32 = 380.0;
+/// From this width it leads with "Trading:" too.
+pub const SWITCH_WORDS: f32 = 600.0;
+
+/// The switch's text with strategies armed on its account (a switch that says "Disabled"
+/// doesn't stop them, decision 0025), as whole items that fit its row at each width: the state
+/// always, and the count with its noun always (with a count the switch doesn't shrink: the
+/// account chip gives way, so the number is never cut). A reason orders would be denied goes
+/// to the status line ([`reason_on_status`]). No strategies armed: [`switch_text`].
+pub fn switch_text_armed(enabled: bool, blocker: Option<&str>, armed: usize, width: f32) -> String {
+    if armed == 0 {
+        return switch_text(enabled, blocker, is_narrow(width));
+    }
+    let alert = if enabled && blocker.is_some() {
+        "!"
+    } else {
+        ""
+    };
+    if is_narrow(width) {
+        let state = if enabled { "On" } else { "Off" };
+        return format!("{state}{alert} · {armed} strat");
+    }
+    let state = if enabled { "Enabled" } else { "Disabled" };
+    let full = width == 0.0 || width >= SWITCH_WORDS;
+    if full || width >= SWITCH_STRATEGIES {
+        let lead = if full { "Trading: " } else { "" };
+        format!("{lead}{state}{alert} · {}", strategies_armed_text(armed))
+    } else {
+        format!("{state}{alert} · {armed} strat")
+    }
+}
+
+/// `1 strategy armed`, `2 strategies armed`.
+fn strategies_armed_text(armed: usize) -> String {
+    format!("{armed} strateg{} armed", plural_y(armed))
+}
+
+/// Whether why orders would be denied shows on the status line, not the switch: narrow panels,
+/// and any panel whose switch is already showing a strategy count.
+pub fn reason_on_status(narrow: bool, armed: usize) -> bool {
+    narrow || armed > 0
+}
+
 /// The order hotkeys chip's text: the state in words (narrow: "Keys" and the knob).
 pub fn keys_text(on: bool, narrow: bool) -> &'static str {
     match (on, narrow) {
@@ -1291,9 +1339,15 @@ fn keys_chip<V: TradePane>(
     )
 }
 
-/// A narrow panel's status line for an enabled switch whose orders would be denied.
-pub fn blocked_line(blocker: &str) -> String {
-    format!("Enabled, but orders are denied: {blocker}")
+/// The status line for an enabled switch whose orders would be denied. `short` below
+/// [`KEYS_IN_HEADER`], where the line may share its row with the Keys chip: the reason is what
+/// matters, and the line's items are laid out whole, last ones left out.
+pub fn blocked_line(blocker: &str, short: bool) -> String {
+    if short {
+        format!("Denied: {blocker}")
+    } else {
+        format!("Enabled, but orders are denied: {blocker}")
+    }
 }
 
 /// The guardrail strip's text for a lockout: "Cooldown · 3 losses in a row · 12 min left",
@@ -1597,17 +1651,61 @@ pub fn panel_height(width: f32) -> f32 {
     HDR_H + CARD_H + STATUS_H + meters + 2.0 * SEG_H + GRID_H + UTIL_H + PAD_Y
 }
 
+/// Below this width the disabled panel's line drops to its short form (the long one would be
+/// cut: 50 characters at the width test's 7.5 px).
+pub const LOCKED_HINT_FULL: f32 = 400.0;
+/// From this width that line, with strategies armed, also says how to enable.
+pub const LOCKED_HINT_ARMED_FULL: f32 = 520.0;
+
 /// What a disabled panel says in the joins' place: the lock that binds. With nothing else
 /// in the way, how to enable; with a lockout or another blocker too, that first (enabling
 /// alone would not unlock entries).
-pub fn locked_hint(blocker: Option<&str>) -> String {
-    match blocker {
-        Some(b) => format!("Entries locked: {b} · trading off"),
-        None => format!(
-            "Entries locked: enable trading ({})",
-            crate::commands::hint(crate::commands::Command::Trade(TradeCmd::ToggleArm))
-        ),
+///
+/// With strategies armed on the account the count leads, because "entries locked" alone would
+/// read as if nothing can enter: `2 strategies still armed · DOM locked`. "Still" only when
+/// this switch is the only lock: a blocker (a closed market, a blackout, a lockout) may bind
+/// them too, and the core decides. Laid out by [`whole_items`], so a narrow panel leaves out
+/// what follows the count, whole, and never cuts the number.
+pub fn locked_hint(blocker: Option<&str>, armed: usize, width: f32) -> String {
+    let key = crate::commands::hint(crate::commands::Command::Trade(TradeCmd::ToggleArm));
+    let at = |w: f32| width == 0.0 || width >= w;
+    if armed > 0 {
+        let strategies = strategies_armed_text(armed);
+        return match blocker {
+            Some(b) if at(LOCKED_HINT_ARMED_FULL) => {
+                format!("{strategies} · Entries locked: {b}")
+            }
+            Some(b) => format!("{strategies} · {}", capitalized(b)),
+            None => {
+                let still = format!("{armed} strateg{} still armed", plural_y(armed));
+                if at(LOCKED_HINT_ARMED_FULL) {
+                    format!("{still} · DOM entries locked ({key})")
+                } else {
+                    format!("{still} · DOM locked")
+                }
+            }
+        };
     }
+    match (blocker, at(LOCKED_HINT_FULL)) {
+        (Some(b), true) => format!("Entries locked: {b} · trading off"),
+        (None, true) => format!("Entries locked: enable trading ({key})"),
+        (Some(b), false) => format!("Locked: {b}"),
+        (None, false) => format!("Locked: {key}"),
+    }
+}
+
+/// First letter upper case (a blocker's words start lower case).
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// `strategy`/`strategies`'s ending.
+fn plural_y(n: usize) -> &'static str {
+    if n == 1 { "y" } else { "ies" }
 }
 
 /// The utility row's labels: words, short in a narrow panel ("Cancel all" keeps its object
@@ -1728,6 +1826,8 @@ pub fn dom_bar<V: TradePane>(
     };
     let blocked = blocker(v, product, data.as_ref(), cx);
     let blocker = blocked.as_deref();
+    let strategies_armed = data.as_ref().map_or(0, |d| d.strategies_armed);
+    let reason_below = reason_on_status(narrow, strategies_armed);
 
     let mut panel = div()
         .relative()
@@ -1758,7 +1858,9 @@ pub fn dom_bar<V: TradePane>(
             .cursor_pointer()
             .font_weight(FontWeight::BOLD)
             .whitespace_nowrap()
-            .overflow_hidden();
+            .overflow_hidden()
+            // A count is never cut: the account chip gives way.
+            .when(strategies_armed > 0, |d| d.flex_shrink_0());
         // The knob: filled when enabled, a hollow ring when disabled.
         let knob = div().size(px(8.0)).rounded_full().border_1();
         let s = if enabled {
@@ -1767,18 +1869,34 @@ pub fn dom_bar<V: TradePane>(
                 .text_color(t.on_warn)
                 .child(knob.bg(t.on_warn).border_color(t.on_warn))
         } else {
+            // Disabled reads quiet, unless strategies are armed: that part mustn't be missed.
             s.border_color(t.axis_line)
-                .text_color(t.text_dim)
+                .text_color(if strategies_armed > 0 {
+                    t.text_main
+                } else {
+                    t.text_dim
+                })
                 .child(knob.border_color(t.text_dim))
         };
-        let s = s.child(switch_text(enabled, blocker, narrow));
-        let name = if enabled {
+        let s = s.child(switch_text_armed(enabled, blocker, strategies_armed, width));
+        let verb = if enabled {
             "Disable trading"
         } else {
             "Enable trading"
         };
+        let name = match (strategies_armed, blocker) {
+            (0, _) => verb.to_owned(),
+            (n, why) => {
+                let it = if n == 1 { "it" } else { "them" };
+                let why = why.map_or_else(String::new, |b| format!(" Orders are denied: {b}."));
+                format!(
+                    "{verb}. {}: this switch doesn't stop {it} (Stop all does).{why}",
+                    strategies_armed_text(n)
+                )
+            }
+        };
         run_on_click(
-            tip(s, name, Some(TradeCmd::ToggleArm), t),
+            tip(s, &name, Some(TradeCmd::ToggleArm), t),
             TradeCmd::ToggleArm,
             cx,
         )
@@ -1848,11 +1966,11 @@ pub fn dom_bar<V: TradePane>(
                 t,
             )),
             // The calendar: a blackout (or a calendar that can't answer) as a strip; a
-            // release coming as a quiet line, unless a narrow panel needs the line for why
+            // release coming as a quiet line, unless the panel needs the line for why
             // orders are denied.
             (None, None, None)
                 if d.news.as_ref().is_some_and(|(warns, _)| {
-                    *warns || !(narrow && enabled && blocker.is_some())
+                    *warns || !(reason_below && enabled && blocker.is_some())
                 }) =>
             {
                 let (warns, text) = d.news.as_ref().expect("checked");
@@ -1873,9 +1991,14 @@ pub fn dom_bar<V: TradePane>(
                     status.child(whole_items(&line, t.text_dim, false))
                 }
             }
-            // Narrow: the switch shows only "!", the reason is here.
-            _ => match blocker.filter(|_| narrow && enabled) {
-                Some(b) => status.child(lock_strip(&blocked_line(b), "", true, t)),
+            // Narrow, or a strategy count on the switch: it shows only "!", the reason is here.
+            _ => match blocker.filter(|_| reason_below && enabled) {
+                Some(b) => status.child(lock_strip(
+                    &blocked_line(b, !keys_in_header(width)),
+                    "",
+                    true,
+                    t,
+                )),
                 None => status,
             },
         },
@@ -1908,7 +2031,8 @@ pub fn dom_bar<V: TradePane>(
             .child(gate(qty_row(v, narrow, t, cx)))
             .child(gate(bracket_row(v, product, narrow, t, cx)));
         // 7. Order buttons: market (filled) with the price they'd hit, joins (outlined).
-        panel = panel.child(order_grid(v, product, enabled, guarded, blocker, t, cx));
+        let locked = locked_hint(blocker, strategies_armed, width);
+        panel = panel.child(order_grid(v, product, enabled, guarded, locked, t, cx));
     }
 
     // 8. Utility row: BE and Reverse (Reverse dims while disabled), Cancel all and Flatten
@@ -2537,7 +2661,7 @@ fn order_grid<V: TradePane>(
     product: &Product,
     enabled: bool,
     guarded: bool,
-    blocker: Option<&str>,
+    locked: String,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> gpui::Div {
@@ -2642,7 +2766,10 @@ fn order_grid<V: TradePane>(
                 .items_center()
                 .justify_center()
                 .text_color(t.text_main)
-                .child(locked_hint(blocker)),
+                .min_w_0()
+                .overflow_hidden()
+                // Whole items, the count first: what doesn't fit is left out, never cut.
+                .child(whole_items(&locked, t.text_main, false)),
         );
     }
     grid
@@ -4133,10 +4260,43 @@ mod tests {
 
     #[test]
     fn the_locked_hint_names_the_lock_that_binds() {
-        assert!(locked_hint(None).starts_with("Entries locked: enable trading ("));
+        assert!(locked_hint(None, 0, 800.0).starts_with("Entries locked: enable trading ("));
         assert_eq!(
-            locked_hint(Some("cooldown")),
+            locked_hint(Some("cooldown"), 0, 800.0),
             "Entries locked: cooldown · trading off"
+        );
+        // A narrow panel's short form (the long one would be cut).
+        assert!(locked_hint(None, 0, 240.0).starts_with("Locked: "));
+        assert_eq!(locked_hint(Some("cooldown"), 0, 240.0), "Locked: cooldown");
+        // Strategies armed, and this switch the only lock: the count first, "still armed".
+        let wide = locked_hint(None, 2, 800.0);
+        assert!(
+            wide.starts_with("2 strategies still armed · DOM entries locked ("),
+            "{wide}"
+        );
+        assert_eq!(
+            locked_hint(None, 1, 420.0),
+            "1 strategy still armed · DOM locked"
+        );
+        assert_eq!(
+            locked_hint(None, 2, 240.0),
+            "2 strategies still armed · DOM locked"
+        );
+        // Another lock binds too: never "still" (the core may be refusing their entries as
+        // well), and the count stays first.
+        for width in [240.0, 420.0, 800.0] {
+            let line = locked_hint(Some("news blackout"), 2, width);
+            assert!(line.starts_with("2 strategies armed · "), "{line}");
+            assert!(line.to_lowercase().contains("news blackout"), "{line}");
+            assert!(!line.contains("still"), "{line}");
+        }
+        assert_eq!(
+            locked_hint(Some("market closed"), 2, 800.0),
+            "2 strategies armed · Entries locked: market closed"
+        );
+        assert_eq!(
+            locked_hint(Some("market closed"), 1, 240.0),
+            "1 strategy armed · Market closed"
         );
     }
 
@@ -4230,10 +4390,52 @@ mod tests {
         );
         assert_eq!(switch_text(true, None, true), "Enabled");
         assert_eq!(switch_text(true, Some("market closed"), true), "Enabled !");
+        // Strategies armed on the account: the state and the count at every width.
+        let closed = Some("market closed");
+        assert_eq!(switch_text_armed(false, None, 0, 240.0), "Disabled");
+        assert_eq!(switch_text_armed(false, None, 1, 240.0), "Off · 1 strat");
+        assert_eq!(switch_text_armed(true, closed, 2, 240.0), "On! · 2 strat");
         assert_eq!(
-            blocked_line("market closed"),
+            switch_text_armed(false, None, 2, 320.0),
+            "Disabled · 2 strat"
+        );
+        assert_eq!(
+            switch_text_armed(true, closed, 2, 320.0),
+            "Enabled! · 2 strat"
+        );
+        assert_eq!(
+            switch_text_armed(false, None, 1, 420.0),
+            "Disabled · 1 strategy armed"
+        );
+        assert_eq!(
+            switch_text_armed(true, closed, 2, 420.0),
+            "Enabled! · 2 strategies armed"
+        );
+        assert_eq!(
+            switch_text_armed(false, None, 1, 800.0),
+            "Trading: Disabled · 1 strategy armed"
+        );
+        assert_eq!(
+            switch_text_armed(false, closed, 2, 800.0),
+            "Trading: Disabled · 2 strategies armed"
+        );
+        assert_eq!(
+            switch_text_armed(true, closed, 2, 800.0),
+            "Trading: Enabled! · 2 strategies armed"
+        );
+        // Not laid out yet: the full layout.
+        assert_eq!(
+            switch_text_armed(true, None, 2, 0.0),
+            "Trading: Enabled · 2 strategies armed"
+        );
+        // The reason moves below whenever a count is on the switch.
+        assert!(reason_on_status(true, 0) && reason_on_status(false, 1));
+        assert!(!reason_on_status(false, 0));
+        assert_eq!(
+            blocked_line("market closed", false),
             "Enabled, but orders are denied: market closed"
         );
+        assert_eq!(blocked_line("market closed", true), "Denied: market closed");
     }
 
     /// The panel's height is a function of its width only: no trading state can change it, so
@@ -4285,6 +4487,74 @@ mod tests {
             60.0 + w("PAPER") + switch + 2.0 * 8.0 <= room,
             "header {switch}"
         );
+        // With strategies armed, a two-digit count and a blocker on the switch: its text beside
+        // the badge, and the account (which gives way) keeps at least a hit target. The
+        // switch is text, px_2, border, knob and gap: 30 px past the text (`w` has 10).
+        let account_left = |width: f32, keys: f32| {
+            let text = switch_text_armed(true, Some("market closed"), 12, width);
+            let gaps = if keys > 0.0 { 3.0 } else { 2.0 } * 8.0;
+            // The badge's gap to the chip (gap_1) too.
+            width - 2.0 * 8.0 - w("PAPER") - 4.0 - keys - (w(&text) + 20.0) - gaps
+        };
+        assert!(
+            account_left(MIN_DOM_WIDTH, 0.0) >= MIN_HIT,
+            "240 px with a count"
+        );
+        assert!(
+            account_left(NARROW_BELOW, 0.0) >= MIN_HIT,
+            "300 px with a count"
+        );
+        assert!(
+            account_left(SWITCH_STRATEGIES, 0.0) >= MIN_HIT,
+            "380 px with a count"
+        );
+        // The disabled panel's line: whole at each width's form, and with strategies armed its
+        // first item (the count) is always whole, with a two-digit count, at the narrowest
+        // (`whole_items` leaves out whatever follows it, whole).
+        let line = |s: &str| s.chars().count() as f32 * CHAR;
+        let long = Some("feed stale 1234 s");
+        for (hint, w, what) in [
+            (
+                locked_hint(None, 0, MIN_DOM_WIDTH),
+                MIN_DOM_WIDTH,
+                "no count",
+            ),
+            (
+                locked_hint(long, 0, MIN_DOM_WIDTH),
+                MIN_DOM_WIDTH,
+                "no count, reason",
+            ),
+            (
+                locked_hint(None, 0, LOCKED_HINT_FULL),
+                LOCKED_HINT_FULL,
+                "no count at 400",
+            ),
+            (locked_hint(None, 12, 320.0), 320.0, "count at 320"),
+            (locked_hint(long, 12, 340.0), 340.0, "count, reason at 340"),
+            (
+                locked_hint(None, 12, LOCKED_HINT_ARMED_FULL),
+                LOCKED_HINT_ARMED_FULL,
+                "count at 520",
+            ),
+            (
+                locked_hint(long, 12, LOCKED_HINT_ARMED_FULL),
+                LOCKED_HINT_ARMED_FULL,
+                "count, reason at 520",
+            ),
+        ] {
+            assert!(line(&hint) <= w - 16.0, "{what}: {hint}");
+        }
+        for hint in [
+            locked_hint(None, 12, MIN_DOM_WIDTH),
+            locked_hint(long, 12, MIN_DOM_WIDTH),
+        ] {
+            let first = status_parts(&hint).next().expect("items").0;
+            assert!(first.contains("12 strateg"), "{hint}");
+            assert!(line(first) <= room, "{first}");
+        }
+        // The denied line keeps its longest reason, whole (with the Keys chip on the line too,
+        // a long reason is left out whole: the switch's tooltip has it).
+        assert!(line(&blocked_line("feed stale 1234 s", true)) + 12.0 <= room);
         // From KEYS_IN_HEADER: the account, the Keys chip (knob and px_2 on top of `w`) and
         // the widest wide switch text fit one row.
         let room_k = KEYS_IN_HEADER - 2.0 * 8.0;
@@ -4315,6 +4585,14 @@ mod tests {
         );
         assert!(keys_in_header(0.0) && keys_in_header(KEYS_IN_HEADER));
         assert!(!keys_in_header(KEYS_IN_HEADER - 1.0) && !keys_in_header(MIN_DOM_WIDTH));
+        assert!(
+            account_left(KEYS_IN_HEADER, keys) >= MIN_HIT,
+            "480 px with a count"
+        );
+        assert!(
+            account_left(SWITCH_WORDS, keys) >= 60.0,
+            "600 px with a count"
+        );
         let header = 60.0 + w("PAPER") + keys + widest + 3.0 * 8.0;
         assert!(header <= room_k, "header with Keys {header} > {room_k}");
         const { assert!(MIN_HIT >= 20.0) };

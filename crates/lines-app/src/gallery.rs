@@ -206,6 +206,13 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     };
     v.push(paper("orders-armed", true, ORDERS, "--arm"));
     v.push(paper("orders-disarmed", false, ORDERS, ""));
+    // A strategy armed on the account: the switch says so (decision 0025).
+    v.push(paper(
+        "switch-strategy-armed",
+        false,
+        "strategy 1; manual",
+        "",
+    ));
     // In the daily break the paper broker refuses orders (session closed): a rejection on
     // its row and in the header.
     let mut r = args("--layout trading --size 1600x900 --theme dark --paper");

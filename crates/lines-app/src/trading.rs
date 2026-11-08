@@ -170,9 +170,10 @@ pub struct TradeState {
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
     guards: HashMap<AccountId, GuardView>,
-    /// Each strategy instance's state and reason, from `Event::Strategy` (decision 0025):
-    /// the core enforces it, so the strategy panel shows this over the host's view.
-    strategies: HashMap<StrategyId, (StrategyState, Option<String>)>,
+    /// Each strategy instance's state, reason and account, from `Event::Strategy` (decision
+    /// 0025): the core enforces it, so the strategy panel shows this over the host's view and
+    /// the DOM's switch counts the armed ones on its account.
+    strategies: HashMap<StrategyId, (StrategyState, Option<String>, AccountId)>,
     /// The newest fills (`strategy_marks::KEEP_FILLS`), for the chart's strategy markers.
     fills: VecDeque<lines_trading::FillEvent>,
     /// Bumped on every fill (charts rebuild their strategy markers on it).
@@ -259,6 +260,7 @@ impl TradeState {
             Event::Breach { account, .. } => Some(account),
             Event::Strategy {
                 id,
+                account,
                 state,
                 reason,
                 removed,
@@ -266,7 +268,7 @@ impl TradeState {
                 if removed {
                     self.strategies.remove(&id);
                 } else {
-                    self.strategies.insert(id, (state, reason));
+                    self.strategies.insert(id, (state, reason, account));
                 }
                 None
             }
@@ -414,7 +416,7 @@ impl TradeState {
         let mut v: Vec<StrategyId> = self
             .strategies
             .iter()
-            .filter(|(_, (s, _))| matches!(s, StrategyState::Armed | StrategyState::Paused))
+            .filter(|(_, (s, ..))| matches!(s, StrategyState::Armed | StrategyState::Paused))
             .map(|(id, _)| *id)
             .collect();
         v.sort();
@@ -423,7 +425,16 @@ impl TradeState {
 
     /// A strategy instance's state and reason as the core last reported them.
     pub fn strategy(&self, id: StrategyId) -> Option<(StrategyState, Option<&str>)> {
-        self.strategies.get(&id).map(|(s, r)| (*s, r.as_deref()))
+        self.strategies.get(&id).map(|(s, r, _)| (*s, r.as_deref()))
+    }
+
+    /// How many strategy instances the core last reported Armed on this account: they may
+    /// enter whatever a DOM's trading switch says.
+    pub fn strategies_armed(&self, account: &AccountId) -> usize {
+        self.strategies
+            .values()
+            .filter(|(s, _, a)| *s == StrategyState::Armed && a == account)
+            .count()
     }
 
     /// The account's guardrail lockout, if one is in force (`None`: active).
@@ -2888,6 +2899,32 @@ mod tests {
             "{steps:?}"
         );
         assert!(parse_script("guard news loud", &es_product, es(), &a).is_err());
+    }
+
+    /// The DOM's switch counts the instances armed on its account: not paused or stopped ones,
+    /// not another account's, not one removed.
+    #[test]
+    fn strategies_armed_counts_per_account() {
+        let (a, b) = (AccountId::new("paper"), AccountId::new("paper-eval"));
+        let mut s = TradeState::default();
+        let event = |id, account: &AccountId, state, removed| Event::Strategy {
+            id: StrategyId(id),
+            account: account.clone(),
+            state,
+            reason: None,
+            removed,
+        };
+        let now = Instant::now();
+        assert_eq!(s.strategies_armed(&a), 0);
+        s.apply(event(1, &a, StrategyState::Armed, false), now);
+        s.apply(event(2, &a, StrategyState::Armed, false), now);
+        s.apply(event(3, &b, StrategyState::Armed, false), now);
+        s.apply(event(4, &a, StrategyState::Disarmed, false), now);
+        assert_eq!((s.strategies_armed(&a), s.strategies_armed(&b)), (2, 1));
+        s.apply(event(1, &a, StrategyState::Paused, false), now);
+        assert_eq!(s.strategies_armed(&a), 1);
+        s.apply(event(2, &a, StrategyState::Stopped, true), now);
+        assert_eq!(s.strategies_armed(&a), 0);
     }
 
     #[test]

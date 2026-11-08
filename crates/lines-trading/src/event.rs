@@ -47,6 +47,8 @@ pub enum Event {
     /// 0025). `reason`: why it paused or stopped, in plain words.
     Strategy {
         id: StrategyId,
+        /// The account it trades.
+        account: AccountId,
         state: StrategyState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
