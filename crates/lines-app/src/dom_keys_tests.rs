@@ -225,8 +225,12 @@ fn order_keys_send_nothing_while_the_keys_chip_is_out_of_sight() {
     }
     let (_, _, n) = t.handle().latency();
     assert_eq!(n, 0, "no command reached the core");
-    for k in ["ctrl-shift-f", "ctrl-shift-a"] {
-        assert!(!key(k).needs_hotkeys(), "{k}: exits are never gated");
+    for k in ["shift-f", "shift-a"] {
+        let id = press_exit(&t, k);
+        assert!(
+            matches!(t.cache.read().result(id), Some(Ok(_))),
+            "{k} works with the chip out of sight"
+        );
     }
 }
 
