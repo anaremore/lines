@@ -1,11 +1,11 @@
 //! The Positions pane's content, without GPUI: every open position on every account, what it
-//! is worth now, and its exits. The core decides everything; the money here is the core's own
-//! (`PositionView::unrealised`), so nothing is computed twice. The last price is read back from
-//! that P&L, for display.
+//! is worth now, its exits, which columns fit, and what its Flatten sends. The core decides
+//! everything; the money here is the core's own (`PositionView::unrealised`), so nothing is
+//! computed twice. The last price is read back from that P&L, for display.
 
 use std::fmt::Write;
 
-use lines_core::{ContractKey, Price, Product};
+use lines_core::{ContractKey, Price, Product, UtcMillis};
 use lines_trading::trigger::{TriggerKind, TriggerView};
 use lines_trading::types::ContractSpec;
 use lines_trading::{AccountId, Command, Money, Order, PositionView, Role};
@@ -14,6 +14,8 @@ use lines_trading::{AccountId, Command, Money, Order, PositionView, Role};
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub account: AccountId,
+    /// The account's name, as the trading header shows it.
+    pub name: String,
     /// PAPER, SIM or LIVE, as the journal and the trading header say it.
     pub badge: &'static str,
     pub contract: ContractKey,
@@ -21,6 +23,8 @@ pub struct Row {
     pub avg: Option<f64>,
     pub last: Option<f64>,
     pub pnl: Money,
+    /// When the price the P&L was taken at was seen.
+    pub marked_at: Option<UtcMillis>,
     pub stop: Exit,
     pub target: Exit,
 }
@@ -35,6 +39,9 @@ pub enum Exit {
     /// An option's trigger at this price of its underlying.
     Trigger(Price),
 }
+
+/// An account the pane may list: its id, badge and name.
+pub type Listed = (AccountId, &'static str, String);
 
 /// What one price unit of one contract is worth, in whole currency.
 fn per_unit(product: &Product, contract: ContractKey) -> Option<f64> {
@@ -93,20 +100,22 @@ pub fn exits<'a>(
     (stop, target)
 }
 
-/// The pane's rows from the trading state: every account the app lists, positions that aren't
-/// flat, the most real accounts first (LIVE before SIM before PAPER), then by contract.
-pub fn rows(st: &crate::trading::TradeState, accounts: &[(AccountId, &'static str)]) -> Vec<Row> {
+/// The pane's rows from the trading state: the listed accounts (one, with a filter), positions
+/// that aren't flat, the most real accounts first (LIVE before SIM before PAPER), then by contract.
+pub fn rows(
+    st: &crate::trading::TradeState,
+    accounts: &[Listed],
+    filter: Option<&AccountId>,
+) -> Vec<Row> {
     let mut out = Vec::new();
-    for (account, badge) in accounts {
+    for (account, badge, name) in accounts {
+        if filter.is_some_and(|f| f != account) {
+            continue;
+        }
         for p in st.positions_of(account).filter(|p| p.qty != 0) {
-            out.push(row(st, account, badge, p));
+            out.push(row(st, account, badge, name, p));
         }
     }
-    let rank = |b: &str| match b {
-        "LIVE" => 0,
-        "SIM" => 1,
-        _ => 2,
-    };
     out.sort_by(|a, b| {
         rank(a.badge)
             .cmp(&rank(b.badge))
@@ -117,10 +126,29 @@ pub fn rows(st: &crate::trading::TradeState, accounts: &[(AccountId, &'static st
     out
 }
 
+fn rank(badge: &str) -> u8 {
+    match badge {
+        "LIVE" => 0,
+        "SIM" => 1,
+        _ => 2,
+    }
+}
+
+/// The header's tag: the most real account listed (LIVE, then SIM, then PAPER); `None` with
+/// nothing listed.
+pub fn header_badge(accounts: &[Listed], filter: Option<&AccountId>) -> Option<&'static str> {
+    accounts
+        .iter()
+        .filter(|(a, _, _)| filter.is_none_or(|f| f == a))
+        .map(|(_, b, _)| *b)
+        .min_by_key(|b| rank(b))
+}
+
 fn row(
     st: &crate::trading::TradeState,
     account: &AccountId,
     badge: &'static str,
+    name: &str,
     p: &PositionView,
 ) -> Row {
     let product = lines_feed::catalog::get(p.contract.product);
@@ -134,12 +162,14 @@ fn row(
     );
     Row {
         account: account.clone(),
+        name: name.to_owned(),
         badge,
         contract: p.contract,
         qty: p.qty,
         avg: p.avg_price,
         last,
         pnl: p.unrealised,
+        marked_at: p.marked_at,
         stop,
         target,
     }
@@ -151,28 +181,48 @@ pub fn totals(rows: &[Row]) -> (usize, Money) {
     (rows.len(), pnl)
 }
 
-/// A row's Close: the DOM's Flatten for that contract. Reduce-only, so it can't open, grow or
-/// flip a position, and it cancels that contract's orders on the account.
-pub fn close(row: &Row) -> Command {
+/// `3 positions`, `1 position`.
+pub fn count_words(n: usize) -> String {
+    if n == 1 {
+        "1 position".to_owned()
+    } else {
+        format!("{n} positions")
+    }
+}
+
+/// Flatten all's question: `Flatten 3 positions?`.
+pub fn flatten_prompt(n: usize) -> String {
+    format!("Flatten {}?", count_words(n))
+}
+
+/// A row's Flatten: the DOM's Flatten for that account and contract (cancel everything, then
+/// close; the owner's rule).
+pub fn flatten(row: &Row) -> Command {
     Command::Flatten {
         account: row.account.clone(),
         contract: Some(row.contract),
     }
 }
 
-/// The header's Flatten all or Cancel all: each listed position's contract, nothing else.
-pub fn exit_all(rows: &[Row], flatten: bool) -> Vec<Command> {
-    rows.iter()
-        .map(|r| {
-            let (account, contract) = (r.account.clone(), Some(r.contract));
-            if flatten {
-                Command::Flatten { account, contract }
-            } else {
-                Command::CancelAll { account, contract }
-            }
-        })
-        .collect()
+/// Flatten all: each listed position's own Flatten, nothing else.
+pub fn flatten_all(rows: &[Row]) -> Vec<Command> {
+    rows.iter().map(flatten).collect()
 }
+
+/// Whether a row's P&L is older than its market allows: an option's quote age limit by expiry,
+/// anything else a few seconds without a price (a feed that stopped). No price yet is stale too.
+pub fn stale(row: &Row, now: UtcMillis) -> bool {
+    let limit = if row.contract.option_key().is_some() {
+        lines_trading::risk::option_quote_stale_ms(row.contract, now)
+    } else {
+        STALE_MS
+    };
+    row.marked_at.is_none_or(|t| now.0 - t.0 > limit)
+}
+
+/// A future's or crypto's P&L with no price for this long reads stale (twice the feed's own
+/// stale limit, as a trigger's underlying).
+pub const STALE_MS: i64 = lines_trading::risk::DEFAULT_TRIGGER_STALE_MS;
 
 /// Where a click on a row takes the link group: a future's own contract, and an option's
 /// underlying (charts and DOMs show the underlying, and its chain the option).
@@ -185,13 +235,9 @@ pub fn target_of(contract: ContractKey) -> lines_feed::catalog::Target {
     }
 }
 
-/// `▲ Long 2`, `▼ Short 1`: the side in a shape and a word, never color alone.
-pub fn write_side(out: &mut impl Write, qty: i64) -> std::fmt::Result {
-    if qty > 0 {
-        write!(out, "▲ Long {qty}")
-    } else {
-        write!(out, "▼ Short {}", -qty)
-    }
+/// `▲ Long`, `▼ Short`: the side in a shape and a word, never color alone.
+pub fn side_word(qty: i64) -> &'static str {
+    if qty > 0 { "▲ Long" } else { "▼ Short" }
 }
 
 /// An exit as text: `5809.50`, `5809.50 +1`, `SPY 682.50`; nothing when there's none.
@@ -226,6 +272,85 @@ pub fn write_exit(
 /// The header's state, beside every tab: `3 open`. Nothing when nothing is.
 pub fn open_label(count: usize) -> Option<String> {
     (count > 0).then(|| format!("{count} open"))
+}
+
+/// The pane's columns, left to right.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Col {
+    Symbol,
+    Account,
+    Side,
+    Qty,
+    Avg,
+    Last,
+    Exits,
+    Pnl,
+    Flatten,
+}
+
+impl Col {
+    pub const ALL: [Col; 9] = [
+        Col::Symbol,
+        Col::Account,
+        Col::Side,
+        Col::Qty,
+        Col::Avg,
+        Col::Last,
+        Col::Exits,
+        Col::Pnl,
+        Col::Flatten,
+    ];
+
+    /// Width, logical px.
+    pub fn width(self) -> f32 {
+        match self {
+            Col::Symbol => 132.0,
+            Col::Account => 96.0,
+            Col::Side => 70.0,
+            Col::Qty => 44.0,
+            Col::Avg => 80.0,
+            Col::Last => 80.0,
+            Col::Exits => 150.0,
+            Col::Pnl => 96.0,
+            Col::Flatten => 64.0,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Col::Symbol => "Symbol",
+            Col::Account => "Account",
+            Col::Side => "Side",
+            Col::Qty => "Qty",
+            Col::Avg => "Avg",
+            Col::Last => "Last",
+            Col::Exits => "Stop / Target",
+            Col::Pnl => "Open P&L",
+            Col::Flatten => "",
+        }
+    }
+
+    /// Numbers sit right.
+    pub fn right(self) -> bool {
+        matches!(self, Col::Qty | Col::Avg | Col::Last | Col::Pnl)
+    }
+}
+
+/// Which columns go first when the pane is narrow: right to left, Symbol, Qty, P&L and
+/// Flatten last of all.
+const DROP: [Col; 5] = [Col::Exits, Col::Last, Col::Avg, Col::Side, Col::Account];
+
+/// The columns that fit `width` px, in order.
+pub fn shown(width: f32) -> Vec<Col> {
+    let mut cols = Col::ALL.to_vec();
+    let total = |cols: &[Col]| cols.iter().map(|c| c.width()).sum::<f32>();
+    for d in DROP {
+        if total(&cols) <= width {
+            break;
+        }
+        cols.retain(|c| *c != d);
+    }
+    cols
 }
 
 #[cfg(test)]
@@ -359,64 +484,57 @@ mod tests {
 
     #[test]
     fn the_side_is_a_shape_and_a_word() {
-        let side = |q| {
-            let mut s = String::new();
-            write_side(&mut s, q).unwrap();
-            s
-        };
-        assert_eq!(side(2), "▲ Long 2");
-        assert_eq!(side(-1), "▼ Short 1");
+        assert_eq!(side_word(2), "▲ Long");
+        assert_eq!(side_word(-1), "▼ Short");
     }
 
     fn a_row(account: &str, contract: ContractKey, pnl: i64) -> Row {
         Row {
             account: AccountId::new(account),
+            name: account.to_owned(),
             badge: "PAPER",
             contract,
             qty: 1,
             avg: None,
             last: None,
             pnl: Money::whole(pnl),
+            marked_at: Some(UtcMillis(1_000)),
             stop: Exit::None,
             target: Exit::None,
         }
     }
 
-    /// The header covers exactly what the pane lists: a Close and the header's exits are the
-    /// DOM's Flatten and Cancel All for each listed contract, and the total is theirs.
+    /// A row's Flatten and Flatten all are the DOM's Flatten for each listed account and
+    /// contract, and the total is theirs.
     #[test]
-    fn the_exits_and_totals_cover_what_is_listed() {
-        let rows = [a_row("paper", es(), 250), a_row("paper", call(), -72)];
+    fn flatten_and_totals_cover_what_is_listed() {
+        let rows = [a_row("paper", es(), 250), a_row("sim", call(), -72)];
         assert_eq!(totals(&rows), (2, Money::whole(178)));
         assert_eq!(totals(&[]), (0, Money::ZERO));
         assert_eq!(
-            close(&rows[0]),
+            flatten(&rows[0]),
             Command::Flatten {
                 account: AccountId::new("paper"),
                 contract: Some(es()),
             }
         );
-        let flat = exit_all(&rows, true);
-        assert_eq!(flat.len(), 2);
-        assert!(flat.iter().all(|c| matches!(
-            c,
-            Command::Flatten {
-                contract: Some(_),
-                ..
-            }
-        )));
-        let cancel = exit_all(&rows, false);
-        assert!(cancel.iter().all(|c| matches!(
-            c,
-            Command::CancelAll {
-                contract: Some(_),
-                ..
-            }
-        )));
-        assert!(
-            exit_all(&[], true).is_empty(),
-            "nothing listed, nothing sent"
+        assert_eq!(
+            flatten_all(&rows),
+            vec![
+                Command::Flatten {
+                    account: AccountId::new("paper"),
+                    contract: Some(es()),
+                },
+                Command::Flatten {
+                    account: AccountId::new("sim"),
+                    contract: Some(call()),
+                },
+            ]
         );
+        assert!(flatten_all(&[]).is_empty(), "nothing listed, nothing sent");
+        assert_eq!(flatten_prompt(3), "Flatten 3 positions?");
+        assert_eq!(flatten_prompt(1), "Flatten 1 position?");
+        assert_eq!(count_words(0), "0 positions");
     }
 
     /// A future switches the group to its contract; an option to its underlying.
@@ -431,5 +549,51 @@ mod tests {
     fn the_open_label_says_only_when_something_is() {
         assert_eq!(open_label(0), None);
         assert_eq!(open_label(3), Some("3 open".to_owned()));
+    }
+
+    /// A narrow pane gives up columns right to left; Symbol, Qty, P&L and Flatten last of all.
+    #[test]
+    fn narrow_panes_drop_columns_right_to_left() {
+        let full: f32 = Col::ALL.iter().map(|c| c.width()).sum();
+        assert_eq!(shown(full), Col::ALL.to_vec());
+        let without_exits = shown(full - 1.0);
+        assert!(!without_exits.contains(&Col::Exits));
+        assert!(without_exits.contains(&Col::Last));
+        let narrow = shown(200.0);
+        assert_eq!(narrow, vec![Col::Symbol, Col::Qty, Col::Pnl, Col::Flatten]);
+        // Narrower still: the four stay (the pane clips rather than lose the Flatten).
+        assert_eq!(shown(50.0), narrow);
+    }
+
+    /// A P&L with no price for longer than its market allows reads stale, never silently frozen.
+    #[test]
+    fn a_pnl_with_no_recent_price_is_stale() {
+        let t = UtcMillis::parse_iso("2026-11-09T15:00:00Z").unwrap();
+        let mut r = a_row("paper", es(), 10);
+        r.marked_at = Some(t);
+        assert!(!stale(&r, UtcMillis(t.0 + STALE_MS)));
+        assert!(stale(&r, UtcMillis(t.0 + STALE_MS + 1)));
+        r.marked_at = None;
+        assert!(stale(&r, t), "no price yet");
+        // An option by its expiry's limit: 10 s on the day it expires.
+        let mut o = a_row("paper", call(), 10);
+        o.marked_at = Some(t);
+        assert!(!stale(&o, UtcMillis(t.0 + 10_000)));
+        assert!(stale(&o, UtcMillis(t.0 + 10_001)));
+    }
+
+    /// The header's tag is the most real account listed.
+    #[test]
+    fn the_header_badge_is_the_most_real_listed() {
+        let accounts: Vec<Listed> = vec![
+            (AccountId::new("paper"), "PAPER", "Paper".into()),
+            (AccountId::new("sim"), "SIM", "Sim".into()),
+        ];
+        assert_eq!(header_badge(&accounts, None), Some("SIM"));
+        assert_eq!(
+            header_badge(&accounts, Some(&AccountId::new("paper"))),
+            Some("PAPER")
+        );
+        assert_eq!(header_badge(&[], None), None);
     }
 }

@@ -2457,12 +2457,18 @@ impl TradingCore {
             (Some(m), Some(s)) => s.money(p.unrealised(m), 1),
             _ => Money::ZERO,
         };
+        // The time of the price `mark` uses: the last trade's, else the quote's.
+        let marked_at = self
+            .marks
+            .get(&contract)
+            .and_then(|m| m.last.and(m.last_at).or(m.quoted_at));
         self.events.push(Event::Position(PositionView {
             account: account.clone(),
             contract,
             qty: p.qty(),
             avg_price: p.avg_price(),
             unrealised,
+            marked_at,
         }));
     }
 

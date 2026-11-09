@@ -1950,7 +1950,8 @@ pub enum Step {
 ///   only the trading core sees (resting orders fill, the journal's MAE/MFE move), for
 ///   round trips in a screenshot of a finished replay;
 /// - `strategy N` (add instance N on the account and contract, arm it, send what follows as
-///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss).
+///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss), `future SYM`
+///   (another product's front month from there on, to hold several at once).
 pub fn parse_script(
     s: &str,
     product: &lines_core::Product,
@@ -1961,6 +1962,7 @@ pub fn parse_script(
     use lines_trading::{BracketSpec, OrderSpec, Side};
     let mut account = first_account.clone();
     let mut contract = contract;
+    let mut product = product.clone();
     let mut out = Vec::new();
     let mut guards: HashMap<AccountId, Guardrails> = HashMap::new();
     for raw in s.split(';') {
@@ -2004,6 +2006,14 @@ pub fn parse_script(
                     * 1000.0) as i64,
             )),
             // The underlying of the option in hand, for a trigger to see.
+            // Another product's front month from here on (a screenshot holding several).
+            ["future", sym] => {
+                let p = lines_feed::catalog::by_symbol(sym)
+                    .ok_or_else(|| anyhow!("future {sym:?}: not in the catalog"))?;
+                contract = lines_feed::front_month(&p, None)
+                    .ok_or_else(|| anyhow!("future {sym:?}: no front month"))?;
+                product = p;
+            }
             ["under", p] => out.push(Step::Print(
                 ContractKey::equity(contract.product),
                 price(p)?,

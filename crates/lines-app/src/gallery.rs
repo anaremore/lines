@@ -500,21 +500,46 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
-    // Every open position: a chart beside the positions pane, its row's exits the option's
-    // triggers; the status line counts them from any tab. Narrow too.
-    for (name, quick, size) in [
-        ("positions", true, "1400x600"),
-        ("positions-narrow", false, "760x520"),
+    // Every open position: a chart beside the positions pane with three of them (a long future,
+    // a short one, an option whose exits are its triggers); the status line counts them from
+    // any tab. Narrow, light with the colorblind palette, and flat too.
+    let three = format!(
+        "{armed}; future ES; print 6000.00; buy 2 mkt; ack; future NQ; print 21000.00; sell 1 mkt; ack"
+    );
+    for (name, quick, size, look, script) in [
+        (
+            "positions",
+            true,
+            "1400x600",
+            "--theme dark",
+            three.as_str(),
+        ),
+        (
+            "positions-narrow",
+            false,
+            "760x520",
+            "--theme dark",
+            three.as_str(),
+        ),
+        (
+            "positions-light-cb",
+            false,
+            "1400x600",
+            "--theme light --palette cb",
+            three.as_str(),
+        ),
+        ("positions-flat", false, "1000x400", "--theme dark", ""),
     ] {
         let mut a = vec![
             "--workspace".to_owned(),
             ws("positions.json"),
             "--size".to_owned(),
             size.to_owned(),
-            "--paper".to_owned(),
-            armed.to_owned(),
         ];
-        a.extend(args("--theme dark"));
+        if !script.is_empty() {
+            a.extend(["--paper".to_owned(), script.to_owned()]);
+        }
+        a.extend(args(look));
         let mut sc = s(name, quick, CHAIN_AT, a);
         sc.chain = true;
         v.push(sc);
