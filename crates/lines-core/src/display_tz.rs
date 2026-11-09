@@ -183,11 +183,14 @@ impl DisplayTz {
 
     /// A name that holds all year, for a header over many times: "ET", "UTC", or the IANA
     /// city ("Chicago", "Port of Spain"); an abbreviation ("CST") would be wrong for the
-    /// rows on the other side of a DST change. A zone without a name: its label at `t`.
+    /// rows on the other side of a DST change. A zone without a city (no name, or `Etc/GMT+5`,
+    /// whose POSIX sign is the inverse of its offset, and which has no DST): its label at `t`.
     pub fn write_name<W: fmt::Write>(&self, t: UtcMillis, out: &mut W) -> fmt::Result {
         match (self.label, self.tz.iana_name()) {
             (Label::Fixed(s), _) => out.write_str(s),
-            (Label::Abbrev, Some(n)) => {
+            (Label::Abbrev, Some(n))
+                if !n.starts_with("Etc/") && !n.bytes().any(|b| b.is_ascii_digit()) =>
+            {
                 let city = n.rsplit('/').next().unwrap_or(n);
                 for (i, part) in city.split('_').enumerate() {
                     if i > 0 {
@@ -197,7 +200,7 @@ impl DisplayTz {
                 }
                 Ok(())
             }
-            (Label::Abbrev, None) => self.write_label(t, out),
+            (Label::Abbrev, _) => self.write_label(t, out),
         }
     }
 
@@ -355,6 +358,9 @@ mod tests {
         assert_eq!(name(&pos, "2026-07-15T18:30:00Z"), "Port of Spain");
         assert_eq!(name(&DisplayTz::exchange(), "2026-07-15T18:30:00Z"), "ET");
         assert_eq!(name(&DisplayTz::utc(), "2026-07-15T18:30:00Z"), "UTC");
+        // Etc/GMT+5 is UTC-5 (POSIX signs): its exact label, never "GMT+5".
+        let etc = DisplayTz::resolve(&ZoneChoice::Named("Etc/GMT+5".into())).unwrap();
+        assert_eq!(name(&etc, "2026-07-15T18:30:00Z"), "-05");
     }
 
     #[test]

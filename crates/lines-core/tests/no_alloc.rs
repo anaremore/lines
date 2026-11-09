@@ -117,7 +117,11 @@ fn paint_path_does_not_allocate() {
             // What paint does each frame: the process-wide zone, and a clone kept by a pane.
             let current = lines_core::display_tz::current();
             let kept = zone.clone();
-            std::hint::black_box((&current, &kept));
+            // A Time header's name (`pane_columns::Columns::name_zone`).
+            let mut name = FixedStr::<40>::new();
+            kept.write_name(UtcMillis(frame as i64 * 60_000), &mut name)
+                .unwrap();
+            std::hint::black_box((&current, &kept, &name));
             scene.build(series.bars(), &vp, &fmt, 1.25, series.period_ms(), zone);
             let mut label = FixedStr::<32>::new();
             for line in &scene.price_lines {

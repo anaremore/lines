@@ -311,7 +311,7 @@ pub enum Table {
     Journal,
 }
 
-/// The Time header's room: "Time " and the longest zone name (a city: "Dumont DUrville").
+/// The Time header's room: "Time " and the longest zone name (a city: "DumontDUrville").
 const TIME_HEADER_CAP: usize = 40;
 
 /// A pane's columns: the trader's choices, this frame's layout, and what the content needs.
