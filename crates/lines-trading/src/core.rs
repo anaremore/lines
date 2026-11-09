@@ -123,6 +123,8 @@ struct Mark {
     ask: Option<Price>,
     /// When an option's quote was stamped.
     quoted_at: Option<UtcMillis>,
+    /// When a bid or ask last came (a contract marked by its book alone).
+    book_at: Option<UtcMillis>,
 }
 
 impl Mark {
@@ -2397,8 +2399,14 @@ impl TradingCore {
                     };
                     m.quoted_at = Some(time);
                 }
-                MarketInput::Bid(p) => m.bid = Some(p),
-                MarketInput::Ask(p) => m.ask = Some(p),
+                MarketInput::Bid(p) => {
+                    m.bid = Some(p);
+                    m.book_at = Some(now);
+                }
+                MarketInput::Ask(p) => {
+                    m.ask = Some(p);
+                    m.book_at = Some(now);
+                }
                 _ => {}
             }
             self.broker.market(now, contract, i);
@@ -2461,7 +2469,7 @@ impl TradingCore {
         let marked_at = self
             .marks
             .get(&contract)
-            .and_then(|m| m.last.and(m.last_at).or(m.quoted_at));
+            .and_then(|m| m.last.and(m.last_at).or(m.quoted_at).or(m.book_at));
         self.events.push(Event::Position(PositionView {
             account: account.clone(),
             contract,

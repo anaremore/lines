@@ -85,7 +85,11 @@ pub fn exits<'a>(
         }
     };
     for o in orders {
-        if o.side.sign() != -position.signum() || o.parent.is_some_and(&entry_open) {
+        // A leg still held for its entry (not working yet) isn't this position's; once the
+        // entry has filled at all, its legs work for what filled.
+        let held = matches!(o.state, OrderState::Submitted | OrderState::Acked)
+            && o.parent.is_some_and(&entry_open);
+        if o.side.sign() != -position.signum() || held {
             continue;
         }
         let Some(p) = o.kind.prices().next() else {
@@ -134,8 +138,7 @@ pub fn rows(
         rank(a.badge)
             .cmp(&rank(b.badge))
             .then(a.account.0.cmp(&b.account.0))
-            .then(a.contract.product.cmp(&b.contract.product))
-            .then(format!("{:?}", a.contract).cmp(&format!("{:?}", b.contract)))
+            .then(a.contract.cmp(&b.contract))
     });
     out
 }
@@ -204,6 +207,38 @@ pub fn flatten_outcome(state: &OrderState, open: bool, replaced: bool) -> Option
             Some("Flatten canceled: the position is still open".to_owned())
         }
         _ => None,
+    }
+}
+
+/// A press on a row's Flatten counts only once the pointer has moved since the rows last
+/// changed: a row that closes or comes in slides the others, and a still pointer would be over
+/// another position than the one it was aimed at.
+#[derive(Clone, Debug, Default)]
+pub struct PressGuard {
+    rows: Vec<(AccountId, ContractKey)>,
+    changed: bool,
+}
+
+impl PressGuard {
+    /// The rows as they stand, each render.
+    pub fn see(&mut self, rows: &[Row]) {
+        let now: Vec<_> = rows
+            .iter()
+            .map(|r| (r.account.clone(), r.contract))
+            .collect();
+        if now != self.rows {
+            self.rows = now;
+            self.changed = true;
+        }
+    }
+
+    pub fn pointer_moved(&mut self) {
+        self.changed = false;
+    }
+
+    /// Whether a press now means what's under it.
+    pub fn may_press(&self) -> bool {
+        !self.changed
     }
 }
 
@@ -504,8 +539,13 @@ mod tests {
         // A bracket's leg whose entry is still open isn't this position's.
         let mut leg = order(Role::StopLoss, 578_000);
         leg.parent = Some(OrderId(1));
+        leg.state = OrderState::Acked;
         let (stop, _) = exits(std::iter::once(&leg), [].iter(), 1, |_| true);
-        assert_eq!(stop, Exit::None);
+        assert_eq!(stop, Exit::None, "held for its entry");
+        // Its entry partly filled: the leg works for what filled.
+        leg.state = OrderState::Working;
+        let (stop, _) = exits(std::iter::once(&leg), [].iter(), 1, |_| true);
+        assert_eq!(stop, Exit::Order(Price(578_000), 0));
         let (stop, _) = exits(std::iter::once(&leg), [].iter(), 1, none);
         assert_eq!(stop, Exit::Order(Price(578_000), 0));
     }
@@ -661,6 +701,22 @@ mod tests {
         o.marked_at = Some(t);
         assert!(!stale(&o, UtcMillis(t.0 + 10_000)));
         assert!(stale(&o, UtcMillis(t.0 + 10_001)));
+    }
+
+    /// Rows that move under a still pointer hold a press until it moves.
+    #[test]
+    fn a_press_waits_for_the_pointer_after_the_rows_move() {
+        let mut g = PressGuard::default();
+        let rows = [a_row("paper", es(), 0), a_row("paper", call(), 0)];
+        g.see(&rows);
+        g.pointer_moved();
+        assert!(g.may_press());
+        g.see(&rows);
+        assert!(g.may_press(), "the same rows");
+        g.see(&rows[1..]);
+        assert!(!g.may_press(), "one closed: the other slid up");
+        g.pointer_moved();
+        assert!(g.may_press());
     }
 
     /// The header's tag is the most real account listed.

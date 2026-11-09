@@ -28,10 +28,11 @@ use crate::wsdoc::PaneDoc;
 const MIN_HIT: f32 = 20.0;
 const ROW_H: f32 = 22.0;
 
-/// A Flatten sent from here, until its outcome is known.
+/// A Flatten sent from here, until its outcome is known (or a minute passes with none).
 struct Asked {
     id: CommandId,
     label: String,
+    at: Instant,
 }
 
 /// A Flatten's market order, watched until it closes or ends without closing.
@@ -66,6 +67,8 @@ pub struct PositionsView {
     width: f32,
     /// Accounts that can't be traded through Lines, and why.
     read_only: Vec<(AccountId, String)>,
+    /// A row's Flatten waits for the pointer after the rows move.
+    press_guard: model::PressGuard,
 }
 
 impl EventEmitter<FeedChanged> for PositionsView {}
@@ -134,6 +137,7 @@ impl PositionsView {
             note: None,
             width: 0.0,
             read_only: Vec::new(),
+            press_guard: model::PressGuard::default(),
         }
     }
 
@@ -170,6 +174,7 @@ impl PositionsView {
             return false;
         };
         self.rows = model::rows(&st, &self.accounts, self.filter.as_ref());
+        self.press_guard.see(&self.rows);
         let mut notes = Vec::new();
         let mut watch = Vec::new();
         self.asked.retain(|a| match st.result(a.id) {
@@ -190,14 +195,15 @@ impl PositionsView {
                 }
                 false
             }
-            None => true,
+            // An answer that has left the cache's list isn't coming back to us.
+            None => a.at.elapsed() < std::time::Duration::from_secs(60),
         });
         self.watching.extend(watch);
         // Accepted isn't closed: the broker can reject the market order, or it can end with
         // nothing to fill on. Said as the chain says it, with the broker's own words.
         self.watching.retain(|w| {
             let Some(o) = st.order(w.order) else {
-                return true;
+                return false;
             };
             if !o.state.is_terminal() {
                 return true;
@@ -258,6 +264,7 @@ impl PositionsView {
             self.asked.push(Asked {
                 id,
                 label: Self::label(r),
+                at: Instant::now(),
             });
         }
     }
@@ -626,7 +633,16 @@ impl PositionsView {
                 Col::Side => Self::cell(c)
                     .text_color(if r.qty > 0 { t.up } else { t.down })
                     .child(model::side_word(r.qty)),
-                Col::Qty => Self::cell(c).child(r.qty.abs().to_string()),
+                Col::Qty => {
+                    let mut q = String::new();
+                    match &product {
+                        Some(p) => {
+                            let _ = p.qty.write(lines_core::Qty(r.qty.abs()), &mut q);
+                        }
+                        None => q = r.qty.abs().to_string(),
+                    }
+                    Self::cell(c).child(q)
+                }
                 Col::Avg => Self::cell(c).child(price(r.avg)),
                 Col::Last => Self::cell(c)
                     .when(stale, |d| d.text_color(t.text_dim))
@@ -647,21 +663,28 @@ impl PositionsView {
                         .flex()
                         .justify_end()
                         .child(crate::popover::always_live(
-                            self.button(SharedString::from(format!("position-flatten-{n}")), word)
-                                .when(off.is_some(), |b| b.text_color(t.text_dim))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(why) = this.read_only(&row.account) {
-                                            this.note = Some(why);
-                                        } else if this.guarded(ev) {
-                                            this.flatten(std::slice::from_ref(&row), cx);
-                                        }
-                                        cx.notify();
-                                    }),
-                                ),
-                        ))
+                        self.button(SharedString::from(format!("position-flatten-{n}")), word)
+                            .when(off.is_some(), |b| b.text_color(t.text_dim))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(why) = this.read_only(&row.account) {
+                                        this.note = Some(why);
+                                    } else if !this.press_guard.may_press() {
+                                        // Said once; the next press is the trader's own.
+                                        this.press_guard.pointer_moved();
+                                        this.note = Some(
+                                            "The rows just changed: check the row and press again"
+                                                .to_owned(),
+                                        );
+                                    } else if this.guarded(ev) {
+                                        this.flatten(std::slice::from_ref(&row), cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                    ))
                 }
             });
         }
@@ -721,10 +744,9 @@ impl Render for PositionsView {
         self.common.paints += 1;
         let t = self.theme;
         let money = crate::picker_view::settings(cx).pnl_display.money();
-        // The market clock (a replay's), else the wall's.
-        let now = Trading::try_global(cx)
-            .and_then(|tr| tr.now(&self.store))
-            .or_else(|| Some(lines_feed::now_utc()));
+        // The pane's clock (a replay's market time, a live source's wall time); with none,
+        // nothing is called stale rather than judged on another clock.
+        let now = Trading::try_global(cx).and_then(|tr| tr.now(&self.store));
         if self.rows.is_empty() {
             self.confirm = false;
         }
@@ -753,6 +775,9 @@ impl Render for PositionsView {
                 .min_h_0()
                 .overflow_scroll()
                 .track_focus(&self.focus)
+                .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, _| {
+                    this.press_guard.pointer_moved();
+                }))
                 .child(self.titles(&cols))
                 .children(rows)
                 .child(self.total_row(&cols, money, now))
