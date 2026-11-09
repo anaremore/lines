@@ -429,8 +429,15 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     let armed = "under 683.59; option 2026-11-09 684 call; buy 2 @ 0.65; ack; trigger stop 682.50; trigger target 686.00; option 2026-11-09 680 put; trigger entry 681.50 max 0.25 1";
     let long = "under 683.59; option 2026-11-09 684 call; buy 2 @ 0.65; ack";
     let stale = format!("{armed}; wait 11");
-    let lines: [(&str, bool, &str, Option<&str>, &str, &str); 9] = [
-        ("chain-lines-stale", false, &stale, None, "1600x800", "dark"),
+    let lines = [
+        (
+            "chain-lines-stale",
+            false,
+            stale.as_str(),
+            None,
+            "1600x800",
+            "dark",
+        ),
         ("chain-lines", true, armed, None, "1600x800", "dark"),
         ("chain-lines-light", false, armed, None, "1600x800", "light"),
         ("chain-lines-narrow", false, armed, None, "800x640", "dark"),

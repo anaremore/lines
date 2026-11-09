@@ -585,6 +585,45 @@ fn moving_a_stop_goes_through_the_core() {
     );
 }
 
+/// An entry that fires during a drag: its cancel is refused, so the arm that waits on that answer
+/// never goes and nothing buys twice.
+#[test]
+fn a_fired_entrys_cancel_is_refused_so_it_isnt_armed_again() {
+    use lines_trading::trigger::TriggerKind;
+    let mut r = Rig::new();
+    let k = key(684, Right::Call);
+    let c = contract_of(k);
+    r.quote(k, 240, 242);
+    underlying_print(&mut r, 68_300);
+    arm(
+        &mut r,
+        c,
+        TriggerKind::Entry {
+            qty: Qty(1),
+            max_price: Price(500),
+        },
+        68_350,
+    );
+    let id = r.t.cache.read().triggers().next().map(|v| v.id).unwrap();
+    r.wait(1);
+    r.quote(k, 240, 242);
+    underlying_print(&mut r, 68_350);
+    r.t.settle();
+    assert_eq!(live_triggers(&r), 0, "it fired");
+    let cancel = r.t.submit(
+        lines_trading::Source::Dom,
+        Instant::now(),
+        Command::CancelTrigger {
+            account: account(),
+            id,
+        },
+    );
+    r.t.settle();
+    let answer = r.t.cache.read().result(cancel).cloned().expect("answered");
+    assert!(answer.is_err(), "there's nothing to cancel");
+    assert!(!crate::chain_lines::arm_after_cancel(&answer));
+}
+
 /// "When SPY" is the same ticket: an entry at the level with the ticket's size and its price as
 /// the max, and never a second order path. Only a buy can wait.
 #[test]

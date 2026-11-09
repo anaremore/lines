@@ -58,6 +58,11 @@ impl Line {
     pub fn draggable(&self) -> bool {
         !self.working
     }
+
+    /// The same line, whatever its level: drafts and the ticket have no id of their own.
+    pub fn same(&self, other: &Line) -> bool {
+        self.source == other.source && self.kind == other.kind && self.contract == other.contract
+    }
 }
 
 /// What a line's place is checked against.
@@ -89,6 +94,10 @@ pub fn refusal(line: &Line, to: Price, around: &Around) -> Option<&'static str> 
 }
 
 fn entry_refusal(line: &Line, to: Price, right: Right, a: &Around) -> Option<&'static str> {
+    // The core won't arm an entry without a fresh print, and a move starts by canceling this one.
+    if line.stale {
+        return Some("the feed is stale: moving it would end it");
+    }
     let Some(last) = a.last else {
         return Some("no underlying price: an entry can't tell which way it fires");
     };
@@ -155,6 +164,13 @@ fn exit_refusal(kind: TriggerKind, to: Price, right: Right, a: &Around) -> Optio
     None
 }
 
+/// What a moved entry does once the core answers its cancel: arm at the new level, or stop. A
+/// refused cancel means the entry isn't there to move (it fired, say), and arming anyway would
+/// buy a second time.
+pub fn arm_after_cancel<T, E>(answer: &Result<T, E>) -> bool {
+    answer.is_ok()
+}
+
 /// Arm a line where it is.
 pub fn arm(account: AccountId, line: &Line, level: Price) -> Command {
     Command::ArmTrigger(TriggerSpec {
@@ -165,9 +181,10 @@ pub fn arm(account: AccountId, line: &Line, level: Price) -> Command {
     })
 }
 
-/// An armed line moved to `to`. A Stop or Target is replaced by arming it again, and the old one
-/// stays if that's refused. An entry has no such swap: it's canceled first, because with both
-/// alive one print could fire two, so a refusal ends the entry and says so.
+/// An armed line moved to `to`, in order. A Stop or Target is replaced by arming it again, and the
+/// old one stays if that's refused. An entry has no such swap: it's canceled first, because with
+/// both alive one print could fire two, and the second goes only on [`arm_after_cancel`]. A refusal
+/// of that one ends the entry and says so.
 pub fn move_commands(account: AccountId, line: &Line, id: TriggerId, to: Price) -> Vec<Command> {
     let again = arm(account.clone(), line, to);
     if line.kind.is_exit() {
@@ -282,7 +299,7 @@ pub fn row_warning(v: &TriggerView) -> Option<(&'static str, String)> {
 /// An ended trigger worth telling: what the trader did themselves isn't news.
 pub fn ended_message(v: &TriggerView) -> Option<String> {
     let why = v.reason.as_deref()?;
-    if why == "replaced" || why.starts_with("you ") {
+    if why == "replaced" || why == "canceled" || why.starts_with("you ") {
         return None;
     }
     let mut series = String::new();
@@ -492,6 +509,40 @@ mod tests {
         assert!(matches!(&cmds[0], Command::ArmTrigger(s) if s.level == Price(68_300)));
     }
 
+    /// Two series' drafts of one kind are two lines: a drag moves the one it holds.
+    #[test]
+    fn a_line_is_itself_across_series() {
+        let a = line(TriggerKind::Stop, Right::Call);
+        let mut b = a;
+        b.contract = series(690, Right::Call);
+        assert!(a.same(&a));
+        assert!(!a.same(&b));
+        let mut other_kind = a;
+        other_kind.kind = TriggerKind::Target;
+        assert!(!a.same(&other_kind));
+        let mut moved = a;
+        moved.level = Price(1);
+        assert!(a.same(&moved), "the level is what a drag changes");
+    }
+
+    #[test]
+    fn a_refused_cancel_never_arms() {
+        assert!(arm_after_cancel::<(), ()>(&Ok(())));
+        assert!(!arm_after_cancel::<(), ()>(&Err(())));
+    }
+
+    #[test]
+    fn a_stale_armed_entry_refuses_a_move_rather_than_lose_it() {
+        let mut entry = line(ENTRY, Right::Call);
+        entry.fires = Some(AtOrAbove);
+        entry.stale = true;
+        assert!(refusal(&entry, Price(68_500), &around(0)).is_some());
+        // An exit can move: it needs no fresh print to arm.
+        let mut stop = line(TriggerKind::Stop, Right::Call);
+        stop.stale = true;
+        assert!(refusal(&stop, Price(68_300), &around(1)).is_none());
+    }
+
     #[test]
     fn new_lines_start_on_their_own_side() {
         use TriggerKind::{Stop, Target};
@@ -590,7 +641,7 @@ mod tests {
         let m = ended_message(&v).unwrap();
         assert!(m.contains("Entry on 684C"), "{m}");
         assert!(m.contains("the ask is above your max"), "{m}");
-        for mine in ["replaced", "you canceled all", "you flattened"] {
+        for mine in ["replaced", "canceled", "you canceled all", "you flattened"] {
             v.reason = Some(mine.to_owned());
             assert_eq!(ended_message(&v), None, "{mine}");
         }

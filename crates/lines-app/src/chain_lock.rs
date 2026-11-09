@@ -161,6 +161,12 @@ pub fn table_moved<T: PartialEq>(was: Option<T>, now: T) -> bool {
     was.is_some_and(|w| w != now)
 }
 
+/// Whether the foot just left the pointer behind: it shrank from under a still pointer, so what
+/// was a press on the foot is a press on the table now.
+pub fn foot_left_pointer(was: f32, now: f32, pointer_y: f32) -> bool {
+    was < now && pointer_y >= was && pointer_y < now
+}
+
 /// The marker's words.
 pub fn write_marker(
     out: &mut impl std::fmt::Write,
@@ -415,6 +421,18 @@ mod tests {
         assert!(
             table_moved(Some(window), (100.0, 200.0, 1600.0, 900.0)),
             "a vertical maximize where only the size is reported (X11, Wayland)"
+        );
+    }
+
+    #[test]
+    fn the_foot_leaves_the_pointer_only_when_it_shrinks_from_under_it() {
+        assert!(foot_left_pointer(600.0, 650.0, 620.0));
+        assert!(!foot_left_pointer(600.0, 650.0, 590.0), "above it");
+        assert!(!foot_left_pointer(600.0, 650.0, 660.0), "still on it");
+        assert!(!foot_left_pointer(650.0, 600.0, 620.0), "it grew");
+        assert!(
+            !foot_left_pointer(f32::INFINITY, 600.0, 620.0),
+            "first frame"
         );
     }
 
