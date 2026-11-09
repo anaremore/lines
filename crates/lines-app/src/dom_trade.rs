@@ -347,18 +347,26 @@ pub enum QuickOrder {
 /// What an order key says while the DOM's order hotkeys are off.
 pub const HOTKEYS_OFF: &str = "Order keys off: enable hotkeys (Ctrl+Shift+Y)";
 
+/// What an order key says while a short pane has no room for the Keys chip.
+pub const KEYS_HIDDEN: &str = "Order keys off: pane too short to show Keys";
+
 /// The command for an order key (`commands::TradeCmd::needs_hotkeys`). Order keys need the
 /// DOM's own hotkey switch ("Keys on", off by default, sticky like the trading switch) on top
-/// of everything a button needs ([`quick`]): with it off nothing is built or sent. `ctx` is
-/// read only once the switch allows it.
+/// of everything a button needs ([`quick`]): with it off nothing is built or sent. Its chip must
+/// be in view too (`chip_shown`): keys that can send an order are never out of sight. `ctx` is
+/// read only once these allow it.
 pub fn key_order(
     q: QuickOrder,
     hotkeys: bool,
+    chip_shown: bool,
     arming: Arming,
     ctx: impl FnOnce() -> Result<EntryCtx, Refusal>,
 ) -> Result<TradeCommand, Refusal> {
     if !hotkeys {
         return Err(Refusal(HOTKEYS_OFF));
+    }
+    if !chip_shown {
+        return Err(Refusal(KEYS_HIDDEN));
     }
     quick(q, arming, &ctx()?)
 }

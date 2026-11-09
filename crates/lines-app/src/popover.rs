@@ -138,6 +138,7 @@ pub fn opened<V: 'static>(cx: &mut Context<V>, kind: Kind, close: fn(&mut V, &mu
 /// The view's popover `kind` closed (keeps the slot exact; a stale entry is harmless, since
 /// closing a shut popover does nothing).
 pub fn closed<V: 'static>(cx: &mut Context<V>, kind: Kind) {
+    mark_moved_under_pointer();
     let key = (cx.entity_id(), kind);
     if let Some(g) = cx.try_global::<Open>()
         && g.slot.current() == Some(key)
@@ -193,9 +194,82 @@ thread_local! {
     static DISMISSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Where and when a first press landed.
+type FirstPress = (f32, f32, std::time::Instant);
+
+thread_local! {
+    /// Where the last first press that reached an order control landed, until something under the
+    /// pointer goes or moves.
+    static FIRST_PRESS: std::cell::Cell<Option<FirstPress>> = const { std::cell::Cell::new(None) };
+}
+
+/// Note that what was under the pointer has gone or moved (a list closed, a menu item ran, a pane
+/// changed size): a double-click's second press was aimed at it, not at what is there now.
+pub fn mark_moved_under_pointer() {
+    FIRST_PRESS.with(|f| f.set(None));
+}
+
+/// How far apart a double-click's presses can be (the system's own limit is a few pixels).
+const SAME_SPOT: f32 = 8.0;
+
+/// How old a first press can be and still be this double-click's. Generous for a normal
+/// double-click; a slower one's second press does nothing, the safe way to be wrong.
+const FIRST_PRESS_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One press's verdict: whether to do nothing. A first press always acts and is remembered. A
+/// second may act only if a first press that reached an order control landed on the same spot just
+/// now and nothing has moved since. Anything else is safe by default: a list or button that closed
+/// on the first press, or a control that has taken its place, needs no list of its own here.
+///
+/// An order control stays refused for the whole run of presses, until a pause makes the next a
+/// first press again. An exit (`exit`) is refused only once: the refused press is remembered, so a
+/// trader pressing Flatten again and again after a near miss gets it on the next press.
+fn refuse_press(
+    first: &mut Option<FirstPress>,
+    click_count: usize,
+    at: (f32, f32),
+    now: std::time::Instant,
+    exit: bool,
+) -> bool {
+    if click_count <= 1 {
+        *first = Some((at.0, at.1, now));
+        return false;
+    }
+    let refused = !first.is_some_and(|(x, y, when)| {
+        (x - at.0).abs() <= SAME_SPOT
+            && (y - at.1).abs() <= SAME_SPOT
+            && now.saturating_duration_since(when) <= FIRST_PRESS_AGE
+    });
+    if !refused || exit {
+        *first = Some((at.0, at.1, now));
+    }
+    refused
+}
+
+fn press_verdict(click_count: usize, at: gpui::Point<gpui::Pixels>, exit: bool) -> bool {
+    let at = (f32::from(at.x), f32::from(at.y));
+    FIRST_PRESS.with(|f| {
+        let mut first = f.get();
+        let refused = refuse_press(&mut first, click_count, at, std::time::Instant::now(), exit);
+        f.set(first);
+        refused
+    })
+}
+
+/// Called by every press that can send an order or set what one uses: whether to do nothing.
+pub fn second_press(click_count: usize, at: gpui::Point<gpui::Pixels>) -> bool {
+    press_verdict(click_count, at, false)
+}
+
+/// The same for Flatten and Cancel all, which are refused at most once in a run of presses.
+pub fn second_press_exit(click_count: usize, at: gpui::Point<gpui::Pixels>) -> bool {
+    press_verdict(click_count, at, true)
+}
+
 /// A backdrop just took a press: its release is the dismiss's too, and finishes nothing (a
 /// drawing waiting for its second point). Cleared by the next press a pane sees.
 pub fn mark_dismissing() {
+    mark_moved_under_pointer();
     DISMISSING.with(|d| d.set(true));
 }
 
@@ -212,6 +286,7 @@ pub fn clear_dismissing() {
 /// Close whatever popover is open (Flatten or Cancel all was pressed with one open).
 pub fn close_any(cx: &mut App) {
     if cx.try_global::<Open>().is_some_and(|g| g.close.is_some()) {
+        mark_moved_under_pointer();
         let g = cx.global_mut::<Open>();
         let close = g.close.take();
         g.slot = Slot::default();
@@ -469,6 +544,68 @@ impl Element for Layer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A second press acts only after a guarded first press on the same spot with nothing moved
+    /// since: double-clicking a control still repeats it, and everything else is refused.
+    #[test]
+    fn a_second_press_acts_only_after_its_own_first() {
+        let spot = (100.0, 200.0);
+        let now = std::time::Instant::now();
+        let later = now + FIRST_PRESS_AGE + std::time::Duration::from_millis(1);
+        for exit in [false, true] {
+            // Double-click on a control: both presses act, as a click twice does. For an exit
+            // that sends one order: the core places no second Flatten while the first is open.
+            let mut first = None;
+            assert!(
+                !refuse_press(&mut first, 1, spot, now, exit),
+                "a first press"
+            );
+            assert!(!refuse_press(&mut first, 2, spot, now, exit));
+            assert!(
+                !refuse_press(&mut first, 3, (103.0, 198.0), now, exit),
+                "a few px off"
+            );
+            // An old press on this spot is not this double-click's first.
+            assert!(refuse_press(
+                &mut Some((spot.0, spot.1, now)),
+                2,
+                spot,
+                later,
+                exit
+            ));
+            // The first press went elsewhere: nothing remembered, or something far away.
+            assert!(refuse_press(&mut None, 2, spot, now, exit));
+            assert!(refuse_press(
+                &mut Some((400.0, 200.0, now)),
+                2,
+                spot,
+                now,
+                exit
+            ));
+            // A pause makes the next a first press, whatever came before.
+            assert!(!refuse_press(&mut None, 1, spot, now, exit));
+        }
+    }
+
+    /// A triple-click after a list closed: Sell or a ladder row stays refused for the whole run,
+    /// while an exit pressed again is never dead.
+    #[test]
+    fn a_run_of_presses_refuses_orders_throughout_and_an_exit_once() {
+        let spot = (100.0, 200.0);
+        let now = std::time::Instant::now();
+        let mut order = None;
+        assert!(refuse_press(&mut order, 2, spot, now, false));
+        assert!(refuse_press(&mut order, 3, spot, now, false));
+        assert!(refuse_press(&mut order, 4, spot, now, false));
+        assert!(
+            !refuse_press(&mut order, 1, spot, now, false),
+            "after a pause"
+        );
+        let mut exit = None;
+        assert!(refuse_press(&mut exit, 2, spot, now, true));
+        assert!(!refuse_press(&mut exit, 3, spot, now, true));
+        assert!(!refuse_press(&mut exit, 4, spot, now, true));
+    }
 
     /// A list under a header chip.
     const LIST: Rect = Rect {

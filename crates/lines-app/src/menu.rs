@@ -192,6 +192,7 @@ impl Menu {
                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             *slot(this) = None;
+                            crate::popover::mark_moved_under_pointer();
                             run(this, cmd, window, cx);
                             cx.notify();
                         }),

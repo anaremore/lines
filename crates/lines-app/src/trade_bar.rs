@@ -82,6 +82,10 @@ pub struct PaneTrade {
     pub account_menu: bool,
     /// A refusal made in the UI (not by the core), with when.
     local_flash: Option<(String, Instant)>,
+    /// The local message's word: NOT SENT for an order action, NOTICE otherwise.
+    local_flash_label: &'static str,
+    /// Whether the Keys chip is in view as last drawn. Order keys send only while it is.
+    keys_shown: std::cell::Cell<bool>,
     cache: Option<Arc<TradeCache>>,
     seen: u64,
     /// The P&L display setting's epoch last drawn.
@@ -164,6 +168,8 @@ impl PaneTrade {
             seen_size: SIZE_EPOCH.load(Ordering::Relaxed),
             account_menu: trading.is_some_and(|t| t.start_account_menu),
             local_flash: None,
+            local_flash_label: "NOT SENT",
+            keys_shown: std::cell::Cell::new(true),
             cache: trading.map(|t| t.cache.clone()),
             seen: u64::MAX,
             seen_display: crate::pnl::display_epoch(),
@@ -234,6 +240,20 @@ impl PaneTrade {
 
     pub fn flash(&mut self, msg: impl Into<String>) {
         self.local_flash = Some((msg.into(), Instant::now()));
+        self.local_flash_label = "NOT SENT";
+    }
+
+    /// The press a notice asked for has come: it no longer applies.
+    fn clear_notice(&mut self) {
+        if self.local_flash_label == "NOTICE" {
+            self.local_flash = None;
+        }
+    }
+
+    /// A brief message about the panel itself, with no order involved.
+    fn notice(&mut self, msg: impl Into<String>) {
+        self.local_flash = Some((msg.into(), Instant::now()));
+        self.local_flash_label = "NOTICE";
     }
 
     pub fn local_flash(&self) -> Option<&str> {
@@ -576,7 +596,8 @@ fn run_with<V: TradePane>(
         let arming = v.trade_ref().arming;
         let ctx = || entry_ctx(v, cx).map_err(dom_trade::Refusal);
         let built = if key && cmd.needs_hotkeys() {
-            dom_trade::key_order(q, v.trade_ref().hotkeys, arming, ctx)
+            let pt = v.trade_ref();
+            dom_trade::key_order(q, pt.hotkeys, pt.keys_shown.get(), arming, ctx)
         } else {
             ctx().and_then(|ctx| dom_trade::quick(q, arming, &ctx))
         };
@@ -758,6 +779,7 @@ fn run_with<V: TradePane>(
 }
 
 pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut Context<V>) {
+    crate::popover::mark_moved_under_pointer();
     close_account_menu(v, cx);
     let t = v.trade();
     if account.is_some() && account != t.account {
@@ -1170,7 +1192,7 @@ struct BarData {
     /// refuses entries.
     news: Option<(bool, String)>,
     news_block: Option<&'static str>,
-    /// (label, text): DENIED / REJECTED / WARNING / NOT SENT.
+    /// (label, text): DENIED / REJECTED / WARNING / NOT SENT / NOTICE.
     flashes: Vec<(&'static str, String)>,
     unresolved: usize,
     working: usize,
@@ -1317,7 +1339,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         data.unresolved = s.unresolved(account);
     }
     if let Some(m) = pt.local_flash() {
-        data.flashes.push(("NOT SENT", m.to_owned()));
+        data.flashes.push((pt.local_flash_label, m.to_owned()));
     }
     Some(data)
 }
@@ -1744,7 +1766,8 @@ pub fn breakeven(
 pub const NARROW_BELOW: f32 = 300.0;
 
 /// From this width the Keys chip sits in the header beside the account and the switch (the
-/// widest switch text included); narrower, it shows on the status line while keys are on.
+/// widest switch text included); narrower, it shows on the status line while keys are on, and on
+/// the account row, where it fits, once a short pane's status line has gone.
 pub const KEYS_IN_HEADER: f32 = 480.0;
 
 /// Whether the Keys chip sits in the header (else it trails the status line while keys are
@@ -1785,16 +1808,236 @@ fn presets_shown(narrow: bool) -> usize {
 /// Smallest hit target (logical px, both ways).
 pub const MIN_HIT: f32 = 20.0;
 
-/// The panel's height at `width`: a function of the width only, never of the trading state
-/// (position, lockout, flashes, the editor, enabled or not), so the ladder below never shifts
-/// (docs/design.md §7).
-pub fn panel_height(width: f32) -> f32 {
-    let meters = if is_narrow(width) {
-        METERS_NARROW_H
-    } else {
-        METERS_H
+/// The exits' line when nothing else of the panel shows: their 22 px and a pixel or two around.
+const EXITS_H: f32 = MIN_HIT + 6.0;
+/// The shortest pane whose Cancel all and Flatten can be pressed whole (a pane can be dragged
+/// shorter: 5% of its split). Below this they are cut, and keys and the palette still reach them.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const MIN_DOM_HEIGHT: f32 = EXITS_H;
+/// The ladder's header and three rows, so it shows the inside market. Shorter, it doesn't show.
+pub const LADDER_MIN_H: f32 =
+    crate::pane_columns::HEADER_ROW_H + 3.0 * crate::dom_view::LADDER_ROW_H;
+
+/// Which of the panel's rows a pane has room for. Cancel all and Flatten always come first
+/// (docs/design.md §3); everything else goes whole, never cut through, in the order of
+/// [`panel_rows`]. A function of the pane's size only (and the editor, below), never of the
+/// trading state, so the ladder never shifts as a position opens or a lockout starts (§7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PanelRows {
+    /// The pane's own header, with its contract. Without it the exits share the line with the
+    /// pane's controls and name the contract themselves.
+    pub pane_header: bool,
+    /// The account and the switch, and BE and Reverse beside the exits. Without it the exits' line
+    /// says what fits of the account's badge, the position, the switch's state and Keys.
+    pub account: bool,
+    /// Without it, the position and its P&L take one line on the account row.
+    pub card: bool,
+    pub status: bool,
+    pub meters: bool,
+    /// Quantity and bracket: what a ladder click uses, so they go together with the ladder.
+    pub entry: bool,
+    pub buttons: bool,
+    pub ladder: bool,
+}
+
+impl PanelRows {
+    const ALL: PanelRows = PanelRows {
+        pane_header: true,
+        account: true,
+        card: true,
+        status: true,
+        meters: true,
+        entry: true,
+        buttons: true,
+        ladder: true,
     };
-    HDR_H + CARD_H + STATUS_H + meters + 2.0 * SEG_H + GRID_H + UTIL_H + PAD_Y
+
+    /// These rows' height at `width`, the pane's header not included.
+    pub fn height(&self, width: f32) -> f32 {
+        if !self.account {
+            return EXITS_H;
+        }
+        let meters = if is_narrow(width) {
+            METERS_NARROW_H
+        } else {
+            METERS_H
+        };
+        let row = |shown: bool, h: f32| if shown { h } else { 0.0 };
+        HDR_H
+            + row(self.card, CARD_H)
+            + row(self.status, STATUS_H)
+            + row(self.meters, meters)
+            + row(self.entry, 2.0 * SEG_H)
+            + row(self.buttons, GRID_H)
+            + UTIL_H
+            + PAD_Y
+    }
+}
+
+fn pane_header_h() -> f32 {
+    crate::pane::header_height(crate::layout::PaneKind::Dom)
+}
+
+/// The rows with the bracket editor and confirmation closed. With three ladder rows kept: the order
+/// buttons go first (the ladder and keys still enter). Then the ladder with quantity and bracket,
+/// whole: a click on it uses them, so it never shows without them. Then the rule meters, the status
+/// line and the position card (its line stays on the account row). Paper or live and the contract
+/// never go: the exits' own line says them once their rows have gone.
+fn closed_rows(width: f32, pane_h: f32) -> PanelRows {
+    let mut r = PanelRows::ALL;
+    let fits = |r: &PanelRows, ladder: f32| pane_header_h() + r.height(width) + ladder <= pane_h;
+    if !fits(&r, LADDER_MIN_H) {
+        r.buttons = false;
+    }
+    if !fits(&r, LADDER_MIN_H) {
+        (r.entry, r.ladder) = (false, false);
+    }
+    if !fits(&r, 0.0) {
+        r.meters = false;
+    }
+    if !fits(&r, 0.0) {
+        r.status = false;
+    }
+    if !fits(&r, 0.0) {
+        r.card = false;
+    }
+    if !fits(&r, 0.0) {
+        r.account = false;
+    }
+    if !fits(&r, 0.0) {
+        r.pane_header = false;
+    }
+    r
+}
+
+/// The rows for a pane `pane_h` tall (0: not laid out yet, all of them). `editing`: the bracket
+/// editor or confirmation is open and fits ([`editor_fits`]): it takes the quantity, bracket and
+/// button rows' space, from the ladder where those rows were gone (the one case where the panel's
+/// height follows state). Every other row is as it is with it closed.
+pub fn panel_rows(width: f32, pane_h: f32, editing: bool) -> PanelRows {
+    if pane_h <= 0.0 {
+        return PanelRows::ALL;
+    }
+    let mut r = closed_rows(width, pane_h);
+    if editing && editor_fits(width, pane_h) {
+        (r.entry, r.buttons) = (true, true);
+        r.ladder = pane_header_h() + r.height(width) + LADDER_MIN_H <= pane_h;
+    }
+    r
+}
+
+/// Whether the bracket editor or confirmation has room: a pane too short closes it (never hidden
+/// and still taking keys).
+pub fn editor_fits(width: f32, pane_h: f32) -> bool {
+    if pane_h <= 0.0 {
+        return true;
+    }
+    let mut r = closed_rows(width, pane_h);
+    (r.entry, r.buttons) = (true, true);
+    r.account && pane_header_h() + r.height(width) <= pane_h
+}
+
+/// Whether the bracket editor or confirmation is open: see [`panel_rows`].
+pub fn panel_editing(pt: &PaneTrade) -> bool {
+    pt.bracket_confirm.is_some() || pt.editor.is_some()
+}
+
+/// Close the bracket editor or confirmation in a pane too short for it, and say so. A confirmation
+/// closes as its Keep does: nothing changes.
+pub fn close_editor_too_short(pt: &mut PaneTrade) {
+    pt.editor = None;
+    pt.bracket_confirm = None;
+    pt.notice("Bracket editor closed: pane too short");
+}
+
+/// The position once the card has gone, as whole items: the side and quantity (or "Flat"), the
+/// average, and the P&L as the display allows with its sign.
+fn position_items(
+    position: Option<(i64, Option<f64>, Option<f64>, Money)>,
+    mode: crate::pnl::PnlDisplay,
+    product: &Product,
+    narrow: bool,
+) -> (String, Option<String>, Option<(String, f64)>) {
+    let Some((q, avg, ticks, money)) = position else {
+        return ("Flat".to_owned(), None, None);
+    };
+    let arrow = if q > 0 { "▲" } else { "▼" };
+    let side = if narrow {
+        format!("{arrow} {}", q.abs())
+    } else {
+        let word = if q > 0 { "LONG" } else { "SHORT" };
+        format!("{arrow} {word} {}", q.abs())
+    };
+    let avg = avg.map(|a| format!("@ {}", avg_text(product, a)));
+    let mut text = String::new();
+    let pnl = if mode.money() {
+        let _ = crate::pnl::write_money(&mut text, money);
+        Some((text, money.0 as f64))
+    } else if let Some(tk) = ticks.filter(|_| mode.ticks()) {
+        let _ = crate::pnl::write_ticks(&mut text, tk);
+        Some((text, tk))
+    } else {
+        None
+    };
+    (side, avg, pnl)
+}
+
+/// A short line's items in priority order, by width: which fit in `room`, whole (a number is never
+/// cut, and a button is never pressed for room). One too wide is left out; later ones may still fit.
+fn fit_items(room: f32, widths: &[f32]) -> Vec<bool> {
+    let mut left = room;
+    widths
+        .iter()
+        .map(|w| {
+            // An item this line doesn't have takes no room.
+            let fits = *w > 0.0 && *w + 8.0 <= left;
+            if fits {
+                left -= *w + 8.0;
+            }
+            fits
+        })
+        .collect()
+}
+
+/// Whether the Keys chip is in view while the account row shows: in the header, on the status line
+/// while that shows, or on this row where it fit. Below it the exits' line decides.
+fn keys_chip_on_account_row(width: f32, status: bool, keys_here: bool) -> bool {
+    keys_in_header(width) || status || keys_here
+}
+
+/// Rules exist on this account, but a short pane has no room for their meters: never reads the
+/// same as an account with no rules.
+const RULES_HIDDEN: &str = "rules hidden";
+
+/// The Keys chip's room wherever it is laid out by estimate: its words, knob, gap and padding. A chip
+/// counted as in view is whole, so order keys are never live behind a cut one.
+const KEYS_CHIP_W: f32 = 90.0;
+
+/// What's left on the account row for the position, past the badge, the least of the account's
+/// name, the switch with this text, the Keys chip if it shows, and their gaps.
+fn account_row_room(width: f32, switch: &str, keys: bool) -> f32 {
+    let (keys_w, gaps) = if keys { (KEYS_CHIP_W, 4.0) } else { (0.0, 3.0) };
+    width - 16.0 - 52.0 - MIN_HIT - (word_w(switch) + 30.0) - keys_w - gaps * 8.0
+}
+
+/// A word's width on these lines, at the panel's wide glyph estimate.
+fn word_w(s: &str) -> f32 {
+    s.chars().count() as f32 * 7.5
+}
+
+/// An exit's fixed width on the exits' line: its word at a mid 12 px glyph and its padding, tight
+/// enough to leave what the exits act on some room in a narrow panel. Fixed, so a P&L gaining a
+/// digit beside them can't move the edge between Cancel all and Flatten.
+fn exit_w(s: &str) -> f32 {
+    s.chars().count() as f32 * 6.0 + 12.0
+}
+
+/// The panel's height at `width` with every row: a function of the width only, never of the
+/// trading state (position, lockout, flashes, the editor, enabled or not), so the ladder below
+/// never shifts (docs/design.md §7).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn panel_height(width: f32) -> f32 {
+    PanelRows::ALL.height(width)
 }
 
 /// Below this width the disabled panel's line drops to its short form (the long one would be
@@ -1917,8 +2160,27 @@ fn run_on_click<V: TradePane>(
 ) -> gpui::Stateful<gpui::Div> {
     el.on_mouse_down(
         MouseButton::Left,
-        cx.listener(move |v: &mut V, _, _, cx| {
+        cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
             cx.stop_propagation();
+            // Aimed at what has moved (the bracket editor closing, a list over this row).
+            let exit = matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll);
+            let refused = if exit {
+                crate::popover::second_press_exit(ev.click_count, ev.position)
+            } else {
+                crate::popover::second_press(ev.click_count, ev.position)
+            };
+            if refused {
+                if exit {
+                    // An exit is never refused in silence: the next press acts.
+                    v.trade()
+                        .notice("Press again: that press followed a change here");
+                    cx.notify();
+                }
+                return;
+            }
+            if exit {
+                v.trade().clear_notice();
+            }
             if matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll) {
                 // Drawn over an open popover's backdrop (`popover::always_live`): it closes.
                 crate::popover::close_any(cx);
@@ -1939,12 +2201,13 @@ fn tip(
 
 /// The DOM's trading panel (trade panel v2): account and the trading switch; the position
 /// card; the lockout or refusal line; rule meters; quantity and bracket; order buttons; the
-/// utility row. Its height depends only on its width ([`panel_height`]). Nothing when
+/// utility row. Its height depends only on the pane's size ([`panel_rows`]). Nothing when
 /// trading isn't running.
 pub fn dom_bar<V: TradePane>(
     v: &V,
     product: &Product,
     width: f32,
+    rows: PanelRows,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> Option<AnyElement> {
@@ -1980,10 +2243,10 @@ pub fn dom_bar<V: TradePane>(
         .flex()
         .flex_col()
         .flex_shrink_0()
-        .h(px(panel_height(width)))
+        .h(px(rows.height(width)))
         .overflow_hidden()
         .px_2()
-        .pb(px(PAD_Y))
+        .when(rows.account, |d| d.pb(px(PAD_Y)))
         .bg(t.bg)
         .border_b_1()
         .border_color(t.axis_line)
@@ -2047,26 +2310,109 @@ pub fn dom_bar<V: TradePane>(
             cx,
         )
     };
-    panel = panel.child(
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .h(px(HDR_H))
-            .child(account_chip(v, data.as_ref(), t, cx))
-            .child(div().flex_1())
-            // Narrower than KEYS_IN_HEADER the header has no room beside the account and
-            // the switch; the chip shows on the status line while keys are on (off is the
-            // default).
-            .when(keys_in_header(width), |d| {
-                d.child(keys_chip(pt.hotkeys, false, t, cx))
-            })
-            .child(switch),
-    );
+    if rows.account {
+        let switch_words = switch_text_armed(enabled, blocker, strategies_armed, width);
+        // Keys on with the status line gone: here, unless it would cut the switch or the account.
+        let keys_here = !keys_in_header(width)
+            && pt.hotkeys
+            && !rows.status
+            && account_row_room(width, &switch_words, true) >= 0.0;
+        pt.keys_shown
+            .set(keys_chip_on_account_row(width, rows.status, keys_here));
+        let rules_hidden = !rows.meters && data.as_ref().is_some_and(|d| !d.rules.is_empty());
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .h(px(HDR_H))
+                .child(account_chip(v, data.as_ref(), t, cx))
+                .when(!rows.card || rules_hidden, |row| {
+                    row.child({
+                        let mut gap = div().flex_shrink_0().flex().items_center().gap_2();
+                        if let Some(d) = data.as_ref() {
+                            // With the card showing, only the rules' token belongs here.
+                            let (side, avg, pnl) = if rows.card {
+                                (String::new(), None, None)
+                            } else {
+                                position_items(d.position, mode, product, narrow)
+                            };
+                            // Beside the account (which gives way) and the switch.
+                            let room = account_row_room(
+                                width,
+                                &switch_words,
+                                keys_in_header(width) || keys_here,
+                            );
+                            let fit = fit_items(
+                                room,
+                                &[
+                                    word_w(&side),
+                                    pnl.as_ref().map_or(0.0, |(s, _)| word_w(s)),
+                                    if rules_hidden {
+                                        word_w(RULES_HIDDEN)
+                                    } else {
+                                        0.0
+                                    },
+                                    avg.as_deref().map_or(0.0, word_w),
+                                ],
+                            );
+                            gap = gap
+                                .when(fit[0], |d| {
+                                    d.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(t.text_main)
+                                            .child(side),
+                                    )
+                                })
+                                .when_some(avg.filter(|_| fit[3]), |d, a| {
+                                    d.child(div().flex_shrink_0().text_color(t.text_dim).child(a))
+                                })
+                                .when_some(pnl.filter(|_| fit[1]), |d, (s, v)| {
+                                    d.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(if v > 0.0 {
+                                                t.up
+                                            } else if v < 0.0 {
+                                                t.down
+                                            } else {
+                                                t.text_main
+                                            })
+                                            .child(s),
+                                    )
+                                })
+                                .when(fit[2], |d| {
+                                    d.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_color(t.text_main)
+                                            .child(RULES_HIDDEN),
+                                    )
+                                });
+                        }
+                        gap
+                    })
+                })
+                .child(div().flex_1())
+                // Narrower than KEYS_IN_HEADER the header has no room beside the account and
+                // the switch; the chip shows on the status line while keys are on (off is the
+                // default), and here once that line has gone.
+                .when(keys_in_header(width), |d| {
+                    d.child(keys_chip(pt.hotkeys, false, t, cx))
+                })
+                .when(keys_here, |d| d.child(keys_chip(true, narrow, t, cx)))
+                .child(switch),
+        );
+    }
 
     // 2. The position card.
-    panel = panel.child(position_card(data.as_ref(), product, width, t));
+    if rows.card {
+        panel = panel.child(position_card(data.as_ref(), product, width, t));
+    }
 
     // 3. One status line: a refusal (brief) or the lockout / account state (lasting).
     let status = div().h(px(STATUS_H)).flex().flex_row().items_center();
@@ -2162,23 +2508,35 @@ pub fn dom_bar<V: TradePane>(
     } else {
         status
     };
-    panel = panel.child(status);
+    if rows.status {
+        panel = panel.child(status);
+    }
 
     // 4. Rule meters (narrow: one line behind ▸; open, they lie over what follows).
-    panel = panel.child(meters(v, data.as_ref(), mode, narrow, t, cx));
+    if rows.meters {
+        panel = panel.child(meters(v, data.as_ref(), mode, narrow, t, cx));
+    }
 
     // 5.–6. Quantity and bracket, or the bracket editor in their place (with the buttons).
-    if let Some(c) = &pt.bracket_confirm {
-        panel = panel.child(bracket_confirm_view(c, v, product, narrow, t, cx));
-    } else if let Some(ed) = &pt.editor {
-        panel = panel.child(editor_view(ed, pt.editor_msg.as_deref(), v, t, cx));
+    if panel_editing(pt) {
+        if rows.entry && rows.buttons {
+            if let Some(c) = &pt.bracket_confirm {
+                panel = panel.child(bracket_confirm_view(c, v, product, narrow, t, cx));
+            } else if let Some(ed) = &pt.editor {
+                panel = panel.child(editor_view(ed, pt.editor_msg.as_deref(), v, t, cx));
+            }
+        }
     } else {
-        panel = panel
-            .child(gate(qty_row(v, narrow, t, cx)))
-            .child(gate(bracket_row(v, product, narrow, t, cx)));
+        if rows.entry {
+            panel = panel
+                .child(gate(qty_row(v, narrow, t, cx)))
+                .child(gate(bracket_row(v, product, narrow, t, cx)));
+        }
         // 7. Order buttons: market (filled) with the price they'd hit, joins (outlined).
-        let locked = locked_hint(blocker, strategies_armed, width);
-        panel = panel.child(order_grid(v, product, enabled, guarded, locked, t, cx));
+        if rows.buttons {
+            let locked = locked_hint(blocker, strategies_armed, width);
+            panel = panel.child(order_grid(v, product, enabled, guarded, locked, t, cx));
+        }
     }
 
     // 8. Utility row: BE and Reverse (Reverse dims while disabled), Cancel all and Flatten
@@ -2196,7 +2554,150 @@ pub fn dom_bar<V: TradePane>(
         (TradeCmd::Flatten, "Flatten", labels[3], false),
     ];
     let mut row = div().flex().flex_row().items_center().gap_1().h(px(UTIL_H));
+    if !rows.account {
+        // Nothing else of the panel shows: the exits say what they act on. What fits beside them
+        // goes first by priority (the buttons have their room already), whole.
+        let (name, badge) = account_words(v, data.as_ref());
+        let contract = contract_of(v.trade_store())
+            .filter(|_| !rows.pane_header)
+            .map(|c| c.label(product).as_str().to_owned());
+        let position = data
+            .as_ref()
+            .map(|d| position_items(d.position, mode, product, true));
+        let (side, avg, pnl) = match position {
+            Some((side, avg, pnl)) => (Some(side), avg, pnl),
+            None => (None, None, None),
+        };
+        // The header has gone too: the feed's state has nowhere else to show.
+        let stale = (!rows.pane_header)
+            .then(|| crate::pane::stale_badge(v.trade_store(), t))
+            .flatten();
+        let unavailable = !rows.pane_header && v.trade_unavailable();
+        // An armed strategy's count is what the switch says first; "!": orders are being denied.
+        let state = if strategies_armed > 0 {
+            switch_text_armed(enabled, blocker, strategies_armed, width)
+        } else {
+            match (enabled, blocker) {
+                (true, Some(_)) => "Trading on !".to_owned(),
+                (true, None) => "Trading on".to_owned(),
+                (false, _) => "Trading off".to_owned(),
+            }
+        };
+        let rules_hidden = data.as_ref().is_some_and(|d| !d.rules.is_empty());
+        let controls = if rows.pane_header {
+            0.0
+        } else {
+            crate::pane::controls_gutter(crate::layout::PaneKind::Dom) - 8.0
+        };
+        let off = |l: &str| {
+            if locked.is_some() {
+                exit_w(&format!("{l} off"))
+            } else {
+                exit_w(l)
+            }
+        };
+        // Flatten's width with its "off" either way: the edge between the exits never moves.
+        let flatten = exit_w(&format!("{} off", labels[3]));
+        let room = width - 16.0 - controls - off(labels[2]) - flatten - 4.0;
+        let chip = |s: &str| word_w(s) + 10.0;
+        let fit = fit_items(
+            room,
+            &[
+                chip(badge),
+                if stale.is_some() {
+                    170.0
+                } else if unavailable {
+                    word_w("unavailable")
+                } else {
+                    0.0
+                },
+                side.as_deref().map_or(0.0, word_w),
+                contract.as_deref().map_or(0.0, word_w),
+                pnl.as_ref().map_or(0.0, |(s, _)| word_w(s)),
+                chip(&state),
+                KEYS_CHIP_W,
+                if rules_hidden {
+                    word_w(RULES_HIDDEN)
+                } else {
+                    0.0
+                },
+                avg.as_deref().map_or(0.0, word_w),
+                word_w(&name),
+            ],
+        );
+        pt.keys_shown.set(fit[6]);
+        let plain = |s: String, bold: bool| {
+            div()
+                .flex_shrink_0()
+                .when(bold, |d| d.font_weight(FontWeight::BOLD))
+                .text_color(t.text_main)
+                .child(s)
+        };
+        row = row.h(px(EXITS_H)).child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .items_center()
+                .gap_2()
+                .when(fit[1], |d| {
+                    d.children(stale).when(unavailable, |d| {
+                        d.child(plain("unavailable".to_owned(), true))
+                    })
+                })
+                .when(fit[0], |d| d.child(account_badge(badge, t).flex_shrink_0()))
+                .when(fit[9], |d| d.child(plain(name, false)))
+                .when_some(contract.filter(|_| fit[3]), |d, c| d.child(plain(c, true)))
+                .when_some(side.filter(|_| fit[2]), |d, s| d.child(plain(s, true)))
+                .when_some(avg.filter(|_| fit[8]), |d, a| {
+                    d.child(div().flex_shrink_0().text_color(t.text_dim).child(a))
+                })
+                .when_some(pnl.filter(|_| fit[4]), |d, (s, v)| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if v > 0.0 {
+                                t.up
+                            } else if v < 0.0 {
+                                t.down
+                            } else {
+                                t.text_main
+                            })
+                            .child(s),
+                    )
+                })
+                .when(fit[5], |d| {
+                    // The switch's state by word and fill, as on the switch itself.
+                    let pill = div()
+                        .flex_shrink_0()
+                        .px_1()
+                        .rounded_sm()
+                        .border_1()
+                        .font_weight(FontWeight::BOLD)
+                        .child(state);
+                    d.child(if enabled {
+                        pill.bg(t.warn).border_color(t.warn).text_color(t.on_warn)
+                    } else {
+                        pill.border_color(t.axis_line).text_color(t.text_main)
+                    })
+                })
+                .when(fit[6], |d| d.child(keys_chip(pt.hotkeys, false, t, cx)))
+                .when(fit[7], |d| d.child(plain(RULES_HIDDEN.to_owned(), false))),
+        );
+    }
+    if !rows.pane_header {
+        // The pane's controls share this line (the panel's own 8 px of padding is part of that
+        // room).
+        let controls = crate::pane::controls_gutter(crate::layout::PaneKind::Dom);
+        row = row.pr(px(controls - 8.0));
+    }
     for (i, (cmd, name, label, entry)) in util.into_iter().enumerate() {
+        if entry && !rows.account {
+            continue;
+        }
         // BE and Reverse size to their words; Cancel all and Flatten take the rest. On a
         // read-only account those two read "off" and refuse with the reason when clicked.
         let off = !entry && locked.is_some();
@@ -2210,12 +2711,22 @@ pub fn dom_bar<V: TradePane>(
         } else {
             name
         };
+        let whole = if cmd == TradeCmd::Flatten {
+            exit_w(&format!("{} off", labels[3]))
+        } else {
+            exit_w(label.as_ref())
+        };
         let mut b = cell(("util", i as u64), t).child(label);
         if off {
             b = b.text_color(t.text_dim);
         }
         if !entry {
-            b = b.flex_1();
+            b = if rows.account {
+                b.flex_1()
+            } else {
+                // Their words whole, and where they are whatever the line beside them says.
+                b.flex_shrink_0().w(px(whole))
+            };
         }
         if cmd == TradeCmd::Flatten && !off {
             b = b
@@ -2609,8 +3120,11 @@ fn qty_row<V: TradePane>(
         let s = tip(s, &format!("Quantity {q}"), None, t);
         row = row.child(s.on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |v: &mut V, _, _, cx| {
+            cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
                 cx.stop_propagation();
+                if crate::popover::second_press(ev.click_count, ev.position) {
+                    return;
+                }
                 set_size(v, q, cx);
             }),
         ));
@@ -2626,8 +3140,11 @@ fn qty_row<V: TradePane>(
     let s = tip(s, "Type a quantity", None, t);
     row.child(s.on_mouse_down(
         MouseButton::Left,
-        cx.listener(|v: &mut V, _, window, cx| {
+        cx.listener(|v: &mut V, ev: &gpui::MouseDownEvent, window, cx| {
             cx.stop_propagation();
+            if crate::popover::second_press(ev.click_count, ev.position) {
+                return;
+            }
             // The keys must reach the pane: in a popped-out window focus may sit on its root.
             v.trade_focus().clone().focus(window, cx);
             open_size_field(v);
@@ -2698,8 +3215,11 @@ fn bracket_row<V: TradePane>(
     );
     row = row.child(off.on_mouse_down(
         MouseButton::Left,
-        cx.listener(move |v: &mut V, _, _, cx| {
+        cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
             cx.stop_propagation();
+            if crate::popover::second_press(ev.click_count, ev.position) {
+                return;
+            }
             if position_on_now(v, cx) {
                 v.trade().flash(
                     "Off isn't available with one bracket for the position: turn Pos off first",
@@ -2731,8 +3251,11 @@ fn bracket_row<V: TradePane>(
         let s = tip(s, &format!("Bracket {}", label(b, product, units)), None, t);
         row = row.child(s.on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |v: &mut V, _, _, cx| {
+            cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
                 cx.stop_propagation();
+                if crate::popover::second_press(ev.click_count, ev.position) {
+                    return;
+                }
                 v.trade().bracket = Some(b);
                 cx.notify();
             }),
@@ -3103,6 +3626,20 @@ fn preview_entry<V: TradePane>(v: &V) -> Option<(Price, bool)> {
     ask.map(|p| (p, true))
 }
 
+/// An account is set but not listed: a broker's, waiting for it.
+fn account_waiting<V: TradePane>(v: &V) -> bool {
+    v.trade_ref().account.is_some()
+}
+
+/// The account's name and badge in words, as the chip shows them.
+fn account_words<V: TradePane>(v: &V, data: Option<&BarData>) -> (String, &'static str) {
+    match data {
+        Some(d) => (d.account_name.clone(), d.badge),
+        None if account_waiting(v) => ("broker account (waiting)".to_owned(), "LIVE"),
+        None => ("no account".to_owned(), "PAPER"),
+    }
+}
+
 /// The account name (click: choose another) and the PAPER badge.
 fn account_chip<V: TradePane>(
     v: &V,
@@ -3112,7 +3649,7 @@ fn account_chip<V: TradePane>(
 ) -> AnyElement {
     // An account set but not listed is a broker's, waiting for it: LIVE until the broker
     // says otherwise (never shown as simulated), read-only.
-    let fallback = if v.trade_ref().account.is_some() {
+    let fallback = if account_waiting(v) {
         ("broker account (waiting)".to_owned(), "LIVE", true, None)
     } else {
         ("no account".to_owned(), "PAPER", false, None)
@@ -3800,8 +4337,11 @@ fn bracket_confirm_view<V: TradePane>(
     )
     .on_mouse_down(
         MouseButton::Left,
-        cx.listener(move |v: &mut V, _, _, cx| {
+        cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
             cx.stop_propagation();
+            if crate::popover::second_press(ev.click_count, ev.position) {
+                return;
+            }
             // Exactly what it was shown for: this account and contract (a pane that moved
             // drops the confirmation).
             if v.trade_ref().bracket_ask.is_some() {
@@ -4602,6 +5142,217 @@ mod tests {
         const { assert!(2.0 * SEG_H + GRID_H >= 20.0 + 4.0 * 20.0 + 24.0) };
     }
 
+    /// Cancel all and Flatten at every pane height from the shortest supported, in the narrowest
+    /// and widest panels: what shows always fits the pane (nothing cut, nothing pushed out), a row
+    /// that went never comes back in a shorter pane, and a ladder never shows without quantity.
+    #[test]
+    fn the_exits_fit_at_every_pane_height() {
+        let header = pane_header_h();
+        for width in [MIN_DOM_WIDTH, NARROW_BELOW, 420.0, 1400.0] {
+            let mut last = panel_rows(width, 2000.0, false);
+            assert_eq!(last, PanelRows::ALL);
+            for h in (MIN_DOM_HEIGHT as u32..2000).rev() {
+                let pane_h = h as f32;
+                let r = panel_rows(width, pane_h, false);
+                let top = if r.pane_header { header } else { 0.0 };
+                assert!(top + r.height(width) <= pane_h, "{width} x {h}: {r:?}");
+                if r.ladder {
+                    assert!(r.entry, "{width} x {h}");
+                    assert!(
+                        top + r.height(width) + LADDER_MIN_H <= pane_h,
+                        "{width} x {h}: {r:?}"
+                    );
+                }
+                let kept = |new: bool, old: bool| !new || old;
+                assert!(
+                    kept(r.pane_header, last.pane_header)
+                        && kept(r.account, last.account)
+                        && kept(r.card, last.card)
+                        && kept(r.status, last.status)
+                        && kept(r.meters, last.meters)
+                        && kept(r.entry, last.entry)
+                        && kept(r.buttons, last.buttons)
+                        && kept(r.ladder, last.ladder),
+                    "{width} x {h}: {r:?} after {last:?}"
+                );
+                last = r;
+            }
+        }
+        // The shortest and narrowest: both exits whole, beside the pane's controls, with their
+        // words (what they act on takes what's left).
+        let room = MIN_DOM_WIDTH - 8.0 - crate::pane::controls_gutter(crate::layout::PaneKind::Dom);
+        let labels = util_labels(MIN_DOM_WIDTH);
+        let flatten = exit_w(&format!("{} off", labels[3]));
+        assert!(exit_w(labels[2]) + flatten + 4.0 <= room, "{room}");
+        const { assert!(MIN_HIT + 2.0 <= MIN_DOM_HEIGHT) };
+    }
+
+    /// Where each row goes, in the order docs/known-gaps.md and the PR state: a wide panel, and
+    /// the narrow one whose meters are 18 px shorter.
+    #[test]
+    fn rows_give_way_in_order() {
+        let all = PanelRows::ALL;
+        for (width, full, ladder, meters) in [
+            (420.0, 413.0, 335.0, 211.0),
+            (MIN_DOM_WIDTH, 395.0, 317.0, 193.0),
+        ] {
+            assert_eq!(panel_rows(width, full, false), all, "{width}: all fit");
+            let no_buttons = PanelRows {
+                buttons: false,
+                ..all
+            };
+            assert_eq!(panel_rows(width, full - 1.0, false), no_buttons);
+            assert_eq!(panel_rows(width, ladder, false), no_buttons);
+            let no_ladder = PanelRows {
+                entry: false,
+                ladder: false,
+                ..no_buttons
+            };
+            assert_eq!(panel_rows(width, ladder - 1.0, false), no_ladder);
+            assert_eq!(panel_rows(width, meters, false), no_ladder);
+            let no_meters = PanelRows {
+                meters: false,
+                ..no_ladder
+            };
+            assert_eq!(panel_rows(width, meters - 1.0, false), no_meters);
+            assert_eq!(panel_rows(width, 173.0, false), no_meters);
+            let no_status = PanelRows {
+                status: false,
+                ..no_meters
+            };
+            assert_eq!(panel_rows(width, 172.0, false), no_status);
+            assert_eq!(panel_rows(width, 149.0, false), no_status);
+            let no_card = PanelRows {
+                card: false,
+                ..no_status
+            };
+            assert_eq!(panel_rows(width, 148.0, false), no_card);
+            assert_eq!(panel_rows(width, 91.0, false), no_card);
+            let no_account = PanelRows {
+                account: false,
+                ..no_card
+            };
+            assert_eq!(panel_rows(width, 90.0, false), no_account);
+            assert_eq!(panel_rows(width, 53.0, false), no_account);
+            let exits = PanelRows {
+                pane_header: false,
+                ..no_account
+            };
+            assert_eq!(panel_rows(width, 52.0, false), exits);
+            assert_eq!(panel_rows(width, MIN_DOM_HEIGHT, false), exits);
+        }
+        assert_eq!(panel_rows(420.0, 0.0, false), all, "not laid out yet");
+    }
+
+    /// The editor takes only the rows it replaces: nothing else changes, and where its rows were
+    /// showing the panel doesn't move at all. A pane too short closes it rather than hide it.
+    #[test]
+    fn the_editor_changes_only_its_own_rows() {
+        for h in 26..600 {
+            let pane_h = h as f32;
+            let closed = panel_rows(420.0, pane_h, false);
+            let open = panel_rows(420.0, pane_h, true);
+            if !editor_fits(420.0, pane_h) {
+                assert_eq!(open, closed, "{h}");
+                continue;
+            }
+            assert!(open.entry && open.buttons, "{h}");
+            assert_eq!(
+                (
+                    open.pane_header,
+                    open.account,
+                    open.card,
+                    open.status,
+                    open.meters
+                ),
+                (
+                    closed.pane_header,
+                    closed.account,
+                    closed.card,
+                    closed.status,
+                    closed.meters
+                ),
+                "{h}"
+            );
+            assert!(pane_header_h() + open.height(420.0) <= pane_h, "{h}");
+            if closed.entry && closed.buttons {
+                assert_eq!(open, closed, "{h}: the ladder stays put");
+            }
+        }
+        assert!(editor_fits(420.0, 0.0), "not laid out yet");
+        assert!(!editor_fits(420.0, 150.0));
+    }
+
+    /// The position once the card has gone: direction by shape and word, only what the P&L display
+    /// allows, and the P&L apart from the average it can be misread with.
+    #[test]
+    fn the_position_items_follow_the_display() {
+        use crate::pnl::PnlDisplay as P;
+        let es = lines_feed::catalog::get(lines_feed::catalog::ES).unwrap();
+        let long = Some((2, Some(599_425.0), Some(-17.0), Money::cents(-42_500)));
+        let (side, avg, pnl) = position_items(long, P::Both, &es, false);
+        assert_eq!(side, "▲ LONG 2");
+        assert!(avg.unwrap().starts_with("@ "));
+        assert_eq!(pnl.unwrap().0, "-$425.00");
+        assert_eq!(position_items(long, P::Both, &es, true).0, "▲ 2", "narrow");
+        assert_eq!(position_items(long, P::Off, &es, false).2, None);
+        assert_eq!(
+            position_items(long, P::Ticks, &es, false).2.unwrap().0,
+            "-17.0 t"
+        );
+        let short = Some((-3, None, None, Money::cents(5_000)));
+        assert_eq!(position_items(short, P::Both, &es, false).0, "▼ SHORT 3");
+        assert_eq!(position_items(None, P::Both, &es, false).0, "Flat");
+    }
+
+    /// The account row never cuts the switch's count or takes the account's last hit target: Keys
+    /// shows there only with room, armed strategies and all.
+    #[test]
+    fn the_account_row_keeps_keys_only_with_room() {
+        let armed = |w: f32| switch_text_armed(true, None, 1, w);
+        for width in [MIN_DOM_WIDTH, NARROW_BELOW, 380.0, 479.0] {
+            let room = account_row_room(width, &armed(width), true);
+            // Everything on the row, at this estimate, in the panel's width.
+            let used = 52.0 + MIN_HIT + word_w(&armed(width)) + 30.0 + KEYS_CHIP_W + 4.0 * 8.0;
+            assert!((width - 16.0 - used - room).abs() < 0.01, "{width}");
+        }
+        assert!(account_row_room(MIN_DOM_WIDTH, &armed(MIN_DOM_WIDTH), true) < 0.0);
+        assert!(account_row_room(479.0, "Enabled", true) >= 0.0);
+        // In view: the header, the status line, or this row with room. None of them: order keys
+        // send nothing (`dom_trade::key_order`).
+        assert!(keys_chip_on_account_row(480.0, false, false));
+        assert!(
+            keys_chip_on_account_row(0.0, false, false),
+            "not laid out yet"
+        );
+        assert!(keys_chip_on_account_row(400.0, true, false));
+        assert!(keys_chip_on_account_row(400.0, false, true));
+        assert!(!keys_chip_on_account_row(400.0, false, false));
+    }
+
+    /// A short line keeps whole items in priority order: one too wide is left out, never cut, and
+    /// a later one that fits still shows. No room at all leaves the buttons their room.
+    #[test]
+    fn a_short_line_keeps_whole_items_by_priority() {
+        assert_eq!(fit_items(100.0, &[40.0, 80.0, 30.0]), [true, false, true]);
+        assert_eq!(fit_items(0.0, &[40.0]), [false]);
+        assert_eq!(fit_items(-50.0, &[1.0]), [false]);
+        assert_eq!(
+            fit_items(100.0, &[0.0, 92.0]),
+            [false, true],
+            "nothing there costs nothing"
+        );
+        // The narrowest strip, beside its exits, holds the badge from about 295 px wide
+        // (docs/known-gaps.md).
+        let line = |width: f32| {
+            let controls = crate::pane::controls_gutter(crate::layout::PaneKind::Dom) - 8.0;
+            let room = width - 16.0 - controls - exit_w("Cancel all") - exit_w("Flatten off") - 4.0;
+            fit_items(room, &[word_w("PAPER") + 10.0])[0]
+        };
+        assert!(line(300.0));
+        assert!(!line(270.0));
+    }
+
     /// The panel at its narrowest (MIN_DOM_WIDTH): every row's items fit, at a wide 12 px
     /// glyph (7.5 px a character), with ≥ 20 px hit targets.
     #[test]
@@ -4627,7 +5378,8 @@ mod tests {
         let confirm = w("Keep") + w("Replace 99") + 8.0;
         assert!(confirm <= room, "confirmation buttons {confirm}");
         // Header: the switch (its widest narrow text) beside an account name that shrinks;
-        // narrow, the Keys chip is on the status line, not here (a wide header holds both).
+        // narrow, the Keys chip is on the status line, or here only where it fits (a wide header
+        // holds both).
         let switch = w(&switch_text(true, Some("contract unknown"), true)) + 2.0 * 8.0;
         assert!(
             60.0 + w("PAPER") + switch + 2.0 * 8.0 <= room,

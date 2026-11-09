@@ -17,7 +17,7 @@ use lines_trading::{
 
 use crate::commands::{Command, TradeCmd, command_for};
 use crate::dom_trade::{
-    self, ArmEvent, ArmPrefs, Arming, ENABLE_TO_TRADE, EntryCtx, HOTKEYS_OFF, Refusal,
+    self, ArmEvent, ArmPrefs, Arming, ENABLE_TO_TRADE, EntryCtx, HOTKEYS_OFF, KEYS_HIDDEN, Refusal,
 };
 use crate::trading::{Trading, TradingSetup};
 
@@ -127,7 +127,7 @@ fn press(t: &Trading, keys: &str, hotkeys: bool, arming: Arming) -> Result<Comma
     let tc = key(keys);
     assert!(tc.needs_hotkeys(), "{keys}: an order key");
     let q = tc.quick().expect("an order key");
-    let cmd = dom_trade::key_order(q, hotkeys, arming, || Ok(ctx(t)))?;
+    let cmd = dom_trade::key_order(q, hotkeys, true, arming, || Ok(ctx(t)))?;
     let id = t.submit(Source::Hotkey, Instant::now(), cmd);
     t.settle();
     Ok(id)
@@ -209,6 +209,29 @@ fn order_keys_are_refused_while_hotkeys_or_trading_are_off() {
     assert!(s.position(&account(), es()).is_none());
     let (_, _, n) = t.handle().latency();
     assert_eq!(n, 0, "no command reached the core");
+}
+
+/// A short pane with no room for the Keys chip: order keys send nothing, whatever else is on, and
+/// say why. Off still says off. Flatten and Cancel all never depend on it.
+#[test]
+fn order_keys_send_nothing_while_the_keys_chip_is_out_of_sight() {
+    let t = start(None);
+    for k in ORDER_KEYS {
+        let q = key(k).quick().expect("an order key");
+        let hidden = dom_trade::key_order(q, true, false, armed(), || Ok(ctx(&t)));
+        assert_eq!(hidden.unwrap_err(), Refusal(KEYS_HIDDEN), "{k}");
+        let off = dom_trade::key_order(q, false, false, armed(), || Ok(ctx(&t)));
+        assert_eq!(off.unwrap_err(), Refusal(HOTKEYS_OFF), "{k}");
+    }
+    let (_, _, n) = t.handle().latency();
+    assert_eq!(n, 0, "no command reached the core");
+    for k in ["shift-f", "shift-a"] {
+        let id = press_exit(&t, k);
+        assert!(
+            matches!(t.cache.read().result(id), Some(Ok(_))),
+            "{k} works with the chip out of sight"
+        );
+    }
 }
 
 /// Each order key with the hotkeys and trading on: the order it names, through the core.

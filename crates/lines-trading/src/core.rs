@@ -269,6 +269,9 @@ pub enum OverfillPolicy {
     Reject,
 }
 
+/// How long a Flatten's order with no word from the broker holds back another Flatten.
+const FLATTEN_ANSWER_MS: i64 = 5_000;
+
 impl TradingCore {
     pub fn new(broker: Box<dyn Broker>) -> TradingCore {
         TradingCore {
@@ -1214,12 +1217,37 @@ impl TradingCore {
                 // Closing a position cancels every order on it, whoever placed it: a trader's
                 // stop left working after the position is gone would open a new one. With
                 // nothing to close, a strategy's Flatten is its Cancel All (its own orders).
+                //
+                // A Flatten already on its way for a position stays, and no second one goes: it is
+                // the order closing it, and until its fill is reported the position still looks
+                // open, so another market order could reverse it on a broker that doesn't honor
+                // reduce-only. Refused or cancelled, it is no longer open and the next one goes;
+                // while its cancel is on its way it may yet fill, so nothing goes until that's known.
+                // A venue silent for [`FLATTEN_ANSWER_MS`] may have lost it: an exit is never dead,
+                // so from then on it is cancelled and replaced as any other order.
+                let closing: std::collections::BTreeSet<OrderId> = self
+                    .orders
+                    .values()
+                    .filter(|o| o.is_open() && o.role == Role::Flatten && o.account == account)
+                    .filter(|o| positions.iter().any(|(k, _)| *k == o.contract))
+                    .filter(|o| now.0.saturating_sub(o.updated.0) < FLATTEN_ANSWER_MS)
+                    .map(|o| o.id)
+                    .collect();
                 let mut ids = if positions.is_empty() {
                     self.cancel_all(env, now, &account, contract)
                 } else {
-                    self.cancel_every(env, now, &account, contract)
+                    let others = self
+                        .orders
+                        .values()
+                        .filter(|o| o.account == account && !closing.contains(&o.id))
+                        .map(|o| o.id)
+                        .collect();
+                    self.cancel_scoped(env, now, &account, contract, Some(others))
                 };
                 for (k, q) in positions {
+                    if closing.iter().any(|id| self.orders[id].contract == k) {
+                        continue;
+                    }
                     let spec = OrderSpec {
                         account: account.clone(),
                         contract: k,
@@ -1260,17 +1288,6 @@ impl TradingCore {
         // A strategy cancels only its own orders (decision 0025).
         let scope = self.cancel_scope(env.source);
         self.cancel_scoped(env, now, account, contract, scope)
-    }
-
-    /// Every open order on the account (and contract), whoever's: a Flatten closing positions.
-    fn cancel_every(
-        &mut self,
-        env: &Envelope,
-        now: UtcMillis,
-        account: &AccountId,
-        contract: Option<ContractKey>,
-    ) -> Vec<OrderId> {
-        self.cancel_scoped(env, now, account, contract, None)
     }
 
     fn cancel_scoped(
