@@ -1112,16 +1112,15 @@ mod tests {
             pane("dom"),
             pane("journal")
         );
-        let w: WorkspaceDoc = serde_json::from_str(&json).unwrap();
+        // Through the same decoding a saved file goes through.
+        let Decoded::Ok { value: w, .. } = decode::<WorkspaceDoc>(&FORMAT, json.as_bytes()) else {
+            panic!("the file loads");
+        };
         let layout = &w.windows[0].tabs[0].layout;
         let heights = |h: f32| -> Vec<f32> {
             layout
                 .place_where(Rect::new(0.0, 0.0, 800.0, h), &|_| true, &|p: &PaneDoc| {
-                    if p.kind == PaneKind::Dom {
-                        crate::trade_bar::MIN_DOM_PANE_H
-                    } else {
-                        0.0
-                    }
+                    crate::trade_bar::min_pane_h(p.kind)
                 })
                 .iter()
                 .map(|p| p.rect.h)

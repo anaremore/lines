@@ -440,10 +440,8 @@ impl Tab {
 
     /// The least height a split leaves this pane: a DOM keeps its header, account and exits.
     fn min_h(&self, id: &PaneId) -> f32 {
-        match self.handle(*id).map(|h| h.kind()) {
-            Some(crate::layout::PaneKind::Dom) => crate::trade_bar::MIN_DOM_PANE_H,
-            _ => 0.0,
-        }
+        self.handle(*id)
+            .map_or(0.0, |h| crate::trade_bar::min_pane_h(h.kind()))
     }
 
     fn order(&self) -> Vec<PaneId> {

@@ -1810,6 +1810,14 @@ pub const MIN_HIT: f32 = 20.0;
 
 /// The least height a split leaves a DOM: its header, the account row and the exits.
 pub const MIN_DOM_PANE_H: f32 = 27.0 + HDR_H + UTIL_H + PAD_Y;
+
+/// The least height a split leaves a pane of this kind.
+pub fn min_pane_h(kind: crate::layout::PaneKind) -> f32 {
+    match kind {
+        crate::layout::PaneKind::Dom => MIN_DOM_PANE_H,
+        _ => 0.0,
+    }
+}
 /// The ladder's header and three rows, so it shows the inside market. Shorter, it doesn't show.
 pub const LADDER_MIN_H: f32 =
     crate::pane_columns::HEADER_ROW_H + 3.0 * crate::dom_view::LADDER_ROW_H;
@@ -1870,6 +1878,12 @@ fn pane_header_h() -> f32 {
     crate::pane::header_height(crate::layout::PaneKind::Dom)
 }
 
+/// Nothing measured yet. Not the same as a pane measured at no height, which a window too short
+/// for its DOMs can leave: that one shows nothing, and its order keys send nothing.
+fn not_laid_out(width: f32, pane_h: f32) -> bool {
+    width <= 0.0 && pane_h <= 0.0
+}
+
 /// A pane's height as the rows reckon it: layout snaps to device pixels, so at 150% a pane held at
 /// the minimum measures 90.67 and must still count as its 91.
 fn reckoned_h(pane_h: f32) -> f32 {
@@ -1910,7 +1924,7 @@ fn closed_rows(width: f32, pane_h: f32) -> PanelRows {
 /// button rows' space, from the ladder where those rows were gone (the one case where the panel's
 /// height follows state). Every other row is as it is with it closed.
 pub fn panel_rows(width: f32, pane_h: f32, editing: bool) -> PanelRows {
-    if pane_h <= 0.0 {
+    if not_laid_out(width, pane_h) {
         return PanelRows::ALL;
     }
     let pane_h = reckoned_h(pane_h);
@@ -1925,7 +1939,7 @@ pub fn panel_rows(width: f32, pane_h: f32, editing: bool) -> PanelRows {
 /// Whether the bracket editor or confirmation has room: a pane too short closes it (never hidden
 /// and still taking keys).
 pub fn editor_fits(width: f32, pane_h: f32) -> bool {
-    if pane_h <= 0.0 {
+    if not_laid_out(width, pane_h) {
         return true;
     }
     let pane_h = reckoned_h(pane_h);
@@ -1933,6 +1947,9 @@ pub fn editor_fits(width: f32, pane_h: f32) -> bool {
     (r.entry, r.buttons) = (true, true);
     r.account && pane_header_h() + r.height(width) <= pane_h
 }
+
+/// From this width, a pane without its account row names the position beside the exits.
+const POSITION_BESIDE_EXITS: f32 = 400.0;
 
 /// Whether a button of the utility row shows: BE and Reverse (`entry`) need the account row, because
 /// they act on a position and an account the pane no longer names without it.
@@ -2561,6 +2578,20 @@ pub fn dom_bar<V: TradePane>(
             .as_ref()
             .map_or(if waiting { "LIVE" } else { "PAPER" }, |d| d.badge);
         row = row.child(account_badge(word, t).flex_shrink_0());
+        // The position too, with room for it, so this pane can't read as flat. It says only what
+        // it knows: with no account data there's no side to name.
+        if width >= POSITION_BESIDE_EXITS
+            && let Some(d) = data.as_ref()
+        {
+            let (side, _, _) = position_items(d.position, mode, product, false);
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(t.text_main)
+                    .child(side),
+            );
+        }
     }
     for (i, (cmd, name, label, entry)) in util.into_iter().enumerate() {
         if !util_shows(entry, rows) {
@@ -5086,7 +5117,12 @@ mod tests {
             assert_eq!(panel_rows(width, 90.0, false), no_account);
             assert_eq!(panel_rows(width, 1.0, false), no_account);
         }
-        assert_eq!(panel_rows(420.0, 0.0, false), all, "not laid out yet");
+        assert_eq!(panel_rows(0.0, 0.0, false), all, "not laid out yet");
+        let squeezed = panel_rows(420.0, 0.0, false);
+        assert!(
+            !squeezed.account && !squeezed.ladder,
+            "measured at no height"
+        );
     }
 
     /// The editor takes only the rows it replaces: nothing else changes, and where its rows were
@@ -5112,7 +5148,8 @@ mod tests {
                 assert_eq!(open, closed, "{h}: the ladder stays put");
             }
         }
-        assert!(editor_fits(420.0, 0.0), "not laid out yet");
+        assert!(editor_fits(0.0, 0.0), "not laid out yet");
+        assert!(!editor_fits(420.0, 0.0), "measured at no height");
         assert!(!editor_fits(420.0, 150.0));
     }
 
