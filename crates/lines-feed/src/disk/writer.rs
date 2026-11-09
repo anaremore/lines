@@ -341,7 +341,7 @@ impl EventSink for ContractWriter {
                     bid: None,
                     ask: Some(p),
                 }),
-                MarketEvent::BookClear if self.depth => {
+                MarketEvent::BookClear | MarketEvent::DepthUnavailable { .. } if self.depth => {
                     Some(NativeEvent::BookClear { time_us: now_us })
                 }
                 MarketEvent::BookLevel {

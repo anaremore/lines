@@ -97,6 +97,8 @@ pub struct DomView {
     seen_revision: u64,
     product: Product,
     has_depth: bool,
+    /// Why there is no depth, from the source (shown in the empty ladder).
+    depth_note: Option<String>,
     grouping: u32,
     view: LadderView,
     rows: Vec<LadderRow>,
@@ -234,8 +236,18 @@ impl Pane for DomView {
     }
 
     fn changed(&mut self) -> bool {
+        // A source can refuse depth while the feed runs (read here, off the paint path); a
+        // change repaints even a quiet feed.
+        let mut note = false;
+        if let Some(d) = self.store.try_read()
+            && (d.depth_note != self.depth_note || d.capabilities.depth != self.has_depth)
+        {
+            self.has_depth = d.capabilities.depth;
+            self.depth_note.clone_from(&d.depth_note);
+            note = true;
+        }
         let shown = self.cols.set.is_shown(DomCol::Trail.index());
-        self.trade.changed() | self.trail.wants_frame(&self.store, shown)
+        note | self.trade.changed() | self.trail.wants_frame(&self.store, shown)
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -249,6 +261,7 @@ impl Pane for DomView {
             let d = self.store.read();
             self.product = d.product.clone();
             self.has_depth = d.capabilities.depth;
+            self.depth_note.clone_from(&d.depth_note);
         }
         let follow = feed.sub.is_some();
         self.orders = OrdersLayer::default();
@@ -277,9 +290,13 @@ impl DomView {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = feed.store().clone();
-        let (product, has_depth) = {
+        let (product, has_depth, depth_note) = {
             let d = store.read();
-            (d.product.clone(), d.capabilities.depth)
+            (
+                d.product.clone(),
+                d.capabilities.depth,
+                d.depth_note.clone(),
+            )
         };
         pane::watch_store(cx);
         if feed.sub.is_some()
@@ -302,6 +319,7 @@ impl DomView {
             seen_revision: u64::MAX,
             product,
             has_depth,
+            depth_note,
             grouping: opts.grouping.max(1),
             view: LadderView::default(),
             rows: Vec::with_capacity(MAX_ROWS),
@@ -910,7 +928,8 @@ impl DomView {
                         d.last_trade,
                         units,
                         top,
-                        rows,
+                        // The note takes the bottom row: the rows above keep their prices.
+                        rows - usize::from(self.depth_note.is_some() && rows > 1),
                         &mut self.rows,
                     )
                 }
@@ -1007,11 +1026,7 @@ impl DomView {
         let body = Bounds::new(point(px(ox), px(oy)), size(px(w), px(body_h)));
 
         if self.rows.is_empty() {
-            let msg = if self.has_depth {
-                "no depth yet"
-            } else {
-                "no depth from this source"
-            };
+            let msg = empty_ladder_text(self.has_depth, self.depth_note.as_deref());
             // The ladder's own empty state, across its (empty) price column.
             crate::layout_rec::set_owner("dom-price");
             self.glyphs.paint(
@@ -1177,6 +1192,18 @@ impl DomView {
             );
         }
         self.cols.paint_rules(&t, body, window);
+        // A thin book must not read as the market's real depth: say so on the bottom row, so
+        // no price the trader aims at moves when the note comes or goes.
+        if let Some(note) = self.depth_note.as_deref()
+            && !self.rows.is_empty()
+        {
+            let note_y = oy + self.rows.len() as f32 * ROW_H;
+            window.paint_quad(fill(rect(ox, note_y, w, top + h - note_y), t.bg));
+            crate::layout_rec::set_owner("dom-price");
+            self.glyphs
+                .paint(note, ox + PAD, note_y, ROW_H, t.text_dim, false, window, cx);
+            crate::layout_rec::set_owner("");
+        }
     }
 
     fn header(&self) -> impl IntoElement {
@@ -1271,6 +1298,15 @@ fn short_pane_message(flash: Option<&str>, status: bool, ladder: bool) -> Option
 /// room for its header and enough rows for the inside market.
 fn ladder_shows(has_panel: bool, rows_ladder: bool, height: f32) -> bool {
     (!has_panel || rows_ladder) && height >= trade_bar::LADDER_MIN_H
+}
+
+/// What an empty ladder says: the source's reason if it gave one.
+fn empty_ladder_text(has_depth: bool, note: Option<&str>) -> &str {
+    match note {
+        Some(n) => n,
+        None if has_depth => "no depth yet",
+        None => "no depth from this source",
+    }
 }
 
 /// The trail column is shown exactly while the trail is on (unless a saved file hid it).
@@ -1454,6 +1490,47 @@ impl Render for DomView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_one_level_book_makes_a_whole_ladder_with_blank_rows() {
+        use lines_core::{Price, Qty};
+        let mut book = lines_core::OrderBook::default();
+        book.set(lines_core::Side::Bid, Price(600_000), Qty(3), 1);
+        book.set(lines_core::Side::Ask, Price(600_025), Qty(4), 1);
+        let units = 25;
+        let top = inside_row(&book, None, units).unwrap() + 5;
+        let mut rows = Vec::with_capacity(MAX_ROWS);
+        let vap = lines_core::VolumeAtPrice::default();
+        build_ladder(&book, &vap, None, units, top, 11, &mut rows);
+        // Every row is a price to click; only the inside has a size.
+        assert_eq!(rows.len(), 11);
+        assert!(
+            rows.windows(2)
+                .all(|w| w[0].price.0 - w[1].price.0 == units)
+        );
+        let sized: Vec<_> = rows
+            .iter()
+            .filter(|r| r.bid.0 > 0 || r.ask.0 > 0)
+            .map(|r| (r.price, r.bid, r.ask, r.best_bid, r.best_ask))
+            .collect();
+        assert_eq!(
+            sized,
+            [
+                (Price(600_025), Qty(0), Qty(4), false, true),
+                (Price(600_000), Qty(3), Qty(0), true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_ladder_gives_the_sources_reason() {
+        assert_eq!(empty_ladder_text(true, None), "no depth yet");
+        assert_eq!(empty_ladder_text(false, None), "no depth from this source");
+        assert_eq!(
+            empty_ladder_text(false, Some("not on your plan")),
+            "not on your plan"
+        );
+    }
 
     /// A short pane says nothing about what doesn't fit; a message with nowhere else to go shows.
     #[test]

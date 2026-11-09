@@ -172,6 +172,8 @@ pub struct ChartData {
     /// continuous display. Never adjusted.
     pub retired: Vec<(ContractKey, BarSeries)>,
     pub capabilities: Capabilities,
+    /// Why this feed has no depth, from the source ([`MarketEvent::DepthUnavailable`]).
+    pub depth_note: Option<String>,
     /// Provider id ("cqg", "coinbase"); for status display, not for feature switches.
     pub provider: &'static str,
     pub series: BarSeries,
@@ -249,6 +251,7 @@ impl ChartData {
             contract,
             retired: Vec::new(),
             capabilities,
+            depth_note: None,
             provider,
             series: BarSeries::new(period_ms, max_bars),
             last_trade: None,
@@ -422,6 +425,12 @@ impl ChartData {
                     }
                 }
                 MarketEvent::BookClear => {
+                    self.book.clear();
+                    book_touched = true;
+                }
+                MarketEvent::DepthUnavailable { ref reason } => {
+                    self.capabilities.depth = false;
+                    self.depth_note = Some(reason.clone());
                     self.book.clear();
                     book_touched = true;
                 }
@@ -950,6 +959,47 @@ mod tests {
             qty: Qty(q),
             aggressor: Some(Aggressor::Buy),
         }
+    }
+
+    /// A source refusing depth mid-feed: the book empties, the reason stays, trades go on.
+    #[test]
+    fn depth_refused_by_the_source_says_why_and_trades_go_on() {
+        let store = ChartStore::new(
+            crate::catalog::get(crate::catalog::ES).unwrap(),
+            None,
+            Capabilities {
+                depth: true,
+                ..Capabilities::default()
+            },
+            "test",
+            60_000,
+            100,
+        );
+        let level = MarketEvent::BookLevel {
+            side: Side::Bid,
+            price: Price(600_000),
+            qty: Qty(3),
+            orders: 1,
+        };
+        store.update_frame(|d| d.apply(&[level]));
+        let reason = "not on your plan".to_owned();
+        let refused = MarketEvent::DepthUnavailable { reason };
+        let revision = store.revision();
+        store.update_frame(|d| d.apply(&[refused]));
+        assert_ne!(store.revision(), revision);
+        let trade = MarketEvent::Trade {
+            time: UtcMillis(1_000),
+            price: Price(600_025),
+            qty: Qty(1),
+            aggressor: None,
+        };
+        store.update_frame(|d| d.apply(&[trade]));
+        let d = store.read();
+        assert!(!d.capabilities.depth);
+        assert_eq!(d.depth_note.as_deref(), Some("not on your plan"));
+        assert_eq!(d.book.best_bid(), None);
+        assert_eq!(d.bid, None);
+        assert_eq!(d.last_trade, Some(Price(600_025)));
     }
 
     /// Decision 0028: a frame of option quotes lands in the chains (their revision moves) but

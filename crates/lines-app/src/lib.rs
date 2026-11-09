@@ -488,6 +488,10 @@ struct Cli {
     /// the user's is read or written unless DIR is theirs.
     #[arg(long, value_name = "DIR", requires = "screenshot")]
     journal_dir: Option<PathBuf>,
+    /// Screenshot: show the replay's book as a source without depth would, only the inside,
+    /// with this note in the DOM.
+    #[arg(long, value_name = "TEXT", requires = "screenshot")]
+    depth_note: Option<String>,
     /// Screenshot: also render the Settings window at this section (appearance, charts, dom,
     /// trading, accounts, data, keys, diagnostics) into `<out stem>-settings.png`.
     #[arg(long, requires = "screenshot")]
@@ -1492,6 +1496,7 @@ where
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
                 journal_dir: cli.journal_dir.clone(),
+                depth_note: cli.depth_note.clone(),
                 layout_report: cli.layout_report,
                 settings: cli
                     .settings

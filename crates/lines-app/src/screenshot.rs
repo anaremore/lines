@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use gpui::{AnyWindowHandle, App, AppContext, AsyncApp, px, size};
+use lines_feed::provider::MarketEvent;
 use lines_feed::registry::FeedRegistry;
 use lines_feed::store::FeedStatus;
 
@@ -79,6 +80,9 @@ pub struct Shot {
     pub hover_header: bool,
     /// Keep the journal in this folder, so a script's trades get trade snapshots (`--journal-dir`).
     pub journal_dir: Option<PathBuf>,
+    /// Show the replay's book as a source without depth would: only the inside, with this note
+    /// (`--depth-note`).
+    pub depth_note: Option<String>,
     /// Record the frame's layout and write the layout lint's findings beside each PNG
     /// (`<stem>.lint.txt`, empty when clean): `--layout-report`.
     pub layout_report: bool,
@@ -132,6 +136,29 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    if let Some(reason) = &shot.depth_note {
+        for f in &feeds {
+            f.store().update_frame(|d| {
+                use lines_core::Side;
+                let top = [Side::Bid, Side::Ask].map(|side| {
+                    d.book
+                        .levels(side)
+                        .next()
+                        .map(|(price, l)| MarketEvent::BookLevel {
+                            side,
+                            price,
+                            qty: l.qty,
+                            orders: l.orders,
+                        })
+                });
+                d.apply(&[MarketEvent::DepthUnavailable {
+                    reason: reason.clone(),
+                }]);
+                let top: Vec<_> = top.into_iter().flatten().collect();
+                d.apply(&top);
+            });
+        }
+    }
 
     // 2. Render one frame off-screen and read it back. Every outcome ends the process from
     // inside the app with its own exit code: quitting the app is not enough, because on
@@ -158,6 +185,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         bracket_position,
         hover_header,
         journal_dir,
+        depth_note: _,
         layout_report,
         settings: settings_shot,
     } = shot;
