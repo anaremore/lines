@@ -138,7 +138,7 @@ impl TradingCore {
             .orders
             .values()
             .filter(|o| &o.account == account && o.contract == contract)
-            .filter(|o| !self.flatten_keeps(o, &positions))
+            .filter(|o| !self.reverse_kept(o, &positions))
             .map(|o| o.id)
             .collect();
         let mut ids = self.cancel_scoped(env, now, account, Some(contract), Some(cancel));

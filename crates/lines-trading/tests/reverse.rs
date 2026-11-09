@@ -35,6 +35,9 @@ struct Venue {
     inner: PaperBroker,
     oco: bool,
     lose_ids: Arc<Mutex<Vec<OrderId>>>,
+    /// Drop the broker's `Modified` reports, so the core never learns a bracket's legs became
+    /// reduce-only (a broker that keeps legs without marking them).
+    drop_modified: Arc<AtomicBool>,
     /// Refuse cancels of these orders (too late to cancel), answering at once.
     refuse_ids: Arc<Mutex<Vec<OrderId>>>,
     refusals: Vec<BrokerEvent>,
@@ -97,6 +100,9 @@ impl Broker for Venue {
     }
     fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
         self.inner.poll(now, out);
+        if self.drop_modified.load(Ordering::Relaxed) {
+            out.retain(|e| !matches!(e, BrokerEvent::Modified { .. }));
+        }
         out.append(&mut self.refusals);
     }
     fn next_wake(&self) -> Option<UtcMillis> {
@@ -116,6 +122,7 @@ struct Rig {
     events: Vec<Event>,
     lose_ids: Arc<Mutex<Vec<OrderId>>>,
     refuse_ids: Arc<Mutex<Vec<OrderId>>>,
+    drop_modified: Arc<AtomicBool>,
     lose_cancels: Arc<AtomicUsize>,
     down: Arc<AtomicBool>,
     placed: Placed,
@@ -129,6 +136,7 @@ impl Rig {
         inner.open_account(acct(), Money::whole(100_000));
         let lose_ids = Arc::new(Mutex::new(Vec::new()));
         let refuse_ids = Arc::new(Mutex::new(Vec::new()));
+        let drop_modified = Arc::new(AtomicBool::new(false));
         let lose_cancels = Arc::new(AtomicUsize::new(0));
         let down = Arc::new(AtomicBool::new(false));
         let placed = Arc::new(Mutex::new(Vec::new()));
@@ -137,6 +145,7 @@ impl Rig {
             oco,
             lose_ids: lose_ids.clone(),
             refuse_ids: refuse_ids.clone(),
+            drop_modified: drop_modified.clone(),
             refusals: Vec::new(),
             lose_cancels: lose_cancels.clone(),
             down: down.clone(),
@@ -149,6 +158,7 @@ impl Rig {
             events: Vec::new(),
             lose_ids,
             refuse_ids,
+            drop_modified,
             lose_cancels,
             down,
             placed,
@@ -782,6 +792,47 @@ fn an_unresolved_order_refuses_the_reverse() {
         assert!(r.placed_since(from).is_empty(), "oco {oco}");
         assert_eq!(r.pos(), 2);
     }
+}
+
+/// A bracket's legs the broker keeps but the core doesn't know are reduce-only are cancelled at
+/// once, as any plain order: kept through the flip, one could fill against the new side.
+#[test]
+fn a_bracket_leg_not_known_reduce_only_is_cancelled_at_once() {
+    let mut r = Rig::new(true);
+    r.drop_modified.store(true, Ordering::Relaxed);
+    let ids = r
+        .cmd(Command::PlaceBracket(lines_trading::BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(2),
+                kind: OrderKind::Market,
+            },
+            take_profit: Some(Price(610_000)),
+            stop_loss: Some(Price(590_000)),
+        }))
+        .unwrap();
+    r.wait(LAT + 1);
+    assert_eq!(r.pos(), 2);
+    let legs: Vec<OrderId> = ids[1..].to_vec();
+    assert!(
+        legs.iter()
+            .all(|id| !r.core.order(*id).unwrap().reduce_only)
+    );
+    // Cancelled at the press, not kept until flat.
+    let asked = r.reverse().unwrap();
+    assert!(legs.iter().all(|l| asked.contains(l)), "{asked:?}");
+    r.wait(LAT + 1);
+    r.wait(LAT + 1);
+    assert_eq!(r.pos(), -2);
+    for id in legs {
+        assert_eq!(r.state(id), OrderState::Cancelled, "leg {id:?}");
+    }
+    // The market falls through the old stop's price: nothing more sells.
+    r.book(585_000);
+    r.wait(LAT + 1);
+    assert_eq!(r.pos(), -2);
 }
 
 /// On `oco: true` an exit whose earlier cancel the broker refused is kept protecting, as any exit
