@@ -5317,13 +5317,18 @@ impl ChainView {
 
     fn footer(&self, size: i64, exits: Option<gpui::Div>) -> impl IntoElement {
         let t = self.theme;
-        // Narrow beside the exits, a message has its own line above them. The exits' row stays
-        // as it is, so no message can slide Flatten under a pointer resting on Cancel.
+        // Narrow beside the exits, a message sits over what's above them, and the footer keeps its
+        // height. So a message arriving moves nothing: not Flatten under a pointer resting on
+        // Cancel, and not a Close or Send from above. It covers those until it clears.
         let width = f(self.bounds.size.width);
         let own_line = footer_note_above(self.note.is_some(), exits.is_some(), width);
         let above = own_line.then(|| {
             div()
-                .flex_shrink_0()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(gpui::relative(1.0))
+                .occlude()
                 .px_2()
                 .py_1()
                 .bg(t.panel)
@@ -5333,13 +5338,16 @@ impl ChainView {
                 .text_color(t.text_main)
                 .children(self.note.clone())
         });
-        let row = div()
+        div()
             .flex()
             .flex_row()
             .flex_shrink_0()
             // The exits' height whether they show or not.
             .min_h(px(STRIP_H))
+            .relative()
             .items_center()
+            // A wrapped message grows the row upward: the exits hold their place at its foot.
+            .when(self.note.is_some(), |d| d.items_end())
             .gap_2()
             .px_2()
             .py_1()
@@ -5369,13 +5377,8 @@ impl ChainView {
                         |d| d.child(self.footer_text(size)),
                     ),
             )
-            .children(exits);
-        div()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
+            .children(exits)
             .children(above)
-            .child(row)
     }
 
     fn footer_text(&self, size: i64) -> String {
@@ -5411,8 +5414,8 @@ fn hold_rows(
     one_click || (window_hovered && table.contains(&pointer))
 }
 
-/// Whether a message goes on its own line above the footer: when it would share a narrow row with
-/// the exits and leave itself a sliver.
+/// Whether a message goes over what's above the footer: when it would share a narrow row with the
+/// exits and leave itself a sliver.
 fn footer_note_above(note: bool, exits: bool, width: f32) -> bool {
     note && exits && width < NARROW_HEADER
 }
@@ -5951,7 +5954,8 @@ mod tests {
         assert!(hold_rows(table, chart, false, true), "One-click, anywhere");
     }
 
-    /// Narrow, a message goes above the exits and they don't move. Wide, it shares their row.
+    /// Narrow, a message goes over what's above and the footer's height holds. Wide, it shares the
+    /// exits' row.
     #[test]
     fn a_footer_message_only_leaves_the_exits_row_when_narrow() {
         assert!(footer_note_above(true, true, NARROW_HEADER - 1.0));

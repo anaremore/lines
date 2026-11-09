@@ -12,7 +12,8 @@ use crate::option_estimate::PnlEstimate;
 /// The pane with P&L to close on: the panel's width and the chain's, in px. The chart has the
 /// rest, and with the panel it has more than the chain's half left it. The chain shows one side,
 /// so it needs less, but never less than a strike, a bid, an ask and their margin. What's under it
-/// wraps at this width (the ticket's price chips, a message beside the exits).
+/// wraps at this width (the ticket's price chips), and a message beside the exits goes over the
+/// strip above them.
 pub fn split(pane_w: f32) -> (f32, f32) {
     let chain = (pane_w * 0.26).max(250.0);
     let panel = (pane_w * 0.30).max(200.0);
