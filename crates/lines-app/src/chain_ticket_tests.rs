@@ -558,12 +558,12 @@ fn moving_a_stop_goes_through_the_core() {
     assert_eq!(v.len(), 1);
     let line = Line::of(&v[0]);
     assert_eq!(line.source, LineSource::Armed(v[0].id));
-    r.send(move_command(account(), v[0].id, Price(68_100)));
+    r.send(move_command(account(), c, v[0].id, Price(68_100)));
     let after = armed(&r);
     assert_eq!(after.len(), 1, "replaced");
     assert_eq!(after[0].level, Price(68_100));
     // Past the market: the core refuses and the Stop that was there stays.
-    r.send(move_command(account(), after[0].id, Price(68_400)));
+    r.send(move_command(account(), c, after[0].id, Price(68_400)));
     let kept = armed(&r);
     assert_eq!(kept.len(), 1, "still protected");
     assert_eq!(kept[0].level, Price(68_100));

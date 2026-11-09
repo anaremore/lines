@@ -1886,7 +1886,11 @@ impl ChainView {
                 let Some(account) = self.trade.account.clone() else {
                     return;
                 };
-                self.ask(crate::chain_lines::move_command(account, id, drag.to), cx);
+                let contract = drag.line.contract;
+                self.ask(
+                    crate::chain_lines::move_command(account, contract, id, drag.to),
+                    cx,
+                );
             }
         }
     }

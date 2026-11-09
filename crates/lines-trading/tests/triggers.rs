@@ -1801,6 +1801,7 @@ fn the_wake_is_never_in_the_past() {
 fn moved(r: &mut Rig, id: TriggerId, level: i64) -> Result<Vec<OrderId>, lines_trading::Reject> {
     r.cmd(Command::MoveTrigger {
         account: acct(),
+        contract: call(),
         id,
         level: Price(level),
     })
@@ -1888,9 +1889,17 @@ fn a_move_is_for_the_account_that_has_it() {
     let id = r.arm(call(), entry(1, 500), 68_400);
     let other = r.cmd(Command::MoveTrigger {
         account: AccountId::new("someone-else"),
+        contract: call(),
         id,
         level: Price(68_500),
     });
     assert!(other.is_err());
+    let wrong_option = r.cmd(Command::MoveTrigger {
+        account: acct(),
+        contract: put(),
+        id,
+        level: Price(68_500),
+    });
+    assert!(wrong_option.is_err());
     assert_eq!(r.core.triggers().next().unwrap().level, Price(68_400));
 }

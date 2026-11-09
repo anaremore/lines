@@ -107,6 +107,9 @@ pub enum Command {
     /// replaces it.
     MoveTrigger {
         account: AccountId,
+        /// The trigger's option: it has to match, and a refusal's note names it.
+        #[serde(with = "crate::types::contract_serde")]
+        contract: ContractKey,
         id: crate::trigger::TriggerId,
         #[serde(with = "crate::types::price_serde")]
         level: Price,

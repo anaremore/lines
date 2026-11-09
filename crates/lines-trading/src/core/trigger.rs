@@ -348,6 +348,7 @@ impl TradingCore {
         &mut self,
         now: UtcMillis,
         env: &Envelope,
+        contract: ContractKey,
         id: TriggerId,
         level: Price,
     ) -> Result<Vec<OrderId>, Reject> {
@@ -356,7 +357,7 @@ impl TradingCore {
             .triggers
             .live
             .get(&id)
-            .filter(|l| Some(&l.view.account) == account.as_ref())
+            .filter(|l| Some(&l.view.account) == account.as_ref() && l.view.contract == contract)
             .map(|l| l.view.clone())
         else {
             return Err(Reject::new(

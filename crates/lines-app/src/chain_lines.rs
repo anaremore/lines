@@ -176,9 +176,15 @@ pub fn arm(account: AccountId, line: &Line, level: Price) -> Command {
 
 /// An armed line moved to `to`: one step in the core, so a refusal leaves it where it was and a
 /// trigger that has fired can't come back.
-pub fn move_command(account: AccountId, id: TriggerId, to: Price) -> Command {
+pub fn move_command(
+    account: AccountId,
+    contract: ContractKey,
+    id: TriggerId,
+    to: Price,
+) -> Command {
     Command::MoveTrigger {
         account,
+        contract,
         id,
         level: to,
     }

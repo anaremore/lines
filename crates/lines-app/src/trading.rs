@@ -1649,9 +1649,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         }
         TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
         TradeCommand::CancelTrigger { account, .. } => (account.clone(), None, None),
-        // A note with no contract flashes on every pane of the account. The pane that moved
-        // it says why it was refused; an ES DOM has nothing to do with it.
-        TradeCommand::MoveTrigger { .. } => return None,
+        TradeCommand::MoveTrigger {
+            account, contract, ..
+        } => (account.clone(), Some(*contract), None),
         TradeCommand::SetBracketMode {
             account, contract, ..
         } => {
