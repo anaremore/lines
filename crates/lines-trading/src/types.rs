@@ -100,6 +100,11 @@ pub struct Money(pub i128);
 
 impl Money {
     pub const ZERO: Money = Money(0);
+
+    /// Exactly zero (an optional saved amount is left out).
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
     pub const UNITS_PER_WHOLE: i128 = 10_000_000_000;
 
     /// Whole currency units (e.g. dollars).

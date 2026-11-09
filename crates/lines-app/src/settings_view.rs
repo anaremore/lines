@@ -1548,7 +1548,11 @@ impl SettingsWindow {
                 .detach();
                 None
             }
-            Ok(None) => Some((i, "Resetting: flattening first".to_owned(), Tone::Done)),
+            Ok(None) => Some((
+                i,
+                "Resetting: anything open is flattened first".to_owned(),
+                Tone::Done,
+            )),
             Err(why) => Some((i, why, Tone::Problem)),
         };
         cx.notify();

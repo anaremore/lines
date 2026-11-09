@@ -440,17 +440,23 @@ fn run(
         if let Some(g) = &mut guard_saves {
             g.after(&core, &events);
         }
-        // A paper account was reset: the file as it was is kept, dated, and the reset saved now.
+        // A paper reset asked for: the file as it is now, before the flatten, is kept dated
+        // (on disk before the reset is ever saved over it); the reset itself is saved at once.
         if events
             .iter()
-            .any(|e| matches!(e, Event::AccountReset { .. }))
+            .any(|e| matches!(e, Event::ResetWaiting { .. }))
             && let Some((path, _)) = &file
         {
             match crate::persist::backup(path, lines_core::UtcMillis(wall_ms())) {
-                Ok(Some(b)) => tracing::info!("paper account reset: kept {}", b.display()),
+                Ok(Some(b)) => tracing::info!("paper account reset asked: kept {}", b.display()),
                 Ok(None) => {}
                 Err(e) => tracing::error!("can't keep a copy of {}: {e:#}", path.display()),
             }
+        }
+        if events
+            .iter()
+            .any(|e| matches!(e, Event::AccountReset { .. }))
+        {
             save(&core, &file);
             last_save = Instant::now();
         }

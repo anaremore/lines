@@ -2642,8 +2642,10 @@ impl TradingCore {
         liquidate: bool,
         equity: Money,
     ) {
-        // Guardrails: the day's loss (realised + unrealised, fees included).
-        let day_pnl = equity - self.accounts[account].tracker.day_open_balance;
+        // Guardrails: the day's loss (realised + unrealised, fees included), with what a paper
+        // reset this trade date carried over (a reset is no way around the daily loss).
+        let a = &self.accounts[account];
+        let day_pnl = equity - a.tracker.day_open_balance + a.guard.carried;
         if now > Self::BEFORE_DATA
             && let Some((_, end)) = self.trade_day(account, now)
             && let Some(a) = self.accounts.get_mut(account)

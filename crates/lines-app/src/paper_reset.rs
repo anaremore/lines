@@ -13,6 +13,8 @@ use lines_trading::AccountId;
 
 /// How long a first press waits for the second.
 pub const CONFIRM: Duration = Duration::from_secs(5);
+/// A second press sooner than this is the same click (a double-click): it doesn't send.
+pub const READ_AT_LEAST: Duration = Duration::from_millis(400);
 
 /// A first press, waiting.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +93,13 @@ pub fn press(
     text: impl FnOnce() -> String,
 ) -> Press {
     if armed(slot, account, journal, now) {
+        if slot
+            .as_ref()
+            .is_some_and(|a| now.duration_since(a.at) < READ_AT_LEAST)
+        {
+            // A double-click: still armed (from the first press), not sent.
+            return Press::Confirm(text());
+        }
         *slot = None;
         return Press::Go;
     }
@@ -138,6 +147,18 @@ mod tests {
         let first = press(&mut slot, &paper(), false, t0, || "confirm".into());
         assert_eq!(first, Press::Confirm("confirm".into()));
         assert!(armed(&slot, &paper(), false, t0));
+        // A double-click's second press doesn't send it.
+        assert!(matches!(
+            press(
+                &mut slot,
+                &paper(),
+                false,
+                t0 + Duration::from_millis(150),
+                String::new
+            ),
+            Press::Confirm(_)
+        ));
+        assert!(armed(&slot, &paper(), false, t0 + Duration::from_secs(1)));
         assert_eq!(
             press(
                 &mut slot,

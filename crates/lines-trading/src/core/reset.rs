@@ -12,8 +12,10 @@
 //! the account, and the trader asks again (with its confirmation) if they still want it.
 //!
 //! What a reset keeps: the account's settings (starting balance, limits, prop rules) and the
-//! trader's guardrails with their counts and any lockout. A reset is not a way out of a lock
-//! the trader set, as a looser guardrail never is (`Command::SetGuardrails`).
+//! trader's guardrails with their counts, any lockout, and the day's P&L so far as the daily
+//! loss guardrail counts it (`GuardrailTracker::carried`, until the next trade date). A reset
+//! is not a way out of a limit the trader set, as a looser guardrail never is
+//! (`Command::SetGuardrails`). The P&L shown and prop progress do start over.
 //!
 //! Paper only: a broker account (any broker that isn't simulated) is refused, and says why.
 
@@ -140,7 +142,10 @@ impl TradingCore {
             return;
         }
         let contracts: Vec<_> = a.positions.keys().copied().collect();
+        // The day so far (the account is flat: all realised), for the daily-loss guardrail.
+        let day_so_far = a.balance - a.tracker.day_open_balance;
         let a = self.accounts.get_mut(account).expect("checked");
+        a.guard.carried = a.guard.carried + day_so_far;
         a.balance = start;
         a.positions.clear();
         // Prop-rule progress starts over: high-water mark, today's opening balance (so today's

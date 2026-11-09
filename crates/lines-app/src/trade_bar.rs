@@ -3760,7 +3760,7 @@ fn reset_press<V: TradePane>(v: &mut V, journal: bool, source: Source, cx: &mut 
         Ok(None) => {
             let name = t.account(&account).map(|a| a.name).unwrap_or_default();
             v.trade().notice(format!(
-                "Resetting {}: flattening first",
+                "Resetting {}: anything open is flattened first",
                 crate::paper_reset::account_words(&name, &t.source)
             ));
         }
