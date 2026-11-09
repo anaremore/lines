@@ -4140,9 +4140,21 @@ impl ChartView {
             self.paint_label(kind, l.time.0, origin, line_h, t.text_dim, window, cx, text);
         }
         // The axis's zone, once, in the corner under the price axis (not for days and weeks:
-        // they are trade dates).
+        // they are trade dates). A price label or tag reaching down into the corner wins: the
+        // zone yields that frame (the crosshair's tag still names it).
+        let zone_span = Span {
+            top: self.above_axis + 4.0,
+            bottom: self.above_axis + 4.0 + LABEL_PX * 1.3,
+        };
+        let corner_clear = label_clear_of_tags(zone_span, &tags)
+            && label_clear_of_tags(zone_span, &drawing_tags)
+            && (0..price_lines).all(|i| {
+                let y = self.scene.price_lines[i].y;
+                y < 0.0 || y > ph || !Span::around(y, LABEL_PX * 0.65).overlaps(zone_span)
+            });
         if let Some(at) = self.scene.time_lines.last().map(|l| l.time)
             && !tf.is_daily()
+            && corner_clear
         {
             let zone = self.zone.clone();
             let key = zone.offset_ms(at);

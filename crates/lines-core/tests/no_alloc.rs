@@ -119,7 +119,7 @@ fn paint_path_does_not_allocate() {
             let kept = zone.clone();
             // A Time header's name (`pane_columns::Columns::name_zone`).
             let mut name = FixedStr::<40>::new();
-            kept.write_name(UtcMillis(frame as i64 * 60_000), &mut name)
+            kept.write_name(UtcMillis(frame * 60_000), &mut name)
                 .unwrap();
             std::hint::black_box((&current, &kept, &name));
             scene.build(series.bars(), &vp, &fmt, 1.25, series.period_ms(), zone);
