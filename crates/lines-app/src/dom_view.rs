@@ -236,15 +236,18 @@ impl Pane for DomView {
     }
 
     fn changed(&mut self) -> bool {
-        // A source can refuse depth while the feed runs (read here, off the paint path).
-        if let Some(d) = self.store.try_read() {
+        // A source can refuse depth while the feed runs (read here, off the paint path); a
+        // change repaints even a quiet feed.
+        let mut note = false;
+        if let Some(d) = self.store.try_read()
+            && (d.depth_note != self.depth_note || d.capabilities.depth != self.has_depth)
+        {
             self.has_depth = d.capabilities.depth;
-            if d.depth_note != self.depth_note {
-                self.depth_note.clone_from(&d.depth_note);
-            }
+            self.depth_note.clone_from(&d.depth_note);
+            note = true;
         }
         let shown = self.cols.set.is_shown(DomCol::Trail.index());
-        self.trade.changed() | self.trail.wants_frame(&self.store, shown)
+        note | self.trade.changed() | self.trail.wants_frame(&self.store, shown)
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
