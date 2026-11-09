@@ -1476,7 +1476,7 @@ impl TradingCore {
     /// flat is allowed, and so is reducing. Every order working on that side counts, exits and a
     /// Flatten's included: if one of those closes the position first, this one would open the
     /// other side. Rules' orders too: a strategy reverses an option in two orders, not one.
-    fn check_option_through_flat(&self, spec: &OrderSpec) -> Result<(), Reject> {
+    pub(super) fn check_option_through_flat(&self, spec: &OrderSpec) -> Result<(), Reject> {
         let position = self.position(&spec.account, spec.contract);
         if position == 0 || spec.side.sign() == position.signum() {
             return Ok(());
@@ -1484,7 +1484,8 @@ impl TradingCore {
         let working: i64 = self
             .orders
             .values()
-            .filter(|o| o.is_open())
+            // One with no known outcome may still fill, as much as a working one.
+            .filter(|o| o.is_open() || o.state == OrderState::Unresolved)
             .filter(|o| o.account == spec.account && o.contract == spec.contract)
             .filter(|o| o.side == spec.side)
             .map(|o| o.remaining().0)

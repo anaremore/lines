@@ -301,6 +301,55 @@ fn growing_an_order_through_flat_is_refused() {
     .unwrap();
 }
 
+/// A Flatten's order working counts, and so does one a rebuild left with no known outcome: either
+/// could still close the position first.
+#[test]
+fn a_flatten_or_an_unknown_order_counts_too() {
+    let mut r = Rig::holding(1);
+    // Its market order on its way.
+    r.cmd(Command::Flatten {
+        account: acct(),
+        contract: Some(call()),
+    })
+    .unwrap();
+    let e = r.order(Side::Sell, 1, 300).unwrap_err();
+    assert!(e.message.contains("already working"), "{}", e.message);
+    r.wait(LAT + 1);
+    assert_eq!(r.position(), 0);
+
+    let mut r = Rig::holding(1);
+    let id = r.order(Side::Sell, 1, 300).unwrap()[0];
+    r.core.rebuild(r.now());
+    r.collect();
+    assert_eq!(r.core.order(id).unwrap().state, OrderState::Unresolved);
+    let e = r.order(Side::Sell, 1, 300).unwrap_err();
+    assert!(e.message.contains("already working"), "{}", e.message);
+}
+
+/// An Entry (a buy) armed on a short larger than nothing would cross it when it fires, unwatched:
+/// refused when armed, while the trader is looking.
+#[test]
+fn an_entry_through_a_short_is_refused_when_armed() {
+    let mut r = Rig::holding(-2);
+    let arm = |r: &mut Rig, qty| {
+        r.cmd(Command::ArmTrigger(TriggerSpec {
+            account: acct(),
+            contract: call(),
+            kind: TriggerKind::Entry {
+                qty: Qty(qty),
+                max_price: Price(300),
+            },
+            level: Price(68_400),
+        }))
+    };
+    let e = arm(&mut r, 3).unwrap_err();
+    assert_eq!(
+        e.message,
+        "buying 3 would turn your short 2 into long 1: use Close, or buy 2 at most"
+    );
+    arm(&mut r, 2).unwrap();
+}
+
 /// From flat, a sell opens a short: the owner's ruling allows it (a real broker may reject it;
 /// paper doesn't). Adding to a position is no crossing either.
 #[test]
@@ -368,6 +417,33 @@ fn a_fired_stops_rejection_shows_on_its_row() {
     r.refuse.store(false, Ordering::Relaxed);
     r.quote(150, 152);
     r.wait(LAT + 1);
+    assert_eq!(r.position(), 0);
+}
+
+/// A fired Entry whose limit the broker rejects: the Entry is reported ended again, in the broker's
+/// words, and nothing is left working.
+#[test]
+fn a_fired_entrys_rejection_shows_on_its_row() {
+    let mut r = Rig::holding(0);
+    r.cmd(Command::ArmTrigger(TriggerSpec {
+        account: acct(),
+        contract: call(),
+        kind: TriggerKind::Entry {
+            qty: Qty(1),
+            max_price: Price(300),
+        },
+        level: Price(68_400),
+    }))
+    .unwrap();
+    r.refuse.store(true, Ordering::Relaxed);
+    r.print(68_400);
+    r.wait(LAT + 1);
+    let v = r.trigger();
+    assert_eq!(v.state, TriggerState::Ended);
+    let reason = v.reason.unwrap_or_default();
+    assert!(reason.starts_with("the broker rejected order"), "{reason}");
+    assert!(reason.ends_with(SAYS), "{reason}");
+    assert_eq!(r.working(), 0);
     assert_eq!(r.position(), 0);
 }
 

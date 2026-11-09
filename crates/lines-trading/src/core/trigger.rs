@@ -209,17 +209,17 @@ impl TradingCore {
                         "the max price isn't on the option's tick grid",
                     ));
                 }
-                // A lockout now refuses it now; it's asked again when it fires.
-                self.check_guardrails(
-                    now,
-                    &OrderSpec {
-                        account: spec.account.clone(),
-                        contract: spec.contract,
-                        side: crate::types::Side::Buy,
-                        qty,
-                        kind: OrderKind::Limit { price: max_price },
-                    },
-                )?;
+                // A lockout now refuses it now; it's asked again when it fires. So does a buy
+                // through a short to a long, while the trader is looking.
+                let buy = OrderSpec {
+                    account: spec.account.clone(),
+                    contract: spec.contract,
+                    side: crate::types::Side::Buy,
+                    qty,
+                    kind: OrderKind::Limit { price: max_price },
+                };
+                self.check_guardrails(now, &buy)?;
+                self.check_option_through_flat(&buy)?;
                 // Which way it fires comes from where the underlying is, so it has to be known.
                 let Some(last) = fresh_last else {
                     return Err(Reject::new(
@@ -721,6 +721,14 @@ impl TradingCore {
             }
             let e = self.triggers.entries.remove(i);
             if !working {
+                // The broker rejected it: nobody watches a ticket for a fired Entry, so its row
+                // says so, in the broker's words.
+                if let Some(OrderState::Rejected { reason }) = order.map(|o| &o.state) {
+                    let mut view = e.view;
+                    view.reason =
+                        Some(format!("the broker rejected order {}: {reason}", e.order.0));
+                    self.events.push(Event::Trigger(view));
+                }
                 continue;
             }
             let (filled, qty) = order.map_or((0, 0), |o| (o.filled.0, o.qty.0));
