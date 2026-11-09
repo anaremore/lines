@@ -12,9 +12,11 @@ use anyhow::Result;
 use lines_core::{Price, Product, UtcMillis};
 use serde::Deserialize;
 
+use lines_core::style::{LineStyle, LineType};
+
 use super::{
     BoxFuture, ChartPrices, LevelContext, LevelFrame, LevelMap, LevelMeta, LevelSource, LevelStyle,
-    LevelTransport, LevelValue, RefreshMode,
+    LevelTransport, LevelType, LevelValue, RefreshMode, TypeStyle,
 };
 
 pub const ID: &str = "demo";
@@ -69,6 +71,30 @@ struct Anchor {
     color: String,
 }
 
+/// Its own colors with the strokes its map gives each kind (pivot 2 px; support, the VWAP band
+/// and the anchor dashed).
+const fn own(line: LineType, width: u8) -> TypeStyle {
+    TypeStyle {
+        line: LineStyle {
+            line,
+            width,
+            ..TypeStyle::OWN.line
+        },
+        ..TypeStyle::OWN
+    }
+}
+
+/// The demo's level types (`LevelSource::types`): every kind its map uses, in the levels'
+/// own colors.
+pub static TYPES: [LevelType; 6] = [
+    LevelType::line("pivot", "Pivot", "Lines", own(LineType::Solid, 2)),
+    LevelType::line("resist", "Resistance", "Lines", own(LineType::Solid, 1)),
+    LevelType::line("support", "Support", "Lines", own(LineType::Dashed, 1)),
+    LevelType::line("anchor", "Anchored", "Lines", own(LineType::Dashed, 1)),
+    LevelType::zone("zone", "Zone", "Zones", own(LineType::Solid, 1)),
+    LevelType::zone("band", "VWAP band", "Zones", own(LineType::Dashed, 1)),
+];
+
 pub struct DemoLevels;
 
 struct DemoTransport;
@@ -105,6 +131,9 @@ impl LevelSource for DemoLevels {
     }
     fn stale_after(&self) -> Duration {
         Duration::from_secs(24 * 3600)
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &TYPES
     }
     fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
         Box::pin(async { Ok(Box::new(DemoTransport) as Box<dyn LevelTransport>) })

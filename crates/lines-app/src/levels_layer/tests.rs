@@ -416,3 +416,94 @@ fn option_charts_get_no_level_sources() {
     layer.snapshot(None);
     assert!(layer.sources().iter().any(|(id, ..)| id == "late-serving"));
 }
+
+/// Per-type styles on the chart (decision 0026): each kind the source declares resolves to
+/// its type's look (the demo's: its levels' own colors), a type the chart hides isn't
+/// placed, a restyle re-resolves without a new map, and the label mode switches the texts to
+/// `name : price` (in the product's format) and back.
+#[test]
+fn types_resolve_hide_and_label_with_the_price() {
+    use lines_core::levels::LabelMode;
+    use lines_core::style::Color;
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+            None,
+        );
+    };
+    frame(&mut layer);
+    let pivot = layer.kind_look(i, "pivot").expect("declared");
+    assert_eq!((pivot.line.color, pivot.line.width), (Color::Own, 2));
+    assert_eq!(
+        layer.kind_look(i, "zone").unwrap().fill.color,
+        Color::Own,
+        "the demo's zones keep their own colors"
+    );
+    // The demo's own mode is the name; its labels say so.
+    assert!(
+        layer
+            .label_texts(i)
+            .iter()
+            .flatten()
+            .any(|t| t == "Pivot 6010")
+    );
+    let placed = layer.placed_per_source()[i];
+    // Hide the pivot type and ask for prices in the labels.
+    let (types, default) = layer.source_types("demo").unwrap();
+    assert_eq!(default, LabelMode::Name);
+    let mut set = study_style::StudyStyles::default();
+    let mut looks = Look::defaults(&study_style::LEVELS).to_vec();
+    for t in types {
+        let mut l = study_style::read_type(&PartStyles::new(), t);
+        l.shown = t.id != "pivot";
+        looks.push(l);
+    }
+    set.set_level_style(
+        "demo",
+        &study_style::LevelEdit {
+            looks,
+            types,
+            label: LabelMode::NamePrice,
+            label_default: default,
+        },
+    );
+    layer.set_styles(&set.levels);
+    frame(&mut layer);
+    assert_eq!(layer.placed_per_source()[i], placed - 1, "the pivot hidden");
+    assert!(!layer.kind_look(i, "pivot").unwrap().shown);
+    let texts: Vec<&str> = layer.label_texts(i).iter().flatten().map(String::as_str).collect();
+    assert!(texts.contains(&"Pivot 6010 : 6010.00"), "{texts:?}");
+    assert!(texts.contains(&"Supply : 6022.50"), "a zone: its upper edge");
+    assert!(
+        texts.contains(&"VWAP ±7.50"),
+        "VWAP-relative: the name only"
+    );
+    // Back to the defaults: nothing saved, the name only again.
+    layer.set_styles(&Default::default());
+    frame(&mut layer);
+    assert_eq!(layer.placed_per_source()[i], placed);
+    assert!(
+        layer
+            .label_texts(i)
+            .iter()
+            .flatten()
+            .all(|t| !t.contains(" : "))
+    );
+}

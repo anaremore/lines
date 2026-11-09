@@ -984,16 +984,16 @@ impl ChartView {
             ),
             StudyRef::Levels(id) => {
                 let (_, label, _) = self.levels.sources().into_iter().find(|s| s.0 == *id)?;
-                let looks = set.styles.levels.get(id).map_or_else(
-                    || ss::Look::defaults(&ss::LEVELS),
-                    |m| ss::read(m, &ss::LEVELS),
-                );
-                (
-                    format!("Levels · {label}"),
-                    &ss::LEVELS,
-                    looks.to_vec(),
+                let (types, label_default) = self.levels.source_types(id)?;
+                let empty = lines_indicators::PartStyles::new();
+                return Some(ss::level_editor(
+                    format!("Levels · {label} style"),
+                    set.styles.levels.get(id).unwrap_or(&empty),
+                    types,
+                    label_default,
                     self.levels.source_color(id),
-                )
+                    |kind| self.levels.kind_color(id, kind),
+                ));
             }
         };
         Some(ss::editor(format!("{title} style"), defs, &looks, source))
@@ -4819,9 +4819,20 @@ impl ChartView {
                     self.toggle_studies_menu(cx);
                 }
                 crate::style_editor::Outcome::Changed => {
-                    let looks = crate::study_style::looks_of(&e);
+                    let action = match &r {
+                        StudyRef::Levels(id) => match self.levels.source_types(id) {
+                            Some((types, label)) => StudyAction::SetLevelStyle(
+                                id.clone(),
+                                Box::new(crate::study_style::LevelEdit::of(&e, types, label)),
+                            ),
+                            None => {
+                                StudyAction::SetStyle(r.clone(), crate::study_style::looks_of(&e))
+                            }
+                        },
+                        _ => StudyAction::SetStyle(r.clone(), crate::study_style::looks_of(&e)),
+                    };
                     let mut s = self.study_set();
-                    s.apply(&StudyAction::SetStyle(r.clone(), looks));
+                    s.apply(&action);
                     self.set_study_set(s);
                     self.study_style = Some((r, e));
                 }

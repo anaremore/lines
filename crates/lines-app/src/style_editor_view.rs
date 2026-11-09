@@ -161,24 +161,57 @@ fn wrapped_lines(widths: impl Iterator<Item = f32>, w: f32) -> f32 {
 fn control_w(c: Control, on: bool, names: &[&'static str]) -> f32 {
     let label = |s: String| s.chars().count() as f32 * 12.0 * 0.62;
     4.0 + match c {
-        Control::Color(_) => HIT,
+        Control::Color(_) | Control::FillColor(_) => HIT,
         c if is_toggle(c) => 8.0 + 14.0 + 8.0 + label(control_label(c, names)),
         c => (16.0 + label(control_label(c, names)) + if on { 16.0 } else { 0.0 }).max(HIT),
     }
 }
 
-/// The pinned tab strip (none for one part).
-fn tabs_height(e: &StyleEditor) -> f32 {
-    if e.parts.len() > 1 {
-        4.0 + 24.0 + 4.0 + 1.0
-    } else {
-        0.0
+/// The tabs by group, in the parts' order (one group, `None`, unless the parts are grouped: a
+/// level source's types).
+pub fn tab_groups(e: &StyleEditor) -> Vec<(Option<&'static str>, Vec<usize>)> {
+    let mut out: Vec<(Option<&'static str>, Vec<usize>)> = Vec::new();
+    for (i, p) in e.parts.iter().enumerate() {
+        match out.iter_mut().find(|(g, _)| *g == p.group) {
+            Some((_, v)) => v.push(i),
+            None => out.push((p.group, vec![i])),
+        }
     }
+    out
+}
+
+/// Whether the tabs are listed under group headings (each group a row that wraps).
+fn grouped(e: &StyleEditor) -> bool {
+    e.parts.iter().any(|p| p.group.is_some())
+}
+
+/// A tab's drawn width (its padding; semibold when selected, so the wide estimate).
+fn tab_w(title: &str) -> f32 {
+    16.0 + title.chars().count() as f32 * 12.0 * 0.62
+}
+
+/// The pinned tab strip (none for one part) at editor width `w`: one row, or a level source's
+/// grouped tabs, each group's row wrapping beside its heading.
+fn tabs_height(e: &StyleEditor, w: f32) -> f32 {
+    if e.parts.len() <= 1 {
+        return 0.0;
+    }
+    if !grouped(e) {
+        return 4.0 + 24.0 + 4.0 + 1.0;
+    }
+    let tabs_w = (w - 2.0 - 24.0 - LABEL_W).max(1.0);
+    let groups = tab_groups(e);
+    let mut h = 4.0 + 4.0 + 1.0 + 2.0 * (groups.len() as f32 - 1.0);
+    for (_, tabs) in &groups {
+        let lines = wrapped_lines(tabs.iter().map(|&i| tab_w(e.parts[i].title)), tabs_w);
+        h += lines * 24.0 + (lines - 1.0) * 4.0;
+    }
+    h
 }
 
 /// What doesn't scroll: header, tabs and footer (title, "Save as default", the key hint, full
-/// or short) and the borders.
-fn chrome_height(e: &StyleEditor) -> f32 {
+/// or short) and the borders, at editor width `w`.
+fn chrome_height(e: &StyleEditor, w: f32) -> f32 {
     let title = 16.0 + line_h(13.0) + 1.0;
     let save = if e.default_label.is_some() {
         4.0 + 28.0
@@ -186,7 +219,7 @@ fn chrome_height(e: &StyleEditor) -> f32 {
         0.0
     };
     let hint = 8.0 + line_h(11.0);
-    2.0 + title + tabs_height(e) + 1.0 + save + hint
+    2.0 + title + tabs_height(e, w) + 1.0 + save + hint
 }
 
 /// Whether `row` is drawn in the footer ("Save as default"), outside the scroll body.
@@ -338,19 +371,20 @@ pub fn content_height(
 ) -> f32 {
     let inner = (w - 2.0 - 24.0).max(1.0);
     let controls_w = (inner - LABEL_W).max(1.0);
-    let mut h = chrome_height(e) + 8.0; // the body's padding
+    let mut h = chrome_height(e, w) + 8.0; // the body's padding
     for r in e.rows() {
         if let [(Control::SaveDefault, _)] = r.controls.as_slice() {
             continue; // in the footer
         }
         let widths = r.controls.iter().map(|&(c, on)| control_w(c, on, names));
-        if r.label == "Color" {
+        if is_color_row(&r) {
+            let main = r.label == "Color";
             let lines = wrapped_lines(widths, controls_w);
             h += 4.0 + line_h(12.0) + lines * 24.0 + (lines - 1.0) * 4.0 + 2.0;
-            if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note) {
+            if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
                 h += 4.0 + text_lines(note.chars().count(), 11.0, inner) * line_h(11.0);
             }
-            if e.hex.is_some() {
+            if e.hex.is_some() && e.hex_fill != main {
                 // The entry, then its hint beside it or below, wrapping on its own when it
                 // is wider than the row.
                 let hint_w = HEX_HINT.chars().count() as f32 * 12.0 * 0.62;
@@ -363,7 +397,7 @@ pub fn content_height(
                             + text_lines(HEX_HINT.chars().count(), 12.0, controls_w) * line_h(12.0)
                     };
             }
-            if !warnings.is_empty() {
+            if main && !warnings.is_empty() {
                 // Inside the box: margins, border, padding, the bar and the marker.
                 let text_w = (inner - 2.0 - 16.0 - 3.0 - 8.0 - 16.0 - 8.0).max(1.0);
                 h += 8.0 + 2.0 + 8.0 + 4.0 * (warnings.len() as f32 - 1.0);
@@ -377,6 +411,12 @@ pub fn content_height(
         }
     }
     h.ceil()
+}
+
+/// A row of color swatches with a name line: the tab's color ("Color") or a level type's zone
+/// fill ("Fill").
+fn is_color_row(r: &Row) -> bool {
+    r.label == "Color" || r.label == "Fill"
 }
 
 /// The focus ring around a control: 2 px accent when focused, else the same space clear (so
@@ -404,7 +444,8 @@ pub fn color_row_name(
 ) -> Option<String> {
     let name = |c: &Control| match c {
         Control::Color(Color::Own) => e.own_name().to_owned(),
-        Control::Color(c) => color_name(*c, names),
+        Control::FillColor(Color::Own) => e.fill_own_name().to_owned(),
+        Control::Color(c) | Control::FillColor(c) => color_name(*c, names),
         c => control_label(*c, names),
     };
     let selected = row.controls.iter().find(|(_, on)| *on);
@@ -627,46 +668,93 @@ pub fn render(
     let mut groups: Vec<gpui::Div> = Vec::with_capacity(rows.len());
     let mut tabs_strip = None;
     if e.parts.len() > 1 {
-        let mut tabs = div()
+        let tab = |i: usize| {
+            let on = i == e.tab;
+            div()
+                .id(("style-tab", i))
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .flex_none()
+                .items_center()
+                .text_size(px(12.0))
+                .whitespace_nowrap()
+                .text_color(if on { t.text_main } else { t.text_dim })
+                .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
+                .border_b_2()
+                .border_color(if on {
+                    t.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(|s| s.text_color(t.text_main))
+                .child(e.parts[i].title)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view: &mut ChartView, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        view.style_tab(i, cx);
+                    }),
+                )
+        };
+        let strip = div()
             .flex_none()
             .px(px(12.0))
             .pt(px(4.0))
             .pb(px(4.0))
-            .flex()
-            .flex_row()
-            .gap(px(4.0))
             .border_b_1()
             .border_color(t.axis_line);
-        for (i, p) in e.parts.iter().enumerate() {
-            let on = i == e.tab;
-            tabs = tabs.child(
-                div()
-                    .id(("style-tab", i))
-                    .h(px(24.0))
-                    .px(px(8.0))
+        tabs_strip = Some(if grouped(e) {
+            // A level source's types: one row per group, its heading beside tabs that wrap.
+            // Never taller than leaves the body a few rows (it scrolls past that).
+            let cap = (at.h - chrome_height(e, at.w) + tabs_height(e, at.w) - 96.0).max(32.0);
+            let mut col = div()
+                .id("style-tabs")
+                .max_h(px(cap))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(2.0));
+            for (g, tabs) in tab_groups(e) {
+                let mut row = div()
                     .flex()
-                    .items_center()
-                    .text_size(px(12.0))
-                    .text_color(if on { t.text_main } else { t.text_dim })
-                    .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .border_b_2()
-                    .border_color(if on {
-                        t.accent
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .hover(|s| s.text_color(t.text_main))
-                    .child(p.title)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |view: &mut ChartView, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            view.style_tab(i, cx);
-                        }),
-                    ),
-            );
-        }
-        tabs_strip = Some(tabs);
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(4.0));
+                for i in tabs {
+                    row = row.child(tab(i));
+                }
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .child(
+                            div()
+                                .w(px(LABEL_W))
+                                .flex_none()
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .text_size(px(11.0))
+                                .text_color(t.text_dim)
+                                .whitespace_nowrap()
+                                .truncate()
+                                .child(g.unwrap_or("")),
+                        )
+                        .child(row),
+                );
+            }
+            strip.child(col)
+        } else {
+            let mut row = strip.flex().flex_row().gap(px(4.0));
+            for i in 0..e.parts.len() {
+                row = row.child(tab(i));
+            }
+            row
+        });
     }
     let mut footer_save = None;
     for (r, row) in rows.iter().enumerate() {
@@ -705,7 +793,8 @@ pub fn render(
             );
             continue;
         }
-        let is_color = row.label == "Color";
+        let is_color = is_color_row(row);
+        let main = row.label == "Color";
         let mut group = div().flex_none().flex().flex_col();
         let mut controls = div()
             .flex()
@@ -734,6 +823,7 @@ pub fn render(
             let focused = focus == (r, k);
             let inner = match c {
                 Control::Color(color) => swatch(t, t.swatch_color(e, color), on),
+                Control::FillColor(color) => swatch(t, t.fill_swatch_color(e, color), on),
                 c if is_toggle(c) => checkbox(t, on, control_label(c, names)),
                 c => choice(t, on, control_label(c, names)),
             };
@@ -797,7 +887,7 @@ pub fn render(
         if is_color {
             // A study part's note (how its colors apply), the custom color entry, then the
             // readability warnings, right under the colors.
-            if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note) {
+            if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
                 group = group.child(
                     div()
                         .px(px(12.0))
@@ -808,7 +898,7 @@ pub fn render(
                         .child(note),
                 );
             }
-            if let Some(hex) = &e.hex {
+            if let Some(hex) = e.hex.as_ref().filter(|_| e.hex_fill != main) {
                 group = group.child(
                     div()
                         .pl(px(12.0 + LABEL_W))
@@ -832,7 +922,7 @@ pub fn render(
                         .child(div().min_w(px(0.0)).text_color(t.text_dim).child(HEX_HINT)),
                 );
             }
-            if !warnings.is_empty() {
+            if main && !warnings.is_empty() {
                 group = group.child(warning_box(t, warnings));
             }
         }
@@ -871,8 +961,8 @@ pub fn render(
     let (view_h, body_h) = if view_h > 0.0 {
         (view_h, view_h + f32::from(scroll.max_offset().y))
     } else {
-        let view = (at.h - chrome_height(e)).max(0.0);
-        (view, (content_h - chrome_height(e)).max(0.0))
+        let view = (at.h - chrome_height(e, at.w)).max(0.0);
+        (view, (content_h - chrome_height(e, at.w)).max(0.0))
     };
     let bar = thumb(view_h, body_h, -f32::from(scroll.offset().y)).map(|(top, h)| {
         div()
@@ -1298,6 +1388,50 @@ mod tests {
         let narrow = content_height(&e, &warnings, 260.0, &names);
         assert!(narrow > wide, "{narrow} > {wide}");
         assert!(wide > content_height(&e, &[], W, &names) + 7.0 * 19.0);
+    }
+
+    /// A level source's editor with types: its tabs are grouped (the source's own first), the
+    /// grouped strip is counted in the height (taller at narrow widths, where groups wrap), the
+    /// box stays inside the plot area, and every row is a body child.
+    #[test]
+    fn a_level_editor_groups_its_types_and_fits() {
+        use crate::study_style::level_editor;
+        use lines_core::levels::LabelMode;
+        let names = crate::theme::Theme::dark(crate::theme::Palette::Standard).study_names;
+        let mut e = level_editor(
+            "Levels · Demo style".into(),
+            &Default::default(),
+            &lines_feed::levels::demo::TYPES,
+            LabelMode::Name,
+            None,
+            |_| None,
+        );
+        let groups = tab_groups(&e);
+        assert_eq!(
+            groups.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+            [
+                Some(crate::study_style::SOURCE_GROUP),
+                Some("Lines"),
+                Some("Zones")
+            ]
+        );
+        assert!(tabs_height(&e, W) > 2.0 * 24.0, "a row per group");
+        assert!(tabs_height(&e, 280.0) >= tabs_height(&e, W));
+        for tab in 0..e.parts.len() {
+            e.select_tab(tab);
+            let rows = e.rows();
+            assert_eq!(body_len(&rows), rows.len(), "tab {tab}: no footer row");
+            for area in [(1600.0, 876.0), (420.0, 276.0), (900.0, 200.0)] {
+                let w = width(area.0);
+                let h = content_height(&e, &[], w, &names);
+                let p = place_study(area, 60.0, 0.0, h);
+                inside(p, area);
+            }
+        }
+        // The zone type's tab has its fill rows.
+        e.select_tab(e.parts.iter().position(|p| p.title == "Zone").unwrap());
+        assert!(e.rows().iter().any(|r| r.label == "Fill"));
+        assert!(e.rows().iter().any(|r| r.label == "Fill opacity"));
     }
 
     /// Focus moved to a row out of view scrolls the least that shows it; a row taller than

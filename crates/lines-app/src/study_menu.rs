@@ -92,6 +92,9 @@ pub enum StudyAction {
     ToggleLevelLabels(String),
     /// Restyle a study: every part's look, in its parts' order (`crate::study_style`).
     SetStyle(StudyRef, Vec<Look>),
+    /// Restyle a level source from its whole style editor: its Lines and Zones, each type
+    /// it declares, its label mode (`crate::study_style::LevelEdit`).
+    SetLevelStyle(String, Box<crate::study_style::LevelEdit>),
     /// Replace every study with a template's (boxed: a study set is large).
     Replace(Box<StudySet>),
 }
@@ -277,6 +280,7 @@ impl StudySet {
                 }
                 StudyRef::Levels(id) => self.styles.set_levels(id, looks),
             },
+            StudyAction::SetLevelStyle(id, e) => self.styles.set_level_style(id, e),
             StudyAction::Replace(set) => *self = (**set).clone(),
         }
     }

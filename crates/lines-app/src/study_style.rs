@@ -24,6 +24,7 @@
 
 use std::collections::BTreeMap;
 
+use lines_core::levels::{LabelMode, LevelType};
 use lines_core::style::{Color, FillStyle, LineStyle, LineType, MAX_WIDTH, MIN_WIDTH, Rgb};
 use lines_indicators::{IndicatorConfig, PartStyles};
 use serde::{Deserialize, Serialize};
@@ -258,6 +259,8 @@ pub struct Look {
     pub style: PartStyle,
     /// An optional part is drawn (always `true` for the others).
     pub shown: bool,
+    /// A level type with zones: its fill (`None` for every other part).
+    pub fill: Option<FillStyle>,
 }
 
 impl Look {
@@ -294,6 +297,7 @@ impl Look {
         defs.map(|d| Look {
             style: d.style,
             shown: !d.optional,
+            fill: None,
         })
     }
 }
@@ -311,6 +315,7 @@ fn read_part(v: Option<&Value>, d: &PartDef) -> Look {
     let mut look = Look {
         style: d.style,
         shown: !d.optional,
+        fill: None,
     };
     let Some(Value::Object(o)) = v else {
         return look;
@@ -515,6 +520,330 @@ impl StudyStyles {
             self.levels.remove(id);
         }
     }
+
+    /// Restyle level source `id` from its whole editor: its Lines and Zones, each declared
+    /// type, its label mode (each saved only while it differs from its default).
+    pub fn set_level_style(&mut self, id: &str, e: &LevelEdit) {
+        let m = self.levels.entry(id.to_owned()).or_default();
+        write(m, &LEVELS, &e.looks);
+        for (t, l) in e.types.iter().zip(e.looks.iter().skip(LEVELS.len())) {
+            write_type(m, t, l);
+        }
+        write_label(m, e.label, e.label_default);
+        if m.is_empty() {
+            self.levels.remove(id);
+        }
+    }
+}
+
+// ---- level types (a source's declared kinds, styled per chart) ---------------------------
+
+/// Where a level source's per-type styles are saved in its `StudyStyles::levels` entry: an
+/// object by type id, each holding only what differs from the type's default (`color`, `line`,
+/// `width`, `opacity`, `shown`, and a zone type's `fill`: `color`, `opacity`).
+pub const TYPES_KEY: &str = "types";
+/// Where a level source's label mode is saved (`"name"`, `"name-price"`), only while it
+/// differs from the source's own.
+pub const LABEL_KEY: &str = "label";
+/// The tab group of a level source's own Lines and Zones (beside its types' groups).
+pub const SOURCE_GROUP: &str = "All";
+
+const TYPE_PART: &str = "t";
+const FILL_PART: &str = "fill";
+
+/// A type's default color as the editor offers it first: each level's own colors (`source`:
+/// the type's first one, for the swatch), else the type's recommended color.
+fn type_own(c: Color, source: Option<Rgb>) -> Own {
+    match c {
+        Color::Own => Own {
+            name: "Source colors",
+            token: OwnToken::Source(source),
+        },
+        c => Own {
+            name: "Recommended",
+            token: OwnToken::Is(c),
+        },
+    }
+}
+
+/// A type's line part and fill part. Their `Color::Own` is "not set for this type": the source's
+/// override, else the type's recommended color ([`resolve_type`]).
+fn type_defs(t: &LevelType) -> (PartDef, PartDef) {
+    let s = t.style;
+    let line = PartDef {
+        key: TYPE_PART,
+        title: t.label,
+        style: PartStyle::Line(
+            LineStyle {
+                color: Color::Own,
+                ..s.line
+            }
+            .normalised(),
+        ),
+        stroke: true,
+        own: Some(type_own(s.line.color, None)),
+        optional: false,
+        note: None,
+    };
+    let fill = PartDef {
+        key: FILL_PART,
+        title: t.label,
+        style: PartStyle::Fill(
+            FillStyle {
+                color: Color::Own,
+                ..s.fill
+            }
+            .normalised(),
+        ),
+        stroke: false,
+        own: Some(type_own(s.fill.color, None)),
+        optional: false,
+        note: None,
+    };
+    (line, fill)
+}
+
+/// Level type `t`'s look as saved in a source's `styles` (missing fields: the type's default;
+/// a type never saved, or new since: its default).
+pub fn read_type(styles: &PartStyles, t: &LevelType) -> Look {
+    let (ld, fd) = type_defs(t);
+    let o = styles.get(TYPES_KEY).and_then(|v| v.get(t.id));
+    let mut look = read_part(o, &ld);
+    look.shown = o
+        .and_then(|o| o.get("shown"))
+        .and_then(Value::as_bool)
+        .unwrap_or(t.style.shown);
+    look.fill = t.zone.then(
+        || match read_part(o.and_then(|o| o.get(FILL_PART)), &fd).style {
+            PartStyle::Fill(f) => f,
+            _ => t.style.fill,
+        },
+    );
+    look
+}
+
+/// Write type `t`'s `look` into a source's `styles`: only the fields that changed, each kept
+/// only while it differs from the type's default; fields and types this build doesn't know stay.
+pub fn write_type(styles: &mut PartStyles, t: &LevelType, look: &Look) {
+    if read_type(styles, t) == *look {
+        return;
+    }
+    let (ld, fd) = type_defs(t);
+    let mut types = match styles.remove(TYPES_KEY) {
+        Some(Value::Object(o)) => o,
+        Some(other) => {
+            // Not this build's shape: left as saved.
+            styles.insert(TYPES_KEY.to_owned(), other);
+            return;
+        }
+        None => Map::new(),
+    };
+    let mut m = PartStyles::new();
+    if let Some(v) = types.remove(t.id) {
+        m.insert(TYPE_PART.to_owned(), v);
+    }
+    let was = read_part(m.get(TYPE_PART), &ld);
+    let shown_was = m
+        .get(TYPE_PART)
+        .and_then(|o| o.get("shown"))
+        .and_then(Value::as_bool)
+        .unwrap_or(t.style.shown);
+    write_part(
+        &mut m,
+        &ld,
+        &Look {
+            style: look.style,
+            shown: was.shown,
+            fill: None,
+        },
+    );
+    let mut o = match m.remove(TYPE_PART) {
+        Some(Value::Object(o)) => o,
+        _ => Map::new(),
+    };
+    if shown_was != look.shown {
+        set(
+            &mut o,
+            "shown",
+            (look.shown != t.style.shown).then_some(Value::Bool(look.shown)),
+        );
+    }
+    if let (true, Some(f)) = (t.zone, look.fill) {
+        let mut mf = PartStyles::new();
+        if let Some(v) = o.remove(FILL_PART) {
+            mf.insert(FILL_PART.to_owned(), v);
+        }
+        write_part(
+            &mut mf,
+            &fd,
+            &Look {
+                style: PartStyle::Fill(f),
+                shown: true,
+                fill: None,
+            },
+        );
+        if let Some(v) = mf.remove(FILL_PART) {
+            o.insert(FILL_PART.to_owned(), v);
+        }
+    }
+    if !o.is_empty() {
+        types.insert(t.id.to_owned(), Value::Object(o));
+    }
+    if !types.is_empty() {
+        styles.insert(TYPES_KEY.to_owned(), Value::Object(types));
+    }
+}
+
+/// A source's label mode as saved (else the source's own, `default`).
+pub fn read_label(styles: &PartStyles, default: LabelMode) -> LabelMode {
+    styles
+        .get(LABEL_KEY)
+        .and_then(Value::as_str)
+        .and_then(LabelMode::from_key)
+        .unwrap_or(default)
+}
+
+/// Save a source's label mode (removed when back at the source's own; an unreadable value is
+/// left as saved while the mode isn't changed).
+pub fn write_label(styles: &mut PartStyles, mode: LabelMode, default: LabelMode) {
+    if read_label(styles, default) == mode {
+        return;
+    }
+    if mode == default {
+        styles.remove(LABEL_KEY);
+    } else {
+        styles.insert(LABEL_KEY.to_owned(), Value::String(mode.key().to_owned()));
+    }
+}
+
+/// How a level type is drawn on a chart. Colors may be `Color::Own`: each level's own.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TypeLook {
+    pub shown: bool,
+    /// Its lines and a zone's edges.
+    pub line: LineStyle,
+    /// A zone's fill (opacity scales `LEVEL_ZONE_ALPHA`).
+    pub fill: FillStyle,
+}
+
+/// Level type `t`'s look, field by field: the chart's override for the type (`ty`, as
+/// [`read_type`] gives it), else the chart's override for the whole source (`source`: its
+/// Lines and Zones color and opacity, decision 0026), else the type's recommended look (which
+/// may be each level's own color).
+pub fn resolve_type(t: &LevelType, source: &[Look; 2], ty: &Look) -> TypeLook {
+    let d = t.style;
+    let l = match ty.style {
+        PartStyle::Line(l) => l,
+        _ => LineStyle {
+            color: Color::Own,
+            ..d.line
+        },
+    };
+    let f = ty.fill.unwrap_or(FillStyle {
+        color: Color::Own,
+        ..d.fill
+    });
+    let (sl, sz) = (source[LEVEL_LINES], source[LEVEL_ZONES]);
+    let (dl, dz) = (
+        Look::defaults(&LEVELS)[LEVEL_LINES].opacity(),
+        Look::defaults(&LEVELS)[LEVEL_ZONES].opacity(),
+    );
+    let color = |mine: Color, src: Color, def: Color| {
+        if mine != Color::Own {
+            mine
+        } else if src != Color::Own {
+            src
+        } else {
+            def
+        }
+    };
+    let opacity = |mine: u8, def: u8, src: u8, src_def: u8| {
+        if mine != def {
+            mine
+        } else if src != src_def {
+            src
+        } else {
+            def
+        }
+    };
+    TypeLook {
+        shown: ty.shown,
+        line: LineStyle {
+            color: color(l.color, sl.color(), d.line.color),
+            line: l.line,
+            width: l.width,
+            opacity: opacity(l.opacity, d.line.opacity, sl.opacity(), dl),
+        },
+        fill: FillStyle {
+            color: color(f.color, sz.color(), d.fill.color),
+            opacity: opacity(f.opacity, d.fill.opacity, sz.opacity(), dz),
+        },
+    }
+}
+
+/// A level source's whole style edit (its editor's parts): the source's Lines and Zones, then
+/// one look per declared type in `types` order, and its label mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LevelEdit {
+    pub looks: Vec<Look>,
+    pub types: &'static [LevelType],
+    pub label: LabelMode,
+    /// The source's own label mode (saved only when the chart's differs).
+    pub label_default: LabelMode,
+}
+
+impl LevelEdit {
+    /// The edit an editor shows (built by [`level_editor`] for this source).
+    pub fn of(e: &StyleEditor, types: &'static [LevelType], label_default: LabelMode) -> LevelEdit {
+        LevelEdit {
+            looks: looks_of(e),
+            types,
+            label: match e.options.label_price {
+                Some(true) => LabelMode::NamePrice,
+                Some(false) => LabelMode::Name,
+                None => label_default,
+            },
+            label_default,
+        }
+    }
+}
+
+/// The style editor of a level source (`styles`: its saved entry): its Lines and Zones (under
+/// "All" when it declares types), a tab per declared type grouped as the source groups them
+/// (show, color, line type, width, opacity; a zone type's fill too), and its label option on
+/// the first tab. `color_of(kind)`: the first color of a kind in the source's map (the "Source
+/// colors" swatch); `source`: its first color.
+pub fn level_editor(
+    title: String,
+    styles: &PartStyles,
+    types: &'static [LevelType],
+    label_default: LabelMode,
+    source: Option<Rgb>,
+    color_of: impl Fn(&str) -> Option<Rgb>,
+) -> StyleEditor {
+    let looks = read(styles, &LEVELS);
+    let mut e = editor(title, &LEVELS, &looks, source);
+    if !types.is_empty() {
+        for p in &mut e.parts {
+            p.group = Some(SOURCE_GROUP);
+        }
+    }
+    for t in types {
+        let look = read_type(styles, t);
+        let kind = color_of(t.id);
+        e.parts.push(Part {
+            title: t.label,
+            style: look.style,
+            stroke: true,
+            own: Some(type_own(t.style.line.color, kind)),
+            shown: Some(look.shown),
+            note: None,
+            group: Some(t.group),
+            fill: look.fill.map(|f| (f, type_own(t.style.fill.color, kind))),
+        });
+    }
+    e.options.label_price = Some(read_label(styles, label_default) == LabelMode::NamePrice);
+    e
 }
 
 /// The style editor for a study's parts, titled `title`. `source`: a level source's first
@@ -536,6 +865,8 @@ pub fn editor(title: String, defs: &[PartDef], looks: &[Look], source: Option<Rg
             }),
             shown: d.optional.then_some(l.shown),
             note: d.note,
+            group: None,
+            fill: None,
         })
         .collect();
     StyleEditor::for_study(title, parts)
@@ -548,6 +879,7 @@ pub fn looks_of(e: &StyleEditor) -> Vec<Look> {
         .map(|p| Look {
             style: p.style,
             shown: p.shown.unwrap_or(true),
+            fill: p.fill.map(|(f, _)| f),
         })
         .collect()
 }

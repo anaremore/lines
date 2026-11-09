@@ -371,3 +371,106 @@ fn a_values_as_of_falls_back_to_the_maps() {
 fn b() -> LevelMapBuilder {
     LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
 }
+
+fn es_format() -> PriceFormat {
+    PriceFormat::new(
+        crate::price::PriceScale::decimal(2),
+        crate::price::DisplayStyle::Decimal { digits: 2 },
+        TICK,
+    )
+}
+
+/// A label in name-and-price mode reads `name : price` in the product's format: a line's
+/// price, a raw value at the nearest price unit (not rounded to the tick), a zone's upper edge;
+/// a VWAP-relative level keeps its name (its price moves); a level without a label has none.
+#[test]
+fn label_text_is_name_and_price() {
+    let f = es_format();
+    let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+        .line(
+            "zone-bull",
+            LevelValue::Tick(Price(755_625)),
+            Some("Bull Zone"),
+            style(),
+        )
+        .line("dd", LevelValue::Raw(748_207.4), Some("DD"), style())
+        .zone(
+            "zone",
+            LevelValue::Tick(Price(599_500)),
+            LevelValue::Tick(Price(599_750)),
+            Some("Z1"),
+            style(),
+        )
+        .line("vw", LevelValue::VwapOffset(750.0), Some("+1 RI"), style())
+        .line("nolabel", LevelValue::Tick(Price(600_000)), None, style())
+        .build(TICK)
+        .unwrap();
+    let texts: Vec<Option<String>> = m
+        .levels
+        .iter()
+        .map(|l| label_text(l, LabelMode::NamePrice, &f))
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            Some("Bull Zone : 7556.25".into()),
+            Some("DD : 7482.07".into()),
+            Some("Z1 : 5997.50".into()),
+            Some("+1 RI".into()),
+            None,
+        ]
+    );
+    assert_eq!(
+        label_text(&m.levels[0], LabelMode::Name, &f).as_deref(),
+        Some("Bull Zone")
+    );
+    for mode in [LabelMode::Name, LabelMode::NamePrice] {
+        assert_eq!(LabelMode::from_key(mode.key()), Some(mode));
+    }
+    assert_eq!(LabelMode::from_key("price-only"), None);
+    assert_eq!(LabelMode::default(), LabelMode::Name);
+}
+
+/// Labels are placed by height alone (they are right-aligned at the plot's edge, so any two at
+/// the same height overlap whatever their length): a longer `name : price` label two pixels
+/// from another is still dropped, never drawn over it, and the level stays drawn.
+#[test]
+fn close_long_labels_give_way() {
+    let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+        .line(
+            "open",
+            LevelValue::Tick(Price(600_000)),
+            Some("Open : 6000.00"),
+            style(),
+        )
+        .line(
+            "half-gap",
+            LevelValue::Tick(Price(600_025)),
+            Some("Half Gap : 6000.25"),
+            style(),
+        )
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(8);
+    place(&m, &vp(), None, |_| true, &mut out);
+    assert_eq!(out.len(), 2);
+    place_labels(&mut out, &m, 17.6, 400.0, None);
+    assert!(out[0].label_y.is_some());
+    assert_eq!(out[1].label_y, None, "dropped, not drawn over the first");
+}
+
+/// The source's `TypeStyle::OWN` is the look before types: own color, solid, 1 px, zones at
+/// the 25 % that is 10 %.
+#[test]
+fn own_type_style_is_todays_look() {
+    let s = TypeStyle::OWN;
+    assert!(s.shown);
+    assert_eq!(s.line.color, Color::Own);
+    assert_eq!(
+        (s.line.line, s.line.width, s.line.opacity),
+        (LineType::Solid, 1, 100)
+    );
+    assert_eq!((s.fill.color, s.fill.opacity), (Color::Own, 25));
+    let z = LevelType::zone("zone-bull", "Bull Zone", "Zones", s);
+    assert!(z.zone && !LevelType::line("hp", "HP", "Lines", s).zone);
+}

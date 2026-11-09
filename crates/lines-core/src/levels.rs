@@ -18,7 +18,8 @@ use std::fmt;
 
 use crate::bars::Bar;
 use crate::instrument::{ContractKey, ProductId};
-use crate::price::Price;
+use crate::price::{Price, PriceFormat};
+use crate::style::{Color, FillStyle, LineStyle, LineType};
 use crate::time::UtcMillis;
 use crate::viewport::Viewport;
 
@@ -465,6 +466,136 @@ impl LevelMapBuilder {
             None => Ok(self.map),
         }
     }
+}
+
+// ---- level types (declared by a source; styled per chart) --------------------------------
+
+/// How a type's levels look unless the chart restyles them (decision 0026). A color is a
+/// [`Color`]: [`Color::Own`] is each level's own color (its [`LevelStyle`], decision 0022), a
+/// theme token ([`Color::Palette`]: the theme's n-th study color; [`Color::Text`]: its main text
+/// color) follows dark/light and the palette, [`Color::Custom`] is the same in every theme.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TypeStyle {
+    /// Drawn at all.
+    pub shown: bool,
+    /// Lines of the type, and a zone's edges. Width in logical px; opacity scales the level's
+    /// own alpha.
+    pub line: LineStyle,
+    /// A zone's fill: opacity scales a zone's own translucency (40 %: the default 25 % is the
+    /// 10 % zones always had).
+    pub fill: FillStyle,
+}
+
+impl TypeStyle {
+    /// Each level as its source drew it before types: its own color, solid, 1 px, a zone's fill
+    /// at 10 %.
+    pub const OWN: TypeStyle = TypeStyle {
+        shown: true,
+        line: LineStyle {
+            color: Color::Own,
+            line: LineType::Solid,
+            width: 1,
+            opacity: 100,
+        },
+        fill: FillStyle {
+            color: Color::Own,
+            opacity: 25,
+        },
+    };
+}
+
+/// A kind of level a source declares (`LevelSource::types`): the kind slug its levels carry
+/// ([`LevelMap::kinds`]), how the style editor lists it, and its recommended look.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LevelType {
+    /// The kind slug (`hp`, `zone-bull`).
+    pub id: &'static str,
+    /// The editor's name for it ("Dyn HP").
+    pub label: &'static str,
+    /// The heading it's listed under ("Zones", "Lines").
+    pub group: &'static str,
+    /// Its levels include zones: the editor offers a fill.
+    pub zone: bool,
+    pub style: TypeStyle,
+}
+
+impl LevelType {
+    pub const fn line(
+        id: &'static str,
+        label: &'static str,
+        group: &'static str,
+        style: TypeStyle,
+    ) -> LevelType {
+        LevelType {
+            id,
+            label,
+            group,
+            zone: false,
+            style,
+        }
+    }
+
+    pub const fn zone(
+        id: &'static str,
+        label: &'static str,
+        group: &'static str,
+        style: TypeStyle,
+    ) -> LevelType {
+        LevelType {
+            id,
+            label,
+            group,
+            zone: true,
+            style,
+        }
+    }
+}
+
+/// What a level's label says.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LabelMode {
+    /// Its name ("Bull Zone").
+    #[default]
+    Name,
+    /// Its name and price, `Bull Zone : 7556.25`, in the product's price format. A level that
+    /// moves with the VWAP keeps its name only (its price changes every bar).
+    NamePrice,
+}
+
+impl LabelMode {
+    /// The saved name.
+    pub fn key(self) -> &'static str {
+        match self {
+            LabelMode::Name => "name",
+            LabelMode::NamePrice => "name-price",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<LabelMode> {
+        [LabelMode::Name, LabelMode::NamePrice]
+            .into_iter()
+            .find(|m| m.key() == s)
+    }
+}
+
+/// The label drawn for level `l` in `mode` (`None`: it has none). Built when the map or the mode
+/// changes, never per frame: the price is the line's (a zone's upper edge, where its label
+/// sits), a raw value at the nearest price unit, printed with `fmt`.
+pub fn label_text(l: &Level, mode: LabelMode, fmt: &PriceFormat) -> Option<String> {
+    let name = l.label.as_deref()?;
+    let value = match l.shape {
+        LevelShape::Line(v) => v,
+        LevelShape::Zone { upper, .. } => upper,
+    };
+    let price = match (mode, value) {
+        (LabelMode::Name, _) | (_, LevelValue::VwapOffset(_)) => None,
+        (LabelMode::NamePrice, LevelValue::Tick(p)) => Some(p),
+        (LabelMode::NamePrice, LevelValue::Raw(v)) => Some(Price(v.round() as i64)),
+    };
+    Some(match price {
+        Some(p) => format!("{name} : {}", fmt.format::<32>(p).as_str()),
+        None => name.to_owned(),
+    })
 }
 
 // ---- placement (paint path: no allocation) -----------------------------------------------
