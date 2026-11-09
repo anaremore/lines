@@ -500,6 +500,25 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
+    // Every open position: a chart beside the positions pane, its row's exits the option's
+    // triggers; the status line counts them from any tab. Narrow too.
+    for (name, quick, size) in [
+        ("positions", true, "1400x600"),
+        ("positions-narrow", false, "760x520"),
+    ] {
+        let mut a = vec![
+            "--workspace".to_owned(),
+            ws("positions.json"),
+            "--size".to_owned(),
+            size.to_owned(),
+            "--paper".to_owned(),
+            armed.to_owned(),
+        ];
+        a.extend(args("--theme dark"));
+        let mut sc = s(name, quick, CHAIN_AT, a);
+        sc.chain = true;
+        v.push(sc);
+    }
     // A trigger no pane on screen shows: the workspace says so, in the plain chain's status too.
     {
         let mut a = vec![
@@ -1058,6 +1077,20 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ),
     )
     .context("chain.json")?;
+    // A chart over the positions pane, in one link group.
+    let positions = format!(
+        r#"{{ "split": {{ "axis": "column", "ratio": 0.55, "first": {}, "second": {} }} }}"#,
+        chain.replacen(r#""kind": "chain""#, r#""kind": "chart""#, 1),
+        chain.replacen(r#""kind": "chain""#, r#""kind": "positions""#, 1),
+    );
+    std::fs::write(
+        dir.join("positions.json"),
+        format!(
+            r#"{{ "version": 8, "name": "gallery", "crosshair_sync": false,
+  "windows": [ {{ "active_tab": 0, "tabs": [ {{ "focused": 1, "layout": {positions} }} ] }} ] }}"#
+        ),
+    )
+    .context("positions.json")?;
     // A chart of the same underlying, with no chain to show its triggers.
     let chart_only = chain.replacen(r#""kind": "chain""#, r#""kind": "chart""#, 1);
     std::fs::write(

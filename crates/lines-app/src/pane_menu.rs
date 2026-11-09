@@ -388,6 +388,7 @@ fn pane(m: &PaneMenu) -> MenuItem {
         MenuItem::of(Command::Split(crate::layout::Axis::Row), false),
         MenuItem::of(Command::Split(crate::layout::Axis::Column), false),
         row("Pop out", Command::PopOut),
+        MenuItem::of(Command::OpenPositions, false),
         MenuItem::sep(),
         // What the pane is (pick one); the top-level Show › is what a chart draws.
         MenuItem::header("Show as"),

@@ -24,6 +24,8 @@ pub enum PaneKind {
     Strategies,
     /// An underlying's option chain (decision 0028; workspace format 6).
     Chain,
+    /// Every open position on every account (workspace format 8).
+    Positions,
 }
 
 impl PaneKind {
@@ -35,6 +37,7 @@ impl PaneKind {
             PaneKind::Journal => "Journal",
             PaneKind::Strategies => "Strategies",
             PaneKind::Chain => "Option chain",
+            PaneKind::Positions => "Positions",
         }
     }
 }

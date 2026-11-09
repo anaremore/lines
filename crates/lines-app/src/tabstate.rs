@@ -131,6 +131,7 @@ pub fn toggle_kind<Id: Copy + Eq + Hash>(
             PaneKind::Journal => "no journal goes with this pane",
             PaneKind::Strategies => "no strategy panel goes with this pane",
             PaneKind::Chain => "no option chain goes with this pane",
+            PaneKind::Positions => "no positions pane goes with this pane",
         });
     }
     let any_shown = candidates.iter().any(|id| leaves[id].state.is_shown());

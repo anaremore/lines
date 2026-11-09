@@ -581,6 +581,17 @@ impl TradeCache {
         }
     }
 
+    /// Every account's revision and the global one together (lock-free): changes whenever any
+    /// account's orders, positions or P&L did.
+    pub fn any_revision(&self) -> u64 {
+        self.revisions.values().fold(
+            self.global
+                .load(Ordering::Acquire)
+                .wrapping_mul(0x9e37_79b9),
+            |r, a| r.wrapping_mul(31).wrapping_add(a.load(Ordering::Acquire)),
+        )
+    }
+
     /// The account's revision (lock-free): changes whenever its orders, positions, P&L or
     /// rule state did.
     pub fn revision(&self, account: &AccountId) -> u64 {

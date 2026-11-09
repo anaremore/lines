@@ -183,7 +183,8 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
             | PaneKind::Tape
             | PaneKind::Journal
             | PaneKind::Strategies
-            | PaneKind::Chain,
+            | PaneKind::Chain
+            | PaneKind::Positions,
             false,
         ) => &OTHER,
     }
@@ -197,8 +198,8 @@ pub fn header_height(kind: PaneKind) -> f32 {
         PaneKind::Dom | PaneKind::Tape | PaneKind::Journal => 27.0,
         // Its Flatten and Cancel buttons (20 px) set the line, shown or not.
         PaneKind::Chain => 29.0,
-        // Its Stop all button (20 px) sets the line.
-        PaneKind::Strategies => 30.0,
+        // Its Stop all button (20 px) sets the line; Cancel all and Flatten all likewise.
+        PaneKind::Strategies | PaneKind::Positions => 30.0,
     }
 }
 
@@ -689,6 +690,7 @@ mod tests {
             PaneKind::Journal,
             PaneKind::Strategies,
             PaneKind::Chain,
+            PaneKind::Positions,
         ]
         .into_iter()
         .flat_map(|k| [(k, false), (k, true)])

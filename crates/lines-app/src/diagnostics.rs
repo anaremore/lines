@@ -375,6 +375,7 @@ fn sample(cx: &mut App) -> (Vec<FeedSample>, Vec<PaneSample>) {
             PaneKind::Journal => "journal",
             PaneKind::Strategies => "strategies",
             PaneKind::Chain => "chain",
+            PaneKind::Positions => "positions",
         };
         let (visible, paints, paint_us) = handle.perf(cx);
         pane_samples.push(PaneSample {

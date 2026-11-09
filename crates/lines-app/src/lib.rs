@@ -51,6 +51,8 @@ mod picker;
 mod picker_view;
 mod pnl;
 mod popover;
+mod positions;
+mod positions_view;
 mod profile;
 mod redact;
 #[cfg(feature = "screenshot")]
