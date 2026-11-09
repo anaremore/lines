@@ -10,7 +10,7 @@ default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indica
 
 [workspace.package]
 edition = "2024"
-version = "0.3.7"
+version = "0.3.8"
 license = "FSL-1.1-ALv2"
 publish = false
 
