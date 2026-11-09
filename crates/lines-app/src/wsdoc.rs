@@ -1096,6 +1096,55 @@ mod tests {
         assert!(w.crosshair_sync);
     }
 
+    /// A workspace saved with a DOM's split below today's minimum loads as saved, and placing it
+    /// holds the DOM at the minimum; the saved ratio stays, so a taller window restores it.
+    #[test]
+    fn a_saved_split_smaller_than_a_doms_minimum_is_held_at_it() {
+        let pane = |kind: &str| {
+            format!(
+                r#"{{ "pane": {{ "kind": "{kind}", "product": {{ "product": 1, "symbol": "ES" }} }} }}"#
+            )
+        };
+        let json = format!(
+            r#"{{ "version": 3, "name": "old", "crosshair_sync": false,
+  "windows": [ {{ "active_tab": 0, "tabs": [ {{ "focused": 0, "layout":
+    {{ "split": {{ "axis": "column", "ratio": 0.05, "first": {}, "second": {} }} }} }} ] }} ] }}"#,
+            pane("dom"),
+            pane("journal")
+        );
+        // Through the same decoding a saved file goes through.
+        let Decoded::Ok { value: w, .. } = decode::<WorkspaceDoc>(&FORMAT, json.as_bytes()) else {
+            panic!("the file loads");
+        };
+        let layout = &w.windows[0].tabs[0].layout;
+        let heights = |h: f32| -> Vec<f32> {
+            layout
+                .place_where(Rect::new(0.0, 0.0, 800.0, h), &|_| true, &|p: &PaneDoc| {
+                    crate::trade_bar::min_pane_h(p.kind)
+                })
+                .iter()
+                .map(|p| p.rect.h)
+                .collect()
+        };
+        let min = crate::trade_bar::MIN_DOM_PANE_H;
+        assert_eq!(
+            heights(800.0),
+            [min, 800.0 - min],
+            "ratio's 40 px is held at the minimum"
+        );
+        assert_eq!(
+            heights(2000.0),
+            [100.0, 1900.0],
+            "a taller window: the saved split"
+        );
+        let again: WorkspaceDoc =
+            serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        let Layout::Split { ratio, .. } = &again.windows[0].tabs[0].layout else {
+            panic!()
+        };
+        assert_eq!(*ratio, 0.05, "saving it again doesn't lose the ratio");
+    }
+
     #[test]
     fn bench_is_six_charts_and_two_doms() {
         let w = WorkspaceDoc::bench();

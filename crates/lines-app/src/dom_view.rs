@@ -115,8 +115,8 @@ pub struct DomView {
     orders: OrdersLayer,
     /// Whether the trading header was last rendered with its narrow labels.
     header_narrow: Option<bool>,
-    /// The whole pane's height (last frame's layout; 0: not laid out yet): which of the trade
-    /// panel's rows it has room for.
+    /// The whole pane's height (last frame's layout; 0 with `pane_w` 0: not laid out yet): which of
+    /// the trade panel's rows it has room for.
     pane_h: f32,
     /// The whole pane's width: the ladder's bounds aren't known while its feed is unavailable.
     pane_w: f32,
@@ -1260,6 +1260,13 @@ fn measures_columns(hovered: bool, measured: bool) -> bool {
     !hovered || !measured
 }
 
+/// What shows where a short pane's ladder would be: only a message the hidden status line can't
+/// show (a closed editor's, a refused key's). A short pane shows what fits, with no hint about the
+/// rest.
+fn short_pane_message(flash: Option<&str>, status: bool, ladder: bool) -> Option<&str> {
+    flash.filter(|_| !status && !ladder)
+}
+
 /// Whether the ladder shows: the panel's own decision, which keeps it with its quantity row, and
 /// room for its header and enough rows for the inside market.
 fn ladder_shows(has_panel: bool, rows_ladder: bool, height: f32) -> bool {
@@ -1322,8 +1329,7 @@ impl DomView {
         let before = self.panel_rows();
         // A ladder row moves under a still pointer with any change of height too.
         let moved = self.pane_h != h;
-        // Render takes every width decision from here: last frame's width could leave a short
-        // line's items pushing the exits out.
+        // Render takes every width decision from here.
         let mut changed = self.pane_w != w;
         self.pane_w = w;
         self.pane_h = h;
@@ -1358,41 +1364,23 @@ impl Render for DomView {
         let rows = self.panel_rows();
         let trade = trade_bar::dom_bar(self, &self.product, width, rows, &t, cx);
         self.has_panel = trade.is_some();
-        // Without a panel the exits aren't taking the header's line.
-        let pane_header = rows.pane_header || trade.is_none();
-        // What a short pane has left below the panel, for saying why the ladder is gone.
-        let left_over = self.pane_h
-            - rows.height(width)
-            - if pane_header {
-                pane::header_height(crate::layout::PaneKind::Dom)
-            } else {
-                0.0
-            };
-        // A message the hidden status line can't show (a closed editor's) comes first.
-        let note = self
-            .trade
-            .local_flash()
-            .filter(|_| !rows.status)
-            .map_or_else(
-                || "Pane too short: no ladder or order rows".to_owned(),
-                str::to_owned,
-            );
-        let hidden_note = (trade.is_some()
-            && !rows.ladder
-            && left_over >= ROW_H
-            && self.feed.unavailable.is_none())
-        .then(|| {
-            div()
-                .absolute()
-                .left(px(8.0))
-                .right(px(8.0))
-                .top_0()
-                .h(px(ROW_H))
-                .truncate()
-                .text_size(px(12.0))
-                .text_color(t.text_dim)
-                .child(note)
-        });
+        // What a short pane has left below the panel.
+        let left_over =
+            self.pane_h - rows.height(width) - pane::header_height(crate::layout::PaneKind::Dom);
+        let hidden_note = short_pane_message(self.trade.local_flash(), rows.status, rows.ladder)
+            .filter(|_| trade.is_some() && left_over >= ROW_H && self.feed.unavailable.is_none())
+            .map(|message| {
+                div()
+                    .absolute()
+                    .left(px(8.0))
+                    .right(px(8.0))
+                    .top_0()
+                    .h(px(ROW_H))
+                    .truncate()
+                    .text_size(px(12.0))
+                    .text_color(t.text_dim)
+                    .child(message.to_owned())
+            });
         let measure = entity.clone();
         let today = pane::today(self.frozen, &self.store);
         let overlay =
@@ -1436,7 +1424,7 @@ impl Render for DomView {
                 .absolute()
                 .size_full(),
             )
-            .when(pane_header, |d| d.child(self.header()))
+            .child(self.header())
             .children(trade)
             .child(
                 div()
@@ -1466,6 +1454,23 @@ impl Render for DomView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A short pane says nothing about what doesn't fit; a message with nowhere else to go shows.
+    #[test]
+    fn a_short_pane_shows_no_hint_only_a_message() {
+        assert_eq!(short_pane_message(None, false, false), None, "no hint");
+        assert_eq!(short_pane_message(Some("m"), false, false), Some("m"));
+        assert_eq!(
+            short_pane_message(Some("m"), true, false),
+            None,
+            "the status line has it"
+        );
+        assert_eq!(
+            short_pane_message(Some("m"), false, true),
+            None,
+            "the ladder is there"
+        );
+    }
 
     /// Columns hold still under a resting pointer (Ask can't slide under it), once measured.
     #[test]
