@@ -8,7 +8,8 @@
 //!
 //! A command passes, in order: validation (account, contract, quantity, tick grid, broker
 //! capabilities) → prop rules (blocked after a breach; contract cap) → pre-trade risk → the
-//! broker. Flatten, Cancel All and cancels skip rules and risk: they always work. The news
+//! broker. Flatten, Cancel All and cancels skip rules and risk: they always work, but for a
+//! Flatten with a position to close while the broker is disconnected (refused whole). The news
 //! blackout (roadmap 8b) reads the economic calendar given with
 //! [`TradingCore::set_econ_schedule`] (the bundled one by default) on the core's clock.
 //!
@@ -41,6 +42,7 @@ use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind
 
 /// The order id a fill made outside Lines carries ([`BrokerEvent::ExternalFill`]): no order.
 pub const EXTERNAL_ORDER: OrderId = OrderId(0);
+mod cancels;
 mod position_bracket;
 mod strategy_gate;
 mod trigger;
@@ -210,8 +212,8 @@ pub struct TradingCore {
     broker_events: Vec<BrokerEvent>,
     /// Terminal orders kept for display, oldest dropped first.
     finished: VecDeque<OrderId>,
-    /// Orders with a cancel on its way (not sent twice).
-    cancelling: HashSet<OrderId>,
+    /// Cancels sent and not answered yet (`core/cancels.rs`).
+    cancelling: HashMap<OrderId, cancels::SentCancel>,
     /// Expired option positions already sent to settle (one try per run).
     settled: HashSet<(AccountId, ContractKey)>,
     overfill: OverfillPolicy,
@@ -289,7 +291,7 @@ impl TradingCore {
             events: Vec::new(),
             broker_events: Vec::new(),
             finished: VecDeque::new(),
-            cancelling: HashSet::new(),
+            cancelling: HashMap::new(),
             settled: HashSet::new(),
             overfill: OverfillPolicy::default(),
             fill_ids: HashSet::new(),
@@ -794,9 +796,8 @@ impl TradingCore {
                 );
                 // A sibling still holding the pair: open and not being cancelled (× then a quick
                 // re-add must pair the new exit, not leave it alone).
-                let cancelling = &self.cancelling;
                 let open = |id: Option<OrderId>, orders: &BTreeMap<OrderId, Order>| {
-                    id.filter(|i| !cancelling.contains(i))
+                    id.filter(|i| !self.cancel_pending(*i))
                         .and_then(|i| orders.get(&i))
                         .is_some_and(|o| o.is_open())
                 };
@@ -805,7 +806,7 @@ impl TradingCore {
                     .values()
                     .find(|o| {
                         o.is_open()
-                            && !cancelling.contains(&o.id)
+                            && !self.cancel_pending(o.id)
                             && o.reduce_only
                             && o.role != Role::Flatten
                             && !open(o.oco, &self.orders)
@@ -1104,9 +1105,7 @@ impl TradingCore {
             } => self.set_bracket_mode(env, now, &account, contract, mode, replace),
             Command::CancelOrder { order, .. } => {
                 self.open_order(&account, order)?;
-                if self.cancelling.insert(order) {
-                    self.send(env, now, BrokerRequest::Cancel { id: order });
-                }
+                self.send_cancel(env, now, order);
                 Ok(vec![order])
             }
             Command::CancelAll { contract, .. } => {
@@ -1222,6 +1221,15 @@ impl TradingCore {
                     .map(|(k, p)| (*k, p.qty()))
                     .filter(|(_, q)| *q != 0)
                     .collect();
+                // A broker that can't be reached can't close anything. Refused whole, before any
+                // cancel is remembered: otherwise the stop's cancel would go on reconnect, with
+                // the market order long failed, and strip the position's protection.
+                if !positions.is_empty() && !self.broker.connected() {
+                    return Err(Reject::new(
+                        RejectCode::Broker,
+                        "the broker is disconnected: nothing was sent, your orders stand; flatten when it is back",
+                    ));
+                }
                 // Closing a position cancels every order on it, whoever placed it: a trader's
                 // stop left working after the position is gone would open a new one. With
                 // nothing to close, a strategy's Flatten is its Cancel All (its own orders).
@@ -1232,15 +1240,33 @@ impl TradingCore {
                 // reduce-only. Refused or cancelled, it is no longer open and the next one goes;
                 // while its cancel is on its way it may yet fill, so nothing goes until that's known.
                 // A venue silent for [`FLATTEN_ANSWER_MS`] may have lost it: an exit is never dead,
-                // so from then on it is cancelled and replaced as any other order.
+                // so from then on it is cancelled and replaced as any other order. Unresolved (a
+                // rebuild came before the broker's answer) counts too: it may still fill.
                 let closing: std::collections::BTreeSet<OrderId> = self
                     .orders
                     .values()
-                    .filter(|o| o.is_open() && o.role == Role::Flatten && o.account == account)
+                    .filter(|o| o.is_open() || o.state == OrderState::Unresolved)
+                    .filter(|o| o.role == Role::Flatten && o.account == account)
                     .filter(|o| positions.iter().any(|(k, _)| *k == o.contract))
                     .filter(|o| now.0.saturating_sub(o.updated.0) < FLATTEN_ANSWER_MS)
                     .map(|o| o.id)
                     .collect();
+                // An unresolved one not closing anything now (past that, or the position reads
+                // flat) may still fill, and the cancels below only cover open orders.
+                // Once: a cancel that got nowhere isn't asked again on every Flatten after.
+                let scope = self.cancel_scope(env.source);
+                let unresolved: Vec<OrderId> = self
+                    .orders
+                    .values()
+                    .filter(|o| o.state == OrderState::Unresolved && o.role == Role::Flatten)
+                    .filter(|o| o.account == account && contract.is_none_or(|c| c == o.contract))
+                    .filter(|o| scope.as_ref().is_none_or(|s| s.contains(&o.id)))
+                    .filter(|o| !closing.contains(&o.id) && !self.cancel_gave_up(o.id))
+                    .map(|o| o.id)
+                    .collect();
+                for id in unresolved {
+                    self.send_cancel(env, now, id);
+                }
                 let mut ids = if positions.is_empty() {
                     self.cancel_all(env, now, &account, contract)
                 } else {
@@ -1315,9 +1341,7 @@ impl TradingCore {
             .map(|o| o.id)
             .collect();
         for &id in &ids {
-            if self.cancelling.insert(id) {
-                self.send(env, now, BrokerRequest::Cancel { id });
-            }
+            self.send_cancel(env, now, id);
         }
         ids
     }
@@ -1390,7 +1414,7 @@ impl TradingCore {
             .orders
             .values()
             .filter(|o| o.is_open() && expired(&o.contract))
-            .filter(|o| !self.cancelling.contains(&o.id))
+            .filter(|o| !self.cancel_on_its_way(now, o.id))
             .map(|o| (o.account.clone(), o.id))
             .collect();
         for (account, order) in orders {
@@ -1695,11 +1719,15 @@ impl TradingCore {
                 }
             }
         }
+        // Disconnected, a Flatten is refused: not asked on every tick, the next one after
+        // reconnecting goes if the window is still open.
+        if !self.broker.connected() {
+            return;
+        }
         for (account, contract, at) in todo {
-            let id = self.submit(
+            let id = self.submit_internal(
                 now,
                 Source::Rule,
-                Instant::now(),
                 Command::Flatten {
                     account: account.clone(),
                     contract: Some(contract),
@@ -1942,6 +1970,7 @@ impl TradingCore {
         if self.settle_options(now) {
             self.poll(now);
         }
+        self.cancels_resend(now);
         self.news_flatten(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
@@ -1960,6 +1989,7 @@ impl TradingCore {
             .chain(cooldowns)
             .chain(news)
             .chain(self.triggers_wake())
+            .chain(self.cancels_wake())
             .min()
     }
 
@@ -2021,7 +2051,7 @@ impl TradingCore {
                 &o.account == account
                     && o.is_open()
                     && exit
-                    && !self.cancelling.contains(&o.id)
+                    && !self.cancel_on_its_way(now, o.id)
                     && (position == 0 || o.side.sign() == position.signum())
             })
             .map(|o| o.id)
@@ -2086,6 +2116,9 @@ impl TradingCore {
             }
             BrokerEvent::Working { id, at } => self.transition(id, OrderState::Working, at),
             BrokerEvent::Rejected { id, reason, at } => {
+                if self.cancel_refused(id, &reason, at) {
+                    return self.orders.get(&id).map(|o| o.account.clone());
+                }
                 self.transition(id, OrderState::Rejected { reason }, at)
             }
             BrokerEvent::Cancelled { id, at, .. } => self.transition(id, OrderState::Cancelled, at),
@@ -2578,6 +2611,7 @@ impl TradingCore {
                 self.events.push(Event::Order(o));
             }
         }
+        self.cancels_rebuilt();
         self.events.push(Event::Rebuilt {
             accounts: snap.accounts.len(),
             open_orders: open,

@@ -150,7 +150,7 @@ impl TradingCore {
 
     /// An order working and not on its way out.
     fn live_order(&self, id: Option<OrderId>) -> Option<OrderId> {
-        id.filter(|i| !self.cancelling.contains(i))
+        id.filter(|i| !self.cancel_pending(*i))
             .filter(|i| self.orders.get(i).is_some_and(Order::is_open))
     }
 
@@ -292,9 +292,7 @@ impl TradingCore {
             }
         } else {
             for id in exits {
-                if self.cancelling.insert(id) {
-                    self.send(env, now, BrokerRequest::Cancel { id });
-                }
+                self.send_cancel(env, now, id);
                 cancelled.push(id);
             }
         }
@@ -408,7 +406,7 @@ impl TradingCore {
         }
         let state = self.orders.get(&id).map(|o| o.state.clone());
         // Sent with no known outcome (a reconnect): never assumed gone, never placed again.
-        if matches!(state, Some(OrderState::Unresolved)) && !self.cancelling.contains(&id) {
+        if matches!(state, Some(OrderState::Unresolved)) && !self.cancel_pending(id) {
             return false;
         }
         leg.id = None;
@@ -476,7 +474,9 @@ impl TradingCore {
         // A Flatten on its way closes the position: nothing is placed meanwhile (what it
         // leaves open, if it only partly fills, gets its legs after).
         let flattening = self.orders.values().any(|o| {
-            o.is_open()
+            (o.is_open()
+                || (o.state == OrderState::Unresolved
+                    && now.0.saturating_sub(o.updated.0) < super::FLATTEN_ANSWER_MS))
                 && o.role == Role::Flatten
                 && &o.account == account
                 && o.contract == contract

@@ -744,7 +744,10 @@ pub fn position_row(avg_price: f64, tick: i64, units: i64) -> i64 {
 /// full message stays in the header). Known reasons by their wording, else the message's
 /// first word, at most 9 characters.
 pub fn short_reason(message: &str) -> &str {
-    const KNOWN: [(&str, &str); 16] = [
+    const KNOWN: [(&str, &str); 18] = [
+        // First: whatever else it mentions, the cancel is what failed.
+        ("cancel refused", "no cancel"),
+        ("no answer to", "no cancel"),
         ("market is closed", "closed"),
         ("tick grid", "tick"),
         ("trading halted", "halted"),
@@ -1766,6 +1769,19 @@ mod tests {
         );
         // Unknown: the first word, at most 9 characters.
         assert_eq!(short_reason(ENABLE_TO_TRADE), "disabled");
+        assert_eq!(
+            short_reason("still working: cancel refused: market is closed"),
+            "no cancel"
+        );
+        assert_eq!(
+            short_reason("still working: no answer to 3 cancels"),
+            "no cancel"
+        );
+        // Other refusals that mention the word keep their own tag.
+        assert_eq!(
+            short_reason("venue can't hold a stop and a target as one-cancels-other"),
+            "venue"
+        );
         assert_eq!(short_reason("insufficient margin"), "insuffici");
         assert_eq!(short_reason(""), "");
         for m in [

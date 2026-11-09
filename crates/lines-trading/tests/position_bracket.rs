@@ -55,6 +55,8 @@ struct Wrapped {
     rejected: Vec<BrokerEvent>,
     /// Exit placements that reached the broker.
     exits_seen: Arc<AtomicUsize>,
+    /// Lose the next market order.
+    lose_market: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Broker for Wrapped {
@@ -67,6 +69,12 @@ impl Broker for Wrapped {
         c
     }
     fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
+        if let BrokerRequest::Place(o) = &req
+            && matches!(o.kind, OrderKind::Market)
+            && self.lose_market.swap(false, Ordering::Relaxed)
+        {
+            return;
+        }
         if let BrokerRequest::Place(o) = &req
             && o.reduce_only
             && !matches!(o.kind, OrderKind::Market)
@@ -119,6 +127,7 @@ struct Rig {
     drop_modifies: Arc<AtomicUsize>,
     reject_exits: Arc<std::sync::atomic::AtomicBool>,
     exits_seen: Arc<AtomicUsize>,
+    lose_market: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Rig {
@@ -132,6 +141,7 @@ impl Rig {
         let drop_modifies = Arc::new(AtomicUsize::new(0));
         let reject_exits = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let exits_seen = Arc::new(AtomicUsize::new(0));
+        let lose_market = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut core = TradingCore::new(Box::new(Wrapped {
             inner,
             drop_modifies: drop_modifies.clone(),
@@ -139,6 +149,7 @@ impl Rig {
             reject_exits: reject_exits.clone(),
             rejected: Vec::new(),
             exits_seen: exits_seen.clone(),
+            lose_market: lose_market.clone(),
         }));
         core.add_account(account, None);
         let mut r = Rig {
@@ -149,6 +160,7 @@ impl Rig {
             drop_modifies,
             reject_exits,
             exits_seen,
+            lose_market,
         };
         r.book(&[(6000.00, 50)], &[(6000.25, 50)]);
         r
@@ -613,6 +625,7 @@ fn a_restart_adopts_the_pair_and_keeps_following_the_position() {
             drop_modifies: Arc::new(AtomicUsize::new(0)),
             reject_exits: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             exits_seen: Arc::new(AtomicUsize::new(0)),
+            lose_market: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         r.core.rebuild(r.now());
         r.collect();
@@ -1024,4 +1037,36 @@ fn a_shorts_off_grid_average_rounds_toward_the_entry() {
             (Side::Buy, 2, limit(5996.25))
         ]
     );
+}
+
+/// A Flatten a rebuild left unresolved may still fill, so no new pair goes for 5 s; lost for
+/// good, the position gets its pair again after that.
+#[test]
+fn no_pair_goes_while_an_unresolved_flatten_may_still_fill() {
+    let mut r = Rig::new();
+    r.mode(MODE, false).unwrap();
+    r.market_order(Side::Buy, 2);
+    r.wait(LAT);
+    assert_eq!(r.exits_seen.load(Ordering::Relaxed), 2);
+    r.lose_market.store(true, Ordering::Relaxed);
+    r.cmd(Command::Flatten {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(LAT + 1); // the pair's cancels land
+    r.t += 1;
+    r.core.rebuild(r.now());
+    r.collect();
+    assert_eq!(r.pos(), 2);
+    r.wait(4_900);
+    assert_eq!(
+        r.exits_seen.load(Ordering::Relaxed),
+        2,
+        "nothing placed yet"
+    );
+    r.wait(200);
+    r.wait(LAT + 1);
+    assert_eq!(r.exits_seen.load(Ordering::Relaxed), 4, "protected again");
+    assert_eq!(r.exits().len(), 2);
 }

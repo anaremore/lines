@@ -241,8 +241,9 @@ impl TradingCore {
                 .collect();
             targets.sort();
             targets.dedup();
+            let mut refused = None;
             for (account, contract) in targets {
-                self.submit_internal(
+                let command = self.submit_internal(
                     now,
                     source,
                     Command::Flatten {
@@ -250,6 +251,18 @@ impl TradingCore {
                         contract: Some(contract),
                     },
                 );
+                refused = refused.or_else(|| {
+                    self.events.iter().rev().find_map(|e| match e {
+                        Event::Command {
+                            id, result: Err(r), ..
+                        } if *id == command => Some(r.clone()),
+                        _ => None,
+                    })
+                });
+            }
+            // Stopped all the same; the person hears that its position is still open.
+            if let Some(r) = refused {
+                return Err(r);
             }
         }
         Ok(Vec::new())
@@ -290,7 +303,7 @@ impl TradingCore {
         let entries: Vec<OrderId> = mine
             .into_iter()
             .filter_map(|o| self.orders.get(&o))
-            .filter(|o| o.is_open() && !self.cancelling.contains(&o.id) && Some(o.id) != keep)
+            .filter(|o| o.is_open() && !self.cancel_on_its_way(now, o.id) && Some(o.id) != keep)
             .filter(|o| match o.role {
                 Role::Entry => true,
                 // A single order that only closes part of the position is an exit.
@@ -423,11 +436,17 @@ impl TradingCore {
         if self.strategy_day_pnl(now, id) > -limit {
             return;
         }
-        if let Some(i) = self.strategies.get_mut(&id) {
+        // Disconnected, a Flatten is refused: the day isn't closed yet, the next look tries.
+        // Up, the day is closed before the pause: its cancels look here again.
+        let up = self.broker.connected();
+        if up && let Some(i) = self.strategies.get_mut(&id) {
             i.loss_closed = day;
         }
         if state == StrategyState::Armed {
             self.pause_strategy(now, id, StrategyState::Paused, DAILY_LOSS.into());
+        }
+        if !up {
+            return;
         }
         self.submit_internal(
             now,

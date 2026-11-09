@@ -3,16 +3,19 @@
 //! preset's rule, DST, and a missing or stale calendar (never taken as clear).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use lines_core::econ::EconSchedule;
 use lines_core::{ContractKey, Month, Price, Qty, Side as BookSide, UtcMillis};
 use lines_feed::catalog;
+use lines_trading::broker::{BrokerEvent, BrokerRequest, BrokerSnapshot};
 use lines_trading::guardrails::Guardrails;
 use lines_trading::news::{NewsAction, NewsBlackout};
 use lines_trading::{
-    AccountConfig, AccountId, Command, Event, FillModel, MarketInput, Money, OrderId, OrderKind,
-    OrderSpec, PaperBroker, PaperConfig, Reject, RejectCode, RulePreset, Side, Source, TradingCore,
+    AccountConfig, AccountId, Broker, BrokerCaps, Command, Event, FillModel, MarketInput, Money,
+    OrderId, OrderKind, OrderSpec, PaperBroker, PaperConfig, Reject, RejectCode, RulePreset, Side,
+    Source, TradingCore,
 };
 
 const LAT: i64 = 20;
@@ -68,10 +71,47 @@ fn cpi() -> i64 {
     at("2026-11-10T13:30:00Z")
 }
 
+/// The paper broker, but it can be disconnected.
+struct Link {
+    inner: PaperBroker,
+    up: Arc<AtomicBool>,
+}
+
+impl Broker for Link {
+    fn name(&self) -> &str {
+        "link"
+    }
+    fn capabilities(&self) -> BrokerCaps {
+        self.inner.capabilities()
+    }
+    fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
+        self.inner.request(now, req)
+    }
+    fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput) {
+        self.inner.market(now, contract, input)
+    }
+    fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
+        self.inner.poll(now, out)
+    }
+    fn next_wake(&self) -> Option<UtcMillis> {
+        self.inner.next_wake()
+    }
+    fn snapshot(&self) -> BrokerSnapshot {
+        self.inner.snapshot()
+    }
+    fn connected(&self) -> bool {
+        self.up.load(Ordering::Relaxed)
+    }
+    fn simulated(&self) -> bool {
+        true
+    }
+}
+
 struct Rig {
     core: TradingCore,
     t: i64,
     events: Vec<Event>,
+    up: Arc<AtomicBool>,
 }
 
 impl Rig {
@@ -84,13 +124,18 @@ impl Rig {
             ..Default::default()
         });
         b.open_account(cfg.id.clone(), Money::whole(cfg.starting_balance));
-        let mut core = TradingCore::new(Box::new(b));
+        let up = Arc::new(AtomicBool::new(true));
+        let mut core = TradingCore::new(Box::new(Link {
+            inner: b,
+            up: up.clone(),
+        }));
         core.set_econ_schedule(schedule.map(|s| Arc::new(EconSchedule::parse(s).unwrap())));
         core.add_account(cfg, None);
         let mut r = Rig {
             core,
             t: cpi() - 30 * MIN,
             events: Vec::new(),
+            up,
         };
         r.cmd(Command::SetGuardrails {
             account: acct(),
@@ -278,6 +323,31 @@ fn flatten_closes_affected_positions_once_when_the_window_opens() {
     r.go(cpi() + 2 * MIN);
     r.market_fill(Side::Buy);
     assert_eq!(r.position(), 1);
+}
+
+/// Disconnected when the window opens: not asked on every tick (each refusal would spend a
+/// command result nobody asked for), and closed once the broker is back.
+#[test]
+fn a_news_flatten_while_disconnected_waits_for_the_broker() {
+    let mut r = Rig::new(NewsAction::Flatten);
+    r.market_fill(Side::Buy);
+    r.up.store(false, Ordering::Relaxed);
+    let before = r.events.len();
+    r.go(cpi() - 2 * MIN);
+    for _ in 0..5 {
+        r.wait(100);
+    }
+    let answers = r.events[before..]
+        .iter()
+        .filter(|e| matches!(e, Event::Command { .. }))
+        .count();
+    assert_eq!(answers, 0, "nothing asked while it is down");
+    assert_eq!(r.position(), 1);
+    r.up.store(true, Ordering::Relaxed);
+    r.wait(100);
+    r.wait(LAT);
+    assert_eq!(r.position(), 0);
+    assert_eq!(r.rule_flattens(), 1);
 }
 
 #[test]

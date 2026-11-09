@@ -267,6 +267,24 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
+            Event::CancelFailed {
+                account,
+                contract,
+                order,
+                reason,
+                ..
+            } => {
+                let price = self.orders.get(&order).and_then(|o| first_price(&o.kind));
+                self.flashes.push_back(Flash {
+                    kind: FlashKind::Warning,
+                    account: account.clone(),
+                    contract: Some(contract),
+                    price,
+                    message: reason,
+                    at: now,
+                });
+                Some(account)
+            }
             // (Kept for the chain's armed rows and lines, decision 0029.) A restored one's notice.
             Event::Trigger(t) => {
                 let account = t.account.clone();
@@ -892,7 +910,9 @@ impl VenueIds {
                 o.oco = o.oco.map(|p| self.order(p));
             }
             Event::Fill(f) => f.order = self.order(f.order),
-            Event::Overfill { order, .. } => *order = self.order(*order),
+            Event::Overfill { order, .. } | Event::CancelFailed { order, .. } => {
+                *order = self.order(*order)
+            }
             _ => {}
         }
         e
@@ -2219,6 +2239,59 @@ mod tests {
         assert!(
             matches!(s.result(CommandId(9)), Some(Err(_))),
             "the panel reads it"
+        );
+    }
+
+    /// On a venue the failed cancel names the shared id, never the venue's own, which could be a
+    /// paper order's.
+    #[test]
+    fn a_failed_cancel_names_the_shared_id() {
+        use lines_core::{ContractKey, Month, UtcMillis};
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let mut ids = VenueIds::new(0);
+        let local = lines_trading::OrderId(7);
+        let shared = ids.order(local);
+        assert_ne!(shared, local);
+        let e = ids.event(Event::CancelFailed {
+            account: AccountId::new("venue-1"),
+            contract: k,
+            order: local,
+            reason: "still working: no answer to 3 cancels".into(),
+            at: UtcMillis(0),
+        });
+        let Event::CancelFailed { order, .. } = e else {
+            panic!("{e:?}");
+        };
+        assert_eq!(order, shared);
+    }
+
+    /// A cancel that didn't happen reaches the person: the order is still live.
+    #[test]
+    fn a_failed_cancel_flashes() {
+        use lines_core::{ContractKey, Month, UtcMillis};
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let mut s = TradeState::default();
+        let account = AccountId::new("venue-1");
+        let touched = s.apply(
+            Event::CancelFailed {
+                account: account.clone(),
+                contract: k,
+                order: lines_trading::OrderId(7),
+                reason: "still working: cancel refused: too late to cancel".into(),
+                at: UtcMillis(0),
+            },
+            Instant::now(),
+        );
+        assert_eq!(touched, Some(account));
+        let f = s.flashes.back().expect("a flash");
+        assert_eq!(
+            f.kind,
+            FlashKind::Warning,
+            "the order isn't rejected: it is live"
+        );
+        assert_eq!(
+            f.message,
+            "still working: cancel refused: too late to cancel"
         );
     }
 

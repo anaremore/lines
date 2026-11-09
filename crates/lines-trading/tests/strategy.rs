@@ -537,6 +537,75 @@ fn stop_is_never_gated() {
     assert_eq!(r.state(), StrategyState::Stopped);
 }
 
+/// Disconnected, the daily loss pauses it but can't close: the day isn't marked closed, and the
+/// trade is closed once the broker is back.
+#[test]
+fn a_daily_loss_while_disconnected_closes_the_trade_when_it_is_back() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 2, OrderKind::Market)).unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    r.up.store(false, Ordering::Relaxed);
+    r.book(&[(5990.0, 10)], &[(5990.25, 10)]);
+    r.trade(5990.0, 1);
+    assert_eq!(r.state(), StrategyState::Paused);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 2, "can't close it yet");
+    r.up.store(true, Ordering::Relaxed);
+    r.wait(30);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0, "closed once it is back");
+}
+
+/// With a working entry, the pause's cancels look at the daily loss again: still one close.
+#[test]
+fn the_daily_loss_close_goes_once_with_a_working_entry() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 1, limit(5900.0))).unwrap();
+    r.bot(buy(es(), 1, OrderKind::Market)).unwrap();
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    let before = r.events.len();
+    // $50/pt x 1 contract x 20 points is $1,000, the limit.
+    r.book(&[(5980.0, 10)], &[(5980.25, 10)]);
+    r.trade(5980.0, 1);
+    assert_eq!(r.state(), StrategyState::Paused);
+    r.wait(30);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    let rule_commands = r.events[before..]
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Event::Command {
+                    source: Source::Rule,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(rule_commands, 2, "the entry's cancel and one close");
+}
+
+/// Stop with flatten while disconnected: stopped all the same, and the person hears that the
+/// position is still open.
+#[test]
+fn stop_with_flatten_says_when_the_position_stays_open() {
+    let mut r = Rig::armed();
+    r.bot(buy(es(), 1, OrderKind::Market)).unwrap();
+    r.wait(30);
+    r.up.store(false, Ordering::Relaxed);
+    let no = r
+        .manual(Command::StopStrategies {
+            id: Some(ID),
+            flatten: true,
+        })
+        .unwrap_err();
+    assert!(no.message.contains("disconnected"), "{}", no.message);
+    assert_eq!(r.state(), StrategyState::Stopped);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+}
+
 #[test]
 fn a_strategy_stops_or_pauses_only_itself() {
     let mut r = Rig::armed();
