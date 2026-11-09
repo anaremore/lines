@@ -237,6 +237,21 @@ impl Rig {
         })
         .unwrap();
     }
+    /// Cancel the Flatten's market order still working on the contract (it found no bid).
+    fn cancel_flatten(&mut self, c: ContractKey) {
+        let id = self
+            .core
+            .open_orders(&acct())
+            .find(|o| o.contract == c && matches!(o.kind, OrderKind::Market))
+            .map(|o| o.id)
+            .expect("the Flatten works on");
+        self.cmd(Command::CancelOrder {
+            account: acct(),
+            order: id,
+        })
+        .unwrap();
+        self.wait(LAT + 1);
+    }
     fn quote(&mut self, bid: Option<i64>, ask: Option<i64>) {
         self.t += 1;
         let time = self.now();
@@ -303,8 +318,9 @@ impl Rig {
     }
 }
 
-/// Long 1 with a Stop, the bid gone, Flatten: the position stays, so the Stop does, and it still
-/// fires when the level is reached.
+/// Long 1 with a Stop, the bid gone, Flatten: the position stays, so the Stop does. The Flatten's
+/// market order works on and sells when a bid comes back; cancelled, the Stop still fires when
+/// the level is reached.
 #[test]
 fn a_flatten_with_no_bid_keeps_the_stop() {
     let mut r = Rig::new(true, RTH);
@@ -314,6 +330,8 @@ fn a_flatten_with_no_bid_keeps_the_stop() {
     r.flatten(call());
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), call()), 1, "no bid to fill on");
+    assert_eq!(r.core.triggers().count(), 1, "still protected");
+    r.cancel_flatten(call());
     assert_eq!(r.core.triggers().count(), 1, "still protected");
     r.quote(Some(100), Some(102));
     r.print(68_100);
@@ -379,10 +397,36 @@ fn a_flatten_ends_entries_whatever_happens() {
     let left: Vec<_> = r.core.triggers().map(|t| t.kind).collect();
     assert_eq!(left, [TriggerKind::Stop], "the entry went, the Stop didn't");
     r.wait(LAT + 1);
+    r.cancel_flatten(call());
     r.quote(Some(240), Some(242));
     r.print(68_400);
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), call()), 1, "nothing bought");
+}
+
+/// A Flatten with no bid isn't over: its market order works on, and the bid's return closes the
+/// position at it, the Flatten's doing.
+#[test]
+fn a_flatten_with_no_bid_sells_when_the_bid_returns() {
+    let mut r = Rig::new(true, RTH);
+    r.long_call(1);
+    r.arm(TriggerKind::Stop, 68_200);
+    r.quote(None, Some(242));
+    r.flatten(call());
+    r.wait(LAT + 1);
+    let market = r
+        .core
+        .open_orders(&acct())
+        .find(|o| matches!(o.kind, OrderKind::Market))
+        .map(|o| (o.id, o.state.clone()))
+        .expect("working on, visible");
+    assert_eq!(market.1, OrderState::Working);
+    r.quote(Some(150), Some(152));
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0);
+    assert_eq!(r.fills(call()).last(), Some(&(Side::Sell, 150, 1)));
+    assert_eq!(r.state(market.0), OrderState::Filled);
+    assert_eq!(r.core.triggers().count(), 0);
 }
 
 /// Cancel All keeps its rule: it ends a position's Stop, and leaves the position.
@@ -698,8 +742,8 @@ fn a_flatten_cancels_a_plain_stop_at_once() {
     assert_eq!(r.core.position(&acct(), es()), 2);
 }
 
-/// A Flatten that failed gets no credit for what closes the position later: the reason says what
-/// happened, and the app reports it.
+/// A Flatten that failed (its market order cancelled before a bid came back) gets no credit for
+/// what closes the position later: the reason says what happened, and the app reports it.
 #[test]
 fn a_failed_flatten_doesnt_take_credit_for_a_later_close() {
     let last_reason = |r: &Rig| {
@@ -717,6 +761,7 @@ fn a_failed_flatten_doesnt_take_credit_for_a_later_close() {
     r.flatten(call());
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), call()), 1);
+    r.cancel_flatten(call());
     r.quote(Some(150), Some(152));
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), call()), 0);
@@ -739,6 +784,7 @@ fn a_failed_flatten_doesnt_take_credit_for_a_later_close() {
     r.flatten(call());
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), call()), 1);
+    r.cancel_flatten(call());
     r.quote(Some(250), Some(252));
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), call()), 0);

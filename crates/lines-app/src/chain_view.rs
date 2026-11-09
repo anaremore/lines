@@ -2328,7 +2328,7 @@ impl ChainView {
         let excess = self.watching.len().saturating_sub(MAX_ASKED);
         self.watching.drain(..excess);
         // Accepted isn't filled: the broker can still reject an order on arrival, and a Flatten
-        // has no fill on a stale quote or a missing side, so it says the position stayed.
+        // canceled before it closed the position says so.
         self.watching.retain(|id| {
             use lines_trading::{OrderState, Role};
             let Some(o) = st.order(*id) else {
@@ -2341,11 +2341,17 @@ impl ChainView {
                     false
                 }
                 OrderState::Cancelled if flatten => {
-                    // Its exits are still working: only Cancel All takes those.
-                    note = Some(
-                        "Flatten found no usable quote on its side: the position is still open"
-                            .to_owned(),
-                    );
+                    // Its exits are still working: only Cancel All takes those. A Flatten's market
+                    // order works on until a usable quote comes, so it ends unfilled only when
+                    // cancelled, replaced, at the session's close or at expiry (where settlement
+                    // closes the position: then there's nothing to say).
+                    // Replaced by another Flatten still working: that one speaks for it.
+                    let replaced = st
+                        .open_orders(&o.account, o.contract)
+                        .any(|w| w.role == Role::Flatten && w.id != o.id);
+                    if !replaced && st.position(&o.account, o.contract).is_some() {
+                        note = Some("Flatten canceled: the position is still open".to_owned());
+                    }
                     false
                 }
                 OrderState::Submitted => true,

@@ -336,9 +336,13 @@ fn market_order_walks_a_thin_book() {
     assert_eq!(r.fills(id2), vec![(px(6001.00), 3)]);
     assert_eq!(
         r.state(id2),
-        OrderState::Cancelled,
-        "the book ran out: the rest is cancelled"
+        OrderState::PartiallyFilled,
+        "the book ran out: the rest works on"
     );
+    // The level refills: the rest takes it, at its price.
+    r.book(&[(5999.75, 4)], &[(6001.25, 3)]);
+    assert_eq!(r.fills(id2), vec![(px(6001.00), 3), (px(6001.25), 1)]);
+    assert_eq!(r.state(id2), OrderState::Filled);
 }
 
 #[test]
