@@ -1797,3 +1797,100 @@ fn the_wake_is_never_in_the_past() {
     r.wait(1);
     assert!(r.core.next_wake().is_none_or(|w| w.0 > r.t));
 }
+
+fn moved(r: &mut Rig, id: TriggerId, level: i64) -> Result<Vec<OrderId>, lines_trading::Reject> {
+    r.cmd(Command::MoveTrigger {
+        account: acct(),
+        id,
+        level: Price(level),
+    })
+}
+
+/// An entry moves as one step: the same trigger at the new level, and what it does then.
+#[test]
+fn a_moved_entry_is_the_same_entry_at_its_new_level() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.print(68_300);
+    let id = r.arm(call(), entry(1, 500), 68_400);
+    moved(&mut r, id, 68_500).unwrap();
+    let v: Vec<_> = r.core.triggers().cloned().collect();
+    assert_eq!(v.len(), 1, "one entry, never two");
+    assert_eq!(v[0].id, id);
+    assert_eq!(v[0].level, Price(68_500));
+    assert_eq!(v[0].direction, Direction::AtOrAbove);
+    // The old level is nothing now.
+    r.print(68_400);
+    assert_eq!(r.core.triggers().count(), 1, "not fired");
+    r.print(68_500);
+    assert_eq!(r.core.triggers().count(), 0, "fired at the new one");
+}
+
+/// Refused, it stays armed where it was: there's no moment with nothing armed.
+#[test]
+fn a_refused_move_leaves_the_entry_armed() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.print(68_300);
+    let id = r.arm(call(), entry(1, 500), 68_400);
+    let still = |r: &Rig| {
+        let v: Vec<_> = r.core.triggers().cloned().collect();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].level, Price(68_400), "where it was");
+    };
+    assert!(moved(&mut r, id, 68_200).is_err(), "across the market");
+    still(&r);
+    assert!(moved(&mut r, id, 68_300).is_err(), "at the market");
+    still(&r);
+    assert!(moved(&mut r, id, 0).is_err(), "not a price");
+    still(&r);
+    // Gone stale.
+    r.wait(STALE + 1);
+    assert!(moved(&mut r, id, 68_500).is_err(), "no fresh price");
+    still(&r);
+}
+
+/// An entry that fired during a drag: the move finds nothing, and nothing buys a second time.
+#[test]
+fn a_move_of_a_fired_entry_is_refused_and_arms_nothing() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.print(68_300);
+    let id = r.arm(call(), entry(1, 500), 68_400);
+    r.print(68_400);
+    assert_eq!(r.core.triggers().count(), 0, "it fired");
+    assert!(moved(&mut r, id, 68_500).is_err());
+    assert_eq!(r.core.triggers().count(), 0, "and nothing new is armed");
+}
+
+/// A Stop moves by the core's own swap, and a refusal keeps the one that's protecting it.
+#[test]
+fn a_moved_stop_is_replaced_and_a_refusal_keeps_it() {
+    let mut r = Rig::long_call(2);
+    r.print(68_300);
+    let id = r.arm(call(), TriggerKind::Stop, 68_000);
+    moved(&mut r, id, 68_100).unwrap();
+    let v: Vec<_> = r.core.triggers().cloned().collect();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].level, Price(68_100));
+    let id = v[0].id;
+    assert!(moved(&mut r, id, 68_400).is_err(), "past the market");
+    let v: Vec<_> = r.core.triggers().cloned().collect();
+    assert_eq!(v.len(), 1, "still protected");
+    assert_eq!((v[0].id, v[0].level), (id, Price(68_100)));
+}
+
+#[test]
+fn a_move_is_for_the_account_that_has_it() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.print(68_300);
+    let id = r.arm(call(), entry(1, 500), 68_400);
+    let other = r.cmd(Command::MoveTrigger {
+        account: AccountId::new("someone-else"),
+        id,
+        level: Price(68_500),
+    });
+    assert!(other.is_err());
+    assert_eq!(r.core.triggers().next().unwrap().level, Price(68_400));
+}

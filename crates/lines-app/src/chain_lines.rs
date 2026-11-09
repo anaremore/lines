@@ -94,9 +94,9 @@ pub fn refusal(line: &Line, to: Price, around: &Around) -> Option<&'static str> 
 }
 
 fn entry_refusal(line: &Line, to: Price, right: Right, a: &Around) -> Option<&'static str> {
-    // The core won't arm an entry without a fresh print, and a move starts by canceling this one.
+    // The core won't move an entry without a fresh print.
     if line.stale {
-        return Some("the feed is stale: moving it would end it");
+        return Some("the feed is stale: it can't tell which way it would fire");
     }
     let Some(last) = a.last else {
         return Some("no underlying price: an entry can't tell which way it fires");
@@ -164,13 +164,6 @@ fn exit_refusal(kind: TriggerKind, to: Price, right: Right, a: &Around) -> Optio
     None
 }
 
-/// What a moved entry does once the core answers its cancel: arm at the new level, or stop. A
-/// refused cancel means the entry isn't there to move (it fired, say), and arming anyway would
-/// buy a second time.
-pub fn arm_after_cancel<T, E>(answer: &Result<T, E>) -> bool {
-    answer.is_ok()
-}
-
 /// Arm a line where it is.
 pub fn arm(account: AccountId, line: &Line, level: Price) -> Command {
     Command::ArmTrigger(TriggerSpec {
@@ -181,16 +174,13 @@ pub fn arm(account: AccountId, line: &Line, level: Price) -> Command {
     })
 }
 
-/// An armed line moved to `to`, in order. A Stop or Target is replaced by arming it again, and the
-/// old one stays if that's refused. An entry has no such swap: it's canceled first, because with
-/// both alive one print could fire two, and the second goes only on [`arm_after_cancel`]. A refusal
-/// of that one ends the entry and says so.
-pub fn move_commands(account: AccountId, line: &Line, id: TriggerId, to: Price) -> Vec<Command> {
-    let again = arm(account.clone(), line, to);
-    if line.kind.is_exit() {
-        vec![again]
-    } else {
-        vec![Command::CancelTrigger { account, id }, again]
+/// An armed line moved to `to`: one step in the core, so a refusal leaves it where it was and a
+/// trigger that has fired can't come back.
+pub fn move_command(account: AccountId, id: TriggerId, to: Price) -> Command {
+    Command::MoveTrigger {
+        account,
+        id,
+        level: to,
     }
 }
 
@@ -547,27 +537,6 @@ mod tests {
         assert!(refusal(&stop, Price(68_300), &around(1)).is_some());
     }
 
-    /// One print must never be able to fire two entries: the old goes first. An exit's swap is
-    /// the core's, and the old one stays if the new one is refused.
-    #[test]
-    fn moving_an_entry_cancels_first_and_an_exit_is_replaced() {
-        let account = AccountId::new("paper");
-        let id = TriggerId(7);
-        let cmds = move_commands(
-            account.clone(),
-            &line(ENTRY, Right::Call),
-            id,
-            Price(68_500),
-        );
-        assert!(matches!(cmds[0], Command::CancelTrigger { id: i, .. } if i == id));
-        assert!(matches!(&cmds[1], Command::ArmTrigger(s) if s.level == Price(68_500)));
-        assert_eq!(cmds.len(), 2);
-        let stop = line(TriggerKind::Stop, Right::Call);
-        let cmds = move_commands(account, &stop, id, Price(68_300));
-        assert_eq!(cmds.len(), 1);
-        assert!(matches!(&cmds[0], Command::ArmTrigger(s) if s.level == Price(68_300)));
-    }
-
     /// Two series' drafts of one kind are two lines: a drag moves the one it holds.
     #[test]
     fn a_line_is_itself_across_series() {
@@ -585,13 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_cancel_never_arms() {
-        assert!(arm_after_cancel::<(), ()>(&Ok(())));
-        assert!(!arm_after_cancel::<(), ()>(&Err(())));
-    }
-
-    #[test]
-    fn a_stale_armed_entry_refuses_a_move_rather_than_lose_it() {
+    fn a_stale_armed_entry_refuses_a_move() {
         let mut entry = line(ENTRY, Right::Call);
         entry.fires = Some(AtOrAbove);
         entry.stale = true;

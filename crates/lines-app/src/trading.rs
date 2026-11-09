@@ -1631,40 +1631,41 @@ impl Trading {
 /// name an instance and show in the strategy panel, decision 0025). It routes the command to
 /// its account's core and refuses it on a read-only account.
 fn note_for(cmd: &TradeCommand) -> Option<Note> {
-    let (account, contract, price) = match cmd {
-        TradeCommand::PlaceOrder(o) | TradeCommand::PlaceExit(o) => {
-            (o.account.clone(), Some(o.contract), first_price(&o.kind))
-        }
-        TradeCommand::PlaceBracket(b) => (
-            b.entry.account.clone(),
-            Some(b.entry.contract),
-            first_price(&b.entry.kind),
-        ),
-        TradeCommand::ModifyOrder { account, price, .. } => (account.clone(), None, *price),
-        TradeCommand::CancelOrder { account, .. } => (account.clone(), None, None),
-        TradeCommand::CancelAll { account, contract }
-        | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
-        TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
-            (account.clone(), None, None)
-        }
-        TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
-        TradeCommand::CancelTrigger { account, .. } => (account.clone(), None, None),
-        TradeCommand::SetBracketMode {
-            account, contract, ..
-        } => {
-            return Some(Note {
-                account: account.clone(),
-                contract: Some(*contract),
-                price: None,
-                silent: true,
-            });
-        }
-        TradeCommand::AddStrategy(_)
-        | TradeCommand::RemoveStrategy { .. }
-        | TradeCommand::ArmStrategy { .. }
-        | TradeCommand::PauseStrategy { .. }
-        | TradeCommand::StopStrategies { .. } => return None,
-    };
+    let (account, contract, price) =
+        match cmd {
+            TradeCommand::PlaceOrder(o) | TradeCommand::PlaceExit(o) => {
+                (o.account.clone(), Some(o.contract), first_price(&o.kind))
+            }
+            TradeCommand::PlaceBracket(b) => (
+                b.entry.account.clone(),
+                Some(b.entry.contract),
+                first_price(&b.entry.kind),
+            ),
+            TradeCommand::ModifyOrder { account, price, .. } => (account.clone(), None, *price),
+            TradeCommand::CancelOrder { account, .. } => (account.clone(), None, None),
+            TradeCommand::CancelAll { account, contract }
+            | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
+            TradeCommand::SetGuardrails { account, .. }
+            | TradeCommand::SetRules { account, .. } => (account.clone(), None, None),
+            TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
+            TradeCommand::CancelTrigger { account, .. }
+            | TradeCommand::MoveTrigger { account, .. } => (account.clone(), None, None),
+            TradeCommand::SetBracketMode {
+                account, contract, ..
+            } => {
+                return Some(Note {
+                    account: account.clone(),
+                    contract: Some(*contract),
+                    price: None,
+                    silent: true,
+                });
+            }
+            TradeCommand::AddStrategy(_)
+            | TradeCommand::RemoveStrategy { .. }
+            | TradeCommand::ArmStrategy { .. }
+            | TradeCommand::PauseStrategy { .. }
+            | TradeCommand::StopStrategies { .. } => return None,
+        };
     Some(Note {
         account,
         contract,

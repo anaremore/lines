@@ -544,7 +544,7 @@ fn flatten_ends_the_triggers_and_closes() {
 /// is refused the old one stays.
 #[test]
 fn moving_a_stop_goes_through_the_core() {
-    use crate::chain_lines::{Line, LineSource, move_commands};
+    use crate::chain_lines::{Line, LineSource, move_command};
     use lines_trading::trigger::TriggerKind;
     let mut r = Rig::new();
     let k = key(684, Right::Call);
@@ -558,17 +558,12 @@ fn moving_a_stop_goes_through_the_core() {
     assert_eq!(v.len(), 1);
     let line = Line::of(&v[0]);
     assert_eq!(line.source, LineSource::Armed(v[0].id));
-    for cmd in move_commands(account(), &line, v[0].id, Price(68_100)) {
-        r.send(cmd);
-    }
+    r.send(move_command(account(), v[0].id, Price(68_100)));
     let after = armed(&r);
     assert_eq!(after.len(), 1, "replaced");
     assert_eq!(after[0].level, Price(68_100));
     // Past the market: the core refuses and the Stop that was there stays.
-    let line = Line::of(&after[0]);
-    for cmd in move_commands(account(), &line, after[0].id, Price(68_400)) {
-        r.send(cmd);
-    }
+    r.send(move_command(account(), after[0].id, Price(68_400)));
     let kept = armed(&r);
     assert_eq!(kept.len(), 1, "still protected");
     assert_eq!(kept[0].level, Price(68_100));
@@ -583,45 +578,6 @@ fn moving_a_stop_goes_through_the_core() {
         st.triggers_ended_since(st.triggers_ended_count()).count(),
         0
     );
-}
-
-/// An entry that fires during a drag: its cancel is refused, so the arm that waits on that answer
-/// never goes and nothing buys twice.
-#[test]
-fn a_fired_entrys_cancel_is_refused_so_it_isnt_armed_again() {
-    use lines_trading::trigger::TriggerKind;
-    let mut r = Rig::new();
-    let k = key(684, Right::Call);
-    let c = contract_of(k);
-    r.quote(k, 240, 242);
-    underlying_print(&mut r, 68_300);
-    arm(
-        &mut r,
-        c,
-        TriggerKind::Entry {
-            qty: Qty(1),
-            max_price: Price(500),
-        },
-        68_350,
-    );
-    let id = r.t.cache.read().triggers().next().map(|v| v.id).unwrap();
-    r.wait(1);
-    r.quote(k, 240, 242);
-    underlying_print(&mut r, 68_350);
-    r.t.settle();
-    assert_eq!(live_triggers(&r), 0, "it fired");
-    let cancel = r.t.submit(
-        lines_trading::Source::Dom,
-        Instant::now(),
-        Command::CancelTrigger {
-            account: account(),
-            id,
-        },
-    );
-    r.t.settle();
-    let answer = r.t.cache.read().result(cancel).cloned().expect("answered");
-    assert!(answer.is_err(), "there's nothing to cancel");
-    assert!(!crate::chain_lines::arm_after_cancel(&answer));
 }
 
 /// "When SPY" is the same ticket: an entry at the level with the ticket's size and its price as

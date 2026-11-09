@@ -343,6 +343,103 @@ impl TradingCore {
         }
     }
 
+    /// The trader moves one, as a single step: refused, it stays where it was.
+    pub(super) fn trigger_move(
+        &mut self,
+        now: UtcMillis,
+        env: &Envelope,
+        id: TriggerId,
+        level: Price,
+    ) -> Result<Vec<OrderId>, Reject> {
+        let account = env.command.account().cloned();
+        let Some(view) = self
+            .triggers
+            .live
+            .get(&id)
+            .filter(|l| Some(&l.view.account) == account.as_ref())
+            .map(|l| l.view.clone())
+        else {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                format!("no armed trigger {}", id.0),
+            ));
+        };
+        if view.state != TriggerState::Armed {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                "an exit is already closing this position",
+            ));
+        }
+        let spec = TriggerSpec {
+            account: view.account.clone(),
+            contract: view.contract,
+            kind: view.kind,
+            level,
+        };
+        // An exit's own swap: every check of a new one, and the old stays if refused.
+        if view.kind.is_exit() {
+            return self.trigger_arm(now, env, spec);
+        }
+        if matches!(env.source, Source::Strategy(_)) {
+            return Err(Reject::new(
+                RejectCode::Strategy,
+                "strategies can't use triggers yet",
+            ));
+        }
+        let under = underlying(view.contract);
+        let on_grid = self.spec(under).is_some_and(|s| s.on_tick_grid(level));
+        if level.0 <= 0 || !on_grid {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                "the level isn't on the underlying's tick grid",
+            ));
+        }
+        if let TriggerKind::Entry { qty, max_price } = view.kind {
+            self.check_guardrails(
+                now,
+                &OrderSpec {
+                    account: view.account.clone(),
+                    contract: view.contract,
+                    side: crate::types::Side::Buy,
+                    qty,
+                    kind: OrderKind::Limit { price: max_price },
+                },
+            )?;
+        }
+        let guard = self.guard_of(&view.account);
+        let fresh_last = self
+            .triggers
+            .prints
+            .get(&view.contract.product)
+            .filter(|(t, _)| now.0 - t.0 <= guard.trigger_stale_ms)
+            .map(|(_, p)| *p);
+        let Some(last) = fresh_last else {
+            return Err(Reject::new(
+                RejectCode::Risk,
+                "no fresh underlying price: an entry can't tell which way it fires",
+            ));
+        };
+        if last == level {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                "the underlying is already at this level",
+            ));
+        }
+        // It's the same entry: across the market it would be another trade.
+        if view.direction.reached(level, last) {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                "the wrong side of the market: it would fire the other way",
+            ));
+        }
+        if let Some(l) = self.triggers.live.get_mut(&id) {
+            l.view.level = level;
+            let moved = l.view.clone();
+            self.events.push(Event::Trigger(moved));
+        }
+        Ok(Vec::new())
+    }
+
     /// The trader cancels one: a fired Target's order goes with it.
     pub(super) fn trigger_cancel(
         &mut self,
