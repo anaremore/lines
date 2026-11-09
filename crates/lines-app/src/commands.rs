@@ -809,12 +809,8 @@ pub fn label(c: Command) -> String {
             TradeCmd::BracketUnits => "Trade: bracket units (ticks / points)",
             TradeCmd::EditBrackets => "Trade: edit bracket presets…",
             TradeCmd::BracketMode => "Trade: bracket for the whole position / per entry (switch)",
-            TradeCmd::ResetPaper => {
-                "Trade: Reset paper account (flattens first; keeps the journal)"
-            }
-            TradeCmd::ResetPaperJournal => {
-                "Trade: Reset paper account and clear its journal (flattens first)"
-            }
+            TradeCmd::ResetPaper => "Trade: Reset paper account (keeps the journal)",
+            TradeCmd::ResetPaperJournal => "Trade: Reset paper account and clear its journal",
             TradeCmd::NextAccount => "Trade: Next account",
             TradeCmd::QtyUp => "Trade: Quantity up",
             TradeCmd::QtyDown => "Trade: Quantity down",
