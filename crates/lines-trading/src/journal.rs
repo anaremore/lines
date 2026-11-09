@@ -321,6 +321,21 @@ impl Journal {
         std::mem::take(&mut self.shot_requests)
     }
 
+    /// Drop every trade of `account`, closed and open: a paper account reset with its journal
+    /// cleared. Other accounts' trades, and their edits, stay. Returns how many closed trades went.
+    pub fn clear_account(&mut self, account: &AccountId) -> usize {
+        let before = self.closed.len();
+        self.closed.retain(|t| &t.account != account);
+        self.by_id = self
+            .closed
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id.clone(), i))
+            .collect();
+        self.open.retain(|(a, _), _| a != account);
+        before - self.closed.len()
+    }
+
     /// Closed trades, in the order they closed.
     pub fn trades(&self) -> &[Trade] {
         &self.closed
@@ -754,6 +769,8 @@ enum Msg {
     Flush(Sender<()>),
     /// See [`Journal::add_unmarked`].
     Unmarked(Vec<AccountId>),
+    /// See [`JournalShared::clear_account`].
+    Clear(AccountId),
 }
 
 /// The journal on its own thread (`lines-journal`). The trading thread sends it the core's
@@ -828,6 +845,12 @@ impl JournalShared {
     /// Edit a trade's tags and note (applied and saved on the journal thread).
     pub fn edit(&self, e: Edit) {
         let _ = self.tx.send(Msg::Edit(e));
+    }
+
+    /// Clear `account`'s trades (a paper account reset that asked for it): from the journal,
+    /// and from its file, which is kept first as a dated `.bak` ([`store::JournalWriter::rewrite`]).
+    pub fn clear_account(&self, account: AccountId) {
+        let _ = self.tx.send(Msg::Clear(account));
     }
 
     /// Write the closed trades as CSV to `path` (on the journal thread; errors are logged).
@@ -923,6 +946,19 @@ fn run(
                     Ok(()) => tracing::info!("journal exported to {}", path.display()),
                     Err(e) => tracing::error!("journal export to {} failed: {e}", path.display()),
                 }
+            }
+            Msg::Clear(account) => {
+                let n = j.clear_account(&account);
+                tracing::info!("journal: cleared {n} trades of a reset paper account");
+                if let Some(w) = &writer {
+                    w.rewrite(
+                        j.trades()
+                            .iter()
+                            .map(|t| Record::Trade(Box::new(t.clone())))
+                            .collect(),
+                    );
+                }
+                publish(&j);
             }
             Msg::Sync(tx) => {
                 let _ = tx.send(());

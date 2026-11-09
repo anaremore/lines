@@ -593,6 +593,57 @@ fn a_v1_journal_migrates_to_v2_when_written() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A paper reset that clears its journal: that account's trades go, from memory and from the
+/// file (kept first as a dated `.bak`); another account's stay, and appends continue after.
+#[test]
+fn clearing_an_account_rewrites_the_file_and_keeps_a_copy() {
+    let dir = std::env::temp_dir().join(format!("lines-journal-clear-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mock.jsonl");
+    let mine = closed(10.0, 5, &["a"]);
+    let mut theirs = closed(-5.0, 20, &[]);
+    theirs.account = AccountId::new("other");
+    theirs.id = "other-1".into();
+    let mut j = Journal::from_records([
+        Record::Trade(Box::new(mine.clone())),
+        Record::Trade(Box::new(theirs.clone())),
+    ]);
+    assert_eq!(j.clear_account(&acct()), 1);
+    assert_eq!(j.trades(), std::slice::from_ref(&theirs));
+    assert!(j.trade(&mine.id).is_none());
+    assert!(
+        j.trade("other-1").is_some(),
+        "ids still find the trades left"
+    );
+
+    let w = JournalWriter::open(path.clone(), "mock", None).unwrap();
+    w.append(Record::Trade(Box::new(mine)));
+    w.append(Record::Trade(Box::new(theirs.clone())));
+    assert!(w.flush(std::time::Duration::from_secs(5)));
+    let before = std::fs::read_to_string(&path).unwrap();
+    w.rewrite(vec![Record::Trade(Box::new(theirs.clone()))]);
+    w.append(Record::Trade(Box::new(closed(3.0, 30, &[]))));
+    assert!(w.flush(std::time::Duration::from_secs(5)));
+    let l = store::read(&path).unwrap().unwrap();
+    assert_eq!(
+        l.records.len(),
+        2,
+        "the other account's trade, then the new one"
+    );
+    assert_eq!(l.records[0], Record::Trade(Box::new(theirs)));
+    let baks: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("mock-") && n.ends_with(".jsonl.bak"))
+        .collect();
+    assert_eq!(baks.len(), 1, "{baks:?}");
+    assert_eq!(std::fs::read_to_string(dir.join(&baks[0])).unwrap(), before);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
     let dir = std::env::temp_dir().join(format!("lines-journal-{}", std::process::id()));
