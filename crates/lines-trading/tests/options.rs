@@ -357,12 +357,12 @@ fn a_stale_quote_never_fills() {
             time: late,
         },
     );
-    // A fresh quote: a new close fills on it.
-    let close = r
-        .cmd(Command::PlaceExit(Rig::spec(Side::Sell, 1, limit(250))))
-        .unwrap()[0];
+    // The Flatten that found nothing left the resting close in place, and it has stayed unfilled
+    // through all of that. The fresh quote fills it, through its limit, and the position is flat.
+    assert_eq!(r.fills(resting), [(240, 1)]);
+    assert_eq!(r.position(call()), 0);
     r.wait(LAT + 1);
-    assert_eq!(r.fills(close), [(250, 1)]);
+    assert_eq!(r.position(call()), 0);
 }
 
 /// An empty or crossed quote keeps the last mark: open P&L isn't erased.

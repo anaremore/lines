@@ -573,7 +573,14 @@ impl PaperBroker {
                 continue;
             };
             let opposes = position != 0 && po.order.side.sign() == -position.signum();
-            let pool = paired.unwrap_or(closable);
+            // A Flatten's market order fills now or goes: it may close the position whatever the
+            // exits cover, and takes none of their cover, so they still protect it if it can't.
+            let flatten = po.order.role == Role::Flatten;
+            let pool = if flatten {
+                position.abs()
+            } else {
+                paired.unwrap_or(closable)
+            };
             let allowed = if opposes { pool } else { 0 };
             let left = po.order.remaining().0;
             if allowed == 0 && entry_working {
@@ -594,7 +601,7 @@ impl PaperBroker {
                 let order = po.order.clone();
                 self.out.push(BrokerEvent::Modified { order });
             }
-            if paired.is_none() {
+            if paired.is_none() && !flatten {
                 budgeted.push((id, allowed));
                 closable -= left.min(allowed);
             }

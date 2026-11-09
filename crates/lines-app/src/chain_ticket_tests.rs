@@ -518,7 +518,8 @@ fn cancel_all_takes_the_stop_and_leaves_the_position_saying_so() {
     assert_eq!(live_triggers(&r), 0, "triggers count as orders");
 }
 
-/// Flatten cancels everything and closes, with no message about a stop: nothing is left to stop.
+/// Flatten closes, and that ends the triggers, with no message about a stop: nothing is left to
+/// stop.
 #[test]
 fn flatten_ends_the_triggers_and_closes() {
     use lines_trading::trigger::TriggerKind;

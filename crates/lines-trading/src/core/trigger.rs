@@ -45,6 +45,9 @@ struct Live {
     next_try: UtcMillis,
     /// The quote a fired exit last tried on: a Stop the broker couldn't fill waits for a new one.
     tried: Option<UtcMillis>,
+    /// A person's Flatten is closing its position: if that's what ends it, it's no news. Cleared
+    /// once that Flatten is over with the position still open.
+    flattened: bool,
 }
 
 fn underlying(contract: ContractKey) -> ContractKey {
@@ -329,6 +332,7 @@ impl TradingCore {
                 order: None,
                 next_try: UtcMillis(i64::MIN),
                 tried: None,
+                flattened: false,
             },
         );
     }
@@ -484,9 +488,10 @@ impl TradingCore {
         }
     }
 
-    /// A person's Cancel All or Flatten ends the triggers it covers: they would open or close
-    /// what was just cancelled or closed. A person cancelling a chasing Target's order stops
-    /// the chase. Internal commands (`Source::Rule`) never do.
+    /// A person's Cancel All ends the triggers it covers. A person's Flatten ends only entries,
+    /// which would reopen what it closes: a Stop or Target ends by itself once the position is
+    /// flat, so a Flatten that can't close leaves it protecting the position. A person cancelling
+    /// a chasing Target's order stops the chase. Internal commands (`Source::Rule`) never do.
     pub(super) fn trigger_person_acted(&mut self, env: &Envelope) {
         if crate::broker::Origin::of(env.source) != crate::broker::Origin::Manual {
             return;
@@ -510,11 +515,24 @@ impl TradingCore {
             }
             _ => return,
         };
+        let flatten = matches!(env.command, Command::Flatten { .. });
+        if flatten {
+            for l in self.triggers.live.values_mut() {
+                if &l.view.account == account
+                    && contract.is_none_or(|c| c == l.view.contract)
+                    && l.view.kind.is_exit()
+                    && l.view.state == TriggerState::Armed
+                {
+                    l.flattened = true;
+                }
+            }
+        }
         let covered: Vec<TriggerId> = self
             .triggers
             .live
             .values()
             .filter(|l| &l.view.account == account && contract.is_none_or(|c| c == l.view.contract))
+            .filter(|l| !(flatten && l.view.kind.is_exit()))
             .map(|l| l.view.id)
             .collect();
         let why = match env.command {
@@ -663,6 +681,8 @@ impl TradingCore {
             return;
         };
         l.view.state = TriggerState::Working;
+        // It closes the position now, if the Flatten didn't.
+        l.flattened = false;
         let (account, contract, word) =
             (l.view.account.clone(), l.view.contract, l.view.kind.word());
         let view = l.view.clone();
@@ -734,13 +754,23 @@ impl TradingCore {
             if kind.is_exit() {
                 let position = self.position(&account, contract);
                 if position == 0 {
-                    let why = if state == TriggerState::Working {
+                    let flattened = self.triggers.live.get(&id).is_some_and(|l| l.flattened);
+                    let why = if flattened {
+                        "you flattened"
+                    } else if state == TriggerState::Working {
                         "closed"
                     } else {
                         "the position closed"
                     };
                     self.trigger_end(id, why);
                     continue;
+                }
+                // That Flatten failed: what closes the position later isn't it.
+                if self.triggers.live.get(&id).is_some_and(|l| l.flattened)
+                    && !self.flatten_under_way(&account, contract, now)
+                    && let Some(l) = self.triggers.live.get_mut(&id)
+                {
+                    l.flattened = false;
                 }
                 let right = contract.option_key().map_or(Right::Call, |k| k.right);
                 let flipped =

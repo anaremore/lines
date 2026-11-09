@@ -1039,10 +1039,11 @@ fn a_shorts_off_grid_average_rounds_toward_the_entry() {
     );
 }
 
-/// A Flatten a rebuild left unresolved may still fill, so no new pair goes for 5 s; lost for
-/// good, the position gets its pair again after that.
+/// A Flatten a rebuild left unresolved may still fill, and no second pair goes beside the first:
+/// the pair stays through the Flatten (`core/flatten.rs`), so lost for good, the position still
+/// has its protection, before and after the 5 s.
 #[test]
-fn no_pair_goes_while_an_unresolved_flatten_may_still_fill() {
+fn an_unresolved_flatten_leaves_the_pair_protecting() {
     let mut r = Rig::new();
     r.mode(MODE, false).unwrap();
     r.market_order(Side::Buy, 2);
@@ -1054,7 +1055,7 @@ fn no_pair_goes_while_an_unresolved_flatten_may_still_fill() {
         contract: Some(es()),
     })
     .unwrap();
-    r.wait(LAT + 1); // the pair's cancels land
+    r.wait(LAT + 1);
     r.t += 1;
     r.core.rebuild(r.now());
     r.collect();
@@ -1065,8 +1066,9 @@ fn no_pair_goes_while_an_unresolved_flatten_may_still_fill() {
         2,
         "nothing placed yet"
     );
+    assert_eq!(r.exits().len(), 2, "still protected");
     r.wait(200);
     r.wait(LAT + 1);
-    assert_eq!(r.exits_seen.load(Ordering::Relaxed), 4, "protected again");
+    assert_eq!(r.exits_seen.load(Ordering::Relaxed), 2, "the same pair");
     assert_eq!(r.exits().len(), 2);
 }
