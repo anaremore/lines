@@ -2007,7 +2007,7 @@ impl ChartView {
                     v.focus.focus(window, cx);
                     // Recorded for what's pressed next; its verdict can't refuse more than this.
                     let _ = crate::popover::second_press(ev.click_count, ev.position);
-                    if crate::chart_trade::strip_press_acts(ev.click_count) {
+                    if crate::chart_trade::strip_press_acts(o, ev.click_count) {
                         v.strip_pressed(o, cx);
                     }
                 }),
