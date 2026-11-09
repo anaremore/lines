@@ -87,6 +87,8 @@ pub struct AccountInfo {
     pub badge: &'static str,
     /// Why Lines can't trade the account (`None`: it can). Every command on it is refused here.
     pub read_only: Option<String>,
+    /// A paper account's starting balance (whole units): what a reset puts it back to.
+    pub start_balance: Option<i64>,
 }
 
 impl AccountInfo {
@@ -100,6 +102,7 @@ impl AccountInfo {
             venue: None,
             badge: "PAPER",
             read_only: None,
+            start_balance: None,
         }
     }
 }
@@ -344,6 +347,20 @@ impl TradeState {
             }
             Event::ResetWaiting { account } => {
                 self.resets_waiting.insert(account.clone());
+                Some(account)
+            }
+            Event::ResetDropped { account, reason } => {
+                self.resets_waiting.remove(&account);
+                self.clear_on_reset.remove(&account);
+                // Said where the account's refusals are (the DOM's header).
+                self.flashes.push_back(Flash {
+                    kind: FlashKind::Warning,
+                    account: account.clone(),
+                    contract: None,
+                    price: None,
+                    message: reason,
+                    at: now,
+                });
                 Some(account)
             }
             Event::AccountReset { account, .. } => {
@@ -1043,6 +1060,7 @@ fn venue_accounts(index: usize, source: &dyn AccountSource) -> Vec<AccountInfo> 
             venue: Some(index),
             badge: badge(a.kind),
             read_only: a.tradable.err(),
+            start_balance: None,
         })
         .collect()
 }
@@ -1301,6 +1319,7 @@ impl Trading {
             .accounts()
             .map(|(c, _)| AccountInfo {
                 option_guard: c.limits.option_guard.clone().unwrap_or_default(),
+                start_balance: Some(c.starting_balance),
                 ..AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone())
             })
             .collect();
@@ -1692,15 +1711,21 @@ impl Trading {
         let press = {
             let mut arm = self.reset_arm.lock().unwrap_or_else(|e| e.into_inner());
             paper_reset::press(&mut arm, account, journal, Instant::now(), || {
-                paper_reset::confirm_text(&info.name, &self.source, journal)
+                paper_reset::confirm_text(&info.name, &self.source, info.start_balance, journal)
             })
         };
         match press {
             Press::Confirm(text) => Ok(Some(text)),
             Press::Go => {
+                // The reset sent last decides: a plain one keeps the journal even if one that
+                // clears it was sent before it.
+                let mut s = self.cache.read();
                 if journal {
-                    self.cache.read().clear_on_reset.insert(account.clone());
+                    s.clear_on_reset.insert(account.clone());
+                } else {
+                    s.clear_on_reset.remove(account);
                 }
+                drop(s);
                 self.submit(
                     source,
                     Instant::now(),
@@ -2788,7 +2813,9 @@ mod tests {
 
         let first = t.press_reset(&account, true, Source::Palette).unwrap();
         assert!(
-            first.is_some_and(|s| s.starts_with("Reset paper: flattens and clears")),
+            first.is_some_and(
+                |s| s.starts_with("Reset paper: flattens and clears balance (back to $50,000)")
+            ),
             "the first press only arms it"
         );
         assert!(t.reset_armed(&account, true));

@@ -62,6 +62,13 @@ pub enum Event {
     ResetWaiting {
         account: AccountId,
     },
+    /// A waiting reset was dropped, never to happen later on its own: its flatten ended without
+    /// closing the position (a refused or ended market order), or a new order was placed on the
+    /// account. `reason` says which; a reset is asked again with its confirmation.
+    ResetDropped {
+        account: AccountId,
+        reason: String,
+    },
     /// A paper account was reset: back to `balance` (its starting balance), nothing open, prop
     /// progress and today's P&L cleared. Its guardrails, counts and any lockout are kept.
     AccountReset {

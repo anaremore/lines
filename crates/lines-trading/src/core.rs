@@ -784,6 +784,15 @@ impl TradingCore {
         {
             self.strategy_manual(now, &account, &env.command);
         }
+        if matches!(
+            env.command,
+            Command::PlaceOrder(_)
+                | Command::PlaceExit(_)
+                | Command::PlaceBracket(_)
+                | Command::ArmTrigger(_)
+        ) {
+            self.reset_on_new_order(&account);
+        }
         match env.command.clone() {
             Command::ArmTrigger(spec) => self.trigger_arm(now, env, spec),
             Command::CancelTrigger { id, contract, .. } => {

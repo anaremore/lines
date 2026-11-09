@@ -1459,13 +1459,21 @@ impl SettingsWindow {
             return div().into_any_element();
         }
         let mut row = div().flex().flex_row().flex_wrap().gap_1().flex_none();
-        for (k, journal) in [(0usize, false), (1, true)] {
-            let armed = account
+        let armed_any = [false, true].map(|j| {
+            account
                 .as_ref()
                 .zip(trading)
-                .is_some_and(|(a, t)| t.reset_armed(a, journal));
+                .is_some_and(|(a, t)| t.reset_armed(a, j))
+        });
+        for (k, journal) in [(0usize, false), (1, true)] {
+            let armed = armed_any[k];
+            // While one is armed it is the only target: the other goes.
+            if !armed && armed_any.contains(&true) {
+                continue;
+            }
             let label = match (armed, journal) {
-                (true, _) => "Press again",
+                (true, false) => "Press again: reset",
+                (true, true) => "Press again: reset and clear journal",
                 (false, false) => "Reset…",
                 (false, true) => "Reset and clear journal…",
             };
@@ -1505,7 +1513,7 @@ impl SettingsWindow {
         [false, true]
             .into_iter()
             .find(|&j| t.reset_armed(&account, j))
-            .map(|j| crate::paper_reset::confirm_text(&info.name, &t.source, j))
+            .map(|j| crate::paper_reset::confirm_text(&info.name, &t.source, info.start_balance, j))
     }
 
     /// A press of a reset button (or Enter on the row: the one keeping the journal).
@@ -1525,6 +1533,8 @@ impl SettingsWindow {
             cx.notify();
             return;
         };
+        // A person's command from a window (the core has no Settings source; Palette is the
+        // person's, so its inner Flatten pauses strategies on the account as a click would).
         self.note = match t.press_reset(&account, journal, lines_trading::Source::Palette) {
             // The row says what the second press does while it waits (`reset_confirm`), and
             // drops it when the wait is over.
@@ -2022,7 +2032,9 @@ impl Render for SettingsWindow {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .px_3()
-            .py_2()
+            .pt_2()
+            // Room under the last row: its controls never sit on the footer's rule.
+            .pb_4()
             .child(div().font_weight(FontWeight::BOLD).pb_1().child(title));
         // Per-account settings: which account (and product) they mean.
         let per_account = rows.iter().any(|&i| {

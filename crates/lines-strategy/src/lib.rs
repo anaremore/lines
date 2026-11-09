@@ -128,6 +128,7 @@ pub fn concerns(cfg: &lines_trading::StrategyConfig, e: &Event) -> bool {
         Event::Breach { account, .. }
         | Event::Guardrail { account, .. }
         | Event::ResetWaiting { account }
+        | Event::ResetDropped { account, .. }
         | Event::AccountReset { account, .. } => account == a,
         Event::Overfill { account, .. } => account == a,
         Event::CancelFailed {

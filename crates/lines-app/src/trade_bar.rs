@@ -3889,56 +3889,94 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
         let waiting = trading.cache.read().resetting(&info.id);
         list = list.child(div().my_1().h(px(1.0)).bg(t.axis_line));
         if waiting {
+            // In place of the reset rows: one is on its way, and a second can't be started.
             list = list.child(
                 div()
                     .px_2()
                     .py_1()
-                    .text_color(t.text_dim)
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .text_color(t.text_main)
+                    .child(
+                        // Pending is outlined (design.md §3), never color alone.
+                        div()
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(t.text_main)
+                            .font_weight(FontWeight::BOLD)
+                            .child("PENDING"),
+                    )
                     .child(format!("Resetting {who}: waiting for the flatten to fill")),
             );
-        }
-        for (k, journal) in [(0u64, false), (1, true)] {
-            let armed = trading.reset_armed(&info.id, journal);
-            let label = match (armed, journal) {
-                (true, _) => format!(
-                    "Press again: {}",
-                    crate::paper_reset::confirm_text(&info.name, &trading.source, journal)
-                ),
-                (false, false) => format!("Reset {who}…"),
-                (false, true) => format!("Reset {who} and clear its journal…"),
-            };
-            let mut item = div()
-                .id(("acct-reset", k))
-                .px_2()
-                .py_1()
-                .cursor_pointer()
-                .hover(move |s| s.bg(accent.opacity(0.18)))
-                .text_color(t.text_main)
-                .child(label);
-            if armed {
-                // Waiting for the second press: marked by its words and a border, not color alone.
-                item = item
-                    .border_1()
-                    .border_color(t.warn)
-                    .font_weight(FontWeight::BOLD);
+        } else {
+            let mut armed_text = None;
+            for (k, journal) in [(0u64, false), (1, true)] {
+                let armed = trading.reset_armed(&info.id, journal);
+                // One line whatever the state: nothing below it moves under the pointer.
+                let label = if armed {
+                    armed_text = Some(crate::paper_reset::confirm_text(
+                        &info.name,
+                        &trading.source,
+                        info.start_balance,
+                        journal,
+                    ));
+                    crate::paper_reset::armed_label(&info.name, &trading.source, journal)
+                } else if journal {
+                    format!("Reset {who} and clear its journal…")
+                } else {
+                    format!("Reset {who}…")
+                };
+                let mut item = div()
+                    .id(("acct-reset", k))
+                    .px_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(accent.opacity(0.18)))
+                    // Destructive rows go last, in their token (design.md §6); the words say it.
+                    .text_color(t.destructive)
+                    .whitespace_nowrap()
+                    .truncate()
+                    .child(label);
+                if armed {
+                    // Waiting for the second press: its words and a border, not color alone.
+                    item = item
+                        .border_1()
+                        .border_color(t.warn)
+                        .font_weight(FontWeight::BOLD);
+                }
+                list = list.child(item.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v: &mut V, _, _, cx| {
+                        cx.stop_propagation();
+                        reset_press(v, journal, Source::Dom, cx);
+                        // Sent: the list closes (the pane says what happens next).
+                        let sent = Trading::try_global(cx).is_some_and(|t| {
+                            v.trade_ref()
+                                .account
+                                .as_ref()
+                                .is_some_and(|a| !t.reset_armed(a, journal))
+                        });
+                        if sent {
+                            close_account_menu(v, cx);
+                        }
+                    }),
+                ));
             }
-            list = list.child(item.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |v: &mut V, _, _, cx| {
-                    cx.stop_propagation();
-                    reset_press(v, journal, Source::Dom, cx);
-                    // Sent: the list closes (the pane says what happens next).
-                    let sent = Trading::try_global(cx).is_some_and(|t| {
-                        v.trade_ref()
-                            .account
-                            .as_ref()
-                            .is_some_and(|a| !t.reset_armed(a, journal))
-                    });
-                    if sent {
-                        close_account_menu(v, cx);
-                    }
-                }),
-            ));
+            // What the second press does, under the rows (last: nothing above it moves).
+            if let Some(text) = armed_text {
+                list = list.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .text_size(px(11.0))
+                        .text_color(t.text_main)
+                        .child(text),
+                );
+            }
         }
     }
     Some(list.into_any_element())

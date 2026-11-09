@@ -1859,6 +1859,7 @@ mod tests {
             venue: (!paper).then_some(0),
             badge,
             read_only: None,
+            start_balance: None,
         };
         let labels = account_labels(&[
             account("sim", "Paper 50K eval", true, "PAPER"),

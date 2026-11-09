@@ -1792,10 +1792,10 @@ pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> 
     }
 }
 
-/// Thousands separators: 1500 → "1,500".
 /// Settings › Accounts › Reset paper account (its buttons are the window's own).
 pub const RESET_KEY: &str = "accounts.reset";
 
+/// Thousands separators: 1500 → "1,500".
 pub fn grouped(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();

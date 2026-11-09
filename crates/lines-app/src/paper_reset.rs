@@ -40,15 +40,30 @@ pub fn account_words(name: &str, source: &str) -> String {
     }
 }
 
-/// What the reset will do, in the words its confirmation shows.
-pub fn confirm_text(name: &str, source: &str, journal: bool) -> String {
+/// What the reset will do, in the words its confirmation shows: the balance it goes back to
+/// (`start`, whole units) is named, so "clears balance" never reads as zero.
+pub fn confirm_text(name: &str, source: &str, start: Option<i64>, journal: bool) -> String {
     let who = account_words(name, source);
+    let balance = match start {
+        Some(n) => format!("balance (back to ${})", crate::settings_schema::grouped(n)),
+        None => "balance (back to its start)".to_owned(),
+    };
     if journal {
         format!(
-            "Reset {who}: flattens and clears balance, positions, orders, today's P&L and its journal"
+            "Reset {who}: flattens and clears {balance}, positions, orders, today's P&L and its journal"
         )
     } else {
-        format!("Reset {who}: flattens and clears balance, positions, orders and today's P&L")
+        format!("Reset {who}: flattens and clears {balance}, positions, orders and today's P&L")
+    }
+}
+
+/// The armed row's one line ("Press again to reset Paper (mock)"): its details show below.
+pub fn armed_label(name: &str, source: &str, journal: bool) -> String {
+    let who = account_words(name, source);
+    if journal {
+        format!("Press again to reset {who} and clear its journal")
+    } else {
+        format!("Press again to reset {who}")
     }
 }
 
@@ -95,14 +110,18 @@ mod tests {
     #[test]
     fn the_words_name_the_account_and_source() {
         assert_eq!(
-            confirm_text("Paper", "databento", false),
-            "Reset Paper (databento): flattens and clears balance, positions, orders and today's P&L"
+            confirm_text("Paper", "databento", Some(50_000), false),
+            "Reset Paper (databento): flattens and clears balance (back to $50,000), positions, orders and today's P&L"
         );
         assert_eq!(
-            confirm_text("Paper", "mock", true),
-            "Reset Paper (mock): flattens and clears balance, positions, orders, today's P&L and its journal"
+            confirm_text("Paper", "mock", Some(50_000), true),
+            "Reset Paper (mock): flattens and clears balance (back to $50,000), positions, orders, today's P&L and its journal"
         );
-        assert!(confirm_text("Paper", "", false).starts_with("Reset Paper: "));
+        assert!(confirm_text("Paper", "", None, false).starts_with("Reset Paper: "));
+        assert_eq!(
+            armed_label("Paper", "mock", true),
+            "Press again to reset Paper (mock) and clear its journal"
+        );
         assert_eq!(
             broker_refusal("Evaluation"),
             "Evaluation is a broker account: only a paper account can be reset"

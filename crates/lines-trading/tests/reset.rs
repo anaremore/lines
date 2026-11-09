@@ -212,6 +212,74 @@ fn a_reset_waits_while_its_flatten_is_open() {
     assert_eq!(r.core.balance(&acct()), Some(Money::whole(50_000)));
 }
 
+impl Rig {
+    fn dropped(&self) -> Option<String> {
+        self.events.iter().find_map(|e| match e {
+            Event::ResetDropped { account, reason } if *account == acct() => Some(reason.clone()),
+            _ => None,
+        })
+    }
+}
+
+/// A new order while the reset waits drops it: it never resets the trading done since.
+#[test]
+fn a_new_order_drops_a_waiting_reset() {
+    let mut r = Rig::new();
+    r.market_at(6000.00);
+    r.place(Side::Buy, 1, OrderKind::Market);
+    r.wait(LAT);
+    r.reset().unwrap();
+    assert_eq!(r.core.resets_waiting().count(), 1);
+    r.place(Side::Buy, 1, OrderKind::Limit { price: px(5990.00) });
+    assert_eq!(
+        r.dropped().as_deref(),
+        Some("Reset not done: a new order was placed on the account")
+    );
+    assert_eq!(r.core.resets_waiting().count(), 0);
+    // The flatten fills and the account is flat: no reset.
+    r.wait(LAT);
+    r.cmd(Command::CancelAll {
+        account: acct(),
+        contract: None,
+    })
+    .unwrap();
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert!(!r.was_reset());
+}
+
+/// The flatten is refused (the market closed): the reset is dropped, never left to go off
+/// once the account is flat on another day.
+#[test]
+fn a_flatten_that_ends_without_closing_drops_the_reset() {
+    let mut r = Rig::new();
+    r.market_at(6000.00);
+    r.place(Side::Buy, 1, OrderKind::Market);
+    r.wait(LAT);
+    // Saturday: CME is closed; the flatten's market order is refused.
+    r.t = UtcMillis::parse_iso("2026-11-14T15:00:00Z").unwrap().0;
+    r.reset().unwrap();
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+    assert_eq!(
+        r.dropped().as_deref(),
+        Some("Reset not done: its flatten ended with the position still open")
+    );
+    assert_eq!(r.core.resets_waiting().count(), 0);
+    // Monday: the trader flattens and trades on; nothing resets.
+    r.t = UtcMillis::parse_iso("2026-11-16T15:00:00Z").unwrap().0;
+    r.market_at(6010.00);
+    r.cmd(Command::Flatten {
+        account: acct(),
+        contract: None,
+    })
+    .unwrap();
+    r.wait(LAT);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert!(!r.was_reset());
+    assert_ne!(r.core.balance(&acct()), Some(Money::whole(50_000)));
+}
+
 #[test]
 fn a_strategy_cannot_reset_an_account() {
     let mut r = Rig::new();

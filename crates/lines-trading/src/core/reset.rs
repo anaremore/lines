@@ -6,7 +6,10 @@
 //! sends, with its protections), and only once the account is flat, with no order open or
 //! unresolved, does the reset happen: the broker's balance and positions, then the core's
 //! balance, positions and prop-rule progress (high-water mark, today's P&L, breaches). A
-//! flatten that can't fill yet (no market) leaves the reset waiting, and the account says so.
+//! flatten still working leaves the reset waiting, and the account says so. A waiting reset never
+//! goes off later on its own: it is dropped (`Event::ResetDropped`) when its flatten ends without
+//! closing the position (refused, or ended with the session) or when a new order is placed on
+//! the account, and the trader asks again (with its confirmation) if they still want it.
 //!
 //! What a reset keeps: the account's settings (starting balance, limits, prop rules) and the
 //! trader's guardrails with their counts and any lockout. A reset is not a way out of a lock
@@ -69,21 +72,57 @@ impl TradingCore {
                 .any(|o| &o.account == account && !o.state.is_terminal())
     }
 
-    /// Reset every account waiting for it whose flatten is done.
+    /// Whether something may still close the account's position: an order open or unresolved
+    /// on it, or a Flatten waiting to send its market order.
+    fn reset_closing(&self, account: &AccountId, now: UtcMillis) -> bool {
+        self.orders
+            .values()
+            .any(|o| &o.account == account && !o.state.is_terminal())
+            || self.accounts.get(account).is_some_and(|a| {
+                a.positions
+                    .iter()
+                    .filter(|(_, p)| p.qty() != 0)
+                    .any(|(k, _)| self.flatten_under_way(account, *k, now))
+            })
+    }
+
+    /// Reset every account waiting for it whose flatten is done; drop the ones whose flatten
+    /// ended with the position still open.
     pub(super) fn reset_pending(&mut self, now: UtcMillis) {
         if self.resets.is_empty() {
             return;
         }
-        let ready: Vec<AccountId> = self
-            .resets
-            .iter()
-            .filter(|a| self.reset_quiet(a))
-            .cloned()
-            .collect();
-        for account in ready {
-            self.resets.remove(&account);
-            self.reset_now(now, &account);
+        let waiting: Vec<AccountId> = self.resets.iter().cloned().collect();
+        for account in waiting {
+            if self.reset_quiet(&account) {
+                self.resets.remove(&account);
+                self.reset_now(now, &account);
+            } else if !self.reset_closing(&account, now) {
+                self.reset_drop(
+                    &account,
+                    "Reset not done: its flatten ended with the position still open",
+                );
+            }
         }
+    }
+
+    /// A new order on an account waiting for its reset drops the reset (it never resets the
+    /// trading done since).
+    pub(super) fn reset_on_new_order(&mut self, account: &AccountId) {
+        if self.resets.contains(account) {
+            self.reset_drop(
+                account,
+                "Reset not done: a new order was placed on the account",
+            );
+        }
+    }
+
+    fn reset_drop(&mut self, account: &AccountId, reason: &str) {
+        self.resets.remove(account);
+        self.events.push(Event::ResetDropped {
+            account: account.clone(),
+            reason: reason.to_owned(),
+        });
     }
 
     fn reset_now(&mut self, now: UtcMillis, account: &AccountId) {
