@@ -796,7 +796,7 @@ pub fn label(c: Command) -> String {
             TradeCmd::SellMarket => "Trade: Sell market (selected quantity)",
             TradeCmd::JoinBid => "Trade: Join bid (buy limit at the best bid)",
             TradeCmd::JoinAsk => "Trade: Join ask (sell limit at the best ask)",
-            TradeCmd::Reverse => "Trade: Reverse position (market, twice the size)",
+            TradeCmd::Reverse => "Trade: Reverse position (close it, open the other side)",
             TradeCmd::BuyAsk => "Trade: Buy at the ask (limit at the best ask)",
             TradeCmd::SellBid => "Trade: Sell at the bid (limit at the best bid)",
             TradeCmd::ToggleHotkeys => "Trade: toggle order hotkeys (Keys on/off)",

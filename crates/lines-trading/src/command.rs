@@ -83,6 +83,31 @@ pub enum Command {
         )]
         contract: Option<ContractKey>,
     },
+    /// Reverse the open position as one step (`core/reverse.rs`): cancel every order on the
+    /// contract, close the position with a Flatten's reduce-only market order, and open the same
+    /// size on the other side with a separate market order (never one order of twice the size a
+    /// stale exit could overfill). The opening is an entry: guardrails, lockouts, prop rules and
+    /// risk limits check it, and a refusal sends nothing. Its bracket (per-entry mode) is placed
+    /// from where it is expected to fill; in position mode the position's pair follows the flip.
+    /// A second Reverse, or one while a Flatten is closing the position, is refused. A person's
+    /// only.
+    Reverse {
+        account: AccountId,
+        #[serde(with = "contract_serde")]
+        contract: ContractKey,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "opt_price_serde"
+        )]
+        take_profit: Option<Price>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "opt_price_serde"
+        )]
+        stop_loss: Option<Price>,
+    },
     /// The trader's guardrails for the account (roadmap 8b): tighter rules apply at once,
     /// looser ones with the next trade date (`guardrails::GuardrailTracker::request`). Never
     /// clears a lockout.
@@ -192,6 +217,7 @@ impl Command {
             | Command::CancelOrder { account, .. }
             | Command::CancelAll { account, .. }
             | Command::Flatten { account, .. }
+            | Command::Reverse { account, .. }
             | Command::SetGuardrails { account, .. }
             | Command::SetRules { account, .. }
             | Command::SetBracketMode { account, .. } => Some(account),
@@ -227,6 +253,7 @@ impl Command {
                 | Command::CancelOrder { .. }
                 | Command::CancelAll { .. }
                 | Command::Flatten { .. }
+                | Command::Reverse { .. }
         )
     }
 }

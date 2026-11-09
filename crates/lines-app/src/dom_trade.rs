@@ -239,8 +239,6 @@ pub struct EntryCtx {
     pub qty: Qty,
     /// Signed current position in the contract.
     pub position: i64,
-    /// Orders open on the contract (bracket exits included).
-    pub working: usize,
     pub bracket: Option<BracketPreset>,
     /// Price units per tick.
     pub tick: i64,
@@ -248,10 +246,6 @@ pub struct EntryCtx {
     pub best_ask: Option<Price>,
     pub last: Option<Price>,
 }
-
-/// Reverse refused while orders work on the contract.
-pub const REVERSE_WORKING: &str =
-    "cancel working orders first: their fills would add to the reversed position";
 
 /// Why a click did nothing (shown inline in the DOM, briefly).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -376,8 +370,9 @@ pub const ENABLE_TO_TRADE: &str = "Entries locked: enable trading (Ctrl+Shift+Sp
 
 /// The command for a header order button. Brackets attach as for clicks (only to orders that
 /// open or add): a market order's exits are placed from the price it is expected to fill at
-/// (the best ask for a buy, the best bid for a sell, else the last trade). Reverse never
-/// carries a bracket: it closes the position before it opens the other side.
+/// (the best ask for a buy, the best bid for a sell, else the last trade). Reverse is the core's
+/// one step (`Command::Reverse`: it cancels the contract's orders, closes and opens with two
+/// orders); its new position gets the bracket as a fresh entry would.
 pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeCommand, Refusal> {
     if !arming.is_armed() {
         return Err(Refusal(ENABLE_TO_TRADE));
@@ -415,24 +410,27 @@ pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeComma
             if ctx.position == 0 {
                 return Err(Refusal("no position to reverse"));
             }
-            // A working order (a bracket exit above all) could fill after the reversal and
-            // add to the new position: the trader cancels first (Cancel all), then reverses.
-            if ctx.working > 0 {
-                return Err(Refusal(REVERSE_WORKING));
-            }
-            let side = if ctx.position > 0 {
-                Side::Sell
+            let (side, at) = if ctx.position > 0 {
+                (Side::Sell, ctx.best_bid.or(ctx.last))
             } else {
-                Side::Buy
+                (Side::Buy, ctx.best_ask.or(ctx.last))
             };
-            let entry = OrderSpec {
+            let (take_profit, stop_loss) = match (ctx.bracket, at) {
+                (Some(b), Some(at)) => {
+                    let (tp, sl) = bracket_prices(side, at, b, ctx.tick);
+                    (Some(tp), Some(sl))
+                }
+                (Some(_), None) => {
+                    return Err(Refusal("no market price yet to place the bracket from"));
+                }
+                (None, _) => (None, None),
+            };
+            return Ok(TradeCommand::Reverse {
                 account: ctx.account.clone(),
                 contract: ctx.contract,
-                side,
-                qty: Qty(ctx.position.abs() * 2),
-                kind: OrderKind::Market,
-            };
-            return Ok(TradeCommand::PlaceOrder(entry));
+                take_profit,
+                stop_loss,
+            });
         }
     };
     if qty.0 <= 0 {
@@ -447,15 +445,11 @@ pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeComma
     };
     Ok(match (ctx.bracket, bracket_at) {
         (Some(b), Some(at)) if opens_or_adds(side, ctx.position) => {
-            let s = side.sign();
-            let (stop, target) = (
-                b.stop_ticks as i64 * ctx.tick,
-                b.target_ticks as i64 * ctx.tick,
-            );
+            let (tp, sl) = bracket_prices(side, at, b, ctx.tick);
             TradeCommand::PlaceBracket(BracketSpec {
                 entry,
-                take_profit: Some(Price(at.0 + s * target)),
-                stop_loss: Some(Price(at.0 - s * stop)),
+                take_profit: Some(tp),
+                stop_loss: Some(sl),
             })
         }
         (Some(_), None) if opens_or_adds(side, ctx.position) => {
@@ -463,6 +457,13 @@ pub fn quick(q: QuickOrder, arming: Arming, ctx: &EntryCtx) -> Result<TradeComma
         }
         _ => TradeCommand::PlaceOrder(entry),
     })
+}
+
+/// A bracket's target and stop for an entry on `side` expected to fill at `at`.
+fn bracket_prices(side: Side, at: Price, b: BracketPreset, tick: i64) -> (Price, Price) {
+    let s = side.sign();
+    let (stop, target) = (b.stop_ticks as i64 * tick, b.target_ticks as i64 * tick);
+    (Price(at.0 + s * target), Price(at.0 - s * stop))
 }
 
 // ---- working orders ----------------------------------------------------------------------
@@ -925,7 +926,6 @@ mod tests {
             contract: esz6(),
             qty: Qty(2),
             position: 0,
-            working: 0,
             bracket: None,
             tick: ES,
             best_bid: Some(Price(600_000)),
@@ -1206,47 +1206,62 @@ mod tests {
         }
     }
 
+    /// Reverse is the core's one step: the contract's position and its working orders go to
+    /// the core, which cancels, closes and opens. The new position's bracket is placed from
+    /// where the opening should fill (the bid for a sell), as a fresh entry's would.
     #[test]
-    fn reverse_flips_with_one_market_order_for_twice_the_position() {
+    fn reverse_asks_the_core_for_one_step() {
         let mut c = ctx();
         assert_eq!(
             quick(QuickOrder::Reverse, armed(), &c),
             Err(Refusal("no position to reverse"))
         );
         c.position = 2;
+        assert_eq!(
+            quick(QuickOrder::Reverse, armed(), &c).unwrap(),
+            TradeCommand::Reverse {
+                account: c.account.clone(),
+                contract: c.contract,
+                take_profit: None,
+                stop_loss: None,
+            }
+        );
         c.bracket = Some(BracketPreset {
             stop_ticks: 8,
             target_ticks: 16,
         });
-        let r = quick(QuickOrder::Reverse, armed(), &c).unwrap();
-        assert!(
-            matches!(r, TradeCommand::PlaceOrder(_)),
-            "no bracket on a reverse"
-        );
-        let s = spec(&r);
-        assert_eq!(
-            (s.side, s.qty, s.kind),
-            (Side::Sell, Qty(4), OrderKind::Market)
-        );
+        let TradeCommand::Reverse {
+            take_profit,
+            stop_loss,
+            ..
+        } = quick(QuickOrder::Reverse, armed(), &c).unwrap()
+        else {
+            panic!("a Reverse");
+        };
+        let bid = c.best_bid.unwrap().0;
+        assert_eq!(take_profit, Some(Price(bid - 16 * c.tick)));
+        assert_eq!(stop_loss, Some(Price(bid + 8 * c.tick)));
+        // Short: it buys, from the ask.
         c.position = -3;
-        let s2 = quick(QuickOrder::Reverse, armed(), &c).unwrap();
-        assert_eq!((spec(&s2).side, spec(&s2).qty), (Side::Buy, Qty(6)));
-    }
-
-    /// Review round 1: a bracketed position's exits keep working after a reversal (they
-    /// aren't the reversal's exits), and a later exit fill would double the new position.
-    /// Reverse is refused while any order works on the contract.
-    #[test]
-    fn reverse_is_refused_while_orders_work() {
-        let mut c = ctx();
-        c.position = 2;
-        c.working = 2; // the bracket's target and stop
+        let ask = c.best_ask.unwrap().0;
+        let TradeCommand::Reverse {
+            take_profit,
+            stop_loss,
+            ..
+        } = quick(QuickOrder::Reverse, armed(), &c).unwrap()
+        else {
+            panic!("a Reverse");
+        };
+        assert_eq!(take_profit, Some(Price(ask + 16 * c.tick)));
+        assert_eq!(stop_loss, Some(Price(ask - 8 * c.tick)));
+        // No price to place the bracket from: refused, as a fresh entry is.
+        c.best_bid = None;
+        c.best_ask = None;
+        c.last = None;
         assert_eq!(
             quick(QuickOrder::Reverse, armed(), &c),
-            Err(Refusal(REVERSE_WORKING))
+            Err(Refusal("no market price yet to place the bracket from"))
         );
-        c.working = 0;
-        assert!(quick(QuickOrder::Reverse, armed(), &c).is_ok());
     }
 
     #[test]

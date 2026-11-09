@@ -120,7 +120,7 @@ impl TradingCore {
     /// the order unresolved since: it may still fill. Not an earlier Flatten's order: past
     /// [`FLATTEN_ANSWER_MS`] that one is replaced at once (`docs/known-gaps.md`). One whose cancel
     /// got nowhere (refused, or out of sends) has no answer to wait for.
-    fn flatten_waits(&self, account: &AccountId, contract: ContractKey) -> bool {
+    pub(super) fn flatten_waits(&self, account: &AccountId, contract: ContractKey) -> bool {
         self.orders.values().any(|o| {
             !o.state.is_terminal()
                 && &o.account == account

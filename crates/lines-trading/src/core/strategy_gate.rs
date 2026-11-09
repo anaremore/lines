@@ -472,6 +472,7 @@ impl TradingCore {
                 self.orders.get(order).map(|o| o.contract)
             }
             Command::CancelAll { contract, .. } | Command::Flatten { contract, .. } => *contract,
+            Command::Reverse { contract, .. } => Some(*contract),
             _ => return,
         };
         // The person is taking over its trade (the daily-loss close leaves it alone until it
