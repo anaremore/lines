@@ -3748,16 +3748,20 @@ impl ChainView {
         let cell_h = (bottom - top) / rows.max(1) as f32;
         for col in 0..COLS {
             let at = time(col as f32 + 0.5);
-            let cx0 = x0 + col as f32 * cw;
+            // Edges on whole pixels, each cell's start the last one's end: no gap, and no overlap
+            // to show as a line through a translucent shade.
+            let cx0 = (x0 + col as f32 * cw).round();
+            let cx1 = (x0 + (col + 1) as f32 * cw).round();
             for row in 0..rows {
-                let y = top + row as f32 * cell_h;
-                let Some(p) = traded.pnl_at(&model, price_at(y + cell_h / 2.0), at) else {
+                let y = (top + row as f32 * cell_h).round();
+                let y1 = (top + (row + 1) as f32 * cell_h).round();
+                let Some(p) = traded.pnl_at(&model, price_at((y + y1) / 2.0), at) else {
                     continue;
                 };
                 let color = if p.is_loss() { t.down } else { t.up };
                 let a = 0.03 + 0.25 * p.shade(largest);
                 window.paint_quad(fill(
-                    Bounds::new(point(px(cx0), px(y)), size(px(cw + 0.5), px(cell_h + 0.5))),
+                    Bounds::new(point(px(cx0), px(y)), size(px(cx1 - cx0), px(y1 - y))),
                     gpui::Hsla { a, ..color },
                 ));
             }
@@ -4985,10 +4989,16 @@ impl ChainView {
                 .text_size(px(12.0))
                 .text_color(t.text_main)
                 .child(div().flex_shrink_0().size(px(8.0)).bg(swatch))
-                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(text))
+                .child(
+                    div()
+                        .max_w_full()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(text),
+                )
         };
         let limit = || {
             div()
+                .max_w_full()
                 .text_color(t.text_dim)
                 .child(crate::chain_lines::LIMIT)
         };
@@ -4996,6 +5006,7 @@ impl ChainView {
             div()
                 .flex()
                 .flex_row()
+                .max_w_full()
                 .gap_1()
                 .items_start()
                 .child(
@@ -5014,9 +5025,6 @@ impl ChainView {
         if let Some(text) = self.summary_text() {
             rows.push(
                 div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
                     .px_2()
                     .py(px(2.0))
                     .bg(t.panel)
