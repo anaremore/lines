@@ -925,7 +925,8 @@ impl DomView {
                         d.last_trade,
                         units,
                         top,
-                        rows,
+                        // The note takes the bottom row: the rows above keep their prices.
+                        rows - usize::from(self.depth_note.is_some() && rows > 1),
                         &mut self.rows,
                     )
                 }
@@ -1191,21 +1192,13 @@ impl DomView {
         // A thin book must not read as the market's real depth: say so on the bottom row, so
         // no price the trader aims at moves when the note comes or goes.
         if let Some(note) = self.depth_note.as_deref()
-            && let Some(last) = self.rows.len().checked_sub(1).filter(|&n| n > 0)
+            && !self.rows.is_empty()
         {
-            let note_y = oy + last as f32 * ROW_H;
+            let note_y = oy + self.rows.len() as f32 * ROW_H;
             window.paint_quad(fill(rect(ox, note_y, w, top + h - note_y), t.bg));
             crate::layout_rec::set_owner("dom-price");
-            self.glyphs.paint(
-                note,
-                table_l + PAD,
-                note_y,
-                ROW_H,
-                t.text_dim,
-                false,
-                window,
-                cx,
-            );
+            self.glyphs
+                .paint(note, ox + PAD, note_y, ROW_H, t.text_dim, false, window, cx);
             crate::layout_rec::set_owner("");
         }
     }
@@ -1314,7 +1307,6 @@ fn empty_ladder_text(has_depth: bool, note: Option<&str>) -> &str {
 }
 
 /// The trail column is shown exactly while the trail is on (unless a saved file hid it).
-
 fn sync_trail_column(cols: &mut Columns, trail: &DomTrail, hidden: bool) {
     let i = DomCol::Trail.index();
     let specs = cols.specs();
