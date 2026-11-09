@@ -1097,6 +1097,17 @@ impl SettingsWindow {
             self.zone_key(ev, cx);
             return;
         }
+        // The UI zoom is app-wide: its keys work here too (not while a number is typed).
+        if self.edit.is_none()
+            && let Some(
+                c @ (crate::commands::Command::ZoomIn
+                | crate::commands::Command::ZoomOut
+                | crate::commands::Command::ZoomReset),
+            ) = crate::commands::command_for(&ev.keystroke)
+        {
+            cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
+            return;
+        }
         let k = &ev.keystroke;
         let m = k.modifiers;
         let key = k.key.as_str();
@@ -1601,7 +1612,7 @@ impl SettingsWindow {
                                 div()
                                     .id(("reset", i))
                                     // A 20 px hit, the minimum.
-                                    .w(crate::zoom::ui(20.0))
+                                    .w(crate::zoom::hit(20.0))
                                     .flex()
                                     .justify_center()
                                     .flex_none()

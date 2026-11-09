@@ -45,6 +45,13 @@ pub fn ui(v: f32) -> Pixels {
     px(f(v))
 }
 
+/// A hit target's size at the zoom, never below its 100 % size (20 px is the least hit target,
+/// `docs/design.md`): 80 % makes text smaller, never targets.
+#[inline]
+pub fn hit(v: f32) -> Pixels {
+    px(f(v).max(v))
+}
+
 /// The windows' rem size (GPUI's default, 16 px, at 100 %).
 #[inline]
 pub fn rem() -> Pixels {
@@ -99,6 +106,16 @@ pub fn step(pct: u16, dir: i8) -> u16 {
 /// The saved form: absent at the default.
 pub fn saved(pct: u16) -> Option<u16> {
     (pct != DEFAULT).then_some(pct)
+}
+
+/// `ui_zoom` as saved, leniently: a number becomes the nearest step; anything else, 100 %.
+pub fn deserialize_saved<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error> {
+    use serde::Deserialize;
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_f64().map(|n| {
+        let n = n.clamp(0.0, f64::from(u16::MAX)) as u16;
+        nearest(n)
+    }))
 }
 
 /// The settings row's choices, and a step's index among them.

@@ -751,7 +751,9 @@ impl Columns {
             .enumerate()
             .filter_map(|(i, c)| {
                 let d = ColumnDoc {
-                    width: self.set.width(i),
+                    // Saved in 100 % units (`crate::zoom`), so a width dragged at 150 % reads
+                    // back the same size at 100 %.
+                    width: self.set.width(i).map(|w| w / crate::zoom::get()),
                     shown: (self.set.is_shown(i) != specs[i].shown_by_default)
                         .then_some(self.set.is_shown(i)),
                 };
@@ -764,7 +766,8 @@ impl Columns {
         let specs = self.specs();
         for (i, c) in all.iter().enumerate() {
             if let Some(d) = doc.get(c) {
-                self.set.restore(specs, i, d.width, d.shown);
+                self.set
+                    .restore(specs, i, d.width.map(crate::zoom::f), d.shown);
             }
         }
         // A file can't hide every column: keep the price column in that case.
