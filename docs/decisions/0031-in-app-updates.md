@@ -1,6 +1,6 @@
 # 0031: In-app updates, signed, never during a trade
 
-**Status:** Proposed (drafted 2026-11-09 from the owner's request; awaiting the owner's acceptance and the owner-only choices under "Open")
+**Status:** Accepted (owner accepted 2026-11-09; the owner-only choices under "Open" are still to be made)
 
 **Context:** Lines ships often: three pre-releases on 2026-11-09 alone. Updating today means downloading a zip and replacing files by hand. The owner wants updates applied inside the app with no reinstall. Lines is a trading terminal, so an update must never interrupt a position or working orders, and must never run code that didn't come from this project. Public builds are released from `.github/workflows/release.yml`. The official build, with private connectors, is built from `anaremore/lines-connectors` (0020).
 

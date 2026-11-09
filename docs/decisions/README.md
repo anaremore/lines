@@ -36,4 +36,4 @@ Format: Status · Context · Decision · Consequences.
 | 0028 | Equities and listed options (SPY/QQQ first) through a broker extension, amends 0013 (Accepted) |
 | 0029 | Trading options from the underlying's chart, with triggers on the underlying's price (Accepted) |
 | 0030 | Several data sources at once, set up in Settings › Connections (Accepted) |
-| 0031 | In-app updates, signed, never during a trade (Proposed) |
+| 0031 | In-app updates, signed, never during a trade (Accepted) |
