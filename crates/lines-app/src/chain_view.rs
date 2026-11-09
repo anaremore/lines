@@ -399,6 +399,8 @@ pub struct ChainView {
     /// The P&L display shows money: without it neither this nor the summary shows.
     show_money: bool,
     traded: Option<Traded>,
+    /// The position the Risk / Reward summary is about.
+    summary: Option<Traded>,
     /// The main area's top in the window, for the chart's line handles.
     main_top: f32,
     /// Lines on the underlying's price (decision 0029), refreshed each render (capacity kept), and
@@ -479,7 +481,7 @@ struct Frame {
 struct Traded {
     contract: ContractKey,
     model: Option<crate::option_estimate::Model>,
-    /// The position, or 0: then it reads as if `qty` were bought at `basis`.
+    /// The position, or 0: then it reads as if `qty` (negative: sold) traded at `basis`.
     position: i64,
     qty: i64,
     /// What it cost, in price units: the position's average, the ticket's price, or the ask.
@@ -489,7 +491,7 @@ struct Traded {
 }
 
 impl Traded {
-    /// What's held, or what it's reading as held.
+    /// What's held, or what it reads as held: negative is short.
     fn signed(&self) -> i64 {
         if self.position != 0 {
             self.position
@@ -979,6 +981,7 @@ impl ChainView {
             pnl_on: false,
             show_money: true,
             traded: None,
+            summary: None,
             main_top: 0.0,
             lines: Vec::with_capacity(crate::chain_lines::MAX_LINES),
             line_ys: [f32::NAN; crate::chain_lines::MAX_LINES],
@@ -1067,22 +1070,59 @@ impl ChainView {
     /// P&L to close on or off (decision 0029). The chain narrows or widens, so every row and
     /// column moves: One-click goes off and says so, as with the chart.
     pub fn toggle_pnl(&mut self, cx: &mut Context<Self>) {
-        if !self.pnl_on && !self.chart_shown() {
-            self.note = Some("P&L to close needs the chart beside the chain".to_owned());
-            cx.notify();
-            return;
+        let showing = self.pnl_shown();
+        if !showing {
+            let why = if !self.chart_shown() {
+                Some("P&L to close needs the chart beside the chain")
+            } else if !self.show_money {
+                Some("P&L to close needs the P&L display on")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                self.note = Some(why.to_owned());
+                cx.notify();
+                return;
+            }
+            self.pick_traded_side();
         }
-        if !self.pnl_on && !self.show_money {
-            self.note = Some("P&L to close needs the P&L display on".to_owned());
-            cx.notify();
-            return;
-        }
-        self.pnl_on = !self.pnl_on;
+        self.pnl_on = !showing;
         self.rows_moved();
         self.frame.release();
         self.frame.locked_key = None;
         self.layout = Layout::default();
         cx.notify();
+    }
+
+    /// The side worth keeping when the chain drops to one: the ticket's, else the selection's as
+    /// it is, else a position's if none is on the side in view.
+    fn pick_traded_side(&mut self) {
+        if let Some(t) = &self.ticket {
+            self.side = t.key.right;
+            return;
+        }
+        if self.selected.is_some() {
+            return;
+        }
+        let (Some(account), Some(st)) = (self.trade.account.as_ref(), self.trade.try_cache())
+        else {
+            return;
+        };
+        let rights = st
+            .positions_of(account)
+            .filter(|p| p.contract.product == self.product.id && p.qty != 0)
+            .filter_map(|p| p.contract.option_key().map(|k| k.right));
+        let mut first = None;
+        for r in rights {
+            if r == self.side {
+                return;
+            }
+            first = first.or(Some(r));
+        }
+        drop(st);
+        if let Some(r) = first {
+            self.side = r;
+        }
     }
 
     /// P&L to close is showing. It has the chart's scale to stand on, and money to show.
@@ -1099,12 +1139,16 @@ impl ChainView {
         cx.notify();
     }
 
-    /// The series P&L to close and the summary are about: the ticket's, the selection's, the
-    /// position or line on the shown side, else the money. What it starts from: the position's
-    /// average, the ticket's price, or the ask.
+    /// The series P&L to close is about: the ticket's, the selection's, the position or line on
+    /// the shown side, else the money. What it starts from: the position's average, the ticket's
+    /// price, or the ask. The summary is about a position with exits: this one if it is, else the
+    /// first. Busy this instant: last frame's, as the rest of the pane does.
     fn refresh_traded(&mut self, cx: &App) {
         self.show_money = crate::picker_view::settings(cx).pnl_display.money();
-        self.traded = None;
+        // Before the store's lock, which this takes too and which isn't reentrant.
+        let selected = self.selected_key();
+        let size = self.size(cx);
+        let now = Trading::try_global(cx).and_then(|t| t.now(&self.store));
         let (Some(st), Some(d)) = (self.trade.try_cache(), self.store.try_read()) else {
             return;
         };
@@ -1129,52 +1173,68 @@ impl ChainView {
                 right: self.side,
             })
         });
+        let build = |key: OptionKey| {
+            let contract = self.contract(key);
+            let quote = d
+                .chains
+                .chain(key.expiry)
+                .and_then(|c| c.find(key.strike).ok().map(|i| c.rows[i]))
+                .and_then(|r| match key.right {
+                    Right::Call => r.call,
+                    Right::Put => r.put,
+                });
+            let position = account.and_then(|a| st.position(a, contract));
+            let ticket = self.ticket.as_ref().filter(|t| t.key == key);
+            let basis = position.and_then(|p| p.avg_price).or_else(|| {
+                ticket
+                    .and_then(|t| t.price)
+                    .or(ticket::sides(quote.as_ref()).1)
+                    .map(|p| p.0 as f64)
+            });
+            // No money to read it in: no estimate rather than +$0 everywhere.
+            let per_unit = ticket::premium(&self.product, contract, 1, Price(1))
+                .map(|m| m.0 as f64 / lines_trading::Money::UNITS_PER_WHOLE as f64);
+            let model = per_unit.and_then(|_| {
+                crate::option_estimate::Model::new(contract, quote.as_ref(), d.last_trade, now)
+            });
+            let sold = ticket.is_some_and(|t| t.side == Side::Sell);
+            Traded {
+                contract,
+                model,
+                position: position.map_or(0, |p| p.qty),
+                qty: if sold { -size } else { size },
+                basis,
+                per_unit: per_unit.unwrap_or(0.0),
+            }
+        };
         let key = self
             .ticket
             .as_ref()
             .map(|t| t.key)
-            .or_else(|| self.selected_key())
+            .or(selected)
             .or(held)
             .or(lined)
             .or(money);
-        let Some(key) = key else {
-            return;
+        let traded = key.map(&build);
+        let has_exit = |c: ContractKey| {
+            self.lines
+                .iter()
+                .any(|l| l.contract == c && l.kind.is_exit())
         };
-        let contract = self.contract(key);
-        let quote = d
-            .chains
-            .chain(key.expiry)
-            .and_then(|c| c.find(key.strike).ok().map(|i| c.rows[i]))
-            .and_then(|r| match key.right {
-                Right::Call => r.call,
-                Right::Put => r.put,
+        let summary = traded
+            .filter(|t| t.position != 0 && has_exit(t.contract))
+            .or_else(|| {
+                self.lines
+                    .iter()
+                    .filter(|l| l.kind.is_exit())
+                    .filter_map(|l| l.contract.option_key())
+                    .map(&build)
+                    .find(|t| t.position != 0)
             });
-        let last = d.last_trade;
         drop(d);
-        let now = Trading::try_global(cx).and_then(|t| t.now(&self.store));
-        let model = crate::option_estimate::Model::new(contract, quote.as_ref(), last, now);
-        let position = account.and_then(|a| st.position(a, contract));
-        let qty = position.map_or(0, |p| p.qty);
-        let avg = position.and_then(|p| p.avg_price);
         drop(st);
-        let ticket_price = self
-            .ticket
-            .as_ref()
-            .filter(|t| t.side == Side::Buy)
-            .and_then(|t| t.price);
-        let ask = ticket::sides(quote.as_ref()).1;
-        let basis = avg.or_else(|| ticket_price.or(ask).map(|p| p.0 as f64));
-        let per_unit = ticket::premium(&self.product, contract, 1, Price(1)).map_or(0.0, |m| {
-            m.0 as f64 / lines_trading::Money::UNITS_PER_WHOLE as f64
-        });
-        self.traded = Some(Traded {
-            contract,
-            model,
-            position: qty,
-            qty: self.size(cx),
-            basis,
-            per_unit,
-        });
+        self.traded = traded;
+        self.summary = summary;
     }
 
     /// No chart beside the chain: what needs a line can't stay.
@@ -2732,7 +2792,6 @@ impl ChainView {
         let Some(expiry) = self.frame.expiry else {
             return;
         };
-        self.selected = Some(strike);
         let right = if x < self.layout.strike_x.0 {
             Some(Right::Call)
         } else if x > self.layout.strike_x.1 {
@@ -2741,7 +2800,10 @@ impl ChainView {
             None
         };
         // The margin where a hidden side would be is nothing to press.
-        let right = right.filter(|r| self.frame.hidden_side != Some(*r));
+        if right.is_some() && right == self.frame.hidden_side {
+            return;
+        }
+        self.selected = Some(strike);
         if let Some(r) = right {
             self.side = r;
         }
@@ -3697,6 +3759,7 @@ impl ChainView {
         let mut title = FixedStr::<64>::new();
         let product = &self.product;
         let basis = traded.basis;
+        let room = w - 2.0 * PAD;
         let _ = crate::chain_pnl::write_title(
             &mut title,
             traded.contract,
@@ -3707,6 +3770,12 @@ impl ChainView {
             },
             traded.qty,
         );
+        // Whole in a narrow panel: the sum goes first, then the size, never the ≈.
+        if self.glyphs.width(title.as_str(), t.text_main, true, window) > room {
+            title = FixedStr::<64>::new();
+            let _ = crate::chain_lines::write_series(&mut title, traded.contract);
+            let _ = std::fmt::Write::write_str(&mut title, "  ≈ P&L to close");
+        }
         self.glyphs.paint(
             title.as_str(),
             x0 + PAD,
@@ -3719,7 +3788,7 @@ impl ChainView {
         );
         let (Some(model), Some(_)) = (traded.model, basis) else {
             self.glyphs.paint(
-                "No estimate: no implied volatility",
+                "No estimate",
                 x0 + PAD,
                 top + 6.0,
                 ROW_H,
@@ -3728,6 +3797,7 @@ impl ChainView {
                 window,
                 cx,
             );
+            pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
             return;
         };
         let (now, close) = (model.now(), model.close());
@@ -3825,7 +3895,10 @@ impl ChainView {
             y += LABEL_EVERY;
         }
         // Its name, where the line is, on a chip so it's read over the values.
-        let named = (3..COLS).find(|c| !even[*c].is_nan());
+        // (A plot shorter than the chip has no room to name it.)
+        let named = (3..COLS)
+            .find(|c| !even[*c].is_nan())
+            .filter(|_| bottom - top >= TAG_H);
         if let Some(col) = named {
             let word = "breakeven";
             let tw = self.glyphs.width(word, t.text_main, false, window) + 2.0 * 4.0;
@@ -4922,11 +4995,8 @@ impl ChainView {
     /// Stop or Target on it, armed or not, with the P&L display showing money.
     fn summary_text(&self) -> Option<String> {
         let traded = self
-            .traded
+            .summary
             .filter(|_| self.chart_shown() && self.show_money)?;
-        if traded.position == 0 {
-            return None;
-        }
         let model = traded.model?;
         let at = |kind: TriggerKind| {
             let line = self

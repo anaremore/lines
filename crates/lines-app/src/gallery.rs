@@ -513,6 +513,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             "pnl",
         ),
         ("chain-pnl-narrow", false, "800x640", "--theme dark", "pnl"),
+        ("chain-pnl-mid", false, "940x640", "--theme dark", "pnl"),
         (
             "chain-pnl-ticket",
             false,

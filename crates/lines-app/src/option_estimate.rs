@@ -54,6 +54,7 @@ impl PnlEstimate {
     /// `+$40`, `-$15`.
     pub fn write(self, out: &mut impl Write) -> fmt::Result {
         let rounded = self.0.round();
+        // (-0.4 rounds to -0.0, which isn't below 0, and reads +$0.)
         let sign = if rounded < 0.0 { '-' } else { '+' };
         write!(out, "{sign}${}", rounded.abs() as i64)
     }
@@ -76,7 +77,8 @@ impl PnlEstimate {
 
     /// `1 : 4.3` as 4.3: reward for each unit of risk, when one is a loss and the other a gain.
     pub fn reward_to_risk(reward: PnlEstimate, risk: PnlEstimate) -> Option<f64> {
-        (reward.0 > 0.0 && risk.0 < 0.0).then(|| reward.0 / -risk.0)
+        // As they read: a loss that rounds to nothing isn't one to divide by.
+        (reward.0.round() > 0.0 && risk.0.round() < 0.0).then(|| reward.0 / -risk.0)
     }
 }
 

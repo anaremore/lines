@@ -63,6 +63,8 @@ pub fn write_title<W: Write>(
     crate::chain_lines::write_series(out, contract)?;
     if position != 0 {
         write!(out, " {position:+} @ ")?;
+    } else if qty < 0 {
+        write!(out, " if {} sold @ ", -qty)?;
     } else {
         write!(out, " if {qty} bought @ ")?;
     }
@@ -131,12 +133,19 @@ mod tests {
         assert_eq!(say(None, None), "");
     }
 
-    /// A Stop in profit isn't a risk to divide by.
+    /// A Stop in profit isn't a risk to divide by, and nor is one that reads as nothing.
     #[test]
     fn no_ratio_without_a_loss_and_a_gain() {
         assert_eq!(
             say(Some(pnl(20.0)), Some(pnl(308.0))),
             "Risk ≈ +$20  ·  Reward ≈ +$308"
+        );
+        assert_eq!(
+            say(
+                Some(test_estimate(100.0).pnl(1, 100.4, 1.0)),
+                Some(pnl(308.0))
+            ),
+            "Risk ≈ +$0  ·  Reward ≈ +$308"
         );
     }
 
@@ -152,6 +161,7 @@ mod tests {
         assert_eq!(title(2, 2), "684C +2 @ 0.65  ≈ P&L to close");
         assert_eq!(title(-1, 1), "684C -1 @ 0.65  ≈ P&L to close");
         assert_eq!(title(0, 3), "684C if 3 bought @ 0.65  ≈ P&L to close");
+        assert_eq!(title(0, -2), "684C if 2 sold @ 0.65  ≈ P&L to close");
     }
 
     /// The chart keeps room at the narrowest width the option chart has, and has more than it
