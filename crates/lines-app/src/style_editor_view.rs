@@ -430,7 +430,7 @@ pub fn names<'t>(e: &StyleEditor, t: &'t Theme) -> &'t [&'static str; 4] {
 fn swatch(t: &Theme, fill: Hsla, on: bool) -> gpui::Div {
     // Selected: a 2 px ring in the text color and a dot inside (never color alone).
     div()
-        .size(crate::zoom::ui(HIT))
+        .size(crate::zoom::hit(HIT))
         .p(crate::zoom::ui(2.0))
         .rounded_sm()
         .border_2()
@@ -462,7 +462,7 @@ fn swatch(t: &Theme, fill: Hsla, on: bool) -> gpui::Div {
 
 fn checkbox(t: &Theme, on: bool, label: String) -> gpui::Div {
     div()
-        .h(crate::zoom::ui(HIT))
+        .h(crate::zoom::hit(HIT))
         .px(crate::zoom::ui(4.0))
         .flex()
         .flex_row()
@@ -492,8 +492,8 @@ fn checkbox(t: &Theme, on: bool, label: String) -> gpui::Div {
 fn choice(t: &Theme, on: bool, label: String) -> gpui::Div {
     // Selected: a check, a 1 px accent border and a stronger fill (WCAG 1.4.11).
     div()
-        .h(crate::zoom::ui(HIT))
-        .min_w(crate::zoom::ui(HIT))
+        .h(crate::zoom::hit(HIT))
+        .min_w(crate::zoom::hit(HIT))
         .px(crate::zoom::ui(8.0))
         .flex()
         .flex_row()

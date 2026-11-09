@@ -4534,7 +4534,6 @@ impl ChartView {
             f32::from(self.plot.size.width),
             f32::from(self.plot.size.height),
         );
-        let line_h = px(label_px() * 1.3);
         let fmt = self.instrument.price;
         let mut tags = [(Price(0), 0.0f32, lines_core::drawings::Style::DEFAULT); MAX_DRAWING_TAGS];
         let mut n = 0;
@@ -4595,8 +4594,8 @@ impl ChartView {
             self.paint_label(
                 LabelKind::DrawingTag(crate::theme::rgb_of(text).to_u32()),
                 price.0,
-                point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65)),
-                line_h,
+                point(px(ox + pw + 8.0), px(oy + y - LABEL_PX_100 * 0.65)),
+                px(LABEL_PX_100 * 1.3),
                 text,
                 window,
                 cx,
@@ -4750,7 +4749,8 @@ impl ChartView {
                 .is_none_or(|(s, _)| s.strip_suffix('▏') != Some(text))
             {
                 let shown = format!("{text}▏");
-                let line = self.shape(&shown, t.text_main, window);
+                // A note is a drawing: typed at the size it is drawn at, which doesn't zoom.
+                let line = self.shape_sized(&shown, t.text_main, LABEL_PX_100, window);
                 self.note_entry_line = Some((shown, line));
             }
             let Some((_, line)) = &self.note_entry_line else {
@@ -5522,7 +5522,13 @@ impl ChartView {
         if !self.labels.contains_key(&(kind, key)) {
             let mut s = FixedStr::<32>::new();
             text(&mut s);
-            let line = self.shape(s.as_str(), color, window);
+            // A drawing's tag sits in a box that doesn't zoom (`DRAWING_TAG_H`).
+            let size = if matches!(kind, LabelKind::DrawingTag(_)) {
+                LABEL_PX_100
+            } else {
+                label_px()
+            };
+            let line = self.shape_sized(s.as_str(), color, size, window);
             self.labels.insert((kind, key), line);
         }
         &self.labels[&(kind, key)]
