@@ -45,7 +45,8 @@ struct Live {
     next_try: UtcMillis,
     /// The quote a fired exit last tried on: a Stop the broker couldn't fill waits for a new one.
     tried: Option<UtcMillis>,
-    /// A person's Flatten asked to close its position: if that's what ends it, it's no news.
+    /// A person's Flatten is closing its position: if that's what ends it, it's no news. Cleared
+    /// once that Flatten is over with the position still open.
     flattened: bool,
 }
 
@@ -520,6 +521,7 @@ impl TradingCore {
                 if &l.view.account == account
                     && contract.is_none_or(|c| c == l.view.contract)
                     && l.view.kind.is_exit()
+                    && l.view.state == TriggerState::Armed
                 {
                     l.flattened = true;
                 }
@@ -762,6 +764,13 @@ impl TradingCore {
                     };
                     self.trigger_end(id, why);
                     continue;
+                }
+                // That Flatten failed: what closes the position later isn't it.
+                if self.triggers.live.get(&id).is_some_and(|l| l.flattened)
+                    && !self.flatten_under_way(&account, contract)
+                    && let Some(l) = self.triggers.live.get_mut(&id)
+                {
+                    l.flattened = false;
                 }
                 let right = contract.option_key().map_or(Right::Call, |k| k.right);
                 let flipped =

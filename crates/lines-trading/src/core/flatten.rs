@@ -154,6 +154,19 @@ impl TradingCore {
         }
     }
 
+    /// A Flatten's market order is working or waiting to go on this contract.
+    pub(super) fn flatten_under_way(&self, account: &AccountId, contract: ContractKey) -> bool {
+        self.pending_flattens
+            .iter()
+            .any(|p| &p.account == account && p.contract == contract)
+            || self.orders.values().any(|o| {
+                o.is_open()
+                    && o.role == Role::Flatten
+                    && &o.account == account
+                    && o.contract == contract
+            })
+    }
+
     /// When a waiting Flatten stops waiting for an answer.
     pub(super) fn flatten_wake(&self) -> Option<UtcMillis> {
         self.pending_flattens

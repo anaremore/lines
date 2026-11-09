@@ -642,6 +642,74 @@ fn a_flatten_cancels_a_plain_stop_at_once() {
     r.book(es(), 580_000);
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), es()), 0);
+
+    // In the halt: it's gone, and the position stays. The stated limit, pinned.
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(2);
+    let id = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: OrderKind::Stop {
+                trigger: Price(590_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    r.t = UtcMillis::parse_iso(CME_HALT).unwrap().0;
+    r.flatten(es());
+    r.wait(LAT + 1);
+    assert_eq!(r.state(id), OrderState::Cancelled);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+}
+
+/// A Flatten that failed gets no credit for what closes the position later: the reason says what
+/// happened, and the app reports it.
+#[test]
+fn a_failed_flatten_doesnt_take_credit_for_a_later_close() {
+    let last_reason = |r: &Rig| {
+        r.events.iter().rev().find_map(|e| match e {
+            Event::Trigger(t) if t.state == TriggerState::Ended => t.reason.clone(),
+            _ => None,
+        })
+    };
+    // A Stop already waiting for a bid, Flatten fails, the bid returns: the Stop closes it.
+    let mut r = Rig::new(true, RTH);
+    r.long_call(1);
+    r.arm(TriggerKind::Stop, 68_200);
+    r.quote(None, Some(242));
+    r.print(68_100);
+    r.flatten(call());
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 1);
+    r.quote(Some(150), Some(152));
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0);
+    assert_eq!(last_reason(&r).as_deref(), Some("closed"));
+
+    // Armed, Flatten fails, and a resting close fills later.
+    let mut r = Rig::new(true, RTH);
+    r.long_call(1);
+    r.arm(TriggerKind::Stop, 68_000);
+    r.cmd(Command::PlaceExit(OrderSpec {
+        account: acct(),
+        contract: call(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: OrderKind::Limit { price: Price(245) },
+    }))
+    .unwrap();
+    r.wait(LAT + 1);
+    r.quote(None, Some(242));
+    r.flatten(call());
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 1);
+    r.quote(Some(250), Some(252));
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0);
+    assert_eq!(last_reason(&r).as_deref(), Some("the position closed"));
 }
 
 /// A person's Cancel All doesn't take back a rule's waiting Flatten, which asks only once; and a
