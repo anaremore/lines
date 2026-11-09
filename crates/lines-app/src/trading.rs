@@ -1684,6 +1684,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
             (account.clone(), None, None)
         }
         TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
+        TradeCommand::Reverse {
+            account, contract, ..
+        } => (account.clone(), Some(*contract), None),
         TradeCommand::CancelTrigger {
             account, contract, ..
         } => (account.clone(), Some(*contract), None),
@@ -1928,7 +1931,7 @@ pub enum Step {
 ///   `bracket STOP/TARGET` (ticks) after a limit or stop;
 /// - `ack` (acks arrive; orders sent after the last `ack` stay pending);
 /// - `option YYYY-MM-DD STRIKE call|put`: the orders that follow are on that option series;
-/// - `flatten`, `cancelall` (the contract), `account ID`, `tag A,B` (the newest closed trade's
+/// - `flatten`, `reverse`, `cancelall` (the contract), `account ID`, `tag A,B` (the newest closed trade's
 ///   tags in the journal);
 /// - `guard trades N | streak LOSSES/MINUTES | loss MONEY | position N | close MINUTES`: one
 ///   guardrail for the account (roadmap 8b; the others unchanged);
@@ -2089,6 +2092,12 @@ pub fn parse_script(
             ["flatten"] => out.push(Step::Command(TradeCommand::Flatten {
                 account: account.clone(),
                 contract: Some(contract),
+            })),
+            ["reverse"] => out.push(Step::Command(TradeCommand::Reverse {
+                account: account.clone(),
+                contract,
+                take_profit: None,
+                stop_loss: None,
             })),
             ["cancelall"] => out.push(Step::Command(TradeCommand::CancelAll {
                 account: account.clone(),
@@ -2777,7 +2786,6 @@ mod tests {
             contract: es(),
             qty: Qty(2),
             position,
-            working: 0,
             bracket: None,
             tick: 25,
             best_bid: Some(px(best.0)),
@@ -3040,11 +3048,12 @@ mod tests {
         assert_eq!(
             t.cache.read().position(&account, es()).map(|p| p.qty),
             Some(-2),
-            "one market order for twice the position"
+            "a reduce-only close and a separate opening"
         );
-        // Every order the buttons sent (and the cancel) carried a click time to the core.
+        // Every order the buttons sent (and the cancel) carried a click time to the core:
+        // Reverse sent two, its close and its opening.
         let (_, _, n) = t.handle().latency();
-        assert_eq!(n, 4);
+        assert_eq!(n, 5);
         // Disarmed: nothing is built, so nothing is sent.
         assert!(
             quick(

@@ -502,13 +502,11 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
     let pt = v.trade_ref();
     let account = pt.account.clone().ok_or("no account")?;
     let contract = contract_of(v.trade_store()).ok_or("contract unknown")?;
-    let (position, working) = {
-        let s = t.cache.read();
-        (
-            s.position(&account, contract).map_or(0, |p| p.qty),
-            s.open_orders(&account, contract).count(),
-        )
-    };
+    let position = t
+        .cache
+        .read()
+        .position(&account, contract)
+        .map_or(0, |p| p.qty);
     let (best_bid, best_ask, last, tick, symbol) = v
         .trade_store()
         .try_read()
@@ -533,7 +531,6 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
             settings.new_panes.default_qty,
         )),
         position,
-        working,
         bracket: pt.bracket,
         tick,
         best_bid,
@@ -5500,9 +5497,8 @@ mod tests {
                 lines_core::Month::new(12).unwrap(),
             ),
             qty: Qty(1),
-            // Reverse is refused while orders work on the contract.
-            position: 1,
-            working: 1,
+            // No position: Reverse is refused.
+            position: 0,
             bracket: None,
             tick: 25,
             best_bid: None,

@@ -28,7 +28,9 @@
 //!   the bid never fills a buy, which would pay less than any real market order), each option
 //!   quote. Until done, cancelled, or its session closes (a day order: it never fills at the
 //!   next session's open). A reduce-only one still shrinks with the position; a plain one that
-//!   closes the position (no larger than it) turns reduce-only, so it never reverses it. Limit
+//!   closes the position (no larger than what closing market orders already working leave of it)
+//!   turns reduce-only, so it never reverses it; a Reverse's opening, sent beside its close, stays
+//!   an entry. Limit
 //!   orders are unchanged.
 //! - **Stops trigger on trades** at or through the trigger.
 //! - **Fees** per contract (per quantity unit), per side, from the account's balance.
@@ -388,12 +390,22 @@ impl PaperBroker {
             OrderKind::Market => {
                 // A market order closing the position (no larger than it): its remainder is
                 // reduce-only, so it can never take the position past flat while it works on
-                // (an exit filling meanwhile would otherwise leave it reversing).
+                // (an exit filling meanwhile would otherwise leave it reversing). What closing
+                // market orders already working cover isn't its to close: a Reverse's opening
+                // goes beside its close, and is an entry, not a second close.
                 let pos = self.position_of(&o.account, o.contract);
+                let covered: i64 = self
+                    .orders
+                    .values()
+                    .filter(|p| p.order.id != o.id && p.order.is_open() && p.order.reduce_only)
+                    .filter(|p| p.order.account == o.account && p.order.contract == o.contract)
+                    .filter(|p| p.order.side == o.side && matches!(p.order.kind, OrderKind::Market))
+                    .map(|p| p.order.remaining().0)
+                    .sum();
                 let closing = !o.reduce_only
                     && pos != 0
                     && o.side.sign() == -pos.signum()
-                    && o.qty.0 <= pos.abs();
+                    && o.qty.0 <= pos.abs() - covered;
                 // Nothing to fill against at all (no book on its side, no trade yet; a future):
                 // nothing would ever show it a price, so it ends here.
                 let blind = o.contract.option_key().is_none()

@@ -512,6 +512,24 @@ impl TradingCore {
             Command::CancelAll { account, contract } | Command::Flatten { account, contract } => {
                 (account, *contract)
             }
+            // Entries armed on it would add to the new position or reopen the old: they end. Its
+            // exits end by themselves once the position flips.
+            Command::Reverse {
+                account, contract, ..
+            } => {
+                let entries: Vec<TriggerId> = self
+                    .triggers
+                    .live
+                    .values()
+                    .filter(|l| &l.view.account == account && l.view.contract == *contract)
+                    .filter(|l| !l.view.kind.is_exit())
+                    .map(|l| l.view.id)
+                    .collect();
+                for id in entries {
+                    self.trigger_end(id, "you reversed");
+                }
+                return;
+            }
             Command::CancelOrder { account, order } => {
                 let chased: Vec<TriggerId> = self
                     .triggers

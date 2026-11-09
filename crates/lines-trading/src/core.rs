@@ -28,7 +28,7 @@ use lines_core::{CivilDate, ContractKey, Price, ProductId, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::{Broker, BrokerEvent, BrokerRequest, PaneContext, RequestContext};
-use crate::command::{Command, Envelope, OrderSpec, Reject, RejectCode, Source};
+use crate::command::{BracketSpec, Command, Envelope, OrderSpec, Reject, RejectCode, Source};
 use crate::event::{AccountView, Event, FillEvent, PositionView};
 use crate::guardrails::{Entry, GuardChange, GuardState, GuardrailTracker};
 use crate::market::MarketInput;
@@ -45,6 +45,7 @@ pub const EXTERNAL_ORDER: OrderId = OrderId(0);
 mod cancels;
 mod flatten;
 mod position_bracket;
+mod reverse;
 mod strategy_gate;
 mod trigger;
 
@@ -245,6 +246,11 @@ pub struct TradingCore {
     triggers: trigger::Triggers,
     /// Market orders of a Flatten waiting for their contract's cancels (`core/flatten.rs`).
     pending_flattens: Vec<flatten::PendingFlatten>,
+    /// Reverses from their press until their orders are done (`core/reverse.rs`).
+    reverses: Vec<reverse::ReverseRun>,
+    /// A Reverse's opening being checked: the account and contract whose orders (about to be
+    /// cancelled) the checks leave out, and the opening's own size for the risk limits.
+    reverse_checking: Option<(AccountId, ContractKey, Qty)>,
 }
 
 /// Saved guardrail progress (by id) and settings (by name or id) for accounts that join.
@@ -310,6 +316,8 @@ impl TradingCore {
             join_guards: JoinGuards::default(),
             triggers: trigger::Triggers::default(),
             pending_flattens: Vec::new(),
+            reverses: Vec::new(),
+            reverse_checking: None,
         }
     }
 
@@ -715,6 +723,7 @@ impl TradingCore {
         if result.is_ok() {
             self.trigger_person_acted(&env);
             self.flatten_take_back(&env);
+            self.reverse_take_back(&env, now);
         }
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
@@ -731,6 +740,7 @@ impl TradingCore {
         // Requests may complete at once (zero latency): apply what the broker has.
         self.poll(now);
         self.flatten_pending(now);
+        self.reverse_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -848,71 +858,10 @@ impl TradingCore {
                 Ok(vec![id])
             }
             Command::PlaceBracket(b) => {
-                if b.entry.contract.option_key().is_some() {
-                    return Err(Reject::new(
-                        RejectCode::Invalid,
-                        "no brackets on options: single-leg limits only",
-                    ));
-                }
-                if !self.broker.capabilities().server_brackets {
-                    return Err(Reject::new(
-                        RejectCode::Broker,
-                        format!("{} doesn't hold brackets", self.broker.name()),
-                    ));
-                }
+                self.bracket_supported(&b.entry)?;
                 self.check_new(now, &b.entry)?;
-                if b.take_profit.is_none() && b.stop_loss.is_none() {
-                    return Err(Reject::new(RejectCode::Invalid, "a bracket needs an exit"));
-                }
-                let spec = self.spec(b.entry.contract).expect("checked");
-                for p in b.take_profit.iter().chain(b.stop_loss.iter()) {
-                    if !spec.on_tick_grid(*p) {
-                        return Err(Reject::new(
-                            RejectCode::Invalid,
-                            "exit price is off the tick grid",
-                        ));
-                    }
-                }
-                let entry = self.new_order(now, &b.entry, Role::Entry, None);
-                let exit_side = b.entry.side.opposite();
-                let mut exits = Vec::new();
-                let mk = |kind| OrderSpec {
-                    kind,
-                    side: exit_side,
-                    ..b.entry.clone()
-                };
-                if let Some(p) = b.take_profit {
-                    exits.push(self.new_order(
-                        now,
-                        &mk(OrderKind::Limit { price: p }),
-                        Role::TakeProfit,
-                        Some(entry.id),
-                    ));
-                }
-                if let Some(p) = b.stop_loss {
-                    exits.push(self.new_order(
-                        now,
-                        &mk(OrderKind::Stop { trigger: p }),
-                        Role::StopLoss,
-                        Some(entry.id),
-                    ));
-                }
-                if exits.len() == 2 {
-                    let (a, c) = (exits[0].id, exits[1].id);
-                    exits[0].oco = Some(c);
-                    exits[1].oco = Some(a);
-                    for x in &exits {
-                        self.orders.insert(x.id, x.clone());
-                    }
-                }
-                let ids: Vec<OrderId> = std::iter::once(entry.id)
-                    .chain(exits.iter().map(|x| x.id))
-                    .collect();
-                for x in &exits {
-                    self.events.push(Event::Order(x.clone()));
-                }
-                self.send(env, now, BrokerRequest::Bracket { entry, exits });
-                Ok(ids)
+                self.bracket_exits_valid(&b)?;
+                Ok(self.bracket_send(env, now, &b))
             }
             Command::ModifyOrder {
                 order, qty, price, ..
@@ -1216,6 +1165,12 @@ impl TradingCore {
             | Command::ArmStrategy { .. }
             | Command::PauseStrategy { .. }
             | Command::StopStrategies { .. } => unreachable!("handled by strategy_control"),
+            Command::Reverse {
+                contract,
+                take_profit,
+                stop_loss,
+                ..
+            } => self.reverse(env, now, &account, contract, take_profit, stop_loss),
             Command::Flatten { contract, .. } => {
                 let simulated = self.broker.simulated();
                 let positions: Vec<(ContractKey, i64)> = self.accounts[&account]
@@ -1295,6 +1250,84 @@ impl TradingCore {
                 Ok(ids)
             }
         }
+    }
+
+    /// A bracket order can go at all: never on options, and only to a broker holding brackets.
+    fn bracket_supported(&self, entry: &OrderSpec) -> Result<(), Reject> {
+        if entry.contract.option_key().is_some() {
+            return Err(Reject::new(
+                RejectCode::Invalid,
+                "no brackets on options: single-leg limits only",
+            ));
+        }
+        if !self.broker.capabilities().server_brackets {
+            return Err(Reject::new(
+                RejectCode::Broker,
+                format!("{} doesn't hold brackets", self.broker.name()),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A bracket's exits: at least one, on the tick grid (the contract already checked).
+    fn bracket_exits_valid(&mut self, b: &BracketSpec) -> Result<(), Reject> {
+        if b.take_profit.is_none() && b.stop_loss.is_none() {
+            return Err(Reject::new(RejectCode::Invalid, "a bracket needs an exit"));
+        }
+        let spec = self.spec(b.entry.contract).expect("checked");
+        for p in b.take_profit.iter().chain(b.stop_loss.iter()) {
+            if !spec.on_tick_grid(*p) {
+                return Err(Reject::new(
+                    RejectCode::Invalid,
+                    "exit price is off the tick grid",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Send a checked bracket: the entry, its exits held until it fills (one-cancels-other).
+    fn bracket_send(&mut self, env: &Envelope, now: UtcMillis, b: &BracketSpec) -> Vec<OrderId> {
+        let entry = self.new_order(now, &b.entry, Role::Entry, None);
+        let exit_side = b.entry.side.opposite();
+        let mut exits = Vec::new();
+        let mk = |kind| OrderSpec {
+            kind,
+            side: exit_side,
+            ..b.entry.clone()
+        };
+        if let Some(p) = b.take_profit {
+            exits.push(self.new_order(
+                now,
+                &mk(OrderKind::Limit { price: p }),
+                Role::TakeProfit,
+                Some(entry.id),
+            ));
+        }
+        if let Some(p) = b.stop_loss {
+            exits.push(self.new_order(
+                now,
+                &mk(OrderKind::Stop { trigger: p }),
+                Role::StopLoss,
+                Some(entry.id),
+            ));
+        }
+        if exits.len() == 2 {
+            let (a, c) = (exits[0].id, exits[1].id);
+            exits[0].oco = Some(c);
+            exits[1].oco = Some(a);
+            for x in &exits {
+                self.orders.insert(x.id, x.clone());
+            }
+        }
+        let ids: Vec<OrderId> = std::iter::once(entry.id)
+            .chain(exits.iter().map(|x| x.id))
+            .collect();
+        for x in &exits {
+            self.events.push(Event::Order(x.clone()));
+        }
+        self.send(env, now, BrokerRequest::Bracket { entry, exits });
+        ids
     }
 
     fn open_order(&self, account: &AccountId, id: OrderId) -> Result<Order, Reject> {
@@ -1825,7 +1858,24 @@ impl TradingCore {
             now,
         );
         let acct = &self.accounts[&spec.account];
-        let position = acct.positions.get(&spec.contract).map_or(0, Position::qty);
+        let mut position = acct.positions.get(&spec.contract).map_or(0, Position::qty);
+        // A Reverse's opening: its own size, from flat (its close goes first).
+        let reversing = match &self.reverse_checking {
+            Some((a, c, q)) if a == &spec.account && *c == spec.contract => Some(*q),
+            _ => None,
+        };
+        let opening;
+        let spec = match reversing {
+            Some(qty) => {
+                position = 0;
+                opening = OrderSpec {
+                    qty,
+                    ..spec.clone()
+                };
+                &opening
+            }
+            None => spec,
+        };
         let (open_buy, open_sell) = self.open_qty(&spec.account, spec.contract);
         let ctx = RiskContext {
             position,
@@ -1866,6 +1916,14 @@ impl TradingCore {
     /// pair once (only one of it can fill: its larger remainder). Held bracket exits are left
     /// out.
     fn open_qty(&self, account: &AccountId, contract: ContractKey) -> (i64, i64) {
+        // A Reverse's checks: what it cancels doesn't count.
+        if self
+            .reverse_checking
+            .as_ref()
+            .is_some_and(|(a, c, _)| a == account && *c == contract)
+        {
+            return (0, 0);
+        }
         let mut b = 0;
         let mut s = 0;
         for o in self.open_orders(account).filter(|o| o.contract == contract) {
@@ -1998,6 +2056,7 @@ impl TradingCore {
         self.cancels_resend(now);
         self.news_flatten(now);
         self.flatten_pending(now);
+        self.reverse_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -2018,6 +2077,7 @@ impl TradingCore {
             .chain(self.entries_wake())
             .chain(self.cancels_wake())
             .chain(self.flatten_wake())
+            .chain(self.reverse_wake())
             .min()
     }
 
@@ -2359,6 +2419,7 @@ impl TradingCore {
             self.account_changed(now, &a);
         }
         self.flatten_pending(now);
+        self.reverse_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);

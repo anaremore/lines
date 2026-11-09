@@ -99,7 +99,6 @@ fn ctx(t: &Trading) -> EntryCtx {
         contract: es(),
         qty: Qty(2),
         position: s.position(&account(), es()).map_or(0, |p| p.qty),
-        working: s.open_orders(&account(), es()).count(),
         bracket: None,
         tick: 25,
         best_bid: Some(px(BID)),

@@ -1142,7 +1142,6 @@ mod tests {
             ),
             qty: Qty(2),
             position: 0,
-            working: 0,
             bracket: None,
             tick: 25,
             best_bid: Some(Price(580_000)),
