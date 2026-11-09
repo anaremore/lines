@@ -2039,7 +2039,9 @@ impl ChartView {
             .gap(px(STRIP_GAP))
             .bg(t.panel)
             .rounded_sm()
-            .text_size(crate::zoom::ui(11.0))
+            // The strip's geometry is the pointer's (`chart_trade::strip_box`) and doesn't zoom;
+            // neither does its text (docs/known-gaps.md).
+            .text_size(px(11.0))
             .child(size_control);
         for (o, label, w, fill, line) in buttons {
             let el = div()
@@ -2179,8 +2181,8 @@ impl ChartView {
                 + usize::from(!rows.is_empty()),
             self.studies.legend_rows() + usize::from(fp.is_some()) + rows.len(),
         );
-        let row_h = 12.0 * 1.3 + 4.0;
-        let bottom = 30.0 + text_rows as f32 * row_h + boxes as f32 * 12.0 + 4.0;
+        let row_h = crate::zoom::f(12.0 * 1.3 + 4.0);
+        let bottom = crate::zoom::f(30.0 + boxes as f32 * 12.0 + 4.0) + text_rows as f32 * row_h;
         self.legend_band
             .set((8.0 + LEGEND_MAX_W, bottom.max(readout_bottom())));
         if studies.is_none() && rows.is_empty() && fp.is_none() {
@@ -2195,8 +2197,8 @@ impl ChartView {
                 .flex_col()
                 .gap_1()
                 .max_w(px(LEGEND_MAX_W))
-                .px(px(8.0))
-                .py(px(4.0))
+                .px(crate::zoom::ui(8.0))
+                .py(crate::zoom::ui(4.0))
                 .bg(t.label_bg)
                 .text_size(crate::zoom::ui(12.0))
                 .children(rows.into_iter().map(|r| {

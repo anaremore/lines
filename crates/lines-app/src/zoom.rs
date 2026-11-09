@@ -68,6 +68,16 @@ pub fn set(pct: u16) -> bool {
     true
 }
 
+/// `--ui-zoom`: one of [`STEPS`], nothing else.
+pub fn parse_step(s: &str) -> Result<u16, String> {
+    s.trim()
+        .trim_end_matches('%')
+        .parse::<u16>()
+        .ok()
+        .filter(|p| STEPS.contains(p))
+        .ok_or_else(|| format!("{s}: expected one of 80, 90, 100, 110, 125, 150"))
+}
+
 /// The step nearest `pct` (a hand-edited setting of 112 is 110).
 pub fn nearest(pct: u16) -> u16 {
     *STEPS
@@ -112,6 +122,15 @@ mod tests {
         assert_eq!(step(80, -1), 80, "the bottom holds");
         assert_eq!(step(150, 0), 100);
         assert_eq!(step(112, 1), 125, "from the nearest step");
+    }
+
+    #[test]
+    fn the_flag_takes_a_step_only() {
+        assert_eq!(parse_step("125"), Ok(125));
+        assert_eq!(parse_step("150%"), Ok(150));
+        assert!(parse_step("7").is_err());
+        assert!(parse_step("300").is_err());
+        assert!(parse_step("abc").is_err());
     }
 
     #[test]

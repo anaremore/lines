@@ -41,7 +41,8 @@ const SEP_H_100: f32 = 9.0;
 /// [`SEP_H_100`] at the UI zoom (`crate::zoom`).
 #[inline]
 fn sep_h() -> f32 {
-    crate::zoom::f(SEP_H_100)
+    // `my_1` (rem, zooms) above and below a 1 px line (doesn't).
+    crate::zoom::f(SEP_H_100 - 1.0) + 1.0
 }
 /// The list's padding above its first row (`py_1`).
 const PAD_100: f32 = 4.0;

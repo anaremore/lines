@@ -559,6 +559,22 @@ impl Picker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ui_zoom_is_written_only_off_100_and_reads_back() {
+        let s = Settings::default();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("ui_zoom"), "absent at 100 %: {json}");
+        let s = Settings {
+            ui_zoom: crate::zoom::saved(125),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ui_zoom, Some(125));
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.ui_zoom, None, "a file from before reads as 100 %");
+    }
+
     use super::*;
     use lines_core::Month;
     use lines_feed::catalog::{BTC_USD, ES, ETH_USD, MES, MNQ, NQ, ZN};

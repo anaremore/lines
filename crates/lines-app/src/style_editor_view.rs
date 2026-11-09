@@ -782,7 +782,7 @@ pub fn render(
             );
             group = group.child(
                 div()
-                    .pl(px(12.0 + LABEL_W))
+                    .pl(crate::zoom::ui(12.0 + LABEL_W))
                     .pr(crate::zoom::ui(12.0))
                     .pb(crate::zoom::ui(2.0))
                     .child(controls),
@@ -816,7 +816,7 @@ pub fn render(
             if let Some(hex) = &e.hex {
                 group = group.child(
                     div()
-                        .pl(px(12.0 + LABEL_W))
+                        .pl(crate::zoom::ui(12.0 + LABEL_W))
                         .pr(crate::zoom::ui(12.0))
                         .py(crate::zoom::ui(4.0))
                         .flex()
