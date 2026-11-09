@@ -423,3 +423,26 @@ fn only_live_modes_are_live() {
     assert!(!mode_for(true, Some("r".into()), Some("x".into())).is_live());
     assert!(mode_for(false, Some("r".into()), None).is_live());
 }
+
+#[test]
+fn replays_know_which_products_were_recorded() {
+    let dir = std::env::temp_dir().join(format!("lines-levels-rec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(recording_path(&dir, "acme", "CL"), b"").unwrap();
+    let replay = LevelMode::Replay(dir.clone());
+    assert!(replay.recorded("acme", "CL"));
+    assert!(!replay.recorded("acme", "ES"), "no file for ES");
+    assert!(!replay.recorded("other", "CL"), "another source's file");
+    // Only a levels replay reads files.
+    assert!(!LevelMode::Record(dir.clone()).recorded("acme", "CL"));
+    assert!(!LevelMode::NotRecorded.recorded("acme", "CL"));
+    assert!(!LevelMode::Live.recorded("acme", "CL"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn registering_announces_a_serving_change() {
+    let before = serving_generation();
+    register(Arc::new(DemoLevels)).unwrap();
+    assert!(serving_generation() > before);
+}

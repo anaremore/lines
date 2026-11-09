@@ -213,9 +213,13 @@ pub fn register(source: Arc<dyn LevelSource>) -> Result<()> {
     if !ok {
         bail!("level source id {id:?}: use 1-32 lowercase letters, digits and '-'");
     }
-    let mut t = table().write();
-    t.retain(|s| s.id() != id);
-    t.push(source);
+    {
+        let mut t = table().write();
+        t.retain(|s| s.id() != id);
+        t.push(source);
+    }
+    // Charts opened before it was registered ask again.
+    serving_changed();
     Ok(())
 }
 

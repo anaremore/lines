@@ -56,6 +56,14 @@ impl LevelMode {
     pub fn is_live(&self) -> bool {
         matches!(self, LevelMode::Live | LevelMode::Record(_))
     }
+
+    /// Replay with a batch file for `source` and `product` ([`replay_recorded`]).
+    pub fn recorded(&self, source: &str, product: &str) -> bool {
+        match self {
+            LevelMode::Replay(dir) => recording_path(dir, source, product).is_file(),
+            _ => false,
+        }
+    }
 }
 
 /// Whether this run's levels are live ([`LevelMode::is_live`]). A source whose
@@ -251,6 +259,15 @@ impl LevelHandle {
     pub fn source(&self) -> &str {
         &self.entry.key.0
     }
+}
+
+/// Whether this run replays recorded levels (`LevelMode::Replay`) and has a batch file for
+/// `source` and `product` (the [`recording_path`] the runtime would read). Sources whose
+/// `serves` depends on what a live service lists answer this in a replay, so a replay shows
+/// exactly what was recorded, with no service. A file check: call it when a chart attaches,
+/// not per frame.
+pub fn replay_recorded(source: &str, product: &str) -> bool {
+    mode().read().recorded(source, product)
 }
 
 /// The `.lfr` path of a source's batches for a product in `dir`.
