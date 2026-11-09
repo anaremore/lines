@@ -249,7 +249,8 @@ fn working_orders_count_toward_crossing() {
     r.wait(LAT + 1);
     let e = r.order(Side::Sell, 1, 300).unwrap_err();
     assert!(
-        e.message.ends_with(": what's working already closes it"),
+        e.message
+            .ends_with(": what's working already closes it, or use Close"),
         "{}",
         e.message
     );
@@ -326,7 +327,7 @@ fn a_flatten_or_an_unknown_order_counts_too() {
     assert!(e.message.contains("already working"), "{}", e.message);
 }
 
-/// An Entry (a buy) armed on a short larger than nothing would cross it when it fires, unwatched:
+/// An Entry (a buy) bigger than the short it's armed on would cross it when it fires, unwatched:
 /// refused when armed, while the trader is looking.
 #[test]
 fn an_entry_through_a_short_is_refused_when_armed() {

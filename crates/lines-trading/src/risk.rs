@@ -133,7 +133,7 @@ pub fn through_flat(position: i64, working: i64, side: Side, qty: i64) -> Option
     let instead = if room > 0 {
         format!("use Close, or {word} {room} at most")
     } else {
-        "what's working already closes it".to_owned()
+        "what's working already closes it, or use Close".to_owned()
     };
     Some(format!(
         "{verb} {qty}{with} would turn your {was} {held} into {now} {after}: {instead}"
