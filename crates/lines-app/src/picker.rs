@@ -75,6 +75,39 @@ pub fn heading(entries: &[Entry], hits: &[Hit], query: &str, i: usize) -> Option
     starts.then(|| group.label())
 }
 
+/// One line of the picker's list: a group heading or a result row (an index into the hits).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Line {
+    Heading(&'static str),
+    Row(usize),
+}
+
+/// The lines the list shows: at most `n`, headings counted as lines, always including the
+/// selected row (at the bottom when scrolled down, as before headings), and `n` of them
+/// whenever there are that many, so the list keeps its height as the selection moves.
+pub fn visible_lines(
+    entries: &[Entry],
+    hits: &[Hit],
+    query: &str,
+    selected: usize,
+    n: usize,
+) -> Vec<Line> {
+    let mut lines = Vec::with_capacity(hits.len() + 8);
+    let mut at = 0;
+    for i in 0..hits.len() {
+        if let Some(h) = heading(entries, hits, query, i) {
+            lines.push(Line::Heading(h));
+        }
+        if i == selected {
+            at = lines.len();
+        }
+        lines.push(Line::Row(i));
+    }
+    let start = (at + 1).saturating_sub(n);
+    let end = (start + n).min(lines.len());
+    lines[end.saturating_sub(n)..end].to_vec()
+}
+
 /// The other size of the same index: ES ↔ MES, NQ ↔ MNQ (from the products' micro
 /// equivalence data). `None` for products without one.
 pub fn size_partner(entries: &[Entry], id: ProductId) -> Option<ProductId> {
@@ -554,6 +587,7 @@ mod tests {
         assert_eq!(symbols(&e, "mnq", &none)[0], "MNQ");
         assert_eq!(symbols(&e, "MNQ", &none)[0], "MNQ", "case-insensitive");
         let cbot = symbols(&e, "cbot", &none);
+        assert!(cbot.len() >= 9, "{cbot:?}");
         assert!(
             cbot[..9]
                 .iter()
@@ -869,6 +903,19 @@ mod tests {
         assert_eq!(e[hits[0].index].product.symbol, "GC");
         assert_eq!(heading(&e, &hits, "", 0), None);
         assert_eq!(heading(&e, &hits, "", 1), Some("Equity index"));
+        // The list window keeps its line count (headings included) wherever the selection is,
+        // and always shows the selected row.
+        Searcher::default().search(&e, "", &none, &mut hits);
+        for sel in 0..hits.len() {
+            let v = visible_lines(&e, &hits, "", sel, 10);
+            assert_eq!(v.len(), 10, "selection {sel}");
+            assert!(v.contains(&Line::Row(sel)), "selection {sel}: {v:?}");
+        }
+        let v = visible_lines(&e, &hits, "", 0, 10);
+        assert_eq!(v[0], Line::Heading("Equity index"));
+        assert_eq!(v.iter().filter(|l| matches!(l, Line::Row(_))).count(), 8);
+        let last = hits.len() - 1;
+        assert_eq!(visible_lines(&e, &hits, "", last, 10)[9], Line::Row(last));
         // Searching ranks by match, without headings.
         Searcher::default().search(&e, "nq", &none, &mut hits);
         assert!((0..hits.len()).all(|i| heading(&e, &hits, "nq", i).is_none()));

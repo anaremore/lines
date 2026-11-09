@@ -333,7 +333,8 @@ impl ContractKey {
         }
         let year: u16 = match digits.len() {
             2 => 2000 + digits.parse::<u16>().ok()?,
-            4 => digits.parse().ok()?,
+            // A typed year before 1900 is a mistake, not a contract (and has no calendar).
+            4 => digits.parse().ok().filter(|y| *y >= 1900)?,
             _ => return None,
         };
         match product.kind {
@@ -644,6 +645,9 @@ mod tests {
             "January is not listed for ES"
         );
         assert_eq!(ContractKey::parse_label(&es, "ES"), None);
+        assert_eq!(ContractKey::parse_label(&es, "ESZ0000"), None, "year 0");
+        assert_eq!(ContractKey::parse_label(&es, "ESZ1899"), None);
+        assert!(ContractKey::parse_label(&es, "ESZ1900").is_some());
         assert_eq!(
             ContractKey::parse_label(&es, "ESZ6"),
             None,

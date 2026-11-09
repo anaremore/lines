@@ -21,8 +21,11 @@ use crate::persist::Writer;
 use crate::picker::{self, Picker, Settings};
 use crate::theme::Theme;
 
-/// Result rows shown at once.
+/// Lines shown at once: result rows and group headings.
 const PICKER_ROWS: usize = 10;
+/// Height of one line (a row or a heading), so the list's height doesn't depend on how many
+/// headings are in view.
+const LINE_H: f32 = 28.0;
 const PICKER_W: f32 = 600.0;
 
 /// Recents and favourites for the whole app.
@@ -240,9 +243,38 @@ impl PickerUi {
         let p = self.picker.as_ref()?;
         let t = *theme;
         let settings = settings(cx).clone();
-        let first = p.selected.saturating_sub(PICKER_ROWS - 1);
-        let mut rows = div().flex().flex_col().py_1();
-        for (i, hit) in p.hits.iter().enumerate().skip(first).take(PICKER_ROWS) {
+        // Headings count as lines, and every line is one height, so the list keeps its height
+        // as the selection moves (docs/design.md §7). In a short pane the list gives way first
+        // (clipped), never the query or the hints line.
+        let mut rows = div()
+            .flex()
+            .flex_col()
+            .py_1()
+            .flex_shrink(1.0)
+            .min_h_0()
+            .overflow_hidden();
+        let lines =
+            picker::visible_lines(&self.entries, &p.hits, &p.query, p.selected, PICKER_ROWS);
+        for line in lines {
+            let i = match line {
+                picker::Line::Heading(label) => {
+                    rows = rows.child(
+                        div()
+                            .flex_none()
+                            .h(px(LINE_H))
+                            .flex()
+                            .items_end()
+                            .px_3()
+                            .pb_1()
+                            .text_size(px(11.0))
+                            .text_color(t.text_dim)
+                            .child(label),
+                    );
+                    continue;
+                }
+                picker::Line::Row(i) => i,
+            };
+            let hit = &p.hits[i];
             let e = &self.entries[hit.index];
             let selected = i == p.selected;
             let row = picker::contract_row(&e.product, today, if selected { p.offset } else { 0 });
@@ -281,16 +313,6 @@ impl PickerUi {
                 }
                 (None, None) => {}
             }
-            if let Some(label) = picker::heading(&self.entries, &p.hits, &p.query, i) {
-                rows = rows.child(
-                    div()
-                        .px_3()
-                        .pt_1()
-                        .text_size(px(11.0))
-                        .text_color(t.text_dim)
-                        .child(label),
-                );
-            }
             let star = if settings.is_favourite(e.product.id) {
                 "★"
             } else {
@@ -299,12 +321,13 @@ impl PickerUi {
             rows = rows.child(
                 div()
                     .id(("picker-row", i))
+                    .flex_none()
+                    .h(px(LINE_H))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .py_1()
                     .border_l_2()
                     .border_color(if selected {
                         t.accent
@@ -353,6 +376,7 @@ impl PickerUi {
             div().text_color(t.text_main).child(p.query.clone())
         };
         let hints = div()
+            .flex_none()
             .flex()
             .flex_row()
             .justify_between()
@@ -372,14 +396,17 @@ impl PickerUi {
                 .top(px(24.0))
                 .left_0()
                 .right_0()
+                .bottom_0()
                 .flex()
                 .justify_center()
+                .items_start()
                 .child(
                     div()
                         .id("symbol-picker")
                         .occlude()
                         .w(px(PICKER_W))
                         .max_w_full()
+                        .max_h_full()
                         .flex()
                         .flex_col()
                         .bg(t.panel)
@@ -390,6 +417,7 @@ impl PickerUi {
                         .font_features(self.tnum.clone())
                         .child(
                             div()
+                                .flex_none()
                                 .flex()
                                 .flex_row()
                                 .items_center()

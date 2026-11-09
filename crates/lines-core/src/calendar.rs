@@ -123,8 +123,13 @@ pub fn business_days_before(mut d: CivilDate, n: u32) -> CivilDate {
     d
 }
 
-fn prev_month(y: u16, m: u8) -> (u16, u8) {
-    if m == 1 { (y - 1, 12) } else { (y, m - 1) }
+/// The month before; `None` before year 0 (a key nobody lists, e.g. a typed `CLF0000`).
+fn prev_month(y: u16, m: u8) -> Option<(u16, u8)> {
+    if m == 1 {
+        Some((y.checked_sub(1)?, 12))
+    } else {
+        Some((y, m - 1))
+    }
 }
 
 /// Calendar expiry (last trading day) of a dated contract. `None` for spot or for a key that
@@ -139,7 +144,7 @@ pub fn calendar_expiry(product: &Product, key: ContractKey) -> Option<CivilDate>
         return None;
     }
     let m = month.number();
-    let (py, pm) = prev_month(year, m);
+    let (py, pm) = prev_month(year, m)?;
     Some(match expiry {
         ExpiryRule::ThirdFriday => third_friday(year, m),
         ExpiryRule::SeventhBusinessDayBeforeLastBusinessDay => {
@@ -185,7 +190,7 @@ pub fn calendar_roll_date(product: &Product, key: ContractKey) -> Option<CivilDa
     Some(match roll {
         RollRule::DaysBeforeExpiry(n) => calendar_expiry(product, key)?.add_days(-(n as i64)),
         RollRule::DaysBeforeFirstNotice(n) => {
-            let (py, pm) = prev_month(year, month.number());
+            let (py, pm) = prev_month(year, month.number())?;
             last_business_day(py, pm).add_days(-(n as i64))
         }
     })
@@ -340,6 +345,24 @@ mod tests {
         );
         let gcz6 = ContractKey::monthly(gc.id, 2026, Month::new(12).unwrap());
         assert_eq!(calendar_roll_date(&gc, gcz6), Some(d(2026, 11, 28)));
+    }
+
+    /// January of year 0 has no previous month: no calendar date rather than an underflow.
+    #[test]
+    fn year_zero_has_no_prior_month() {
+        let cl = Product {
+            kind: ProductKind::Future {
+                cycle: MonthCycle::MONTHLY,
+                expiry: ExpiryRule::BusinessDaysBefore25thOfPriorMonth(3),
+                roll: RollRule::DaysBeforeFirstNotice(2),
+            },
+            ..es()
+        };
+        let k = ContractKey::monthly(cl.id, 0, Month::new(1).unwrap());
+        assert_eq!(calendar_expiry(&cl, k), None);
+        assert_eq!(calendar_roll_date(&cl, k), None);
+        let k = ContractKey::monthly(cl.id, 1, Month::new(1).unwrap());
+        assert!(calendar_expiry(&cl, k).is_some());
     }
 
     #[test]
