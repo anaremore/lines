@@ -542,17 +542,21 @@ pub fn contract_name(product: &Product, key: OptionKey, expiry: &str) -> String 
     )
 }
 
-/// The send button: `Buy 1 at 2.41`, `Close 2 at 3.10`.
+/// The send button: `Buy 1 at 2.41`, `Close 2 at 3.10`, and `Sell to open 1 at 2.41` for a sell
+/// that opens or adds to a short (no long position to sell): what it does to the account, as
+/// state, not a hint. `position` is `None` when it isn't known this frame: then it says only Sell.
 pub fn send_label(
     product: &Product,
     side: Side,
     close: bool,
     qty: i64,
     p: Option<Price>,
+    position: Option<i64>,
 ) -> String {
     let word = match (close, side) {
         (true, _) => "Close",
         (false, Side::Buy) => "Buy",
+        (false, Side::Sell) if position.is_some_and(|p| p <= 0) => "Sell to open",
         (false, Side::Sell) => "Sell",
     };
     match p {
@@ -1059,18 +1063,32 @@ mod tests {
         assert_eq!(side_word(Side::Sell), "▼ SELL");
         assert_eq!(contract_name(&p, key(), "Nov 9"), "SPY Nov 9 684 Call");
         assert_eq!(
-            send_label(&p, Side::Buy, false, 1, Some(Price(241))),
+            send_label(&p, Side::Buy, false, 1, Some(Price(241)), Some(0)),
             "Buy 1 at 2.41"
         );
         assert_eq!(
-            send_label(&p, Side::Sell, false, 2, Some(Price(160))),
+            send_label(&p, Side::Sell, false, 2, Some(Price(160)), Some(3)),
             "Sell 2 at 1.60"
         );
         assert_eq!(
-            send_label(&p, Side::Sell, true, 2, Some(Price(310))),
+            send_label(&p, Side::Sell, true, 2, Some(Price(310)), Some(2)),
             "Close 2 at 3.10"
         );
-        assert_eq!(send_label(&p, Side::Buy, false, 1, None), "Buy 1");
+        assert_eq!(send_label(&p, Side::Buy, false, 1, None, Some(0)), "Buy 1");
+        // A sell with no long to sell opens a short, and says so.
+        assert_eq!(
+            send_label(&p, Side::Sell, false, 1, Some(Price(241)), Some(0)),
+            "Sell to open 1 at 2.41"
+        );
+        assert_eq!(
+            send_label(&p, Side::Sell, false, 1, Some(Price(241)), Some(-2)),
+            "Sell to open 1 at 2.41"
+        );
+        // Not known this frame: never a claim it can't back.
+        assert_eq!(
+            send_label(&p, Side::Sell, false, 1, Some(Price(241)), None),
+            "Sell 1 at 2.41"
+        );
         // The multiplier, exact: 2.41 × 100 × 3.
         assert_eq!(
             premium(&p, contract(), 3, Price(241)),

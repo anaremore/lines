@@ -209,17 +209,17 @@ impl TradingCore {
                         "the max price isn't on the option's tick grid",
                     ));
                 }
-                // A lockout now refuses it now; it's asked again when it fires.
-                self.check_guardrails(
-                    now,
-                    &OrderSpec {
-                        account: spec.account.clone(),
-                        contract: spec.contract,
-                        side: crate::types::Side::Buy,
-                        qty,
-                        kind: OrderKind::Limit { price: max_price },
-                    },
-                )?;
+                // A lockout now refuses it now; it's asked again when it fires. So does a buy
+                // through a short to a long, while the trader is looking.
+                let buy = OrderSpec {
+                    account: spec.account.clone(),
+                    contract: spec.contract,
+                    side: crate::types::Side::Buy,
+                    qty,
+                    kind: OrderKind::Limit { price: max_price },
+                };
+                self.check_guardrails(now, &buy)?;
+                self.check_option_through_flat(&buy)?;
                 // Which way it fires comes from where the underlying is, so it has to be known.
                 let Some(last) = fresh_last else {
                     return Err(Reject::new(
@@ -721,6 +721,14 @@ impl TradingCore {
             }
             let e = self.triggers.entries.remove(i);
             if !working {
+                // The broker rejected it: nobody watches a ticket for a fired Entry, so its row
+                // says so, in the broker's words.
+                if let Some(OrderState::Rejected { reason }) = order.map(|o| &o.state) {
+                    let mut view = e.view;
+                    view.reason =
+                        Some(format!("the broker rejected order {}: {reason}", e.order.0));
+                    self.events.push(Event::Trigger(view));
+                }
                 continue;
             }
             let (filled, qty) = order.map_or((0, 0), |o| (o.filled.0, o.qty.0));
@@ -916,6 +924,18 @@ impl TradingCore {
         }
     }
 
+    /// The broker's own words when it rejected this trigger's last order: nobody watches a ticket
+    /// for a fired trigger, so its row says it.
+    fn trigger_rejected(&self, id: TriggerId) -> Option<String> {
+        let order = self.triggers.live.get(&id)?.order?;
+        match &self.orders.get(&order)?.state {
+            OrderState::Rejected { reason } => {
+                Some(format!("the broker rejected order {}: {reason}", order.0))
+            }
+            _ => None,
+        }
+    }
+
     /// A fired exit's next move. It always closes what the position is now.
     fn trigger_step_exit(&mut self, now: UtcMillis, id: TriggerId) {
         let Some(l) = self.triggers.live.get(&id) else {
@@ -957,18 +977,19 @@ impl TradingCore {
                     self.trigger_note(id, Some(format!("no usable {side_word}: waiting to exit")));
                     return;
                 }
-                // The broker couldn't fill on this quote: a new one, not a loop.
+                // The broker couldn't fill on this quote, or rejected it: a new one, not a loop.
+                let rejected = self.trigger_rejected(id);
                 let tried = self.triggers.live.get(&id).and_then(|l| l.tried);
                 if tried.is_some() && tried == mark.quoted_at {
-                    self.trigger_note(
-                        id,
-                        Some(format!(
-                            "the {side_word} couldn't fill it: waiting for a new quote"
-                        )),
+                    let why = rejected.as_deref().map_or_else(
+                        || format!("the {side_word} couldn't fill it"),
+                        str::to_owned,
                     );
+                    self.trigger_note(id, Some(format!("{why}: waiting for a new quote")));
                     return;
                 }
-                self.trigger_note(id, None);
+                // Tried again, the rejection stays said until something else is.
+                self.trigger_note(id, rejected.map(|r| format!("{r}: trying again")));
                 if let Some(l) = self.triggers.live.get_mut(&id) {
                     l.tried = mark.quoted_at;
                 }
@@ -1018,7 +1039,12 @@ impl TradingCore {
             Some(l) => (l.order, l.next_try, l.next_try == UtcMillis(i64::MIN)),
             None => return,
         };
+        let rejected = self.trigger_rejected(id);
         if now < due {
+            // A rejection says so at once, not at the next chase.
+            if let Some(r) = &rejected {
+                self.trigger_note(id, Some(format!("{r}: trying again")));
+            }
             return;
         }
         let open = order
@@ -1072,7 +1098,10 @@ impl TradingCore {
                 if let (Some(o), Some(l)) = (ids.first(), self.triggers.live.get_mut(&id)) {
                     l.order = Some(*o);
                 }
-                None
+                // Placed again after a rejection: the broker's words stay until it answers.
+                rejected
+                    .filter(|_| !ids.is_empty())
+                    .map(|r| format!("{r}: trying again"))
             }
             Err(r) => Some(r.message),
         };

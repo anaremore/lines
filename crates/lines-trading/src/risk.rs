@@ -107,6 +107,39 @@ pub const DEFAULT_TARGET_CHASE_MS: i64 = 3_000;
 /// then, and a fill long after would be on a move that failed.
 pub const DEFAULT_ENTRY_FILL_MS: i64 = 10_000;
 
+/// Why an order would take a position through flat to the other side (`None`: it doesn't). One
+/// definition, for the core's refusal and the ticket's: `working` is everything already working on
+/// the order's side, exits included (one filling first would leave this one to open the other
+/// side).
+pub fn through_flat(position: i64, working: i64, side: Side, qty: i64) -> Option<String> {
+    if position == 0 || side.sign() == position.signum() {
+        return None;
+    }
+    let held = position.abs();
+    let after = working + qty - held;
+    if after <= 0 {
+        return None;
+    }
+    let (verb, word, was, now) = match side {
+        Side::Sell => ("selling", "sell", "long", "short"),
+        Side::Buy => ("buying", "buy", "short", "long"),
+    };
+    let with = if working > 0 {
+        format!(" with the {working} already working")
+    } else {
+        String::new()
+    };
+    let room = held - working;
+    let instead = if room > 0 {
+        format!("use Close, or {word} {room} at most")
+    } else {
+        "what's working already closes it, or use Close".to_owned()
+    };
+    Some(format!(
+        "{verb} {qty}{with} would turn your {was} {held} into {now} {after}: {instead}"
+    ))
+}
+
 /// An option's quote as the guard sees it.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct OptionQuoteView {
