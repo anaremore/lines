@@ -939,7 +939,8 @@ impl DomView {
         // Not while the pointer rests on the ladder: a column narrowing as a size changes would
         // slide Ask under it, and the next press would sell. A wider number waits, cut, until the
         // pointer leaves.
-        let hovered = window.is_window_hovered() && bounds.contains(&window.mouse_position());
+        let hovered =
+            !self.frozen && window.is_window_hovered() && bounds.contains(&window.mouse_position());
         let measure = measures_columns(hovered, self.cols_measured);
         self.cols_measured |= measure;
         if measure {

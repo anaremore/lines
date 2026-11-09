@@ -553,7 +553,8 @@ mod tests {
         let now = std::time::Instant::now();
         let later = now + FIRST_PRESS_AGE + std::time::Duration::from_millis(1);
         for exit in [false, true] {
-            // Double-click on a control: both presses act, as a click twice does.
+            // Double-click on a control: both presses act, as a click twice does. For an exit
+            // that sends one order: the core places no second Flatten while the first is open.
             let mut first = None;
             assert!(
                 !refuse_press(&mut first, 1, spot, now, exit),

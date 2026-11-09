@@ -243,6 +243,13 @@ impl PaneTrade {
         self.local_flash_label = "NOT SENT";
     }
 
+    /// The press a notice asked for has come: it no longer applies.
+    fn clear_notice(&mut self) {
+        if self.local_flash_label == "NOTICE" {
+            self.local_flash = None;
+        }
+    }
+
     /// A brief message about the panel itself, with no order involved.
     fn notice(&mut self, msg: impl Into<String>) {
         self.local_flash = Some((msg.into(), Instant::now()));
@@ -2170,6 +2177,9 @@ fn run_on_click<V: TradePane>(
                     cx.notify();
                 }
                 return;
+            }
+            if exit {
+                v.trade().clear_notice();
             }
             if matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll) {
                 // Drawn over an open popover's backdrop (`popover::always_live`): it closes.
