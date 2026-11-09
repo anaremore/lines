@@ -83,6 +83,7 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 # Screenshot mode (decision 0009). Replays at full speed to --at, renders off-screen, writes PNG, exits.
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
+# --shift-drag X0,Y0:X1,Y1 replays a Shift+drag on the first chart (plot-local px, as --cursor), released: the measure it leaves.
 # --drag-position Y previews the position line dragged to plot-local Y (the stop or target it would set, with its P&L; nothing is placed).
 # --order-controls shows the first single-order mark's and tag's − / size / +, as if hovered.
 # --order-size N starts every symbol at that order size; --max-order-qty N sets the paper accounts' largest allowed order (a larger size shows "max N").

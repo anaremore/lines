@@ -442,6 +442,10 @@ struct Cli {
     /// would set, with its P&L (a preview; nothing is placed).
     #[arg(long, requires = "screenshot")]
     drag_position: Option<f32>,
+    /// Screenshot: a Shift+drag on the first chart from X0,Y0 to X1,Y1 (plot-local logical
+    /// px, as --cursor), released: the measure it leaves.
+    #[arg(long, requires = "screenshot", value_parser = parse_drag)]
+    shift_drag: Option<((f32, f32), (f32, f32))>,
     /// Screenshot: zoom the auto-fitted price range by this factor around the plot's center
     /// (as Ctrl+wheel would), which switches the price axis to manual scale.
     #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
@@ -800,6 +804,12 @@ fn parse_zoom(s: &str) -> Result<f64, String> {
         Ok(f) if f.is_finite() && f > 0.0 => Ok(f),
         _ => Err("expected a positive factor, e.g. 1.5 (>1 zooms in)".into()),
     }
+}
+
+/// `X0,Y0:X1,Y1` (`--shift-drag`).
+fn parse_drag(s: &str) -> Result<((f32, f32), (f32, f32)), String> {
+    let (a, b) = s.split_once(':').ok_or("expected X0,Y0:X1,Y1")?;
+    Ok((parse_point(a)?, parse_point(b)?))
 }
 
 fn parse_point(s: &str) -> Result<(f32, f32), String> {
@@ -1419,6 +1429,7 @@ where
             tick_continuous: cli.tick_continuous,
             cursor: cli.cursor,
             drag_position: cli.drag_position,
+            shift_drag: cli.shift_drag,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),
             indicators: cli

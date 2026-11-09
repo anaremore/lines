@@ -79,6 +79,11 @@ pub struct ChartDrawings {
     dragged: Option<Drawing>,
     /// The temporary measure (pinned with Enter).
     measure: Option<(Anchor, Anchor)>,
+    /// A Shift+drag measure in progress: the measure tool and its first anchor are set for
+    /// this press only, and the release ends it (`quick_down`).
+    quick: bool,
+    /// The pointer's last anchor during a Shift+drag (a release off the plot ends there).
+    quick_at: Option<Anchor>,
     /// A note being typed at an anchor.
     note: Option<(Anchor, String)>,
     /// Each tool's style for new drawings (the saved defaults; the restyle keys change them
@@ -113,6 +118,8 @@ impl ChartDrawings {
             drag: None,
             dragged: None,
             measure: None,
+            quick: false,
+            quick_at: None,
             note: None,
             defaults: [Style::DEFAULT; Tool::ALL.len()],
             editor: None,
@@ -162,6 +169,7 @@ impl ChartDrawings {
 
     /// Choose a tool (again: leave drawing mode).
     pub fn set_tool(&mut self, tool: Tool) {
+        self.end_quick();
         self.pending = None;
         self.note = None;
         self.measure = None;
@@ -395,12 +403,54 @@ impl ChartDrawings {
     /// pointer): a drag in progress is dropped, the drawing stays as it was.
     pub fn release_lost(&mut self) -> bool {
         self.dragged = None;
-        self.drag.take().is_some()
+        // A Shift+drag whose release was missed ends where the pointer last was.
+        let quick = self.quick;
+        if quick {
+            let first = self.pending.map(|(a, _)| a);
+            self.end_quick();
+            self.measure = first.zip(self.quick_at.take()).filter(|(a, b)| a != b);
+        }
+        self.drag.take().is_some() || quick
+    }
+
+    fn end_quick(&mut self) {
+        if self.quick {
+            self.quick = false;
+            self.tool = None;
+            self.pending = None;
+        }
+        self.quick_at = None;
+    }
+
+    /// Shift+press at plot-local (`x`, `y`) on empty plot: a measure from here, ended by the
+    /// release (no tool to pick first; Alt+U and two clicks stay). The chart calls it only
+    /// when no order line, tag or handle, and no drawing, is under the press, and with no
+    /// tool chosen. False (the chart pans) with no bars to anchor to.
+    pub fn quick_down(&mut self, x: f32, y: f32, anchor: Option<Anchor>) -> bool {
+        if self.tool.is_some() || self.drag.is_some() {
+            return false;
+        }
+        let Some(at) = anchor else {
+            return false;
+        };
+        if self.note.is_some() {
+            self.commit_note();
+        }
+        self.hidden = false;
+        self.selected = None;
+        self.measure = None;
+        self.tool = Some(Tool::Measure);
+        self.pending = Some((at, (x, y)));
+        self.quick = true;
+        self.quick_at = Some(at);
+        true
     }
 
     /// Esc: cancel the tool, then the measure, then the selection.
     pub fn cancel(&mut self) -> bool {
         if self.tool.is_some() || self.pending.is_some() || self.note.is_some() {
+            self.quick = false;
+            self.quick_at = None;
             self.tool = None;
             self.pending = None;
             self.note = None;
@@ -482,6 +532,21 @@ impl ChartDrawings {
 
     /// The press ended at plot-local (`x`, `y`). Returns whether it was the drawings'.
     pub fn on_up(&mut self, x: f32, y: f32, anchor: Option<Anchor>) -> bool {
+        if self.quick {
+            // The Shift+drag ends here: a measure if it moved (off the plot: where the pointer
+            // last was on it); a Shift+click leaves nothing.
+            let Some((first, at)) = self.pending else {
+                self.end_quick();
+                return true;
+            };
+            let moved = (x - at.0).abs().max((y - at.1).abs()) > CLICK_SLOP;
+            let end = anchor.or(self.quick_at);
+            self.end_quick();
+            if moved && let Some(b) = end {
+                self.measure = Some((first, b));
+            }
+            return true;
+        }
         if let (Some(tool), Some((first, at))) = (self.tool, self.pending) {
             // Press-drag-release draws too (a click leaves the first anchor waiting).
             let moved = (x - at.0).abs().max((y - at.1).abs()) > CLICK_SLOP;
@@ -714,6 +779,9 @@ impl ChartDrawings {
             }
         }
         drop(set);
+        if self.quick && pointer.is_some() {
+            self.quick_at = pointer;
+        }
         if let (Some(tool), Some((first, _)), Some(at)) = (self.tool, self.pending, pointer) {
             let d = Drawing::new(tool, first, at, self.default_style(tool));
             self.preview = project(&d, axis, vp);
