@@ -5367,7 +5367,7 @@ impl ChainView {
     }
 
     /// What the footer reports: a message, or a state that changes what a click does or what shows.
-    /// No hints: the app's own hint bar carries those.
+    /// No hints in the pane (the owner's no-clutter rule).
     fn footer_text(&self, size: i64) -> Option<String> {
         footer_state(
             self.note.as_deref(),
