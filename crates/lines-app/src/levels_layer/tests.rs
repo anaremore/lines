@@ -218,3 +218,201 @@ fn legend_reason_does_not_repeat_the_source_name() {
         "no panic on short or non-ASCII"
     );
 }
+
+/// A source whose products are learned at run time (from its service): it serves nothing
+/// until told otherwise.
+struct LateServing;
+
+static LATE_SERVES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct NoFrames;
+
+impl lines_feed::levels::LevelTransport for NoFrames {
+    fn fetch(
+        &mut self,
+    ) -> lines_feed::levels::BoxFuture<'_, anyhow::Result<Vec<lines_feed::levels::LevelFrame>>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+impl lines_feed::levels::LevelSource for LateServing {
+    fn id(&self) -> &'static str {
+        "late-serving"
+    }
+    fn label(&self) -> &'static str {
+        "Late"
+    }
+    fn serves(&self, _: &Product) -> bool {
+        LATE_SERVES.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn refresh(&self) -> lines_feed::levels::RefreshMode {
+        lines_feed::levels::RefreshMode::OneShot
+    }
+    fn stale_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(60)
+    }
+    fn connect(
+        &self,
+        _: &LevelContext,
+    ) -> lines_feed::levels::BoxFuture<
+        'static,
+        anyhow::Result<Box<dyn lines_feed::levels::LevelTransport>>,
+    > {
+        Box::pin(async { Ok(Box::new(NoFrames) as Box<dyn lines_feed::levels::LevelTransport>) })
+    }
+    fn decode(
+        &self,
+        _: &LevelContext,
+        _: &dyn lines_feed::levels::ChartPrices,
+        _: Option<&LevelMap>,
+        _: &[lines_feed::levels::LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        Ok(None)
+    }
+}
+
+/// Puts `LateServing` back to serving nothing (and tells charts) however the test ends, so a
+/// failure can't leave it on other tests' charts. (Sources can't be unregistered; one that
+/// serves nothing has no slot anywhere.)
+struct LateGuard;
+
+impl Drop for LateGuard {
+    fn drop(&mut self) {
+        LATE_SERVES.store(false, std::sync::atomic::Ordering::Release);
+        lines_feed::levels::serving_changed();
+    }
+}
+
+/// A source that doesn't serve the chart's product has no slot: nothing drawn, no legend or
+/// menu row. When its answer changes (`levels::serving_changed`), the next snapshot joins it,
+/// and drops it again when it stops serving, without a feed change. A source still serving
+/// keeps its slot through it: the same map, never "missing" for a frame.
+#[test]
+fn sources_join_and_leave_when_their_serving_changes() {
+    use std::sync::atomic::Ordering;
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _reset = LateGuard;
+    LATE_SERVES.store(false, Ordering::Release);
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    lines_feed::levels::register(Arc::new(LateServing)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let has_late = |layer: &LevelsLayer| {
+        let menu = layer.sources().iter().any(|(id, ..)| id == "late-serving");
+        let legend = layer.legend().iter().any(|r| r.label == "Late");
+        assert_eq!(menu, legend, "menu and legend agree");
+        menu
+    };
+    let demo = |layer: &LevelsLayer| {
+        let i = layer
+            .sources()
+            .iter()
+            .position(|(id, ..)| id == "demo")
+            .expect("demo serves ES");
+        let map = layer.map(i).cloned().expect("demo map");
+        assert_ne!(layer.legend()[i].text, "missing");
+        map
+    };
+    layer.snapshot(None);
+    assert!(!has_late(&layer), "not served: no row at all");
+    let demo_map = demo(&layer);
+
+    let before = layer.revision();
+    LATE_SERVES.store(true, Ordering::Release);
+    lines_feed::levels::serving_changed();
+    assert_ne!(layer.revision(), before, "the chart repaints");
+    layer.snapshot(None);
+    assert!(has_late(&layer), "joined without a feed change");
+    assert!(Arc::ptr_eq(&demo(&layer), &demo_map), "demo kept its slot");
+
+    LATE_SERVES.store(false, Ordering::Release);
+    lines_feed::levels::serving_changed();
+    layer.snapshot(None);
+    assert!(!has_late(&layer), "left again");
+    assert!(Arc::ptr_eq(&demo(&layer), &demo_map), "demo kept its slot");
+}
+
+/// Re-attaching to the same market (a link group, a `set_feed` to the same store) joins the
+/// running tasks: the same map, never "missing", no refetch.
+#[test]
+fn reattaching_to_the_same_market_keeps_the_map() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let demo = |layer: &LevelsLayer| {
+        let i = layer
+            .sources()
+            .iter()
+            .position(|(id, ..)| id == "demo")
+            .expect("demo serves ES");
+        let map = layer.map(i).cloned();
+        let text = layer.legend()[i].text.clone();
+        (map, text)
+    };
+    layer.snapshot(None);
+    let (map, text) = demo(&layer);
+    let map = map.expect("demo map");
+    assert_ne!(text, "missing");
+    layer.attach(&store);
+    // Before any new snapshot the slot is the old one, map included.
+    let (again, text) = demo(&layer);
+    assert!(again.is_some_and(|m| Arc::ptr_eq(&m, &map)));
+    assert_ne!(text, "missing");
+    layer.snapshot(None);
+    let (again, text) = demo(&layer);
+    assert!(again.is_some_and(|m| Arc::ptr_eq(&m, &map)), "same task");
+    assert_ne!(text, "missing");
+}
+
+/// An option chart has no level sources (decision 0028 puts options on the underlying's
+/// product: its levels are in another market's prices): no slot, no legend row, no error.
+/// The underlying's own chart still gets them.
+#[test]
+fn option_charts_get_no_level_sources() {
+    use lines_core::{CivilDate, Right};
+    use std::sync::atomic::Ordering;
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _reset = LateGuard;
+    LATE_SERVES.store(true, Ordering::Release); // serves every product
+    lines_feed::levels::register(Arc::new(LateServing)).unwrap();
+    let spy = catalog::get(catalog::SPY).unwrap();
+    let store_for = |contract: ContractKey| {
+        Arc::new(ChartStore::new(
+            spy.clone(),
+            Some(contract),
+            Capabilities::default(),
+            "test",
+            60_000,
+            1000,
+        ))
+    };
+    let option = ContractKey::option(
+        catalog::SPY,
+        CivilDate::new(2026, 12, 18).unwrap(),
+        Price(60_000),
+        Right::Call,
+    );
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store_for(option));
+    layer.snapshot(None);
+    assert!(layer.sources().is_empty(), "no slot on an option chart");
+    assert!(layer.legend().is_empty(), "no legend row");
+    // Even after a serving change.
+    lines_feed::levels::serving_changed();
+    layer.snapshot(None);
+    assert!(layer.sources().is_empty());
+    // The shares chart does.
+    layer.attach(&store_for(ContractKey::equity(catalog::SPY)));
+    layer.snapshot(None);
+    assert!(layer.sources().iter().any(|(id, ..)| id == "late-serving"));
+}
