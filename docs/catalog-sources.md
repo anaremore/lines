@@ -24,9 +24,9 @@ is `tick × unit × point value` exactly (`catalog::tests::cme_tick_values_are_e
 | MYM | 8 | CBOT | 1 | 1 | $0.50 | $0.50 | decimal | HMUZ | 3rd Friday | 8 days before | 08:30–15:00 | cme-equity-index |
 | M2K | 9 | CME | 0.01 | 0.10 | $5 | $0.50 | decimal | HMUZ | 3rd Friday | 8 days before | 08:30–15:00 | cme-equity-index |
 | ZT | 12 | CBOT | 1/256 | 1/8 of 1/32 | $2,000 | $7.8125 | 32nds + eighths (`110'033`) | HMUZ | last business day of the month | 2 days before first notice | 07:20–14:00 | cbot-treasury |
-| ZF | 11 | CBOT | 1/256 | 1/4 of 1/32 | $1,000 | $7.8125 | 32nds + quarters (`108'077`) | HMUZ | last business day of the month | 2 days before first notice | 07:20–14:00 | cbot-treasury |
+| ZF | 11 | CBOT | 1/256 | 1/4 of 1/32 | $1,000 | $7.8125 | 32nds + eighths (`108'077`, `108'078`) | HMUZ | last business day of the month | 2 days before first notice | 07:20–14:00 | cbot-treasury |
 | ZN | 3 | CBOT | 1/128 | 1/2 of 1/32 | $1,000 | $15.625 | 32nds + quarters (`112'165`) | HMUZ | 7th business day before the last | 2 days before first notice | 07:20–14:00 | cbot-treasury |
-| ZB | 10 | CBOT | 1/128 | 1/32 | $1,000 | $31.25 | 32nds (`117'31`) | HMUZ | 7th business day before the last | 2 days before first notice | 07:20–14:00 | cbot-treasury |
+| ZB | 10 | CBOT | 1/32 | 1/32 | $1,000 | $31.25 | 32nds (`117'31`) | HMUZ | 7th business day before the last | 2 days before first notice | 07:20–14:00 | cbot-treasury |
 | CL | 13 | NYMEX | 0.01 | 0.01 | $1,000 | $10.00 | decimal | monthly | 3 business days before the 25th of the prior month* | 5 days before last trade | 08:00–13:30 | cme-energy-metals |
 | MCL | 14 | NYMEX | 0.01 | 0.01 | $100 | $1.00 | decimal | monthly | 1 business day before CL's | 5 days before last trade | 08:00–13:30 | cme-energy-metals |
 | NG | 15 | NYMEX | 0.001 | 0.001 | $10,000 | $10.00 | decimal | monthly | 3rd last business day of the prior month | 5 days before last trade | 08:00–13:30 | cme-energy-metals |

@@ -26,6 +26,10 @@ const PICKER_ROWS: usize = 10;
 /// Height of one line (a row or a heading), so the list's height doesn't depend on how many
 /// headings are in view.
 const LINE_H: f32 = 28.0;
+/// The symbol column: one line wide enough for the longest catalog symbol (`BTC-PERP.KR`,
+/// 11 characters, about 84 px in 13 px semibold), the row's 8 px gap after it. A longer one
+/// ends in "…" rather than wrapping.
+const SYMBOL_W: f32 = 92.0;
 const PICKER_W: f32 = 600.0;
 
 /// Recents and favourites for the whole app.
@@ -252,7 +256,12 @@ impl PickerUi {
             .py_1()
             .flex_shrink(1.0)
             .min_h_0()
-            .overflow_hidden();
+            .overflow_hidden()
+            // A full list reserves all its lines, so a window shown one short (it won't end
+            // on a heading with no row) keeps the same height.
+            .when(p.hits.len() >= PICKER_ROWS, |d| {
+                d.h(px(PICKER_ROWS as f32 * LINE_H + 8.0))
+            });
         let lines =
             picker::visible_lines(&self.entries, &p.hits, &p.query, p.selected, PICKER_ROWS);
         for line in lines {
@@ -287,7 +296,13 @@ impl PickerUi {
             } else {
                 t.text_main
             };
-            let mut right = div().flex().flex_row().gap_2().text_color(t.text_dim);
+            let mut right = div()
+                .flex_none()
+                .whitespace_nowrap()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .text_color(t.text_dim);
             match (&unavailable, &row) {
                 (Some(reason), _) => right = right.child(reason.clone()),
                 (None, Some(r)) => {
@@ -338,7 +353,9 @@ impl PickerUi {
                     .child(div().w(px(12.0)).text_color(t.text_dim).child(star))
                     .child(
                         div()
-                            .w(px(64.0))
+                            .flex_none()
+                            .w(px(SYMBOL_W))
+                            .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
                             .child(e.product.symbol),
@@ -346,7 +363,8 @@ impl PickerUi {
                     .child(
                         div()
                             .flex_1()
-                            .overflow_hidden()
+                            .min_w_0()
+                            .truncate()
                             .text_color(t.text_dim)
                             .child(format!("{}  ·  {}", e.product.description, e.exchange)),
                     )

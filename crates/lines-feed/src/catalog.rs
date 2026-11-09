@@ -317,12 +317,13 @@ pub fn all() -> [Product; 33] {
             ZF,
             "ZF",
             "5-Year T-Note",
-            // Tick 1/4 of a 32nd; unit 1/256 keeps eighth-32nd spread prices exact.
+            // Tick 1/4 of a 32nd; unit 1/256 keeps eighth-32nd spread prices exact, and the
+            // display shows eighths so none is truncated (a quarter reads as CME's: `'077`).
             treasury_price(
                 256,
                 DisplayStyle::SubFraction {
                     denominator: 32,
-                    sub: 4,
+                    sub: 8,
                 },
                 2,
             ),
@@ -351,8 +352,10 @@ pub fn all() -> [Product; 33] {
             ZB,
             "ZB",
             "30-Year T-Bond",
-            // Tick 1/32; unit 1/128 as ZN's (a finer value shows truncated to its 32nd).
-            treasury_price(128, DisplayStyle::Fraction { denominator: 32 }, 4),
+            // Unit = tick = 1/32, shown in plain 32nds as CME quotes it. A finer unit would need
+            // a sub-digit on every price (or truncate one); a value finer than 1/32 from a
+            // provider is counted, never rounded.
+            treasury_price(32, DisplayStyle::Fraction { denominator: 32 }, 1),
             usd(1000),
             treasury(ExpiryRule::SeventhBusinessDayBeforeLastBusinessDay),
             None,
@@ -892,8 +895,13 @@ mod tests {
             "108'077",
             "7 3/4 32nds"
         );
+        assert_eq!(
+            f(ZF, 108 * 256 + 7 * 8 + 7).as_str(),
+            "108'078",
+            "7 7/8 32nds (a spread price), not truncated"
+        );
         assert_eq!(f(ZN, 112 * 128 + 16 * 4 + 2).as_str(), "112'165");
-        assert_eq!(f(ZB, 117 * 128 + 31 * 4).as_str(), "117'31");
+        assert_eq!(f(ZB, 117 * 32 + 31).as_str(), "117'31");
         assert_eq!(f(ZC, 432 * 8 + 2).as_str(), "432'2", "432 1/4 cents");
         assert_eq!(f(ZS, 1050 * 8 + 6).as_str(), "1050'6");
         assert_eq!(f(JAPANESE_YEN, 65_455).as_str(), "0.0065455");

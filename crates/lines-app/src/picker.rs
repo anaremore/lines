@@ -83,8 +83,9 @@ pub enum Line {
 }
 
 /// The lines the list shows: at most `n`, headings counted as lines, always including the
-/// selected row (at the bottom when scrolled down, as before headings), and `n` of them
-/// whenever there are that many, so the list keeps its height as the selection moves.
+/// selected row (at the bottom when scrolled down, as before headings). It never ends on a
+/// heading with no row under it: that heading gives way to one more line above, or, at the top
+/// of the list, to nothing (the view reserves the height of `n` lines, so it stays put).
 pub fn visible_lines(
     entries: &[Entry],
     hits: &[Hit],
@@ -105,7 +106,13 @@ pub fn visible_lines(
     }
     let start = (at + 1).saturating_sub(n);
     let end = (start + n).min(lines.len());
-    lines[end.saturating_sub(n)..end].to_vec()
+    let mut start = end.saturating_sub(n);
+    let mut end = end;
+    if end > start && matches!(lines[end - 1], Line::Heading(_)) {
+        end -= 1;
+        start = start.saturating_sub(1);
+    }
+    lines[start..end].to_vec()
 }
 
 /// The other size of the same index: ES ↔ MES, NQ ↔ MNQ (from the products' micro
@@ -908,11 +915,17 @@ mod tests {
         Searcher::default().search(&e, "", &none, &mut hits);
         for sel in 0..hits.len() {
             let v = visible_lines(&e, &hits, "", sel, 10);
-            assert_eq!(v.len(), 10, "selection {sel}");
+            assert!(v.len() == 10 || (v.len() == 9 && v[0] == Line::Heading("Equity index")));
             assert!(v.contains(&Line::Row(sel)), "selection {sel}: {v:?}");
+            assert!(
+                matches!(v.last(), Some(Line::Row(_))),
+                "ends on a row: {v:?}"
+            );
         }
+        // The top: "Equity index" and its 8 rows, not a lone "Rates" heading under them.
         let v = visible_lines(&e, &hits, "", 0, 10);
         assert_eq!(v[0], Line::Heading("Equity index"));
+        assert_eq!(v.len(), 9);
         assert_eq!(v.iter().filter(|l| matches!(l, Line::Row(_))).count(), 8);
         let last = hits.len() - 1;
         assert_eq!(visible_lines(&e, &hits, "", last, 10)[9], Line::Row(last));
