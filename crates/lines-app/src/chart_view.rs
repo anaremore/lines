@@ -6384,8 +6384,7 @@ fn prepare_studies(
         l.prepare(d, bars, vp);
     }
     studies.prepare(bars, vp, max_columns);
-    let last_y = d.last_trade.map(|p| vp.price_to_y(p.0 as f64) as f32);
-    levels.prepare(d, bars, vp, last_y);
+    levels.prepare(d, bars, vp);
 }
 
 /// Where a measure's readout goes (plot-local top-left): on the far side of the measured

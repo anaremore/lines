@@ -15,8 +15,9 @@
 //!   state. Labels are shaped once per distinct text (a cache miss allocates).
 //! - Freshness (docs/design.md §7): a **stale** map is drawn dimmed and says so in the legend;
 //!   a **missing** one draws nothing and says "missing". Never shown as current.
-//! - Labels never cover the last-price row: they move off it (`place_labels`); the last-price
-//!   line and tag are drawn after every layer.
+//! - Labels stay on their own levels (`place_labels`): the price never moves them, the
+//!   last-price line and tag are drawn over them (after every layer), and only labels that
+//!   overlap each other give way, with hysteresis so the layout doesn't flicker.
 //! - Per pane ([`LevelsConfig`], saved with the workspace): all levels, per source, per kind,
 //!   and labels. The chart's study visibility applies on top: "hide studies" hides levels,
 //!   "hide study labels" and Clean chart hide their labels and legend rows.
@@ -144,6 +145,9 @@ struct Slot {
     texts: Vec<Option<String>>,
     /// Bumped whenever the looks above change (the zone scale's cache key).
     rev: u64,
+    /// Which levels' labels showed last frame (by level index; `place_labels`' hysteresis),
+    /// sized with the map.
+    shown_labels: Vec<bool>,
     /// What its zone fills are scaled by under the candles (`zone_scale`) for (theme, map,
     /// looks): computed when one of them changes, not every frame.
     zone_scale: Cell<Option<ZoneScale>>,
@@ -425,6 +429,7 @@ impl LevelsLayer {
                     kind_looks: [None; MAX_KINDS],
                     texts: Vec::new(),
                     rev: 0,
+                    shown_labels: Vec::new(),
                     handle,
                     label,
                     map: None,
@@ -539,19 +544,17 @@ impl LevelsLayer {
             }
             if fresh {
                 s.refresh(styles, &price);
+                // A new map: its levels' labels start from scratch.
+                let n = s.map.as_ref().map_or(0, |m| m.levels.len());
+                s.shown_labels.clear();
+                s.shown_labels.resize(n, false);
             }
         }
     }
 
-    /// Under the store lock, after the viewport update. `last_y`: the last price's row.
-    /// Draws from this frame's [`Self::snapshot`] (never re-reads the sources).
-    pub fn prepare(
-        &mut self,
-        data: &ChartData,
-        bars: BarsView<'_>,
-        vp: &Viewport,
-        last_y: Option<f32>,
-    ) {
+    /// Under the store lock, after the viewport update. Draws from this frame's
+    /// [`Self::snapshot`] (never re-reads the sources).
+    pub fn prepare(&mut self, data: &ChartData, bars: BarsView<'_>, vp: &Viewport) {
         let plot_h = vp.height as f32;
         if data.market_time.is_some() {
             self.clock = data.market_time;
@@ -607,7 +610,13 @@ impl LevelsLayer {
             }
             s.kinds = mask;
             place(map, vp, vwap_now, |k| mask & (1 << k) != 0, &mut s.placed);
-            place_labels(&mut s.placed, map, LABEL_PX * 1.6, plot_h, last_y);
+            place_labels(
+                &mut s.placed,
+                map,
+                LABEL_PX * 1.6,
+                plot_h,
+                &mut s.shown_labels,
+            );
         }
     }
 

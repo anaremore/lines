@@ -96,7 +96,6 @@ fn legend_and_levels_describe_the_same_frame() {
         &d,
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
-        None,
     );
     assert_eq!(
         rows[i].text, "as of 13:00 UTC",
@@ -111,7 +110,6 @@ fn legend_and_levels_describe_the_same_frame() {
         &d,
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
-        None,
     );
     assert_eq!(layer.legend()[i].text, "missing");
     assert_eq!(layer.placed_per_source()[i], 0, "missing: nothing drawn");
@@ -121,7 +119,6 @@ fn legend_and_levels_describe_the_same_frame() {
         &d,
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
-        None,
     );
     assert_eq!(layer.legend()[i].text, "as of 13:00 UTC");
     assert!(layer.placed_per_source()[i] > 0);
@@ -145,11 +142,11 @@ fn layer_places_filters_and_reports_freshness() {
         .position(|(id, ..)| id == "demo")
         .expect("demo serves ES");
     // One frame: snapshot (render), then prepare (paint).
-    let prepare = |layer: &mut LevelsLayer, last_y: Option<f32>| {
+    let prepare = |layer: &mut LevelsLayer, _: Option<f32>| {
         let d = store.read();
         layer.snapshot(d.market_time);
         let bars = BarsView::fixed(d.series.bars(), d.series.period_ms());
-        layer.prepare(&d, bars, &vp(), last_y);
+        layer.prepare(&d, bars, &vp());
     };
     prepare(&mut layer, None);
     // 3 lines + 2 zones + the anchored line (the chart has the 14:30 bar): all on screen.
@@ -164,17 +161,17 @@ fn layer_places_filters_and_reports_freshness() {
     assert_eq!(rows[i].text, "as of 13:00 UTC");
     assert!(!rows[i].warn);
 
-    // Kinds and sources hide; labels move off the last-price row.
+    // Kinds and sources hide; labels stay on their levels.
     layer.config.toggle_kind("demo", "zone");
     prepare(&mut layer, None);
     assert_eq!(layer.placed_per_source()[i], 4);
     layer.config.toggle_kind("demo", "zone");
-    // The pivot (6010.00) sits at (604000 - 601000) / 15 = 200 px; a last price there pushes
-    // its label one label height (17.6 px) above.
-    prepare(&mut layer, Some(200.0));
+    // The pivot (6010.00) sits at (604000 - 601000) / 15 = 200 px; its label stays there
+    // (a last price on that row draws over it, never moves it).
+    prepare(&mut layer, None);
     let pivot = layer.placed(i).iter().find(|p| p.index == 0).unwrap();
     assert_eq!(pivot.top, 200.0);
-    assert!((pivot.label_y.unwrap() - (200.0 - LABEL_PX * 1.6)).abs() < 1e-3);
+    assert_eq!(pivot.label_y, Some(200.0));
     layer.config.toggle_source("demo");
     prepare(&mut layer, None);
     assert_eq!(layer.placed_per_source()[i], 0);
@@ -445,7 +442,6 @@ fn types_resolve_hide_and_label_with_the_price() {
             &d,
             BarsView::fixed(d.series.bars(), d.series.period_ms()),
             &vp(),
-            None,
         );
     };
     frame(&mut layer);
@@ -488,9 +484,17 @@ fn types_resolve_hide_and_label_with_the_price() {
     frame(&mut layer);
     assert_eq!(layer.placed_per_source()[i], placed - 1, "the pivot hidden");
     assert!(!layer.kind_look(i, "pivot").unwrap().shown);
-    let texts: Vec<&str> = layer.label_texts(i).iter().flatten().map(String::as_str).collect();
+    let texts: Vec<&str> = layer
+        .label_texts(i)
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
     assert!(texts.contains(&"Pivot 6010 : 6010.00"), "{texts:?}");
-    assert!(texts.contains(&"Supply : 6022.50"), "a zone: its upper edge");
+    assert!(
+        texts.contains(&"Supply : 6022.50"),
+        "a zone: its upper edge"
+    );
     assert!(
         texts.contains(&"VWAP ±7.50"),
         "VWAP-relative: the name only"
@@ -506,4 +510,54 @@ fn types_resolve_hide_and_label_with_the_price() {
             .flatten()
             .all(|t| !t.contains(" : "))
     );
+}
+
+/// Labels stay on their levels whatever the price does: trades walk the last price across
+/// every labeled demo level (levels and viewport fixed), and every label's y is the same in
+/// every frame (it used to step off the last price's row, so labels near it bounced).
+#[test]
+fn a_last_price_sweeping_the_levels_never_moves_a_label() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+        layer
+            .placed(i)
+            .iter()
+            .map(|p| (p.index, p.label_y))
+            .collect::<Vec<_>>()
+    };
+    let first = frame(&mut layer);
+    assert!(first.iter().filter(|(_, y)| y.is_some()).count() >= 3);
+    let t0 = UtcMillis::parse_iso("2026-11-05T14:30:01").unwrap();
+    // 5990.00 to 6030.00 a tick at a time: through the support, the pivot, the zones and
+    // the resistance.
+    for (k, p) in (599_000..=603_000).step_by(25).enumerate() {
+        store.update(|d| {
+            d.apply(&[MarketEvent::Trade {
+                time: UtcMillis(t0.0 + k as i64),
+                price: Price(p),
+                qty: Qty(1),
+                aggressor: Some(Aggressor::Buy),
+            }])
+        });
+        assert_eq!(frame(&mut layer), first, "last price {p}");
+    }
 }

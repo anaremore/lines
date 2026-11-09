@@ -650,38 +650,56 @@ pub fn place(
     }
 }
 
-/// Choose label positions: a line's label sits on its line, a zone's on its top edge,
-/// clamped into the plot. A label that would cover the last-price row (`avoid`, ± one label
-/// height) is moved just above or below it; a label overlapping one already placed is
-/// dropped (the level is still drawn). In place, no allocation.
+/// The extra separation (a fraction of a label's height) a label hidden last frame needs
+/// before it shows again: labels near the clash distance keep one layout instead of
+/// flickering.
+pub const LABEL_HYSTERESIS: f32 = 0.25;
+
+/// Choose label positions: a label is anchored to its own level (a line's on its line, a
+/// zone's on its top edge), clamped into the plot, and never moved for anything else: the
+/// last price and the tags on the axis paint over it. Labels only give way to each other: a
+/// label overlapping one already placed is dropped (the level is still drawn). Levels at
+/// fixed prices are placed first, in map order, then those moving with the VWAP, so a moving
+/// band never reshuffles the others. The layout depends only on the levels and the viewport,
+/// never the price, and keeps last frame's decision near the threshold: `shown` (by level
+/// index, updated in place) says which labels showed last frame; a hidden one shows again
+/// only once it is clear of every shown label by [`LABEL_HYSTERESIS`] more. In place, no
+/// allocation.
 pub fn place_labels(
     placed: &mut [Placed],
     map: &LevelMap,
     label_h: f32,
     plot_h: f32,
-    avoid: Option<f32>,
+    shown: &mut [bool],
 ) {
     let half = label_h * 0.5;
-    for i in 0..placed.len() {
-        let p = placed[i];
-        if map.levels[p.index as usize].label.is_none() {
-            placed[i].label_y = None;
-            continue;
-        }
-        let mut y = p.top.clamp(half, (plot_h - half).max(half));
-        if let Some(a) = avoid
-            && (y - a).abs() < label_h
-        {
-            y = if y <= a { a - label_h } else { a + label_h };
-            if y < half || y > plot_h - half {
-                y = if y < half { a + label_h } else { a - label_h };
+    for p in placed.iter_mut() {
+        p.label_y = None;
+    }
+    for moving in [false, true] {
+        for i in 0..placed.len() {
+            let p = placed[i];
+            if p.vwap_relative != moving || map.levels[p.index as usize].label.is_none() {
+                continue;
             }
+            let was = shown.get(p.index as usize).copied().unwrap_or(false);
+            let y = p.top.clamp(half, (plot_h - half).max(half));
+            let need = if was {
+                label_h
+            } else {
+                label_h * (1.0 + LABEL_HYSTERESIS)
+            };
+            let clash = placed
+                .iter()
+                .filter_map(|q| q.label_y)
+                .any(|q| (q - y).abs() < need);
+            placed[i].label_y = (!clash).then_some(y);
         }
-        let clash = placed[..i]
-            .iter()
-            .filter_map(|q| q.label_y)
-            .any(|q| (q - y).abs() < label_h);
-        placed[i].label_y = (!clash && y >= half - 0.5 && y <= plot_h - half + 0.5).then_some(y);
+    }
+    for p in placed.iter() {
+        if let Some(s) = shown.get_mut(p.index as usize) {
+            *s = p.label_y.is_some();
+        }
     }
 }
 
