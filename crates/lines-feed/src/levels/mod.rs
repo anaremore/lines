@@ -25,6 +25,7 @@ pub mod runtime;
 pub mod demo;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -164,7 +165,11 @@ pub trait LevelSource: Send + Sync + 'static {
     fn id(&self) -> &'static str;
     /// Short display name (legend, menus).
     fn label(&self) -> &'static str;
-    /// Whether this source has levels for `product`.
+    /// Whether this source has levels for `product`. Called on the UI thread when a chart
+    /// attaches, and again at render after [`serving_changed`] (never block: answer from what
+    /// the source already knows). An answer that changes later is announced with
+    /// [`serving_changed`]. Never asked for an option chart: level sources are not attached
+    /// to option contracts (the underlying's levels are in another market's prices).
     fn serves(&self, product: &Product) -> bool;
     fn refresh(&self) -> RefreshMode;
     /// A map older than this (since it was last received or confirmed) shows as stale.
@@ -210,9 +215,13 @@ pub fn register(source: Arc<dyn LevelSource>) -> Result<()> {
     if !ok {
         bail!("level source id {id:?}: use 1-32 lowercase letters, digits and '-'");
     }
-    let mut t = table().write();
-    t.retain(|s| s.id() != id);
-    t.push(source);
+    {
+        let mut t = table().write();
+        t.retain(|s| s.id() != id);
+        t.push(source);
+    }
+    // Charts opened before it was registered ask again.
+    serving_changed();
     Ok(())
 }
 
@@ -229,6 +238,24 @@ pub fn serving(product: &Product) -> Vec<Arc<dyn LevelSource>> {
         .filter(|s| s.serves(product))
         .cloned()
         .collect()
+}
+
+static SERVING_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Announce that a source's [`LevelSource::serves`] answers changed (e.g. it learned the
+/// products it serves from its service after charts were opened): first update what `serves`
+/// returns, then call this. Charts ask every source again ([`serving`]) and add or remove its
+/// layer; a source that doesn't serve a chart's product shows nothing there, not even a
+/// legend row. Only live runs ([`runtime::is_live`]) may change their answers this way.
+/// Cheap: call it only when an answer changed.
+pub fn serving_changed() {
+    SERVING_GENERATION.fetch_add(1, Ordering::Release);
+}
+
+/// Bumped by every [`serving_changed`]. A chart that attached at an older generation asks
+/// [`serving`] again.
+pub fn serving_generation() -> u64 {
+    SERVING_GENERATION.load(Ordering::Acquire)
 }
 
 pub fn by_id(id: &str) -> Option<Arc<dyn LevelSource>> {
