@@ -346,7 +346,11 @@ fn a_reset_keeps_a_lockout() {
     });
     r.losing_trade();
     assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
-    r.cmd(Command::ResetPaper { account: acct() }).unwrap();
+    r.cmd(Command::ResetPaper {
+        account: acct(),
+        clear_journal: false,
+    })
+    .unwrap();
     assert!(
         r.events
             .iter()

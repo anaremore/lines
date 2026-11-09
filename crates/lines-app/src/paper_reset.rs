@@ -3,8 +3,9 @@
 //!
 //! The first press arms it and names what it will do ("Reset Paper (mock): flattens and clears
 //! balance, positions, orders and today's P&L"); a second press of the same reset within
-//! [`CONFIRM`] sends it (`Command::ResetPaper`, which flattens through the core first). Anything
-//! else, or the time running out, disarms it. A broker account is refused before anything arms.
+//! [`CONFIRM`] sends it (`Command::ResetPaper`, which flattens through the core first). The
+//! time running out disarms it, as does the other reset's first press (one waits at a time). A
+//! broker account is refused before anything arms.
 
 use std::time::{Duration, Instant};
 

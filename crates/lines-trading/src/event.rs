@@ -76,6 +76,9 @@ pub enum Event {
         balance: crate::types::Money,
         #[serde(with = "time_serde")]
         at: UtcMillis,
+        /// Its journal trades go too (the journal clears them on this event, in order).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear_journal: bool,
     },
     /// A cancel didn't happen: the broker refused it, or never answered it. `reason` says which,
     /// and whether the order is still working or its outcome unknown. On a working order

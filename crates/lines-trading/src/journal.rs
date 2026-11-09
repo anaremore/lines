@@ -769,8 +769,6 @@ enum Msg {
     Flush(Sender<()>),
     /// See [`Journal::add_unmarked`].
     Unmarked(Vec<AccountId>),
-    /// See [`JournalShared::clear_account`].
-    Clear(AccountId),
 }
 
 /// The journal on its own thread (`lines-journal`). The trading thread sends it the core's
@@ -847,12 +845,6 @@ impl JournalShared {
         let _ = self.tx.send(Msg::Edit(e));
     }
 
-    /// Clear `account`'s trades (a paper account reset that asked for it): from the journal,
-    /// and from its file, which is kept first as a dated `.bak` ([`store::JournalWriter::rewrite`]).
-    pub fn clear_account(&self, account: AccountId) {
-        let _ = self.tx.send(Msg::Clear(account));
-    }
-
     /// Write the closed trades as CSV to `path` (on the journal thread; errors are logged).
     pub fn export(&self, path: PathBuf) {
         let _ = self.tx.send(Msg::Export(path));
@@ -918,6 +910,25 @@ fn run(
                             w.append(Record::Trade(Box::new(t)));
                         }
                     }
+                    // A reset that clears its journal: here, in order, so trades after it stay.
+                    if let Event::AccountReset {
+                        account,
+                        clear_journal: true,
+                        ..
+                    } = e
+                    {
+                        let n = j.clear_account(account);
+                        tracing::info!("journal: cleared {n} trades of a reset paper account");
+                        if let Some(w) = &writer {
+                            w.rewrite(
+                                j.trades()
+                                    .iter()
+                                    .map(|t| Record::Trade(Box::new(t.clone())))
+                                    .collect(),
+                            );
+                        }
+                        closed = true;
+                    }
                 }
                 if closed || j.open_trades().count() != open {
                     publish(&j);
@@ -946,19 +957,6 @@ fn run(
                     Ok(()) => tracing::info!("journal exported to {}", path.display()),
                     Err(e) => tracing::error!("journal export to {} failed: {e}", path.display()),
                 }
-            }
-            Msg::Clear(account) => {
-                let n = j.clear_account(&account);
-                tracing::info!("journal: cleared {n} trades of a reset paper account");
-                if let Some(w) = &writer {
-                    w.rewrite(
-                        j.trades()
-                            .iter()
-                            .map(|t| Record::Trade(Box::new(t.clone())))
-                            .collect(),
-                    );
-                }
-                publish(&j);
             }
             Msg::Sync(tx) => {
                 let _ = tx.send(());

@@ -194,10 +194,6 @@ pub struct TradeState {
     pub fills_seen: u64,
     /// Paper accounts whose reset waits for its flatten (`Event::ResetWaiting`).
     resets_waiting: HashSet<AccountId>,
-    /// Paper accounts whose reset also clears their journal, once it happens.
-    clear_on_reset: HashSet<AccountId>,
-    /// Journals to clear now (their reset happened): the pump sends them.
-    clears_due: Vec<AccountId>,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -351,7 +347,6 @@ impl TradeState {
             }
             Event::ResetDropped { account, reason } => {
                 self.resets_waiting.remove(&account);
-                self.clear_on_reset.remove(&account);
                 // Said where the account's refusals are (the DOM's header).
                 self.flashes.push_back(Flash {
                     kind: FlashKind::Warning,
@@ -365,9 +360,6 @@ impl TradeState {
             }
             Event::AccountReset { account, .. } => {
                 self.resets_waiting.remove(&account);
-                if self.clear_on_reset.remove(&account) {
-                    self.clears_due.push(account.clone());
-                }
                 Some(account)
             }
             Event::Overfill {
@@ -1354,7 +1346,6 @@ impl Trading {
             cache.clone(),
             None,
             Some((bridge.clone(), handle.clone())),
-            Some(journal.clone()),
         );
         // The full state as the first events.
         handle.rebuild();
@@ -1443,8 +1434,6 @@ impl Trading {
                 cache.clone(),
                 Some(ids.clone()),
                 // Triggers are paper only.
-                None,
-                // So are resets (and their journal clears).
                 None,
             );
             let source = ext.accounts();
@@ -1717,20 +1706,14 @@ impl Trading {
         match press {
             Press::Confirm(text) => Ok(Some(text)),
             Press::Go => {
-                // The reset sent last decides: a plain one keeps the journal even if one that
-                // clears it was sent before it.
-                let mut s = self.cache.read();
-                if journal {
-                    s.clear_on_reset.insert(account.clone());
-                } else {
-                    s.clear_on_reset.remove(account);
-                }
-                drop(s);
+                // The core keeps the last one asked: a plain reset keeps the journal even if
+                // one that clears it was sent before it.
                 self.submit(
                     source,
                     Instant::now(),
                     TradeCommand::ResetPaper {
                         account: account.clone(),
+                        clear_journal: journal,
                     },
                 );
                 Ok(None)
@@ -1800,7 +1783,7 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::CancelOrder { account, .. } => (account.clone(), None, None),
         TradeCommand::CancelAll { account, contract }
         | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
-        TradeCommand::ResetPaper { account } => (account.clone(), None, None),
+        TradeCommand::ResetPaper { account, .. } => (account.clone(), None, None),
         TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
             (account.clone(), None, None)
         }
@@ -1912,7 +1895,6 @@ fn spawn_pump(
     cache: Arc<TradeCache>,
     ids: Option<Arc<Mutex<VenueIds>>>,
     trigger_feeds: Option<(FeedBridge, TradingHandle)>,
-    journal: Option<Arc<JournalShared>>,
 ) {
     // A venue's ids, translated into the shared cache's.
     let tag = ids
@@ -1982,12 +1964,6 @@ fn spawn_pump(
                             touched.push(a);
                         }
                         next = events.try_recv().ok();
-                    }
-                    // A reset that asked for it: its journal goes now that it happened.
-                    for a in s.clears_due.drain(..) {
-                        if let Some(j) = &journal {
-                            j.clear_account(a);
-                        }
                     }
                 }
                 hold_feeds(&mut touched);

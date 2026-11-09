@@ -16,7 +16,7 @@
 //! Orders, positions and balances are the **broker's**; the core keeps a cache updated from
 //! broker events and replaced wholesale by [`TradingCore::rebuild`] after a (re)connect.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -237,8 +237,9 @@ pub struct TradingCore {
     /// External fills for accounts not added yet (a broker can report executions before its
     /// accounts join): applied when they do. Oldest dropped past `KEEP_HELD`.
     held: VecDeque<BrokerEvent>,
-    /// Paper accounts whose reset waits for their flatten (`core/reset.rs`).
-    resets: BTreeSet<AccountId>,
+    /// Paper accounts whose reset waits for their flatten (`core/reset.rs`), and whether it
+    /// clears their journal.
+    resets: BTreeMap<AccountId, bool>,
     /// Strategy instances (decision 0025), and which instance placed each order.
     strategies: BTreeMap<StrategyId, Instance>,
     strategy_orders: HashMap<OrderId, StrategyId>,
@@ -318,7 +319,7 @@ impl TradingCore {
             fill_order: VecDeque::new(),
             adopted: HashSet::new(),
             held: VecDeque::new(),
-            resets: BTreeSet::new(),
+            resets: BTreeMap::new(),
             strategies: BTreeMap::new(),
             strategy_orders: HashMap::new(),
             position_brackets: BTreeMap::new(),
@@ -736,6 +737,19 @@ impl TradingCore {
             self.trigger_person_acted(&env);
             self.flatten_take_back(&env);
             self.reverse_take_back(&env, now);
+            // An order accepted on an account waiting for its reset drops the reset.
+            if matches!(
+                env.command,
+                Command::PlaceOrder(_)
+                    | Command::PlaceExit(_)
+                    | Command::PlaceBracket(_)
+                    | Command::ArmTrigger(_)
+                    | Command::Reverse { .. }
+            ) && let Some(a) = env.command.account()
+            {
+                let a = a.clone();
+                self.reset_on_new_order(&a);
+            }
         }
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
@@ -783,15 +797,6 @@ impl TradingCore {
             && env.command.is_order_action()
         {
             self.strategy_manual(now, &account, &env.command);
-        }
-        if matches!(
-            env.command,
-            Command::PlaceOrder(_)
-                | Command::PlaceExit(_)
-                | Command::PlaceBracket(_)
-                | Command::ArmTrigger(_)
-        ) {
-            self.reset_on_new_order(&account);
         }
         match env.command.clone() {
             Command::ArmTrigger(spec) => self.trigger_arm(now, env, spec),
@@ -1193,14 +1198,14 @@ impl TradingCore {
                 stop_loss,
                 ..
             } => self.reverse(env, now, &account, contract, take_profit, stop_loss),
-            Command::ResetPaper { .. } => {
+            Command::ResetPaper { clear_journal, .. } => {
                 if matches!(env.source, Source::Strategy(_)) {
                     return Err(Reject::new(
                         RejectCode::Strategy,
                         "a strategy can't reset an account",
                     ));
                 }
-                self.reset_start(now, env, &account)
+                self.reset_start(now, env, &account, clear_journal)
             }
             Command::Flatten { contract, .. } => {
                 let simulated = self.broker.simulated();

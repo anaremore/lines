@@ -836,6 +836,36 @@ fn screenshot_names_round_trip_and_older_lines_load() {
     );
 }
 
+/// A reset that clears its journal clears it on its event, in order: the trades before it go,
+/// a trade made right after it (in the same batch, or before the UI could act) stays.
+#[test]
+fn a_reset_clears_the_journal_in_order_with_the_events() {
+    let shared = JournalShared::start(Journal::new(), None);
+    let mut obs = shared.observer();
+    let reset = |clear_journal| Event::AccountReset {
+        account: acct(),
+        balance: Money::whole(50_000),
+        at: at(5),
+        clear_journal,
+    };
+    obs.events(&[fill("a1", 1, Side::Buy, 6000.0, 1, 0.0, 0)]);
+    obs.events(&[fill("a2", 2, Side::Sell, 6001.0, 1, 0.0, 2)]);
+    // A reset that keeps the journal: nothing goes.
+    obs.events(&[reset(false)]);
+    shared.sync();
+    assert_eq!(shared.snapshot().unwrap().trades.len(), 1);
+    // One that clears it, then a round trip in the same batch.
+    obs.events(&[
+        reset(true),
+        fill("b1", 3, Side::Buy, 6000.0, 1, 0.0, 6),
+        fill("b2", 4, Side::Sell, 6002.0, 1, 0.0, 8),
+    ]);
+    shared.sync();
+    let trades = shared.snapshot().unwrap().trades.clone();
+    assert_eq!(trades.len(), 1, "only the trade after the reset");
+    assert_eq!(trades[0].entry_time, at(6));
+}
+
 /// The journal thread asks only when the journal is saved; a flush reaches the drawing thread.
 #[test]
 fn only_a_saved_journal_asks_and_a_flush_waits_for_the_drawing() {

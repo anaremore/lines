@@ -111,8 +111,12 @@ pub enum Command {
     /// Reset a paper account (`core/reset.rs`): flatten and cancel everything on it now, then,
     /// once it is flat with nothing open, back to its starting balance with today's P&L and
     /// prop progress cleared. Refused on a broker account. Always allowed, as a Flatten.
+    /// `clear_journal`: the account's journal trades go too, in order with the events (the
+    /// journal acts on `Event::AccountReset`).
     ResetPaper {
         account: AccountId,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear_journal: bool,
     },
     /// The trader's guardrails for the account (roadmap 8b): tighter rules apply at once,
     /// looser ones with the next trade date (`guardrails::GuardrailTracker::request`). Never
@@ -224,7 +228,7 @@ impl Command {
             | Command::CancelAll { account, .. }
             | Command::Flatten { account, .. }
             | Command::Reverse { account, .. }
-            | Command::ResetPaper { account }
+            | Command::ResetPaper { account, .. }
             | Command::SetGuardrails { account, .. }
             | Command::SetRules { account, .. }
             | Command::SetBracketMode { account, .. } => Some(account),

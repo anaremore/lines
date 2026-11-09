@@ -112,7 +112,10 @@ impl Rig {
     }
 
     fn reset(&mut self) -> Result<Vec<OrderId>, lines_trading::Reject> {
-        self.cmd(Command::ResetPaper { account: acct() })
+        self.cmd(Command::ResetPaper {
+            account: acct(),
+            clear_journal: false,
+        })
     }
 
     fn was_reset(&self) -> bool {
@@ -287,7 +290,10 @@ fn a_strategy_cannot_reset_an_account() {
         r.now(),
         Source::Strategy(lines_trading::StrategyId(1)),
         Instant::now(),
-        Command::ResetPaper { account: acct() },
+        Command::ResetPaper {
+            account: acct(),
+            clear_journal: false,
+        },
     );
     r.events.extend(r.core.drain());
     let result = r
@@ -344,6 +350,7 @@ fn a_broker_account_is_refused_and_says_why() {
         Instant::now(),
         Command::ResetPaper {
             account: AccountId::new("venue-1"),
+            clear_journal: false,
         },
     );
     let events = core.drain();

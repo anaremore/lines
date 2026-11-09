@@ -32,6 +32,7 @@ impl TradingCore {
         now: UtcMillis,
         env: &Envelope,
         account: &AccountId,
+        clear_journal: bool,
     ) -> Result<Vec<OrderId>, Reject> {
         if !self.broker.simulated() {
             let name = self
@@ -53,7 +54,8 @@ impl TradingCore {
         };
         let ids = self.run(now, &flatten)?;
         self.trigger_person_acted(&flatten);
-        self.resets.insert(account.clone());
+        // The reset asked last decides whether the journal goes.
+        self.resets.insert(account.clone(), clear_journal);
         self.events.push(Event::ResetWaiting {
             account: account.clone(),
         });
@@ -92,11 +94,11 @@ impl TradingCore {
         if self.resets.is_empty() {
             return;
         }
-        let waiting: Vec<AccountId> = self.resets.iter().cloned().collect();
+        let waiting: Vec<AccountId> = self.resets.keys().cloned().collect();
         for account in waiting {
             if self.reset_quiet(&account) {
-                self.resets.remove(&account);
-                self.reset_now(now, &account);
+                let clear_journal = self.resets.remove(&account).unwrap_or(false);
+                self.reset_now(now, &account, clear_journal);
             } else if !self.reset_closing(&account, now) {
                 self.reset_drop(
                     &account,
@@ -109,7 +111,7 @@ impl TradingCore {
     /// A new order on an account waiting for its reset drops the reset (it never resets the
     /// trading done since).
     pub(super) fn reset_on_new_order(&mut self, account: &AccountId) {
-        if self.resets.contains(account) {
+        if self.resets.contains_key(account) {
             self.reset_drop(
                 account,
                 "Reset not done: a new order was placed on the account",
@@ -125,12 +127,16 @@ impl TradingCore {
         });
     }
 
-    fn reset_now(&mut self, now: UtcMillis, account: &AccountId) {
+    fn reset_now(&mut self, now: UtcMillis, account: &AccountId, clear_journal: bool) {
         let Some(a) = self.accounts.get(account) else {
             return;
         };
         let start = Money::whole(a.cfg.starting_balance);
         if !self.broker.reset_account(now, account, start) {
+            self.reset_drop(
+                account,
+                "Reset not done: this broker can't reset an account",
+            );
             return;
         }
         let contracts: Vec<_> = a.positions.keys().copied().collect();
@@ -148,12 +154,13 @@ impl TradingCore {
             account: account.clone(),
             balance: start,
             at: now,
+            clear_journal,
         });
         self.account_changed(now, account);
     }
 
     /// Accounts whose reset waits for their flatten (the UI says so).
     pub fn resets_waiting(&self) -> impl Iterator<Item = &AccountId> {
-        self.resets.iter()
+        self.resets.keys()
     }
 }
