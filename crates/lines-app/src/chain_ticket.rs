@@ -661,6 +661,8 @@ pub struct ShotTicket {
     pub draft: Option<(String, String)>,
     /// Armed rows read as after a restart.
     pub restored: bool,
+    /// P&L to close is on.
+    pub pnl: bool,
 }
 
 #[cfg(any(test, feature = "screenshot"))]
@@ -714,12 +716,16 @@ pub fn parse_shot(s: &str) -> Result<ShotTicket, String> {
                 out.restored = true;
                 rest = more;
             }
+            ("pnl", more) => {
+                out.pnl = true;
+                rest = more;
+            }
             _ => return Err(format!("--chain-ticket {s:?}: unexpected {first:?}")),
         }
     }
-    if out.open.is_none() && !out.one_click && out.drag.is_none() && !out.restored {
+    if out.open.is_none() && !out.one_click && out.drag.is_none() && !out.restored && !out.pnl {
         return Err(format!(
-            "--chain-ticket {s:?}: expected `buy|sell STRIKE call|put [at PRICE] [close] [when LEVEL] [draft KIND LEVEL]`, `drag KIND LEVEL`, `restored` or `one-click`"
+            "--chain-ticket {s:?}: expected `buy|sell STRIKE call|put [at PRICE] [close] [when LEVEL] [draft KIND LEVEL]`, `drag KIND LEVEL`, `restored`, `pnl` or `one-click`"
         ));
     }
     Ok(out)

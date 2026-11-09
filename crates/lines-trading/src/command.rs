@@ -117,6 +117,9 @@ pub enum Command {
     /// Disarm one, or stop a fired Target's chase and cancel its order.
     CancelTrigger {
         account: AccountId,
+        /// The trigger's option: it has to match, and a refusal's note names it.
+        #[serde(with = "contract_serde")]
+        contract: ContractKey,
         id: crate::trigger::TriggerId,
     },
     /// Create or replace a strategy instance (decision 0025). It starts Disarmed; an armed

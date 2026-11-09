@@ -1648,7 +1648,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
             (account.clone(), None, None)
         }
         TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
-        TradeCommand::CancelTrigger { account, .. } => (account.clone(), None, None),
+        TradeCommand::CancelTrigger {
+            account, contract, ..
+        } => (account.clone(), Some(*contract), None),
         TradeCommand::MoveTrigger {
             account, contract, ..
         } => (account.clone(), Some(*contract), None),

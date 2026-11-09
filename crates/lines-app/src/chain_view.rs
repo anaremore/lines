@@ -393,6 +393,12 @@ pub struct ChainView {
     _chart_feed: Option<gpui::Subscription>,
     /// The pane's width as of the last frame.
     pane_w: f32,
+    /// P&L to close (decision 0029), and what it's of, refreshed each render. Not saved: it's off
+    /// each start.
+    pnl_on: bool,
+    /// The P&L display shows money: without it neither this nor the summary shows.
+    show_money: bool,
+    traded: Option<Traded>,
     /// The main area's top in the window, for the chart's line handles.
     main_top: f32,
     /// Lines on the underlying's price (decision 0029), refreshed each render (capacity kept), and
@@ -461,9 +467,49 @@ struct Frame {
     candidates: Vec<crate::chain_lock::Candidate>,
     /// The band the rows may use, in window coordinates.
     area: (f32, f32),
+    /// The side P&L to close leaves out.
+    hidden_side: Option<Right>,
     /// The markers as painted.
     markers: [Option<crate::chain_lock::MarkerHit>; 2],
     picked: Vec<crate::chain_lock::Candidate>,
+}
+
+/// The series P&L to close and the summary are about, and what they start from. Display only.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Traded {
+    contract: ContractKey,
+    model: Option<crate::option_estimate::Model>,
+    /// The position, or 0: then it reads as if `qty` were bought at `basis`.
+    position: i64,
+    qty: i64,
+    /// What it cost, in price units: the position's average, the ticket's price, or the ask.
+    basis: Option<f64>,
+    /// Currency per price unit of one contract.
+    per_unit: f64,
+}
+
+impl Traded {
+    /// What's held, or what it's reading as held.
+    fn signed(&self) -> i64 {
+        if self.position != 0 {
+            self.position
+        } else {
+            self.qty
+        }
+    }
+
+    fn pnl_at(
+        &self,
+        model: &crate::option_estimate::Model,
+        under: f64,
+        at: i64,
+    ) -> Option<crate::option_estimate::PnlEstimate> {
+        Some(
+            model
+                .value_at(under, at)
+                .pnl(self.signed(), self.basis?, self.per_unit),
+        )
+    }
 }
 
 /// A line being dragged: nothing is sent until it's released on the plot, and only if it can go.
@@ -712,9 +758,9 @@ impl Frame {
             let row = self.rows.iter().position(|r| r.strike == m.strike);
             let (held, working) = (m.position != 0, m.orders);
             match row.and_then(|n| self.ys.get(n)) {
-                // Its row is on screen.
-                Some(top) if top + ROW_H <= foot_top => {}
-                // Its row is behind the foot.
+                // Its row is on screen, and so is its side.
+                Some(top) if top + ROW_H <= foot_top && self.hidden_side != Some(m.right) => {}
+                // Its row is behind the foot, or its side isn't shown.
                 Some(_) => {
                     off.between.held += u32::from(held);
                     off.between.working += working;
@@ -930,6 +976,9 @@ impl ChainView {
             chart: None,
             _chart_feed: None,
             pane_w: 0.0,
+            pnl_on: false,
+            show_money: true,
+            traded: None,
             main_top: 0.0,
             lines: Vec::with_capacity(crate::chain_lines::MAX_LINES),
             line_ys: [f32::NAN; crate::chain_lines::MAX_LINES],
@@ -1013,6 +1062,119 @@ impl ChainView {
     /// The chart beside the chain is on and has room.
     fn chart_shown(&self) -> bool {
         self.chart.is_some() && self.pane_w >= CHART_MIN_W
+    }
+
+    /// P&L to close on or off (decision 0029). The chain narrows or widens, so every row and
+    /// column moves: One-click goes off and says so, as with the chart.
+    pub fn toggle_pnl(&mut self, cx: &mut Context<Self>) {
+        if !self.pnl_on && !self.chart_shown() {
+            self.note = Some("P&L to close needs the chart beside the chain".to_owned());
+            cx.notify();
+            return;
+        }
+        if !self.pnl_on && !self.show_money {
+            self.note = Some("P&L to close needs the P&L display on".to_owned());
+            cx.notify();
+            return;
+        }
+        self.pnl_on = !self.pnl_on;
+        self.rows_moved();
+        self.frame.release();
+        self.frame.locked_key = None;
+        self.layout = Layout::default();
+        cx.notify();
+    }
+
+    /// P&L to close is showing. It has the chart's scale to stand on, and money to show.
+    fn pnl_shown(&self) -> bool {
+        self.pnl_on && self.chart_shown() && self.show_money
+    }
+
+    /// The other side, with only one in view: every cell changes under a still pointer.
+    fn flip_side(&mut self, cx: &mut Context<Self>) {
+        self.leave_ticket();
+        self.ticket = None;
+        self.side = crate::chain_pnl::other_side(self.side);
+        self.rows_moved();
+        cx.notify();
+    }
+
+    /// The series P&L to close and the summary are about: the ticket's, the selection's, the
+    /// position or line on the shown side, else the money. What it starts from: the position's
+    /// average, the ticket's price, or the ask.
+    fn refresh_traded(&mut self, cx: &App) {
+        self.show_money = crate::picker_view::settings(cx).pnl_display.money();
+        self.traded = None;
+        let (Some(st), Some(d)) = (self.trade.try_cache(), self.store.try_read()) else {
+            return;
+        };
+        let expiry = self.shown_expiry(&d.chains);
+        let on_side = |c: ContractKey| {
+            c.option_key()
+                .filter(|k| k.right == self.side && Some(k.expiry) == expiry)
+        };
+        let account = self.trade.account.as_ref();
+        let held = account.and_then(|a| {
+            st.positions_of(a)
+                .filter(|p| p.contract.product == self.product.id && p.qty != 0)
+                .find_map(|p| on_side(p.contract))
+        });
+        let lined = self.lines.iter().find_map(|l| on_side(l.contract));
+        let money = expiry.and_then(|e| {
+            let chain = d.chains.chain(e)?;
+            let row = chain.rows.get(chain.atm(d.last_trade?)?)?;
+            Some(OptionKey {
+                expiry: e,
+                strike: row.strike,
+                right: self.side,
+            })
+        });
+        let key = self
+            .ticket
+            .as_ref()
+            .map(|t| t.key)
+            .or_else(|| self.selected_key())
+            .or(held)
+            .or(lined)
+            .or(money);
+        let Some(key) = key else {
+            return;
+        };
+        let contract = self.contract(key);
+        let quote = d
+            .chains
+            .chain(key.expiry)
+            .and_then(|c| c.find(key.strike).ok().map(|i| c.rows[i]))
+            .and_then(|r| match key.right {
+                Right::Call => r.call,
+                Right::Put => r.put,
+            });
+        let last = d.last_trade;
+        drop(d);
+        let now = Trading::try_global(cx).and_then(|t| t.now(&self.store));
+        let model = crate::option_estimate::Model::new(contract, quote.as_ref(), last, now);
+        let position = account.and_then(|a| st.position(a, contract));
+        let qty = position.map_or(0, |p| p.qty);
+        let avg = position.and_then(|p| p.avg_price);
+        drop(st);
+        let ticket_price = self
+            .ticket
+            .as_ref()
+            .filter(|t| t.side == Side::Buy)
+            .and_then(|t| t.price);
+        let ask = ticket::sides(quote.as_ref()).1;
+        let basis = avg.or_else(|| ticket_price.or(ask).map(|p| p.0 as f64));
+        let per_unit = ticket::premium(&self.product, contract, 1, Price(1)).map_or(0.0, |m| {
+            m.0 as f64 / lines_trading::Money::UNITS_PER_WHOLE as f64
+        });
+        self.traded = Some(Traded {
+            contract,
+            model,
+            position: qty,
+            qty: self.size(cx),
+            basis,
+            per_unit,
+        });
     }
 
     /// No chart beside the chain: what needs a line can't stay.
@@ -1982,6 +2144,7 @@ impl ChainView {
         self.ask(
             lines_trading::Command::CancelTrigger {
                 account,
+                contract: view.contract,
                 id: view.id,
             },
             cx,
@@ -2224,6 +2387,7 @@ impl ChainView {
             return;
         };
         self.shot_restored = shot.restored;
+        self.pnl_on |= shot.pnl;
         if let Some((kind, level)) = shot.drag.clone()
             && let Ok(units) = self.product.price.scale.parse_decimal(&level)
         {
@@ -2453,6 +2617,7 @@ impl ChainView {
             "left" => self.step_expiry(-1),
             "right" => self.step_expiry(1),
             "tab" if m.shift => self.cell = self.cell.other(),
+            "tab" if self.pnl_shown() => self.flip_side(cx),
             "tab" => {
                 self.side = match self.side {
                     Right::Call => Right::Put,
@@ -2569,14 +2734,17 @@ impl ChainView {
         };
         self.selected = Some(strike);
         let right = if x < self.layout.strike_x.0 {
-            self.side = Right::Call;
             Some(Right::Call)
         } else if x > self.layout.strike_x.1 {
-            self.side = Right::Put;
             Some(Right::Put)
         } else {
             None
         };
+        // The margin where a hidden side would be is nothing to press.
+        let right = right.filter(|r| self.frame.hidden_side != Some(*r));
+        if let Some(r) = right {
+            self.side = r;
+        }
         if let Some(right) = right {
             let key = OptionKey {
                 expiry,
@@ -2762,18 +2930,27 @@ impl ChainView {
         let action_w = self.glyphs.width("Cancel", t.text_main, false, window) + PAD;
         let pos_full =
             self.glyphs.width(POS_SAMPLE, t.text_main, false, window) + action_w + 2.0 * PAD;
-        let quotes_w = strike_w + 2.0 * (cols[5] + cols[6]);
-        let pos_w = if w >= quotes_w + 2.0 * pos_full {
+        // P&L to close keeps only the traded side.
+        let hidden = self
+            .pnl_shown()
+            .then(|| crate::chain_pnl::other_side(self.side));
+        self.frame.hidden_side = hidden;
+        let (show_calls, show_puts) = (hidden != Some(Right::Call), hidden != Some(Right::Put));
+        let sides = if hidden.is_some() { 1.0 } else { 2.0 };
+        let quotes_w = strike_w + sides * (cols[5] + cols[6]);
+        let pos_w = if w >= quotes_w + sides * pos_full {
             pos_full
-        } else if w >= quotes_w + 2.0 * MARK_W {
+        } else if w >= quotes_w + sides * MARK_W {
             MARK_W
         } else {
             0.0
         };
         let compact = pos_w > 0.0 && pos_w < pos_full;
-        let shown = fit_columns(w - 2.0 * pos_w, strike_w, cols);
+        // `fit_columns` counts two sides: one side has twice the room for its columns.
+        let room = w - sides * pos_w;
+        let shown = fit_columns(strike_w + (room - strike_w) * 2.0 / sides, strike_w, cols);
         let table_w = strike_w
-            + 2.0
+            + sides
                 * (pos_w
                     + cols
                         .iter()
@@ -2784,25 +2961,32 @@ impl ChainView {
         let x0 = ox + ((w - table_w) / 2.0).max(0.0);
         // Calls: left to right in CALLS order; strike; puts: CALLS reversed.
         let mut call_x = [0.0f32; 7];
-        let mut x = x0 + pos_w;
-        for i in 0..7 {
-            if shown[i] {
-                call_x[i] = x;
-                x += cols[i];
+        let mut x = x0;
+        if show_calls {
+            x += pos_w;
+            for i in 0..7 {
+                if shown[i] {
+                    call_x[i] = x;
+                    x += cols[i];
+                }
             }
         }
         let strike_x = x;
         x += strike_w;
         // Puts read outward from the strike: bid, ask, last, delta, IV, volume, OI.
         let mut put_x = [0.0f32; 7];
-        for i in [5, 6, 4, 3, 2, 1, 0] {
-            if shown[i] {
-                put_x[i] = x;
-                x += cols[i];
+        if show_puts {
+            for i in [5, 6, 4, 3, 2, 1, 0] {
+                if shown[i] {
+                    put_x[i] = x;
+                    x += cols[i];
+                }
             }
         }
         let put_pos_x = x;
-        x += pos_w;
+        if show_puts {
+            x += pos_w;
+        }
         let calls_end = strike_x;
         let puts_start = strike_x + strike_w;
         // Header rows: CALLS / PUTS, then the titles.
@@ -2827,33 +3011,40 @@ impl ChainView {
                 cx,
             );
         }
-        self.glyphs.paint_right(
-            "CALLS",
-            calls_end - PAD,
-            top,
-            ROW_H,
-            t.text_main,
-            true,
-            window,
-            cx,
-        );
-        self.glyphs.paint(
-            "PUTS",
-            puts_start + PAD,
-            top,
-            ROW_H,
-            t.text_main,
-            true,
-            window,
-            cx,
-        );
+        if show_calls {
+            self.glyphs.paint_right(
+                "CALLS",
+                calls_end - PAD,
+                top,
+                ROW_H,
+                t.text_main,
+                true,
+                window,
+                cx,
+            );
+        }
+        if show_puts {
+            self.glyphs.paint(
+                "PUTS",
+                puts_start + PAD,
+                top,
+                ROW_H,
+                t.text_main,
+                true,
+                window,
+                cx,
+            );
+        }
         let title_y = top + ROW_H;
         for i in 0..7 {
             if !shown[i] {
                 continue;
             }
             let c = Col::CALLS[i];
-            for cx0 in [call_x[i], put_x[i]] {
+            for (on, cx0) in [(show_calls, call_x[i]), (show_puts, put_x[i])] {
+                if !on {
+                    continue;
+                }
                 self.glyphs.paint_right(
                     c.title(),
                     cx0 + cols[i] - PAD,
@@ -2867,26 +3058,30 @@ impl ChainView {
             }
         }
         if !compact && pos_w > 0.0 {
-            self.glyphs.paint(
-                "Pos / Orders",
-                x0 + PAD,
-                title_y,
-                ROW_H,
-                t.text_dim,
-                false,
-                window,
-                cx,
-            );
-            self.glyphs.paint(
-                "Pos / Orders",
-                put_pos_x + PAD,
-                title_y,
-                ROW_H,
-                t.text_dim,
-                false,
-                window,
-                cx,
-            );
+            if show_calls {
+                self.glyphs.paint(
+                    "Pos / Orders",
+                    x0 + PAD,
+                    title_y,
+                    ROW_H,
+                    t.text_dim,
+                    false,
+                    window,
+                    cx,
+                );
+            }
+            if show_puts {
+                self.glyphs.paint(
+                    "Pos / Orders",
+                    put_pos_x + PAD,
+                    title_y,
+                    ROW_H,
+                    t.text_dim,
+                    false,
+                    window,
+                    cx,
+                );
+            }
         }
         self.glyphs.paint_right(
             "Strike",
@@ -2960,13 +3155,13 @@ impl ChainView {
                 Some(l) => (row.strike < l, row.strike > l),
                 None => (false, false),
             };
-            if call_itm {
+            if call_itm && show_calls {
                 window.paint_quad(fill(
                     Bounds::new(point(px(x0), px(y)), size(px(calls_end - x0), px(ROW_H))),
                     t.grid,
                 ));
             }
-            if put_itm {
+            if put_itm && show_puts {
                 window.paint_quad(fill(
                     Bounds::new(
                         point(px(puts_start), px(y)),
@@ -2980,7 +3175,13 @@ impl ChainView {
                     continue;
                 }
                 let c = Col::CALLS[i];
-                for (side_x, q) in [(call_x[i], row.call.as_ref()), (put_x[i], row.put.as_ref())] {
+                for (on, side_x, q) in [
+                    (show_calls, call_x[i], row.call.as_ref()),
+                    (show_puts, put_x[i], row.put.as_ref()),
+                ] {
+                    if !on {
+                        continue;
+                    }
                     cell(&mut s, &self.product, q, c);
                     // A stale quote doesn't read as live (the header says so in a word).
                     let stale = q.is_some_and(|q| {
@@ -3017,6 +3218,9 @@ impl ChainView {
                 (Right::Call, x0, strike_x + 1.0),
                 (Right::Put, put_pos_x, strike_x + strike_w - PAD + 1.0),
             ] {
+                if hidden == Some(right) {
+                    continue;
+                }
                 let Some(m) = self.frame.mark(row.strike, right).copied() else {
                     continue;
                 };
@@ -3464,6 +3668,224 @@ impl ChainView {
         }
     }
 
+    /// P&L to close: past now to the close, on the chart's price scale, shaded by estimated P&L.
+    /// Signed values and a breakeven line say it without color. Display only; nothing here
+    /// allocates: the cells are computed and painted as they go.
+    fn paint_pnl_panel(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        const COLS: usize = 14;
+        const CELL_H: f32 = 12.0;
+        const MAX_ROWS: usize = 160;
+        /// Where the signed values go: near now, the middle, and near the close.
+        const LABEL_COLS: [usize; 3] = [2, 7, 12];
+        const LABEL_EVERY: f32 = 54.0;
+        let t = self.theme;
+        window.paint_quad(fill(bounds, t.bg));
+        let Some(scale) = self.chart_scale(cx) else {
+            return;
+        };
+        let Some(traded) = self.traded else {
+            return;
+        };
+        let (x0, w) = (f(bounds.origin.x), f(bounds.size.width));
+        let (top, bottom) = (scale.plot_top, scale.bottom());
+        let band_top = f(bounds.origin.y);
+        window.paint_quad(fill(
+            Bounds::new(point(px(x0), px(band_top)), size(px(w), px(top - band_top))),
+            t.panel,
+        ));
+        // What it's of. No estimate without the quote's volatility: then it says so and stops.
+        let mut title = FixedStr::<64>::new();
+        let product = &self.product;
+        let basis = traded.basis;
+        let _ = crate::chain_pnl::write_title(
+            &mut title,
+            traded.contract,
+            traded.position,
+            |o| match basis {
+                Some(b) => crate::trade_bar::write_avg(o, product, b),
+                None => std::fmt::Write::write_str(o, "—"),
+            },
+            traded.qty,
+        );
+        self.glyphs.paint(
+            title.as_str(),
+            x0 + PAD,
+            band_top,
+            top - band_top,
+            t.text_main,
+            true,
+            window,
+            cx,
+        );
+        let (Some(model), Some(_)) = (traded.model, basis) else {
+            self.glyphs.paint(
+                "No estimate: no implied volatility",
+                x0 + PAD,
+                top + 6.0,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
+            return;
+        };
+        let (now, close) = (model.now(), model.close());
+        let cw = w / COLS as f32;
+        let time =
+            |col: f32| now + ((close - now).max(0) as f64 * f64::from(col / COLS as f32)) as i64;
+        let price_at = |y: f32| scale.vp.y_to_price(f64::from(y - top));
+        // The shade is against the largest in view, which is at a corner.
+        let mut largest = 0.0f64;
+        for y in [top, bottom] {
+            for at in [now, close] {
+                if let Some(p) = traded.pnl_at(&model, price_at(y), at) {
+                    largest = largest.max(p.size());
+                }
+            }
+        }
+        let rows = (((bottom - top) / CELL_H).ceil() as usize).min(MAX_ROWS);
+        let cell_h = (bottom - top) / rows.max(1) as f32;
+        for col in 0..COLS {
+            let at = time(col as f32 + 0.5);
+            let cx0 = x0 + col as f32 * cw;
+            for row in 0..rows {
+                let y = top + row as f32 * cell_h;
+                let Some(p) = traded.pnl_at(&model, price_at(y + cell_h / 2.0), at) else {
+                    continue;
+                };
+                let color = if p.is_loss() { t.down } else { t.up };
+                let a = 0.03 + 0.25 * p.shade(largest);
+                window.paint_quad(fill(
+                    Bounds::new(point(px(cx0), px(y)), size(px(cw + 0.5), px(cell_h + 0.5))),
+                    gpui::Hsla { a, ..color },
+                ));
+            }
+        }
+        // The breakeven: where it's worth what it cost, at each time.
+        let (lo, hi) = (scale.vp.price_lo, scale.vp.price_hi);
+        let mut even = [f32::NAN; COLS];
+        for (col, y) in even.iter_mut().enumerate() {
+            if let Some(level) = traded
+                .basis
+                .and_then(|b| model.level_for(b, time(col as f32 + 0.5), lo, hi))
+            {
+                *y = top + scale.vp.price_to_y(level) as f32;
+            }
+        }
+        for col in 0..COLS {
+            let y = even[col];
+            if y.is_nan() {
+                continue;
+            }
+            let cx0 = x0 + col as f32 * cw;
+            window.paint_quad(fill(
+                Bounds::new(point(px(cx0), px(y - 0.5)), size(px(cw), px(1.0))),
+                t.text_main,
+            ));
+            if let Some(next) = even.get(col + 1).filter(|n| !n.is_nan()) {
+                let (a, b) = (y.min(*next), y.max(*next));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(px(cx0 + cw - 0.5), px(a)),
+                        size(px(1.0), px((b - a).max(1.0))),
+                    ),
+                    t.text_main,
+                ));
+            }
+        }
+        // Signed values, so color isn't the only signal; none on the breakeven's line.
+        let mut y = top + LABEL_EVERY / 2.0;
+        while y < bottom - ROW_H {
+            for col in LABEL_COLS {
+                if (even[col] - y).abs() < ROW_H {
+                    continue;
+                }
+                let Some(p) = traded.pnl_at(&model, price_at(y), time(col as f32 + 0.5)) else {
+                    continue;
+                };
+                let mut s = FixedStr::<16>::new();
+                let _ = p.write(&mut s);
+                let tw = self.glyphs.width(s.as_str(), t.text_main, false, window);
+                self.glyphs.paint(
+                    s.as_str(),
+                    x0 + (col as f32 + 0.5) * cw - tw / 2.0,
+                    y - ROW_H / 2.0,
+                    ROW_H,
+                    t.text_main,
+                    false,
+                    window,
+                    cx,
+                );
+            }
+            y += LABEL_EVERY;
+        }
+        // Its name, where the line is, on a chip so it's read over the values.
+        let named = (3..COLS).find(|c| !even[*c].is_nan());
+        if let Some(col) = named {
+            let word = "breakeven";
+            let tw = self.glyphs.width(word, t.text_main, false, window) + 2.0 * 4.0;
+            let (bx, by) = (
+                (x0 + col as f32 * cw).min(x0 + w - tw),
+                (even[col] - TAG_H / 2.0).clamp(top, bottom - TAG_H),
+            );
+            window.paint_quad(fill(
+                Bounds::new(point(px(bx), px(by)), size(px(tw), px(TAG_H))),
+                t.panel,
+            ));
+            self.glyphs
+                .paint(word, bx + 4.0, by, TAG_H, t.text_main, false, window, cx);
+        }
+        // Now is the left edge; the lines and the price carry on across.
+        window.paint_quad(fill(
+            Bounds::new(point(px(x0), px(top)), size(px(1.0), px(bottom - top))),
+            t.axis_line,
+        ));
+        if let Some(l) = self.frame.last {
+            let y = scale.y(l);
+            if y >= top && y <= bottom {
+                window.paint_quad(fill(
+                    Bounds::new(point(px(x0), px(y - 0.5)), size(px(w), px(1.0))),
+                    t.last,
+                ));
+            }
+        }
+        for n in 0..self.lines.len() {
+            let line = self.lines[n];
+            let y = scale.y(self.line_level(&line));
+            if y >= top && y <= bottom {
+                self.paint_line(&line, x0, x0 + w, y, window);
+            }
+        }
+        // The time axis, in its band under the plot.
+        let (band, band_h) = (bottom, f(bounds.origin.y + bounds.size.height) - bottom);
+        window.paint_quad(fill(
+            Bounds::new(point(px(x0), px(band)), size(px(w), px(band_h))),
+            t.bg,
+        ));
+        self.glyphs.paint(
+            "now",
+            x0 + 4.0,
+            band,
+            band_h.min(ROW_H),
+            t.text_dim,
+            false,
+            window,
+            cx,
+        );
+        self.glyphs.paint_right(
+            "close",
+            x0 + w - 4.0,
+            band,
+            band_h.min(ROW_H),
+            t.text_dim,
+            false,
+            window,
+            cx,
+        );
+        pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
+    }
+
     /// What the account has past the rows, at the edge it's past: nothing it holds or works goes
     /// unseen on the view it trades from. The foot's marker joins the top's while the ticket or
     /// a long message covers the foot.
@@ -3801,6 +4223,50 @@ impl ChainView {
                                 )
                         }),
                     )
+                    .children(self.chart_shown().then(|| {
+                        let on = self.pnl_shown();
+                        div()
+                            .id("chain-pnl")
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .px_1()
+                            .border_1()
+                            .rounded_sm()
+                            .border_color(if on { t.accent } else { t.control_edge })
+                            .text_color(t.text_main)
+                            .child(if on { "To close: on" } else { "To close: off" })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_pnl(cx);
+                                }),
+                            )
+                    }))
+                    // One side in view: the way to the other.
+                    .children(self.pnl_shown().then(|| {
+                        let word = match self.side {
+                            Right::Call => "Calls",
+                            Right::Put => "Puts",
+                        };
+                        div()
+                            .id("chain-side")
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .px_1()
+                            .border_1()
+                            .rounded_sm()
+                            .border_color(t.control_edge)
+                            .text_color(t.text_main)
+                            .child(word)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.flip_side(cx);
+                                }),
+                            )
+                    }))
                     .child(
                         div()
                             .id("chain-one-click")
@@ -4448,6 +4914,34 @@ impl ChainView {
         )
     }
 
+    /// `684C  Risk ≈ -$72  ·  Reward ≈ +$308  ·  1 : 4.3`: for a position beside the chart with a
+    /// Stop or Target on it, armed or not, with the P&L display showing money.
+    fn summary_text(&self) -> Option<String> {
+        let traded = self
+            .traded
+            .filter(|_| self.chart_shown() && self.show_money)?;
+        if traded.position == 0 {
+            return None;
+        }
+        let model = traded.model?;
+        let at = |kind: TriggerKind| {
+            let line = self
+                .lines
+                .iter()
+                .find(|l| l.contract == traded.contract && l.kind == kind)?;
+            traded.pnl_at(&model, self.line_level(line).0 as f64, model.now())
+        };
+        let (risk, reward) = (at(TriggerKind::Stop), at(TriggerKind::Target));
+        if risk.is_none() && reward.is_none() {
+            return None;
+        }
+        let mut s = String::new();
+        let _ = crate::chain_lines::write_series(&mut s, traded.contract);
+        s.push_str("  ");
+        let _ = crate::chain_pnl::write_summary(&mut s, risk, reward);
+        Some(s)
+    }
+
     /// A row for each trigger, with its Cancel, and each states the limit (decision 0029): the
     /// loud part first if it can't fire. Beside a chart: Stop and Target to add for the selection.
     fn armed_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -4516,6 +5010,25 @@ impl ChainView {
                 .child(div().min_w_0().child(text))
         };
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        // Risk and reward of the position, at its exits. Estimates, marked ≈; wraps, whole.
+        if let Some(text) = self.summary_text() {
+            rows.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .px_2()
+                    .py(px(2.0))
+                    .bg(t.panel)
+                    .border_t_1()
+                    .border_color(t.axis_line)
+                    .text_size(px(12.0))
+                    .text_color(t.text_main)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(text)
+                    .into_any_element(),
+            );
+        }
         for v in views {
             let mut v = v;
             v.restored |= self.shot_restored && v.kind.is_exit();
@@ -4829,6 +5342,7 @@ impl Render for ChainView {
         }
         self.apply_shot(cx);
         self.refresh_lines(cx);
+        self.refresh_traded(cx);
         self.apply_shot_drag();
         self.take_ended();
         let size = self.size(cx);
@@ -5035,6 +5549,25 @@ impl Render for ChainView {
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_line_up))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_line_up_out))
         });
+        // P&L to close, between the chart's axis and the chain.
+        let pnl_split = self
+            .pnl_shown()
+            .then(|| crate::chain_pnl::split(self.pane_w));
+        let pnl_panel = pnl_split.map(|(panel_w, _)| {
+            let entity = cx.entity();
+            div().flex_shrink_0().w(px(panel_w)).h_full().child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, cx| {
+                        entity.update(cx, |v, cx| v.paint_pnl_panel(bounds, window, cx));
+                    },
+                )
+                .size_full(),
+            )
+        });
+        let chain_w = pnl_split.map_or(gpui::relative(CHART_CHAIN_SHARE).into(), |(_, c)| {
+            gpui::Length::from(px(c))
+        });
         let pane = match shown_chart {
             // The strip, the ticket and a long message cover the column's foot rather than push
             // the plot up: a taller foot would move every row under the pointer. Its usual two lines are
@@ -5055,6 +5588,7 @@ impl Render for ChainView {
                         .children(line_handles)
                         .children(tag_handles),
                 )
+                .children(pnl_panel)
                 .child(
                     div()
                         .relative()
@@ -5062,7 +5596,7 @@ impl Render for ChainView {
                         .flex_col()
                         .flex_shrink_0()
                         .h_full()
-                        .w(gpui::relative(CHART_CHAIN_SHARE))
+                        .w(chain_w)
                         .child(table)
                         .child(div().flex_shrink_0().h(px(2.0 * STRIP_H)))
                         .child(

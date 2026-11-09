@@ -1172,6 +1172,10 @@ impl WindowView {
                 Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_chart(cx)),
                 _ => self.refuse("The chart acts on the focused option chain", cx),
             },
+            Command::ChainPnl => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_pnl(cx)),
+                _ => self.refuse("P&L to close acts on the focused option chain", cx),
+            },
             Command::ChainOneClick => match self.tab().focused_handle().cloned() {
                 Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_one_click(cx)),
                 _ => self.refuse("One-click acts on the focused option chain", cx),

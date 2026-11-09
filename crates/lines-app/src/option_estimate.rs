@@ -27,9 +27,13 @@ impl Estimate {
         write!(out, "{whole:.2}")
     }
 
-    /// What holding `position` from `avg` (in price units) would show at this value, in whole
-    /// currency, with `per_unit` the currency one price unit is worth per contract: `+$40`,
-    /// `-$15`. An estimate too, and text for the same reason.
+    /// What holding `position` from `avg` (in price units) would show at this value, with
+    /// `per_unit` the currency one price unit is worth per contract.
+    pub fn pnl(self, position: i64, avg: f64, per_unit: f64) -> PnlEstimate {
+        PnlEstimate((self.0 - avg) * position as f64 * per_unit)
+    }
+
+    /// [`Self::pnl`] as text: `+$40`, `-$15`.
     pub fn write_pnl(
         self,
         out: &mut impl Write,
@@ -37,10 +41,42 @@ impl Estimate {
         avg: f64,
         per_unit: f64,
     ) -> fmt::Result {
-        let pnl = (self.0 - avg) * position as f64 * per_unit;
-        let rounded = pnl.round();
+        self.pnl(position, avg, per_unit).write(out)
+    }
+}
+
+/// An estimated P&L, in whole currency. Display only, like [`Estimate`]: text, a shade and a
+/// ratio for the screen, and no way to a `Money`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct PnlEstimate(f64);
+
+impl PnlEstimate {
+    /// `+$40`, `-$15`.
+    pub fn write(self, out: &mut impl Write) -> fmt::Result {
+        let rounded = self.0.round();
         let sign = if rounded < 0.0 { '-' } else { '+' };
         write!(out, "{sign}${}", rounded.abs() as i64)
+    }
+
+    pub fn is_loss(self) -> bool {
+        self.0 < 0.0
+    }
+
+    pub fn size(self) -> f64 {
+        self.0.abs()
+    }
+
+    /// How strong a shade is against the largest in view: 0 to 1.
+    pub fn shade(self, largest: f64) -> f32 {
+        if largest <= 0.0 {
+            return 0.0;
+        }
+        ((self.0.abs() / largest).clamp(0.0, 1.0)).sqrt() as f32
+    }
+
+    /// `1 : 4.3` as 4.3: reward for each unit of risk, when one is a loss and the other a gain.
+    pub fn reward_to_risk(reward: PnlEstimate, risk: PnlEstimate) -> Option<f64> {
+        (reward.0 > 0.0 && risk.0 < 0.0).then(|| reward.0 / -risk.0)
     }
 }
 
@@ -73,8 +109,99 @@ fn model(under: f64, strike: f64, right: Right, years: f64, sigma: f64) -> f64 {
     }
 }
 
-/// The option's estimated value with the underlying at `level`; `None` without the quote's
-/// volatility or an underlying price to start from, which the tag shows as no estimate.
+/// The model for one option as the market has it now. At today's underlying and time it reads the
+/// mid; the difference from the plain model fades to nothing at the close, where only what
+/// exercising pays is left. Copied by value, so a paint can use it freely.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Model {
+    strike: f64,
+    right: Right,
+    sigma: f64,
+    now: i64,
+    close: i64,
+    /// The mid less the plain model, now.
+    offset: f64,
+}
+
+impl Model {
+    /// `None` without the quote's volatility or an underlying price to start from, which the
+    /// screen shows as no estimate.
+    pub fn new(
+        contract: ContractKey,
+        quote: Option<&OptionQuote>,
+        under: Option<Price>,
+        now: Option<UtcMillis>,
+    ) -> Option<Model> {
+        let key = contract.option_key()?;
+        let q = quote?;
+        let sigma = f64::from(q.iv_bp?) / 10_000.0;
+        let under = under?.0 as f64;
+        let now = now?;
+        let close = lines_feed::catalog::sessions(contract.product)
+            .and_then(|c| c.session(key.expiry, lines_core::SessionKind::Rth))
+            .map_or_else(|| key.expiry.add_days(1).start_utc(), |s| s.close);
+        let strike = key.strike.0 as f64;
+        let years = (close.0 - now.0) as f64 / MS_PER_YEAR;
+        let offset = match (q.bid, q.ask) {
+            (Some(b), Some(a)) if a.0 >= b.0 => {
+                (b.0 + a.0) as f64 / 2.0 - model(under, strike, key.right, years, sigma)
+            }
+            _ => 0.0,
+        };
+        Some(Model {
+            strike,
+            right: key.right,
+            sigma,
+            now: now.0,
+            close: close.0,
+            offset,
+        })
+    }
+
+    pub fn now(&self) -> i64 {
+        self.now
+    }
+
+    pub fn close(&self) -> i64 {
+        self.close
+    }
+
+    /// The value with the underlying at `under` (price units) at time `at`.
+    pub fn value_at(&self, under: f64, at: i64) -> Estimate {
+        let span = (self.close - self.now) as f64;
+        let left = (self.close - at) as f64;
+        let fade = if span > 0.0 {
+            (left / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let years = left / MS_PER_YEAR;
+        let plain = model(under, self.strike, self.right, years, self.sigma);
+        Estimate((plain + self.offset * fade).max(0.0))
+    }
+
+    /// The underlying's price between `lo` and `hi` where the option is worth `value` at time
+    /// `at`; `None`: it isn't, in that range.
+    pub fn level_for(&self, value: f64, at: i64, lo: f64, hi: f64) -> Option<f64> {
+        let above = |s: f64| self.value_at(s, at).0 > value;
+        let (mut a, mut b) = (lo, hi);
+        if above(a) == above(b) {
+            return None;
+        }
+        let at_a = above(a);
+        for _ in 0..24 {
+            let mid = (a + b) / 2.0;
+            if above(mid) == at_a {
+                a = mid;
+            } else {
+                b = mid;
+            }
+        }
+        Some((a + b) / 2.0)
+    }
+}
+
+/// The option's estimated value with the underlying at `level`, now; `None` as [`Model::new`].
 pub fn estimate(
     contract: ContractKey,
     quote: Option<&OptionQuote>,
@@ -82,25 +209,8 @@ pub fn estimate(
     level: Price,
     now: Option<UtcMillis>,
 ) -> Option<Estimate> {
-    let key = contract.option_key()?;
-    let q = quote?;
-    let sigma = f64::from(q.iv_bp?) / 10_000.0;
-    let under = under?.0 as f64;
-    let now = now?;
-    let close = lines_feed::catalog::sessions(contract.product)
-        .and_then(|c| c.session(key.expiry, lines_core::SessionKind::Rth))
-        .map_or_else(|| key.expiry.add_days(1).start_utc(), |s| s.close);
-    let years = (close.0 - now.0) as f64 / MS_PER_YEAR;
-    let strike = key.strike.0 as f64;
-    let at = |s: f64| model(s, strike, key.right, years, sigma);
-    let value = match (q.bid, q.ask) {
-        (Some(b), Some(a)) if a.0 >= b.0 => {
-            let mid = (b.0 + a.0) as f64 / 2.0;
-            mid + at(level.0 as f64) - at(under)
-        }
-        _ => at(level.0 as f64),
-    };
-    Some(Estimate(value.max(0.0)))
+    let m = Model::new(contract, quote, under, now)?;
+    Some(m.value_at(level.0 as f64, m.now))
 }
 
 #[cfg(test)]
@@ -170,7 +280,7 @@ mod tests {
             at_ten(),
         )
         .unwrap();
-        assert_eq!(e, Estimate(242.0));
+        close_to(e.0, 242.0, 1e-6);
     }
 
     /// A call is worth more as the underlying rises and a put as it falls, and neither below 0.
@@ -206,6 +316,72 @@ mod tests {
         assert!(estimate(c, Some(&q), at, Price(68_500), None).is_none());
         let shares = ContractKey::equity(catalog::SPY);
         assert!(estimate(shares, Some(&q), at, Price(68_500), at_ten()).is_none());
+    }
+
+    /// Time decays: at the close it's what exercising pays, whatever the quote said; before it
+    /// the same price is worth more, and now it reads the mid.
+    #[test]
+    fn the_estimate_runs_to_the_close() {
+        let q = quote(240, 244, Some(1_500));
+        let c = contract(684, Right::Call);
+        let m = Model::new(c, Some(&q), Some(Price(68_400)), at_ten()).unwrap();
+        close_to(m.value_at(68_400.0, m.now()).0, 242.0, 1e-6);
+        // At the money with nothing left: nothing.
+        close_to(m.value_at(68_400.0, m.close()).0, 0.0, 1e-6);
+        close_to(m.value_at(68_500.0, m.close()).0, 100.0, 1e-6);
+        close_to(m.value_at(68_300.0, m.close()).0, 0.0, 1e-6);
+        let half = (m.now() + m.close()) / 2;
+        let (now, mid, end) = (
+            m.value_at(68_400.0, m.now()).0,
+            m.value_at(68_400.0, half).0,
+            m.value_at(68_400.0, m.close()).0,
+        );
+        assert!(now > mid && mid > end, "{now} {mid} {end}");
+        // Past the close it stays there.
+        close_to(m.value_at(68_500.0, m.close() + 1_000).0, 100.0, 1e-6);
+    }
+
+    /// The breakeven: where it's worth what was paid, and none where it can't be.
+    #[test]
+    fn a_level_is_found_for_a_value_either_right() {
+        let q = quote(240, 244, Some(1_500));
+        let (lo, hi) = (60_000.0, 76_000.0);
+        let call = contract(684, Right::Call);
+        let m = Model::new(call, Some(&q), Some(Price(68_400)), at_ten()).unwrap();
+        // At the close: the strike plus what was paid.
+        close_to(
+            m.level_for(242.0, m.close(), lo, hi).unwrap(),
+            68_642.0,
+            0.5,
+        );
+        assert_eq!(m.level_for(242.0, m.close(), 68_000.0, 68_100.0), None);
+        let put = contract(684, Right::Put);
+        let p = Model::new(put, Some(&q), Some(Price(68_400)), at_ten()).unwrap();
+        close_to(
+            p.level_for(242.0, p.close(), lo, hi).unwrap(),
+            68_158.0,
+            0.5,
+        );
+    }
+
+    #[test]
+    fn a_pnl_reads_signed_and_shades_by_size() {
+        let text = |p: PnlEstimate| {
+            let mut s = String::new();
+            p.write(&mut s).unwrap();
+            s
+        };
+        let gain = Estimate(282.0).pnl(1, 242.0, 1.0);
+        let loss = Estimate(202.0).pnl(2, 242.0, 1.0);
+        assert_eq!((text(gain), text(loss)), ("+$40".into(), "-$80".into()));
+        assert!(loss.is_loss() && !gain.is_loss());
+        assert_eq!(loss.size(), 80.0);
+        assert_eq!(gain.shade(40.0), 1.0);
+        assert_eq!(gain.shade(160.0), 0.5);
+        assert_eq!(gain.shade(0.0), 0.0);
+        assert_eq!(PnlEstimate::reward_to_risk(gain, loss), Some(0.5));
+        assert_eq!(PnlEstimate::reward_to_risk(loss, gain), None, "backward");
+        assert_eq!(PnlEstimate::reward_to_risk(gain, gain), None, "no risk");
     }
 
     #[test]

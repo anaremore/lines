@@ -446,13 +446,14 @@ impl TradingCore {
         &mut self,
         now: UtcMillis,
         account: &AccountId,
+        contract: ContractKey,
         id: TriggerId,
     ) -> Result<Vec<OrderId>, Reject> {
         let Some(l) = self
             .triggers
             .live
             .get(&id)
-            .filter(|l| &l.view.account == account)
+            .filter(|l| &l.view.account == account && l.view.contract == contract)
         else {
             return Err(Reject::new(
                 RejectCode::Invalid,
