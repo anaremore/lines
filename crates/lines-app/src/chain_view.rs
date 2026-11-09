@@ -393,6 +393,8 @@ pub struct ChainView {
     _chart_feed: Option<gpui::Subscription>,
     /// The pane's width as of the last frame.
     pane_w: f32,
+    /// The chart plot's width when its lines were last painted.
+    plot_w: f32,
     /// P&L to close (decision 0029), and what it's of, refreshed each render. Not saved: it's off
     /// each start.
     pnl_on: bool,
@@ -978,6 +980,7 @@ impl ChainView {
             chart: None,
             _chart_feed: None,
             pane_w: 0.0,
+            plot_w: 0.0,
             pnl_on: false,
             show_money: true,
             traded: None,
@@ -1075,7 +1078,7 @@ impl ChainView {
             let why = if !self.chart_shown() {
                 Some("P&L to close needs the chart beside the chain")
             } else if !self.show_money {
-                Some("P&L to close needs the P&L display on")
+                Some("P&L to close needs the P&L display to show currency")
             } else {
                 None
             };
@@ -1108,10 +1111,13 @@ impl ChainView {
         else {
             return;
         };
+        let expiry = self.frame.expiry;
         let rights = st
             .positions_of(account)
             .filter(|p| p.contract.product == self.product.id && p.qty != 0)
-            .filter_map(|p| p.contract.option_key().map(|k| k.right));
+            .filter_map(|p| p.contract.option_key())
+            .filter(|k| Some(k.expiry) == expiry)
+            .map(|k| k.right);
         let mut first = None;
         for r in rights {
             if r == self.side {
@@ -1185,19 +1191,23 @@ impl ChainView {
                 });
             let position = account.and_then(|a| st.position(a, contract));
             let ticket = self.ticket.as_ref().filter(|t| t.key == key);
-            let basis = position.and_then(|p| p.avg_price).or_else(|| {
-                ticket
+            // A position starts from its own average or nothing: no quote passes for what it
+            // cost. A what-if starts from the ticket's price, else the side it would trade.
+            let sold = ticket.is_some_and(|t| t.side == Side::Sell);
+            let (bid, ask) = ticket::sides(quote.as_ref());
+            let basis = match position.filter(|p| p.qty != 0) {
+                Some(p) => p.avg_price,
+                None => ticket
                     .and_then(|t| t.price)
-                    .or(ticket::sides(quote.as_ref()).1)
-                    .map(|p| p.0 as f64)
-            });
+                    .or(if sold { bid } else { ask })
+                    .map(|p| p.0 as f64),
+            };
             // No money to read it in: no estimate rather than +$0 everywhere.
             let per_unit = ticket::premium(&self.product, contract, 1, Price(1))
                 .map(|m| m.0 as f64 / lines_trading::Money::UNITS_PER_WHOLE as f64);
             let model = per_unit.and_then(|_| {
                 crate::option_estimate::Model::new(contract, quote.as_ref(), d.last_trade, now)
             });
-            let sold = ticket.is_some_and(|t| t.side == Side::Sell);
             Traded {
                 contract,
                 model,
@@ -3724,8 +3734,10 @@ impl ChainView {
                 .paint(s.as_str(), x + PAD, y, TAG_H, t.text_main, true, window, cx);
             self.tag_boxes[order[k]] = (x - x0, y, w);
         }
-        // The handles are built before this paints: a tag that moved needs them built again.
-        if self.tag_boxes != before {
+        // The handles are built before this paints: a tag or plot that moved needs them built again.
+        let plot_w = scale.vp.width as f32;
+        if self.tag_boxes != before || self.plot_w != plot_w {
+            self.plot_w = plot_w;
             window.on_next_frame(|window, _| window.refresh());
         }
     }
@@ -3770,11 +3782,15 @@ impl ChainView {
             },
             traded.qty,
         );
-        // Whole in a narrow panel: the sum goes first, then the size, never the ≈.
+        // Whole in a narrow panel: its price goes, never what says whose it is, or the ≈.
         if self.glyphs.width(title.as_str(), t.text_main, true, window) > room {
             title = FixedStr::<64>::new();
-            let _ = crate::chain_lines::write_series(&mut title, traded.contract);
-            let _ = std::fmt::Write::write_str(&mut title, "  ≈ P&L to close");
+            let _ = crate::chain_pnl::write_title_short(
+                &mut title,
+                traded.contract,
+                traded.position,
+                traded.qty,
+            );
         }
         self.glyphs.paint(
             title.as_str(),
@@ -3950,8 +3966,13 @@ impl ChainView {
             window,
             cx,
         );
+        let mut closes = FixedStr::<24>::new();
+        let _ = std::fmt::Write::write_str(&mut closes, "close ");
+        if let Some(k) = traded.contract.option_key() {
+            let _ = write_chip_date(&mut closes, k.expiry);
+        }
         self.glyphs.paint_right(
-            "close",
+            closes.as_str(),
             x0 + w - 4.0,
             band,
             band_h.min(ROW_H),
@@ -4277,6 +4298,32 @@ impl ChainView {
                                 }),
                             )
                     }))
+                    // One side in view: the way to the other. Left of the chips here, so turning P&L to close
+                    // on moves none of them, and the same width either side.
+                    .children(self.pnl_shown().then(|| {
+                        let word = match self.side {
+                            Right::Call => "Calls",
+                            Right::Put => "Puts",
+                        };
+                        div()
+                            .id("chain-side")
+                            .flex_shrink_0()
+                            .min_w(px(42.0))
+                            .cursor_pointer()
+                            .px_1()
+                            .border_1()
+                            .rounded_sm()
+                            .border_color(t.control_edge)
+                            .text_color(t.text_main)
+                            .child(word)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.flip_side(cx);
+                                }),
+                            )
+                    }))
                     // Off, it costs a narrow header room for nothing: the chart wouldn't fit there.
                     .children(
                         (self.chart.is_some() || self.pane_w >= CHART_MIN_W).then(|| {
@@ -4317,30 +4364,6 @@ impl ChainView {
                                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
                                     this.toggle_pnl(cx);
-                                }),
-                            )
-                    }))
-                    // One side in view: the way to the other.
-                    .children(self.pnl_shown().then(|| {
-                        let word = match self.side {
-                            Right::Call => "Calls",
-                            Right::Put => "Puts",
-                        };
-                        div()
-                            .id("chain-side")
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .px_1()
-                            .border_1()
-                            .rounded_sm()
-                            .border_color(t.control_edge)
-                            .text_color(t.text_main)
-                            .child(word)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.flip_side(cx);
                                 }),
                             )
                     }))
@@ -5880,6 +5903,40 @@ mod tests {
         assert!(!hold_rows(table, on, false, false), "left the window");
         assert!(hold_rows(table, chart, true, true), "One-click, anywhere");
         assert!(hold_rows(table, chart, false, true), "One-click, anywhere");
+    }
+
+    /// With one side in view, what's held on the other is counted: it has a row, but no cell.
+    #[test]
+    fn a_held_series_on_the_hidden_side_is_not_shown() {
+        let day = CivilDate::new(2026, 11, 9).unwrap();
+        let chains = key_chain(day, 670, 690);
+        let s = locked_scale();
+        let mut f = locked_frame();
+        f.locked = true;
+        f.area = (116.0, 480.0);
+        f.refresh_locked(
+            chains.chain(day),
+            Some(Price(68_050)),
+            None,
+            &s,
+            116.0,
+            480.0,
+        );
+        let strike = f.rows[0].strike;
+        f.marks.push(Mark {
+            strike,
+            right: Right::Put,
+            position: 2,
+            avg: None,
+            order: None,
+            orders: 1,
+        });
+        assert_eq!(f.off_rows(&s, f32::INFINITY).between.held, 0, "both sides");
+        f.hidden_side = Some(Right::Call);
+        assert_eq!(f.off_rows(&s, f32::INFINITY).between.held, 0, "its side");
+        f.hidden_side = Some(Right::Put);
+        let off = f.off_rows(&s, f32::INFINITY);
+        assert_eq!((off.between.held, off.between.working), (1, 1), "hidden");
     }
 
     /// A marker counts what no row shows, and its strips never hold a row, so it can't take a

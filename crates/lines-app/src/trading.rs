@@ -2174,8 +2174,6 @@ impl Trading {
 
 #[cfg(test)]
 mod tests {
-    /// The bracket mode names its account and contract (so it goes to that account's core and
-    /// is refused on a read-only one) but flashes no DENIED: the trade panel shows its answer.
     /// A refused trigger command flashes on its own option, not every pane of the account.
     #[test]
     fn a_trigger_commands_note_names_its_option() {
@@ -2199,6 +2197,8 @@ mod tests {
         }
     }
 
+    /// The bracket mode names its account and contract (so it goes to that account's core and
+    /// is refused on a read-only one) but flashes no DENIED: the trade panel shows its answer.
     #[test]
     fn the_bracket_mode_is_routed_like_an_order_but_answered_by_the_panel() {
         use lines_core::{ContractKey, Month};

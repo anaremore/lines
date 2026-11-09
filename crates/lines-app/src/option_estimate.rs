@@ -343,6 +343,22 @@ mod tests {
         close_to(m.value_at(68_500.0, m.close() + 1_000).0, 100.0, 1e-6);
     }
 
+    /// Quoted at or past the close, a tag says what exercising pays; a quote left over adds
+    /// nothing.
+    #[test]
+    fn at_or_past_the_close_it_is_what_exercising_pays() {
+        let q = quote(240, 244, Some(1_500));
+        let late = UtcMillis::parse_iso("2026-11-14T00:00:00Z");
+        let e = estimate(
+            contract(684, Right::Call),
+            Some(&q),
+            Some(Price(68_400)),
+            Price(68_500),
+            late,
+        );
+        close_to(e.unwrap().0, 100.0, 1e-6);
+    }
+
     /// The breakeven: where it's worth what was paid, and none where it can't be.
     #[test]
     fn a_level_is_found_for_a_value_either_right() {

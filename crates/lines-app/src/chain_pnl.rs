@@ -72,6 +72,24 @@ pub fn write_title<W: Write>(
     out.write_str("  ≈ P&L to close")
 }
 
+/// The title with less room. Its price goes, never what says whose it is, or the ≈.
+pub fn write_title_short(
+    out: &mut impl Write,
+    contract: ContractKey,
+    position: i64,
+    qty: i64,
+) -> fmt::Result {
+    crate::chain_lines::write_series(out, contract)?;
+    if position != 0 {
+        write!(out, " {position:+}")?;
+    } else if qty < 0 {
+        write!(out, " if {} sold", -qty)?;
+    } else {
+        write!(out, " if {qty} bought")?;
+    }
+    out.write_str("  ≈ P&L")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +180,14 @@ mod tests {
         assert_eq!(title(-1, 1), "684C -1 @ 0.65  ≈ P&L to close");
         assert_eq!(title(0, 3), "684C if 3 bought @ 0.65  ≈ P&L to close");
         assert_eq!(title(0, -2), "684C if 2 sold @ 0.65  ≈ P&L to close");
+        let short = |position, qty| {
+            let mut s = String::new();
+            write_title_short(&mut s, c, position, qty).unwrap();
+            s
+        };
+        assert_eq!(short(2, 2), "684C +2  ≈ P&L");
+        assert_eq!(short(0, 3), "684C if 3 bought  ≈ P&L");
+        assert_eq!(short(0, -2), "684C if 2 sold  ≈ P&L");
     }
 
     /// The chart keeps room at the narrowest width the option chart has, and has more than it
