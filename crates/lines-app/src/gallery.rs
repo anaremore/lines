@@ -515,6 +515,20 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         ("chain-pnl-narrow", false, "800x640", "--theme dark", "pnl"),
         ("chain-pnl-mid", false, "940x640", "--theme dark", "pnl"),
         (
+            "chain-pnl-ticket-narrow",
+            false,
+            "800x640",
+            "--theme dark",
+            "buy 685 call pnl",
+        ),
+        (
+            "chain-pnl-when-narrow",
+            false,
+            "800x640",
+            "--theme dark",
+            "buy 685 call when 685.00 pnl",
+        ),
+        (
             "chain-pnl-ticket",
             false,
             "1600x800",

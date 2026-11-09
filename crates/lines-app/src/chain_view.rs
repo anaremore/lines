@@ -3758,6 +3758,17 @@ impl ChainView {
             return;
         };
         let Some(traded) = self.traded else {
+            self.glyphs.paint(
+                "No estimate",
+                f(bounds.origin.x) + PAD,
+                scale.plot_top + 6.0,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
+            pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
             return;
         };
         let (x0, w) = (f(bounds.origin.x), f(bounds.size.width));
@@ -3897,9 +3908,13 @@ impl ChainView {
                 let mut s = FixedStr::<16>::new();
                 let _ = p.write(&mut s);
                 let tw = self.glyphs.width(s.as_str(), t.text_main, false, window);
+                // Inside the panel, however large the figure: the chain paints over the rest.
+                let lx = (x0 + (col as f32 + 0.5) * cw - tw / 2.0)
+                    .min(x0 + w - tw - 2.0)
+                    .max(x0 + 2.0);
                 self.glyphs.paint(
                     s.as_str(),
-                    x0 + (col as f32 + 0.5) * cw - tw / 2.0,
+                    lx,
                     y - ROW_H / 2.0,
                     ROW_H,
                     t.text_main,
@@ -4803,10 +4818,12 @@ impl ChainView {
         }
         let controls = controls
             .child(
+                // Wraps rather than run past a narrow chain's edge: a price is never cut.
                 div()
                     .flex()
                     .flex_row()
-                    .flex_shrink_0()
+                    .flex_wrap()
+                    .max_w_full()
                     .items_center()
                     .gap_1()
                     .child(div().text_color(t.text_dim).child(if when.is_some() {
@@ -5306,6 +5323,8 @@ impl ChainView {
             .flex_shrink_0()
             // The exits' height whether they show or not.
             .min_h(px(STRIP_H))
+            // A message keeps a readable width: the exits go under it, not beside a sliver.
+            .when(self.note.is_some(), |d| d.flex_wrap())
             .items_center()
             .gap_2()
             .px_2()
@@ -5318,6 +5337,7 @@ impl ChainView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .when(self.note.is_some(), |d| d.min_w(px(180.0)))
                     // A reason wraps, whole; the hints give way at the edge.
                     .when(self.note.is_none(), |d| {
                         d.whitespace_nowrap().overflow_hidden()
