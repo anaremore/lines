@@ -5317,37 +5317,13 @@ impl ChainView {
 
     fn footer(&self, size: i64, exits: Option<gpui::Div>) -> impl IntoElement {
         let t = self.theme;
-        // Narrow beside the exits, a message sits over what's above them, and the footer keeps its
-        // height. So a message arriving moves nothing: not Flatten under a pointer resting on
-        // Cancel, and not a Close or Send from above. It covers those until it clears.
-        let width = f(self.bounds.size.width);
-        let own_line = footer_note_above(self.note.is_some(), exits.is_some(), width);
-        let above = own_line.then(|| {
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom(gpui::relative(1.0))
-                .occlude()
-                .px_2()
-                .py_1()
-                .bg(t.panel)
-                .border_t_1()
-                .border_color(t.axis_line)
-                .text_size(px(12.0))
-                .text_color(t.text_main)
-                .children(self.note.clone())
-        });
         div()
             .flex()
             .flex_row()
             .flex_shrink_0()
             // The exits' height whether they show or not.
             .min_h(px(STRIP_H))
-            .relative()
             .items_center()
-            // A wrapped message grows the row upward: the exits hold their place at its foot.
-            .when(self.note.is_some(), |d| d.items_end())
             .gap_2()
             .px_2()
             .py_1()
@@ -5370,15 +5346,13 @@ impl ChainView {
                     })
                     // Narrow beside the exits there's no room for hints: only a message shows.
                     .when(
-                        !own_line
-                            && (self.note.is_some()
-                                || (self.ticket.is_none()
-                                    && !(exits.is_some() && width < NARROW_HEADER))),
+                        self.note.is_some()
+                            || (self.ticket.is_none()
+                                && !(exits.is_some() && f(self.bounds.size.width) < NARROW_HEADER)),
                         |d| d.child(self.footer_text(size)),
                     ),
             )
             .children(exits)
-            .children(above)
     }
 
     fn footer_text(&self, size: i64) -> String {
@@ -5412,12 +5386,6 @@ fn hold_rows(
     one_click: bool,
 ) -> bool {
     one_click || (window_hovered && table.contains(&pointer))
-}
-
-/// Whether a message goes over what's above the footer: when it would share a narrow row with the
-/// exits and leave itself a sliver.
-fn footer_note_above(note: bool, exits: bool, width: f32) -> bool {
-    note && exits && width < NARROW_HEADER
 }
 
 /// How many of a series' orders the strip's one line holds; at least one (at the narrowest its
@@ -5952,22 +5920,6 @@ mod tests {
         assert!(!hold_rows(table, on, false, false), "left the window");
         assert!(hold_rows(table, chart, true, true), "One-click, anywhere");
         assert!(hold_rows(table, chart, false, true), "One-click, anywhere");
-    }
-
-    /// Narrow, a message goes over what's above and the footer's height holds. Wide, it shares the
-    /// exits' row.
-    #[test]
-    fn a_footer_message_only_leaves_the_exits_row_when_narrow() {
-        assert!(footer_note_above(true, true, NARROW_HEADER - 1.0));
-        assert!(!footer_note_above(true, true, NARROW_HEADER));
-        assert!(
-            !footer_note_above(true, false, NARROW_HEADER - 1.0),
-            "no exits"
-        );
-        assert!(
-            !footer_note_above(false, true, NARROW_HEADER - 1.0),
-            "no message"
-        );
     }
 
     /// With one side in view, what's held on the other is counted: it has a row, but no cell.
