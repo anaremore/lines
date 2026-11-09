@@ -66,6 +66,9 @@ Run on the exact HEAD you push. Report the SHA and each result.
 - Rebase on origin/main before review and before merge; `--force-with-lease` to your own branch is fine.
 - PR body: `.github/pull_request_template.md`, filled with gate output, screenshots and the risk tier.
 - Merge only with `gh pr merge <n> --merge`. Never `--admin` or `--delete-branch`.
+- Don't end a turn while a build, gate or reviewer you started is running: a stopped thread stalls
+  until someone notices. In T3, mark background work with `t3_background_wait` and wait for it. Once
+  your PR is open, `watch_pull_request` it so checks, reviews and conflicts wake you.
 - Parallel threads: name the shared files you touch (`chart_view.rs`, `dom_view.rs`, `commands.rs`,
   `workspace.rs`, `trading.rs`, `ROADMAP.md`, `docs/invariants.md`) and keep edits there small.
 - Skills: `review-loop` (fresh-context review), `full-send` (to merged), `full-stop` (to a green PR,
