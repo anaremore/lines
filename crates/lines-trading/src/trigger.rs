@@ -6,6 +6,8 @@
 //! - **Entry:** a buy. It fires when the underlying reaches its level from the side it was on
 //!   when armed, and sends a limit at the ask, capped at the trader's max. It doesn't chase: the
 //!   ask above the cap, or any new-order check failing at that moment, ends it with its reason.
+//!   Its limit not filled within [`crate::risk::OptionGuard::entry_fill_ms`] is canceled, and the
+//!   Entry is reported ended again with that reason (what's filled by then stays).
 //! - **Stop and Target:** at most one of each per position, linked: when one fires, the other
 //!   ends. They close whatever the position is when they fire, so they shrink with it, and they
 //!   end if it goes flat or flips. Which way they fire follows the position's direction: a long

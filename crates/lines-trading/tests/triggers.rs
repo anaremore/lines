@@ -16,7 +16,7 @@ use lines_trading::rules::presets;
 use lines_trading::trigger::{Direction, TriggerId, TriggerKind, TriggerSpec, TriggerState};
 use lines_trading::{
     AccountConfig, AccountId, Command, Event, MarketInput, Order, OrderId, OrderKind, OrderSpec,
-    PaperBroker, PaperConfig, RejectCode, Side, Source, TradingCore,
+    OrderState, PaperBroker, PaperConfig, RejectCode, Side, Source, TradingCore,
 };
 
 const LAT: i64 = 20;
@@ -243,6 +243,183 @@ fn entry(qty: i64, max: i64) -> TriggerKind {
         qty: Qty(qty),
         max_price: Price(max),
     }
+}
+
+/// A fired Entry's limit doesn't rest with no end: the option runs before it lands, and not filled
+/// in 10 s it's canceled, so the failed breakout's fall 10 minutes later doesn't fill it. The Entry
+/// says why.
+#[test]
+fn a_fired_entrys_limit_is_canceled_if_not_filled_in_time() {
+    let mut r = Rig::new();
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_400);
+    r.print(68_400);
+    let fired = r.t;
+    r.quote(Some(300), Some(302));
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0, "rests");
+    let order = r.orders(call())[0].id;
+    let wake = r.core.next_wake().expect("a wake for its time");
+    assert_eq!(wake.0, fired + 10_000);
+    r.wait(9_000);
+    assert!(r.core.order(order).unwrap().is_open(), "not before 10 s");
+    r.wait(wake.0 - r.t);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.order(order).unwrap().state, OrderState::Cancelled);
+    assert_eq!(r.state(id), TriggerState::Ended);
+    assert!(
+        r.reason(id).starts_with("not filled in 10 s"),
+        "{}",
+        r.reason(id)
+    );
+    // The breakout fails: nothing fills.
+    r.wait(10 * 60_000);
+    r.print(68_250);
+    r.quote(Some(238), Some(240));
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 0);
+}
+
+/// Filled in time: nothing is canceled, and the Entry isn't reported again.
+#[test]
+fn a_fired_entry_filled_in_time_is_left_alone() {
+    let mut r = Rig::new();
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_400);
+    r.print(68_400);
+    r.wait(LAT + 1);
+    assert_eq!(r.position(call()), 1);
+    let ended = |r: &Rig| {
+        r.events
+            .iter()
+            .filter(|e| matches!(e, Event::Trigger(t) if t.id == id))
+            .count()
+    };
+    let before = ended(&r);
+    r.wait(11_000);
+    assert_eq!(ended(&r), before);
+    assert!(r.core.next_wake().is_none_or(|w| w.0 > r.t));
+    assert!(r.reason(id).starts_with("fired"), "{}", r.reason(id));
+}
+
+/// A person cancels it first: nothing more happens, and the Entry isn't reported again. A person
+/// moving it doesn't take it off the clock: it's still the Entry's limit.
+#[test]
+fn a_fired_entrys_limit_a_person_handles() {
+    let mut r = Rig::new();
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_400);
+    r.print(68_400);
+    r.quote(Some(300), Some(302));
+    r.wait(LAT + 1);
+    let order = r.orders(call())[0].id;
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order,
+    })
+    .unwrap();
+    r.wait(LAT + 1);
+    let reports = |r: &Rig| {
+        r.events
+            .iter()
+            .filter(|e| matches!(e, Event::Trigger(t) if t.id == id))
+            .count()
+    };
+    let before = reports(&r);
+    r.wait(11_000);
+    assert_eq!(reports(&r), before);
+
+    let mut r = Rig::new();
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_400);
+    r.print(68_400);
+    r.quote(Some(300), Some(302));
+    r.wait(LAT + 1);
+    let order = r.orders(call())[0].id;
+    r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order,
+        qty: None,
+        price: Some(Price(250)),
+    })
+    .unwrap();
+    r.wait(10_000);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.order(order).unwrap().state, OrderState::Cancelled);
+    assert!(
+        r.reason(id).starts_with("not filled in 10 s"),
+        "{}",
+        r.reason(id)
+    );
+}
+
+/// A limit a rebuild leaves with no known outcome isn't forgotten: once the broker says it's
+/// working, past its time, it's canceled, with the reason. Set to 0, the wait is 1 s.
+#[test]
+fn a_fired_entrys_unresolved_limit_is_canceled_once_found() {
+    let mut a = AccountConfig::paper("paper-1", 100_000);
+    a.limits.option_guard = Some(lines_trading::risk::OptionGuard {
+        entry_fill_ms: 0,
+        ..Default::default()
+    });
+    let mut r = Rig::with(a);
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_400);
+    r.print(68_400);
+    let order = r.orders(call())[0].id;
+    // Before the broker answers.
+    r.core.rebuild(r.now());
+    r.collect();
+    assert_eq!(r.core.order(order).unwrap().state, OrderState::Unresolved);
+    r.quote(Some(300), Some(302));
+    // While nobody knows, nothing is sent: the broker's answer, when it comes, says it's working.
+    let state = |r: &Rig| r.core.order(order).unwrap().state.clone();
+    while state(&r) == OrderState::Unresolved {
+        assert!(r.reason(id).starts_with("fired"), "{}", r.reason(id));
+        r.wait(1);
+    }
+    // Then past its time it goes, with the reason.
+    r.wait(1_000);
+    r.wait(LAT + 1);
+    assert_eq!(state(&r), OrderState::Cancelled);
+    assert!(
+        r.reason(id).starts_with("not filled in 1 s"),
+        "{}",
+        r.reason(id)
+    );
+}
+
+/// The time is the account's to set, as the Target's chase is.
+#[test]
+fn a_fired_entrys_time_is_the_accounts() {
+    let mut a = AccountConfig::paper("paper-1", 100_000);
+    a.limits.option_guard = Some(lines_trading::risk::OptionGuard {
+        entry_fill_ms: 30_000,
+        ..Default::default()
+    });
+    let mut r = Rig::with(a);
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let id = r.arm(call(), entry(1, 300), 68_400);
+    r.print(68_400);
+    r.quote(Some(300), Some(302));
+    r.wait(LAT + 1);
+    let order = r.orders(call())[0].id;
+    r.wait(15_000);
+    assert!(r.core.order(order).unwrap().is_open());
+    r.wait(15_000);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.order(order).unwrap().state, OrderState::Cancelled);
+    assert!(
+        r.reason(id).starts_with("not filled in 30 s"),
+        "{}",
+        r.reason(id)
+    );
 }
 
 /// An entry fires as the underlying reaches its level, from the side it was armed on, with a

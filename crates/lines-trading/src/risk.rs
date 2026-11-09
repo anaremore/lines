@@ -54,6 +54,8 @@ pub struct OptionGuard {
     pub trigger_stale_ms: i64,
     /// A fired Target re-prices to the bid this often (decision 0029).
     pub target_chase_ms: i64,
+    /// A fired Entry's limit not filled in this long is canceled: it doesn't rest with no end.
+    pub entry_fill_ms: i64,
 }
 
 impl Default for OptionGuard {
@@ -64,6 +66,7 @@ impl Default for OptionGuard {
             allow_market: false,
             trigger_stale_ms: DEFAULT_TRIGGER_STALE_MS,
             target_chase_ms: DEFAULT_TARGET_CHASE_MS,
+            entry_fill_ms: DEFAULT_ENTRY_FILL_MS,
         }
     }
 }
@@ -99,6 +102,10 @@ pub const DEFAULT_TRIGGER_STALE_MS: i64 = 10_000;
 
 /// How often a fired Target re-prices, by default (decision 0029: every few seconds).
 pub const DEFAULT_TARGET_CHASE_MS: i64 = 3_000;
+
+/// How long a fired Entry's limit may rest unfilled, by default: a breakout's price is gone by
+/// then, and a fill long after would be on a move that failed.
+pub const DEFAULT_ENTRY_FILL_MS: i64 = 10_000;
 
 /// An option's quote as the guard sees it.
 #[derive(Copy, Clone, Debug, Default)]

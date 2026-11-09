@@ -1989,6 +1989,7 @@ impl TradingCore {
             .chain(cooldowns)
             .chain(news)
             .chain(self.triggers_wake())
+            .chain(self.entries_wake())
             .chain(self.cancels_wake())
             .chain(self.flatten_wake())
             .min()

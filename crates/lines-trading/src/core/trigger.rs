@@ -35,6 +35,18 @@ pub(super) struct Triggers {
     stepping: bool,
     /// Saved exits waiting for the first rebuild.
     restoring: Vec<SavedTrigger>,
+    /// Fired entries' limits, canceled if not filled in time.
+    entries: Vec<FiredEntry>,
+}
+
+/// A fired Entry's limit and when it's canceled if still working.
+struct FiredEntry {
+    order: OrderId,
+    until: UtcMillis,
+    /// How long it was given, for the reason.
+    wait: i64,
+    /// The Entry as it ended, reported again with the cancel's reason.
+    view: TriggerView,
 }
 
 struct Live {
@@ -338,13 +350,13 @@ impl TradingCore {
     }
 
     /// End a trigger, with its reason: its last event.
-    fn trigger_end(&mut self, id: TriggerId, reason: &str) {
-        if let Some(mut l) = self.triggers.live.remove(&id) {
-            l.view.state = TriggerState::Ended;
-            l.view.note = None;
-            l.view.reason = Some(reason.to_owned());
-            self.events.push(Event::Trigger(l.view));
-        }
+    fn trigger_end(&mut self, id: TriggerId, reason: &str) -> Option<TriggerView> {
+        let mut l = self.triggers.live.remove(&id)?;
+        l.view.state = TriggerState::Ended;
+        l.view.note = None;
+        l.view.reason = Some(reason.to_owned());
+        self.events.push(Event::Trigger(l.view.clone()));
+        Some(l.view)
     }
 
     /// The trader moves one, as a single step: refused, it stays where it was.
@@ -662,6 +674,8 @@ impl TradingCore {
             self.trigger_end(id, &why);
             return;
         }
+        // At least a second: a limit canceled before it could land would just flash.
+        let wait = self.guard_of(&account).entry_fill_ms.max(1_000);
         let spec = OrderSpec {
             account,
             contract,
@@ -669,16 +683,83 @@ impl TradingCore {
             qty,
             kind: OrderKind::Limit { price: ask },
         };
-        let why = match self.trigger_issue(now, Command::PlaceOrder(spec)) {
+        let issued = self.trigger_issue(now, Command::PlaceOrder(spec));
+        let why = match &issued {
             Ok(ids) => format!(
                 "fired: limit at {}{}",
                 cs_price(ask, self),
                 ids.first()
                     .map_or(String::new(), |o| format!(", order {}", o.0))
             ),
-            Err(r) => r.message,
+            Err(r) => r.message.clone(),
         };
-        self.trigger_end(id, &why);
+        let ended = self.trigger_end(id, &why);
+        if let (Ok(ids), Some(view)) = (issued, ended)
+            && let Some(&order) = ids.first()
+        {
+            self.triggers.entries.push(FiredEntry {
+                order,
+                until: UtcMillis(now.0.saturating_add(wait)),
+                wait,
+                view,
+            });
+        }
+    }
+
+    /// Fired entries' limits: done once they finish, canceled once their time is up. One with no
+    /// known outcome (unresolved) is kept: a rebuild may find it working, and then it goes.
+    fn entries_step(&mut self, now: UtcMillis) {
+        let mut i = 0;
+        while i < self.triggers.entries.len() {
+            let e = &self.triggers.entries[i];
+            let order = self.orders.get(&e.order);
+            let working = order.is_some_and(|o| o.is_open());
+            let unresolved = order.is_some_and(|o| o.state == OrderState::Unresolved);
+            if unresolved || (working && now < e.until) {
+                i += 1;
+                continue;
+            }
+            let e = self.triggers.entries.remove(i);
+            if !working {
+                continue;
+            }
+            let (filled, qty) = order.map_or((0, 0), |o| (o.filled.0, o.qty.0));
+            let cancel = Command::CancelOrder {
+                account: e.view.account.clone(),
+                order: e.order,
+            };
+            let time = if e.wait % 1000 == 0 {
+                format!("{} s", e.wait / 1000)
+            } else {
+                format!("{} ms", e.wait)
+            };
+            let why = match self.trigger_issue(now, cancel) {
+                Ok(_) if filled > 0 => format!(
+                    "filled {filled} of {qty} in {time}: canceling the rest of order {}",
+                    e.order.0
+                ),
+                // Sent, not yet confirmed: a fill may still beat it, and the position says so.
+                Ok(_) => format!("not filled in {time}: canceling order {}", e.order.0),
+                Err(r) => format!(
+                    "not filled in {time}, and order {} couldn't be canceled: {}",
+                    e.order.0, r.message
+                ),
+            };
+            let mut view = e.view;
+            view.reason = Some(why);
+            self.events.push(Event::Trigger(view));
+        }
+    }
+
+    /// When a fired Entry's limit is next due to be canceled.
+    pub(super) fn entries_wake(&self) -> Option<UtcMillis> {
+        // Never one already past: it would spin the service's loop.
+        self.triggers
+            .entries
+            .iter()
+            .map(|e| e.until)
+            .filter(|w| *w > self.seen_now)
+            .min()
     }
 
     /// An exit fires: its partner ends, and it starts closing.
@@ -738,10 +819,13 @@ impl TradingCore {
     /// Every trigger's watch: positions gone or flipped, expired series, a stale feed, and the
     /// fired exits' next move. Runs after everything that can change those.
     pub(super) fn triggers_step(&mut self, now: UtcMillis) {
-        if self.triggers.stepping || self.triggers.live.is_empty() {
+        if self.triggers.stepping
+            || (self.triggers.live.is_empty() && self.triggers.entries.is_empty())
+        {
             return;
         }
         self.triggers.stepping = true;
+        self.entries_step(now);
         let ids: Vec<TriggerId> = self.triggers.live.keys().copied().collect();
         for id in ids {
             let Some(l) = self.triggers.live.get(&id) else {
