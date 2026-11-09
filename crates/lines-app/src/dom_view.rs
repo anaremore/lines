@@ -120,6 +120,9 @@ pub struct DomView {
     pane_h: f32,
     /// The whole pane's width: the ladder's bounds aren't known while its feed is unavailable.
     pane_w: f32,
+    /// Whether the columns have been measured once: a ladder first painted under the pointer has
+    /// to be.
+    cols_measured: bool,
     /// Whether the bracket editor was open as last painted: its closing moves rows.
     was_editing: bool,
     /// Whether this pane has a trade panel, whose rows decide if the ladder shows.
@@ -315,6 +318,7 @@ impl DomView {
             pane_h: 0.0,
             pane_w: 0.0,
             was_editing: false,
+            cols_measured: false,
             has_panel: false,
             trail,
         }
@@ -932,8 +936,16 @@ impl DomView {
 
         // What each column must hold this frame: its title and its widest number (bold is
         // the wider face). Columns are laid out from these: never narrower.
-        self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
-        for i in 0..self.rows.len() {
+        // Not while the pointer rests on the ladder: a column narrowing as a size changes would
+        // slide Ask under it, and the next press would sell. A wider number waits, cut, until the
+        // pointer leaves.
+        let hovered = window.is_window_hovered() && bounds.contains(&window.mouse_position());
+        let measure = measures_columns(hovered, self.cols_measured);
+        self.cols_measured |= measure;
+        if measure {
+            self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
+        }
+        for i in 0..if measure { self.rows.len() } else { 0 } {
             let r = self.rows[i];
             s.clear();
             let _ = fmt.write(r.price, &mut s);
@@ -953,9 +965,11 @@ impl DomView {
             }
         }
         // The orders column holds two orders per row, each `S10+` or `10/25` at most.
-        let ow = self.glyphs.width("S88+", t.text_main, true, window);
-        self.cols
-            .need(DomCol::Orders.index(), 2.0 * (ow + 6.0), PAD);
+        if measure {
+            let ow = self.glyphs.width("S88+", t.text_main, true, window);
+            self.cols
+                .need(DomCol::Orders.index(), 2.0 * (ow + 6.0), PAD);
+        }
         // Narrow: volume, then the trail give way, then the rest narrow to their numbers;
         // only then working orders (the panel still counts them; Cancel all reaches them):
         // bid, price and ask stay whole.
@@ -1240,6 +1254,11 @@ impl DomView {
     }
 }
 
+/// Whether this frame measures the ladder's columns from its numbers.
+fn measures_columns(hovered: bool, measured: bool) -> bool {
+    !hovered || !measured
+}
+
 /// Whether the ladder shows: the panel's own decision, which keeps it with its quantity row, and
 /// room for its header and enough rows for the inside market.
 fn ladder_shows(has_panel: bool, rows_ladder: bool, height: f32) -> bool {
@@ -1446,6 +1465,17 @@ impl Render for DomView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Columns hold still under a resting pointer (Ask can't slide under it), once measured.
+    #[test]
+    fn columns_hold_still_under_the_pointer() {
+        assert!(measures_columns(false, true));
+        assert!(
+            measures_columns(true, false),
+            "first paint under the pointer"
+        );
+        assert!(!measures_columns(true, true));
+    }
 
     #[test]
     fn a_ladder_needs_room_for_the_inside_market_and_its_quantity_row() {

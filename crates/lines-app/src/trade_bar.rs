@@ -2004,7 +2004,7 @@ const RULES_HIDDEN: &str = "rules hidden";
 
 /// The Keys chip's room wherever it is laid out by estimate: its words, knob, gap and padding. A chip
 /// counted as in view is whole, so order keys are never live behind a cut one.
-const KEYS_CHIP_W: f32 = 75.0;
+const KEYS_CHIP_W: f32 = 90.0;
 
 /// What's left on the account row for the position, past the badge, the least of the account's
 /// name, the switch with this text, the Keys chip if it shows, and their gaps.
@@ -2156,7 +2156,19 @@ fn run_on_click<V: TradePane>(
         cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
             cx.stop_propagation();
             // Aimed at what has moved (the bracket editor closing, a list over this row).
-            if crate::popover::second_press(ev.click_count, ev.position) {
+            let exit = matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll);
+            let refused = if exit {
+                crate::popover::second_press_exit(ev.click_count, ev.position)
+            } else {
+                crate::popover::second_press(ev.click_count, ev.position)
+            };
+            if refused {
+                if exit {
+                    // An exit is never refused in silence: the next press acts.
+                    v.trade()
+                        .notice("Press again: that press followed a change here");
+                    cx.notify();
+                }
                 return;
             }
             if matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll) {
@@ -2574,7 +2586,9 @@ pub fn dom_bar<V: TradePane>(
                 exit_w(l)
             }
         };
-        let room = width - 16.0 - controls - off(labels[2]) - off(labels[3]) - 4.0;
+        // Flatten's width with its "off" either way: the edge between the exits never moves.
+        let flatten = exit_w(&format!("{} off", labels[3]));
+        let room = width - 16.0 - controls - off(labels[2]) - flatten - 4.0;
         let chip = |s: &str| word_w(s) + 10.0;
         let fit = fit_items(
             room,
@@ -2687,7 +2701,11 @@ pub fn dom_bar<V: TradePane>(
         } else {
             name
         };
-        let whole = exit_w(label.as_ref());
+        let whole = if cmd == TradeCmd::Flatten {
+            exit_w(&format!("{} off", labels[3]))
+        } else {
+            exit_w(label.as_ref())
+        };
         let mut b = cell(("util", i as u64), t).child(label);
         if off {
             b = b.text_color(t.text_dim);
@@ -5154,10 +5172,8 @@ mod tests {
         // words (what they act on takes what's left).
         let room = MIN_DOM_WIDTH - 8.0 - crate::pane::controls_gutter(crate::layout::PaneKind::Dom);
         let labels = util_labels(MIN_DOM_WIDTH);
-        assert!(
-            exit_w(labels[2]) + exit_w(labels[3]) + 4.0 <= room,
-            "{room}"
-        );
+        let flatten = exit_w(&format!("{} off", labels[3]));
+        assert!(exit_w(labels[2]) + flatten + 4.0 <= room, "{room}");
         const { assert!(MIN_HIT + 2.0 <= MIN_DOM_HEIGHT) };
     }
 
@@ -5316,15 +5332,15 @@ mod tests {
             [false, true],
             "nothing there costs nothing"
         );
-        // The narrowest strip, beside its exits, holds the badge from about 265 px wide
+        // The narrowest strip, beside its exits, holds the badge from about 295 px wide
         // (docs/known-gaps.md).
         let line = |width: f32| {
             let controls = crate::pane::controls_gutter(crate::layout::PaneKind::Dom) - 8.0;
-            let room = width - 16.0 - controls - exit_w("Cancel all") - exit_w("Flatten") - 4.0;
+            let room = width - 16.0 - controls - exit_w("Cancel all") - exit_w("Flatten off") - 4.0;
             fit_items(room, &[word_w("PAPER") + 10.0])[0]
         };
-        assert!(line(270.0));
-        assert!(!line(240.0));
+        assert!(line(300.0));
+        assert!(!line(270.0));
     }
 
     /// The panel at its narrowest (MIN_DOM_WIDTH): every row's items fit, at a wide 12 px
