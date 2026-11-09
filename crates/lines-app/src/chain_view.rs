@@ -843,6 +843,11 @@ impl ChainView {
         self.picker.is_open() || self.ticket.is_some()
     }
 
+    /// The chart beside the chain has the keys (a note, a timeframe being typed).
+    pub fn chart_takes_text(&self, cx: &App) -> bool {
+        self.chart.as_ref().is_some_and(|c| c.read(cx).takes_text())
+    }
+
     /// The pane's saved account, as the other trading panes restore it.
     pub fn restore_trade(&mut self, doc: Option<&TradeDoc>, cx: &mut Context<Self>) {
         self.trade = PaneTrade::new(doc, cx);
@@ -851,6 +856,10 @@ impl ChainView {
     /// The option chart (decision 0029): the underlying's chart beside the chain, on one price
     /// scale, or the plain chain again.
     pub fn toggle_chart(&mut self, cx: &mut Context<Self>) {
+        // Every row moves: the next click must not send at once.
+        if self.one_click {
+            self.toggle_one_click(cx);
+        }
         self.frame.release();
         self.frame.locked = false;
         self.frame.locked_key = None;
@@ -1930,6 +1939,15 @@ impl ChainView {
                 }
                 self.frame.expiry = expiry;
                 let chain = self.frame.expiry.and_then(|e| d.chains.chain(e));
+                // Before the rows: the strikes held or worked keep theirs.
+                match (self.trade.account.as_ref(), self.trade.try_cache()) {
+                    (Some(a), Some(st)) => self.frame.refresh_marks(&st, a, self.product.id),
+                    // Busy this instant: last frame's marks, and another look next frame.
+                    (Some(_), None) if Trading::try_global(cx).is_some() => {
+                        self.seen_revision = u64::MAX;
+                    }
+                    _ => self.frame.marks.clear(),
+                }
                 match &scale {
                     Some(s) => {
                         let hold = hold_rows(
@@ -2014,14 +2032,6 @@ impl ChainView {
                         .map(|(c, _)| c)
                         .sum::<f32>());
         let x0 = ox + ((w - table_w) / 2.0).max(0.0);
-        match (self.trade.account.as_ref(), self.trade.try_cache()) {
-            (Some(a), Some(st)) => self.frame.refresh_marks(&st, a, self.product.id),
-            // Busy this instant: last frame's marks, and another look next frame.
-            (Some(_), None) if Trading::try_global(cx).is_some() => {
-                self.seen_revision = u64::MAX;
-            }
-            _ => self.frame.marks.clear(),
-        }
         // Calls: left to right in CALLS order; strike; puts: CALLS reversed.
         let mut call_x = [0.0f32; 7];
         let mut x = x0 + pos_w;
@@ -3373,10 +3383,14 @@ impl Render for ChainView {
             canvas(
                 move |bounds, window, cx| {
                     let w = f(bounds.size.width);
-                    entity.update(cx, |v, _| {
+                    entity.update(cx, |v, cx| {
                         // (A notify during this draw wouldn't bring another.)
                         if (v.pane_w >= CHART_MIN_W) != (w >= CHART_MIN_W) {
                             window.on_next_frame(|window, _| window.refresh());
+                            // The chart comes or goes and every row moves, as with the toggle.
+                            if v.pane_w > 0.0 && v.chart.is_some() && v.one_click {
+                                v.toggle_one_click(cx);
+                            }
                         }
                         v.pane_w = w;
                     });
@@ -3410,28 +3424,31 @@ impl Render for ChainView {
             // the plot up: a taller foot would move every row under the pointer. Its usual two lines are
             // always kept clear of rows.
             Some(chart) => root.child(
-                main.child(div().flex_1().min_w_0().h_full().child(chart))
-                    .child(
-                        div()
-                            .relative()
-                            .flex()
-                            .flex_col()
-                            .flex_shrink_0()
-                            .h_full()
-                            .w(gpui::relative(CHART_CHAIN_SHARE))
-                            .child(table)
-                            .child(div().flex_shrink_0().h(px(2.0 * STRIP_H)))
-                            .child(
-                                below
-                                    .id("chain-foot")
-                                    .absolute()
-                                    .bottom_0()
-                                    .left_0()
-                                    .right_0()
-                                    .occlude()
-                                    .on_hover(cx.listener(|_, _: &bool, _, cx| cx.notify())),
-                            ),
-                    ),
+                // Cached, as a workspace pane's view is: chain quotes don't repaint the chart.
+                main.child(div().flex_1().min_w_0().h_full().child(
+                    gpui::AnyView::from(chart).cached(gpui::StyleRefinement::default().size_full()),
+                ))
+                .child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .h_full()
+                        .w(gpui::relative(CHART_CHAIN_SHARE))
+                        .child(table)
+                        .child(div().flex_shrink_0().h(px(2.0 * STRIP_H)))
+                        .child(
+                            below
+                                .id("chain-foot")
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .right_0()
+                                .occlude()
+                                .on_hover(cx.listener(|_, _: &bool, _, cx| cx.notify())),
+                        ),
+                ),
             ),
             None => root.child(main.child(table)).child(below.flex_shrink_0()),
         }

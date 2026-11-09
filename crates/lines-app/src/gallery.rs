@@ -382,6 +382,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             "--theme dark --palette cb",
         ),
         ("chain-chart-narrow", false, "700x520", "--theme dark"),
+        ("chain-chart-mid", false, "860x560", "--theme dark"),
     ] {
         let mut a = vec![
             "--workspace".to_owned(),

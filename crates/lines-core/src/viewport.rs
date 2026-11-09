@@ -209,6 +209,7 @@ impl Viewport {
     /// Jump to the newest bar and re-enable auto-scale and live following.
     pub fn reset(&mut self, len: usize) {
         self.auto_price = true;
+        self.price_fitted = false;
         self.follow_live = true;
         self.live_margin = RIGHT_MARGIN_BARS;
         self.snap_to_latest(len);
@@ -933,6 +934,12 @@ mod tests {
         let fitted = (v.price_lo, v.price_hi);
         v.on_data(&[bar(68_300, 68_450)], 1);
         assert_eq!((v.price_lo, v.price_hi), fitted);
+        // A double-click on the plot, after the trader's own zoom.
+        v.auto_price = false;
+        v.reset(1);
+        v.right_index = 0.0;
+        v.on_data(&[bar(68_300, 68_450)], 1);
+        assert!(v.price_hi < 69_000.0, "the plot's reset refits too");
     }
 
     /// A minimum span widens the fit around the bars, for what's aligned to the scale; bars that

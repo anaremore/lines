@@ -1779,6 +1779,10 @@ impl ChartView {
     /// The auto-fit's smallest price range. Returns whether it changed.
     pub fn set_min_price_span(&mut self, span: f64) -> bool {
         let changed = self.vp.min_price_span != span;
+        // The first one is worth a fit even under a hold: until now no row had room.
+        if self.vp.min_price_span == 0.0 {
+            self.vp.price_fitted = false;
+        }
         self.vp.min_price_span = span;
         changed
     }

@@ -270,6 +270,11 @@ impl PaneHandle {
 
     /// Taking typed text now (symbol search, a note, a timeframe being typed).
     pub(crate) fn takes_text(&self, cx: &App) -> bool {
+        if let PaneHandle::Chain(c) = self
+            && c.read(cx).chart_takes_text(cx)
+        {
+            return true;
+        }
         each!(self, e => e.read(cx).takes_text())
     }
 
