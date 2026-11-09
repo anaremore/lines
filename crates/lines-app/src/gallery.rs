@@ -500,6 +500,64 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
+    // P&L to close (decision 0029): the chart continues to the close and the chain keeps one
+    // side. The summary comes with the position's exits.
+    for (name, quick, size, extra, shot) in [
+        ("chain-pnl", true, "1600x800", "--theme dark", "pnl"),
+        ("chain-pnl-light", false, "1600x800", "--theme light", "pnl"),
+        (
+            "chain-pnl-cb",
+            false,
+            "1600x800",
+            "--theme dark --palette cb",
+            "pnl",
+        ),
+        ("chain-pnl-narrow", false, "800x640", "--theme dark", "pnl"),
+        ("chain-pnl-mid", false, "940x640", "--theme dark", "pnl"),
+        (
+            "chain-pnl-ticket-narrow",
+            false,
+            "800x640",
+            "--theme dark",
+            "buy 685 call pnl",
+        ),
+        (
+            "chain-pnl-when-narrow",
+            false,
+            "800x640",
+            "--theme dark",
+            "buy 685 call when 685.00 pnl",
+        ),
+        (
+            "chain-pnl-ticket",
+            false,
+            "1600x800",
+            "--theme dark",
+            "buy 685 call pnl",
+        ),
+        (
+            "chain-pnl-put",
+            false,
+            "1600x800",
+            "--theme dark",
+            "buy 683 put pnl",
+        ),
+    ] {
+        let mut a = vec![
+            "--workspace".to_owned(),
+            ws("chain-chart.json"),
+            "--size".to_owned(),
+            size.to_owned(),
+            "--paper".to_owned(),
+            armed.to_owned(),
+            "--chain-ticket".to_owned(),
+            shot.to_owned(),
+        ];
+        a.extend(args(extra));
+        let mut sc = s(name, quick, CHAIN_AT, a);
+        sc.chain = true;
+        v.push(sc);
+    }
     // The ticket covers the chain's foot and moves no row.
     let mut foot = s(
         "chain-chart-ticket",

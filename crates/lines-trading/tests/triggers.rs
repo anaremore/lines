@@ -592,6 +592,7 @@ fn the_chase_stops_when_told_or_when_the_position_goes() {
         let c = if by_trigger {
             Command::CancelTrigger {
                 account: acct(),
+                contract: call(),
                 id,
             }
         } else {
@@ -987,6 +988,7 @@ fn a_fired_exit_stays_in_charge_until_told() {
     // Cancelling the waiting Stop: nothing goes when a bid comes.
     r.cmd(Command::CancelTrigger {
         account: acct(),
+        contract: call(),
         id,
     })
     .unwrap();
@@ -1102,6 +1104,7 @@ fn triggers_and_strategies_never_share_an_option() {
     assert!(e.message.contains("an Entry trigger"), "{}", e.message);
     r.cmd(Command::CancelTrigger {
         account: acct(),
+        contract: call(),
         id: armed,
     })
     .unwrap();
@@ -1902,4 +1905,26 @@ fn a_move_is_for_the_account_that_has_it() {
     });
     assert!(wrong_option.is_err());
     assert_eq!(r.core.triggers().next().unwrap().level, Price(68_400));
+}
+
+#[test]
+fn a_cancel_names_the_option_it_is_for() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.print(68_300);
+    let id = r.arm(call(), entry(1, 500), 68_400);
+    let wrong = r.cmd(Command::CancelTrigger {
+        account: acct(),
+        contract: put(),
+        id,
+    });
+    assert!(wrong.is_err());
+    assert_eq!(r.core.triggers().count(), 1, "still armed");
+    r.cmd(Command::CancelTrigger {
+        account: acct(),
+        contract: call(),
+        id,
+    })
+    .unwrap();
+    assert_eq!(r.core.triggers().count(), 0);
 }

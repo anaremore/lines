@@ -6,6 +6,7 @@ mod bench;
 mod brackets;
 mod chain_lines;
 mod chain_lock;
+mod chain_pnl;
 mod chain_ticket;
 mod chain_view;
 mod chart_draw;

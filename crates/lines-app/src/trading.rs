@@ -1648,7 +1648,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
             (account.clone(), None, None)
         }
         TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
-        TradeCommand::CancelTrigger { account, .. } => (account.clone(), None, None),
+        TradeCommand::CancelTrigger {
+            account, contract, ..
+        } => (account.clone(), Some(*contract), None),
         TradeCommand::MoveTrigger {
             account, contract, ..
         } => (account.clone(), Some(*contract), None),
@@ -2172,6 +2174,29 @@ impl Trading {
 
 #[cfg(test)]
 mod tests {
+    /// A refused trigger command flashes on its own option, not every pane of the account.
+    #[test]
+    fn a_trigger_commands_note_names_its_option() {
+        let contract = ContractKey::spot(lines_core::ProductId(2001));
+        let account = lines_trading::AccountId::new("paper");
+        let id = lines_trading::trigger::TriggerId(1);
+        for cmd in [
+            TradeCommand::CancelTrigger {
+                account: account.clone(),
+                contract,
+                id,
+            },
+            TradeCommand::MoveTrigger {
+                account: account.clone(),
+                contract,
+                id,
+                level: lines_core::Price(100),
+            },
+        ] {
+            assert_eq!(note_for(&cmd).unwrap().contract, Some(contract));
+        }
+    }
+
     /// The bracket mode names its account and contract (so it goes to that account's core and
     /// is refused on a read-only one) but flashes no DENIED: the trade panel shows its answer.
     #[test]
