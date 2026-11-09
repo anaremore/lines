@@ -1919,7 +1919,7 @@ fn closed_rows(width: f32, pane_h: f32) -> PanelRows {
     r
 }
 
-/// The rows for a pane `pane_h` tall (0: not laid out yet, all of them). `editing`: the bracket
+/// The rows for a pane `pane_h` tall (nothing measured yet: all of them). `editing`: the bracket
 /// editor or confirmation is open and fits ([`editor_fits`]): it takes the quantity, bracket and
 /// button rows' space, from the ladder where those rows were gone (the one case where the panel's
 /// height follows state). Every other row is as it is with it closed.

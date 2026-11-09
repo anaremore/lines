@@ -115,8 +115,8 @@ pub struct DomView {
     orders: OrdersLayer,
     /// Whether the trading header was last rendered with its narrow labels.
     header_narrow: Option<bool>,
-    /// The whole pane's height (last frame's layout; 0: not laid out yet): which of the trade
-    /// panel's rows it has room for.
+    /// The whole pane's height (last frame's layout; 0 with `pane_w` 0: not laid out yet): which of
+    /// the trade panel's rows it has room for.
     pane_h: f32,
     /// The whole pane's width: the ladder's bounds aren't known while its feed is unavailable.
     pane_w: f32,

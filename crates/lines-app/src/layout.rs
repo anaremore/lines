@@ -605,8 +605,7 @@ impl<T: PartialEq> Layout<T> {
     }
 }
 
-/// Split `r` along `axis` at `ratio`, at a whole pixel.
-/// Split `r`. A `Column` boundary keeps `min_first` above it and `min_second` below it; a space too
+/// Split `r` along `axis` at `ratio`, at a whole pixel. A `Column` boundary keeps `min_first` above it and `min_second` below it; a space too
 /// short for both keeps the first's, and the second has what's left.
 fn cut(r: Rect, axis: Axis, ratio: f32, min_first: f32, min_second: f32) -> (Rect, Rect) {
     match axis {
