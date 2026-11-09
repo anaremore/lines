@@ -46,7 +46,10 @@ pub fn write_summary(
     if let (Some(risk), Some(reward)) = (risk, reward)
         && let Some(ratio) = PnlEstimate::reward_to_risk(reward, risk)
     {
-        write!(out, "  ·  1 : {ratio:.1}")?;
+        // Under 0.05 it would read 1 : 0.0, as if there were no reward at all.
+        if ratio >= 0.05 {
+            write!(out, "  ·  1 : {ratio:.1}")?;
+        }
     }
     Ok(())
 }
@@ -164,6 +167,22 @@ mod tests {
                 Some(pnl(308.0))
             ),
             "Risk ≈ +$0  ·  Reward ≈ +$308"
+        );
+    }
+
+    /// A reward too small to show as a ratio doesn't read as none.
+    #[test]
+    fn a_tiny_ratio_is_left_out() {
+        assert_eq!(
+            say(Some(pnl(-99.0)), Some(pnl(40.0))),
+            "Risk ≈ -$99  ·  Reward ≈ +$40  ·  1 : 0.4"
+        );
+        assert_eq!(
+            say(
+                Some(test_estimate(0.0).pnl(10, 100.0, 1.0)),
+                Some(pnl(40.0))
+            ),
+            "Risk ≈ -$1000  ·  Reward ≈ +$40"
         );
     }
 

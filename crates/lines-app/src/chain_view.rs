@@ -1074,6 +1074,13 @@ impl ChainView {
     /// column moves: One-click goes off and says so, as with the chart.
     pub fn toggle_pnl(&mut self, cx: &mut Context<Self>) {
         let showing = self.pnl_shown();
+        // On but out of sight (no chart, or no money shown): off, so it doesn't come back.
+        if self.pnl_on && !showing {
+            self.pnl_on = false;
+            self.note = Some("P&L to close is off".to_owned());
+            cx.notify();
+            return;
+        }
         if !showing {
             let why = if !self.chart_shown() {
                 Some("P&L to close needs the chart beside the chain")
@@ -3474,7 +3481,9 @@ impl ChainView {
                 let _ = std::fmt::Write::write_char(&mut s, ' ');
                 let _ = self.product.price.write(l, &mut s);
                 let tw = self.glyphs.width(s.as_str(), t.on_last, true, window) + 2.0 * PAD;
-                let tx = strike_x + (strike_w - tw) / 2.0;
+                // Inside the table: with one side showing the strike is its outer column, and a price
+                // is never cut.
+                let tx = (strike_x + (strike_w - tw) / 2.0).min(ox + w - tw).max(ox);
                 window.paint_quad(fill(
                     Bounds::new(point(px(tx), px(y - tag_h / 2.0)), size(px(tw), px(tag_h))),
                     t.last,
