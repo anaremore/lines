@@ -16,8 +16,20 @@
 //!   Several paper orders share a trade's quantity (oldest first): the simulation never fills
 //!   more than printed.
 //! - **Market orders** (and marketable limits, triggered stops) **walk the book** level by
-//!   level from the touch; liquidity they took is not reused until the book updates that level.
-//!   With no book on that side they fill at the last trade price; with neither they reject.
+//!   level from the touch; liquidity they took at a level is not offered again until the level
+//!   grows past it or goes (a quote or rebuild showing the same size is the same liquidity).
+//!   With no book on that side they fill at the last trade price; with neither a market
+//!   order is cancelled (nothing would ever show it a price).
+//! - **A market order's remainder works on** (decision 0005: market orders walk the book, and a
+//!   one-level book, as a top-of-book feed gives, is only the first step of the walk): what the
+//!   book couldn't fill stays Working, visible with its remaining quantity, and takes later
+//!   liquidity at its price, first in line: the book on its side after each batch, each trade at or
+//!   beyond the inside on its side (up to the traded quantity, at the trade's price: a print at
+//!   the bid never fills a buy, which would pay less than any real market order), each option
+//!   quote. Until done, cancelled, or its session closes (a day order: it never fills at the
+//!   next session's open). A reduce-only one still shrinks with the position; a plain one that
+//!   closes the position (no larger than it) turns reduce-only, so it never reverses it. Limit
+//!   orders are unchanged.
 //! - **Stops trigger on trades** at or through the trigger.
 //! - **Fees** per contract (per quantity unit), per side, from the account's balance.
 //! - **Options** (decision 0028) trade on their own quote, never the underlying's price:
@@ -30,10 +42,10 @@
 //!     behaves as trade-through);
 //!   - prints, on the option or its underlying, never fill an option order;
 //!   - **a missing side never fills**: no bid, a zero bid or a crossed quote leaves that side
-//!     empty, so nothing can fill against it, and a market order (Flatten) is cancelled rather
-//!     than filling at a last price;
+//!     empty, so nothing can fill against it; a market order (Flatten) works on until a quote
+//!     has that side, never filling at a last price;
 //!   - **a stale quote never fills**: older than `risk::option_quote_stale_ms`, an order that would
-//!     cross it rests instead and a market order is cancelled, until a fresh quote comes;
+//!     cross it rests instead, a market order too, until a fresh quote comes;
 //!   - orders and fills only in the regular session (options don't trade extended hours);
 //!   - expiry: [`Broker::settle`], asked by the core at the close.
 //! - **Brackets / OCO are server-side**: the broker holds the exits (acked, inactive) until the
@@ -125,8 +137,12 @@ pub struct PaperState {
 struct Market {
     book: OrderBook,
     last: Option<Price>,
-    /// Liquidity taken by our market orders since the book last updated each level.
+    /// Liquidity our market orders took at each level: what the level shows again at its price
+    /// is the same liquidity, so only what it grows past this is new (decision 0005: paper errs
+    /// pessimistic). Forgotten when the level goes.
     taken: HashMap<(bool, i64), i64>,
+    /// The book changed in this batch: working market orders walk it once the batch is in.
+    walk: bool,
     /// When an option's book was last quoted.
     quoted_at: Option<UtcMillis>,
 }
@@ -370,10 +386,38 @@ impl PaperBroker {
         let o = po.order.clone();
         match o.kind {
             OrderKind::Market => {
+                // A market order closing the position (no larger than it): its remainder is
+                // reduce-only, so it can never take the position past flat while it works on
+                // (an exit filling meanwhile would otherwise leave it reversing).
+                let pos = self.position_of(&o.account, o.contract);
+                let closing = !o.reduce_only
+                    && pos != 0
+                    && o.side.sign() == -pos.signum()
+                    && o.qty.0 <= pos.abs();
+                // Nothing to fill against at all (no book on its side, no trade yet; a future):
+                // nothing would ever show it a price, so it ends here.
+                let blind = o.contract.option_key().is_none()
+                    && self.markets.get(&o.contract).is_none_or(|m| {
+                        m.last.is_none()
+                            && m.book.levels(book_side(o.side.opposite())).next().is_none()
+                    });
+                if blind {
+                    self.cancel(now, id, "no market price to fill the market order at");
+                    return;
+                }
                 self.execute(now, id, None);
-                // A market order never rests: what the book couldn't fill is cancelled.
+                // What the book couldn't fill works on, first in line for what comes next
+                // (`walk_markets`, the trades in `on_trade`): never cancelled for want of
+                // liquidity, never resting silently.
                 if self.orders.get(&id).is_some_and(|p| p.order.is_open()) {
-                    self.cancel(now, id, "no more liquidity for the market order");
+                    self.set_working(now, id);
+                    if closing && let Some(po) = self.orders.get_mut(&id) {
+                        po.order.reduce_only = true;
+                        let order = po.order.clone();
+                        self.out.push(BrokerEvent::Modified { order });
+                        let position = self.position_of(&o.account, o.contract);
+                        self.shrink_reduce_only(now, &o.account, o.contract, position);
+                    }
                 }
             }
             OrderKind::Limit { price } => {
@@ -413,7 +457,7 @@ impl PaperBroker {
         };
         let (contract, side) = (po.order.contract, po.order.side);
         if self.quote_stale(contract, now) {
-            return; // it rests (a market order is cancelled) until a fresh quote
+            return; // it rests (a market order works on) until a fresh quote
         }
         let mut left = po.order.remaining().0;
         let mut fills: Vec<(Price, i64)> = Vec::new();
@@ -565,9 +609,11 @@ impl PaperBroker {
                 continue;
             };
             let opposes = position != 0 && po.order.side.sign() == -position.signum();
-            // A Flatten's market order fills now or goes: it may close the position whatever the
-            // exits cover, and takes none of their cover, so they still protect it if it can't.
-            let flatten = po.order.role == Role::Flatten;
+            // A Flatten's market order (or any closing market order's remainder) may close the
+            // position whatever the exits cover, and takes none of their cover, so they still
+            // protect it while it works on (a thin book) or if it ends unfilled.
+            let flatten =
+                po.order.role == Role::Flatten || matches!(po.order.kind, OrderKind::Market);
             let pool = if flatten {
                 position.abs()
             } else {
@@ -770,6 +816,8 @@ impl PaperBroker {
     }
 
     fn on_trade(&mut self, now: UtcMillis, contract: ContractKey, price: Price, qty: Qty) {
+        // What the print can still fill: a stop filled at its price takes its share first.
+        let mut left = qty.0;
         // Stops first: a trade at or through the trigger arms them as market/limit orders.
         let triggered: Vec<OrderId> = self
             .orders
@@ -794,9 +842,15 @@ impl PaperBroker {
             match po.order.kind {
                 OrderKind::Stop { .. } => {
                     self.execute(now, id, None);
-                    if self.orders.get(&id).is_some_and(|p| p.order.is_open()) {
+                    if let Some(rest) = self
+                        .orders
+                        .get(&id)
+                        .filter(|p| p.order.is_open())
+                        .map(|p| p.order.remaining().0)
+                    {
                         // No book: the triggering trade's price.
                         self.fill(now, id, price, Qty(i64::MAX));
+                        left -= rest;
                     }
                 }
                 OrderKind::StopLimit { limit, .. } => {
@@ -809,8 +863,37 @@ impl PaperBroker {
                 _ => {}
             }
         }
+        // Market orders still working come first, at the trade's price, up to what it printed:
+        // only a print at or beyond the inside on their side (a buy pays the ask or more), so a
+        // remainder never fills better than a real market order would.
+        for id in self.working_markets(contract) {
+            if left <= 0 {
+                break;
+            }
+            let Some((rest, side)) = self
+                .orders
+                .get(&id)
+                .map(|p| (p.order.remaining().0, p.order.side))
+            else {
+                continue;
+            };
+            let inside = self.markets.get(&contract).and_then(|m| match side {
+                Side::Buy => m.book.best_ask().map(|(p, _)| p),
+                Side::Sell => m.book.best_bid().map(|(p, _)| p),
+            });
+            // No inside on its side (a snapshot mid-rebuild): nothing to say the print reached it.
+            let reaches = inside.is_some_and(|i| match side {
+                Side::Buy => price >= i,
+                Side::Sell => price <= i,
+            });
+            if !reaches {
+                continue;
+            }
+            let q = rest.min(left);
+            left -= q;
+            self.fill(now, id, price, Qty(q));
+        }
         // Resting limits (and triggered stop-limits) fill from the trade per the model.
-        let mut left = qty.0;
         let resting: Vec<OrderId> = self
             .orders
             .values()
@@ -906,6 +989,7 @@ impl PaperBroker {
         if !self.market_open(contract, now) || self.quote_stale(contract, now) {
             return;
         }
+        self.walk_markets(now, contract);
         let touch = self.cfg.fill_model == FillModel::Touch;
         let resting: Vec<(OrderId, Price)> = self
             .orders
@@ -927,12 +1011,96 @@ impl PaperBroker {
         }
     }
 
+    /// Market orders on the contract still working, oldest first.
+    fn working_markets(&self, contract: ContractKey) -> Vec<OrderId> {
+        if !self.any_working_market() {
+            return Vec::new();
+        }
+        let mut ids: Vec<(UtcMillis, OrderId)> = self
+            .orders
+            .values()
+            .filter(|p| p.order.contract == contract && !p.held && p.order.is_open())
+            .filter(|p| matches!(p.order.kind, OrderKind::Market))
+            .map(|p| (p.order.created, p.order.id))
+            .collect();
+        ids.sort();
+        ids.into_iter().map(|(_, id)| id).collect()
+    }
+
+    fn any_working_market(&self) -> bool {
+        self.orders
+            .values()
+            .any(|p| matches!(p.order.kind, OrderKind::Market) && p.order.is_open())
+    }
+
+    /// Whether the session an order was placed in has closed (an option's: the regular one).
+    fn session_over(&self, o: &Order, now: UtcMillis) -> bool {
+        if !self.cfg.check_sessions {
+            return false;
+        }
+        let Some(cal) = lines_feed::catalog::sessions(o.contract.product) else {
+            return false;
+        };
+        let close = match o.contract.option_key() {
+            // Its regular session: the one it was placed in, or (placed before the open, acked
+            // after it) the next.
+            Some(_) => cal
+                .next_session(o.created, SessionKind::Rth)
+                .map(|s| s.close),
+            None => cal.next_close(o.created),
+        };
+        close.is_some_and(|c| now >= c)
+    }
+
+    /// Market orders still working when their session closed end there, as a broker's day
+    /// orders do: never filling at the next session's open, on a replay's jump past the
+    /// close too.
+    fn expire_markets(&mut self, now: UtcMillis) {
+        if !self.any_working_market() {
+            return;
+        }
+        let over: Vec<OrderId> = self
+            .orders
+            .values()
+            .filter(|p| matches!(p.order.kind, OrderKind::Market) && p.order.is_open())
+            .filter(|p| self.session_over(&p.order, now))
+            .map(|p| p.order.id)
+            .collect();
+        for id in over {
+            self.cancel(now, id, "the session closed before the market order filled");
+        }
+    }
+
+    /// Working market orders take what the book now offers on their side, as a new order
+    /// would. Only from a book that has that side: an emptied one (a snapshot's clear) never
+    /// sends them to the last trade's price.
+    fn walk_markets(&mut self, now: UtcMillis, contract: ContractKey) {
+        if !self.market_open(contract, now) || self.quote_stale(contract, now) {
+            return;
+        }
+        for id in self.working_markets(contract) {
+            let Some(side) = self.orders.get(&id).map(|p| p.order.side) else {
+                continue;
+            };
+            let has_side = self
+                .markets
+                .get(&contract)
+                .is_some_and(|m| m.book.levels(book_side(side.opposite())).next().is_some());
+            if has_side {
+                self.execute(now, id, None);
+            }
+        }
+    }
+
     fn on_book(&mut self, contract: ContractKey, side: BookSide, price: Price, qty: Qty) {
         let Some(m) = self.markets.get_mut(&contract) else {
             return;
         };
         m.book.set(side, price, qty, 0);
-        m.taken.remove(&(side == BookSide::Bid, price.0));
+        if qty.0 <= 0 {
+            m.taken.remove(&(side == BookSide::Bid, price.0));
+        }
+        m.walk = true;
         // Queue estimate: a level that shrank below our queue means cancels ahead of us.
         for po in self.orders.values_mut() {
             if po.order.contract == contract
@@ -973,6 +1141,7 @@ impl Broker for PaperBroker {
 
     fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput) {
         self.markets.entry(contract).or_default();
+        self.expire_markets(now);
         match *input {
             MarketInput::Trade { price, qty, .. } => {
                 if let Some(m) = self.markets.get_mut(&contract) {
@@ -990,10 +1159,11 @@ impl Broker for PaperBroker {
                 time,
             } => self.on_option_quote(now, contract, bid, ask, last, time),
             MarketInput::Book { side, price, qty } => self.on_book(contract, side, price, qty),
+            // What was taken stays: a rebuild shows the same liquidity again.
             MarketInput::BookClear => {
                 if let Some(m) = self.markets.get_mut(&contract) {
                     m.book.clear();
-                    m.taken.clear();
+                    m.walk = true;
                 }
             }
             MarketInput::Last(price) => {
@@ -1006,10 +1176,33 @@ impl Broker for PaperBroker {
     }
 
     fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
+        // Working market orders first (they're older than anything arriving now), on the book
+        // as the whole batch left it: never on half a rebuild.
+        self.expire_markets(now);
+        let mut changed: Vec<ContractKey> = self
+            .markets
+            .iter_mut()
+            .filter_map(|(k, m)| std::mem::take(&mut m.walk).then_some((k, m)))
+            .map(|(k, m)| {
+                // Levels gone from the book are forgotten: back later, they're new liquidity.
+                let book = &m.book;
+                m.taken.retain(|(bid, p), _| {
+                    let side = if *bid { BookSide::Bid } else { BookSide::Ask };
+                    book.range(side, Price(*p), Price(*p + 1)).next().is_some()
+                });
+                *k
+            })
+            .collect();
+        // In a fixed order, so the events are the same on every run.
+        changed.sort();
+        for contract in changed {
+            self.walk_markets(now, contract);
+        }
         while self.pending.front().is_some_and(|(due, _)| *due <= now) {
             let (due, req) = self.pending.pop_front().expect("checked");
             self.handle(due, req);
         }
+        self.expire_markets(now);
         out.append(&mut self.out);
     }
 

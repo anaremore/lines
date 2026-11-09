@@ -2341,11 +2341,13 @@ impl ChainView {
                     false
                 }
                 OrderState::Cancelled if flatten => {
-                    // Its exits are still working: only Cancel All takes those.
-                    note = Some(
-                        "Flatten found no usable quote on its side: the position is still open"
-                            .to_owned(),
-                    );
+                    // Its exits are still working: only Cancel All takes those. A Flatten's market
+                    // order works on until a usable quote comes, so it ends unfilled only when
+                    // cancelled, replaced, at the session's close or at expiry (where settlement
+                    // closes the position: then there's nothing to say).
+                    if st.position(&o.account, o.contract).is_some() {
+                        note = Some("Flatten canceled: the position is still open".to_owned());
+                    }
                     false
                 }
                 OrderState::Submitted => true,

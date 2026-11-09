@@ -1196,8 +1196,36 @@ struct BarData {
     flashes: Vec<(&'static str, String)>,
     unresolved: usize,
     working: usize,
+    /// Market orders still working (a thin book's remainder): what is left to buy and to sell.
+    market_left: Option<(i64, i64)>,
     /// Strategy instances armed on this account (the switch says so: it doesn't stop them).
     strategies_armed: usize,
+}
+
+/// What is left of the market orders working at the broker (they have no price row): to buy, to
+/// sell. Not those still on their way (no flicker for a market order's latency).
+fn market_left<'a>(orders: impl Iterator<Item = &'a lines_trading::Order>) -> Option<(i64, i64)> {
+    use lines_trading::{OrderState, Side};
+    let (mut buy, mut sell) = (0, 0);
+    for o in orders
+        .filter(|o| matches!(o.kind, lines_trading::OrderKind::Market))
+        .filter(|o| matches!(o.state, OrderState::Working | OrderState::PartiallyFilled))
+    {
+        match o.side {
+            Side::Buy => buy += o.remaining().0,
+            Side::Sell => sell += o.remaining().0,
+        }
+    }
+    (buy + sell > 0).then_some((buy, sell))
+}
+
+/// `market sell 3 left` (both sides, rare: `market buy 1, sell 3 left`).
+fn market_words((buy, sell): (i64, i64)) -> String {
+    match (buy, sell) {
+        (b, 0) => format!("market buy {b} left"),
+        (0, s) => format!("market sell {s} left"),
+        (b, s) => format!("market buy {b}, sell {s} left"),
+    }
 }
 
 fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
@@ -1220,6 +1248,7 @@ fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
         flashes: Vec::new(),
         unresolved: 0,
         working: 0,
+        market_left: None,
         strategies_armed: 0,
     }
 }
@@ -1251,6 +1280,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         }
         if let Some(k) = contract {
             data.working = s.open_orders(account, k).count();
+            data.market_left = market_left(s.open_orders(account, k));
             if let Some(p) = s.position(account, k) {
                 let ticks = match (p.avg_price, last) {
                     (Some(a), Some(m)) => open_ticks(p.qty, a, m, product.price.tick),
@@ -2814,15 +2844,17 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
     }
     // Third line: working orders (and unresolved), today's P&L while in a position.
     let working = d.map_or(0, |d| d.working);
+    let market = d.and_then(|d| d.market_left);
     let unresolved = d.map_or(0, |d| d.unresolved);
     let left = div()
         .flex()
         .flex_row()
         .gap_2()
         .text_color(t.text_dim)
-        .child(match working {
-            0 => "No working orders".to_owned(),
-            n => format!("{n} working"),
+        .child(match (working, market) {
+            (0, _) => "No working orders".to_owned(),
+            (n, None) => format!("{n} working"),
+            (n, Some(m)) => format!("{n} working · {}", market_words(m)),
         })
         .when(unresolved > 0, |e| {
             e.child(
@@ -5356,6 +5388,61 @@ mod tests {
         assert!(header <= room_k, "header with Keys {header} > {room_k}");
         const { assert!(MIN_HIT >= 20.0) };
         assert!(is_narrow(MIN_DOM_WIDTH) && !is_narrow(NARROW_BELOW) && !is_narrow(0.0));
+    }
+
+    /// A market order still working (a thin book's remainder) says so, with what is left.
+    #[test]
+    fn a_working_market_order_says_what_is_left() {
+        use lines_core::{ContractKey, Month, UtcMillis};
+        use lines_trading::{Order, OrderId, OrderKind, OrderState, Role};
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let order = |id: u64, side: Side, kind: OrderKind, qty: i64, filled: i64| Order {
+            id: OrderId(id),
+            account: AccountId::new("paper-1"),
+            contract: k,
+            side,
+            qty: Qty(qty),
+            kind,
+            state: OrderState::PartiallyFilled,
+            filled: Qty(filled),
+            fill_value: 0,
+            role: Role::Flatten,
+            parent: None,
+            oco: None,
+            triggered: false,
+            created: UtcMillis(0),
+            updated: UtcMillis(0),
+            reduce_only: true,
+            overfill: Qty(0),
+        };
+        let orders = [
+            order(1, Side::Sell, OrderKind::Market, 5, 2),
+            order(
+                2,
+                Side::Sell,
+                OrderKind::Limit {
+                    price: Price(600_000),
+                },
+                1,
+                0,
+            ),
+        ];
+        let left = market_left(orders.iter());
+        assert_eq!(left, Some((0, 3)));
+        assert_eq!(market_words(left.unwrap()), "market sell 3 left");
+        assert_eq!(market_left(orders[1..].iter()), None);
+        let mut orders = orders.to_vec();
+        // On its way (no answer yet): not shown.
+        let mut sent = order(3, Side::Buy, OrderKind::Market, 1, 0);
+        sent.state = OrderState::Submitted;
+        orders.push(sent);
+        assert_eq!(market_left(orders.iter()), Some((0, 3)));
+        // Both sides: both said.
+        orders.push(order(4, Side::Buy, OrderKind::Market, 2, 1));
+        assert_eq!(
+            market_words(market_left(orders.iter()).unwrap()),
+            "market buy 1, sell 3 left"
+        );
     }
 
     /// The switch is saved with the pane and restored (sticky across a restart); disabled

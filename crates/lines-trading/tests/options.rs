@@ -283,7 +283,7 @@ fn a_missing_side_never_fills() {
     r.quote(None, Some(5));
     let blind = r.cmd(Command::PlaceExit(Rig::spec(Side::Sell, 2, limit(3))));
     assert_eq!(blind.unwrap_err().code, RejectCode::Risk);
-    // Flatten is a market order: with no bid it is cancelled, never filled at a last price.
+    // Flatten is a market order: with no bid it works on, never filled at a last price.
     let time = UtcMillis(r.t + 1);
     r.market(
         call(),
@@ -303,6 +303,16 @@ fn a_missing_side_never_fills() {
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 2, "nothing to sell to");
     assert!(flat.iter().all(|id| r.fills(*id).is_empty()));
+    let market = *flat.last().unwrap();
+    assert_eq!(
+        r.state(market),
+        OrderState::Working,
+        "working on, not cancelled"
+    );
+    // The bid comes back: it sells there.
+    r.quote(Some(4), Some(5));
+    assert_eq!(r.fills(market), [(4, 2)]);
+    assert_eq!(r.position(call()), 0);
 }
 
 /// The age limit goes by expiry, on the option market's own date.
@@ -381,7 +391,7 @@ fn a_later_expiry_keeps_its_quote_longer() {
 }
 
 /// A stale quote fills nothing and gives no mid: an opening order is refused, a resting order
-/// waits, and Flatten is cancelled, until a fresh quote comes.
+/// waits, and Flatten works on, until a fresh quote comes.
 #[test]
 fn a_stale_quote_never_fills() {
     let mut r = Rig::new();
@@ -411,7 +421,7 @@ fn a_stale_quote_never_fills() {
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 1, "Flatten: no fill on a stale quote");
     let market = *flat.last().unwrap();
-    assert!(matches!(r.state(market), OrderState::Cancelled));
+    assert_eq!(r.state(market), OrderState::Working);
     // A quote stamped long ago is no fresher for arriving now.
     let old = UtcMillis(r.t - 20 * 60_000);
     r.market(
@@ -436,9 +446,10 @@ fn a_stale_quote_never_fills() {
             time: late,
         },
     );
-    // The Flatten that found nothing left the resting close in place, and it has stayed unfilled
-    // through all of that. The fresh quote fills it, through its limit, and the position is flat.
-    assert_eq!(r.fills(resting), [(240, 1)]);
+    // The Flatten's market order worked on through all of that. The fresh quote is the first it
+    // can fill on: it sells at the bid, first in line, and the position is flat.
+    assert_eq!(r.fills(market), [(250, 1)]);
+    assert!(r.fills(resting).is_empty());
     assert_eq!(r.position(call()), 0);
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 0);
