@@ -29,6 +29,19 @@ use crate::drawings_store::{MAX_NOTE, ProductDrawings};
 use crate::style_editor::{Outcome, StyleEditor};
 use crate::theme::{Theme, drawing_dash};
 
+/// Whether a press on the plot is the Shift+drag ruler's: Shift without Ctrl/Cmd or Alt, no
+/// tool chosen, and nothing under it that keeps its own press (an order's tag, marker or
+/// handle, the position tag, a drawing or its handles).
+pub fn shift_measures(
+    shift: bool,
+    other_modifier: bool,
+    tool_chosen: bool,
+    order_under: bool,
+    drawing_under: bool,
+) -> bool {
+    shift && !other_modifier && !tool_chosen && !order_under && !drawing_under
+}
+
 /// Each tool's style for new drawings, in `Tool::ALL` order.
 pub type ToolStyles = [Style; Tool::ALL.len()];
 
@@ -440,6 +453,8 @@ impl ChartDrawings {
         self.hidden = false;
         self.selected = None;
         self.measure = None;
+        // A pending "Delete all" must not take the Enter that pins this measure.
+        self.confirm_clear = false;
         self.tool = Some(Tool::Measure);
         self.pending = Some((at, (x, y)));
         self.quick = true;

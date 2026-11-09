@@ -670,3 +670,71 @@ fn a_shift_drag_released_off_the_plot_or_lost_still_measures() {
     r.frame(0.0, 0.0);
     assert!(r.d.measure_shown().is_none());
 }
+
+/// What keeps its own press over Shift: Ctrl/Cmd or Alt, a chosen tool, an order's tag,
+/// marker or handle (or the position tag), a drawing or its handles.
+#[test]
+fn shift_measures_only_on_empty_plot_with_shift_alone() {
+    assert!(shift_measures(true, false, false, false, false));
+    assert!(
+        !shift_measures(false, false, false, false, false),
+        "plain drag pans"
+    );
+    assert!(
+        !shift_measures(true, true, false, false, false),
+        "Ctrl, Cmd or Alt"
+    );
+    assert!(
+        !shift_measures(true, false, true, false, false),
+        "drawing mode"
+    );
+    assert!(
+        !shift_measures(true, false, false, true, false),
+        "an order line"
+    );
+    assert!(
+        !shift_measures(true, false, false, false, true),
+        "a drawing"
+    );
+}
+
+/// Anything that ends a press mid-drag leaves no tool chosen and no stray measure.
+#[test]
+fn a_shift_drag_interrupted_leaves_nothing_armed() {
+    let es = catalog::get(catalog::ES).unwrap();
+    // Another tool chosen mid-drag: that tool, and the release does nothing.
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.d.set_tool(Tool::Trend);
+    assert_eq!(r.d.tool(), Some(Tool::Trend));
+    r.up(400.0, 100.0);
+    assert!(r.items().is_empty());
+    // Hidden mid-drag: the release ends it, nothing left armed.
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.d.set_hidden(true);
+    r.up(400.0, 100.0);
+    assert_eq!(r.d.tool(), None);
+    // Another product mid-drag: everything ends.
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.d.set_data(ProductDrawings::ephemeral(es, Vec::new()));
+    r.up(400.0, 100.0);
+    assert_eq!(r.d.tool(), None);
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_none());
+}
+
+/// A pending "Delete all" doesn't take the Enter that pins a Shift+drag's measure.
+#[test]
+fn enter_after_a_shift_drag_pins_and_never_deletes_all() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    assert_eq!(r.items().len(), 1);
+    r.d.confirm_clear = true;
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    assert_eq!(r.d.key("enter", None), Key::Handled);
+    assert_eq!(r.items().len(), 2, "pinned; nothing deleted");
+}

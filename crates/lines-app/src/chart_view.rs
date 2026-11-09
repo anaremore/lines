@@ -1391,21 +1391,21 @@ impl ChartView {
             {
                 return;
             }
-            // Shift+drag on empty plot measures. An order line, tag or handle keeps its own
-            // press, as does a drawing (and its handles); Ctrl and Alt keep theirs.
-            if ev.modifiers.shift
-                && !ctrl
-                && !ev.modifiers.alt
-                && ev.click_count == 1
-                && self.drawings.tool().is_none()
-                && !self.order_under(x, y)
-                && self.drawings.hit_at(x as f32, y as f32).is_none()
-            {
+            // Shift+drag on empty plot measures (a quick second one too: never the view
+            // reset). An order line, tag or handle keeps its own press, as does a drawing (and
+            // its handles); Ctrl and Alt keep theirs. With no anchor this instant (the feed
+            // holds the store, or no bars) the press does nothing rather than pan.
+            if crate::chart_draw::shift_measures(
+                ev.modifiers.shift,
+                ctrl || ev.modifiers.alt,
+                self.drawings.tool().is_some(),
+                self.order_under(x, y),
+                self.drawings.hit_at(x as f32, y as f32).is_some(),
+            ) {
                 let anchor = self.drawing_anchor(x, y);
-                if self.drawings.quick_down(x as f32, y as f32, anchor) {
-                    cx.notify();
-                    return;
-                }
+                self.drawings.quick_down(x as f32, y as f32, anchor);
+                cx.notify();
+                return;
             }
             let anchor = self.drawing_anchor(x, y);
             if self.drawings.on_down(x as f32, y as f32, ctrl, anchor) {
@@ -2466,8 +2466,6 @@ impl ChartView {
         true
     }
 
-    /// A press in the plot at plot-local (`x`, `y`) on an order tag, its `×`, a position
-    /// handle or an edge marker (last frame's layout). Returns whether it was one of those.
     /// Whether an order's tag, marker or handle, or the position line's tag, is at plot-local
     /// (`x`, `y`): what `order_pressed` would take.
     fn order_under(&self, x: f64, y: f64) -> bool {
@@ -2487,6 +2485,8 @@ impl ChartView {
                     .is_some_and(|t| t.contains(x as f32, y as f32)))
     }
 
+    /// A press in the plot at plot-local (`x`, `y`) on an order tag, its `×`, a position
+    /// handle or an edge marker (last frame's layout). Returns whether it was one of those.
     fn order_pressed(&mut self, x: f64, y: f64, cx: &mut Context<Self>) -> bool {
         use lines_core::geometry::order_tags::{TagHit, centre_on, handle_is_target, hit};
         let n = self.ct.n_tags;
@@ -3133,7 +3133,6 @@ impl ChartView {
                     snap_anchor(&axis, &self.vp, fmt.tick, magnet, x.into(), y.into())
                 };
                 let (from, to) = (at(a), at(b));
-                self.drawings.cancel();
                 self.drawings.quick_down(a.0, a.1, from);
                 self.drawings.on_up(b.0, b.1, to);
             }
