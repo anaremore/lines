@@ -3,10 +3,11 @@
 //! Deterministic: a fixed-seed generator makes the file identical on every run.
 //!
 //! Trade date 2026-11-09 (Monday, EST): SPY trades every 2 s of the regular session,
-//! 14:30-21:00 UTC (09:30-16:00 ET), a random walk around 684.00. Every 5 minutes (and at the
-//! open) one frame carries a quote for every series of six expiries (the same day, the next
-//! two days, Friday's weekly, the November monthly and the December quarterly), strikes 664 to
-//! 704 every dollar, calls and puts.
+//! 14:30-21:00 UTC (09:30-16:00 ET), a random walk around 684.00. Every series of six expiries
+//! (the same day, the next two days, Friday's weekly, the November monthly and the December
+//! quarterly), strikes 664 to 704 every dollar, calls and puts, is quoted from the open on: the
+//! same day every 8 s and the rest every 40 s, inside the age limits by expiry
+//! (`lines_trading::risk`), so the session can trade all day.
 //!
 //! Option prices are Black-Scholes values (r = 4%) on a volatility smile, rounded to the
 //! penny: bid and ask a few cents around the value, a series worth under a cent quoted 0.00 /
@@ -41,8 +42,10 @@ pub const EXPIRIES: [(u16, u8, u8); 6] = [
 ];
 /// Strikes, whole dollars.
 pub const STRIKES: std::ops::RangeInclusive<i64> = 664..=704;
-/// Chain snapshots this often (ms).
-const CHAIN_EVERY_MS: i64 = 5 * 60_000;
+/// The same day's series are quoted this often (ms).
+pub const SAME_DAY_EVERY_MS: i64 = 8_000;
+/// Later expiries' series are quoted this often (ms).
+pub const LATER_EVERY_MS: i64 = 40_000;
 
 struct Rng(u64);
 
@@ -157,7 +160,7 @@ pub fn write_spy_chain(out: &Path) -> io::Result<(u64, u64)> {
     let mut spot: i64 = 68_400;
     let (mut trades, mut quotes) = (0u64, 0u64);
     let mut buf = Vec::new();
-    let mut next_chain = open;
+    let (mut next_same_day, mut next_later) = (open, open);
     let mut t = open;
     while t < close {
         buf.clear();
@@ -178,8 +181,15 @@ pub fn write_spy_chain(out: &Path) -> io::Result<(u64, u64)> {
             &mut buf,
         );
         trades += 1;
-        if t >= next_chain {
-            for &(y, m, d) in &EXPIRIES {
+        let (same_day, later) = (t >= next_same_day, t >= next_later);
+        if same_day {
+            next_same_day += SAME_DAY_EVERY_MS;
+        }
+        if later {
+            next_later += LATER_EVERY_MS;
+        }
+        for (i, &(y, m, d)) in EXPIRIES.iter().enumerate() {
+            if if i == 0 { same_day } else { later } {
                 let expiry = CivilDate::new(y, m, d).expect("date");
                 for strike in STRIKES {
                     for right in [Right::Call, Right::Put] {
@@ -200,7 +210,6 @@ pub fn write_spy_chain(out: &Path) -> io::Result<(u64, u64)> {
                     }
                 }
             }
-            next_chain += CHAIN_EVERY_MS;
         }
         w.write(
             Direction::FromServer,
@@ -263,7 +272,12 @@ mod tests {
         let path = dir.join("spy.lfr");
         let (trades, quotes) = write_spy_chain(&path).unwrap();
         assert_eq!(trades, 390 * 30);
-        assert_eq!(quotes, 78 * 6 * 41 * 2, "every 5 minutes from the open");
+        let per_expiry = 41 * 2;
+        assert_eq!(
+            quotes,
+            2925 * per_expiry + 585 * 5 * per_expiry,
+            "from the open: the same day every 8 s, the rest every 40 s"
+        );
         let mut r = RecordedEvents::open(&path).unwrap();
         assert_eq!(r.product().symbol, "SPY");
         let (mut seen_quotes, mut seen_trades) = (0u64, 0u64);

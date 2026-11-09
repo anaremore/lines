@@ -1273,6 +1273,52 @@ fn a_short_positions_exits_buy_back() {
     assert_eq!(r.fills(call()).last(), Some(&(900, 1)), "no ceiling");
 }
 
+/// A Stop firing after a gap in the option's quotes doesn't sell on the old bid: SPY fell $5 while
+/// the 2.40 sat there. It waits, and sells on the next quote.
+#[test]
+fn a_stop_after_a_gap_sells_on_the_new_quote() {
+    let mut r = Rig::long_call(1);
+    r.arm(call(), TriggerKind::Stop, 68_200);
+    r.wait(14 * 60_000);
+    r.print(67_800);
+    r.wait(LAT + 1);
+    assert_eq!(
+        r.core.position(&acct(), call()),
+        1,
+        "2.40 is 14 minutes old"
+    );
+    r.quote(Some(20), Some(22));
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0);
+    let sold = r.events.iter().find_map(|e| match e {
+        Event::Fill(f) if f.side == Side::Sell => Some(f.price),
+        _ => None,
+    });
+    assert_eq!(sold, Some(Price(20)));
+}
+
+/// The same for an Entry, with a live underlying and quotes gone quiet for 14 minutes, and for
+/// just past the same-day limit: it doesn't buy on the old ask, and says the quote is stale even
+/// when the old ask is above its max.
+#[test]
+fn an_entry_doesnt_fire_on_an_old_ask() {
+    for (steps, max) in [(168, 300), (3, 300), (3, 200)] {
+        let mut r = Rig::new();
+        r.print(68_300);
+        r.quote(Some(240), Some(242));
+        let id = r.arm(call(), entry(1, max), 68_900);
+        for _ in 0..steps {
+            r.wait(5_000);
+            r.print(68_310);
+        }
+        r.print(68_900);
+        r.wait(LAT + 1);
+        assert_eq!(r.core.position(&acct(), call()), 0);
+        assert!(r.orders(call()).is_empty());
+        assert!(r.reason(id).contains("stale"), "{}", r.reason(id));
+    }
+}
+
 /// A stale underlying never fires one, and says so. When data returns past a level, an exit
 /// fires at once and an entry ends with its reason. An old print says nothing about now.
 #[test]
@@ -1419,10 +1465,9 @@ fn a_restart_keeps_exits_and_drops_entries() {
     assert_eq!(r.core.triggers().count(), 0);
 }
 
-/// The saved format: v4, with a tested migration, and an older file reads with no triggers.
+/// The saved format from v4 on, with a tested migration: an older file reads with no triggers.
 #[test]
-fn the_trading_file_moves_to_v4() {
-    assert_eq!(persist::VERSION, 4);
+fn a_file_from_before_triggers_reads_with_none() {
     let v3 = serde_json::json!({
         "version": 3,
         "paper": PaperConfig::default(),
@@ -1430,14 +1475,14 @@ fn the_trading_file_moves_to_v4() {
         "accounts": [],
         "next_order_id": 1,
     });
-    let v4 = persist::migrate(v3).unwrap();
-    assert_eq!(v4["version"], 4);
-    let f: TradingFile = serde_json::from_value(v4).unwrap();
+    let migrated = persist::migrate(v3).unwrap();
+    assert_eq!(migrated["version"], persist::VERSION);
+    let f: TradingFile = serde_json::from_value(migrated).unwrap();
     assert!(f.triggers.is_empty());
     // Damaged: no accounts.
     assert!(persist::migrate(serde_json::json!({"version": 3})).is_err());
     // Newer: refused.
-    assert!(persist::migrate(serde_json::json!({"version": 5})).is_err());
+    assert!(persist::migrate(serde_json::json!({"version": persist::VERSION + 1})).is_err());
 }
 
 /// Lockouts block entries, never exits.

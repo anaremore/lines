@@ -371,8 +371,6 @@ pub struct ChainView {
     /// Focused in an active window as of the last frame: what a click found. Input's capture
     /// phase moves the focus before the pane hears the click, so now can't say.
     aimed: bool,
-    /// A quote older than this is stale (the account's guard, as of the last frame).
-    stale_after_ms: i64,
     /// The market clock as of the last frame.
     now: Option<lines_core::UtcMillis>,
     /// No quote in view is fresh.
@@ -966,7 +964,6 @@ impl ChainView {
             one_click: false,
             asked: Vec::new(),
             aimed: false,
-            stale_after_ms: lines_trading::risk::OptionGuard::default().stale_after_ms,
             now: None,
             quotes_stale: false,
             sent_at: None,
@@ -1568,14 +1565,13 @@ impl ChainView {
             .map(|t| t.submit(lines_trading::Source::Dom, std::time::Instant::now(), cmd))
     }
 
-    /// The quote, unless it's past the guard's limit: a stale one prices nothing.
+    /// The quote, unless it's past its expiry's limit: a stale one prices nothing.
     fn live_quote(&self, key: OptionKey) -> Option<OptionQuote> {
         let q = self.quote(key)?;
-        let guard = lines_trading::risk::OptionGuard {
-            stale_after_ms: self.stale_after_ms,
-            ..Default::default()
-        };
-        let stale = self.now.is_some_and(|n| ticket::quote_stale(&q, &guard, n));
+        let contract = self.contract(key);
+        let stale = self
+            .now
+            .is_some_and(|n| ticket::quote_stale(&q, contract, n));
         (!stale).then_some(q)
     }
 
@@ -3178,10 +3174,16 @@ impl ChainView {
             .flatten()
             .map(|q| q.time.0)
             .max();
-        let quotes_stale = self
-            .now
+        // The limit on what's in view, worked out once a frame.
+        let stale_at = self.now.zip(self.frame.expiry).map(|(n, e)| {
+            (
+                n,
+                lines_trading::risk::expiry_quote_stale_ms(self.product.id, e, n),
+            )
+        });
+        let quotes_stale = stale_at
             .zip(newest)
-            .is_some_and(|(n, q)| n.0 - q > self.stale_after_ms);
+            .is_some_and(|((n, limit), q)| n.0 - q > limit);
         if quotes_stale != self.quotes_stale {
             self.quotes_stale = quotes_stale;
             self.seen_revision = u64::MAX;
@@ -3253,10 +3255,8 @@ impl ChainView {
                     }
                     cell(&mut s, &self.product, q, c);
                     // A stale quote doesn't read as live (the header says so in a word).
-                    let stale = q.is_some_and(|q| {
-                        self.now
-                            .is_some_and(|n| n.0 - q.time.0 > self.stale_after_ms)
-                    });
+                    let stale = q
+                        .is_some_and(|q| stale_at.is_some_and(|(n, limit)| n.0 - q.time.0 > limit));
                     self.glyphs.paint_right(
                         s.as_str(),
                         side_x + cols[i] - PAD,
@@ -5467,14 +5467,6 @@ impl Render for ChainView {
         self.aimed = self.focus.is_focused(window) && window.is_window_active();
         self.sync_chart_visible(cx);
         self.sync_chart_span(cx);
-        if let Some(i) = self
-            .trade
-            .account
-            .as_ref()
-            .and_then(|a| Trading::try_global(cx).and_then(|t| t.account(a)))
-        {
-            self.stale_after_ms = i.option_guard.stale_after_ms;
-        }
         self.apply_shot(cx);
         self.refresh_lines(cx);
         self.refresh_traded(cx);

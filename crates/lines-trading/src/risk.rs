@@ -2,7 +2,7 @@
 //! maximum order size, maximum position, a fat-finger price band around the market, and a
 //! daily loss limit. Flatten, Cancel All and cancels never pass through here.
 
-use lines_core::{Price, Qty, UtcMillis};
+use lines_core::{CivilDate, ContractKey, Price, ProductId, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::command::{Reject, RejectCode};
@@ -49,8 +49,6 @@ pub struct OptionGuard {
     pub min_band_ticks: i64,
     /// Allow market orders (Flatten always may).
     pub allow_market: bool,
-    /// A quote older than this has no mid to check against.
-    pub stale_after_ms: i64,
     /// A trigger's underlying with no trade for this long is stale: it can't fire (decision
     /// 0029).
     pub trigger_stale_ms: i64,
@@ -64,16 +62,36 @@ impl Default for OptionGuard {
             max_from_mid_pct: 25,
             min_band_ticks: 10,
             allow_market: false,
-            stale_after_ms: DEFAULT_QUOTE_STALE_MS,
             trigger_stale_ms: DEFAULT_TRIGGER_STALE_MS,
             target_chase_ms: DEFAULT_TARGET_CHASE_MS,
         }
     }
 }
 
-/// How old an option quote may be before it counts as stale, by default: 15 minutes. A quiet
-/// series quotes rarely, and its quote stays good until it changes.
-pub const DEFAULT_QUOTE_STALE_MS: i64 = 15 * 60_000;
+/// How old a quote on a series expiring today may be: its price moves by the second.
+pub const SAME_DAY_QUOTE_STALE_MS: i64 = 10_000;
+/// How old a quote on a later expiry may be.
+pub const LATER_QUOTE_STALE_MS: i64 = 60_000;
+
+/// How old a quote on this expiry may be before it counts as stale: nothing fills on it, checks
+/// against it or shows as live. The one definition, for the core, the paper broker and the chain.
+/// "Today" is the product's own market date; an expiry already past counts as today.
+pub fn expiry_quote_stale_ms(product: ProductId, expiry: CivilDate, now: UtcMillis) -> i64 {
+    let today = lines_feed::catalog::sessions(product)
+        .map_or_else(|| CivilDate::from_utc(now), |cal| cal.local(now).0);
+    if expiry <= today {
+        SAME_DAY_QUOTE_STALE_MS
+    } else {
+        LATER_QUOTE_STALE_MS
+    }
+}
+
+/// [`expiry_quote_stale_ms`] for a contract; anything but an option gets the shorter limit.
+pub fn option_quote_stale_ms(contract: ContractKey, now: UtcMillis) -> i64 {
+    contract.option_key().map_or(SAME_DAY_QUOTE_STALE_MS, |k| {
+        expiry_quote_stale_ms(contract.product, k.expiry, now)
+    })
+}
 
 /// How long an underlying can go without a trade before a trigger counts it as stale, by default.
 /// Twice the feed's own stale limit: SPY trades many times a second in regular hours.
@@ -138,9 +156,8 @@ pub fn check_option(
             ));
         }
     }
-    let fresh = quote
-        .at
-        .is_some_and(|t| now.0 - t.0 <= guard.stale_after_ms);
+    let limit = option_quote_stale_ms(spec.contract, now);
+    let fresh = quote.at.is_some_and(|t| now.0 - t.0 <= limit);
     let (Some(bid), Some(ask), true) = (quote.bid, quote.ask, fresh) else {
         return Err(risk(if quote.at.is_some() && !fresh {
             "this option's quote is stale: no mid to check the limit against".into()
@@ -181,7 +198,7 @@ pub fn check_option_exit(
     if let OrderKind::Limit { price } = *kind
         && quote
             .at
-            .is_some_and(|t| now.0 - t.0 <= guard.stale_after_ms)
+            .is_some_and(|t| now.0 - t.0 <= option_quote_stale_ms(spec.contract, now))
     {
         let touch = match side {
             Side::Sell => quote.bid,

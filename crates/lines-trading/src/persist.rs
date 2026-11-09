@@ -13,9 +13,12 @@
 //! - **v3**: the same layout, and contracts may be equities or options (decision 0028,
 //!   `types::ContractDoc`). The version moved so that an older build refuses the file instead
 //!   of reading an option position as spot.
-//! - **v4**: the current format: an optional list of armed exit triggers (decision 0029). The
-//!   version moved so that an older build refuses the file instead of reading it and silently
-//!   dropping a position's Stop.
+//! - **v4**: an optional list of armed exit triggers (decision 0029). The version moved so that
+//!   an older build refuses the file instead of reading it and silently dropping a position's
+//!   Stop.
+//! - **v5**: the current format: no saved limit on an option quote's age, which is now one
+//!   function by expiry (`risk::option_quote_stale_ms`). The version moved so that an older build
+//!   refuses the file instead of reading it and going back to its 15 minutes.
 //!
 //! A file from a newer Lines is refused (never half-read), and a damaged file is reported,
 //! never silently replaced.
@@ -31,7 +34,7 @@ use crate::guardrails::GuardrailTracker;
 use crate::paper::{PaperConfig, PaperState};
 use crate::rules::RuleTracker;
 
-pub const VERSION: u64 = 4;
+pub const VERSION: u64 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAccount {
@@ -77,10 +80,32 @@ pub fn migrate(mut v: Value) -> Result<Value> {
             1 => v1_to_v2(v)?,
             2 => v2_to_v3(v)?,
             3 => v3_to_v4(v)?,
+            4 => v4_to_v5(v)?,
             n => bail!("no migration from version {n}"),
         };
         version += 1;
     }
+    Ok(v)
+}
+
+/// v4 → v5: the 15 minutes every file holds (and any hand-set age) go, for the function by expiry.
+fn v4_to_v5(mut v: Value) -> Result<Value> {
+    let o = v.as_object_mut().context("v4 file is not an object")?;
+    if let Some(paper) = o.get_mut("paper").and_then(Value::as_object_mut) {
+        paper.remove("option_quote_stale_ms");
+    }
+    let Some(accounts) = o.get_mut("accounts").and_then(Value::as_array_mut) else {
+        bail!("v4 file has no accounts");
+    };
+    for a in accounts {
+        if let Some(guard) = a
+            .pointer_mut("/config/limits/option_guard")
+            .and_then(Value::as_object_mut)
+        {
+            guard.remove("stale_after_ms");
+        }
+    }
+    o.insert("version".into(), json!(5));
     Ok(v)
 }
 
@@ -402,6 +427,41 @@ mod tests {
         let again = serde_json::to_value(&f).unwrap();
         assert_eq!(again["version"], json!(VERSION));
         assert_eq!(read(&again.to_string()), f);
+    }
+
+    /// A v4 file holds 900000 twice. Both go, the guard's other settings stay, and a file written
+    /// back has neither.
+    #[test]
+    fn a_v4_file_loses_its_saved_quote_age() {
+        let mut v: Value = serde_json::from_str(V2).unwrap();
+        v["version"] = json!(4);
+        v["paper"]["option_quote_stale_ms"] = json!(900_000);
+        v["accounts"][0]["config"]["limits"]["option_guard"] = json!({
+            "max_from_mid_pct": 5,
+            "min_band_ticks": 1,
+            "allow_market": true,
+            "stale_after_ms": 900_000,
+            "trigger_stale_ms": 20_000,
+            "target_chase_ms": 4_000
+        });
+        let migrated = migrate(v).unwrap();
+        assert_eq!(migrated["version"], json!(VERSION));
+        // On the migrated value: reading the file would drop unknown keys anyway.
+        assert!(migrated["paper"].get("option_quote_stale_ms").is_none());
+        let saved = &migrated["accounts"][0]["config"]["limits"]["option_guard"];
+        assert!(saved.get("stale_after_ms").is_none(), "{saved}");
+        assert_eq!(saved["max_from_mid_pct"], json!(5));
+        let f: TradingFile = serde_json::from_value(migrated).unwrap();
+        let guard = f.accounts[0].config.limits.option_guard.clone().unwrap();
+        assert_eq!(guard.max_from_mid_pct, 5);
+        assert!(guard.allow_market);
+        assert_eq!(guard.trigger_stale_ms, 20_000);
+        assert_eq!(guard.target_chase_ms, 4_000);
+        let written = serde_json::to_string(&f).unwrap();
+        assert!(!written.contains("option_quote_stale_ms"), "{written}");
+        assert!(!written.contains("stale_after_ms"), "{written}");
+        // No accounts is no file, as in every migration.
+        assert!(migrate(json!({"version": 4})).is_err());
     }
 
     #[test]
