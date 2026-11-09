@@ -153,6 +153,13 @@ pub fn rows_jumped(was: Option<(f32, f64)>, now: Option<(f32, f64)>) -> bool {
     was != now
 }
 
+/// Whether the table itself moved or changed width, so its cells aren't where they were, with a
+/// chart or without. Not its height: the plain list is anchored at the top, so a taller footer
+/// moves no cell, and beside a chart `rows_jumped` has the height. The first frame moves nothing.
+pub fn table_moved(was: Option<(f32, f32, f32)>, now: (f32, f32, f32)) -> bool {
+    was.is_some_and(|w| w != now)
+}
+
 /// The marker's words.
 pub fn write_marker(
     out: &mut impl std::fmt::Write,
@@ -387,6 +394,16 @@ mod tests {
         assert!(!rows_jumped(None, None));
         // The trader's own zoom: the rows move, and it was aimed.
         assert!(!rows_jumped(here, at(68_100.0, 68_900.0, 600.0, 40.0)));
+    }
+
+    #[test]
+    fn the_table_moves_with_its_position_or_width() {
+        let at = (800.0, 40.0, 700.0);
+        assert!(!table_moved(None, at), "the first frame");
+        assert!(!table_moved(Some(at), at));
+        assert!(table_moved(Some(at), (690.0, 40.0, 610.0)), "narrower");
+        assert!(table_moved(Some(at), (800.0, 60.0, 700.0)), "lower");
+        assert!(table_moved(Some(at), (780.0, 40.0, 700.0)), "sideways");
     }
 
     #[test]

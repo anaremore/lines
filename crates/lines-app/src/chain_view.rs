@@ -419,6 +419,8 @@ struct Frame {
     ys: Vec<f32>,
     /// The scale `ys` were placed for.
     locked_key: Option<(f64, f64, f32, f64)>,
+    /// Where the table was last frame: position and width.
+    table_at: Option<(f32, f32, f32)>,
     /// Where the chart's plot was last frame, if the rows are on its scale.
     locked_geometry: Option<(f32, f64)>,
     candidates: Vec<crate::chain_lock::Candidate>,
@@ -2001,6 +2003,13 @@ impl ChainView {
         } else {
             None
         };
+        // The columns are laid out from the table's own bounds, chart or no chart.
+        let table_at = (ox, top, w);
+        if crate::chain_lock::table_moved(self.frame.table_at, table_at) && self.one_click {
+            self.rows_moved();
+            window.on_next_frame(|window, _| window.refresh());
+        }
+        self.frame.table_at = Some(table_at);
         let geometry = scale.as_ref().map(|s| s.geometry());
         if crate::chain_lock::rows_jumped(self.frame.locked_geometry, geometry) {
             self.frame.locked_geometry = geometry;
