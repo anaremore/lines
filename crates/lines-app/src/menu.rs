@@ -41,8 +41,8 @@ pub struct MenuItem {
     pub header: bool,
     /// Drawn in `Theme::destructive` (delete, close, cancel).
     pub destructive: bool,
-    /// A header in the main text color: an object menu's name and value (a section's name is
-    /// small capitals, dim).
+    /// An object menu's name and value: a header (dim, never highlighted) in normal case above a
+    /// divider (a section's name is small capitals).
     pub title: bool,
     /// An on/off switch: drawn as a box (checked when on), told apart from one of a set (a
     /// check on the one in force) and from an action.
@@ -348,42 +348,54 @@ impl Menu {
             cx,
         );
         let mut rects = vec![main];
-        let mut root = div().absolute().size_full();
+        let mut sub_list = None;
         if let Some(o) = self.open {
             let sub = self.sub_items();
             let rect = sub_place(main, row_top(&self.items, o), SUB_W, list_h(sub), vp);
             rects.push(rect);
             let shown = self.in_sub.then_some(self.sub_selected);
-            let list = rows(&t, rect, sub, shown, None, "submenu", slot, run, true, cx);
-            root =
-                root.child(gpui::deferred(list).with_priority(crate::dropdown::OVERLAY_PRIORITY));
+            sub_list = Some(rows(
+                &t, rect, sub, shown, None, "submenu", slot, run, true, cx,
+            ));
         }
         // The menu deferred above any open header dropdown (`dropdown::OVERLAY_PRIORITY`); its
-        // backdrop at every popover's (under Flatten and Cancel all, `crate::popover`).
-        root.child(
-            gpui::deferred(
-                // A press anywhere else closes the menu and does nothing else
-                // (`crate::popover`): it occludes, and stops the press.
-                div()
-                    .id("menu-backdrop")
-                    .absolute()
-                    .size_full()
-                    .occlude()
-                    .on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                        let p = (f32::from(ev.position.x), f32::from(ev.position.y));
-                        if let Some(d) = crate::popover::outside_click(true, p, &rects) {
-                            if d.consume {
-                                cx.stop_propagation();
+        // backdrop at every popover's (under Flatten and Cancel all, `crate::popover`). Deferred
+        // draws of one priority paint (and take the pointer) in the order they are added: the
+        // submenu goes last, so where it overlaps the menu (flipped left in a narrow window) it
+        // is on top.
+        let root = div()
+            .absolute()
+            .size_full()
+            .child(
+                gpui::deferred(
+                    // A press anywhere else closes the menu and does nothing else
+                    // (`crate::popover`): it occludes, and stops the press.
+                    div()
+                        .id("menu-backdrop")
+                        .absolute()
+                        .size_full()
+                        .occlude()
+                        .on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            let p = (f32::from(ev.position.x), f32::from(ev.position.y));
+                            if let Some(d) = crate::popover::outside_click(true, p, &rects) {
+                                if d.consume {
+                                    cx.stop_propagation();
+                                }
+                                crate::popover::mark_dismissing();
+                                *slot(this) = None;
+                                cx.notify();
                             }
-                            crate::popover::mark_dismissing();
-                            *slot(this) = None;
-                            cx.notify();
-                        }
-                    })),
+                        })),
+                )
+                .with_priority(crate::dropdown::BACKDROP_PRIORITY),
             )
-            .with_priority(crate::dropdown::BACKDROP_PRIORITY),
-        )
-        .child(gpui::deferred(list).with_priority(crate::dropdown::OVERLAY_PRIORITY))
+            .child(gpui::deferred(list).with_priority(crate::dropdown::OVERLAY_PRIORITY));
+        match sub_list {
+            Some(s) => {
+                root.child(gpui::deferred(s).with_priority(crate::dropdown::OVERLAY_PRIORITY))
+            }
+            None => root,
+        }
         .into_any_element()
     }
 }
@@ -463,7 +475,7 @@ fn rows<V: 'static>(
             // Level with the rows' labels: padding, the 2 px edge, the check column and the
             // gap. An object's title in the main text, a section's name in small capitals.
             let (color, size, text) = if item.title {
-                (t.text_main, 12.0, item.label.clone())
+                (t.text_dim, 12.0, item.label.clone())
             } else {
                 (t.text_dim, 10.5, item.label.to_uppercase())
             };

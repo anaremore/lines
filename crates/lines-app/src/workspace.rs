@@ -2795,10 +2795,10 @@ impl WindowView {
             self.open_menu(at, cx);
         }
         if let (Some(sub), Some(menu)) = (&m.sub, self.menu.as_mut()) {
-            let Some(i) = menu.items.iter().position(|i| i.label == *sub) else {
+            let i = menu.items.iter().position(|i| i.label == *sub);
+            if !i.is_some_and(|i| menu.open_sub(i, true)) {
                 shot_menu_failed(&format!("no row \"{sub}\" opens a submenu"));
-            };
-            menu.open_sub(i, true);
+            }
         }
         true
     }

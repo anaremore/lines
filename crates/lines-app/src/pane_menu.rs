@@ -208,7 +208,7 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
                 toggle("Price trail", Command::DomTrail, d.trail),
                 MenuItem {
                     hint: format!("{:.1} s", f64::from(d.half_life_ms) / 1000.0),
-                    ..row("Trail half-life (next)", Command::DomTrailHalfLife)
+                    ..row("Next trail half-life", Command::DomTrailHalfLife)
                 },
             ],
         ));
@@ -425,8 +425,10 @@ fn pane(m: &PaneMenu) -> MenuItem {
         sub.push(MenuItem::of(Command::ReopenTab, false));
     }
     sub.push(MenuItem::sep());
+    // Hiding is for a DOM or time & sales (a chart is what they hide around).
     if m.chart.is_none() {
         sub.push(MenuItem::of(Command::HidePane, false));
+        sub.push(MenuItem::sep());
     }
     sub.push(MenuItem::of(Command::ClosePane, false).destructive());
     MenuItem::submenu("Pane", m.kind.label(), sub)
