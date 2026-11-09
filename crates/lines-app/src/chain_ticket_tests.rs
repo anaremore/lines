@@ -698,3 +698,45 @@ fn a_live_trigger_wants_its_underlyings_feed_until_it_ends() {
     assert_eq!(live_triggers(&r), 0);
     assert!(!missing(&r), "nothing alive, nothing wanted");
 }
+
+/// Long 1, the ticket's size 5, a sell: the ticket says what the core will, before the press, and
+/// the core refuses it in those words. From flat, the same sell goes and opens a short, and the
+/// button says so.
+#[test]
+fn a_sell_through_flat_is_refused_in_the_cores_words() {
+    let mut r = Rig::new();
+    let k = key(684, Right::Call);
+    let c = contract_of(k);
+    r.quote(k, 240, 242);
+    r.hold(c, 1, 242);
+    let said = lines_trading::risk::through_flat(r.position(c), 0, Side::Sell, 5).unwrap();
+    let id = r.t.submit(
+        Source::Dom,
+        Instant::now(),
+        command(account(), c, Side::Sell, 5, Price(240), false),
+    );
+    r.t.settle();
+    let got = r.t.cache.read().result(id).cloned().expect("answered");
+    assert_eq!(got.unwrap_err().message, said);
+    assert_eq!(r.position(c), 1);
+    assert!(r.orders(c).is_empty());
+
+    // Flat: a sell to open goes.
+    let flat = contract_of(key(690, Right::Call));
+    r.quote_on(flat, 100, 102);
+    let p = catalog::get(catalog::SPY).unwrap();
+    assert_eq!(
+        send_label(
+            &p,
+            Side::Sell,
+            false,
+            1,
+            Some(Price(100)),
+            Some(r.position(flat))
+        ),
+        "Sell to open 1 at 1.00"
+    );
+    assert!(lines_trading::risk::through_flat(0, 0, Side::Sell, 1).is_none());
+    r.send(command(account(), flat, Side::Sell, 1, Price(100), false));
+    assert_eq!(r.position(flat), -1);
+}

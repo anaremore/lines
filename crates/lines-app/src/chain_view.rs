@@ -1486,6 +1486,13 @@ impl ChainView {
     }
 
     /// The position on a series.
+    /// The position, `None` while the cache is busy this frame.
+    fn known_position(&self, key: OptionKey) -> Option<i64> {
+        let a = self.trade.account.as_ref()?;
+        let st = self.trade.try_cache()?;
+        Some(st.position(a, self.contract(key)).map_or(0, |p| p.qty))
+    }
+
     fn position(&self, key: OptionKey) -> i64 {
         let Some(a) = self.trade.account.as_ref() else {
             return 0;
@@ -1544,6 +1551,17 @@ impl ChainView {
             ),
             None => (at_start, None),
         };
+        // Through flat to the other side, after the checks the core asks first: its own words.
+        let through_flat = (!close)
+            .then(|| {
+                lines_trading::risk::through_flat(
+                    self.position(key),
+                    self.working_on(key, side, true),
+                    side,
+                    self.size(cx),
+                )
+            })
+            .flatten();
         let guard = info
             .as_ref()
             .map(|i| i.option_guard.clone())
@@ -1567,6 +1585,7 @@ impl ChainView {
             price,
             close.then_some(side),
         )
+        .or(through_flat)
     }
 
     fn submit(&self, cmd: lines_trading::Command, cx: &App) -> Option<CommandId> {
@@ -4713,7 +4732,14 @@ impl ChainView {
                 product.symbol,
                 product.price.format::<32>(level).as_str()
             ),
-            None => ticket::send_label(&product, tk.side, tk.close, qty, tk.price),
+            None => ticket::send_label(
+                &product,
+                tk.side,
+                tk.close,
+                qty,
+                tk.price,
+                self.known_position(tk.key),
+            ),
         };
         let side_color = match tk.side {
             Side::Buy => t.up,

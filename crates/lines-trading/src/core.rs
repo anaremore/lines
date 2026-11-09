@@ -1471,6 +1471,30 @@ impl TradingCore {
     }
 
     /// Validation, prop rules and risk for a new order.
+    /// An option order that would take a position through flat to the other side is refused: long
+    /// 1, selling 5 by mistake, ends short 4, which nobody meant (the owner's ruling). Opening from
+    /// flat is allowed, and so is reducing. Every order working on that side counts, exits and a
+    /// Flatten's included: if one of those closes the position first, this one would open the
+    /// other side. Rules' orders too: a strategy reverses an option in two orders, not one.
+    fn check_option_through_flat(&self, spec: &OrderSpec) -> Result<(), Reject> {
+        let position = self.position(&spec.account, spec.contract);
+        if position == 0 || spec.side.sign() == position.signum() {
+            return Ok(());
+        }
+        let working: i64 = self
+            .orders
+            .values()
+            .filter(|o| o.is_open())
+            .filter(|o| o.account == spec.account && o.contract == spec.contract)
+            .filter(|o| o.side == spec.side)
+            .map(|o| o.remaining().0)
+            .sum();
+        match risk::through_flat(position, working, spec.side, spec.qty.0) {
+            Some(why) => Err(Reject::new(RejectCode::Risk, why)),
+            None => Ok(()),
+        }
+    }
+
     fn check_new(&mut self, now: UtcMillis, spec: &OrderSpec) -> Result<(), Reject> {
         let cs = self
             .spec(spec.contract)
@@ -1485,6 +1509,7 @@ impl TradingCore {
                 ));
             }
             self.check_option_kind(now, &spec.account, spec.contract, &spec.kind, None)?;
+            self.check_option_through_flat(spec)?;
         }
         if spec.qty.0 <= 0 {
             return Err(Reject::new(

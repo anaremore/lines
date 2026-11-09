@@ -921,10 +921,19 @@ fn exits_shrink_with_the_position_and_never_flip() {
     assert_eq!(r.orders(call()).len(), n);
     assert_eq!(r.position(call()), 0);
 
-    // It flips: an exit armed for the long side must not fire for the short one.
-    let mut r = Rig::long_call(1);
+    // It flips: an exit armed for the long side must not fire for the short one. Lines refuses an
+    // order through flat, so the broker does it: a sell of 1 it fills for 2 (its quantity is the
+    // truth).
+    let (mut r, s) = scripted(true);
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let buy = r.cmd(buy_call(1)).unwrap()[0];
+    r.wait(1);
+    fill(&mut r, &s, buy, 242, 1);
     let stop = r.arm(call(), TriggerKind::Stop, 68_000);
-    r.open(call(), Side::Sell, 2, 240);
+    let sell = r.cmd(sell_call(1, 240)).unwrap()[0];
+    r.wait(1);
+    fill(&mut r, &s, sell, 240, 2);
     assert_eq!(r.position(call()), -1);
     assert_eq!(r.reason(stop), "the position flipped");
 
@@ -938,16 +947,23 @@ fn exits_shrink_with_the_position_and_never_flip() {
 /// A fired exit ends if the position flips: it never buys back a short it wasn't armed for.
 #[test]
 fn a_fired_exit_ends_when_the_position_flips() {
-    let mut r = Rig::long_call(2);
+    let (mut r, s) = scripted(true);
+    r.print(68_300);
+    r.quote(Some(240), Some(242));
+    let buy = r.cmd(buy_call(2)).unwrap()[0];
+    r.wait(1);
+    fill(&mut r, &s, buy, 242, 2);
     let id = r.arm(call(), TriggerKind::Target, 68_500);
     r.quote(Some(300), Some(900));
     r.print(68_500);
     r.quote(Some(280), Some(900));
-    r.wait(LAT + 1);
+    r.wait(1);
     assert_eq!(r.state(id), TriggerState::Working);
-    // The trader sells through flat at the bid, on a narrower quote the guard allows.
+    // The broker fills its sell of 2 for 5 (Lines refuses an order through flat itself; the
+    // broker's quantity is the truth).
+    let exit = s.lock().unwrap().placed.last().unwrap().id;
     r.quote(Some(280), Some(285));
-    r.open(call(), Side::Sell, 5, 280);
+    fill(&mut r, &s, exit, 280, 5);
     assert_eq!(r.position(call()), -3);
     assert_eq!(r.state(id), TriggerState::Ended);
     assert_eq!(r.reason(id), "the position flipped");
@@ -1783,6 +1799,28 @@ fn scripted(simulated: bool) -> (Rig, Arc<Mutex<Script>>) {
     let mut core = TradingCore::new(Box::new(ScriptBroker(s.clone())));
     core.add_account(AccountConfig::paper("paper-1", 100_000), None);
     (Rig::on(core), s)
+}
+
+fn buy_call(qty: i64) -> Command {
+    Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: call(),
+        side: Side::Buy,
+        qty: Qty(qty),
+        kind: OrderKind::Limit { price: Price(242) },
+    })
+}
+
+fn sell_call(qty: i64, cents: i64) -> Command {
+    Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: call(),
+        side: Side::Sell,
+        qty: Qty(qty),
+        kind: OrderKind::Limit {
+            price: Price(cents),
+        },
+    })
 }
 
 fn fill(r: &mut Rig, s: &Arc<Mutex<Script>>, id: OrderId, price: i64, qty: i64) {
