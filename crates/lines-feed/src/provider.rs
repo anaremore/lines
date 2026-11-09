@@ -129,6 +129,11 @@ pub enum MarketEvent {
     /// The session dropped its book and asked the exchange for a fresh snapshot (checksum
     /// mismatch or a book sequence gap).
     BookResync,
+    /// The source won't send depth on this feed (not on the user's plan, say): the book empties
+    /// and `reason` shows where it would be. Everything else goes on.
+    DepthUnavailable {
+        reason: String,
+    },
     /// Messages known to be missing (sequence gap).
     Gap {
         missed: u64,
