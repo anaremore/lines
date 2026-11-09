@@ -434,6 +434,48 @@ fn the_rest_of_a_flatten_shrinks_with_the_position() {
     assert_eq!(sold, 3, "the 2 from the book and the 1 left");
 }
 
+/// A stop filled at the print (no bid to take) takes its share of the print first: a print of 3
+/// that fires a stop for 2 leaves 1 for a resting limit. Several orders never fill more than printed.
+#[test]
+fn a_stop_filled_at_the_print_takes_its_share_first() {
+    let mut r = Rig::new(CME_OPEN);
+    r.top((6000.00, 10), (6000.25, 10));
+    r.order(Side::Buy, 5, OrderKind::Market);
+    r.wait(LAT);
+    assert_eq!(r.pos(es()), 5);
+    let stop = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: OrderKind::Stop {
+                trigger: px(5999.00),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT);
+    // No bid: the stop fills at the print, and the limit rests below it.
+    r.market(
+        es(),
+        &[
+            MarketInput::BookClear,
+            MarketInput::Book {
+                side: BookSide::Ask,
+                price: px(6000.25),
+                qty: Qty(10),
+            },
+        ],
+    );
+    let limit = r.order(Side::Sell, 2, OrderKind::Limit { price: px(5998.00) });
+    r.wait(LAT);
+    assert!(r.fills(limit).is_empty());
+    r.trade(5999.00, 3);
+    let sum = |f: Vec<(Price, i64)>| f.iter().map(|x| x.1).sum::<i64>();
+    assert_eq!(sum(r.fills(stop)), 2);
+    assert_eq!(sum(r.fills(limit)), 1, "what the stop left of the print");
+}
+
 /// A limit is as before: it takes what it crosses at its limit or better, and rests at its limit.
 #[test]
 fn a_limit_order_is_unchanged() {

@@ -2328,7 +2328,7 @@ impl ChainView {
         let excess = self.watching.len().saturating_sub(MAX_ASKED);
         self.watching.drain(..excess);
         // Accepted isn't filled: the broker can still reject an order on arrival, and a Flatten
-        // has no fill on a stale quote or a missing side, so it says the position stayed.
+        // canceled before it closed the position says so.
         self.watching.retain(|id| {
             use lines_trading::{OrderState, Role};
             let Some(o) = st.order(*id) else {

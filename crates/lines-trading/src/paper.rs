@@ -839,9 +839,24 @@ impl PaperBroker {
                 continue;
             };
             po.order.triggered = true;
+            let (side, before) = (po.order.side, po.order.remaining().0);
             match po.order.kind {
                 OrderKind::Stop { .. } => {
+                    // With no book on its side it fills at the last trade, which is this print:
+                    // that share of the print is taken too.
+                    let no_book = self
+                        .markets
+                        .get(&contract)
+                        .is_none_or(|m| m.book.levels(book_side(side.opposite())).next().is_none());
                     self.execute(now, id, None);
+                    if no_book {
+                        let after = self
+                            .orders
+                            .get(&id)
+                            .filter(|p| p.order.is_open())
+                            .map_or(0, |p| p.order.remaining().0);
+                        left -= before - after;
+                    }
                     if let Some(rest) = self
                         .orders
                         .get(&id)
