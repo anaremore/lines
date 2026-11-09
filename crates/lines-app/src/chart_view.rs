@@ -417,7 +417,7 @@ pub struct ChartView {
     trading_cache: Option<Arc<crate::trading::TradeCache>>,
     /// Screenshot fixture: the position line held dragged to this plot-local y.
     drag_position: Option<f32>,
-    /// Screenshot fixture: a Shift+drag to replay on the first frame with bars.
+    /// Screenshot fixture: a Shift+drag, replayed each frame.
     shift_drag: Option<ShiftDrag>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
     /// groups: they share the market only.
@@ -3125,12 +3125,15 @@ impl ChartView {
             }
             // Drawings: projected for this timeframe; previews and drags follow the pointer.
             let magnet = self.magnet();
-            if let Some((a, b)) = self.shift_drag.take() {
+            // Replayed every frame (screenshots have no pointer), so the measure settles on
+            // the frame's final viewport, never a first frame's before the price fit.
+            if let Some((a, b)) = self.shift_drag {
                 let axis = TimeAxis::new(view);
                 let at = |(x, y): (f32, f32)| {
                     snap_anchor(&axis, &self.vp, fmt.tick, magnet, x.into(), y.into())
                 };
                 let (from, to) = (at(a), at(b));
+                self.drawings.cancel();
                 self.drawings.quick_down(a.0, a.1, from);
                 self.drawings.on_up(b.0, b.1, to);
             }
