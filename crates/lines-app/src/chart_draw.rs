@@ -222,6 +222,15 @@ impl ChartDrawings {
         self.selected.is_some()
     }
 
+    /// The selected drawing's tool, if it is shown on this chart now.
+    pub fn selected_tool(&self) -> Option<Tool> {
+        if self.hidden {
+            return None;
+        }
+        let id = self.selected?;
+        self.drawn.iter().find(|d| d.id == id).map(|d| d.tool)
+    }
+
     /// Whether the selection is a drawing shown on this chart now (the pane menu's "Drawing
     /// style…", Alt+S).
     pub fn selection_shown(&self) -> bool {

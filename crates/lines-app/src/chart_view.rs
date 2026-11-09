@@ -428,6 +428,9 @@ pub struct ChartView {
     tf_menu: bool,
     /// A timeframe being typed (digits, then a unit), while typing.
     tf_entry: Option<String>,
+    /// What the last right click was on (an order's tag, a drawing): the pane menu opened by
+    /// the same click is that object's (`crate::pane_menu`). Taken by the menu.
+    menu_object: Option<crate::pane_menu::MenuObject>,
     /// The hovered bar was cut short by a session break.
     cross_partial: bool,
     /// The product's drawings on this chart (roadmap 11).
@@ -686,6 +689,7 @@ impl ChartView {
             tf_anchor: None,
             tf_menu: fixture.timeframe_menu,
             tf_entry: None,
+            menu_object: None,
             cross_partial: false,
             drawings,
             saved_styles,
@@ -4795,18 +4799,95 @@ impl ChartView {
         );
     }
 
-    /// A right click on the plot: the drawing under it is selected, so the pane menu (opened
-    /// by the workspace on the same click) offers its style.
+    /// A right click on the plot: an order's tag under it, else a drawing (which becomes the
+    /// selection), is what the pane menu (opened by the workspace on the same click) is for.
     fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.menu_object = None;
         if self.region(ev.position) != Some(Region::Plot) {
             return;
         }
         let (x, y) = self.local(ev.position);
+        if let Some(o) = self.order_object_at(x as f32, y as f32) {
+            self.menu_object = Some(o);
+            return;
+        }
         let before = self.drawings.selected;
         self.drawings.right_click(x as f32, y as f32);
+        if let Some(tool) = self.drawings.selected_tool() {
+            self.menu_object = Some(crate::pane_menu::MenuObject::Drawing {
+                title: crate::pane_menu::capitalized(tool.label()),
+            });
+        }
         if self.drawings.selected != before {
             cx.notify();
         }
+    }
+
+    /// The single order whose tag (or its ×) is at plot-local (`x`, `y`), last frame's layout:
+    /// its id, its tag's text, whether it's a stop. A group's tag has no one order.
+    fn order_object_at(&self, x: f32, y: f32) -> Option<crate::pane_menu::MenuObject> {
+        use lines_core::geometry::order_tags::{TagHit, hit};
+        let n = self.ct.n_tags;
+        let id = match hit(&self.ct.tags[..n], &self.ct.markers, &self.ct.handles, x, y)? {
+            TagHit::Body(id) | TagHit::Close(id) if self.ct.group_of(id).is_none() => id,
+            _ => return None,
+        };
+        self.order_object(id)
+    }
+
+    /// A working order shown on the chart, as its tag's menu would name it: a stop if there
+    /// is one, it has the most rows (screenshots: `--context-menu order`).
+    pub fn first_order_object(&self) -> Option<crate::pane_menu::MenuObject> {
+        let objects = self
+            .ct
+            .marks
+            .iter()
+            .filter(|m| self.ct.group_of(m.id.0).is_none())
+            .filter_map(|m| self.order_object(m.id.0));
+        let mut first = None;
+        for o in objects {
+            if matches!(o, crate::pane_menu::MenuObject::Order { stop: true, .. }) {
+                return Some(o);
+            }
+            first.get_or_insert(o);
+        }
+        first
+    }
+
+    fn order_object(&self, id: u64) -> Option<crate::pane_menu::MenuObject> {
+        use crate::chart_trade::write_order_tag;
+        use crate::dom_trade::MarkRole;
+        let m = self.ct.mark(id).copied()?;
+        let mut title = FixedStr::<96>::new();
+        let _ = write_order_tag(&mut title, &m, &self.instrument.price);
+        Some(crate::pane_menu::MenuObject::Order {
+            id,
+            title: title.as_str().to_owned(),
+            stop: MarkRole::of(&m) == MarkRole::Stop,
+        })
+    }
+
+    /// The object the last right click was on, for its menu (once).
+    pub fn take_menu_object(&mut self) -> Option<crate::pane_menu::MenuObject> {
+        self.menu_object.take()
+    }
+
+    /// An order tag menu's row (`crate::pane_menu::object_items`): the tag's own paths.
+    pub fn order_command(&mut self, c: crate::commands::OrderCmd, cx: &mut Context<Self>) {
+        use crate::commands::OrderCmd;
+        match c {
+            OrderCmd::Cancel(id) => self.cancel_order(id, cx),
+            OrderCmd::Resize(id) => {
+                crate::trade_bar::open_resize_field(self, lines_trading::OrderId(id));
+            }
+            OrderCmd::Breakeven => crate::trade_bar::run_key(
+                self,
+                crate::commands::TradeCmd::Breakeven,
+                std::time::Instant::now(),
+                cx,
+            ),
+        }
+        cx.notify();
     }
 
     /// Whether a drawing shown on this chart is selected (the pane menu's "Drawing style…").
