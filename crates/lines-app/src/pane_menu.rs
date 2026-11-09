@@ -79,7 +79,8 @@ pub struct PaneMenu {
 /// The thing under the pointer at a right click.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuObject {
-    /// A working order's tag: its id, its tag's text, and whether it is a protective stop.
+    /// A working order's tag: its id, its tag's text, and whether it is a protective stop of
+    /// an open position (Move to breakeven).
     Order { id: u64, title: String, stop: bool },
     /// A drawing (now the selection): what it is.
     Drawing { title: String },

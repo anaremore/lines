@@ -4856,14 +4856,18 @@ impl ChartView {
 
     fn order_object(&self, id: u64) -> Option<crate::pane_menu::MenuObject> {
         use crate::chart_trade::write_order_tag;
-        use crate::dom_trade::MarkRole;
         let m = self.ct.mark(id).copied()?;
         let mut title = FixedStr::<96>::new();
         let _ = write_order_tag(&mut title, &m, &self.instrument.price);
         Some(crate::pane_menu::MenuObject::Order {
             id,
             title: title.as_str().to_owned(),
-            stop: MarkRole::of(&m) == MarkRole::Stop,
+            // What breakeven moves (`trade_bar::protective`): a stop order against an open
+            // position (a long's sell stops, a short's buy stops).
+            stop: m.stop
+                && self.ct.position.is_some_and(|(qty, _)| {
+                    qty != 0 && (m.side == lines_trading::Side::Sell) == (qty > 0)
+                }),
         })
     }
 
