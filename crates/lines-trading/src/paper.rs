@@ -32,7 +32,7 @@
 //!   - **a missing side never fills**: no bid, a zero bid or a crossed quote leaves that side
 //!     empty, so nothing can fill against it, and a market order (Flatten) is cancelled rather
 //!     than filling at a last price;
-//!   - **a stale quote never fills**: older than `option_quote_stale_ms`, an order that would
+//!   - **a stale quote never fills**: older than `risk::option_quote_stale_ms`, an order that would
 //!     cross it rests instead and a market order is cancelled, until a fresh quote comes;
 //!   - orders and fills only in the regular session (options don't trade extended hours);
 //!   - expiry: [`Broker::settle`], asked by the core at the close.
@@ -73,13 +73,6 @@ pub struct PaperConfig {
     pub default_fee: Money,
     /// Reject orders while the product's market is closed (sessions calendar).
     pub check_sessions: bool,
-    /// An option quote older than this fills nothing.
-    #[serde(default = "default_quote_stale_ms")]
-    pub option_quote_stale_ms: i64,
-}
-
-fn default_quote_stale_ms() -> i64 {
-    crate::risk::DEFAULT_QUOTE_STALE_MS
 }
 
 /// A quote side's size in the one-level book: quotes carry none, so it never runs out.
@@ -93,7 +86,6 @@ impl Default for PaperConfig {
             fees: BTreeMap::new(),
             default_fee: Money::ZERO,
             check_sessions: true,
-            option_quote_stale_ms: default_quote_stale_ms(),
         }
     }
 }
@@ -251,7 +243,7 @@ impl PaperBroker {
                 .markets
                 .get(&contract)
                 .and_then(|m| m.quoted_at)
-                .is_none_or(|t| now.0 - t.0 > self.cfg.option_quote_stale_ms)
+                .is_none_or(|t| now.0 - t.0 > crate::risk::option_quote_stale_ms(contract, now))
     }
 
     fn reject(&mut self, id: OrderId, reason: impl Into<String>, at: UtcMillis) {

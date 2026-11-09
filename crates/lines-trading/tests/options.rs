@@ -7,7 +7,7 @@ use std::time::Instant;
 use lines_core::{CivilDate, ContractKey, Price, Qty, Right, UtcMillis};
 use lines_feed::catalog;
 use lines_trading::guardrails::Guardrails;
-use lines_trading::risk::OptionGuard;
+use lines_trading::risk::{self, OptionGuard};
 use lines_trading::rules::presets;
 use lines_trading::{
     AccountConfig, AccountId, BracketSpec, Command, Event, FillModel, MarketInput, Money, OrderId,
@@ -131,9 +131,13 @@ impl Rig {
 
     /// The series' quote, stamped now; `None` is a missing side.
     fn quote(&mut self, bid: Option<i64>, ask: Option<i64>) {
+        self.quote_on(call(), bid, ask);
+    }
+
+    fn quote_on(&mut self, contract: ContractKey, bid: Option<i64>, ask: Option<i64>) {
         let time = UtcMillis(self.t + 1);
         self.market(
-            call(),
+            contract,
             MarketInput::OptionQuote {
                 bid: bid.map(Price),
                 ask: ask.map(Price),
@@ -301,6 +305,81 @@ fn a_missing_side_never_fills() {
     assert!(flat.iter().all(|id| r.fills(*id).is_empty()));
 }
 
+/// The age limit goes by expiry, on the option market's own date.
+#[test]
+fn the_quote_age_limit_goes_by_expiry() {
+    let limit = |y, m, d, at: &str| {
+        risk::expiry_quote_stale_ms(
+            catalog::SPY,
+            CivilDate::new(y, m, d).unwrap(),
+            UtcMillis::parse_iso(at).unwrap(),
+        )
+    };
+    let (same_day, later) = (10_000, 60_000);
+    assert_eq!(risk::SAME_DAY_QUOTE_STALE_MS, same_day);
+    assert_eq!(risk::LATER_QUOTE_STALE_MS, later);
+    // 10:00 ET.
+    assert_eq!(limit(2026, 11, 9, "2026-11-09T15:00:00Z"), same_day);
+    assert_eq!(limit(2026, 11, 10, "2026-11-09T15:00:00Z"), later);
+    assert_eq!(limit(2026, 11, 8, "2026-11-09T15:00:00Z"), same_day, "past");
+    // 20:00 ET: tomorrow in UTC, still today in New York.
+    assert_eq!(limit(2026, 11, 9, "2026-11-10T01:00:00Z"), same_day);
+    assert_eq!(limit(2026, 11, 10, "2026-11-10T01:00:00Z"), later);
+    // Anything else gets the shorter one.
+    assert_eq!(
+        risk::option_quote_stale_ms(
+            ContractKey::equity(catalog::SPY),
+            UtcMillis::parse_iso("2026-11-09T15:00:00Z").unwrap()
+        ),
+        same_day
+    );
+}
+
+/// The core and the paper broker both use it: the same quote age is stale today and fine on a
+/// later expiry, then stale there too.
+#[test]
+fn a_later_expiry_keeps_its_quote_longer() {
+    let later = ContractKey::option(
+        catalog::SPY,
+        CivilDate::new(2026, 11, 13).unwrap(),
+        call().option_key().unwrap().strike,
+        Right::Call,
+    );
+    assert_eq!(
+        risk::option_quote_stale_ms(call(), UtcMillis(Rig::new().t)),
+        risk::SAME_DAY_QUOTE_STALE_MS,
+        "the fixture's series expires today"
+    );
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    r.quote_on(later, Some(500), Some(502));
+    let quoted = r.t;
+    let buy = |contract| {
+        Command::PlaceOrder(OrderSpec {
+            contract,
+            ..Rig::spec(Side::Buy, 1, limit(502))
+        })
+    };
+    // 30 s on: today's has no mid, the later one fills at its 30-second-old ask.
+    r.t = quoted + 30_000;
+    let refused = r.cmd(Command::PlaceOrder(Rig::spec(Side::Buy, 1, limit(242))));
+    assert_eq!(refused.unwrap_err().code, RejectCode::Risk);
+    let id = r.cmd(buy(later)).unwrap()[0];
+    r.wait(LAT + 1);
+    assert_eq!(r.fills(id), [(502, 1)]);
+    // Past 60 s the later one's stale too, and an order sent just in time rests at the broker.
+    r.t = quoted + risk::LATER_QUOTE_STALE_MS - 5;
+    let resting = r.cmd(buy(later)).unwrap()[0];
+    r.wait(LAT + 1);
+    assert!(r.fills(resting).is_empty());
+    assert_eq!(r.state(resting), OrderState::Working);
+    assert_eq!(
+        r.cmd(buy(later)).unwrap_err().code,
+        RejectCode::Risk,
+        "past its limit"
+    );
+}
+
 /// A stale quote fills nothing and gives no mid: an opening order is refused, a resting order
 /// waits, and Flatten is cancelled, until a fresh quote comes.
 #[test]
@@ -311,7 +390,7 @@ fn a_stale_quote_never_fills() {
     let open = r.limit(Side::Buy, 1, 242);
     assert_eq!(r.fills(open), [(242, 1)]);
     // Sent just in time, it arrives after the quote went stale: it would cross, but rests.
-    r.t = quoted + 15 * 60_000 - 5;
+    r.t = quoted + risk::SAME_DAY_QUOTE_STALE_MS - 5;
     let resting = r
         .cmd(Command::PlaceExit(Rig::spec(Side::Sell, 1, limit(240))))
         .unwrap()[0];
@@ -545,8 +624,8 @@ fn a_modify_never_fills_outside_the_session() {
         }))
         .unwrap()[0];
     r.wait(LAT + 1);
-    // 16:05 ET, the quote stamped at 15:59:50.
-    r.t = UtcMillis::parse_iso("2026-11-09T20:59:50Z").unwrap().0;
+    // 16:05 ET, the quote stamped ten seconds before: fresh, so only the session can stop it.
+    r.t = UtcMillis::parse_iso("2026-11-09T21:04:50Z").unwrap().0;
     let time = r.now();
     r.market(
         later,

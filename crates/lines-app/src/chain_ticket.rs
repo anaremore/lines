@@ -26,9 +26,9 @@ pub fn click_sends(one_click: bool, focused: bool, clicks: usize) -> bool {
     one_click && focused && clicks <= 1
 }
 
-/// Whether a quote is past the guard's limit: nothing about it can be used (nor shown as live).
-pub fn quote_stale(q: &OptionQuote, guard: &OptionGuard, now: lines_core::UtcMillis) -> bool {
-    now.0 - q.time.0 > guard.stale_after_ms
+/// Whether a quote is past its expiry's limit: nothing about it can be used (nor shown as live).
+pub fn quote_stale(q: &OptionQuote, contract: ContractKey, now: lines_core::UtcMillis) -> bool {
+    now.0 - q.time.0 > lines_trading::risk::option_quote_stale_ms(contract, now)
 }
 
 /// A cell of the quote: which side of the market a click or Enter takes.
@@ -993,9 +993,11 @@ mod tests {
             let r = refusal(&check(&p, &g, Some(&q)), None, None).unwrap();
             assert!(r.contains("no two-sided quote"), "no price either: {r}");
         }
-        // Stale: past the guard's limit.
+        // Stale: past its expiry's limit.
         let mut late = check(&p, &g, Some(&q));
-        late.now = Some(lines_core::UtcMillis(q.time.0 + g.stale_after_ms + 1));
+        late.now = Some(lines_core::UtcMillis(
+            q.time.0 + lines_trading::risk::option_quote_stale_ms(contract(), q.time) + 1,
+        ));
         let r = refusal(&late, Some(Price(241)), None).unwrap();
         assert!(r.contains("stale"), "{r}");
         // A prop-rule account can't open, in the core's own words, and closing isn't refused.
@@ -1107,18 +1109,15 @@ mod tests {
         s.clear();
         write_compact(&mut s, 0, Some((Side::Sell, 2))).unwrap();
         assert_eq!(s, "S2");
-        // Past the guard's limit, a quote is stale.
-        let g = OptionGuard::default();
+        // Past its expiry's limit, a quote is stale.
         let q = quote(Some(240), Some(242));
-        assert!(!quote_stale(
-            &q,
-            &g,
-            lines_core::UtcMillis(q.time.0 + g.stale_after_ms)
-        ));
+        let c = contract();
+        let limit = lines_trading::risk::option_quote_stale_ms(c, q.time);
+        assert!(!quote_stale(&q, c, lines_core::UtcMillis(q.time.0 + limit)));
         assert!(quote_stale(
             &q,
-            &g,
-            lines_core::UtcMillis(q.time.0 + g.stale_after_ms + 1)
+            c,
+            lines_core::UtcMillis(q.time.0 + limit + 1)
         ));
     }
 
@@ -1211,7 +1210,7 @@ mod tests {
         assert_eq!(got.unwrap_err().message, said, "one-sided");
         t += 1;
         let q = set_quote(&mut core, t, Some(240), Some(242));
-        let late = t + g.stale_after_ms + 1;
+        let late = t + lines_trading::risk::SAME_DAY_QUOTE_STALE_MS + 1;
         let said = ask(&q, late, false, 241).unwrap();
         let got = send(&mut core, late, limit(&plain, Side::Buy, 1, 241, false));
         assert_eq!(got.unwrap_err().message, said, "stale");

@@ -838,7 +838,11 @@ impl TradingCore {
         }
         let guard = self.guard_of(&account);
         let mark = self.marks.get(&contract).copied().unwrap_or_default();
-        let touch = mark.touch(position, now, guard.stale_after_ms);
+        let touch = mark.touch(
+            position,
+            now,
+            crate::risk::option_quote_stale_ms(contract, now),
+        );
         let side_word = if position > 0 { "bid" } else { "ask" };
         if !in_hours(contract.product, now) {
             self.trigger_note(
