@@ -399,7 +399,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     }
     // Held and worked strikes past the rows: a marker at each edge, and at a pane barely wide
     // enough with the ticket covering the foot, both in one.
-    let far = "option 2026-11-09 697 put; buy 2 @ 13.48; ack; option 2026-11-09 670 call; buy 1 @ 13.71; ack; option 2026-11-09 672 call; buy 3 @ 1.00; ack";
+    let far = "option 2026-11-09 697 put; buy 2 @ 13.48; ack; option 2026-11-09 670 call; buy 1 @ 13.71; ack; option 2026-11-09 672 call; sell 2 @ 12.00; ack";
     for (name, quick, size, ticket) in [
         ("chain-chart-markers", true, "1600x700", None),
         (

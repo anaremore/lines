@@ -103,7 +103,8 @@ impl Off {
 pub struct OffRows {
     pub above: Off,
     pub below: Off,
-    /// In the rows' range without a row: crowded out, or new while the rows hold.
+    /// Nothing to press to reach: crowded out of the rows' range, new while the rows hold, or
+    /// on a row the strip, ticket or a long message covers.
     pub between: Off,
 }
 
@@ -132,13 +133,27 @@ pub fn tally(
     side.working += working;
 }
 
-/// The marker's words: each count named, or when that won't fit, one count per edge.
+/// How much the marker says: as much as fits whole.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Detail {
+    Full,
+    Totals,
+    Bare,
+}
+
+/// Whether every row just left its place, so the next click can't be aimed: the rows went from a
+/// list to the chart's scale or back.
+pub fn rows_jumped(was_locked: bool, locked: bool) -> bool {
+    was_locked != locked
+}
+
+/// The marker's words.
 pub fn write_marker(
     out: &mut impl std::fmt::Write,
     above: Off,
     below: Off,
     between: Off,
-    short: bool,
+    detail: Detail,
 ) {
     let mut first = true;
     let mut sep = |out: &mut dyn std::fmt::Write| {
@@ -146,19 +161,15 @@ pub fn write_marker(
         first = false;
         out.write_str(word)
     };
-    if short {
+    if detail == Detail::Totals {
         let _ = out.write_str("Held or working: ");
     }
-    for (off, word) in [
-        (above, "above"),
-        (below, "below"),
-        (between, "without a row"),
-    ] {
+    for (off, word) in [(above, "above"), (below, "below"), (between, "not shown")] {
         if !off.any() {
             continue;
         }
         let _ = sep(out);
-        if short {
+        if detail != Detail::Full {
             let _ = write!(out, "{} {word}", off.held + off.working);
             continue;
         }
@@ -271,9 +282,9 @@ mod tests {
 
     #[test]
     fn the_marker_says_what_is_past_the_edge() {
-        let say = |a: Off, b: Off, m: Off, short: bool| {
+        let say = |a: Off, b: Off, m: Off, detail: Detail| {
             let mut s = String::new();
-            write_marker(&mut s, a, b, m, short);
+            write_marker(&mut s, a, b, m, detail);
             s
         };
         let (none, held, both) = (
@@ -289,8 +300,11 @@ mod tests {
                 nearest: None,
             },
         );
-        assert_eq!(say(held, none, none, false), "2 held above");
-        assert_eq!(say(none, both, none, false), "1 held, 3 working below");
+        assert_eq!(say(held, none, none, Detail::Full), "2 held above");
+        assert_eq!(
+            say(none, both, none, Detail::Full),
+            "1 held, 3 working below"
+        );
         assert_eq!(
             say(
                 none,
@@ -300,13 +314,17 @@ mod tests {
                     nearest: None
                 },
                 held,
-                false
+                Detail::Full
             ),
-            "1 working below  ·  2 held without a row"
+            "1 working below  ·  2 held not shown"
         );
         assert_eq!(
-            say(held, both, none, true),
+            say(held, both, none, Detail::Totals),
             "Held or working: 2 above  ·  4 below"
+        );
+        assert_eq!(
+            say(held, both, held, Detail::Bare),
+            "2 above  ·  4 below  ·  2 not shown"
         );
     }
 
@@ -340,6 +358,13 @@ mod tests {
             range_showing(&s, Price(70_000), (0.0, 600.0), ROW, false),
             None
         );
+    }
+
+    #[test]
+    fn rows_jump_when_the_scale_comes_or_goes() {
+        assert!(rows_jumped(false, true), "the first fit");
+        assert!(rows_jumped(true, false), "no scale any more");
+        assert!(!rows_jumped(true, true) && !rows_jumped(false, false));
     }
 
     #[test]

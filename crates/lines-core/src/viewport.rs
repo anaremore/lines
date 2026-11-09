@@ -190,6 +190,22 @@ impl Viewport {
         }
     }
 
+    /// The price range means something: fitted to bars, or the trader's own.
+    pub fn price_known(&self) -> bool {
+        self.price_fitted || !self.auto_price
+    }
+
+    /// The auto-fit's smallest range. The first is worth a fit even under a hold: until now the
+    /// range took no account of it. Returns whether it changed.
+    pub fn set_min_price_span(&mut self, span: f64) -> bool {
+        let changed = self.min_price_span != span;
+        if self.min_price_span == 0.0 {
+            self.price_fitted = false;
+        }
+        self.min_price_span = span;
+        changed
+    }
+
     /// Re-enable price auto-scale (the range is refitted on the next `on_data`).
     pub fn restore_auto_price(&mut self) {
         self.auto_price = true;
@@ -940,6 +956,40 @@ mod tests {
         v.right_index = 0.0;
         v.on_data(&[bar(68_300, 68_450)], 1);
         assert!(v.price_hi < 69_000.0, "the plot's reset refits too");
+    }
+
+    /// The range is known once fitted or the trader's; a first minimum span refits under a
+    /// hold, and a later one waits for the hold to end.
+    #[test]
+    fn a_first_span_refits_under_a_hold_and_a_later_one_waits() {
+        let bar = |low: i64, high: i64| Bar {
+            time: UtcMillis(0),
+            open: Price(low),
+            high: Price(high),
+            low: Price(low),
+            close: Price(high),
+            volume: Qty(1),
+        };
+        let bars = [bar(68_300, 68_450)];
+        let mut v = Viewport::default();
+        v.set_size(800.0, 600.0);
+        v.right_index = 0.0;
+        assert!(!v.price_known(), "nothing fitted yet");
+        v.on_data(&bars, 1);
+        assert!(v.price_known());
+        v.price_held = true;
+        assert!(v.set_min_price_span(1_000.0));
+        assert!(!v.price_known(), "worth a fit");
+        v.on_data(&bars, 1);
+        assert!(v.price_hi - v.price_lo >= 1_000.0);
+        let fitted = (v.price_lo, v.price_hi);
+        assert!(v.set_min_price_span(2_000.0));
+        v.on_data(&bars, 1);
+        assert_eq!((v.price_lo, v.price_hi), fitted, "held: it waits");
+        assert!(!v.set_min_price_span(2_000.0));
+        v.auto_price = false;
+        v.price_fitted = false;
+        assert!(v.price_known(), "the trader's own");
     }
 
     /// A minimum span widens the fit around the bars, for what's aligned to the scale; bars that

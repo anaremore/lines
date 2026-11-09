@@ -1778,24 +1778,22 @@ impl ChartView {
 
     /// The auto-fit's smallest price range. Returns whether it changed.
     pub fn set_min_price_span(&mut self, span: f64) -> bool {
-        let changed = self.vp.min_price_span != span;
-        // The first one is worth a fit even under a hold: until now no row had room.
-        if self.vp.min_price_span == 0.0 {
-            self.vp.price_fitted = false;
-        }
-        self.vp.min_price_span = span;
-        changed
+        self.vp.set_min_price_span(span)
     }
 
     /// Its price scale, once laid out: what the option chart's chain lines up with.
     pub fn locked_scale(&self) -> Option<crate::chain_lock::LockedScale> {
         // (Before a first fit its range says nothing: the chain stays a plain list.)
-        let ready =
-            f32::from(self.plot.size.height) > 1.0 && (self.vp.price_fitted || !self.vp.auto_price);
+        let ready = f32::from(self.plot.size.height) > 1.0 && self.vp.price_known();
         ready.then(|| crate::chain_lock::LockedScale {
             vp: self.vp,
             plot_top: f32::from(self.plot.origin.y),
         })
+    }
+
+    /// No smallest price range yet: setting one refits, even under a hold.
+    pub fn no_min_price_span(&self) -> bool {
+        self.vp.min_price_span == 0.0
     }
 
     /// A scale the trader chose (a double-click on the plot or price axis goes back to the fit).
