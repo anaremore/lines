@@ -110,6 +110,10 @@ fn paint_path_does_not_allocate() {
             // Frame.
             vp.on_data(series.bars(), fmt.tick);
             let zone = &zones[frame as usize % 2];
+            // What paint does each frame: the process-wide zone, and a clone kept by a pane.
+            let current = lines_core::display_tz::current();
+            let kept = zone.clone();
+            std::hint::black_box((&current, &kept));
             scene.build(series.bars(), &vp, &fmt, 1.25, series.period_ms(), zone);
             let mut label = FixedStr::<32>::new();
             for line in &scene.price_lines {

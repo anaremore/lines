@@ -218,7 +218,11 @@ mod tests {
             hits.iter()
                 .any(|&i| options()[i] == ZoneChoice::Named("America/New_York".into()))
         );
-        let tokyo = matching("TOKYO");
+        // ("System (Asia/Tokyo)" matches too on a machine in Tokyo.)
+        let tokyo: Vec<usize> = matching("TOKYO")
+            .into_iter()
+            .filter(|&i| options()[i] != ZoneChoice::System)
+            .collect();
         assert_eq!(tokyo.len(), 1);
         assert_eq!(options()[tokyo[0]], ZoneChoice::Named("Asia/Tokyo".into()));
         assert!(

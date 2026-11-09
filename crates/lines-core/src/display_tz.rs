@@ -136,6 +136,10 @@ impl DisplayTz {
         if tz.iana_name().is_some_and(is_utc) {
             return DisplayTz::utc();
         }
+        // An OS on New York's clock reads "ET", as the exchange's choice does.
+        if tz.iana_name() == Some(EXCHANGE) {
+            return DisplayTz::exchange();
+        }
         DisplayTz {
             tz,
             label: Label::Abbrev,

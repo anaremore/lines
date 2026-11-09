@@ -809,7 +809,7 @@ fn table() -> Vec<Setting> {
                 crate::display_zone::KEY,
                 Sec::Appearance,
                 "Time zone",
-                "The clock times show in: charts, time & sales, the journal, strategies. Sessions, the VWAP reset and expiries stay on the exchange's clock.",
+                "Times in charts, time & sales, the journal and strategies. Sessions, the VWAP reset and expiries stay on the exchange's clock.",
                 Scope::App,
                 Normal,
                 Editor,

@@ -1071,6 +1071,7 @@ impl JournalView {
             self.paint_groups(bounds, hair, window, cx);
             return;
         }
+        self.cols.name_zone(lines_feed::now_utc());
         self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
         let rows = self.visible_rows();
         let end = (self.scroll + rows).min(self.rows.len());

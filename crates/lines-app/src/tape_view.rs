@@ -1,6 +1,6 @@
 //! The time & sales pane (roadmap 5): the newest prints, newest on top.
 //!
-//! Each row: time (UTC, ms), price, size, and the aggressor shown by colour *and* a marker
+//! Each row: time (the display zone, ms), price, size, and the aggressor shown by colour *and* a marker
 //! (▲ buyer lifted the offer, ▼ seller hit the bid, · unknown), so it never relies on colour
 //! alone (docs/design.md §4). Prints at or above the large-print size get a highlighted row
 //! and bold text.
@@ -326,6 +326,9 @@ impl TapeView {
 
         // What each column must hold this frame: its title and its widest text (large prints
         // are bold, the wider face). Columns are laid out from these: never narrower.
+        if let Some(p) = self.prints.first() {
+            self.cols.name_zone(p.time);
+        }
         self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
         let n = self.prints.len().min(rows);
         for i in 0..n {
