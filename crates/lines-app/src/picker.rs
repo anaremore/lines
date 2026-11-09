@@ -32,7 +32,10 @@ pub const ROLL_SOON_DAYS: i64 = 5;
 pub struct Entry {
     pub product: Product,
     pub exchange: &'static str,
-    /// "SYMBOL description exchange", what the fuzzy matcher scores.
+    /// The market group the list is sorted and headed by (`catalog::Group`).
+    pub group: Option<catalog::Group>,
+    /// "SYMBOL description exchange", what the fuzzy matcher scores (not the group: its words,
+    /// "Equity index" and the like, would match short queries such as "nq" everywhere).
     haystack: String,
 }
 
@@ -41,14 +44,35 @@ pub fn entries(products: impl IntoIterator<Item = Product>) -> Vec<Entry> {
         .into_iter()
         .map(|product| {
             let exchange = catalog::exchange(product.id);
+            let group = catalog::group(product.id);
             let haystack = format!("{} {} {exchange}", product.symbol, product.description);
             Entry {
                 product,
                 exchange,
+                group,
                 haystack,
             }
         })
         .collect()
+}
+
+/// The group heading shown above result `i` (Equity index, Rates, ...), if it starts one.
+/// Only with an empty query, where everything after the recents and favorites is in catalog
+/// order, which is group order; a search ranks by match, so headings would split it.
+pub fn heading(entries: &[Entry], hits: &[Hit], query: &str, i: usize) -> Option<&'static str> {
+    if !query.trim().is_empty() {
+        return None;
+    }
+    let hit = hits.get(i)?;
+    if hit.group != Group::Other {
+        return None;
+    }
+    let group = entries[hit.index].group?;
+    let starts = match i.checked_sub(1).and_then(|j| hits.get(j)) {
+        Some(prev) => prev.group != Group::Other || entries[prev.index].group != Some(group),
+        None => true,
+    };
+    starts.then(|| group.label())
 }
 
 /// The other size of the same index: ES ↔ MES, NQ ↔ MNQ (from the products' micro
@@ -529,10 +553,12 @@ mod tests {
         );
         assert_eq!(symbols(&e, "mnq", &none)[0], "MNQ");
         assert_eq!(symbols(&e, "MNQ", &none)[0], "MNQ", "case-insensitive");
-        assert_eq!(
-            symbols(&e, "cbot", &none)[0],
-            "ZN",
-            "exchange; fuzzy may add weaker hits"
+        let cbot = symbols(&e, "cbot", &none);
+        assert!(
+            cbot[..9]
+                .iter()
+                .all(|s| catalog::by_symbol(s).is_some_and(|p| catalog::exchange(p.id) == "CBOT")),
+            "exchange first; fuzzy may add weaker hits: {cbot:?}"
         );
         let coinbase = symbols(&e, "coinbase", &none);
         assert_eq!(coinbase, ["BTC/USD", "ETH/USD"]);
@@ -802,5 +828,49 @@ mod tests {
             id,
             "selection follows it"
         );
+    }
+
+    /// The empty query lists products by market group, headed once per group; recents and
+    /// favorites stay on top without headings; a search has no headings.
+    #[test]
+    fn grouped_by_market_with_headings() {
+        let e = all();
+        let none = Settings::default();
+        let mut hits = Vec::new();
+        Searcher::default().search(&e, "", &none, &mut hits);
+        let heads: Vec<_> = (0..hits.len())
+            .filter_map(|i| heading(&e, &hits, "", i).map(|h| (h, e[hits[i].index].product.symbol)))
+            .collect();
+        assert_eq!(
+            heads,
+            [
+                ("Equity index", "ES"),
+                ("Rates", "ZT"),
+                ("Energy", "CL"),
+                ("Metals", "GC"),
+                ("FX", "6E"),
+                ("Agriculture", "ZC"),
+                ("Crypto", "BTC/USD"),
+                ("ETFs", "SPY"),
+            ]
+        );
+        // Every product sits under its own group's heading.
+        let mut current = None;
+        for (i, h) in hits.iter().enumerate() {
+            if heading(&e, &hits, "", i).is_some() {
+                current = e[h.index].group;
+            }
+            assert_eq!(e[h.index].group, current, "{}", e[h.index].product.symbol);
+        }
+        // A recent product stays on top, unheaded; its group's heading still starts the rest.
+        let mut s = Settings::default();
+        s.push_recent(catalog::GC);
+        Searcher::default().search(&e, "", &s, &mut hits);
+        assert_eq!(e[hits[0].index].product.symbol, "GC");
+        assert_eq!(heading(&e, &hits, "", 0), None);
+        assert_eq!(heading(&e, &hits, "", 1), Some("Equity index"));
+        // Searching ranks by match, without headings.
+        Searcher::default().search(&e, "nq", &none, &mut hits);
+        assert!((0..hits.len()).all(|i| heading(&e, &hits, "nq", i).is_none()));
     }
 }

@@ -281,6 +281,16 @@ impl PickerUi {
                 }
                 (None, None) => {}
             }
+            if let Some(label) = picker::heading(&self.entries, &p.hits, &p.query, i) {
+                rows = rows.child(
+                    div()
+                        .px_3()
+                        .pt_1()
+                        .text_size(px(11.0))
+                        .text_color(t.text_dim)
+                        .child(label),
+                );
+            }
             let star = if settings.is_favourite(e.product.id) {
                 "★"
             } else {

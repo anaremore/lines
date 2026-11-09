@@ -78,6 +78,27 @@ impl MonthCycle {
     pub const QUARTERLY: MonthCycle = MonthCycle(1 << 2 | 1 << 5 | 1 << 8 | 1 << 11);
     pub const MONTHLY: MonthCycle = MonthCycle(0x0fff);
 
+    /// A cycle from month codes, e.g. `"GJMQVZ"` (February, April, ... December). For
+    /// constants: an unknown code panics (at compile time in a `const`).
+    pub const fn from_codes(codes: &str) -> MonthCycle {
+        let b = codes.as_bytes();
+        let mut bits = 0u16;
+        let mut i = 0;
+        while i < b.len() {
+            let mut m = 0;
+            while m < 12 {
+                if MONTH_CODES[m] as u8 == b[i] {
+                    break;
+                }
+                m += 1;
+            }
+            assert!(m < 12, "unknown month code");
+            bits |= 1 << m;
+            i += 1;
+        }
+        MonthCycle(bits)
+    }
+
     pub fn contains(self, m: Month) -> bool {
         self.0 & (1 << (m.0 - 1)) != 0
     }
@@ -356,6 +377,20 @@ pub enum ExpiryRule {
     /// The 7th business day before the last business day of the contract month (CBOT
     /// Treasury note futures).
     SeventhBusinessDayBeforeLastBusinessDay,
+    /// The `n`th last business day of the contract month (1 = the last: CBOT 2- and 5-year
+    /// notes; 3: COMEX gold, silver and copper).
+    NthLastBusinessDay(u8),
+    /// The `n`th last business day of the month *before* the contract month (NYMEX Henry Hub
+    /// natural gas: 3, "the third business day prior to the first day of the delivery month").
+    NthLastBusinessDayOfPriorMonth(u8),
+    /// `n` business days before the 25th calendar day of the month before the contract month,
+    /// counted from the business day before the 25th when the 25th isn't one (NYMEX WTI crude
+    /// oil: 3; Micro WTI, one business day earlier: 4).
+    BusinessDaysBefore25thOfPriorMonth(u8),
+    /// The business day before the 15th calendar day of the contract month (CBOT grains).
+    BusinessDayBefore15th,
+    /// `n` business days before the third Wednesday of the contract month (CME FX: 2).
+    BusinessDaysBeforeThirdWednesday(u8),
 }
 
 /// The calendar roll date used when volume isn't available.
@@ -365,7 +400,7 @@ pub enum RollRule {
     /// the second Friday preceding expiry week).
     DaysBeforeExpiry(u8),
     /// Roll this many calendar days before first notice day, which is the last business day of
-    /// the month before the contract month (physically delivered Treasuries).
+    /// the month before the contract month (physically delivered Treasuries, metals, grains).
     DaysBeforeFirstNotice(u8),
 }
 
@@ -590,6 +625,10 @@ mod tests {
         assert_eq!(Month::from_code('A'), None);
         assert_eq!(Month::new(13), None);
         assert_eq!(MonthCycle::QUARTERLY.codes().as_str(), "HMUZ");
+        assert_eq!(MonthCycle::from_codes("HMUZ"), MonthCycle::QUARTERLY);
+        assert_eq!(MonthCycle::from_codes("FGHJKMNQUVXZ"), MonthCycle::MONTHLY);
+        const GRAINS: MonthCycle = MonthCycle::from_codes("ZHKNU");
+        assert_eq!(GRAINS.codes().as_str(), "HKNUZ", "order doesn't matter");
     }
 
     #[test]
