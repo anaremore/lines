@@ -210,7 +210,8 @@ impl TradingCore {
             || self
                 .orders
                 .values()
-                .any(|o| closes(o, now) && &o.account == account && o.contract == contract)
+                .filter(|o| o.is_open() || closes(o, now))
+                .any(|o| o.role == Role::Flatten && &o.account == account && o.contract == contract)
     }
 
     /// When a waiting Flatten stops waiting: 5 s after it asked and after the last word from a

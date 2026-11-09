@@ -994,15 +994,17 @@ fn without_reduce_only_an_unresolved_flatten_and_a_working_order_send_one_close(
         }))
         .unwrap()[0];
     r.wait(LAT + 1);
-    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.lose_ids.lock().unwrap().push(stop);
     r.wait(5_001);
     r.flatten(es());
+    r.wait(1_000);
     assert_eq!(
         r.markets.load(Ordering::Relaxed),
         before + 1,
         "that order's cancel is unanswered"
     );
-    r.wait(2_000);
+    r.lose_ids.lock().unwrap().clear();
+    r.wait(1_000);
     r.wait(LAT + 1);
     r.wait(LAT + 1);
     assert_eq!(r.core.order(stop).unwrap().state, OrderState::Cancelled);
