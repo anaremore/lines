@@ -218,3 +218,90 @@ fn legend_reason_does_not_repeat_the_source_name() {
         "no panic on short or non-ASCII"
     );
 }
+
+/// A source whose products are learned at run time (from its service): it serves nothing
+/// until told otherwise.
+struct LateServing;
+
+static LATE_SERVES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct NoFrames;
+
+impl lines_feed::levels::LevelTransport for NoFrames {
+    fn fetch(
+        &mut self,
+    ) -> lines_feed::levels::BoxFuture<'_, anyhow::Result<Vec<lines_feed::levels::LevelFrame>>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+impl lines_feed::levels::LevelSource for LateServing {
+    fn id(&self) -> &'static str {
+        "late-serving"
+    }
+    fn label(&self) -> &'static str {
+        "Late"
+    }
+    fn serves(&self, _: &Product) -> bool {
+        LATE_SERVES.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn refresh(&self) -> lines_feed::levels::RefreshMode {
+        lines_feed::levels::RefreshMode::OneShot
+    }
+    fn stale_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(60)
+    }
+    fn connect(
+        &self,
+        _: &LevelContext,
+    ) -> lines_feed::levels::BoxFuture<
+        'static,
+        anyhow::Result<Box<dyn lines_feed::levels::LevelTransport>>,
+    > {
+        Box::pin(async { Ok(Box::new(NoFrames) as Box<dyn lines_feed::levels::LevelTransport>) })
+    }
+    fn decode(
+        &self,
+        _: &LevelContext,
+        _: &dyn lines_feed::levels::ChartPrices,
+        _: Option<&LevelMap>,
+        _: &[lines_feed::levels::LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        Ok(None)
+    }
+}
+
+/// A source that doesn't serve the chart's product has no slot: nothing drawn, no legend or
+/// menu row. When its answer changes (`levels::serving_changed`), the next snapshot joins it,
+/// and drops it again when it stops serving, without a feed change.
+#[test]
+fn sources_join_and_leave_when_their_serving_changes() {
+    use std::sync::atomic::Ordering;
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    LATE_SERVES.store(false, Ordering::Release);
+    lines_feed::levels::register(Arc::new(LateServing)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    let has_late = |layer: &LevelsLayer| {
+        let menu = layer.sources().iter().any(|(id, ..)| id == "late-serving");
+        let legend = layer.legend().iter().any(|r| r.label == "Late");
+        assert_eq!(menu, legend, "menu and legend agree");
+        menu
+    };
+    layer.snapshot(None);
+    assert!(!has_late(&layer), "not served: no row at all");
+
+    let before = layer.revision();
+    LATE_SERVES.store(true, Ordering::Release);
+    lines_feed::levels::serving_changed();
+    assert_ne!(layer.revision(), before, "the chart repaints");
+    layer.snapshot(None);
+    assert!(has_late(&layer), "joined without a feed change");
+
+    LATE_SERVES.store(false, Ordering::Release);
+    lines_feed::levels::serving_changed();
+    layer.snapshot(None);
+    assert!(!has_late(&layer), "left again");
+}

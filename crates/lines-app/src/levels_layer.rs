@@ -193,6 +193,10 @@ pub struct LevelsLayer {
     /// The chart's market clock as last seen under the store lock (freshness of replayed
     /// sources when a snapshot can't read the store).
     clock: Option<UtcMillis>,
+    /// The chart's store, to ask the sources again when their answers change.
+    store: Option<Arc<ChartStore>>,
+    /// `levels::serving_generation()` when the sources were last asked.
+    serving_gen: u64,
 }
 
 /// Columns kept for the VWAP that VWAP-relative levels follow.
@@ -210,11 +214,27 @@ impl LevelsLayer {
             vwap_cols: Vec::with_capacity(VWAP_COLUMNS),
             px_per_unit: 0.0,
             clock: None,
+            store: None,
+            serving_gen: 0,
         }
     }
 
     /// Join every registered source that serves the chart's product (on a feed change).
     pub fn attach(&mut self, store: &Arc<ChartStore>) {
+        self.slots.clear();
+        self.vwap = None; // the new feed's node is acquired when a map needs it
+        self.store = Some(store.clone());
+        self.join_serving();
+    }
+
+    /// Ask the registered sources which serve the chart's product (`serves`), keep the slots
+    /// of those still serving, add the new ones and drop the rest: a source that doesn't
+    /// serve the product has no slot, so nothing drawn and no legend or menu row.
+    fn join_serving(&mut self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        self.serving_gen = lines_feed::levels::serving_generation();
         let (product, contract): (Product, _) = {
             let d = store.read();
             self.feed = Some(FeedInfo {
@@ -225,10 +245,13 @@ impl LevelsLayer {
             });
             (d.product.clone(), d.contract)
         };
-        self.vwap = None; // the new feed's node is acquired when a map needs it
+        let mut old = std::mem::take(&mut self.slots);
         self.slots = lines_feed::levels::serving(&product)
             .into_iter()
             .map(|source| {
+                if let Some(i) = old.iter().position(|s| s.handle.source() == source.id()) {
+                    return old.swap_remove(i);
+                }
                 let ctx = LevelContext {
                     product: product.clone(),
                     contract,
@@ -289,11 +312,14 @@ impl LevelsLayer {
             .collect()
     }
 
-    /// Sum of the sources' revisions (repaint when it changes).
+    /// Sum of the sources' revisions (repaint when it changes). A change in which sources
+    /// serve the chart counts too (the next snapshot joins or drops them).
     pub fn revision(&self) -> u64 {
         self.slots
             .iter()
-            .fold(0u64, |a, s| a.wrapping_add(s.handle.cell().revision()))
+            .fold(lines_feed::levels::serving_generation(), |a, s| {
+                a.wrapping_add(s.handle.cell().revision())
+            })
     }
 
     /// This frame's view of every source (map, freshness, error), taken once per frame
@@ -304,6 +330,10 @@ impl LevelsLayer {
     pub fn snapshot(&mut self, market_time: Option<UtcMillis>) {
         if market_time.is_some() {
             self.clock = market_time;
+        }
+        if lines_feed::levels::serving_generation() != self.serving_gen {
+            // A source's answer to `serves` changed: join or leave it.
+            self.join_serving();
         }
         let clock = self.clock;
         for s in &mut self.slots {

@@ -405,3 +405,10 @@ fn recorded_levels_replay_to_the_same_map() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn serving_changed_bumps_the_generation() {
+    let before = serving_generation();
+    serving_changed();
+    assert!(serving_generation() > before);
+}
