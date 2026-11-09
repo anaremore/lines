@@ -969,7 +969,8 @@ impl ChainView {
             sent_at: None,
             watching: Vec::new(),
             shot,
-            glyphs: Glyphs::new(TEXT_PX),
+            // Its painted rows don't zoom yet (docs/known-gaps.md): neither does its text.
+            glyphs: Glyphs::fixed(TEXT_PX),
             bounds: Bounds::default(),
             layout: Layout::default(),
             chart: None,
@@ -4256,13 +4257,15 @@ impl ChainView {
             .px_2()
             .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chain)))
             // Fixed: the exits' buttons appearing never push the rows down.
-            .h(px(pane::header_height(crate::layout::PaneKind::Chain)))
+            .h(crate::zoom::ui(pane::header_height(
+                crate::layout::PaneKind::Chain,
+            )))
             .items_center()
             .bg(t.panel)
             .border_b_1()
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(
                 pane::header_content().child(
                     div()
@@ -4528,7 +4531,7 @@ impl ChainView {
             .bg(t.panel)
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .text_color(t.text_main);
         // Narrow: the row's own place in the table names it; the room goes to its actions.
         if let Some(key) = key.filter(|_| !narrow) {
@@ -5051,7 +5054,7 @@ impl ChainView {
                 .bg(t.panel)
                 .border_t_1()
                 .border_color(t.accent)
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .text_color(t.text_main)
                 .child(top)
                 .child(controls)
@@ -5132,7 +5135,7 @@ impl ChainView {
                 .bg(t.panel)
                 .border_t_1()
                 .border_color(t.axis_line)
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .text_color(t.text_main)
                 .child(div().flex_shrink_0().size(px(8.0)).bg(swatch))
                 .child(
@@ -5176,7 +5179,7 @@ impl ChainView {
                     .bg(t.panel)
                     .border_t_1()
                     .border_color(t.axis_line)
-                    .text_size(px(12.0))
+                    .text_size(crate::zoom::ui(12.0))
                     .text_color(t.text_main)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(text)
@@ -5307,7 +5310,7 @@ impl ChainView {
                         .bg(t.panel)
                         .border_t_1()
                         .border_color(t.axis_line)
-                        .text_size(px(12.0))
+                        .text_size(crate::zoom::ui(12.0))
                         .text_color(t.text_main)
                         .child(
                             div().child(format!("Exits for {series}, on {}:", self.product.symbol)),
@@ -5366,7 +5369,7 @@ impl ChainView {
             .bg(t.panel)
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(
                 div()
                     .flex_1()

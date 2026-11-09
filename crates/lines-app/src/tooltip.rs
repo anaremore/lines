@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyView, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    StatefulInteractiveElement, Styled, Window, div,
 };
 
 use crate::commands::{self, Command};
@@ -34,7 +34,7 @@ impl Render for Tooltip {
             .bg(t.panel)
             .border_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .text_color(t.text_main)
             .child(self.text.clone())
     }

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use gpui::{
     Context, Div, EventEmitter, FocusHandle, FontWeight, InteractiveElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, Styled, div, px,
+    MouseButton, MouseDownEvent, ParentElement, Styled, div,
 };
 use lines_core::CivilDate;
 use lines_feed::store::ChartStore;
@@ -284,8 +284,8 @@ pub fn link_chip(link: LinkGroup, theme: &Theme) -> Option<Div> {
             .gap_1()
             .child(
                 div()
-                    .w(px(8.0))
-                    .h(px(8.0))
+                    .w(crate::zoom::ui(8.0))
+                    .h(crate::zoom::ui(8.0))
                     .rounded_sm()
                     .bg(theme.link[g as usize % theme.link.len()]),
             )
@@ -316,7 +316,7 @@ pub fn unavailable_body<V: Pane>(
             .rounded_md()
             .border_1()
             .border_color(theme.accent)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .text_color(theme.text_main)
             .hover(|d| d.bg(theme.accent.opacity(0.16)))
             .child(format!("Show {} here  (Enter)", s.label))
@@ -341,19 +341,19 @@ pub fn unavailable_body<V: Pane>(
             .text_color(theme.text_dim)
             .child(
                 div()
-                    .text_size(px(15.0))
+                    .text_size(crate::zoom::ui(15.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(u.symbol.clone()),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(crate::zoom::ui(12.0))
                     .child(format!("unavailable: {}", u.reason)),
             )
             .children(button)
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(crate::zoom::ui(11.0))
                     .child("Ctrl+K: choose another symbol"),
             ),
     )

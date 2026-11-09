@@ -806,6 +806,28 @@ fn table() -> Vec<Setting> {
         ),
         with_default(
             s(
+                "appearance.ui_zoom",
+                Sec::Appearance,
+                "UI zoom",
+                "The size of text, rows, headers, menus and panels in every window (Ctrl+= / Ctrl+− / Ctrl+0). The chart's own time and price zoom stay on the wheel and drag.",
+                Scope::App,
+                Normal,
+                Choice(&crate::zoom::LABELS),
+                |p, _, _| {
+                    Value::Choice(crate::zoom::index(
+                        p.app.ui_zoom.unwrap_or(crate::zoom::DEFAULT),
+                    ))
+                },
+                Some(|p, _, v| {
+                    let i = want_choice(v, crate::zoom::STEPS.len())?;
+                    p.app.ui_zoom = crate::zoom::saved(crate::zoom::STEPS[i]);
+                    Ok(())
+                }),
+            ),
+            Value::Choice(2),
+        ),
+        with_default(
+            s(
                 crate::display_zone::KEY,
                 Sec::Appearance,
                 "Time zone",
@@ -2052,7 +2074,7 @@ mod tests {
     fn every_look_setting_undoes_its_own_field() {
         let mut seen = Vec::new();
         for st in all().iter().filter(|s| s.section == Section::Appearance) {
-            if st.key == crate::display_zone::KEY {
+            if st.key == crate::display_zone::KEY || st.key == "appearance.ui_zoom" {
                 // Its own settings field (no CLI look flag to keep apart): a plain undo.
                 continue;
             }

@@ -156,6 +156,9 @@ pub struct Settings {
     /// (`crate::pnl`). Optional: absent (and the default, both) isn't written.
     #[serde(default, skip_serializing_if = "crate::pnl::PnlDisplay::is_default")]
     pub pnl_display: crate::pnl::PnlDisplay,
+    /// The app-wide UI zoom in percent (`crate::zoom::STEPS`). Optional: absent is 100 %.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_zoom: Option<u16>,
     /// The order size per product symbol, shared by every DOM and chart on it. Optional: a
     /// symbol without one uses `new_panes.default_qty`, else 1.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]

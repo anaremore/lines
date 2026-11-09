@@ -19,14 +19,44 @@ use crate::layout::Rect;
 use crate::theme::Theme;
 
 /// Widest a menu or submenu gets (narrower in a narrow window).
-pub const MENU_W: f32 = 280.0;
-pub const SUB_W: f32 = 260.0;
-const ROW_H: f32 = 22.0;
-const SEP_H: f32 = 9.0;
+pub const MENU_W_100: f32 = 280.0;
+/// [`MENU_W_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+pub fn menu_w() -> f32 {
+    crate::zoom::f(MENU_W_100)
+}
+pub const SUB_W_100: f32 = 260.0;
+/// [`SUB_W_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+pub fn sub_w() -> f32 {
+    crate::zoom::f(SUB_W_100)
+}
+const ROW_H_100: f32 = 22.0;
+/// [`ROW_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn row_h() -> f32 {
+    crate::zoom::f(ROW_H_100)
+}
+const SEP_H_100: f32 = 9.0;
+/// [`SEP_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn sep_h() -> f32 {
+    crate::zoom::f(SEP_H_100)
+}
 /// The list's padding above its first row (`py_1`).
-const PAD: f32 = 4.0;
+const PAD_100: f32 = 4.0;
+/// [`PAD_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn pad() -> f32 {
+    crate::zoom::f(PAD_100)
+}
 /// Space kept between a menu and the window's edge.
-const EDGE: f32 = 4.0;
+const EDGE_100: f32 = 4.0;
+/// [`EDGE_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn edge() -> f32 {
+    crate::zoom::f(EDGE_100)
+}
 
 pub struct MenuItem {
     pub label: String,
@@ -132,7 +162,7 @@ impl MenuItem {
     }
 
     fn height(&self) -> f32 {
-        if self.is_sep() { SEP_H } else { ROW_H }
+        if self.is_sep() { sep_h() } else { row_h() }
     }
 }
 
@@ -330,7 +360,7 @@ impl Menu {
         let vp = (f32::from(viewport.width), f32::from(viewport.height));
         let main = place(
             (f32::from(self.at.x), f32::from(self.at.y)),
-            MENU_W,
+            menu_w(),
             list_h(&self.items),
             vp,
         );
@@ -351,7 +381,7 @@ impl Menu {
         let mut sub_list = None;
         if let Some(o) = self.open {
             let sub = self.sub_items();
-            let rect = sub_place(main, row_top(&self.items, o), SUB_W, list_h(sub), vp);
+            let rect = sub_place(main, row_top(&self.items, o), sub_w(), list_h(sub), vp);
             rects.push(rect);
             let shown = self.in_sub.then_some(self.sub_selected);
             sub_list = Some(rows(
@@ -402,35 +432,35 @@ impl Menu {
 
 /// A list's height: its rows and padding.
 pub fn list_h(items: &[MenuItem]) -> f32 {
-    items.iter().map(MenuItem::height).sum::<f32>() + 2.0 * PAD
+    items.iter().map(MenuItem::height).sum::<f32>() + 2.0 * pad()
 }
 
 /// Row `i`'s top, from the list's top.
 fn row_top(items: &[MenuItem], i: usize) -> f32 {
-    PAD + items.iter().take(i).map(MenuItem::height).sum::<f32>()
+    pad() + items.iter().take(i).map(MenuItem::height).sum::<f32>()
 }
 
 /// Where a menu of width `w` (narrower in a narrow window) and height `h` goes, its corner at
-/// `at`: inside the window, `EDGE` from its edges where it fits.
+/// `at`: inside the window, `edge()` from its edges where it fits.
 pub fn place(at: (f32, f32), w: f32, h: f32, (vw, vh): (f32, f32)) -> Rect {
-    let w = w.min(vw - 2.0 * EDGE).max(0.0);
-    let h = h.min(vh - 2.0 * EDGE).max(ROW_H);
-    let x = at.0.min(vw - w - EDGE).max(0.0);
-    let y = at.1.min(vh - h - EDGE).max(0.0);
+    let w = w.min(vw - 2.0 * edge()).max(0.0);
+    let h = h.min(vh - 2.0 * edge()).max(row_h());
+    let x = at.0.min(vw - w - edge()).max(0.0);
+    let y = at.1.min(vh - h - edge()).max(0.0);
     Rect::new(x, y, w, h)
 }
 
 /// A submenu beside its row (`row_top` from the menu's top): to the right of the menu, or to
 /// its left where the window's right edge would cut it; level with the row, moved up to fit.
 pub fn sub_place(main: Rect, row_top: f32, w: f32, h: f32, (vw, vh): (f32, f32)) -> Rect {
-    let w = w.min(vw - 2.0 * EDGE).max(0.0);
+    let w = w.min(vw - 2.0 * edge()).max(0.0);
     let right = main.x + main.w - 2.0;
-    let x = if right + w <= vw - EDGE {
+    let x = if right + w <= vw - edge() {
         right
     } else {
         (main.x - w + 2.0).max(0.0)
     };
-    let top = main.y + row_top - PAD;
+    let top = main.y + row_top - pad();
     place((x, top), w, h, (vw, vh))
 }
 
@@ -465,7 +495,7 @@ fn rows<V: 'static>(
         .border_1()
         .border_color(t.axis_line)
         .rounded_md()
-        .text_size(px(12.0));
+        .text_size(crate::zoom::ui(12.0));
     for (i, item) in items.iter().enumerate() {
         if item.is_sep() {
             list = list.child(div().my_1().h(px(1.0)).flex_none().bg(t.axis_line));
@@ -481,13 +511,13 @@ fn rows<V: 'static>(
             };
             list = list.child(
                 div()
-                    .h(px(ROW_H))
+                    .h(px(row_h()))
                     .flex_none()
                     .px_2()
-                    .pl(px(30.0))
+                    .pl(crate::zoom::ui(30.0))
                     .flex()
                     .items_center()
-                    .text_size(px(size))
+                    .text_size(crate::zoom::ui(size))
                     .text_color(color)
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -511,21 +541,21 @@ fn rows<V: 'static>(
             .child(div().text_color(t.text_dim).child(item.hint.clone()))
             .child(
                 div()
-                    .w(px(8.0))
+                    .w(crate::zoom::ui(8.0))
                     .text_color(t.text_main)
                     .child(if item.sub.is_empty() { "" } else { "›" }),
             );
         let mark = if item.toggle {
             // A switch: a box, checked when on.
             div()
-                .size(px(11.0))
+                .size(crate::zoom::ui(11.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .border_1()
                 .border_color(t.control_edge)
                 .rounded_sm()
-                .text_size(px(10.0))
+                .text_size(crate::zoom::ui(10.0))
                 .text_color(t.text_main)
                 .child(if item.checked { "✓" } else { "" })
         } else {
@@ -538,7 +568,7 @@ fn rows<V: 'static>(
         list = list.child(
             div()
                 .id((id, i))
-                .h(px(ROW_H))
+                .h(px(row_h()))
                 .flex_none()
                 .px_2()
                 .flex()
@@ -552,7 +582,7 @@ fn rows<V: 'static>(
                     gpui::transparent_black()
                 })
                 .when(lit, |d| d.bg(t.accent.opacity(0.16)))
-                .child(div().w(px(12.0)).flex_none().child(mark))
+                .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
                 .child(
                     div()
                         .flex_1()
@@ -730,21 +760,21 @@ mod tests {
     #[test]
     fn a_submenu_flips_left_at_the_right_edge_and_stays_in_the_window() {
         let vp = (1000.0, 600.0);
-        let main = place((100.0, 100.0), MENU_W, 200.0, vp);
-        let s = sub_place(main, 30.0, SUB_W, 120.0, vp);
+        let main = place((100.0, 100.0), MENU_W_100, 200.0, vp);
+        let s = sub_place(main, 30.0, SUB_W_100, 120.0, vp);
         assert!(s.x >= main.x + main.w - 2.0, "right of the menu");
-        assert_eq!(s.y, main.y + 30.0 - PAD, "level with its row");
-        let main = place((900.0, 100.0), MENU_W, 200.0, vp);
+        assert_eq!(s.y, main.y + 30.0 - PAD_100, "level with its row");
+        let main = place((900.0, 100.0), MENU_W_100, 200.0, vp);
         assert!(main.x + main.w <= vp.0, "the menu itself stays in");
-        let s = sub_place(main, 30.0, SUB_W, 120.0, vp);
+        let s = sub_place(main, 30.0, SUB_W_100, 120.0, vp);
         assert!(s.x + s.w <= main.x + 2.0, "flipped to the left");
         // Near the bottom: moved up to fit.
-        let s = sub_place(main, 180.0, SUB_W, 300.0, (1000.0, 400.0));
-        assert!(s.y + s.h <= 400.0 - EDGE);
+        let s = sub_place(main, 180.0, SUB_W_100, 300.0, (1000.0, 400.0));
+        assert!(s.y + s.h <= 400.0 - EDGE_100);
         // A narrow window: nothing outside it.
         let vp = (300.0, 400.0);
-        let main = place((250.0, 10.0), MENU_W, 200.0, vp);
-        let s = sub_place(main, 10.0, SUB_W, 100.0, vp);
+        let main = place((250.0, 10.0), MENU_W_100, 200.0, vp);
+        let s = sub_place(main, 10.0, SUB_W_100, 100.0, vp);
         for r in [main, s] {
             assert!(r.x >= 0.0 && r.x + r.w <= vp.0, "{r:?}");
         }

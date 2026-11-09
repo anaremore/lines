@@ -39,7 +39,7 @@ pub fn render(
                         .px_3()
                         .pt_2()
                         .pb_1()
-                        .text_size(px(11.0))
+                        .text_size(crate::zoom::ui(11.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(t.text_dim)
                         .child(*h),
@@ -51,7 +51,7 @@ pub fn render(
                     div()
                         .px_3()
                         .py_1()
-                        .text_size(px(12.0))
+                        .text_size(crate::zoom::ui(12.0))
                         .text_color(t.text_dim)
                         .truncate()
                         .child(n.clone()),
@@ -74,7 +74,7 @@ pub fn render(
                     div()
                         .id(id)
                         .px_1()
-                        .text_size(px(11.0))
+                        .text_size(crate::zoom::ui(11.0))
                         .text_color(t.text_dim)
                         .hover(|s| s.text_color(t.text_main))
                         .child(text)
@@ -96,7 +96,12 @@ pub fn render(
                             gpui::transparent_black()
                         })
                         .when(selected, |d| d.bg(t.accent.opacity(0.16)))
-                        .child(div().w(px(12.0)).h(px(3.0)).when_some(sw, |d, c| d.bg(c)))
+                        .child(
+                            div()
+                                .w(crate::zoom::ui(12.0))
+                                .h(crate::zoom::ui(3.0))
+                                .when_some(sw, |d, c| d.bg(c)),
+                        )
                         .child(
                             div()
                                 .id(("study-label", i))
@@ -126,8 +131,8 @@ pub fn render(
                 let group = *group;
                 let mut line = div()
                     .px_3()
-                    .py(px(2.0))
-                    .pl(px(32.0))
+                    .py(crate::zoom::ui(2.0))
+                    .pl(crate::zoom::ui(32.0))
                     .flex()
                     .flex_row()
                     .flex_wrap()
@@ -135,8 +140,8 @@ pub fn render(
                     .gap_1()
                     .child(
                         div()
-                            .w(px(64.0))
-                            .text_size(px(11.0))
+                            .w(crate::zoom::ui(64.0))
+                            .text_size(crate::zoom::ui(11.0))
                             .text_color(t.text_dim)
                             .child(group),
                     );
@@ -159,21 +164,21 @@ pub fn render(
                         .rounded_sm()
                         .border_1()
                         .border_color(if sel { t.accent } else { t.axis_line })
-                        .text_size(px(12.0))
+                        .text_size(crate::zoom::ui(12.0))
                         .text_color(t.text_main)
                         .when(*on, |d| d.bg(t.accent.opacity(0.22)))
                         .on_mouse_down(MouseButton::Left, click(i, MenuPart::Primary));
                     let chip = match swatch {
                         Swatch::Study(c) => chip.child(
                             div()
-                                .w(px(14.0))
-                                .h(px(10.0))
+                                .w(crate::zoom::ui(14.0))
+                                .h(crate::zoom::ui(10.0))
                                 .bg(t.study[*c as usize % t.study.len()]),
                         ),
                         Swatch::Custom(rgb) => chip.child(
                             div()
-                                .w(px(14.0))
-                                .h(px(10.0))
+                                .w(crate::zoom::ui(14.0))
+                                .h(crate::zoom::ui(10.0))
                                 .bg(crate::theme::user_color(*rgb, 100)),
                         ),
                         Swatch::None => chip.child(label.clone()),
@@ -215,7 +220,7 @@ pub fn render(
                                 div()
                                     .id(("action-del", i))
                                     .px_1()
-                                    .text_size(px(11.0))
+                                    .text_size(crate::zoom::ui(11.0))
                                     .text_color(t.text_dim)
                                     .hover(|s| s.text_color(t.text_main))
                                     .child("delete")
@@ -238,14 +243,14 @@ pub fn render(
     };
     div()
         .absolute()
-        .top(px(24.0))
-        .right(px(90.0))
+        .top(crate::zoom::ui(24.0))
+        .right(crate::zoom::ui(90.0))
         .child(
             div()
                 .id("study-menu")
                 .occlude()
-                .w(px(W))
-                .max_h(px(620.0))
+                .w(crate::zoom::ui(W))
+                .max_h(crate::zoom::ui(620.0))
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
@@ -253,7 +258,7 @@ pub fn render(
                 .border_1()
                 .border_color(t.axis_line)
                 .rounded_md()
-                .text_size(px(13.0))
+                .text_size(crate::zoom::ui(13.0))
                 .child(
                     div()
                         .px_3()
@@ -280,7 +285,7 @@ pub fn render(
                         .py_1()
                         .border_t_1()
                         .border_color(t.axis_line)
-                        .text_size(px(11.0))
+                        .text_size(crate::zoom::ui(11.0))
                         .text_color(t.text_dim)
                         .whitespace_nowrap()
                         .truncate()
@@ -299,7 +304,7 @@ pub fn anchor_banner(t: &Theme) -> AnyElement {
 pub fn pick_banner(t: &Theme, text: &'static str) -> AnyElement {
     div()
         .absolute()
-        .top(px(30.0))
+        .top(crate::zoom::ui(30.0))
         .left_0()
         .right_0()
         .flex()
@@ -313,7 +318,7 @@ pub fn pick_banner(t: &Theme, text: &'static str) -> AnyElement {
                 .border_1()
                 .border_color(t.accent)
                 .rounded_md()
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .text_color(t.text_main)
                 .child(text),
         )

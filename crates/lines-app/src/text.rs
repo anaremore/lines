@@ -23,7 +23,13 @@ struct Key {
 }
 
 pub struct Glyphs {
+    /// The text size at 100 % (`crate::zoom`); [`Glyphs::size`] is it at the zoom now.
+    base: f32,
     size: f32,
+    /// The zoom generation the cache was shaped at: another one clears it.
+    generation: u32,
+    /// Follows the UI zoom (else always `base`).
+    zooms: bool,
     font: Option<Font>,
     cache: HashMap<Key, ShapedLine>,
 }
@@ -33,15 +39,42 @@ fn color_key(c: Hsla) -> [u32; 4] {
 }
 
 impl Glyphs {
+    /// Glyphs of `size` at 100 %, shaped at the UI zoom (`crate::zoom`).
     pub fn new(size: f32) -> Glyphs {
         Glyphs {
-            size,
+            base: size,
+            size: crate::zoom::f(size),
+            generation: crate::zoom::generation(),
+            zooms: true,
             font: None,
             cache: HashMap::with_capacity(256),
         }
     }
 
+    /// Glyphs of `size` at every zoom: for text in boxes whose geometry doesn't zoom (the
+    /// chart's order and position tags, laid out by `lines_core::geometry::order_tags`).
+    pub fn fixed(size: f32) -> Glyphs {
+        Glyphs {
+            size,
+            zooms: false,
+            ..Glyphs::new(size)
+        }
+    }
+
+    /// The text size now: the base at the zoom now. A zoom change drops what was shaped at
+    /// the old size (once; nothing is allocated until glyphs are shaped again).
+    pub fn size(&mut self) -> f32 {
+        let g = crate::zoom::generation();
+        if self.zooms && g != self.generation {
+            self.generation = g;
+            self.size = crate::zoom::f(self.base);
+            self.cache.clear();
+        }
+        self.size
+    }
+
     fn glyph(&mut self, ch: char, color: Hsla, bold: bool, window: &mut Window) -> &ShapedLine {
+        self.size();
         let key = Key {
             ch,
             color: color_key(color),
@@ -101,8 +134,9 @@ impl Glyphs {
         window: &mut Window,
         cx: &mut App,
     ) -> f32 {
-        let line_h = px(self.size * 1.3);
-        let top = y + (row_h - self.size * 1.3) * 0.5;
+        let size = self.size();
+        let line_h = px(size * 1.3);
+        let top = y + (row_h - size * 1.3) * 0.5;
         let mut at = x;
         for c in s.chars() {
             let g = self.glyph(c, color, bold, window);
@@ -120,7 +154,7 @@ impl Glyphs {
         if crate::layout_rec::on() {
             crate::layout_rec::record_xywh(
                 window,
-                (x, top, at - x, self.size * 1.3),
+                (x, top, at - x, size * 1.3),
                 crate::layout_rec::Spec::text(s)
                     .owner(crate::layout_rec::owner())
                     .layer(crate::layout_rec::layer()),

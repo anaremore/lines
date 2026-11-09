@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Context, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Styled, Subscription, Window, div, prelude::*, px,
+    ParentElement, Styled, Subscription, Window, div, prelude::*,
 };
 use lines_core::{ContractKey, Price, Product, Qty};
 use lines_feed::store::ChartStore;
@@ -1497,7 +1497,7 @@ fn keys_chip<V: TradePane>(
     t: &Theme,
     cx: &mut Context<V>,
 ) -> gpui::Stateful<gpui::Div> {
-    let knob = div().size(px(8.0)).rounded_full().border_1();
+    let knob = div().size(crate::zoom::ui(8.0)).rounded_full().border_1();
     let s = div()
         .id("keys-switch")
         .flex()
@@ -1505,7 +1505,7 @@ fn keys_chip<V: TradePane>(
         .flex_shrink_0()
         .items_center()
         .gap_1()
-        .h(px(MIN_HIT + 2.0))
+        .h(crate::zoom::ui(MIN_HIT + 2.0))
         .px_2()
         .rounded_full()
         .border_1()
@@ -1635,7 +1635,7 @@ fn whole_items(text: &str, color: gpui::Hsla, bold: bool) -> gpui::Div {
         .flex_wrap()
         .gap_x_1()
         .min_w_0()
-        .h(px(ITEMS_LINE_H))
+        .h(crate::zoom::ui(ITEMS_LINE_H))
         .items_center()
         .overflow_hidden()
         .whitespace_nowrap();
@@ -1804,7 +1804,6 @@ pub fn keys_in_header(width: f32) -> bool {
 }
 
 /// The narrowest DOM the panel is designed for (layout test below).
-#[cfg_attr(not(test), allow(dead_code))]
 pub const MIN_DOM_WIDTH: f32 = 240.0;
 
 /// Whether a panel `width` is narrow (0: not laid out yet, full layout).
@@ -2164,8 +2163,8 @@ fn cell(id: impl Into<gpui::ElementId>, t: &Theme) -> gpui::Stateful<gpui::Div> 
         .flex()
         .items_center()
         .justify_center()
-        .min_w(px(MIN_HIT))
-        .h(px(MIN_HIT + 2.0))
+        .min_w(crate::zoom::ui(MIN_HIT))
+        .h(crate::zoom::ui(MIN_HIT + 2.0))
         .px_1()
         .rounded_sm()
         .border_1()
@@ -2283,14 +2282,14 @@ pub fn dom_bar<V: TradePane>(
         .flex()
         .flex_col()
         .flex_shrink_0()
-        .h(px(rows.height(width)))
+        .h(crate::zoom::ui(rows.height(width)))
         .overflow_hidden()
         .px_2()
-        .when(rows.account, |d| d.pb(px(PAD_Y)))
+        .when(rows.account, |d| d.pb(crate::zoom::ui(PAD_Y)))
         .bg(t.bg)
         .border_b_1()
         .border_color(t.axis_line)
-        .text_size(px(12.0));
+        .text_size(crate::zoom::ui(12.0));
 
     // 1. Account ▾ + PAPER, then the trading switch (shape and words, not color alone).
     let switch = {
@@ -2300,7 +2299,7 @@ pub fn dom_bar<V: TradePane>(
             .flex_row()
             .items_center()
             .gap_1()
-            .h(px(MIN_HIT + 2.0))
+            .h(crate::zoom::ui(MIN_HIT + 2.0))
             .px_2()
             .rounded_full()
             .border_1()
@@ -2311,7 +2310,7 @@ pub fn dom_bar<V: TradePane>(
             // A count is never cut: the account chip gives way.
             .when(strategies_armed > 0, |d| d.flex_shrink_0());
         // The knob: filled when enabled, a hollow ring when disabled.
-        let knob = div().size(px(8.0)).rounded_full().border_1();
+        let knob = div().size(crate::zoom::ui(8.0)).rounded_full().border_1();
         let s = if enabled {
             s.bg(t.warn)
                 .border_color(t.warn)
@@ -2370,7 +2369,7 @@ pub fn dom_bar<V: TradePane>(
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .h(px(HDR_H))
+                .h(crate::zoom::ui(HDR_H))
                 .child(account_chip(v, data.as_ref(), t, cx))
                 .when(!rows.card || rules_hidden, |row| {
                     row.child({
@@ -2459,7 +2458,11 @@ pub fn dom_bar<V: TradePane>(
     }
 
     // 3. One status line: a refusal (brief) or the lockout / account state (lasting).
-    let status = div().h(px(STATUS_H)).flex().flex_row().items_center();
+    let status = div()
+        .h(crate::zoom::ui(STATUS_H))
+        .flex()
+        .flex_row()
+        .items_center();
     let locked = read_only(v, cx);
     let flashing = data
         .as_ref()
@@ -2597,7 +2600,12 @@ pub fn dom_bar<V: TradePane>(
         (TradeCmd::CancelAll, "Cancel all orders", labels[2], false),
         (TradeCmd::Flatten, "Flatten", labels[3], false),
     ];
-    let mut row = div().flex().flex_row().items_center().gap_1().h(px(UTIL_H));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .h(crate::zoom::ui(UTIL_H));
     if !rows.account {
         // Paper or live is always in view (docs/design.md §3): the account row's badge moves here.
         let waiting = pt.account.is_some();
@@ -2713,7 +2721,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
             .items_center()
             .justify_between()
             .gap_2()
-            .h(px(16.0))
+            .h(crate::zoom::ui(16.0))
             .whitespace_nowrap()
     };
     let fmt = product.price;
@@ -2721,7 +2729,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         .flex()
         .flex_col()
         .justify_center()
-        .h(px(CARD_H))
+        .h(crate::zoom::ui(CARD_H))
         .px_2()
         .rounded_sm()
         .bg(t.panel);
@@ -2783,7 +2791,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
             card = card.child(line().child(side).children(big.map(|(s, c)| {
                 div()
                     .flex_shrink_0()
-                    .text_size(px(15.0))
+                    .text_size(crate::zoom::ui(15.0))
                     .font_weight(FontWeight::BOLD)
                     .text_color(c)
                     .child(s)
@@ -2830,7 +2838,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                     )
                     .children(day.map(|m| {
                         div()
-                            .text_size(px(15.0))
+                            .text_size(crate::zoom::ui(15.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(tone(m))
                             .child(today(m))
@@ -2900,10 +2908,10 @@ fn meters<V: TradePane>(
             .flex_row()
             .items_center()
             .gap_2()
-            .h(px(16.0))
+            .h(crate::zoom::ui(16.0))
             .child(
                 div()
-                    .w(px(64.0))
+                    .w(crate::zoom::ui(64.0))
                     .flex_shrink_0()
                     .text_color(t.text_dim)
                     .child(label),
@@ -2911,7 +2919,7 @@ fn meters<V: TradePane>(
             .child(
                 div()
                     .flex_1()
-                    .h(px(4.0))
+                    .h(crate::zoom::ui(4.0))
                     .rounded_full()
                     .bg(t.axis_line)
                     .child(
@@ -2934,7 +2942,11 @@ fn meters<V: TradePane>(
             )
     };
     let h = if narrow { METERS_NARROW_H } else { METERS_H };
-    let slot = div().h(px(h)).flex().flex_col().justify_center();
+    let slot = div()
+        .h(crate::zoom::ui(h))
+        .flex()
+        .flex_col()
+        .justify_center();
     if rules.is_empty() {
         return slot.child(
             div()
@@ -2962,7 +2974,7 @@ fn meters<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_1()
-        .h(px(MIN_HIT))
+        .h(crate::zoom::ui(MIN_HIT))
         .cursor_pointer()
         .text_color(t.text_dim)
         .child(if open { "▾" } else { "▸" })
@@ -2987,7 +2999,7 @@ fn meters<V: TradePane>(
         slot = slot.child(
             div()
                 .absolute()
-                .top(px(h))
+                .top(crate::zoom::ui(h))
                 .left_0()
                 .right_0()
                 .px_1()
@@ -3013,7 +3025,10 @@ fn qty_row<V: TradePane>(
     // Over the account's maximum: said here, before the click (shape: the words, not color).
     let over = dom_trade::over_max(size, max_order_qty(v, cx));
     let label_w = if narrow { LABEL_NARROW_W } else { LABEL_W };
-    let label = div().min_w(px(label_w)).flex_shrink_0().whitespace_nowrap();
+    let label = div()
+        .min_w(crate::zoom::ui(label_w))
+        .flex_shrink_0()
+        .whitespace_nowrap();
     let label = match over {
         Some(text) => label
             .text_color(t.warn)
@@ -3027,7 +3042,7 @@ fn qty_row<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_1()
-        .h(px(SEG_H))
+        .h(crate::zoom::ui(SEG_H))
         .on_scroll(
             cx.listener(|v: &mut V, ev: &gpui::ScrollEvent, w, cx| scroll_size(v, ev, w, cx)),
         )
@@ -3115,11 +3130,11 @@ fn bracket_row<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_1()
-        .h(px(SEG_H))
+        .h(crate::zoom::ui(SEG_H))
         .when(!narrow, |r| {
             r.child(
                 div()
-                    .w(px(LABEL_W))
+                    .w(crate::zoom::ui(LABEL_W))
                     .flex_shrink_0()
                     .text_color(t.text_dim)
                     .child("Bracket"),
@@ -3282,13 +3297,13 @@ fn order_grid<V: TradePane>(
             .flex_col()
             .items_center()
             .justify_center()
-            .h(px(36.0))
+            .h(crate::zoom::ui(36.0))
             .rounded_sm()
             .border_1()
             .border_color(line)
             .cursor_pointer()
             .child(div().font_weight(FontWeight::BOLD).child(title))
-            .child(div().text_size(px(11.0)).child(price(p)));
+            .child(div().text_size(crate::zoom::ui(11.0)).child(price(p)));
         let b = match fill {
             // Filled in the side's color, text in the background color (AA both ways).
             Some(c) => b.bg(c).text_color(t.bg),
@@ -3320,7 +3335,7 @@ fn order_grid<V: TradePane>(
         .flex_col()
         .justify_center()
         .gap_1()
-        .h(px(GRID_H))
+        .h(crate::zoom::ui(GRID_H))
         .child(
             row()
                 .child(run_on_click(buy, TradeCmd::BuyMarket, cx))
@@ -3348,7 +3363,7 @@ fn order_grid<V: TradePane>(
         // Disabled: one line says what locks entries, in the joins' place (same height).
         grid = grid.child(
             div()
-                .h(px(36.0))
+                .h(crate::zoom::ui(36.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3379,7 +3394,7 @@ fn editor_view<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(20.0))
+        .h(crate::zoom::ui(20.0))
         .child(
             div()
                 .font_weight(FontWeight::BOLD)
@@ -3407,8 +3422,8 @@ fn editor_view<V: TradePane>(
         };
         div()
             .id(("bracket-cell", (r * 3 + f as usize) as u64))
-            .w(px(w))
-            .h(px(18.0))
+            .w(crate::zoom::ui(w))
+            .h(crate::zoom::ui(18.0))
             .px_1()
             .flex()
             .items_center()
@@ -3436,7 +3451,7 @@ fn editor_view<V: TradePane>(
                 }),
             )
     };
-    let mut list = div().flex().flex_col().gap(px(2.0));
+    let mut list = div().flex().flex_col().gap(crate::zoom::ui(2.0));
     for (r, row) in ed.rows.iter().enumerate().skip(first).take(ROWS) {
         list = list.child(
             div()
@@ -3446,7 +3461,7 @@ fn editor_view<V: TradePane>(
                 .gap_1()
                 .child(
                     div()
-                        .w(px(14.0))
+                        .w(crate::zoom::ui(14.0))
                         .text_color(if r == ed.row { t.accent } else { t.text_dim })
                         .child(if r == ed.row { "›" } else { " " }),
                 )
@@ -3489,7 +3504,7 @@ fn editor_view<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_1()
-        .h(px(24.0))
+        .h(crate::zoom::ui(24.0))
         .child(match problem {
             Some(p) => div()
                 .min_w_0()
@@ -3530,7 +3545,7 @@ fn editor_view<V: TradePane>(
         .flex()
         .flex_col()
         .justify_between()
-        .h(px(h))
+        .h(crate::zoom::ui(h))
         .py_1()
         .child(head)
         .child(list)
@@ -3764,7 +3779,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
         }))
         // A fixed width: the rules line wraps rather than widening the list over the header's
         // other controls (the DOM's arm state).
-        .w(px(320.0))
+        .w(crate::zoom::ui(320.0))
         // Not the header's no-wrap text style.
         .whitespace_normal()
         .flex()
@@ -3774,7 +3789,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
         .border_1()
         .border_color(t.accent)
         .rounded_sm()
-        .text_size(px(12.0));
+        .text_size(crate::zoom::ui(12.0));
     for (i, a) in trading.accounts().iter().enumerate() {
         let id = a.id.clone();
         let on = current.as_ref() == Some(&a.id);
@@ -3816,7 +3831,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                 .child(
                     div()
                         .text_color(t.text_dim)
-                        .text_size(px(11.0))
+                        .text_size(crate::zoom::ui(11.0))
                         .child(detail),
                 )
                 .on_mouse_down(
@@ -4261,7 +4276,7 @@ fn bracket_confirm_view<V: TradePane>(
         .flex()
         .flex_col()
         .gap_1()
-        .h(px(h))
+        .h(crate::zoom::ui(h))
         .overflow_hidden()
         .child(
             div()

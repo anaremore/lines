@@ -59,6 +59,8 @@ fn command(cmd: Command) -> Option<Command> {
         Command::Trade(_) => Some(cmd),
         // An order tag's menu (no key reaches here with one).
         Command::Order(_) => Some(cmd),
+        // The UI zoom is app-wide: its keys work from every window.
+        Command::ZoomIn | Command::ZoomOut | Command::ZoomReset => Some(cmd),
         _ => None,
     }
 }
@@ -130,6 +132,9 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
+            Some(c @ (Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)) => {
+                cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
+            }
             // Every strategy command by name: hiding markers must never fall through to a stop.
             Some(Command::Strategy(c)) => {
                 use crate::commands::StrategyCmd as S;
@@ -284,6 +289,7 @@ impl PaneWindow {
 
 impl Render for PaneWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(crate::zoom::rem());
         let t = self.theme;
         // Controls only while the pointer is over this window (no permanent chrome).
         let controls = window.is_window_hovered().then(|| {
