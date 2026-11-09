@@ -182,6 +182,8 @@ pub const MIN_SIZE: (f32, f32) = (640.0, 420.0);
 /// A row's label and description never get narrower than this (logical px): a control that
 /// doesn't fit beside them moves to its own line below, and a choice's chips wrap.
 pub const LABEL_MIN_W: f32 = 240.0;
+/// A scope chip's widest (an account's name and product: "…" past it).
+const SCOPE_MAX_W: f32 = 160.0;
 /// The section list's width (logical px).
 const NAV_W: f32 = 150.0;
 
@@ -1340,7 +1342,8 @@ impl SettingsWindow {
         let value = (st.get)(prefs, &self.target, &self.facts);
         let selected = self.selected() == Some(i);
         let searching = !self.query.trim().is_empty();
-        let mut name = div().flex().flex_row().items_center().gap_2();
+        // Wraps in the label column (a search's section prefix, the name, the TRADING chip).
+        let mut name = div().flex().flex_row().flex_wrap().items_center().gap_x_2();
         if searching {
             name = name.child(
                 div()
@@ -1353,6 +1356,7 @@ impl SettingsWindow {
         if st.safety == Safety::Trading {
             name = name.child(
                 div()
+                    .flex_none()
                     .px_1()
                     .text_size(px(10.0))
                     .font_weight(FontWeight::BOLD)
@@ -1470,15 +1474,19 @@ impl SettingsWindow {
                         div()
                             .flex()
                             .flex_row()
-                            .items_center()
+                            .items_start()
                             .gap_2()
                             .ml_auto()
                             .min_w_0()
                             .max_w_full()
                             .child(self.control(i, &value, cx))
+                            // An account's name can be long: "…" past its share of the row.
                             .child(
                                 div()
+                                    // Never narrower than its words; "…" only past the cap.
                                     .flex_none()
+                                    .max_w(px(SCOPE_MAX_W))
+                                    .truncate()
                                     .px_1()
                                     .text_size(px(10.5))
                                     .rounded_sm()
@@ -1892,11 +1900,12 @@ mod tests {
     /// collapses to letters).
     #[test]
     fn the_smallest_window_keeps_the_label_column() {
-        // The main column's padding (px_3), the row's (px_2), a trading row's bar and border.
-        let body = MIN_SIZE.0 - NAV_W - 2.0 * 12.0 - 2.0 * 8.0 - 3.0 - 2.0;
+        // The nav and its border, the main column's padding (px_3), the row's (px_2), a trading
+        // row's bar, its gap and the row's border.
+        let body = MIN_SIZE.0 - NAV_W - 1.0 - 2.0 * 12.0 - 2.0 * 8.0 - 3.0 - 8.0 - 2.0;
         const { assert!(MIN_SIZE.0 <= SIZE.0 && MIN_SIZE.1 <= SIZE.1) };
-        // "Workspace", the widest scope chip at 10.5 px, its padding, the reset slot, gaps.
-        let group = 9.0 * 7.0 + 8.0 + 16.0 + 2.0 * 8.0;
+        // A number control, the widest scope chip, the reset slot and the gaps.
+        let group = 72.0 + SCOPE_MAX_W + 16.0 + 2.0 * 8.0;
         assert!(body >= LABEL_MIN_W, "{body}");
         assert!(body >= group, "the control group fits its own line: {body}");
     }

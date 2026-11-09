@@ -101,7 +101,8 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # --hollow up|down (which direction's candle bodies are hollow; default up). Also for the live app, where
 # they win over Settings › Appearance for that run.
 #   --settings SECTION (also render the Settings window into <out stem>-settings.png), --settings-search TEXT,
-#   --settings-set KEY=VALUE (repeatable; e.g. guard.max_daily_loss=1500 shows a loosening's confirmation).
+#   --settings-set KEY=VALUE (repeatable; e.g. guard.max_daily_loss=1500 shows a loosening's confirmation),
+#   --settings-size WxH (the window's size, default 860x620; raised to the 640x420 minimum).
 #   --econ-calendar FILE (an economic calendar in the bundled file's format, read instead of the bundled one by
 #   the app and its trading cores: synthetic releases on synthetic data). Trading scripts: `guard news warn|block|flatten`.
 # --price-zoom F zooms the auto-fitted price range by F (as Ctrl+wheel), i.e. manual price scale.
