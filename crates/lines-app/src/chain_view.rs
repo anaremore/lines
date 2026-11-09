@@ -419,6 +419,8 @@ struct Frame {
     ys: Vec<f32>,
     /// The scale `ys` were placed for.
     locked_key: Option<(f64, f64, f32, f64)>,
+    /// Where the chart's plot was last frame, if the rows are on its scale.
+    locked_geometry: Option<(f32, f64)>,
     candidates: Vec<crate::chain_lock::Candidate>,
     /// The band the rows may use, in window coordinates.
     area: (f32, f32),
@@ -1008,7 +1010,9 @@ impl ChainView {
     /// send at once. Says so, since nothing else would.
     fn rows_moved(&mut self) {
         if std::mem::take(&mut self.one_click) {
-            self.note = Some("One-click is off: the rows moved".to_owned());
+            // A message already showing may be a refusal: it stays, and the chip says off.
+            self.note
+                .get_or_insert_with(|| "One-click is off: the rows moved".to_owned());
             if std::mem::take(&mut self.expiry_pinned) {
                 self.expiry = None;
             }
@@ -1018,6 +1022,7 @@ impl ChainView {
     /// The One-click switch.
     pub fn toggle_one_click(&mut self, cx: &mut Context<Self>) {
         self.one_click = !self.one_click;
+        self.note = note_after_one_click(self.one_click, self.note.take());
         // Its pin ends with it: the pane follows the soonest expiry again.
         if !self.one_click && std::mem::take(&mut self.expiry_pinned) {
             self.expiry = None;
@@ -1996,10 +2001,13 @@ impl ChainView {
         } else {
             None
         };
-        if crate::chain_lock::rows_jumped(self.frame.locked, scale.is_some()) {
+        let geometry = scale.as_ref().map(|s| s.geometry());
+        if crate::chain_lock::rows_jumped(self.frame.locked_geometry, geometry) {
+            self.frame.locked_geometry = geometry;
             self.frame.release();
             self.frame.locked_key = None;
-            // A first fit, or a reset that found no bars. (The header is already drawn.)
+            // A first fit, a reset that found no bars, or a new height. (The header is already
+            // drawn.)
             if self.one_click {
                 self.rows_moved();
                 window.on_next_frame(|window, _| window.refresh());
@@ -2546,6 +2554,19 @@ impl ChainView {
             }
         }
         if let Some(s) = &scale {
+            if self.frame.rows.is_empty() {
+                let msg = "No strikes in view: zoom or pan the chart";
+                self.glyphs.paint(
+                    msg,
+                    ox + PAD,
+                    top + HEAD_H + MARKER_H,
+                    ROW_H,
+                    t.text_dim,
+                    false,
+                    window,
+                    cx,
+                );
+            }
             self.paint_markers(s, bounds, window, cx);
         }
         pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
@@ -3473,6 +3494,12 @@ impl ChainView {
     }
 }
 
+/// The footer's message once One-click is switched: turned on, nothing may stand in front of its
+/// warning that a click sends at once (the message is shown first, and could say it's off).
+fn note_after_one_click(on: bool, note: Option<String>) -> Option<String> {
+    if on { None } else { note }
+}
+
 /// Whether new data must leave the option chart's rows where they are: a press could land on one.
 /// Worked out each paint from what is true now, so nothing can leave it stuck on. GPUI on Windows
 /// never reports a pointer leaving an element or the window by event, only this flag.
@@ -3846,6 +3873,14 @@ mod tests {
         let mut f = Frame::default();
         f.refresh(None, None, None, 10);
         assert!(!f.has_chain && f.rows.is_empty());
+    }
+
+    /// Nothing can say One-click is off while it's on.
+    #[test]
+    fn turning_one_click_on_clears_the_message_in_front_of_its_warning() {
+        let note = || Some("One-click is off: the rows moved".to_owned());
+        assert_eq!(note_after_one_click(true, note()), None);
+        assert_eq!(note_after_one_click(false, note()), note());
     }
 
     /// The hold is what's true now: the pointer on the table in a hovered window, or One-click.

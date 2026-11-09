@@ -30,6 +30,12 @@ impl LockedScale {
         )
     }
 
+    /// Where the plot is: when this changes every row moves, though the prices don't. Leaves out
+    /// the price range, which only the trader's own zoom, pan and resets move under a hold.
+    pub fn geometry(&self) -> (f32, f64) {
+        (self.plot_top, self.vp.height)
+    }
+
     /// The plot's bottom, in window coordinates.
     pub fn bottom(&self) -> f32 {
         self.plot_top + self.vp.height as f32
@@ -141,10 +147,10 @@ pub enum Detail {
     Bare,
 }
 
-/// Whether every row just left its place, so the next click can't be aimed: the rows went from a
-/// list to the chart's scale or back.
-pub fn rows_jumped(was_locked: bool, locked: bool) -> bool {
-    was_locked != locked
+/// Whether every row just left its place with nobody aiming at the new one: the rows went from a
+/// list to the chart's scale or back, or the plot moved or changed height.
+pub fn rows_jumped(was: Option<(f32, f64)>, now: Option<(f32, f64)>) -> bool {
+    was != now
 }
 
 /// The marker's words.
@@ -361,10 +367,26 @@ mod tests {
     }
 
     #[test]
-    fn rows_jump_when_the_scale_comes_or_goes() {
-        assert!(rows_jumped(false, true), "the first fit");
-        assert!(rows_jumped(true, false), "no scale any more");
-        assert!(!rows_jumped(true, true) && !rows_jumped(false, false));
+    fn rows_jump_when_the_scale_comes_or_goes_or_the_plot_moves() {
+        let at = |lo, hi, height, plot_top| {
+            let mut s = scale(lo, hi, height);
+            s.plot_top = plot_top;
+            Some(s.geometry())
+        };
+        let here = at(68_000.0, 69_000.0, 600.0, 40.0);
+        assert!(rows_jumped(None, here), "the first fit");
+        assert!(rows_jumped(here, None), "no scale any more");
+        assert!(
+            rows_jumped(here, at(68_000.0, 69_000.0, 500.0, 40.0)),
+            "height"
+        );
+        assert!(
+            rows_jumped(here, at(68_000.0, 69_000.0, 600.0, 60.0)),
+            "moved"
+        );
+        assert!(!rows_jumped(None, None));
+        // The trader's own zoom: the rows move, and it was aimed.
+        assert!(!rows_jumped(here, at(68_100.0, 68_900.0, 600.0, 40.0)));
     }
 
     #[test]

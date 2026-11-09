@@ -5370,7 +5370,11 @@ impl ChartView {
         let mut left = String::with_capacity(96);
         let mut right = String::with_capacity(160);
         let Some(d) = self.store.try_read() else {
-            return div(); // feed busy this instant; header refreshes next frame
+            // Feed busy this instant; refreshes next frame. Its height stays, or the plot would
+            // move for a frame, and the option chart's rows with it.
+            return div().h(px(crate::pane::header_height(
+                crate::layout::PaneKind::Chart,
+            )));
         };
         let i = &d.product;
         let f = i.price;
