@@ -5,7 +5,7 @@
 //! source's default) and its view state. The market data *source* is not part of a workspace:
 //! it belongs to the run (`--source`), so one workspace works on mock, replay or live data.
 //!
-//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 6).
+//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 7).
 //! Version 2 adds each pane's `state` (shown, hidden, hidden by "chart only", detached) and a
 //! detached pane's `window` placement; version 1 files migrate (every pane shown). Version 3
 //! adds the `journal` pane kind (roadmap 8c); version 2 files read unchanged, and an older
@@ -13,7 +13,8 @@
 //! adds the `strategies` pane kind. Version 5 (decision 0028) lets a pane's contract be an
 //! equity or a listed option; every version 4 file reads unchanged, and an older build
 //! reports a version 5 file as newer instead of misreading an option. Version 6 adds the `chain`
-//! pane kind (an underlying's option chain).
+//! pane kind (an underlying's option chain). Version 7 (decision 0029) adds the chain pane's
+//! option chart mode (`chain_chart`).
 //! Product ids are the catalog's permanent ids; `symbol` is written beside them for people
 //! reading the file and ignored on load. A pane whose product this build doesn't know is kept
 //! as written and shown as unavailable, never dropped.
@@ -96,6 +97,12 @@ fn v5_to_v6(v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
+/// Version 7 added the chain pane's option chart mode (decision 0029): every version 6 file is a
+/// valid version 7 file, its chains plain (an older build reports a version 7 file as newer).
+fn v6_to_v7(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
 const MIGRATIONS: &[Migration] = &[
     v0_never_written,
     v1_to_v2,
@@ -103,11 +110,12 @@ const MIGRATIONS: &[Migration] = &[
     v3_to_v4,
     v4_to_v5,
     v5_to_v6,
+    v6_to_v7,
 ];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 6,
+    current: 7,
     migrations: MIGRATIONS,
 };
 
@@ -173,6 +181,9 @@ pub struct PaneDoc {
     pub dom: Option<DomState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tape: Option<TapeState>,
+    /// A chain pane shows the underlying's chart beside it, on one price scale (version 7).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chain_chart: bool,
     /// A journal pane's view (version 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal: Option<JournalState>,
@@ -198,6 +209,7 @@ impl PaneDoc {
             dom: None,
             tape: None,
             journal: None,
+            chain_chart: false,
             state: PaneState::Shown,
             window: None,
             trade: None,
@@ -1183,7 +1195,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 6"#), "{text}");
+        assert!(text.contains(r#""version": 7"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1663,6 +1675,36 @@ mod tests {
         assert_eq!(leaves[1].kind, PaneKind::Strategies);
     }
 
+    /// Version 7 (decision 0029): the option chart mode, pinned; a version 6 chain stays plain,
+    /// and a plain pane writes nothing new.
+    #[test]
+    fn a_version_7_chain_keeps_its_chart_and_a_version_6_chain_stays_plain() {
+        let file = |version: u32, extra: &str| {
+            format!(
+                r#"{{ "version": {version}, "name": "options",
+                  "windows": [ {{ "tabs": [ {{ "focused": 0, "layout": {{ "pane": {{
+                    "kind": "chain", "link": 0, "state": "shown",
+                    "target": {{ "product": 2001, "symbol": "SPY" }}{extra}
+                  }} }} }} ] }} ] }}"#
+            )
+        };
+        let read = |text: String| {
+            let Decoded::Ok { value: doc, .. } = decode::<WorkspaceDoc>(&FORMAT, text.as_bytes())
+            else {
+                panic!("{text}");
+            };
+            let w = doc.windows[0].tabs[0].layout.leaves()[0].chain_chart;
+            (w, serde_json::to_string(&doc).unwrap())
+        };
+        let (old, _) = read(file(6, ""));
+        assert!(!old, "a version 6 chain is plain");
+        let (on, json) = read(file(7, r#", "chain_chart": true"#));
+        assert!(on);
+        assert!(json.contains(r#""chain_chart":true"#), "{json}");
+        let (_, plain) = read(file(7, ""));
+        assert!(!plain.contains("chain_chart"), "{plain}");
+    }
+
     /// Version 6 (decision 0028): the `chain` pane kind, pinned; a version 5 file reads
     /// unchanged.
     #[test]
@@ -1683,7 +1725,7 @@ mod tests {
         }"#;
         let Decoded::Ok {
             value,
-            migrated_from: None,
+            migrated_from: Some(6),
         } = decode::<WorkspaceDoc>(&FORMAT, v6)
         else {
             panic!("v6 no longer reads")
@@ -1737,7 +1779,7 @@ mod tests {
             Target::Contract(ContractKey::spot(catalog::BTC_USD))
         );
         let text = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
-        assert!(text.contains(r#""version": 6"#), "{text}");
+        assert!(text.contains(r#""version": 7"#), "{text}");
         assert!(
             text.contains(r#""monthly""#),
             "the futures shape is unchanged"
@@ -1777,8 +1819,8 @@ mod tests {
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 7, "windows": 7}"#),
-            Decoded::Newer { found: 7 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 8, "windows": 7}"#),
+            Decoded::Newer { found: 8 }
         );
     }
 

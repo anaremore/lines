@@ -352,6 +352,8 @@ pub struct ChartView {
     crosshair_mode: CrosshairMode,
     /// The order strip (phase 2b) is shown (saved).
     order_strip: bool,
+    /// Shows no orders and sends none (`set_view_only`).
+    view_only: bool,
     /// Axis label spacing has been measured with this window's font.
     space_measured: bool,
     /// The time this chart last reported under its own crosshair.
@@ -631,6 +633,7 @@ impl ChartView {
                 CrosshairMode::Normal
             },
             order_strip: fixture.order_strip || fixture.strip_pick.is_some(),
+            view_only: false,
             space_measured: false,
             reported: (None, None),
             hover: fixture.cursor,
@@ -1766,6 +1769,46 @@ impl ChartView {
         }
     }
 
+    /// View only: this chart shows no orders and sends none (the option chart's underlying,
+    /// decision 0029).
+    pub fn set_view_only(&mut self) {
+        self.view_only = true;
+        self.trade.account = None;
+    }
+
+    /// The auto-fit's smallest price range. Returns whether it changed.
+    pub fn set_min_price_span(&mut self, span: f64) -> bool {
+        self.vp.set_min_price_span(span)
+    }
+
+    /// Its price scale, once laid out: what the option chart's chain lines up with.
+    pub fn locked_scale(&self) -> Option<crate::chain_lock::LockedScale> {
+        // (Before a first fit its range says nothing: the chain stays a plain list.)
+        let ready = f32::from(self.plot.size.height) > 1.0 && self.vp.price_known();
+        ready.then(|| crate::chain_lock::LockedScale {
+            vp: self.vp,
+            plot_top: f32::from(self.plot.origin.y),
+        })
+    }
+
+    /// No smallest price range yet: setting one refits, even under a hold.
+    pub fn no_min_price_span(&self) -> bool {
+        self.vp.min_price_span == 0.0
+    }
+
+    /// A scale the trader chose (a double-click on the plot or price axis goes back to the fit).
+    pub fn set_price_range(&mut self, lo: f64, hi: f64) {
+        self.vp.price_lo = lo;
+        self.vp.price_hi = hi;
+        self.vp.auto_price = false;
+    }
+
+    /// Hold the view against new data while something aligned to it is under the pointer. The
+    /// trader's own zoom and pan still apply, and whatever is aligned follows them.
+    pub fn hold_scale(&mut self, on: bool) {
+        self.vp.price_held = on;
+    }
+
     /// The product this chart shows.
     pub fn product(&self) -> ProductId {
         self.instrument.id
@@ -2877,6 +2920,7 @@ impl ChartView {
             if self.visibility.draws_studies()
                 && self.footprint.config().shown()
                 && self.vp.auto_price
+                && !self.vp.price_held
                 && !self.vp.visible_range(bars.len()).is_empty()
             {
                 // (Only after a real fit: with nothing visible the range isn't refitted, and
@@ -3165,7 +3209,7 @@ impl ChartView {
     /// Copy this frame's orders and position for the chart's account and contract; refused
     /// moves become the chart's refusal tag.
     fn prepare_orders(&mut self, cx: &App) {
-        let Some(t) = crate::trading::Trading::try_global(cx) else {
+        let Some(t) = crate::trading::Trading::try_global(cx).filter(|_| !self.view_only) else {
             self.ct.n_tags = 0;
             return;
         };
@@ -5326,7 +5370,11 @@ impl ChartView {
         let mut left = String::with_capacity(96);
         let mut right = String::with_capacity(160);
         let Some(d) = self.store.try_read() else {
-            return div(); // feed busy this instant; header refreshes next frame
+            // Feed busy this instant; refreshes next frame. Its height stays, or the plot would
+            // move for a frame, and the option chart's rows with it.
+            return div().h(px(crate::pane::header_height(
+                crate::layout::PaneKind::Chart,
+            )));
         };
         let i = &d.product;
         let f = i.price;

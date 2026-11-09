@@ -50,6 +50,14 @@ pub struct Viewport {
     /// A drag is in progress: new data must not move the time axis under the pointer.
     /// Set with [`Viewport::set_held`].
     pub held: bool,
+    /// New data doesn't refit the price range: something aligned to it is under the pointer (the
+    /// option chart's chain, decision 0029). The trader's own zoom and pan still apply.
+    pub price_held: bool,
+    /// `fit_prices` has found bars since this was last reset.
+    pub price_fitted: bool,
+    /// The auto-fit's smallest price range (scaled units; 0: only the tick's own minimum). Lets
+    /// something aligned to the scale keep room: the option chart's chain needs several strikes.
+    pub min_price_span: f64,
 }
 
 impl Default for Viewport {
@@ -65,6 +73,9 @@ impl Default for Viewport {
             follow_live: true,
             live_margin: RIGHT_MARGIN_BARS,
             held: false,
+            price_held: false,
+            price_fitted: false,
+            min_price_span: 0.0,
         }
     }
 }
@@ -179,9 +190,26 @@ impl Viewport {
         }
     }
 
+    /// The price range means something: fitted to bars, or the trader's own.
+    pub fn price_known(&self) -> bool {
+        self.price_fitted || !self.auto_price
+    }
+
+    /// The auto-fit's smallest range. The first is worth a fit even under a hold: until now the
+    /// range took no account of it. Returns whether it changed.
+    pub fn set_min_price_span(&mut self, span: f64) -> bool {
+        let changed = self.min_price_span != span;
+        if self.min_price_span == 0.0 {
+            self.price_fitted = false;
+        }
+        self.min_price_span = span;
+        changed
+    }
+
     /// Re-enable price auto-scale (the range is refitted on the next `on_data`).
     pub fn restore_auto_price(&mut self) {
         self.auto_price = true;
+        self.price_fitted = false;
     }
 
     /// Reset the time axis only (a double-click on it): the default bar width, back to the
@@ -197,6 +225,7 @@ impl Viewport {
     /// Jump to the newest bar and re-enable auto-scale and live following.
     pub fn reset(&mut self, len: usize) {
         self.auto_price = true;
+        self.price_fitted = false;
         self.follow_live = true;
         self.live_margin = RIGHT_MARGIN_BARS;
         self.snap_to_latest(len);
@@ -216,7 +245,8 @@ impl Viewport {
         if self.follow_live && !self.held {
             self.snap_to_latest(bars.len());
         }
-        if self.auto_price {
+        // A hold keeps a range, so it has to have one first (a new symbol, the trader's reset).
+        if self.auto_price && (!self.price_held || !self.price_fitted) {
             self.fit_prices(bars, tick);
         }
     }
@@ -235,12 +265,13 @@ impl Viewport {
             return; // nothing visible: keep the current range
         }
         let (lo, hi) = (lo as f64, hi as f64);
-        let min_span = (tick.max(1) * 10) as f64;
+        let min_span = ((tick.max(1) * 10) as f64).max(self.min_price_span);
         let span = (hi - lo).max(min_span);
         let mid = (hi + lo) / 2.0;
         let pad = span * PRICE_PAD_FRACTION;
         self.price_lo = mid - span / 2.0 - pad;
         self.price_hi = mid + span / 2.0 + pad;
+        self.price_fitted = true;
     }
 
     fn snap_to_latest(&mut self, len: usize) {
@@ -382,6 +413,9 @@ mod tests {
             follow_live: true,
             live_margin: RIGHT_MARGIN_BARS,
             held: false,
+            price_held: false,
+            price_fitted: false,
+            min_price_span: 0.0,
         }
     }
 
@@ -861,5 +895,134 @@ mod tests {
         bars.extend(series(1));
         v.on_data(&bars, 25);
         assert!(close(v.right_index, r + 1.0), "and live following resumes");
+    }
+
+    /// Holding the price leaves time alone: the chart keeps following new bars.
+    #[test]
+    fn a_held_price_still_follows_the_bars() {
+        let bars = |n: i64| -> Vec<Bar> {
+            (0..n)
+                .map(|i| Bar {
+                    time: UtcMillis(i * 60_000),
+                    open: Price(100),
+                    high: Price(110 + i),
+                    low: Price(100),
+                    close: Price(110 + i),
+                    volume: Qty(1),
+                })
+                .collect()
+        };
+        let mut v = Viewport::default();
+        v.set_size(800.0, 600.0);
+        v.on_data(&bars(10), 1);
+        let (right, prices) = (v.right_index, (v.price_lo, v.price_hi));
+        v.price_held = true;
+        v.on_data(&bars(40), 1);
+        assert!(v.right_index > right, "time still follows");
+        assert_eq!((v.price_lo, v.price_hi), prices, "the price doesn't move");
+    }
+
+    /// A hold keeps a range it has: before the first fit, and after the trader's own reset of the
+    /// scale, the bars still fit.
+    #[test]
+    fn a_hold_doesnt_stop_the_first_fit_or_the_traders_reset() {
+        let bar = |low: i64, high: i64| Bar {
+            time: UtcMillis(0),
+            open: Price(low),
+            high: Price(high),
+            low: Price(low),
+            close: Price(high),
+            volume: Qty(1),
+        };
+        let mut v = Viewport::default();
+        v.set_size(800.0, 600.0);
+        v.right_index = 0.0;
+        v.price_held = true;
+        v.on_data(&[bar(68_300, 68_450)], 1);
+        assert!(v.price_lo < 68_300.0 && v.price_hi > 68_450.0, "first fit");
+        let fitted = (v.price_lo, v.price_hi);
+        v.on_data(&[bar(60_000, 70_000)], 1);
+        assert_eq!((v.price_lo, v.price_hi), fitted, "then it holds");
+        v.restore_auto_price();
+        v.on_data(&[bar(60_000, 70_000)], 1);
+        assert!(v.price_lo < 60_000.0, "the reset refits");
+        assert!(v.price_held, "and the hold goes on");
+        let fitted = (v.price_lo, v.price_hi);
+        v.on_data(&[bar(68_300, 68_450)], 1);
+        assert_eq!((v.price_lo, v.price_hi), fitted);
+        // A double-click on the plot, after the trader's own zoom.
+        v.auto_price = false;
+        v.reset(1);
+        v.right_index = 0.0;
+        v.on_data(&[bar(68_300, 68_450)], 1);
+        assert!(v.price_hi < 69_000.0, "the plot's reset refits too");
+    }
+
+    /// The range is known once fitted or the trader's; a first minimum span refits under a
+    /// hold, and a later one waits for the hold to end.
+    #[test]
+    fn a_first_span_refits_under_a_hold_and_a_later_one_waits() {
+        let bar = |low: i64, high: i64| Bar {
+            time: UtcMillis(0),
+            open: Price(low),
+            high: Price(high),
+            low: Price(low),
+            close: Price(high),
+            volume: Qty(1),
+        };
+        let bars = [bar(68_300, 68_450)];
+        let mut v = Viewport::default();
+        v.set_size(800.0, 600.0);
+        v.right_index = 0.0;
+        assert!(!v.price_known(), "nothing fitted yet");
+        v.on_data(&bars, 1);
+        assert!(v.price_known());
+        v.price_held = true;
+        assert!(v.set_min_price_span(1_000.0));
+        assert!(!v.price_known(), "worth a fit");
+        v.on_data(&bars, 1);
+        assert!(v.price_hi - v.price_lo >= 1_000.0);
+        let fitted = (v.price_lo, v.price_hi);
+        assert!(v.set_min_price_span(2_000.0));
+        v.on_data(&bars, 1);
+        assert_eq!((v.price_lo, v.price_hi), fitted, "held: it waits");
+        assert!(!v.set_min_price_span(2_000.0));
+        v.auto_price = false;
+        v.price_fitted = false;
+        assert!(v.price_known(), "the trader's own");
+    }
+
+    /// A minimum span widens the fit around the bars, for what's aligned to the scale; bars that
+    /// already span more are unchanged, and while the price is held nothing refits.
+    #[test]
+    fn the_fit_keeps_a_minimum_span_around_the_bars() {
+        let bar = |low: i64, high: i64| Bar {
+            time: UtcMillis(0),
+            open: Price(low),
+            high: Price(high),
+            low: Price(low),
+            close: Price(high),
+            volume: Qty(1),
+        };
+        let bars = [bar(68_300, 68_450)];
+        let mut v = Viewport::default();
+        v.set_size(800.0, 600.0);
+        v.right_index = 0.0;
+        v.fit_prices(&bars, 1);
+        let narrow = v.price_hi - v.price_lo;
+        v.min_price_span = 1_000.0;
+        v.fit_prices(&bars, 1);
+        let wide = v.price_hi - v.price_lo;
+        assert!(wide >= 1_000.0 && wide > narrow, "{narrow} {wide}");
+        let mid = (v.price_hi + v.price_lo) / 2.0;
+        assert_eq!(mid, (68_300.0 + 68_450.0) / 2.0, "around the bars");
+        v.min_price_span = 10.0;
+        v.fit_prices(&bars, 1);
+        assert_eq!(v.price_hi - v.price_lo, narrow, "bars span more: unchanged");
+        // Held: new data moves nothing.
+        v.price_held = true;
+        let before = (v.price_lo, v.price_hi);
+        v.on_data(&[bar(60_000, 70_000)], 1);
+        assert_eq!((v.price_lo, v.price_hi), before);
     }
 }
