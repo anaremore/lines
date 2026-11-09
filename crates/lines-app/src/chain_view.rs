@@ -2345,7 +2345,11 @@ impl ChainView {
                     // order works on until a usable quote comes, so it ends unfilled only when
                     // cancelled, replaced, at the session's close or at expiry (where settlement
                     // closes the position: then there's nothing to say).
-                    if st.position(&o.account, o.contract).is_some() {
+                    // Replaced by another Flatten still working: that one speaks for it.
+                    let replaced = st
+                        .open_orders(&o.account, o.contract)
+                        .any(|w| w.role == Role::Flatten && w.id != o.id);
+                    if !replaced && st.position(&o.account, o.contract).is_some() {
                         note = Some("Flatten canceled: the position is still open".to_owned());
                     }
                     false
