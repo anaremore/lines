@@ -45,6 +45,8 @@ pub(super) struct SentCancel {
     said: bool,
     /// The broker refused it.
     refused: bool,
+    /// It reached the broker at least once.
+    sent: bool,
     /// Who asked, so a resend reaches the broker as the first send did.
     source: Source,
     pane: Option<PaneContext>,
@@ -80,6 +82,7 @@ impl TradingCore {
         };
         // Disconnected: remembered, not sent, no send spent (it goes when the broker is back).
         let up = self.broker.connected();
+        let sent = up || before.is_some_and(|c| c.sent);
         self.cancelling.insert(
             id,
             SentCancel {
@@ -88,6 +91,7 @@ impl TradingCore {
                 rebuilt: false,
                 said: false,
                 refused: false,
+                sent,
                 source,
                 pane,
             },
@@ -147,6 +151,7 @@ impl TradingCore {
             }
             c.sends += 1;
             c.at = now;
+            c.sent = true;
             let (source, pane) = (c.source, c.pane);
             let command = CommandId(self.next_internal);
             self.next_internal += 1;
@@ -212,7 +217,7 @@ impl TradingCore {
             return false;
         }
         // One remembered and never sent can't have been refused.
-        let Some(c) = self.cancelling.get_mut(&id).filter(|c| c.sends > 0) else {
+        let Some(c) = self.cancelling.get_mut(&id).filter(|c| c.sent) else {
             return false;
         };
         if !c.refused {

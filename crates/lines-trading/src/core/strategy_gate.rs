@@ -436,15 +436,17 @@ impl TradingCore {
         if self.strategy_day_pnl(now, id) > -limit {
             return;
         }
+        // Disconnected, a Flatten is refused: the day isn't closed yet, the next look tries.
+        // Up, the day is closed before the pause: its cancels look here again.
+        let up = self.broker.connected();
+        if up && let Some(i) = self.strategies.get_mut(&id) {
+            i.loss_closed = day;
+        }
         if state == StrategyState::Armed {
             self.pause_strategy(now, id, StrategyState::Paused, DAILY_LOSS.into());
         }
-        // Disconnected, a Flatten is refused: the day isn't closed yet, the next look tries.
-        if !self.broker.connected() {
+        if !up {
             return;
-        }
-        if let Some(i) = self.strategies.get_mut(&id) {
-            i.loss_closed = day;
         }
         self.submit_internal(
             now,

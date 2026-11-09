@@ -868,6 +868,60 @@ fn a_second_refusal_doesnt_end_an_unresolved_order() {
     assert_eq!(r.failures().len(), 1);
 }
 
+/// A `Rejected` for an order whose cancel was only remembered isn't a refused cancel: nothing
+/// was sent to refuse. One sent before a disconnect stays sent, whatever a person asks meanwhile.
+#[test]
+fn only_a_cancel_that_was_sent_can_be_refused() {
+    let mut r = Rig::new();
+    let place = |r: &mut Rig| {
+        r.cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(590_000),
+            },
+        }))
+        .unwrap()[0]
+    };
+    let (remembered, sent) = (place(&mut r), place(&mut r));
+    let at = UtcMillis(r.t);
+    r.inject.lock().unwrap().extend([
+        BrokerEvent::Acked { id: remembered, at },
+        BrokerEvent::Acked { id: sent, at },
+    ]);
+    r.wait(1);
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.cancel(sent);
+    r.up.store(false, Ordering::Relaxed);
+    r.cancel(remembered);
+    r.wait(2_000);
+    r.cancel(sent); // asked again while it is down
+    let refused = |id| BrokerEvent::Rejected {
+        id,
+        reason: "no".into(),
+        at,
+    };
+    r.inject
+        .lock()
+        .unwrap()
+        .extend([refused(remembered), refused(sent)]);
+    r.wait(1);
+    assert_eq!(
+        r.failures().len(),
+        1,
+        "only the one that was sent: {:?}",
+        r.failures()
+    );
+    assert_eq!(r.state(sent), OrderState::Working);
+    // The remembered one wasn't dropped: it goes when the broker is back.
+    r.up.store(true, Ordering::Relaxed);
+    r.wait(2_000);
+    r.wait(LAT + 1);
+    assert_eq!(r.state(remembered), OrderState::Cancelled);
+}
+
 /// A refused cancel on an acked order leaves it alive: a held bracket exit, or an order between
 /// ack and working, is still at the broker. Without a cancel sent, `Rejected` is the order's own.
 #[test]
