@@ -85,13 +85,18 @@ pub fn days_in_month(y: u16, m: u8) -> u8 {
 }
 
 pub fn third_friday(y: u16, m: u8) -> CivilDate {
+    third_weekday(y, m, 4)
+}
+
+/// The third `weekday` (0 = Monday … 6 = Sunday) of a month.
+pub fn third_weekday(y: u16, m: u8, weekday: u8) -> CivilDate {
     let first = CivilDate {
         year: y,
         month: m,
         day: 1,
     };
-    let to_friday = (4 + 7 - first.weekday()) % 7;
-    first.add_days(to_friday as i64 + 14)
+    let to_day = (weekday + 7 - first.weekday()) % 7;
+    first.add_days(to_day as i64 + 14)
 }
 
 pub fn last_business_day(y: u16, m: u8) -> CivilDate {
@@ -118,8 +123,14 @@ pub fn business_days_before(mut d: CivilDate, n: u32) -> CivilDate {
     d
 }
 
-fn prev_month(y: u16, m: u8) -> (u16, u8) {
-    if m == 1 { (y - 1, 12) } else { (y, m - 1) }
+/// The month before. `None` for January of year 0 (no month precedes it): such a key gets no
+/// expiry or roll date rather than an underflow.
+fn prev_month(y: u16, m: u8) -> Option<(u16, u8)> {
+    if m == 1 {
+        Some((y.checked_sub(1)?, 12))
+    } else {
+        Some((y, m - 1))
+    }
 }
 
 /// Calendar expiry (last trading day) of a dated contract. `None` for spot or for a key that
@@ -134,10 +145,39 @@ pub fn calendar_expiry(product: &Product, key: ContractKey) -> Option<CivilDate>
         return None;
     }
     let m = month.number();
+    let (py, pm) = prev_month(year, m)?;
     Some(match expiry {
         ExpiryRule::ThirdFriday => third_friday(year, m),
         ExpiryRule::SeventhBusinessDayBeforeLastBusinessDay => {
             business_days_before(last_business_day(year, m), 7)
+        }
+        ExpiryRule::NthLastBusinessDay(n) => {
+            business_days_before(last_business_day(year, m), u32::from(n.max(1)) - 1)
+        }
+        ExpiryRule::NthLastBusinessDayOfPriorMonth(n) => {
+            business_days_before(last_business_day(py, pm), u32::from(n.max(1)) - 1)
+        }
+        ExpiryRule::BusinessDaysBefore25thOfPriorMonth(n) => {
+            let mut anchor = CivilDate {
+                year: py,
+                month: pm,
+                day: 25,
+            };
+            if !anchor.is_business_day() {
+                anchor = business_days_before(anchor, 1);
+            }
+            business_days_before(anchor, u32::from(n))
+        }
+        ExpiryRule::BusinessDayBefore15th => business_days_before(
+            CivilDate {
+                year,
+                month: m,
+                day: 15,
+            },
+            1,
+        ),
+        ExpiryRule::BusinessDaysBeforeThirdWednesday(n) => {
+            business_days_before(third_weekday(year, m, 2), u32::from(n))
         }
     })
 }
@@ -151,7 +191,7 @@ pub fn calendar_roll_date(product: &Product, key: ContractKey) -> Option<CivilDa
     Some(match roll {
         RollRule::DaysBeforeExpiry(n) => calendar_expiry(product, key)?.add_days(-(n as i64)),
         RollRule::DaysBeforeFirstNotice(n) => {
-            let (py, pm) = prev_month(year, month.number());
+            let (py, pm) = prev_month(year, month.number())?;
             last_business_day(py, pm).add_days(-(n as i64))
         }
     })
@@ -251,6 +291,79 @@ mod tests {
         assert_eq!(calendar_expiry(&zn, zk), Some(d(2025, 12, 22)));
         // First notice day = last business day of November 2025 (Friday 28th); roll 2 days earlier.
         assert_eq!(calendar_roll_date(&zn, zk), Some(d(2025, 11, 26)));
+    }
+
+    /// The other CME rules (catalog sources: docs/catalog-sources.md). Dates chosen away from
+    /// holidays, which the calendar doesn't model.
+    #[test]
+    fn other_expiry_rules() {
+        let es = es();
+        let with = |expiry, roll| Product {
+            kind: ProductKind::Future {
+                cycle: MonthCycle::MONTHLY,
+                expiry,
+                roll,
+            },
+            ..es.clone()
+        };
+        let exp = |p: &Product, y, m| {
+            calendar_expiry(p, ContractKey::monthly(p.id, y, Month::new(m).unwrap())).unwrap()
+        };
+        let roll = RollRule::DaysBeforeExpiry(5);
+        // WTI: 3 business days before the 25th of the prior month. CLZ6: 25 Nov 2026 is a
+        // Wednesday → Friday 20th. CLX6: 25 Oct 2026 is a Sunday → from Friday 23rd → 20th.
+        let cl = with(ExpiryRule::BusinessDaysBefore25thOfPriorMonth(3), roll);
+        assert_eq!(exp(&cl, 2026, 12), d(2026, 11, 20));
+        assert_eq!(exp(&cl, 2026, 11), d(2026, 10, 20));
+        // Micro WTI: one business day before CL.
+        let mcl = with(ExpiryRule::BusinessDaysBefore25thOfPriorMonth(4), roll);
+        assert_eq!(exp(&mcl, 2026, 11), d(2026, 10, 19));
+        assert_eq!(exp(&mcl, 2026, 12), d(2026, 11, 19));
+        // Natural gas: 3rd last business day of the prior month. NGX6 → 28 Oct 2026.
+        let ng = with(ExpiryRule::NthLastBusinessDayOfPriorMonth(3), roll);
+        assert_eq!(exp(&ng, 2026, 11), d(2026, 10, 28));
+        // Gold: 3rd last business day of the month (31 Dec 2026 is a Thursday).
+        let gc = with(ExpiryRule::NthLastBusinessDay(3), roll);
+        assert_eq!(exp(&gc, 2026, 12), d(2026, 12, 29));
+        // 2- and 5-year notes: the last business day (31 Oct 2026 is a Saturday).
+        let zf = with(ExpiryRule::NthLastBusinessDay(1), roll);
+        assert_eq!(exp(&zf, 2026, 12), d(2026, 12, 31));
+        assert_eq!(exp(&zf, 2026, 10), d(2026, 10, 30));
+        // Grains: the business day before the 15th (15 Mar 2027 is a Monday → Friday 12th).
+        let zc = with(ExpiryRule::BusinessDayBefore15th, roll);
+        assert_eq!(exp(&zc, 2026, 12), d(2026, 12, 14));
+        assert_eq!(exp(&zc, 2027, 3), d(2027, 3, 12));
+        // FX: 2 business days before the third Wednesday. December 2026: Wednesday 16th →
+        // Monday 14th. October 2026 starts on a Thursday: third Wednesday the 21st.
+        let fx = with(ExpiryRule::BusinessDaysBeforeThirdWednesday(2), roll);
+        assert_eq!(third_weekday(2026, 10, 2), d(2026, 10, 21));
+        assert_eq!(exp(&fx, 2026, 12), d(2026, 12, 14));
+        assert_eq!(exp(&fx, 2027, 3), d(2027, 3, 15));
+        // Roll before first notice (last business day of the prior month) for a monthly key.
+        let gc = with(
+            ExpiryRule::NthLastBusinessDay(3),
+            RollRule::DaysBeforeFirstNotice(2),
+        );
+        let gcz6 = ContractKey::monthly(gc.id, 2026, Month::new(12).unwrap());
+        assert_eq!(calendar_roll_date(&gc, gcz6), Some(d(2026, 11, 28)));
+    }
+
+    /// January of year 0 has no previous month: no calendar date rather than an underflow.
+    #[test]
+    fn year_zero_has_no_prior_month() {
+        let cl = Product {
+            kind: ProductKind::Future {
+                cycle: MonthCycle::MONTHLY,
+                expiry: ExpiryRule::BusinessDaysBefore25thOfPriorMonth(3),
+                roll: RollRule::DaysBeforeFirstNotice(2),
+            },
+            ..es()
+        };
+        let k = ContractKey::monthly(cl.id, 0, Month::new(1).unwrap());
+        assert_eq!(calendar_expiry(&cl, k), None);
+        assert_eq!(calendar_roll_date(&cl, k), None);
+        let k = ContractKey::monthly(cl.id, 1, Month::new(1).unwrap());
+        assert!(calendar_expiry(&cl, k).is_some());
     }
 
     #[test]

@@ -21,8 +21,15 @@ use crate::persist::Writer;
 use crate::picker::{self, Picker, Settings};
 use crate::theme::Theme;
 
-/// Result rows shown at once.
+/// Lines shown at once: result rows and group headings.
 const PICKER_ROWS: usize = 10;
+/// Height of one line (a row or a heading), so the list's height doesn't depend on how many
+/// headings are in view.
+const LINE_H: f32 = 28.0;
+/// The symbol column: one line wide enough for the longest catalog symbol (`BTC-PERP.KR`,
+/// 11 characters, about 84 px in 13 px semibold), the row's 8 px gap after it. A longer one
+/// ends in "…" rather than wrapping.
+const SYMBOL_W: f32 = 92.0;
 const PICKER_W: f32 = 600.0;
 
 /// Recents and favourites for the whole app.
@@ -240,9 +247,43 @@ impl PickerUi {
         let p = self.picker.as_ref()?;
         let t = *theme;
         let settings = settings(cx).clone();
-        let first = p.selected.saturating_sub(PICKER_ROWS - 1);
-        let mut rows = div().flex().flex_col().py_1();
-        for (i, hit) in p.hits.iter().enumerate().skip(first).take(PICKER_ROWS) {
+        // Headings count as lines, and every line is one height, so the list keeps its height
+        // as the selection moves (docs/design.md §7). In a short pane the list gives way first
+        // (clipped), never the query or the hints line.
+        let mut rows = div()
+            .flex()
+            .flex_col()
+            .py_1()
+            .flex_shrink(1.0)
+            .min_h_0()
+            .overflow_hidden()
+            // A full list reserves all its lines, so a window shown one short (it won't end
+            // on a heading with no row) keeps the same height.
+            .when(p.hits.len() >= PICKER_ROWS, |d| {
+                d.h(px(PICKER_ROWS as f32 * LINE_H + 8.0))
+            });
+        let lines =
+            picker::visible_lines(&self.entries, &p.hits, &p.query, p.selected, PICKER_ROWS);
+        for line in lines {
+            let i = match line {
+                picker::Line::Heading(label) => {
+                    rows = rows.child(
+                        div()
+                            .flex_none()
+                            .h(px(LINE_H))
+                            .flex()
+                            .items_end()
+                            .px_3()
+                            .pb_1()
+                            .text_size(px(11.0))
+                            .text_color(t.text_dim)
+                            .child(label),
+                    );
+                    continue;
+                }
+                picker::Line::Row(i) => i,
+            };
+            let hit = &p.hits[i];
             let e = &self.entries[hit.index];
             let selected = i == p.selected;
             let row = picker::contract_row(&e.product, today, if selected { p.offset } else { 0 });
@@ -255,19 +296,29 @@ impl PickerUi {
             } else {
                 t.text_main
             };
-            let mut right = div().flex().flex_row().gap_2().text_color(t.text_dim);
+            // One line: in a narrow pane each part shrinks to "…" (after the description, which
+            // gives way first), never wraps or clips mid-glyph.
+            let part = || div().min_w_0().truncate();
+            let mut right = div()
+                .flex_shrink(1.0)
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .text_color(t.text_dim);
             match (&unavailable, &row) {
-                (Some(reason), _) => right = right.child(reason.clone()),
+                (Some(reason), _) => right = right.child(part().child(reason.clone())),
                 (None, Some(r)) => {
-                    right = right.child(div().text_color(fg).child(r.label.as_str().to_owned()));
+                    right = right.child(part().text_color(fg).child(r.label.as_str().to_owned()));
                     if r.is_front && !e.product.is_spot() && !e.product.is_equity() {
-                        right = right.child("front");
+                        right = right.child(part().child("front"));
                     }
                     if let Some(x) = r.expiry {
-                        right = right.child(format!("exp {x}"));
+                        right = right.child(part().child(format!("exp {x}")));
                     }
                     if let Some(d) = r.days_to_roll {
-                        let roll = div().child(if r.roll_soon {
+                        let roll = part().child(if r.roll_soon {
                             format!("roll soon · {d}d")
                         } else {
                             format!("roll {d}d")
@@ -289,12 +340,13 @@ impl PickerUi {
             rows = rows.child(
                 div()
                     .id(("picker-row", i))
+                    .flex_none()
+                    .h(px(LINE_H))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .py_1()
                     .border_l_2()
                     .border_color(if selected {
                         t.accent
@@ -305,7 +357,9 @@ impl PickerUi {
                     .child(div().w(px(12.0)).text_color(t.text_dim).child(star))
                     .child(
                         div()
-                            .w(px(64.0))
+                            .flex_none()
+                            .w(px(SYMBOL_W))
+                            .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
                             .child(e.product.symbol),
@@ -313,7 +367,8 @@ impl PickerUi {
                     .child(
                         div()
                             .flex_1()
-                            .overflow_hidden()
+                            .min_w_0()
+                            .truncate()
                             .text_color(t.text_dim)
                             .child(format!("{}  ·  {}", e.product.description, e.exchange)),
                     )
@@ -343,6 +398,7 @@ impl PickerUi {
             div().text_color(t.text_main).child(p.query.clone())
         };
         let hints = div()
+            .flex_none()
             .flex()
             .flex_row()
             .justify_between()
@@ -362,14 +418,17 @@ impl PickerUi {
                 .top(px(24.0))
                 .left_0()
                 .right_0()
+                .bottom_0()
                 .flex()
                 .justify_center()
+                .items_start()
                 .child(
                     div()
                         .id("symbol-picker")
                         .occlude()
                         .w(px(PICKER_W))
                         .max_w_full()
+                        .max_h_full()
                         .flex()
                         .flex_col()
                         .bg(t.panel)
@@ -380,6 +439,7 @@ impl PickerUi {
                         .font_features(self.tnum.clone())
                         .child(
                             div()
+                                .flex_none()
                                 .flex()
                                 .flex_row()
                                 .items_center()

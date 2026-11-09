@@ -593,20 +593,7 @@ mod tests {
             );
         }
         // Every product, a range of distances: points text parses back to the same ticks.
-        for id in [
-            catalog::ES,
-            catalog::NQ,
-            catalog::MES,
-            catalog::MNQ,
-            catalog::ZN,
-            catalog::BTC_USD,
-            catalog::ETH_USD,
-            catalog::BTC_USD_KR,
-            catalog::ETH_USD_KR,
-            catalog::BTC_PERP_KR,
-            catalog::ETH_PERP_KR,
-        ] {
-            let prod = p(id);
+        for prod in catalog::all() {
             for t in 1..=400u32 {
                 let s = amount_text(t, &prod, BracketUnits::Points);
                 assert_eq!(

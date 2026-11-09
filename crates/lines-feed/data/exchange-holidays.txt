@@ -30,9 +30,9 @@
 #             /christmas-holiday-futures-trading-hours-2024/)
 
 format 1
-version 2026-11-07
+version 2026-11-09
 
-# CME equity index futures: ES, NQ, MES, MNQ. Globex Sun-Fri 17:00-16:00 CT; RTH 08:30-15:00 CT.
+# CME equity index futures: ES, NQ, YM, RTY, MES, MNQ, MYM, M2K. Globex Sun-Fri 17:00-16:00 CT; RTH 08:30-15:00 CT.
 calendar cme-equity-index
 coverage 2026 2027 unverified
 source https://www.cmegroup.com/tools-information/holiday-calendar.html
@@ -89,7 +89,7 @@ source https://www.ironbeam.com/ (CME holiday schedules republished per holiday,
 2027-12-24 closed      unverified Christmas (observed)
 # 2027-12-31 (Fri): 2028-01-01 is a Saturday with no observed weekday holiday; assumed regular.
 
-# CBOT Treasury futures: ZN. Globex Sun-Fri 17:00-16:00 CT; RTH 07:20-14:00 CT.
+# CBOT Treasury futures: ZT, ZF, ZN, ZB. Globex Sun-Fri 17:00-16:00 CT; RTH 07:20-14:00 CT.
 # Halt/closed days match the equity calendar (IB lists the same times for interest rates);
 # Good Friday 2026 and early closes differ.
 calendar cbot-treasury
@@ -125,6 +125,118 @@ source https://www.ironbeam.com/ (CME holiday schedules republished per holiday,
 2027-09-06 halt 12:00  unverified Labor Day
 2027-11-25 halt 12:00  unverified Thanksgiving
 2027-11-26 early 12:15 unverified Day after Thanksgiving
+2027-12-24 closed      unverified Christmas (observed)
+
+# CME Group futures added 2026-11-09 (docs/catalog-sources.md). Every line below is
+# unverified: CME's per-holiday product schedules could not be read (cmegroup.com refuses
+# automated access, and search excerpts don't carry the per-product times). What is known:
+#   CME-GF26 (Good Friday 2026 advisory, as excerpted): FX and interest rates settle April 3;
+#     CBOT/NYMEX/COMEX settlements are copied from April 2 (BROKER: crosstrade).
+#   CME-TG26 https://www.cmegroup.com/tools-information/holiday-calendar/files/2026/thanksgiving-holiday-settlement-times-2026.pdf
+#     (as excerpted): November 27 ags, rates, FX and equity settle at 12:00 CT; metals and
+#     energy on their normal schedule.
+# Everything else is PATTERN: the equity/Treasury calendars' days with the product group's
+# customary times, to be checked against CME's holiday calendar before relying on them.
+
+# CME FX futures: 6E, 6J, 6B. Globex Sun-Fri 17:00-16:00 CT; RTH 07:20-14:00 CT.
+# PATTERN: the Treasury calendar's days and times (CME lists FX with rates on halt days).
+calendar cme-fx
+coverage 2026 2027 unverified
+source https://www.cmegroup.com/tools-information/holiday-calendar.html
+source https://www.cmegroup.com/tools-information/holiday-calendar/files/2026/2026-good-friday-clearing-advisory.pdf
+2026-01-01 closed      unverified New Year's Day
+2026-01-19 halt 12:00  unverified Martin Luther King Jr. Day
+2026-02-16 halt 12:00  unverified Presidents Day
+# CME-EXCERPT (CME-GF26): FX settles April 3. Close time PATTERN (the Treasury calendar's).
+2026-04-03 early 10:15 unverified Good Friday (March jobs report)
+2026-05-25 halt 12:00  unverified Memorial Day
+2026-06-19 halt 12:00  unverified Juneteenth
+2026-07-03 halt 12:00  unverified Independence Day (observed)
+2026-09-07 halt 12:00  unverified Labor Day
+2026-11-26 halt 12:00  unverified Thanksgiving
+# CME-EXCERPT (CME-TG26): FX settles at 12:00 CT. Close time PATTERN (rates: 12:15).
+2026-11-27 early 12:15 unverified Day after Thanksgiving
+2026-12-24 early 12:15 unverified Christmas Eve
+2026-12-25 closed      unverified Christmas
+2027-01-01 closed      unverified New Year's Day
+2027-01-18 halt 12:00  unverified Martin Luther King Jr. Day
+2027-02-15 halt 12:00  unverified Presidents Day
+2027-03-26 closed      unverified Good Friday
+2027-05-31 halt 12:00  unverified Memorial Day
+2027-06-18 halt 12:00  unverified Juneteenth (observed)
+2027-07-05 halt 12:00  unverified Independence Day (observed)
+2027-09-06 halt 12:00  unverified Labor Day
+2027-11-25 halt 12:00  unverified Thanksgiving
+2027-11-26 early 12:15 unverified Day after Thanksgiving
+2027-12-24 closed      unverified Christmas (observed)
+
+# NYMEX energy (CL, MCL, NG) and COMEX metals (GC, MGC, SI, HG). Globex Sun-Fri 17:00-16:00 CT.
+# PATTERN: energy and metals customarily halt at 13:30 ET (12:30 CT) on Monday holidays and
+# Thanksgiving, and close at 13:45 ET (12:45 CT) on the day after Thanksgiving and Christmas
+# Eve (BROKER: QuantVPS's 2026 table shows a second, 13:30 halt column next to the 12:00 one,
+# without naming its products). Unconfirmed for 2026 and 2027.
+calendar cme-energy-metals
+coverage 2026 2027 unverified
+source https://www.cmegroup.com/tools-information/holiday-calendar.html
+source https://www.quantvps.com/blog/cme-holiday-schedule (BROKER)
+2026-01-01 closed      unverified New Year's Day
+2026-01-19 halt 12:30  unverified Martin Luther King Jr. Day
+2026-02-16 halt 12:30  unverified Presidents Day
+# BROKER (crosstrade: NYMEX/COMEX settlements copied from April 2): modelled as closed.
+2026-04-03 closed      unverified Good Friday
+2026-05-25 halt 12:30  unverified Memorial Day
+2026-06-19 halt 12:30  unverified Juneteenth
+2026-07-03 halt 12:30  unverified Independence Day (observed)
+2026-09-07 halt 12:30  unverified Labor Day
+2026-11-26 halt 12:30  unverified Thanksgiving
+# CME-EXCERPT (CME-TG26): metals and energy settle on their normal schedule. Close PATTERN.
+2026-11-27 early 12:45 unverified Day after Thanksgiving
+2026-12-24 early 12:45 unverified Christmas Eve
+2026-12-25 closed      unverified Christmas
+2027-01-01 closed      unverified New Year's Day
+2027-01-18 halt 12:30  unverified Martin Luther King Jr. Day
+2027-02-15 halt 12:30  unverified Presidents Day
+2027-03-26 closed      unverified Good Friday
+2027-05-31 halt 12:30  unverified Memorial Day
+2027-06-18 halt 12:30  unverified Juneteenth (observed)
+2027-07-05 halt 12:30  unverified Independence Day (observed)
+2027-09-06 halt 12:30  unverified Labor Day
+2027-11-25 halt 12:30  unverified Thanksgiving
+2027-11-26 early 12:45 unverified Day after Thanksgiving
+2027-12-24 closed      unverified Christmas (observed)
+
+# CBOT grains: ZC, ZS, ZW. Sun-Fri 19:00-07:45 and Mon-Fri 08:30-13:20 CT (the session of a
+# trade date opens 19:00 the evening before). PATTERN: grains don't trade on exchange holidays
+# (closed, reopening 19:00 that evening) and close at 12:05 CT on the day after Thanksgiving
+# and Christmas Eve. Unconfirmed for 2026 and 2027; on the day after Thanksgiving the real
+# session may start at 08:30 rather than the evening before (not modelled).
+calendar cbot-grains
+coverage 2026 2027 unverified
+source https://www.cmegroup.com/tools-information/holiday-calendar.html
+2026-01-01 closed      unverified New Year's Day
+2026-01-19 closed      unverified Martin Luther King Jr. Day
+2026-02-16 closed      unverified Presidents Day
+# BROKER (crosstrade: CBOT settlements copied from April 2).
+2026-04-03 closed      unverified Good Friday
+2026-05-25 closed      unverified Memorial Day
+2026-06-19 closed      unverified Juneteenth
+2026-07-03 closed      unverified Independence Day (observed)
+2026-09-07 closed      unverified Labor Day
+2026-11-26 closed      unverified Thanksgiving
+# CME-EXCERPT (CME-TG26): ags settle at 12:00 CT. Close time PATTERN.
+2026-11-27 early 12:05 unverified Day after Thanksgiving
+2026-12-24 early 12:05 unverified Christmas Eve
+2026-12-25 closed      unverified Christmas
+2027-01-01 closed      unverified New Year's Day
+2027-01-18 closed      unverified Martin Luther King Jr. Day
+2027-02-15 closed      unverified Presidents Day
+2027-03-26 closed      unverified Good Friday
+2027-05-31 closed      unverified Memorial Day
+2027-06-18 closed      unverified Juneteenth (observed)
+2027-07-05 closed      unverified Independence Day (observed)
+2027-09-06 closed      unverified Labor Day
+2027-11-25 closed      unverified Thanksgiving
+2027-11-26 early 12:05 unverified Day after Thanksgiving
 2027-12-24 closed      unverified Christmas (observed)
 
 # US equities and their options: SPY (NYSE Arca), QQQ (Nasdaq). Extended hours 04:00-20:00 ET,
