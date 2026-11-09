@@ -166,8 +166,10 @@ pub trait LevelSource: Send + Sync + 'static {
     /// Short display name (legend, menus).
     fn label(&self) -> &'static str;
     /// Whether this source has levels for `product`. Called on the UI thread when a chart
-    /// attaches (never block: answer from what the source already knows). An answer that
-    /// changes later is announced with [`serving_changed`].
+    /// attaches, and again at render after [`serving_changed`] (never block: answer from what
+    /// the source already knows). An answer that changes later is announced with
+    /// [`serving_changed`]. Never asked for an option chart: level sources are not attached
+    /// to option contracts (the underlying's levels are in another market's prices).
     fn serves(&self, product: &Product) -> bool;
     fn refresh(&self) -> RefreshMode;
     /// A map older than this (since it was last received or confirmed) shows as stale.

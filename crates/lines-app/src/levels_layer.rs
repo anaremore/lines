@@ -232,15 +232,19 @@ impl LevelsLayer {
             });
             (d.product.clone(), d.contract)
         };
-        self.slots.clear();
         self.vwap = None; // the new feed's node is acquired when a map needs it
         self.chart = Some((store.clone(), product, contract));
+        // The old slots stay held while the new ones are acquired, so re-attaching to the
+        // same market joins the running tasks (same map, no "missing", no refetch or
+        // replay re-read); slots for another market are dropped after.
         self.join_serving();
     }
 
     /// Ask the registered sources which serve the chart's product (`serves`), keep the slots
     /// of those still serving, add the new ones and drop the rest: a source that doesn't
-    /// serve the product has no slot, so nothing drawn and no legend or menu row. Uses what
+    /// serve the product has no slot, so nothing drawn and no legend or menu row. An option
+    /// chart has no level sources at all: their levels are the underlying's, in another
+    /// market's prices (decision 0028 puts options on the underlying's product). Uses what
     /// [`Self::attach`] saved: never reads the store (it runs at render).
     fn join_serving(&mut self) {
         let Some((store, product, contract)) = self.chart.clone() else {
@@ -248,10 +252,19 @@ impl LevelsLayer {
         };
         self.serving_gen = lines_feed::levels::serving_generation();
         let mut old = std::mem::take(&mut self.slots);
-        self.slots = lines_feed::levels::serving(&product)
+        let sources = if contract.is_some_and(|c| c.option_key().is_some()) {
+            Vec::new()
+        } else {
+            lines_feed::levels::serving(&product)
+        };
+        let market = (product.id, contract);
+        self.slots = sources
             .into_iter()
             .map(|source| {
-                if let Some(i) = old.iter().position(|s| s.handle.source() == source.id()) {
+                if let Some(i) = old
+                    .iter()
+                    .position(|s| s.handle.source() == source.id() && s.handle.market() == market)
+                {
                     return old.swap_remove(i);
                 }
                 let ctx = LevelContext {
