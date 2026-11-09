@@ -156,7 +156,8 @@ pub fn rows_jumped(was: Option<(f32, f64)>, now: Option<(f32, f64)>) -> bool {
 /// Whether the table itself moved or changed width, so its cells aren't where they were, with a
 /// chart or without. Not its height: the plain list is anchored at the top, so a taller footer
 /// moves no cell, and beside a chart `rows_jumped` has the height. The first frame moves nothing.
-pub fn table_moved(was: Option<(f32, f32, f32)>, now: (f32, f32, f32)) -> bool {
+/// The window's own position goes through this too: a still pointer is over another cell then.
+pub fn table_moved<T: PartialEq>(was: Option<T>, now: T) -> bool {
     was.is_some_and(|w| w != now)
 }
 
@@ -404,6 +405,10 @@ mod tests {
         assert!(table_moved(Some(at), (690.0, 40.0, 610.0)), "narrower");
         assert!(table_moved(Some(at), (800.0, 60.0, 700.0)), "lower");
         assert!(table_moved(Some(at), (780.0, 40.0, 700.0)), "sideways");
+        let window = (100.0, 200.0);
+        assert!(!table_moved(None, window), "the first look at the window");
+        assert!(!table_moved(Some(window), window));
+        assert!(table_moved(Some(window), (100.0, 0.0)), "the window moved");
     }
 
     #[test]

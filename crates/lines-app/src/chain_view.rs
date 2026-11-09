@@ -419,6 +419,8 @@ struct Frame {
     ys: Vec<f32>,
     /// The scale `ys` were placed for.
     locked_key: Option<(f64, f64, f32, f64)>,
+    /// Where the window was when last looked at.
+    window_at: Option<(f32, f32)>,
     /// Where the table was last frame: position and width.
     table_at: Option<(f32, f32, f32)>,
     /// Where the chart's plot was last frame, if the rows are on its scale.
@@ -1014,11 +1016,22 @@ impl ChainView {
         if std::mem::take(&mut self.one_click) {
             // A message already showing may be a refusal: it stays, and the chip says off.
             self.note
-                .get_or_insert_with(|| "One-click is off: the rows moved".to_owned());
+                .get_or_insert_with(|| "One-click is off: the chain moved".to_owned());
             if std::mem::take(&mut self.expiry_pinned) {
                 self.expiry = None;
             }
         }
+    }
+
+    /// One-click ends if the window has moved: the pointer is over another cell. A move needn't
+    /// bring a paint, so a press looks too, before it can send.
+    fn check_window_moved(&mut self, window: &Window) {
+        let origin = window.bounds().origin;
+        let at = (f(origin.x), f(origin.y));
+        if crate::chain_lock::table_moved(self.frame.window_at, at) {
+            self.rows_moved();
+        }
+        self.frame.window_at = Some(at);
     }
 
     /// The One-click switch.
@@ -1897,6 +1910,7 @@ impl ChainView {
         if pane::unavailable_title(&self.feed).is_some() {
             return;
         }
+        self.check_window_moved(window);
         let x = f(ev.position.x);
         let y = f(ev.position.y - self.bounds.origin.y);
         if y < HEAD_H {
@@ -2003,6 +2017,12 @@ impl ChainView {
         } else {
             None
         };
+        let armed = self.one_click;
+        self.check_window_moved(window);
+        if armed && !self.one_click {
+            // (The header is already drawn.)
+            window.on_next_frame(|window, _| window.refresh());
+        }
         // The columns are laid out from the table's own bounds, chart or no chart.
         let table_at = (ox, top, w);
         if crate::chain_lock::table_moved(self.frame.table_at, table_at) && self.one_click {
@@ -3887,7 +3907,7 @@ mod tests {
     /// Nothing can say One-click is off while it's on.
     #[test]
     fn turning_one_click_on_clears_the_message_in_front_of_its_warning() {
-        let note = || Some("One-click is off: the rows moved".to_owned());
+        let note = || Some("One-click is off: the chain moved".to_owned());
         assert_eq!(note_after_one_click(true, note()), None);
         assert_eq!(note_after_one_click(false, note()), note());
     }
