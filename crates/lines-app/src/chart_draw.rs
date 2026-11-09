@@ -439,7 +439,7 @@ impl ChartDrawings {
     /// Shift+press at plot-local (`x`, `y`) on empty plot: a measure from here, ended by the
     /// release (no tool to pick first; Alt+U and two clicks stay). The chart calls it only
     /// when no order line, tag or handle, and no drawing, is under the press, and with no
-    /// tool chosen. False (the chart pans) with no bars to anchor to.
+    /// tool chosen. False with no bars to anchor to (the chart then does nothing with the press).
     pub fn quick_down(&mut self, x: f32, y: f32, anchor: Option<Anchor>) -> bool {
         if self.tool.is_some() || self.drag.is_some() {
             return false;

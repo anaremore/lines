@@ -640,7 +640,7 @@ fn a_shift_click_measures_nothing() {
     r.frame(0.0, 0.0);
     assert!(r.d.measure_shown().is_none());
     assert_eq!(r.d.tool(), None);
-    assert!(!r.d.quick_down(10.0, 10.0, None), "no bars: pan");
+    assert!(!r.d.quick_down(10.0, 10.0, None), "no bars: nothing to anchor");
     r.d.set_tool(Tool::Trend);
     assert!(!r.shift_down(200.0, 300.0), "drawing mode keeps its press");
     assert_eq!(r.d.tool(), Some(Tool::Trend));
