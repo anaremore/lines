@@ -445,7 +445,7 @@ struct Cli {
     /// Screenshot: a Shift+drag on the first chart from X0,Y0 to X1,Y1 (plot-local logical
     /// px, as --cursor), released: the measure it leaves.
     #[arg(long, requires = "screenshot", value_parser = parse_drag)]
-    shift_drag: Option<((f32, f32), (f32, f32))>,
+    shift_drag: Option<chart_view::ShiftDrag>,
     /// Screenshot: zoom the auto-fitted price range by this factor around the plot's center
     /// (as Ctrl+wheel would), which switches the price axis to manual scale.
     #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
@@ -807,7 +807,7 @@ fn parse_zoom(s: &str) -> Result<f64, String> {
 }
 
 /// `X0,Y0:X1,Y1` (`--shift-drag`).
-fn parse_drag(s: &str) -> Result<((f32, f32), (f32, f32)), String> {
+fn parse_drag(s: &str) -> Result<chart_view::ShiftDrag, String> {
     let (a, b) = s.split_once(':').ok_or("expected X0,Y0:X1,Y1")?;
     Ok((parse_point(a)?, parse_point(b)?))
 }

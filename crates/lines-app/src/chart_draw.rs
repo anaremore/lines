@@ -407,8 +407,9 @@ impl ChartDrawings {
         let quick = self.quick;
         if quick {
             let first = self.pending.map(|(a, _)| a);
+            let last = self.quick_at;
             self.end_quick();
-            self.measure = first.zip(self.quick_at.take()).filter(|(a, b)| a != b);
+            self.measure = first.zip(last).filter(|(a, b)| a != b);
         }
         self.drag.take().is_some() || quick
     }

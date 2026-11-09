@@ -181,6 +181,9 @@ pub trait ChartLayer: 'static {
     );
 }
 
+/// A Shift+drag from one plot-local point to another (`--shift-drag`).
+pub type ShiftDrag = ((f32, f32), (f32, f32));
+
 /// Deterministic input for screenshot mode (decision 0009), standing in for the mouse.
 #[derive(Clone, Debug, Default)]
 pub struct Fixture {
@@ -191,7 +194,7 @@ pub struct Fixture {
     pub drag_position: Option<f32>,
     /// A Shift+drag from the first plot-local point to the second, released (screenshots:
     /// `--shift-drag X0,Y0:X1,Y1`): the measure it leaves, through the press path's own calls.
-    pub shift_drag: Option<((f32, f32), (f32, f32))>,
+    pub shift_drag: Option<ShiftDrag>,
     /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
     /// would (turns auto-scale off).
     pub price_zoom: Option<f64>,
@@ -415,7 +418,7 @@ pub struct ChartView {
     /// Screenshot fixture: the position line held dragged to this plot-local y.
     drag_position: Option<f32>,
     /// Screenshot fixture: a Shift+drag to replay on the first frame with bars.
-    shift_drag: Option<((f32, f32), (f32, f32))>,
+    shift_drag: Option<ShiftDrag>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
     /// groups: they share the market only.
     timeframe: Timeframe,
