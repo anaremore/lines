@@ -1012,6 +1012,15 @@ impl ChainView {
         self.picker.is_open() || self.ticket.is_some()
     }
 
+    /// The account and underlying whose triggers this pane's armed rows show.
+    pub fn shows_triggers(&self) -> Option<(AccountId, lines_core::ProductId)> {
+        // Unavailable, it draws no rows.
+        if pane::unavailable_title(&self.feed).is_some() {
+            return None;
+        }
+        Some((self.trade.account.clone()?, self.product.id))
+    }
+
     /// The chart beside the chain has the keys (a note, a timeframe being typed).
     pub fn chart_takes_text(&self, cx: &App) -> bool {
         self.chart.as_ref().is_some_and(|c| c.read(cx).takes_text())

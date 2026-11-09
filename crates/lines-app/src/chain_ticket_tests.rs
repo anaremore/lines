@@ -665,3 +665,36 @@ fn a_when_tickets_keys_go_to_the_field_in_use() {
     assert_eq!(t.price, Some(Price(125)));
     assert_eq!(t.when, Some(Price(68_650)));
 }
+
+/// A live trigger's underlying wants a feed, from arming until it ends. Here the source has none
+/// for it, which the app says; with one, the bridge holds it (see `session.rs`).
+#[test]
+fn a_live_trigger_wants_its_underlyings_feed_until_it_ends() {
+    use lines_trading::trigger::TriggerKind;
+    let mut r = Rig::new();
+    let k = key(684, Right::Call);
+    let c = contract_of(k);
+    r.quote(k, 240, 242);
+    r.hold(c, 2, 242);
+    let missing = |r: &Rig| {
+        r.t.cache
+            .read()
+            .trigger_feeds_missing()
+            .contains(&catalog::SPY)
+    };
+    assert!(!missing(&r), "no trigger, nothing wanted");
+    arm(&mut r, c, TriggerKind::Stop, 68_000);
+    assert_eq!(live_triggers(&r), 1);
+    assert!(
+        missing(&r),
+        "this source has no SPY: it can't fire, and that's said"
+    );
+    let id = r.t.cache.read().triggers().next().map(|v| v.id).unwrap();
+    r.send(Command::CancelTrigger {
+        account: account(),
+        contract: c,
+        id,
+    });
+    assert_eq!(live_triggers(&r), 0);
+    assert!(!missing(&r), "nothing alive, nothing wanted");
+}

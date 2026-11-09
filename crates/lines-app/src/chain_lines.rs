@@ -362,6 +362,36 @@ impl RowsGuard {
     }
 }
 
+/// What the workspace says about triggers, only when something's wrong: any that can't fire (a
+/// stale feed, or no feed to be had), and any no pane on screen shows. `true`: it can't fire, which
+/// is the loud one. A state, not a hint.
+pub fn trigger_status<'a>(
+    triggers: impl Iterator<Item = &'a TriggerView>,
+    no_feed: &std::collections::BTreeSet<lines_core::ProductId>,
+    on_screen: impl Fn(&AccountId, lines_core::ProductId) -> bool,
+) -> Option<(String, bool)> {
+    let (mut dead, mut unseen) = (0, 0);
+    for t in triggers {
+        if t.stale || no_feed.contains(&t.contract.product) {
+            dead += 1;
+        }
+        if !on_screen(&t.account, t.contract.product) {
+            unseen += 1;
+        }
+    }
+    let plural = |n: i32| if n == 1 { "" } else { "s" };
+    let dead_text =
+        (dead > 0).then(|| format!("{dead} trigger{} can't fire: no fresh feed", plural(dead)));
+    let unseen_text =
+        (unseen > 0).then(|| format!("{unseen} trigger{} not on screen", plural(unseen)));
+    let text = match (dead_text, unseen_text) {
+        (Some(a), Some(b)) => format!("{a}  ·  {b}"),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => return None,
+    };
+    Some((text, dead > 0))
+}
+
 /// Tag tops spread so none overlap, keeping order and staying as near their lines as they can.
 /// `ys` are the tags' centers, top first; they come back moved.
 pub fn spread_tags(ys: &mut [f32], tag_h: f32, top: f32, bottom: f32) {
@@ -732,6 +762,45 @@ mod tests {
             dragged_y(300.0, 330.0, 350.0),
             Some(320.0),
             "keeps its 30 px"
+        );
+    }
+
+    /// Nothing while all is well. A Stop no pane shows, or one that can't fire, is said.
+    #[test]
+    fn the_workspace_speaks_only_when_a_trigger_needs_it() {
+        let c = series(684, Right::Call);
+        let stop = view(1, TriggerKind::Stop, c);
+        let target = view(2, TriggerKind::Target, c);
+        let mut stale = view(3, TriggerKind::Stop, c);
+        stale.stale = true;
+        let none = std::collections::BTreeSet::new();
+        let on = |_: &AccountId, _| true;
+        let off = |_: &AccountId, _| false;
+        assert_eq!(trigger_status([].iter(), &none, off), None);
+        assert_eq!(trigger_status([stop.clone()].iter(), &none, on), None);
+        assert_eq!(
+            trigger_status([stop.clone()].iter(), &none, off),
+            Some(("1 trigger not on screen".to_owned(), false))
+        );
+        assert_eq!(
+            trigger_status([stop.clone(), target].iter(), &none, off),
+            Some(("2 triggers not on screen".to_owned(), false))
+        );
+        assert_eq!(
+            trigger_status([stale.clone()].iter(), &none, on),
+            Some(("1 trigger can't fire: no fresh feed".to_owned(), true))
+        );
+        assert_eq!(
+            trigger_status([stale].iter(), &none, off),
+            Some((
+                "1 trigger can't fire: no fresh feed  ·  1 trigger not on screen".to_owned(),
+                true
+            ))
+        );
+        let gone = std::collections::BTreeSet::from([c.product]);
+        assert_eq!(
+            trigger_status([stop].iter(), &gone, on),
+            Some(("1 trigger can't fire: no fresh feed".to_owned(), true))
         );
     }
 

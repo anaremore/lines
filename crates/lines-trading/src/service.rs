@@ -17,7 +17,7 @@
 //! [`TradingHandle::advance_to`]: with [`TradingHandle::sync`] a session is deterministic
 //! (tests, screenshots).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -26,7 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use lines_core::{ContractKey, Side as BookSide, UtcMillis};
+use lines_core::{ContractKey, ProductId, Side as BookSide, UtcMillis};
 use lines_feed::FeedConfig;
 use lines_feed::catalog::Target;
 use lines_feed::provider::MarketEvent;
@@ -518,6 +518,8 @@ pub struct FeedBridge {
     subs: Arc<Mutex<HashMap<ContractKey, Subscription>>>,
     /// Feed ids being forwarded by `follow_store`.
     listening: Arc<Mutex<HashSet<u64>>>,
+    /// The underlyings of live triggers: their feeds, kept running with or without a pane.
+    held: Arc<Mutex<HashMap<ProductId, Subscription>>>,
 }
 
 impl FeedBridge {
@@ -528,7 +530,61 @@ impl FeedBridge {
             base,
             subs: Arc::default(),
             listening: Arc::default(),
+            held: Arc::default(),
         }
+    }
+
+    /// Keep a feed running for exactly these products, so a trigger on one can fire with no pane
+    /// open (decision 0029). It's the subscription a pane on that product has (its front-month
+    /// target), so the core doesn't get that feed's data twice. Returns the products with no feed
+    /// to be had: their triggers can't fire, which the app says.
+    pub fn hold_underlyings(
+        &self,
+        wanted: &BTreeSet<ProductId>,
+        handle: &TradingHandle,
+    ) -> BTreeSet<ProductId> {
+        // Out from under the lock: the last subscriber gone joins its feed's thread.
+        let gone: Vec<Subscription> = {
+            let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            let drop_these: Vec<ProductId> = held
+                .keys()
+                .filter(|p| !wanted.contains(p))
+                .copied()
+                .collect();
+            drop_these.iter().filter_map(|p| held.remove(p)).collect()
+        };
+        drop(gone);
+        let mut missing = BTreeSet::new();
+        for product in wanted {
+            if self.holding(*product) {
+                continue;
+            }
+            let mut cfg = self.base.clone();
+            cfg.target = Some(Target::Product(*product));
+            cfg.record = None;
+            match self.registry.subscribe(cfg) {
+                Ok(sub) => {
+                    self.follow_store(sub.store(), handle);
+                    self.held
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(*product, sub);
+                }
+                Err(e) => {
+                    tracing::warn!("no feed for a trigger's underlying {product:?}: {e:#}");
+                    missing.insert(*product);
+                }
+            }
+        }
+        missing
+    }
+
+    /// A feed is being kept running for this product.
+    pub fn holding(&self, product: ProductId) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&product)
     }
 
     /// Start forwarding a contract's market data to the trading core (once per contract).

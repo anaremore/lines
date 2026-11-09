@@ -175,6 +175,8 @@ pub struct TradeState {
     /// The last few that ended, for their reasons, and how many have ever ended.
     triggers_ended: std::collections::VecDeque<lines_trading::trigger::TriggerView>,
     triggers_ended_count: u64,
+    /// Underlyings of live triggers with no feed to be had.
+    trigger_feeds_missing: std::collections::BTreeSet<lines_core::ProductId>,
     /// Rebuilds seen (from the broker after a (re)connect).
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
@@ -503,6 +505,16 @@ impl TradeState {
         self.guards
             .get(account)
             .filter(|g| g.state != GuardState::Active)
+    }
+
+    /// The underlyings with a trigger alive.
+    fn trigger_products(&self) -> std::collections::BTreeSet<lines_core::ProductId> {
+        self.triggers.values().map(|t| t.contract.product).collect()
+    }
+
+    /// Underlyings of live triggers with no feed to be had.
+    pub fn trigger_feeds_missing(&self) -> &std::collections::BTreeSet<lines_core::ProductId> {
+        &self.trigger_feeds_missing
     }
 
     /// How many triggers have ever ended, to compare with [`Self::triggers_ended_since`].
@@ -1272,12 +1284,14 @@ impl Trading {
         let cache = Arc::new(TradeCache::new(&accounts));
         let (notes, notes_rx) = mpsc::channel();
         let (barrier, barrier_rx) = mpsc::channel();
+        let bridge = FeedBridge::new(registry.clone(), base.clone());
         spawn_pump(
             handle.subscribe(),
             notes_rx,
             barrier_rx,
             cache.clone(),
             None,
+            Some((bridge.clone(), handle.clone())),
         );
         // The full state as the first events.
         handle.rebuild();
@@ -1365,6 +1379,8 @@ impl Trading {
                 vbarrier_rx,
                 cache.clone(),
                 Some(ids.clone()),
+                // Triggers are paper only.
+                None,
             );
             let source = ext.accounts();
             let status = Arc::new(RwLock::new(None));
@@ -1396,7 +1412,7 @@ impl Trading {
             });
         }
         Trading {
-            bridge: FeedBridge::new(registry, base),
+            bridge,
             handle,
             _service: Arc::new(service),
             accounts,
@@ -1771,6 +1787,7 @@ fn spawn_pump(
     barriers: Receiver<Sender<()>>,
     cache: Arc<TradeCache>,
     ids: Option<Arc<Mutex<VenueIds>>>,
+    trigger_feeds: Option<(FeedBridge, TradingHandle)>,
 ) {
     // A venue's ids, translated into the shared cache's.
     let tag = ids
@@ -1787,6 +1804,32 @@ fn spawn_pump(
     let spawned = std::thread::Builder::new()
         .name("lines-trading-ui".into())
         .spawn(move || {
+            // A trigger's underlying keeps its feed from the moment one is alive until the last
+            // one ends, so a Stop fires with no pane open. A restored one arrives here too.
+            // Only when an event came, or to try again for one with no feed (a source that
+            // wasn't ready), every few seconds.
+            let mut wanted = std::collections::BTreeSet::new();
+            let mut retry_at: Option<Instant> = None;
+            let mut hold_feeds = |touched: &mut Vec<Option<AccountId>>| {
+                let Some((bridge, handle)) = &trigger_feeds else {
+                    return;
+                };
+                let retry = retry_at.is_some_and(|at| Instant::now() >= at);
+                if touched.is_empty() && !retry {
+                    return;
+                }
+                let now_wanted = cache.read().trigger_products();
+                if now_wanted != wanted || retry {
+                    let missing = bridge.hold_underlyings(&now_wanted, handle);
+                    retry_at =
+                        (!missing.is_empty()).then(|| Instant::now() + Duration::from_secs(5));
+                    cache.read().trigger_feeds_missing = missing;
+                    wanted = now_wanted;
+                    if !touched.contains(&None) {
+                        touched.push(None);
+                    }
+                }
+            };
             loop {
                 let first = match events.recv_timeout(Duration::from_millis(20)) {
                     Ok(e) => Some(e),
@@ -1816,6 +1859,7 @@ fn spawn_pump(
                         next = events.try_recv().ok();
                     }
                 }
+                hold_feeds(&mut touched);
                 for a in &touched {
                     cache.bump(a.as_ref());
                 }
@@ -1839,6 +1883,7 @@ fn spawn_pump(
                             }
                         }
                     }
+                    hold_feeds(&mut touched);
                     for a in &touched {
                         cache.bump(a.as_ref());
                     }

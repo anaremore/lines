@@ -318,3 +318,102 @@ fn feed_bridge_brings_live_market_data_to_the_paper_broker() {
     }
     assert!(filled, "the market order filled from the mock's book");
 }
+
+/// A trigger's underlying keeps its feed with no pane open, and shares a pane's when there is one,
+/// so the core never gets the same data twice. Letting go leaves the pane's running.
+#[test]
+fn an_underlying_can_be_held_with_no_pane_and_shares_a_panes_feed() {
+    use std::collections::BTreeSet;
+    let base = FeedConfig::new(FeedSource::CqgMock(lines_feed::cqg::mock::MockConfig {
+        quotes_per_sec: 2_000,
+        history_bars: 10,
+        ..Default::default()
+    }));
+    let mut broker = PaperBroker::new(PaperConfig {
+        check_sessions: false,
+        ..Default::default()
+    });
+    broker.open_account(acct(), Money::whole(50_000));
+    let mut core = TradingCore::new(Box::new(broker));
+    core.add_account(AccountConfig::paper("paper-1", 50_000), None);
+    let svc = TradingService::start(core, None).unwrap();
+    let h = svc.handle();
+    let registry = lines_feed::registry::FeedRegistry::new();
+    let bridge = FeedBridge::new(registry.clone(), base.clone());
+    let es = BTreeSet::from([catalog::ES]);
+    assert!(!bridge.holding(catalog::ES));
+    assert!(bridge.hold_underlyings(&es, &h).is_empty());
+    assert!(bridge.holding(catalog::ES));
+    // Asked again: nothing new.
+    assert!(bridge.hold_underlyings(&es, &h).is_empty());
+    // A pane on the product joins the same feed.
+    let mut cfg = base.clone();
+    cfg.target = Some(lines_feed::catalog::Target::Product(catalog::ES));
+    let pane = registry.subscribe(cfg.clone()).unwrap();
+    let again = registry.subscribe(cfg).unwrap();
+    assert_eq!(pane.store().feed_id(), again.store().feed_id());
+    drop(again);
+    // Letting go leaves the pane's running.
+    assert!(bridge.hold_underlyings(&BTreeSet::new(), &h).is_empty());
+    assert!(!bridge.holding(catalog::ES));
+    assert!(pane.store().try_read().is_some());
+    // A source with no feed for a product says so rather than fail.
+    let spy = BTreeSet::from([catalog::SPY]);
+    assert_eq!(bridge.hold_underlyings(&spy, &h), spy);
+    assert!(!bridge.holding(catalog::SPY));
+}
+
+/// The point of holding a trigger's underlying: with no pane open, its data reaches the core, so
+/// paper fills (and a trigger's print) happen.
+#[test]
+fn a_held_underlying_feeds_the_core_with_no_pane() {
+    use std::collections::BTreeSet;
+    let base = FeedConfig::new(FeedSource::CqgMock(lines_feed::cqg::mock::MockConfig {
+        quotes_per_sec: 2_000,
+        history_bars: 10,
+        ..Default::default()
+    }));
+    let es = catalog::get(catalog::ES).unwrap();
+    let front = lines_feed::front_month(&es, None).unwrap();
+    let mut broker = PaperBroker::new(PaperConfig {
+        check_sessions: false,
+        ..Default::default()
+    });
+    broker.open_account(acct(), Money::whole(50_000));
+    let mut core = TradingCore::new(Box::new(broker));
+    core.add_account(AccountConfig::paper("paper-1", 50_000), None);
+    let svc = TradingService::start(core, None).unwrap();
+    let h = svc.handle();
+    let events = h.subscribe();
+    let bridge = FeedBridge::new(lines_feed::registry::FeedRegistry::new(), base);
+    assert!(
+        bridge
+            .hold_underlyings(&BTreeSet::from([catalog::ES]), &h)
+            .is_empty()
+    );
+    std::thread::sleep(Duration::from_millis(800)); // the book arrives
+    let id = h.submit(
+        Source::Test,
+        Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: front,
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Market,
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut filled = false;
+    while Instant::now() < deadline && !filled {
+        if let Ok(e) = events.recv_timeout(Duration::from_millis(500)) {
+            match e {
+                Event::Command { id: i, result, .. } if i == id => {
+                    assert!(result.is_ok(), "{result:?}")
+                }
+                Event::Order(o) if o.state == OrderState::Filled => filled = true,
+                _ => {}
+            }
+        }
+    }
+    assert!(filled, "the held feed's book filled it, with no pane");
+}
