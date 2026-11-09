@@ -304,6 +304,12 @@ pub fn open(id: PaneId, handle: PaneHandle, place: Option<&Placement>, cx: &mut 
                 ..Default::default()
             }),
             icon: crate::window_icon(),
+            window_min_size: (handle.kind() == crate::layout::PaneKind::Dom).then(|| {
+                gpui::size(
+                    gpui::px(crate::trade_bar::MIN_DOM_WIDTH),
+                    gpui::px(crate::trade_bar::MIN_DOM_PANE_H),
+                )
+            }),
             ..Default::default()
         }
     } else {

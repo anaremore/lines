@@ -407,9 +407,11 @@ mod tests {
 
     fn geometry(l: &Layout<u32>, leaves: &HashMap<u32, Leaf>) -> Vec<(u32, Rect)> {
         let order: Vec<u32> = l.leaves().into_iter().copied().collect();
-        l.place_where(Rect::new(0.0, 0.0, 1600.0, 900.0), &|id| {
-            leaves[id].state.is_shown()
-        })
+        l.place_where(
+            Rect::new(0.0, 0.0, 1600.0, 900.0),
+            &|id| leaves[id].state.is_shown(),
+            &|_| 0.0,
+        )
         .into_iter()
         .map(|p| (order[p.index], p.rect))
         .collect()

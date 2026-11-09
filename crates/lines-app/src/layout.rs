@@ -141,6 +141,9 @@ pub struct Divider {
     pub area: Rect,
     /// The boundary's position: x for `Row`, y for `Column`.
     pub at: f32,
+    /// The least height each side keeps (`Column`; 0 otherwise): the boundary stops there.
+    pub min_first: f32,
+    pub min_second: f32,
 }
 
 impl Divider {
@@ -148,7 +151,11 @@ impl Divider {
     pub fn ratio_at(&self, x: f32, y: f32) -> f32 {
         let r = match self.axis {
             Axis::Row => (x - self.area.x) / self.area.w.max(1.0),
-            Axis::Column => (y - self.area.y) / self.area.h.max(1.0),
+            Axis::Column => {
+                let lowest = self.area.y + (self.area.h - self.min_second).max(self.min_first);
+                let y = y.min(lowest).max(self.area.y + self.min_first);
+                (y - self.area.y) / self.area.h.max(1.0)
+            }
         };
         clamp_ratio(r)
     }
@@ -250,19 +257,27 @@ impl<T> Layout<T> {
     #[cfg(test)]
     /// Every leaf's rectangle in `area`. Leaves tile the area exactly; edges are whole px.
     pub fn place(&self, area: Rect) -> Vec<Placed> {
-        self.place_where(area, &|_| true)
+        self.place_where(area, &|_| true, &|_| 0.0)
     }
 
     /// The rectangles of the leaves for which `shown` is true; the others take no space.
     /// A split with one side wholly hidden gives the other side its whole rectangle, and its
     /// ratio is kept, so showing the hidden side again restores exactly the old geometry.
+    /// `min_h` is the least height a leaf keeps, ratio or not, wherever the space allows; the ratio
+    /// itself isn't touched, so a taller window restores the saved split.
     /// `Placed::index` is the leaf's position among *all* leaves.
-    pub fn place_where(&self, area: Rect, shown: &dyn Fn(&T) -> bool) -> Vec<Placed> {
+    pub fn place_where(
+        &self,
+        area: Rect,
+        shown: &dyn Fn(&T) -> bool,
+        min_h: &dyn Fn(&T) -> f32,
+    ) -> Vec<Placed> {
         let mut out = Vec::new();
         let mut next = 0;
         self.walk(
             area,
             shown,
+            min_h,
             &mut next,
             &mut Vec::new(),
             &mut |node, rect, _, index| {
@@ -277,16 +292,22 @@ impl<T> Layout<T> {
     #[cfg(test)]
     /// Every split's boundary in `area`, outermost first.
     pub fn dividers(&self, area: Rect) -> Vec<Divider> {
-        self.dividers_where(area, &|_| true)
+        self.dividers_where(area, &|_| true, &|_| 0.0)
     }
 
     /// The boundaries between shown leaves: a split with a wholly hidden side has none.
-    pub fn dividers_where(&self, area: Rect, shown: &dyn Fn(&T) -> bool) -> Vec<Divider> {
+    pub fn dividers_where(
+        &self,
+        area: Rect,
+        shown: &dyn Fn(&T) -> bool,
+        min_h: &dyn Fn(&T) -> f32,
+    ) -> Vec<Divider> {
         let mut out = Vec::new();
         let mut next = 0;
         self.walk(
             area,
             shown,
+            min_h,
             &mut next,
             &mut Vec::new(),
             &mut |node, rect, path, _| {
@@ -299,7 +320,14 @@ impl<T> Layout<T> {
                     && first.any(shown)
                     && second.any(shown)
                 {
-                    let (a, _) = cut(rect, *axis, *ratio);
+                    let (min_first, min_second) = match axis {
+                        Axis::Row => (0.0, 0.0),
+                        Axis::Column => (
+                            first.min_height(shown, min_h),
+                            second.min_height(shown, min_h),
+                        ),
+                    };
+                    let (a, _) = cut(rect, *axis, *ratio, min_first, min_second);
                     out.push(Divider {
                         path: path.to_vec(),
                         axis: *axis,
@@ -308,11 +336,41 @@ impl<T> Layout<T> {
                             Axis::Row => a.right(),
                             Axis::Column => a.bottom(),
                         },
+                        min_first,
+                        min_second,
                     });
                 }
             },
         );
         out
+    }
+
+    /// The least height this node keeps: stacked leaves add up, side by side the tallest counts.
+    fn min_height(&self, shown: &dyn Fn(&T) -> bool, min_h: &dyn Fn(&T) -> f32) -> f32 {
+        match self {
+            Layout::Pane(t) => {
+                if shown(t) {
+                    min_h(t)
+                } else {
+                    0.0
+                }
+            }
+            Layout::Split {
+                axis,
+                first,
+                second,
+                ..
+            } => {
+                let (a, b) = (
+                    first.min_height(shown, min_h),
+                    second.min_height(shown, min_h),
+                );
+                match axis {
+                    Axis::Row => a.max(b),
+                    Axis::Column => a + b,
+                }
+            }
+        }
     }
 
     /// Whether any leaf here is shown.
@@ -328,6 +386,7 @@ impl<T> Layout<T> {
         &self,
         rect: Rect,
         shown: &dyn Fn(&T) -> bool,
+        min_h: &dyn Fn(&T) -> f32,
         next: &mut usize,
         path: &mut Vec<Side>,
         f: &mut impl FnMut(&Layout<T>, Rect, &[Side], usize),
@@ -346,14 +405,23 @@ impl<T> Layout<T> {
                 second,
             } => {
                 let (a, b) = match (first.any(shown), second.any(shown)) {
-                    (true, true) => cut(rect, *axis, *ratio),
+                    (true, true) => {
+                        let (mf, ms) = match axis {
+                            Axis::Row => (0.0, 0.0),
+                            Axis::Column => (
+                                first.min_height(shown, min_h),
+                                second.min_height(shown, min_h),
+                            ),
+                        };
+                        cut(rect, *axis, *ratio, mf, ms)
+                    }
                     _ => (rect, rect),
                 };
                 path.push(Side::First);
-                first.walk(a, shown, next, path, f);
+                first.walk(a, shown, min_h, next, path, f);
                 path.pop();
                 path.push(Side::Second);
-                second.walk(b, shown, next, path, f);
+                second.walk(b, shown, min_h, next, path, f);
                 path.pop();
             }
         }
@@ -387,7 +455,7 @@ impl<T> Layout<T> {
     /// The leaf whose rectangle lies next to leaf `from` in `dir`: of the leaves across that
     /// edge that overlap it, the one overlapping most (ties: the one nearest its centre).
     pub fn neighbour(&self, from: usize, dir: Direction, area: Rect) -> Option<usize> {
-        self.neighbour_where(from, dir, area, &|_| true)
+        self.neighbour_where(from, dir, area, &|_| true, &|_| 0.0)
     }
 
     /// [`Layout::neighbour`] among shown leaves (`from` and the result index all leaves).
@@ -397,8 +465,9 @@ impl<T> Layout<T> {
         dir: Direction,
         area: Rect,
         shown: &dyn Fn(&T) -> bool,
+        min_h: &dyn Fn(&T) -> f32,
     ) -> Option<usize> {
-        let placed = self.place_where(area, shown);
+        let placed = self.place_where(area, shown, min_h);
         let src = placed.iter().find(|p| p.index == from)?.rect;
         let (cx, cy) = src.centre();
         let eps = 0.5;
@@ -537,7 +606,9 @@ impl<T: PartialEq> Layout<T> {
 }
 
 /// Split `r` along `axis` at `ratio`, at a whole pixel.
-fn cut(r: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
+/// Split `r`. A `Column` boundary keeps `min_first` above it and `min_second` below it; a space too
+/// short for both keeps the first's, and the second has what's left.
+fn cut(r: Rect, axis: Axis, ratio: f32, min_first: f32, min_second: f32) -> (Rect, Rect) {
     match axis {
         Axis::Row => {
             let a = (r.w * ratio).round();
@@ -547,7 +618,11 @@ fn cut(r: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
             )
         }
         Axis::Column => {
-            let a = (r.h * ratio).round();
+            let a = (r.h * ratio)
+                .round()
+                .min(r.h - min_second)
+                .max(min_first)
+                .min(r.h);
             (
                 Rect::new(r.x, r.y, r.w, a),
                 Rect::new(r.x, r.y + a, r.w, r.h - a),
@@ -652,6 +727,88 @@ pub fn trading_group<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stack of a tall-minimum pane (1) over a free one (2), at `ratio`.
+    fn stack(ratio: f32) -> Layout<u32> {
+        Layout::split(Axis::Column, ratio, Layout::Pane(1), Layout::Pane(2))
+    }
+
+    fn min_of_one(id: &u32) -> f32 {
+        if *id == 1 { 91.0 } else { 0.0 }
+    }
+
+    fn heights(l: &Layout<u32>, h: f32) -> Vec<f32> {
+        l.place_where(Rect::new(0.0, 0.0, 800.0, h), &|_| true, &min_of_one)
+            .iter()
+            .map(|p| p.rect.h)
+            .collect()
+    }
+
+    /// A small ratio keeps the pane's minimum, tiling exactly; the ratio is untouched, so a taller
+    /// window gets the saved split back.
+    #[test]
+    fn a_minimum_height_holds_against_the_ratio() {
+        let l = stack(0.05);
+        assert_eq!(heights(&l, 800.0), [91.0, 709.0]);
+        assert_eq!(
+            heights(&l, 2000.0),
+            [100.0, 1900.0],
+            "the ratio's own share"
+        );
+        let Layout::Split { ratio, .. } = l else {
+            panic!()
+        };
+        assert_eq!(ratio, 0.05);
+        // On the second side too.
+        let l = Layout::split(Axis::Column, 0.95, Layout::Pane(2), Layout::Pane(1));
+        assert_eq!(heights(&l, 800.0), [709.0, 91.0]);
+        // Hidden: no claim on the space.
+        let placed = l.place_where(
+            Rect::new(0.0, 0.0, 800.0, 800.0),
+            &|id| *id != 1,
+            &min_of_one,
+        );
+        assert_eq!(placed[0].rect.h, 800.0);
+    }
+
+    /// Nested: stacked minimums add up, side by side the tallest counts, however deep.
+    #[test]
+    fn minimums_add_up_through_nested_splits() {
+        let beside = Layout::split(Axis::Row, 0.5, Layout::Pane(1), Layout::Pane(2));
+        let l = Layout::split(Axis::Column, 0.05, beside, Layout::Pane(2));
+        assert_eq!(heights(&l, 800.0), [91.0, 91.0, 709.0]);
+        let two = Layout::split(Axis::Column, 0.05, Layout::Pane(1), Layout::Pane(1));
+        let l = Layout::split(Axis::Column, 0.05, two, Layout::Pane(2));
+        assert_eq!(heights(&l, 800.0), [91.0, 91.0, 618.0]);
+    }
+
+    /// Too short for every minimum: the rectangles still tile the space, the first keeps its
+    /// minimum and the second has what's left (nothing, past that).
+    #[test]
+    fn a_space_too_short_keeps_the_first_minimum() {
+        let two = Layout::split(Axis::Column, 0.5, Layout::Pane(1), Layout::Pane(1));
+        assert_eq!(heights(&two, 150.0), [91.0, 59.0]);
+        assert_eq!(heights(&two, 60.0), [60.0, 0.0]);
+    }
+
+    /// A drag stops at the minimum, on both sides, and the boundary drawn agrees.
+    #[test]
+    fn a_divider_stops_at_the_minimum() {
+        let two = Layout::split(Axis::Column, 0.5, Layout::Pane(1), Layout::Pane(1));
+        let area = Rect::new(0.0, 10.0, 800.0, 400.0);
+        let d = &two.dividers_where(area, &|_| true, &min_of_one)[0];
+        assert_eq!(d.at, 210.0);
+        assert_eq!(d.ratio_at(0.0, 10.0), 91.0 / 400.0, "dragged to the top");
+        assert_eq!(
+            d.ratio_at(0.0, 410.0),
+            (400.0 - 91.0) / 400.0,
+            "to the bottom"
+        );
+        assert_eq!(d.ratio_at(0.0, 110.0), 0.25, "free between");
+        let free = Layout::split(Axis::Row, 0.5, Layout::Pane(1), Layout::Pane(1));
+        let d = &free.dividers_where(area, &|_| true, &min_of_one)[0];
+        assert_eq!(d.ratio_at(0.0, 0.0), MIN_RATIO, "width is not limited");
+    }
 
     fn area(w: f32, h: f32) -> Rect {
         Rect::new(0.0, 0.0, w, h)

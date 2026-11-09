@@ -65,6 +65,10 @@ use crate::wsdoc::{
 
 const TAB_BAR_H: f32 = 28.0;
 const HINT_H: f32 = 22.0;
+/// The shortest window a person can drag to: room for two DOMs stacked. Narrow enough for any
+/// layout that works today.
+const MIN_WINDOW_W: f32 = crate::trade_bar::MIN_DOM_WIDTH;
+const MIN_WINDOW_H: f32 = TAB_BAR_H + HINT_H + 2.0 * crate::trade_bar::MIN_DOM_PANE_H;
 const TAB_W: f32 = 168.0;
 const TAB_X0: f32 = 4.0;
 /// Width of a divider's grab handle (the visible line is one pixel).
@@ -432,6 +436,14 @@ impl Tab {
 
     fn is_shown(&self, id: &PaneId) -> bool {
         self.state(*id).is_shown()
+    }
+
+    /// The least height a split leaves this pane: a DOM keeps its header, account and exits.
+    fn min_h(&self, id: &PaneId) -> f32 {
+        match self.handle(*id).map(|h| h.kind()) {
+            Some(crate::layout::PaneKind::Dom) => crate::trade_bar::MIN_DOM_PANE_H,
+            _ => 0.0,
+        }
     }
 
     fn order(&self) -> Vec<PaneId> {
@@ -1476,7 +1488,7 @@ impl WindowView {
                     .index_of(&tab.focused)
                     .and_then(|i| {
                         tab.layout
-                            .place_where(area, &|id| tab.is_shown(id))
+                            .place_where(area, &|id| tab.is_shown(id), &|id| tab.min_h(id))
                             .into_iter()
                             .find(|p| p.index == i)
                             .map(|p| p.rect)
@@ -1649,7 +1661,7 @@ impl WindowView {
         let index = tab.layout.index_of(&id);
         let r = tab
             .layout
-            .place_where(area, &|p| tab.is_shown(p))
+            .place_where(area, &|p| tab.is_shown(p), &|p| tab.min_h(p))
             .into_iter()
             .find(|p| Some(p.index) == index)
             .map_or(Rect::new(0.0, 0.0, 360.0, 600.0), |p| p.rect);
@@ -1710,7 +1722,7 @@ impl WindowView {
         };
         if let Some(j) = tab
             .layout
-            .neighbour_where(i, dir, area, &|id| tab.is_shown(id))
+            .neighbour_where(i, dir, area, &|id| tab.is_shown(id), &|id| tab.min_h(id))
         {
             let id = *tab.layout.leaves()[j];
             self.focus_pane(id, window, cx);
@@ -2585,7 +2597,7 @@ impl WindowView {
         let pane = self.tabs.get(self.active).and_then(|t| {
             let order = t.order();
             t.layout
-                .place_where(area, &|id| t.is_shown(id))
+                .place_where(area, &|id| t.is_shown(id), &|id| t.min_h(id))
                 .into_iter()
                 .find(|p| p.rect.contains(x, y - bar))
                 .map(|p| order[p.index])
@@ -2917,7 +2929,8 @@ impl WindowView {
         let shown = |id: &PaneId| tab.is_shown(id);
         let mut out = Vec::new();
         let leaves = tab.layout.leaves();
-        let placed = tab.layout.place_where(area, &shown);
+        let min_h = |id: &PaneId| tab.min_h(id);
+        let placed = tab.layout.place_where(area, &shown, &min_h);
         let hovered = self.hover_pane;
         let bar = self.bar_h();
         for p in &placed {
@@ -2986,7 +2999,7 @@ impl WindowView {
         // Separators and their grab handles (on top of the panes).
         for (i, d) in tab
             .layout
-            .dividers_where(area, &shown)
+            .dividers_where(area, &shown, &min_h)
             .into_iter()
             .enumerate()
         {
@@ -3570,6 +3583,7 @@ pub fn open_window(
             ..Default::default()
         }),
         icon: crate::window_icon(),
+        window_min_size: Some(size(px(MIN_WINDOW_W), px(MIN_WINDOW_H))),
         ..Default::default()
     });
     let handle = cx.open_window(opts, move |window, cx| {
