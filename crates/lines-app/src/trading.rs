@@ -1806,14 +1806,23 @@ fn spawn_pump(
         .spawn(move || {
             // A trigger's underlying keeps its feed from the moment one is alive until the last
             // one ends, so a Stop fires with no pane open. A restored one arrives here too.
+            // Only when an event came, or to try again for one with no feed (a source that
+            // wasn't ready), every few seconds.
             let mut wanted = std::collections::BTreeSet::new();
+            let mut retry_at: Option<Instant> = None;
             let mut hold_feeds = |touched: &mut Vec<Option<AccountId>>| {
                 let Some((bridge, handle)) = &trigger_feeds else {
                     return;
                 };
+                let retry = retry_at.is_some_and(|at| Instant::now() >= at);
+                if touched.is_empty() && !retry {
+                    return;
+                }
                 let now_wanted = cache.read().trigger_products();
-                if now_wanted != wanted {
+                if now_wanted != wanted || retry {
                     let missing = bridge.hold_underlyings(&now_wanted, handle);
+                    retry_at =
+                        (!missing.is_empty()).then(|| Instant::now() + Duration::from_secs(5));
                     cache.read().trigger_feeds_missing = missing;
                     wanted = now_wanted;
                     if !touched.contains(&None) {

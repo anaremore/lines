@@ -2894,7 +2894,10 @@ impl WindowView {
                 d.child(
                     div()
                         .id("trigger-status")
-                        .flex_none()
+                        // Gives way in a narrow window before the links after it; the loud part
+                        // is first.
+                        .min_w_0()
+                        .truncate()
                         .px_1()
                         .when(loud, |d| d.bg(t.warn).text_color(t.on_warn))
                         .when(!loud, |d| d.text_color(t.text_main))

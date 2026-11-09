@@ -1014,6 +1014,10 @@ impl ChainView {
 
     /// The account and underlying whose triggers this pane's armed rows show.
     pub fn shows_triggers(&self) -> Option<(AccountId, lines_core::ProductId)> {
+        // Unavailable, it draws no rows.
+        if pane::unavailable_title(&self.feed).is_some() {
+            return None;
+        }
         Some((self.trade.account.clone()?, self.product.id))
     }
 

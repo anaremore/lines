@@ -535,9 +535,9 @@ impl FeedBridge {
     }
 
     /// Keep a feed running for exactly these products, so a trigger on one can fire with no pane
-    /// open (decision 0029). It's the same subscription a pane on that product has, so the core
-    /// never gets a feed's data twice. Returns the products with no feed to be had: their
-    /// triggers can't fire, which the app says.
+    /// open (decision 0029). It's the subscription a pane on that product has (its front-month
+    /// target), so the core doesn't get that feed's data twice. Returns the products with no feed
+    /// to be had: their triggers can't fire, which the app says.
     pub fn hold_underlyings(
         &self,
         wanted: &BTreeSet<ProductId>,
