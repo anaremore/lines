@@ -1065,10 +1065,13 @@ fn a_waiting_flatten_doesnt_go_beside_one_that_spoke_up() {
         before + 1,
         "not beside the first"
     );
-    // Silent for 5 s again: the wake comes, and it's replaced.
+    // Silent for 5 s again: the wake comes on time, and it's replaced.
+    let spoke = r.core.order(first).unwrap().updated.0;
     let wake = r.core.next_wake().expect("it looks again");
     assert!(wake.0 > r.t, "not in a loop: {} vs {}", wake.0, r.t);
-    r.wait(5_000);
+    assert!(wake.0 <= spoke + 5_000, "{} vs {spoke}", wake.0);
+    r.t = spoke + 5_000;
+    r.wait(0);
     r.wait(LAT + 1);
     assert_eq!(r.markets.load(Ordering::Relaxed), before + 2);
     assert_eq!(r.core.position(&acct(), es()), 0);
@@ -1113,10 +1116,11 @@ fn a_rebuild_doesnt_end_the_wait_for_a_cancel() {
     assert_eq!(r.core.position(&acct(), es()), 0, "flat, not reversed");
 }
 
-/// A Flatten waiting when the broker drops: a market order can't go, and the core doesn't spin on
-/// it. It goes when the broker is back, unless a person took it back.
+/// A Flatten waiting when the broker drops: its market order can't go, and what the position is
+/// when it's back isn't known yet, so it ends as a rejected order saying so. Nothing goes later,
+/// and nothing spins; the next Flatten is a person's to ask.
 #[test]
-fn a_waiting_flatten_holds_through_a_disconnect() {
+fn a_waiting_flatten_ends_on_a_disconnect_and_says_so() {
     let mut r = Rig::new(false, CME_OPEN);
     r.long_es(2);
     r.cmd(Command::PlaceOrder(OrderSpec {
@@ -1131,16 +1135,38 @@ fn a_waiting_flatten_holds_through_a_disconnect() {
     .unwrap();
     r.wait(LAT + 1);
     let before = r.markets.load(Ordering::Relaxed);
-    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.lose_cancels.store(99, Ordering::Relaxed);
     r.flatten(es());
     r.down.store(true, Ordering::Relaxed);
-    r.wait(6_000);
-    assert_eq!(r.markets.load(Ordering::Relaxed), before);
-    let wake = r.core.next_wake().expect("it looks again");
-    assert!(wake.0 > r.t, "not in a loop: {} vs {}", wake.0, r.t);
-    r.down.store(false, Ordering::Relaxed);
     r.wait(1);
-    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before);
+    let reason = r.events.iter().rev().find_map(|e| match e {
+        Event::Order(o) => match &o.state {
+            OrderState::Rejected { reason } => Some(reason.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|s| s.contains("disconnected")),
+        "{reason:?}"
+    );
+    r.wait(6_000);
+    r.down.store(false, Ordering::Relaxed);
+    r.lose_cancels.store(0, Ordering::Relaxed);
+    r.wait(1);
+    r.wait(LAT + 1);
+    assert_eq!(
+        r.markets.load(Ordering::Relaxed),
+        before,
+        "nothing goes later"
+    );
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    // Asked again, it closes.
+    r.flatten(es());
+    r.wait(LAT + 1);
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), es()), 0);
 }

@@ -44,6 +44,16 @@ pub(super) fn closes(o: &Order, now: UtcMillis) -> bool {
         && now.0.saturating_sub(o.updated.0) < FLATTEN_ANSWER_MS
 }
 
+fn flatten_spec(account: &AccountId, contract: ContractKey, qty: i64) -> OrderSpec {
+    OrderSpec {
+        account: account.clone(),
+        contract,
+        side: if qty > 0 { Side::Sell } else { Side::Buy },
+        qty: Qty(qty.abs()),
+        kind: OrderKind::Market,
+    }
+}
+
 impl TradingCore {
     /// Which orders a Flatten of these positions leaves working on a broker honoring reduce-only:
     /// what protects them, and which the broker caps, until they're flat. A plain stop isn't: it
@@ -63,13 +73,7 @@ impl TradingCore {
         contract: ContractKey,
         qty: i64,
     ) -> OrderId {
-        let spec = OrderSpec {
-            account: account.clone(),
-            contract,
-            side: if qty > 0 { Side::Sell } else { Side::Buy },
-            qty: Qty(qty.abs()),
-            kind: OrderKind::Market,
-        };
+        let spec = flatten_spec(account, contract, qty);
         let o = self.new_order(now, &spec, Role::Flatten, None);
         let id = o.id;
         self.send(env, now, BrokerRequest::Place(o));
@@ -128,9 +132,19 @@ impl TradingCore {
 
     /// A Flatten waiting for its cancels goes once they're answered, or the venue has had long
     /// enough. It closes what the position is then: an exit may have filled meanwhile.
-    /// With the broker disconnected its market order can't go: it holds until the broker is back.
+    /// With the broker disconnected the market order can't go, and what the position is when it's
+    /// back isn't known until a rebuild: it ends here, as a refused order saying so.
     pub(super) fn flatten_pending(&mut self, now: UtcMillis) {
         if !self.broker.connected() {
+            for p in std::mem::take(&mut self.pending_flattens) {
+                let qty = self.position(&p.account, p.contract);
+                if qty != 0 {
+                    let spec = flatten_spec(&p.account, p.contract, qty);
+                    let id = self.new_order(now, &spec, Role::Flatten, None).id;
+                    let reason = "the broker disconnected before the close could go: the position is still open and its orders may be canceled".to_owned();
+                    self.transition(id, OrderState::Rejected { reason }, now);
+                }
+            }
             return;
         }
         let mut i = 0;
@@ -144,9 +158,8 @@ impl TradingCore {
                 && self
                     .orders
                     .values()
-                    .any(|o| closes(o, now) && &o.account == &account && o.contract == contract)
+                    .any(|o| closes(o, now) && o.account == account && o.contract == contract)
             {
-                self.pending_flattens[i].since = now;
                 i += 1;
                 continue;
             }
@@ -157,11 +170,14 @@ impl TradingCore {
             }
             let mut p = self.pending_flattens.remove(i);
             // Anything placed while it waited goes too: it could fill or open a position.
-            self.cancel_scoped(&p.env, now, &account, Some(contract), None);
             if qty != 0 {
+                self.cancel_scoped(&p.env, now, &account, Some(contract), None);
                 // Click to sent counts from here: the wait is the broker's answers, not the core.
                 p.env.issued = std::time::Instant::now();
                 self.flatten_send(&p.env, now, &account, contract, qty);
+            } else {
+                // Nothing left to close: a strategy's Flatten is its Cancel All.
+                self.cancel_all(&p.env, now, &account, Some(contract));
             }
         }
     }
@@ -197,18 +213,25 @@ impl TradingCore {
                 .any(|o| closes(o, now) && &o.account == account && o.contract == contract)
     }
 
-    /// When a waiting Flatten stops waiting for an answer.
+    /// When a waiting Flatten stops waiting: 5 s after it asked and after the last word from a
+    /// Flatten order it won't go beside.
     pub(super) fn flatten_wake(&self) -> Option<UtcMillis> {
-        let next = self
-            .pending_flattens
+        self.pending_flattens
             .iter()
-            .map(|p| UtcMillis(p.since.0 + FLATTEN_ANSWER_MS))
-            .min()?;
-        // Disconnected, what is due stays due: look again later, not in a loop.
-        Some(if self.broker.connected() {
-            next
-        } else {
-            UtcMillis(self.seen_now.0.saturating_add(FLATTEN_ANSWER_MS))
-        })
+            .map(|p| {
+                let spoke = self
+                    .orders
+                    .values()
+                    .filter(|o| {
+                        closes(o, self.seen_now)
+                            && o.account == p.account
+                            && o.contract == p.contract
+                    })
+                    .map(|o| o.updated.0)
+                    .max()
+                    .unwrap_or(p.since.0);
+                UtcMillis(p.since.0.max(spoke) + FLATTEN_ANSWER_MS)
+            })
+            .min()
     }
 }
