@@ -1629,6 +1629,7 @@ where
             return;
         }
         workspace::start_autosave(cx);
+        workspace::start_trigger_watch(cx);
         diagnostics::start_sampler(cx);
         cx.activate(true);
     });

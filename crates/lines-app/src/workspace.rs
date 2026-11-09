@@ -136,6 +136,9 @@ pub struct Workspace {
     closed_tabs: tabstate::ClosedTabs<TabDoc>,
     /// The chart that last had focus in a main window (where "Dock beside chart" goes).
     last_chart: Option<PaneId>,
+    /// What's wrong with a trigger, if anything (`chain_lines::trigger_status`), kept fresh by
+    /// `start_trigger_watch`: true when it can't fire.
+    trigger_status: Option<(String, bool)>,
     /// Problems and refusals shown inline in the footer (`crate::notice`: repeats counted,
     /// refusals expire, problems that need action stay until dismissed).
     pub notices: Notices,
@@ -164,6 +167,7 @@ impl Workspace {
             pane_windows: Vec::new(),
             closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
             last_chart: None,
+            trigger_status: None,
             notices: Notices::default(),
             show_perf_stats: false,
             show_latency_hud: false,
@@ -2811,6 +2815,7 @@ impl WindowView {
         let t = self.theme;
         let ws = cx.global::<Workspace>();
         let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
+        let trigger_status = ws.trigger_status.clone();
         let is_first = ws.windows.first().map(|w| w.window_id());
         // What this tab isn't showing, as text that brings it back.
         let (hidden, detached) = match self.tabs.get(self.active) {
@@ -2883,6 +2888,17 @@ impl WindowView {
                                 cx.notify();
                             }),
                         ),
+                )
+            })
+            .when_some(trigger_status, |d, (text, loud)| {
+                d.child(
+                    div()
+                        .id("trigger-status")
+                        .flex_none()
+                        .px_1()
+                        .when(loud, |d| d.bg(t.warn).text_color(t.on_warn))
+                        .when(!loud, |d| d.text_color(t.text_main))
+                        .child(text),
                 )
             })
             .when(!hidden.is_empty(), |d| {
@@ -4106,6 +4122,59 @@ fn autosave_write(doc: &WorkspaceDoc, cx: &mut App) {
         a.last = bytes.clone();
         w.write(a.path.clone(), bytes);
     }
+}
+
+/// Look again at what's wrong with a trigger. Busy this instant: next time.
+pub(crate) fn refresh_trigger_status(cx: &mut App) {
+    let Some(trading) = crate::trading::Trading::try_global(cx) else {
+        return;
+    };
+    // The chains a person can see: the active tab's shown panes in a window on screen, and
+    // anything popped out.
+    let mut shown: Vec<(lines_trading::AccountId, lines_core::ProductId)> = Vec::new();
+    for w in cx.global::<Workspace>().windows.clone() {
+        let _ = w.read_with(cx, |wv, cx| {
+            for (i, tab) in wv.tabs.iter().enumerate() {
+                let front = i == wv.active && wv.window_visible;
+                for (id, pane) in &tab.panes {
+                    let state = tab.state(*id);
+                    let visible = state == PaneState::Detached || (front && state.is_shown());
+                    if let (true, PaneHandle::Chain(c)) = (visible, &pane.handle)
+                        && let Some(s) = c.read(cx).shows_triggers()
+                    {
+                        shown.push(s);
+                    }
+                }
+            }
+        });
+    }
+    let Some(st) = trading.cache.try_read() else {
+        return;
+    };
+    let status = crate::chain_lines::trigger_status(
+        st.triggers(),
+        st.trigger_feeds_missing(),
+        |account, product| shown.iter().any(|(a, p)| a == account && *p == product),
+    );
+    drop(st);
+    let ws = cx.global_mut::<Workspace>();
+    if ws.trigger_status != status {
+        ws.trigger_status = status;
+        for w in ws.windows.clone() {
+            let _ = w.update(cx, |_, _, cx| cx.notify());
+        }
+    }
+}
+
+/// Keep the workspace's word on triggers fresh: a feed can go stale with nothing else changing.
+pub fn start_trigger_watch(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.update(refresh_trigger_status);
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+        }
+    })
+    .detach();
 }
 
 /// Snapshot the workspace every 2 s and save it when it changed (off the UI thread).

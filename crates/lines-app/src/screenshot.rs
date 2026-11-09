@@ -467,6 +467,7 @@ async fn shoot(
     // only paint asks for (VWAP-relative levels follow the chart's ETH VWAP): sync the engine
     // again and give the panes a poll tick before the frames that are read back.
     let _ = cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx));
+    cx.update(crate::workspace::refresh_trigger_status);
     lines_feed::indicators::engine().sync();
     cx.background_executor()
         .timer(Duration::from_millis(100))

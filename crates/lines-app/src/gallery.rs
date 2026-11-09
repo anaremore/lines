@@ -500,6 +500,21 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
+    // A trigger no pane on screen shows: the workspace says so, in the plain chain's status too.
+    {
+        let mut a = vec![
+            "--workspace".to_owned(),
+            ws("chart-only.json"),
+            "--size".to_owned(),
+            "1200x500".to_owned(),
+            "--paper".to_owned(),
+            armed.to_owned(),
+        ];
+        a.extend(args("--theme dark"));
+        let mut sc = s("trigger-off-screen", true, CHAIN_AT, a);
+        sc.chain = true;
+        v.push(sc);
+    }
     // P&L to close (decision 0029): the chart continues to the close and the chain keeps one
     // side. The summary comes with the position's exits.
     for (name, quick, size, extra, shot) in [
@@ -1024,6 +1039,12 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ),
     )
     .context("chain.json")?;
+    // A chart of the same underlying, with no chain to show its triggers.
+    std::fs::write(
+        dir.join("chart-only.json"),
+        chain.replacen(r#""kind": "chain""#, r#""kind": "chart""#, 1),
+    )
+    .context("chart-only.json")?;
     // The option chart (decision 0029): the same pane with its chart on.
     let chain_chart = chain.replacen(
         r#""kind": "chain""#,
