@@ -208,7 +208,7 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
                 toggle("Price trail", Command::DomTrail, d.trail),
                 MenuItem {
                     hint: format!("{:.1} s", f64::from(d.half_life_ms) / 1000.0),
-                    ..row("Next trail half-life", Command::DomTrailHalfLife)
+                    ..row("Next price trail half-life", Command::DomTrailHalfLife)
                 },
             ],
         ));

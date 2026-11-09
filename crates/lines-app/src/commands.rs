@@ -725,7 +725,7 @@ pub fn label(c: Command) -> String {
         Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
         Command::ToggleLatencyHud => "Latency HUD on/off (chart headers)".into(),
         Command::DomTrail => "DOM: price trail on/off".into(),
-        Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
+        Command::DomTrailHalfLife => "DOM: next price trail half-life".into(),
         Command::OpenJournal => "Open journal".into(),
         Command::OpenChain => "Open option chain".into(),
         Command::ChainOneClick => "Option chain: One-click on/off".into(),
