@@ -511,18 +511,18 @@ pub const LINK_TO_TRADE: &str = "Link this chart to a DOM to place orders from i
 /// A strip order with no linked DOM enabled.
 pub const ENABLE_TO_ORDER: &str = "Enable trading on the linked DOM to place orders from the chart";
 
+/// Whether a press on a strip button acts: never a double-click's second, so one double-click on
+/// BUY MKT is one market order, not two (and two brackets with a bracket on). `popover::second_press`
+/// isn't enough here: it lets a second press on the same spot through. So two quick presses within
+/// the system's double-click time are one order; after a pause, each is its own.
+pub fn strip_press_acts(click_count: usize) -> bool {
+    click_count <= 1
+}
+
 /// The command for a strip button: the DOM's own intents (market as its BUY/SELL MKT, a limit
 /// as a click in its bid/ask column at that price), with the chart's quantity and bracket. A
 /// chart shows no switch: the window sends this only when a linked DOM has trading enabled,
 /// so it is built here as if enabled and the switch is checked there (`linked_dom_enabled`).
-/// Whether a press on a strip button acts: never a double-click's second. `popover::second_press`
-/// (`moved`) alone isn't enough here: it lets a second press on the same spot through, and one
-/// double-click on BUY MKT would be two market orders, and two brackets with a bracket on. Two
-/// separate clicks are two presses with a count of 1, and two orders.
-pub fn strip_press_acts(click_count: usize, moved: bool) -> bool {
-    click_count <= 1 && !moved
-}
-
 pub fn strip_command(
     o: StripOrder,
     at: Option<Price>,
@@ -850,31 +850,16 @@ mod tests {
         assert_eq!(tag(&target, &g), "Orders 5 ×5 @ 5790.00–5823.00");
     }
 
-    /// Cancel all takes two presses, and the second answers the count on screen: an order
-    /// finishing in between disarms it.
-    /// One double-click is one order, on the same spot and with the guard's real verdict: the
-    /// guard lets that second press through, so it can't be the only check. Two separate clicks
-    /// still send two. Something moved under the pointer refuses a first press too.
+    /// One double-click is one order, however long the run; a press after a pause counts 1.
     #[test]
     fn a_double_click_on_the_strip_acts_once() {
-        let at = gpui::point(gpui::px(300.0), gpui::px(40.0));
-        crate::popover::mark_moved_under_pointer();
-        let press = |count| {
-            let moved = crate::popover::second_press(count, at);
-            (moved, strip_press_acts(count, moved))
-        };
-        assert_eq!(press(1), (false, true), "the first acts");
-        assert_eq!(
-            press(2),
-            (false, false),
-            "the guard allows it; the strip doesn't"
-        );
-        assert_eq!(press(3), (false, false), "nor a third");
-        assert_eq!(press(1), (false, true), "a separate click");
-        assert_eq!(press(1), (false, true), "and another");
-        assert!(!strip_press_acts(1, true), "something moved");
+        assert!(strip_press_acts(1), "the first");
+        assert!(!strip_press_acts(2), "a double-click's second");
+        assert!(!strip_press_acts(3), "nor a third");
     }
 
+    /// Cancel all takes two presses, and the second answers the count on screen: an order
+    /// finishing in between disarms it.
     #[test]
     fn cancel_all_needs_a_second_press_for_the_same_orders() {
         let row = |id| GroupRow {
