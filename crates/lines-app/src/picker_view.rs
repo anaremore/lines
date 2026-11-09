@@ -135,7 +135,11 @@ impl PickerUi {
 
     pub fn close(&mut self) -> bool {
         self.error = None;
-        self.picker.take().is_some()
+        let closed = self.picker.take().is_some();
+        if closed {
+            crate::popover::mark_moved_under_pointer();
+        }
+        closed
     }
 
     /// Route a key to the open picker.
@@ -212,6 +216,7 @@ impl PickerUi {
             p.selected = row;
             p.offset = 0;
         }
+        crate::popover::mark_moved_under_pointer();
         self.confirm(today, availability)
     }
 

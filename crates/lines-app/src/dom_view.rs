@@ -58,6 +58,8 @@ use crate::wsdoc::{DomState, PaneDoc};
 /// Most rows a ladder shows (the row buffer is allocated once at this size).
 const MAX_ROWS: usize = 256;
 const ROW_H: f32 = 18.0;
+/// A ladder row's height, for the trade panel's reckoning of what a short pane holds.
+pub(crate) const LADDER_ROW_H: f32 = ROW_H;
 const TEXT_PX: f32 = 12.0;
 const PAD: f32 = 6.0;
 
@@ -113,6 +115,15 @@ pub struct DomView {
     orders: OrdersLayer,
     /// Whether the trading header was last rendered with its narrow labels.
     header_narrow: Option<bool>,
+    /// The whole pane's height (last frame's layout; 0: not laid out yet): which of the trade
+    /// panel's rows it has room for.
+    pane_h: f32,
+    /// The whole pane's width: the ladder's bounds aren't known while its feed is unavailable.
+    pane_w: f32,
+    /// Whether the bracket editor was open as last painted: its closing moves rows.
+    was_editing: bool,
+    /// Whether this pane has a trade panel, whose rows decide if the ladder shows.
+    has_panel: bool,
     /// Where price just traded (`crate::dom_trail`), off by default.
     trail: DomTrail,
 }
@@ -137,7 +148,8 @@ impl TradePane for DomView {
         &self.focus
     }
     fn shows_size(&self) -> bool {
-        self.keys_free()
+        // A short pane's quantity row can have gone.
+        self.keys_free() && self.panel_rows().entry
     }
     fn keys_free(&self) -> bool {
         self.trade.bracket_confirm.is_none()
@@ -300,6 +312,10 @@ impl DomView {
             trade,
             orders: OrdersLayer::default(),
             header_narrow: None,
+            pane_h: 0.0,
+            pane_w: 0.0,
+            was_editing: false,
+            has_panel: false,
             trail,
         }
     }
@@ -421,6 +437,7 @@ impl DomView {
     // ---- input ---------------------------------------------------------------------
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let second = crate::popover::second_press(ev.click_count, ev.position);
         // A click that closes a list (the account list, the picker) does only that: never
         // also an order on the ladder under it. The account list (a popover) takes no focus
         // either; it normally takes the press on its backdrop (`crate::popover`), this is the
@@ -431,6 +448,17 @@ impl DomView {
             return;
         }
         self.focus.focus(window, cx);
+        if second {
+            // Aimed at what has moved: a ladder row now under the pointer is no order's aim.
+            cx.stop_propagation();
+            return;
+        }
+        if !self.ladder_showing() {
+            // No ladder shows: no column divider or row to press.
+            self.picker.close();
+            cx.notify();
+            return;
+        }
         if self.picker.close() {
             cx.stop_propagation();
             cx.notify();
@@ -700,6 +728,9 @@ impl DomView {
 
     /// Right-click on the header row: the column menu (the workspace shows it, window-wide).
     fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if crate::popover::second_press(ev.click_count, ev.position) || !self.ladder_showing() {
+            return;
+        }
         let (x, y) = self.table_xy(ev.position);
         if self.cols.hit(x, y, 1) != HeaderHit::Outside {
             cx.emit(ColumnMenu(ev.position));
@@ -732,6 +763,9 @@ impl DomView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ladder_showing() {
+            return;
+        }
         // Under the pointer now, and hovered since the pointer last moved.
         let hovered = (self.column_at(ev.position) == Some(DomColumn::Orders))
             .then(|| self.row_at(ev.position))
@@ -753,6 +787,8 @@ impl DomView {
         if whole != 0.0 {
             self.scroll_rows -= whole;
             self.view.scroll(whole as i64);
+            // A row under a still pointer is another price now.
+            crate::popover::mark_moved_under_pointer();
             cx.notify();
         }
     }
@@ -844,6 +880,13 @@ impl DomView {
         }
         self.common.paints += 1;
         self.bounds = bounds;
+        // A short pane's ladder: enough to show the market, or nothing, and nothing left to press
+        // (what was last drawn is no market to aim at).
+        if !self.ladder_showing() {
+            self.rows.clear();
+            self.orders.hover = None;
+            return;
+        }
         let rows = self.visible_rows();
         // Hit-tested here, after layout, from the pointer's actual position: nothing the
         // trader aims at moves while the pointer is over the ladder.
@@ -1197,6 +1240,12 @@ impl DomView {
     }
 }
 
+/// Whether the ladder shows: the panel's own decision, which keeps it with its quantity row, and
+/// room for its header and enough rows for the inside market.
+fn ladder_shows(has_panel: bool, rows_ladder: bool, height: f32) -> bool {
+    (!has_panel || rows_ladder) && height >= trade_bar::LADDER_MIN_H
+}
+
 /// The trail column is shown exactly while the trail is on (unless a saved file hid it).
 fn sync_trail_column(cols: &mut Columns, trail: &DomTrail, hidden: bool) {
     let i = DomCol::Trail.index();
@@ -1230,6 +1279,52 @@ impl DomView {
     }
 }
 
+impl DomView {
+    fn panel_rows(&self) -> trade_bar::PanelRows {
+        trade_bar::panel_rows(
+            self.pane_w,
+            self.pane_h,
+            trade_bar::panel_editing(&self.trade),
+        )
+    }
+
+    fn ladder_showing(&self) -> bool {
+        ladder_shows(
+            self.has_panel,
+            self.panel_rows().ladder,
+            f(self.bounds.size.height),
+        )
+    }
+
+    /// The pane's height is known only after layout: close the bracket editor if it has no room
+    /// (however it was opened). Whether anything changed and needs another frame.
+    fn set_pane_size(&mut self, w: f32, h: f32, cx: &mut Context<Self>) -> bool {
+        let before = self.panel_rows();
+        // A ladder row moves under a still pointer with any change of height too.
+        let moved = self.pane_h != h;
+        // Render takes every width decision from here: last frame's width could leave a short
+        // line's items pushing the exits out.
+        let mut changed = self.pane_w != w;
+        self.pane_w = w;
+        self.pane_h = h;
+        changed |= self.panel_rows() != before;
+        if trade_bar::panel_editing(&self.trade) && !trade_bar::editor_fits(w, h) {
+            trade_bar::close_editor_too_short(&mut self.trade);
+            changed = true;
+        }
+        let editing = trade_bar::panel_editing(&self.trade);
+        if moved || changed || editing != self.was_editing {
+            // A double-click's second press must not land on what has moved under it.
+            crate::popover::mark_moved_under_pointer();
+        }
+        self.was_editing = editing;
+        if changed {
+            cx.notify();
+        }
+        changed
+    }
+}
+
 impl Render for DomView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
@@ -1238,9 +1333,47 @@ impl Render for DomView {
         PaneTrade::watch_focus(self, &focus, window, cx);
         // The switch is sticky: impossible trading (no contract, feed gone) shows on it as a
         // badge and denies orders; it never flips the switch.
-        let width = f(self.bounds.size.width);
+        let width = self.pane_w;
         self.header_narrow = Some(trade_bar::is_narrow(width));
-        let trade = trade_bar::dom_bar(self, &self.product, width, &t, cx);
+        let rows = self.panel_rows();
+        let trade = trade_bar::dom_bar(self, &self.product, width, rows, &t, cx);
+        self.has_panel = trade.is_some();
+        // Without a panel the exits aren't taking the header's line.
+        let pane_header = rows.pane_header || trade.is_none();
+        // What a short pane has left below the panel, for saying why the ladder is gone.
+        let left_over = self.pane_h
+            - rows.height(width)
+            - if pane_header {
+                pane::header_height(crate::layout::PaneKind::Dom)
+            } else {
+                0.0
+            };
+        // A message the hidden status line can't show (a closed editor's) comes first.
+        let note = self
+            .trade
+            .local_flash()
+            .filter(|_| !rows.status)
+            .map_or_else(
+                || "Pane too short: no ladder or order rows".to_owned(),
+                str::to_owned,
+            );
+        let hidden_note = (trade.is_some()
+            && !rows.ladder
+            && left_over >= ROW_H
+            && self.feed.unavailable.is_none())
+        .then(|| {
+            div()
+                .absolute()
+                .left(px(8.0))
+                .right(px(8.0))
+                .top_0()
+                .h(px(ROW_H))
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(t.text_dim)
+                .child(note)
+        });
+        let measure = entity.clone();
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
@@ -1263,11 +1396,27 @@ impl Render for DomView {
             .into_any_element(),
         };
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header())
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, cx| {
+                        let (w, h) = (f(bounds.size.width), f(bounds.size.height));
+                        // A notify during paint draws nothing by itself: on a quiet feed the exits
+                        // would stay out of view until something else drew.
+                        if measure.update(cx, |v, cx| v.set_pane_size(w, h, cx)) {
+                            window.request_animation_frame();
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .when(pane_header, |d| d.child(self.header()))
             .children(trade)
             .child(
                 div()
@@ -1288,6 +1437,7 @@ impl Render for DomView {
                     }))
                     .on_scroll(cx.listener(Self::on_scroll))
                     .child(body)
+                    .children(hidden_note)
                     .when_some(overlay, |d, o| d.child(o)),
             )
     }
@@ -1296,6 +1446,22 @@ impl Render for DomView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ladder_needs_room_for_the_inside_market_and_its_quantity_row() {
+        let room = HEADER_ROW_H + 3.0 * ROW_H;
+        assert!(!ladder_shows(true, true, 0.0));
+        assert!(!ladder_shows(true, true, room - 1.0));
+        assert!(ladder_shows(true, true, room));
+        // Pane 296 px, width 420: the body has 123 px, and the panel's rows still rule it out.
+        let rows = trade_bar::panel_rows(420.0, 296.0, false);
+        assert!(!rows.ladder && !rows.entry);
+        assert!(!ladder_shows(true, rows.ladder, 123.0));
+        assert!(
+            ladder_shows(false, rows.ladder, 123.0),
+            "no panel: no quantity to hide"
+        );
+    }
 
     #[test]
     fn grouping_cycles_through_presets() {
