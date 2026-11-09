@@ -4514,13 +4514,8 @@ impl ChainView {
                 &chip_date(key.expiry),
             ));
         }
-        // State, not a hint: with no strike selected the strip stays, empty, at its height.
-        if key.is_some() && position.is_none() && orders.is_empty() {
-            row = row.child(
-                div()
-                    .text_color(t.text_dim)
-                    .child("No position or orders here"),
-            );
+        if let Some(text) = strip_state(key.is_some(), position.is_some() || !orders.is_empty()) {
+            row = row.child(div().text_color(t.text_dim).child(text));
         }
         let key = key.unwrap_or(OptionKey {
             expiry: self.frame.expiry?,
@@ -5378,6 +5373,12 @@ impl ChainView {
     }
 }
 
+/// The row strip's words beside a position or orders: state, not a hint, so with no strike selected
+/// it says nothing and stays, empty, at its height.
+fn strip_state(selected: bool, has_any: bool) -> Option<&'static str> {
+    (selected && !has_any).then_some("No position or orders here")
+}
+
 /// The footer's words, if it has any to report.
 fn footer_state(
     note: Option<&str>,
@@ -5764,6 +5765,22 @@ impl Render for ChainView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strip reports a selected strike's state; with none selected it has nothing to say.
+    #[test]
+    fn the_strip_reports_state_and_no_hints() {
+        assert_eq!(
+            strip_state(false, false),
+            None,
+            "no hint to select a strike"
+        );
+        assert_eq!(strip_state(true, false), Some("No position or orders here"));
+        assert_eq!(
+            strip_state(true, true),
+            None,
+            "the position and orders say it"
+        );
+    }
 
     /// The footer reports states and refusals, never a hint; with none, nothing.
     #[test]
