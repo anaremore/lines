@@ -80,6 +80,8 @@ pub struct Shot {
     pub hover_header: bool,
     /// A context menu opens (`--context-menu`).
     pub context_menu: Option<crate::pane_menu::ShotMenu>,
+    /// The UI zoom (`--ui-zoom`).
+    pub ui_zoom: Option<u16>,
     /// Keep the journal in this folder, so a script's trades get trade snapshots (`--journal-dir`).
     pub journal_dir: Option<PathBuf>,
     /// Show the replay's book as a source without depth would: only the inside, with this note
@@ -189,12 +191,14 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         bracket_position,
         hover_header,
         context_menu,
+        ui_zoom,
         journal_dir,
         depth_note: _,
         layout_report,
         settings: settings_shot,
     } = shot;
     LAYOUT_REPORT.store(layout_report, std::sync::atomic::Ordering::Relaxed);
+    crate::zoom::set(ui_zoom.unwrap_or(crate::zoom::DEFAULT));
     if let Some(s) = &settings_shot {
         crate::settings_view::check_shot(&s.section, &s.set)?;
     }

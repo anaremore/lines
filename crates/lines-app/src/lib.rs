@@ -80,6 +80,7 @@ mod versioned;
 mod workspace;
 mod wsdoc;
 mod zipw;
+mod zoom;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -494,6 +495,10 @@ struct Cli {
     /// open; `@X,Y` where (logical px): `--context-menu pane:Show@1400,300`.
     #[arg(long, requires = "screenshot", value_parser = pane_menu::parse_shot_menu)]
     context_menu: Option<pane_menu::ShotMenu>,
+    /// Screenshot: the UI zoom in percent (80, 90, 100, 110, 125, 150), as Settings ›
+    /// Appearance sets it; the chart's own time and price zoom are unchanged.
+    #[arg(long, requires = "screenshot")]
+    ui_zoom: Option<u16>,
     /// Screenshot: keep the journal in DIR (`screenshot.jsonl`) instead of in memory, so trades
     /// a `--paper` script closes get their trade snapshots in DIR/shots/. Evidence only: nothing of
     /// the user's is read or written unless DIR is theirs.
@@ -1520,6 +1525,7 @@ where
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
                 context_menu: cli.context_menu.clone(),
+                ui_zoom: cli.ui_zoom,
                 journal_dir: cli.journal_dir.clone(),
                 depth_note: cli.depth_note.clone(),
                 layout_report: cli.layout_report,
@@ -1599,7 +1605,8 @@ where
         doc.retarget_all(instrument);
     }
     let mut ws = Workspace::new(env);
-    // Settings › Appearance, under any look flag given.
+    // Settings › Appearance, under any look flag given; the UI zoom (`ui_zoom`).
+    zoom::set(settings.settings.ui_zoom.unwrap_or(zoom::DEFAULT));
     ws.env.theme.set(settings_schema::theme_for(
         &settings.settings.appearance.with_flags(look_flags),
     ));

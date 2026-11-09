@@ -465,6 +465,11 @@ fn commit(
     if after.app.new_panes.default_qty != before.app.new_panes.default_qty {
         crate::trade_bar::size_changed();
     }
+    if after.app.ui_zoom != before.app.ui_zoom
+        && crate::zoom::set(after.app.ui_zoom.unwrap_or(crate::zoom::DEFAULT))
+    {
+        cx.defer(crate::workspace::applied_ui_zoom);
+    }
     if let Some(w) = cx.try_global::<Workspace>() {
         w.env.look_flags.set(flags);
     }
@@ -1255,7 +1260,7 @@ impl SettingsWindow {
         let mut nav = div()
             .flex()
             .flex_col()
-            .w(px(NAV_W))
+            .w(crate::zoom::ui(NAV_W))
             .flex_none()
             .py_2()
             .border_r_1()
@@ -1275,7 +1280,9 @@ impl SettingsWindow {
                     .text_color(if on { t.text_main } else { t.text_dim })
                     .when(on, |d| d.bg(t.panel).border_l_2().border_color(t.accent))
                     .child(s.name())
-                    .children(count.map(|n| div().text_size(px(11.0)).child(n.to_string())))
+                    .children(
+                        count.map(|n| div().text_size(crate::zoom::ui(11.0)).child(n.to_string())),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |v, _, _, cx| {
@@ -1367,7 +1374,7 @@ impl SettingsWindow {
                 let mut d = div()
                     .id(("number", i))
                     .flex_none()
-                    .min_w(px(72.0))
+                    .min_w(crate::zoom::ui(72.0))
                     .px_2()
                     .rounded_sm()
                     .border_1()
@@ -1437,7 +1444,7 @@ impl SettingsWindow {
         if searching {
             name = name.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(crate::zoom::ui(11.0))
                     .text_color(t.text_dim)
                     .child(format!("{} ›", st.section.name())),
             );
@@ -1448,7 +1455,7 @@ impl SettingsWindow {
                 div()
                     .flex_none()
                     .px_1()
-                    .text_size(px(10.0))
+                    .text_size(crate::zoom::ui(10.0))
                     .font_weight(FontWeight::BOLD)
                     .border_1()
                     .border_color(t.warn)
@@ -1461,12 +1468,12 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .flex_grow_1()
-            .flex_basis(px(LABEL_MIN_W))
-            .min_w(px(LABEL_MIN_W))
+            .flex_basis(crate::zoom::ui(LABEL_MIN_W))
+            .min_w(crate::zoom::ui(LABEL_MIN_W))
             .child(name)
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_dim)
                     .child(st.description),
             );
@@ -1482,12 +1489,17 @@ impl SettingsWindow {
         }
         // What is in force now, when the core holds a looser value back.
         if let Some(line) = schema::status(st, prefs, &self.target, &self.facts) {
-            left = left.child(div().text_size(px(11.5)).text_color(t.warn).child(line));
+            left = left.child(
+                div()
+                    .text_size(crate::zoom::ui(11.5))
+                    .text_color(t.warn)
+                    .child(line),
+            );
         }
         if let (Kind::Editor, Value::Text(s)) = (st.kind, &value) {
             left = left.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_main)
                     .child(s.clone()),
             );
@@ -1496,7 +1508,7 @@ impl SettingsWindow {
             let _ = n;
             left = left.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::zoom::ui(11.5))
                     .text_color(match tone {
                         Tone::Problem => t.warn,
                         Tone::Done => t.text_main,
@@ -1541,7 +1553,7 @@ impl SettingsWindow {
             .when(st.safety == Safety::Trading, |d| {
                 d.child(
                     div()
-                        .w(px(3.0))
+                        .w(crate::zoom::ui(3.0))
                         .self_stretch()
                         .flex_none()
                         .when(selected, |b| b.bg(t.accent)),
@@ -1575,10 +1587,10 @@ impl SettingsWindow {
                                 div()
                                     // Never narrower than its words; "…" only past the cap.
                                     .flex_none()
-                                    .max_w(px(SCOPE_MAX_W))
+                                    .max_w(crate::zoom::ui(SCOPE_MAX_W))
                                     .truncate()
                                     .px_1()
-                                    .text_size(px(10.5))
+                                    .text_size(crate::zoom::ui(10.5))
                                     .rounded_sm()
                                     .border_1()
                                     .border_color(t.axis_line)
@@ -1589,7 +1601,7 @@ impl SettingsWindow {
                                 div()
                                     .id(("reset", i))
                                     // A 20 px hit, the minimum.
-                                    .w(px(20.0))
+                                    .w(crate::zoom::ui(20.0))
                                     .flex()
                                     .justify_center()
                                     .flex_none()
@@ -1743,9 +1755,9 @@ impl SettingsWindow {
                     .flex_row()
                     .gap_2()
                     .text_color(t.text_dim)
-                    .child(div().w(px(90.0)).child("Stop"))
-                    .child(div().w(px(90.0)).child("Target"))
-                    .child(div().w(px(140.0)).child("Name")),
+                    .child(div().w(crate::zoom::ui(90.0)).child("Stop"))
+                    .child(div().w(crate::zoom::ui(90.0)).child("Target"))
+                    .child(div().w(crate::zoom::ui(140.0)).child("Name")),
             );
         for (r, row) in ed.rows.iter().enumerate() {
             let cell = |text: &str, on: bool, w: f32| {
@@ -1774,7 +1786,7 @@ impl SettingsWindow {
             .or_else(|| ed.cell_problem(ed.row, ed.field));
         v = v.child(
             div()
-                .text_size(px(11.5))
+                .text_size(crate::zoom::ui(11.5))
                 .text_color(if problem.is_some() { t.warn } else { t.text_dim })
                 .child(problem.unwrap_or_else(|| {
                     "Enter saves · Esc cancels · Insert adds · Delete removes · Ctrl+↑↓ reorders · Tab moves".to_owned()
@@ -1835,7 +1847,7 @@ impl SettingsWindow {
         let shown = p.hits.len().min(display_zone::ROWS);
         v = v.child(
             div()
-                .text_size(px(11.5))
+                .text_size(crate::zoom::ui(11.5))
                 .text_color(t.text_dim)
                 .child(if p.hits.is_empty() {
                     "No zone matches · Backspace edits · Esc closes".to_owned()
@@ -1851,7 +1863,8 @@ impl SettingsWindow {
 }
 
 impl Render for SettingsWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(crate::zoom::rem());
         let t = self.theme;
         // What the trading core reports (in force, waiting, lockouts) as of this frame; a
         // busy cache keeps the last frame's.
@@ -1903,7 +1916,7 @@ impl Render for SettingsWindow {
                     .gap_x_2()
                     .gap_y_1()
                     .pb_1()
-                    .text_size(px(12.0))
+                    .text_size(crate::zoom::ui(12.0))
                     .text_color(t.text_dim)
                     .child(
                         div()
@@ -2009,7 +2022,7 @@ impl Render for SettingsWindow {
             .flex_col()
             .bg(t.bg)
             .text_color(t.text_main)
-            .text_size(px(13.0))
+            .text_size(crate::zoom::ui(13.0))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .child(
@@ -2023,7 +2036,7 @@ impl Render for SettingsWindow {
                     .border_color(t.axis_line)
                     .child(div().font_weight(FontWeight::BOLD).child("Settings"))
                     .child(search)
-                    .child(div().text_color(t.text_dim).text_size(px(12.0)).child("Esc closes")),
+                    .child(div().text_color(t.text_dim).text_size(crate::zoom::ui(12.0)).child("Esc closes")),
             )
             .child(
                 div()
@@ -2046,7 +2059,7 @@ impl Render for SettingsWindow {
                     .py_1()
                     .border_t_1()
                     .border_color(t.axis_line)
-                    .text_size(px(11.5))
+                    .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_dim)
                     .child(div().flex_none().whitespace_nowrap().child(
                         "↑↓ settings · ←→ change · Enter edit · Tab sections · Ctrl+Z undo · Ctrl+R reset",

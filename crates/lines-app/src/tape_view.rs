@@ -29,7 +29,7 @@ use lines_feed::store::ChartStore;
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
-    self, ColumnCmd, ColumnMenu, Columns, HEADER_ROW_H, HeaderHit, Table, TapeCol,
+    self, ColumnCmd, ColumnMenu, Columns, HeaderHit, Table, TapeCol, header_row_h,
 };
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
@@ -37,9 +37,19 @@ use crate::theme::Theme;
 use crate::wsdoc::{PaneDoc, TapeState};
 
 const MAX_ROWS: usize = 256;
-const ROW_H: f32 = 17.0;
+const ROW_H_100: f32 = 17.0;
+/// [`ROW_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn row_h() -> f32 {
+    crate::zoom::f(ROW_H_100)
+}
 const TEXT_PX: f32 = 12.0;
-const PAD: f32 = 8.0;
+const PAD_100: f32 = 8.0;
+/// [`PAD_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn pad() -> f32 {
+    crate::zoom::f(PAD_100)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct TapeOptions {
@@ -300,8 +310,8 @@ impl TapeView {
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         self.common.paints += 1;
         self.bounds = bounds;
-        let rows =
-            (((f(bounds.size.height) - HEADER_ROW_H) / ROW_H).floor() as usize).clamp(1, MAX_ROWS);
+        let rows = (((f(bounds.size.height) - header_row_h()) / row_h()).floor() as usize)
+            .clamp(1, MAX_ROWS);
         if let Some(d) = self.store.try_read() {
             self.prints.clear();
             for p in d.tape.iter_newest().take(rows) {
@@ -331,31 +341,32 @@ impl TapeView {
                 .first()
                 .map_or_else(lines_feed::now_utc, |p| p.time),
         );
-        self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
+        self.cols
+            .measure_headers(&mut self.glyphs, &t, pad(), window);
         let n = self.prints.len().min(rows);
         for i in 0..n {
             let p = self.prints[i];
             s.clear();
             let _ = write_tape_time(p.time, &zone, &mut s);
             let tw = self.glyphs.width(s.as_str(), t.text_dim, false, window);
-            self.cols.need(TapeCol::Time.index(), tw, PAD);
+            self.cols.need(TapeCol::Time.index(), tw, pad());
             s.clear();
             let _ = fmt.write(p.price, &mut s);
             let pw = self.glyphs.width(s.as_str(), t.text_main, true, window);
-            self.cols.need(TapeCol::Price.index(), pw, PAD);
+            self.cols.need(TapeCol::Price.index(), pw, pad());
             s.clear();
             let _ = qf.write(p.qty, &mut s);
             let qw = self.glyphs.width(s.as_str(), t.text_main, true, window);
-            self.cols.need(TapeCol::Size.index(), qw, PAD);
+            self.cols.need(TapeCol::Size.index(), qw, pad());
         }
         let mw = self.glyphs.width("▲", t.text_main, false, window);
-        self.cols.need(TapeCol::Side.index(), mw, PAD * 0.5);
+        self.cols.need(TapeCol::Side.index(), mw, pad() * 0.5);
         self.cols.layout(w);
         self.cols.paint_header(
             &mut self.glyphs,
             &t,
             bounds,
-            PAD,
+            pad(),
             &[true, false, false, false],
             window,
             cx,
@@ -367,14 +378,14 @@ impl TapeView {
             cell(TapeCol::Size),
             cell(TapeCol::Side),
         );
-        let oy = top + HEADER_ROW_H;
-        let body = Bounds::new(point(px(ox), px(oy)), size(px(w), px(h - HEADER_ROW_H)));
+        let oy = top + header_row_h();
+        let body = Bounds::new(point(px(ox), px(oy)), size(px(w), px(h - header_row_h())));
         if self.prints.is_empty() {
             self.glyphs.paint(
                 "no trades yet",
-                ox + PAD,
+                ox + pad(),
                 oy + 4.0,
-                ROW_H,
+                row_h(),
                 t.text_dim,
                 false,
                 window,
@@ -384,11 +395,11 @@ impl TapeView {
         }
         for i in 0..n {
             let p = self.prints[i];
-            let y = oy + i as f32 * ROW_H;
+            let y = oy + i as f32 * row_h();
             let large = p.qty >= self.large;
             if large {
                 window.paint_quad(fill(
-                    Bounds::new(point(px(ox), px(y)), size(px(w), px(ROW_H))),
+                    Bounds::new(point(px(ox), px(y)), size(px(w), px(row_h()))),
                     t.large_print,
                 ));
             }
@@ -400,17 +411,25 @@ impl TapeView {
             if let Some((x, _)) = time {
                 s.clear();
                 let _ = write_tape_time(p.time, &zone, &mut s);
-                self.glyphs
-                    .paint(s.as_str(), x + PAD, y, ROW_H, t.text_dim, false, window, cx);
+                self.glyphs.paint(
+                    s.as_str(),
+                    x + pad(),
+                    y,
+                    row_h(),
+                    t.text_dim,
+                    false,
+                    window,
+                    cx,
+                );
             }
             if let Some((x, cw)) = price {
                 s.clear();
                 let _ = fmt.write(p.price, &mut s);
                 self.glyphs.paint_right(
                     s.as_str(),
-                    x + cw - PAD,
+                    x + cw - pad(),
                     y,
-                    ROW_H,
+                    row_h(),
                     color,
                     large,
                     window,
@@ -422,9 +441,9 @@ impl TapeView {
                 let _ = qf.write(p.qty, &mut s);
                 self.glyphs.paint_right(
                     s.as_str(),
-                    x + cw - PAD,
+                    x + cw - pad(),
                     y,
-                    ROW_H,
+                    row_h(),
                     color,
                     large,
                     window,
@@ -434,9 +453,9 @@ impl TapeView {
             if let Some((x, cw)) = side {
                 self.glyphs.paint_right(
                     marker,
-                    x + cw - PAD * 0.5,
+                    x + cw - pad() * 0.5,
                     y,
-                    ROW_H,
+                    row_h(),
                     color,
                     false,
                     window,
@@ -444,7 +463,7 @@ impl TapeView {
                 );
             }
             window.paint_quad(fill(
-                Bounds::new(point(px(ox), px(y + ROW_H - hair)), size(px(w), px(hair))),
+                Bounds::new(point(px(ox), px(y + row_h() - hair)), size(px(w), px(hair))),
                 t.grid,
             ));
         }
@@ -480,7 +499,7 @@ impl TapeView {
             .border_b_1()
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(
                 pane::header_content()
                     .child(

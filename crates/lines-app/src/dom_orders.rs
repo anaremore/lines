@@ -545,7 +545,7 @@ impl OrdersLayer {
                         let _ = crate::chart_trade::write_edge_short(&mut s, &m, above);
                     }
                     if glyphs.width(s.as_str(), t.text_main, false, window) + 8.0 <= ow {
-                        let hh = crate::pane_columns::HEADER_ROW_H;
+                        let hh = crate::pane_columns::header_row_h();
                         let ty = oy - hh;
                         let cell = rect(ox, ty, ow, hh);
                         window.with_content_mask(
@@ -576,7 +576,7 @@ impl OrdersLayer {
                 let _ = write!(s, "{n} hidden");
                 let title_w = glyphs.width("Ord", t.text_dim, false, window);
                 let w = glyphs.width(s.as_str(), t.text_main, true, window) + 6.0;
-                let hh = crate::pane_columns::HEADER_ROW_H;
+                let hh = crate::pane_columns::header_row_h();
                 let ty = oy - hh;
                 let pill = match crate::dom_trade::hidden_placement(ow, title_w, w) {
                     crate::dom_trade::HiddenPlacement::Beside => {

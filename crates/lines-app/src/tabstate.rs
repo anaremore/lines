@@ -429,6 +429,7 @@ mod tests {
             Rect::new(0.0, 0.0, 1600.0, 900.0),
             &|id| leaves[id].state.is_shown(),
             &|_| 0.0,
+            &|_| 0.0,
         )
         .into_iter()
         .map(|p| (order[p.index], p.rect))

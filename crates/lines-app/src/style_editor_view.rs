@@ -27,7 +27,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::chart_view::{AXIS_W, ChartView};
+use crate::chart_view::{ChartView, axis_w};
 use crate::style_editor::{
     Control, Row, StyleEditor, Warning, color_name, control_label, is_toggle,
 };
@@ -61,8 +61,8 @@ pub struct Place {
 /// The right edge the editor keeps to in an `area` this wide: left of the price axis (so the
 /// last-price tag stays visible) when that leaves it [`MIN_BESIDE_AXIS`], else the pane's.
 fn right_edge(area_w: f32) -> f32 {
-    if area_w - AXIS_W - 2.0 * MARGIN >= MIN_BESIDE_AXIS {
-        area_w - AXIS_W - MARGIN
+    if area_w - axis_w() - 2.0 * MARGIN >= MIN_BESIDE_AXIS {
+        area_w - axis_w() - MARGIN
     } else {
         area_w - MARGIN
     }
@@ -117,13 +117,13 @@ pub fn place_study(area: (f32, f32), below: f32, left_clear: f32, h: f32) -> Pla
     let w = width(pw);
     let h = h.min((ph - 2.0 * MARGIN).max(0.0));
     let y = below.min(ph - h - MARGIN).max(MARGIN);
-    let newest = (pw - AXIS_W).max(0.0) * 0.75;
+    let newest = (pw - axis_w()).max(0.0) * 0.75;
     let x = if left_clear <= MARGIN {
         MARGIN
     } else if left_clear + GAP + w <= newest {
         left_clear + GAP
-    } else if ((pw - AXIS_W) - w) * 0.5 >= left_clear && ((pw - AXIS_W) + w) * 0.5 <= newest {
-        ((pw - AXIS_W) - w) * 0.5
+    } else if ((pw - axis_w()) - w) * 0.5 >= left_clear && ((pw - axis_w()) + w) * 0.5 <= newest {
+        ((pw - axis_w()) - w) * 0.5
     } else {
         MARGIN
     };
@@ -430,8 +430,8 @@ pub fn names<'t>(e: &StyleEditor, t: &'t Theme) -> &'t [&'static str; 4] {
 fn swatch(t: &Theme, fill: Hsla, on: bool) -> gpui::Div {
     // Selected: a 2 px ring in the text color and a dot inside (never color alone).
     div()
-        .size(px(HIT))
-        .p(px(2.0))
+        .size(crate::zoom::ui(HIT))
+        .p(crate::zoom::ui(2.0))
         .rounded_sm()
         .border_2()
         .border_color(if on {
@@ -450,24 +450,29 @@ fn swatch(t: &Theme, fill: Hsla, on: bool) -> gpui::Div {
                 .items_center()
                 .justify_center()
                 .when(on, |d| {
-                    d.child(div().size(px(4.0)).rounded_full().bg(t.on_fill(fill)))
+                    d.child(
+                        div()
+                            .size(crate::zoom::ui(4.0))
+                            .rounded_full()
+                            .bg(t.on_fill(fill)),
+                    )
                 }),
         )
 }
 
 fn checkbox(t: &Theme, on: bool, label: String) -> gpui::Div {
     div()
-        .h(px(HIT))
-        .px(px(4.0))
+        .h(crate::zoom::ui(HIT))
+        .px(crate::zoom::ui(4.0))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
-        .text_size(px(12.0))
+        .gap(crate::zoom::ui(8.0))
+        .text_size(crate::zoom::ui(12.0))
         .text_color(t.text_main)
         .child(
             div()
-                .size(px(14.0))
+                .size(crate::zoom::ui(14.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -477,7 +482,7 @@ fn checkbox(t: &Theme, on: bool, label: String) -> gpui::Div {
                 .when(on, |d| {
                     d.bg(t.accent)
                         .text_color(t.on_last)
-                        .text_size(px(11.0))
+                        .text_size(crate::zoom::ui(11.0))
                         .child("✓")
                 }),
         )
@@ -487,18 +492,18 @@ fn checkbox(t: &Theme, on: bool, label: String) -> gpui::Div {
 fn choice(t: &Theme, on: bool, label: String) -> gpui::Div {
     // Selected: a check, a 1 px accent border and a stronger fill (WCAG 1.4.11).
     div()
-        .h(px(HIT))
-        .min_w(px(HIT))
-        .px(px(8.0))
+        .h(crate::zoom::ui(HIT))
+        .min_w(crate::zoom::ui(HIT))
+        .px(crate::zoom::ui(8.0))
         .flex()
         .flex_row()
         .items_center()
         .justify_center()
-        .gap(px(4.0))
+        .gap(crate::zoom::ui(4.0))
         .rounded_sm()
         .border_1()
         .border_color(if on { t.accent } else { t.control_edge })
-        .text_size(px(12.0))
+        .text_size(crate::zoom::ui(12.0))
         .text_color(t.text_main)
         .when(on, |d| {
             d.bg(t.accent.opacity(0.28))
@@ -512,10 +517,10 @@ fn choice(t: &Theme, on: bool, label: String) -> gpui::Div {
 /// color with a meaning it looks like, else (low contrast) half text, half background.
 fn marker(t: &Theme, swatch: Option<Hsla>) -> gpui::Div {
     let chip = div()
-        .mt(px(3.0))
-        .size(px(16.0))
+        .mt(crate::zoom::ui(3.0))
+        .size(crate::zoom::ui(16.0))
         .flex_none()
-        .p(px(2.0))
+        .p(crate::zoom::ui(2.0))
         .rounded_sm()
         .bg(t.bg)
         .border_1()
@@ -541,12 +546,12 @@ fn warning_box(t: &Theme, warnings: &[Warning]) -> gpui::Div {
     let mut list = div()
         .flex_1()
         .min_w(px(0.0))
-        .px(px(8.0))
-        .py(px(4.0))
+        .px(crate::zoom::ui(8.0))
+        .py(crate::zoom::ui(4.0))
         .flex()
         .flex_col()
-        .gap(px(4.0))
-        .text_size(px(12.0))
+        .gap(crate::zoom::ui(4.0))
+        .text_size(crate::zoom::ui(12.0))
         .text_color(t.text_main);
     for w in warnings {
         list = list.child(
@@ -555,7 +560,7 @@ fn warning_box(t: &Theme, warnings: &[Warning]) -> gpui::Div {
                 .flex()
                 .flex_row()
                 .items_start()
-                .gap(px(8.0))
+                .gap(crate::zoom::ui(8.0))
                 .child(marker(t, w.swatch.map(|rgb| user_color(rgb, 100))))
                 .child(
                     div()
@@ -567,15 +572,15 @@ fn warning_box(t: &Theme, warnings: &[Warning]) -> gpui::Div {
         );
     }
     div()
-        .mx(px(12.0))
-        .my(px(4.0))
+        .mx(crate::zoom::ui(12.0))
+        .my(crate::zoom::ui(4.0))
         .flex()
         .flex_row()
         .rounded_sm()
         .bg(t.bg)
         .border_1()
         .border_color(t.control_edge)
-        .child(div().w(px(3.0)).flex_none().bg(t.warn))
+        .child(div().w(crate::zoom::ui(3.0)).flex_none().bg(t.warn))
         .child(list)
 }
 
@@ -629,12 +634,12 @@ pub fn render(
     if e.parts.len() > 1 {
         let mut tabs = div()
             .flex_none()
-            .px(px(12.0))
-            .pt(px(4.0))
-            .pb(px(4.0))
+            .px(crate::zoom::ui(12.0))
+            .pt(crate::zoom::ui(4.0))
+            .pb(crate::zoom::ui(4.0))
             .flex()
             .flex_row()
-            .gap(px(4.0))
+            .gap(crate::zoom::ui(4.0))
             .border_b_1()
             .border_color(t.axis_line);
         for (i, p) in e.parts.iter().enumerate() {
@@ -642,11 +647,11 @@ pub fn render(
             tabs = tabs.child(
                 div()
                     .id(("style-tab", i))
-                    .h(px(24.0))
-                    .px(px(8.0))
+                    .h(crate::zoom::ui(24.0))
+                    .px(crate::zoom::ui(8.0))
                     .flex()
                     .items_center()
-                    .text_size(px(12.0))
+                    .text_size(crate::zoom::ui(12.0))
                     .text_color(if on { t.text_main } else { t.text_dim })
                     .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .border_b_2()
@@ -689,14 +694,14 @@ pub fn render(
                 ring(t, focused).child(
                     div()
                         .id(("style-ctl", r * 64))
-                        .h(px(24.0))
-                        .px(px(8.0))
+                        .h(crate::zoom::ui(24.0))
+                        .px(crate::zoom::ui(8.0))
                         .flex()
                         .items_center()
                         .rounded_sm()
                         .border_1()
                         .border_color(t.control_edge)
-                        .text_size(px(12.0))
+                        .text_size(crate::zoom::ui(12.0))
                         .text_color(if *saved { t.text_dim } else { t.text_main })
                         .hover(|s| s.bg(t.accent.opacity(0.12)))
                         .child(label)
@@ -712,7 +717,7 @@ pub fn render(
             .flex_row()
             .flex_wrap()
             .items_center()
-            .gap(px(4.0));
+            .gap(crate::zoom::ui(4.0));
         if e.row == r {
             // Where the focused row's controls are (content px, from this frame's scrolled
             // bounds), for a key that moves within the row (`EditorScroll::follow`).
@@ -746,17 +751,17 @@ pub fn render(
             );
         }
         let label = div()
-            .w(px(LABEL_W))
+            .w(crate::zoom::ui(LABEL_W))
             .flex_none()
-            .text_size(px(11.0))
+            .text_size(crate::zoom::ui(11.0))
             .text_color(t.text_dim)
             .child(row.label);
         if is_color {
             let named = color_row_name(e, row, r, names);
             group = group.child(
                 div()
-                    .px(px(12.0))
-                    .pt(px(4.0))
+                    .px(crate::zoom::ui(12.0))
+                    .pt(crate::zoom::ui(4.0))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -769,7 +774,7 @@ pub fn render(
                                 .min_w(px(0.0))
                                 .whitespace_nowrap()
                                 .truncate()
-                                .text_size(px(12.0))
+                                .text_size(crate::zoom::ui(12.0))
                                 .text_color(t.text_main)
                                 .child(n),
                         )
@@ -778,15 +783,15 @@ pub fn render(
             group = group.child(
                 div()
                     .pl(px(12.0 + LABEL_W))
-                    .pr(px(12.0))
-                    .pb(px(2.0))
+                    .pr(crate::zoom::ui(12.0))
+                    .pb(crate::zoom::ui(2.0))
                     .child(controls),
             );
         } else {
             group = group.child(
                 div()
-                    .px(px(12.0))
-                    .py(px(2.0))
+                    .px(crate::zoom::ui(12.0))
+                    .py(crate::zoom::ui(2.0))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -800,9 +805,9 @@ pub fn render(
             if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note) {
                 group = group.child(
                     div()
-                        .px(px(12.0))
-                        .pb(px(4.0))
-                        .text_size(px(11.0))
+                        .px(crate::zoom::ui(12.0))
+                        .pb(crate::zoom::ui(4.0))
+                        .text_size(crate::zoom::ui(11.0))
                         .text_color(t.text_dim)
                         .whitespace_normal()
                         .child(note),
@@ -812,17 +817,17 @@ pub fn render(
                 group = group.child(
                     div()
                         .pl(px(12.0 + LABEL_W))
-                        .pr(px(12.0))
-                        .py(px(4.0))
+                        .pr(crate::zoom::ui(12.0))
+                        .py(crate::zoom::ui(4.0))
                         .flex()
                         .flex_row()
                         .flex_wrap()
-                        .gap(px(8.0))
+                        .gap(crate::zoom::ui(8.0))
                         .items_center()
-                        .text_size(px(12.0))
+                        .text_size(crate::zoom::ui(12.0))
                         .child(
                             div()
-                                .px(px(8.0))
+                                .px(crate::zoom::ui(8.0))
                                 .border_1()
                                 .border_color(t.accent)
                                 .rounded_sm()
@@ -854,13 +859,20 @@ pub fn render(
         .border_t_1()
         .border_color(t.axis_line)
         .when_some(footer_save, |d, s| {
-            d.child(div().px(px(12.0)).pt(px(4.0)).flex().flex_row().child(s))
+            d.child(
+                div()
+                    .px(crate::zoom::ui(12.0))
+                    .pt(crate::zoom::ui(4.0))
+                    .flex()
+                    .flex_row()
+                    .child(s),
+            )
         })
         .child(
             div()
-                .px(px(12.0))
-                .py(px(4.0))
-                .text_size(px(11.0))
+                .px(crate::zoom::ui(12.0))
+                .py(crate::zoom::ui(4.0))
+                .text_size(crate::zoom::ui(11.0))
                 .text_color(t.text_dim)
                 .whitespace_nowrap()
                 .truncate()
@@ -878,8 +890,8 @@ pub fn render(
         div()
             .absolute()
             .top(px(top))
-            .right(px(2.0))
-            .w(px(4.0))
+            .right(crate::zoom::ui(2.0))
+            .w(crate::zoom::ui(4.0))
             .h(px(h))
             .rounded_full()
             .bg(t.text_dim)
@@ -900,7 +912,7 @@ pub fn render(
                 .flex_col()
                 .overflow_y_scroll()
                 .track_scroll(scroll)
-                .py(px(4.0))
+                .py(crate::zoom::ui(4.0))
                 .children(groups),
         )
         .when_some(bar, |d, b| d.child(b));
@@ -921,12 +933,12 @@ pub fn render(
                 .border_1()
                 .border_color(t.axis_line)
                 .rounded_md()
-                .text_size(px(13.0))
+                .text_size(crate::zoom::ui(13.0))
                 .child(
                     div()
                         .flex_none()
-                        .px(px(12.0))
-                        .py(px(8.0))
+                        .px(crate::zoom::ui(12.0))
+                        .py(crate::zoom::ui(8.0))
                         .border_b_1()
                         .border_color(t.axis_line)
                         .font_weight(FontWeight::SEMIBOLD)
@@ -999,7 +1011,7 @@ mod tests {
     #[test]
     fn the_profile_editor_sits_clear_of_the_profile() {
         let area = (1400.0, 760.0);
-        let plot_w = area.0 - AXIS_W;
+        let plot_w = area.0 - crate::chart_view::AXIS_W_100;
         let newest = plot_w * 0.75;
         // A quarter-wide profile: right of it.
         let p = place_study(area, 120.0, plot_w * 0.25, 400.0);
@@ -1090,13 +1102,18 @@ mod tests {
             for target in [
                 None,
                 Some((10.0, 10.0, 60.0, 40.0)),
-                Some((pane.0 - AXIS_W - 40.0, 100.0, pane.0 - AXIS_W - 10.0, 120.0)),
-                Some((0.0, 200.0, pane.0 - AXIS_W, 200.0)),
+                Some((
+                    pane.0 - crate::chart_view::AXIS_W_100 - 40.0,
+                    100.0,
+                    pane.0 - crate::chart_view::AXIS_W_100 - 10.0,
+                    120.0,
+                )),
+                Some((0.0, 200.0, pane.0 - crate::chart_view::AXIS_W_100, 200.0)),
             ] {
                 let p = place(pane, target, 300.0);
                 inside(p, pane);
                 assert!(
-                    p.x + p.w <= pane.0 - AXIS_W - MARGIN + 0.01,
+                    p.x + p.w <= pane.0 - crate::chart_view::AXIS_W_100 - MARGIN + 0.01,
                     "{p:?} in {pane:?}"
                 );
                 assert!(p.w >= MIN_BESIDE_AXIS.min(W) - 0.01, "{p:?}");

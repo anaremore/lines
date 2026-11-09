@@ -525,10 +525,10 @@ impl Studies {
             .flex()
             .flex_col()
             .gap_1()
-            .px(px(8.0))
-            .py(px(4.0))
+            .px(crate::zoom::ui(8.0))
+            .py(crate::zoom::ui(4.0))
             .bg(theme.label_bg)
-            .text_size(px(12.0));
+            .text_size(crate::zoom::ui(12.0));
         for s in self.list.iter().filter(shown) {
             let IndicatorConfig::Vwap { spec, .. } = &s.config else {
                 continue;
@@ -543,7 +543,7 @@ impl Studies {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(div().w(px(12.0)).h(px(3.0)).bg(c))
+                .child(div().w(crate::zoom::ui(12.0)).h(crate::zoom::ui(3.0)).bg(c))
                 .child(div().text_color(text).child(format!(
                     "VWAP {}{}",
                     spec.reset.label(),

@@ -1119,9 +1119,12 @@ mod tests {
         let layout = &w.windows[0].tabs[0].layout;
         let heights = |h: f32| -> Vec<f32> {
             layout
-                .place_where(Rect::new(0.0, 0.0, 800.0, h), &|_| true, &|p: &PaneDoc| {
-                    crate::trade_bar::min_pane_h(p.kind)
-                })
+                .place_where(
+                    Rect::new(0.0, 0.0, 800.0, h),
+                    &|_| true,
+                    &|p: &PaneDoc| crate::trade_bar::min_pane_h(p.kind),
+                    &|_| 0.0,
+                )
                 .iter()
                 .map(|p| p.rect.h)
                 .collect()

@@ -88,11 +88,27 @@ use crate::study_style::StudyStyles;
 use crate::theme::Theme;
 use crate::wsdoc::{ChartState, PaneDoc, StudyVisibility};
 
-pub(crate) const AXIS_W: f32 = 78.0;
+pub(crate) const AXIS_W_100: f32 = 78.0;
+
+/// [`AXIS_W_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+pub(crate) fn axis_w() -> f32 {
+    crate::zoom::f(AXIS_W_100)
+}
 /// Where a screenshot opens the style editor: drawing id, tab, and the focus (row, col).
 pub type StyleEditorAt = (u64, usize, Option<(usize, usize)>);
-const AXIS_H: f32 = 24.0;
-const LABEL_PX: f32 = 12.0;
+const AXIS_H_100: f32 = 24.0;
+/// [`AXIS_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn axis_h() -> f32 {
+    crate::zoom::f(AXIS_H_100)
+}
+const LABEL_PX_100: f32 = 12.0;
+/// [`LABEL_PX_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn label_px() -> f32 {
+    crate::zoom::f(LABEL_PX_100)
+}
 const MAX_CACHED_LABELS: usize = 4096;
 /// Colours in signatures (theme tokens only).
 type Colour = gpui::Hsla;
@@ -100,7 +116,12 @@ type Colour = gpui::Hsla;
 /// Gap between a chart tag and the plot's right edge.
 const TAG_GAP_PX: f32 = lines_core::geometry::order_tags::TAG_GAP;
 /// Height of the last-price and crosshair price tags on the price axis.
-const TAG_H: f32 = LABEL_PX * 1.5;
+const TAG_H_100: f32 = LABEL_PX_100 * 1.5;
+/// [`TAG_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn tag_h() -> f32 {
+    crate::zoom::f(TAG_H_100)
+}
 /// Shown in the price-axis corner while price auto-scale is off.
 const MANUAL_LABEL: &str = "manual";
 
@@ -139,7 +160,7 @@ enum LabelKind {
 
 /// Drawing price tags on the axis considered per frame (labels they cover aren't drawn).
 const MAX_DRAWING_TAGS: usize = 8;
-/// A drawing tag's height: shorter than the last-price tag (`TAG_H`), never mistaken for it.
+/// A drawing tag's height: shorter than the last-price tag (`tag_h()`), never mistaken for it.
 const DRAWING_TAG_H: f32 = 16.0;
 /// A drawing tag starts this far into the axis, joined to the plot by its notch.
 const DRAWING_TAG_INSET: f32 = 4.0;
@@ -458,6 +479,8 @@ pub struct ChartView {
     /// The style editor body's scroll state: its scrollbar, and the focus it last scrolled to
     /// show (a key that moves the focus scrolls again; a wheel scroll alone doesn't snap back).
     editor_scroll: crate::style_editor_view::EditorScroll,
+    /// The UI zoom generation the shaped text below was made at (`crate::zoom`).
+    zoom_generation: u32,
     measure_lines: HashMap<
         Option<u64>,
         (
@@ -617,7 +640,7 @@ impl ChartView {
             above_axis: 0.0,
             cross_in_sub: None,
             fp_seen: Default::default(),
-            legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, READOUT_BOTTOM)),
+            legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, readout_bottom())),
             visibility: fixture.visibility,
             picker,
             store,
@@ -678,7 +701,8 @@ impl ChartView {
             hud_at: None,
             hud_compact: false,
             trade,
-            pos_glyphs: crate::text::Glyphs::new(LABEL_PX),
+            // Order and position tags don't zoom: their boxes are lines-core's.
+            pos_glyphs: crate::text::Glyphs::fixed(LABEL_PX_100),
             ct: crate::chart_trade::ChartTradeState {
                 strip_pick: fixture.strip_pick,
                 ..Default::default()
@@ -707,6 +731,7 @@ impl ChartView {
             editor_scroll: Default::default(),
             note_lines: HashMap::new(),
             note_entry_line: None,
+            zoom_generation: crate::zoom::generation(),
             measure_lines: HashMap::new(),
         };
         if fixture.tick_continuous {
@@ -1989,7 +2014,7 @@ impl ChartView {
             .gap(px(STRIP_GAP))
             .bg(t.panel)
             .rounded_sm()
-            .text_size(px(11.0))
+            .text_size(crate::zoom::ui(11.0))
             .child(size_control);
         for (o, label, w, fill, line) in buttons {
             let el = div()
@@ -2089,7 +2114,7 @@ impl ChartView {
     fn legend(&self, t: &Theme) -> Option<gpui::AnyElement> {
         if !self.visibility.draws_labels() {
             // The readout still shows over the plot's top-left.
-            self.legend_band.set((8.0 + LEGEND_MAX_W, READOUT_BOTTOM));
+            self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
             return None;
         }
         let studies = self.studies.legend(t, &self.instrument);
@@ -2109,7 +2134,7 @@ impl ChartView {
                 .px(px(8.0))
                 .py(px(4.0))
                 .bg(t.label_bg)
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .child(div().flex_shrink_0().text_color(t.text_main).child(label))
                 .when_some(note, |d, n| {
                     d.child(div().min_w_0().truncate().text_color(t.text_dim).child(n))
@@ -2132,9 +2157,9 @@ impl ChartView {
         let row_h = 12.0 * 1.3 + 4.0;
         let bottom = 30.0 + text_rows as f32 * row_h + boxes as f32 * 12.0 + 4.0;
         self.legend_band
-            .set((8.0 + LEGEND_MAX_W, bottom.max(READOUT_BOTTOM)));
+            .set((8.0 + LEGEND_MAX_W, bottom.max(readout_bottom())));
         if studies.is_none() && rows.is_empty() && fp.is_none() {
-            self.legend_band.set((8.0 + LEGEND_MAX_W, READOUT_BOTTOM));
+            self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
             return None;
         }
         // Level rows: the source's name, then its state; a long reason ends in an ellipsis at
@@ -2148,7 +2173,7 @@ impl ChartView {
                 .px(px(8.0))
                 .py(px(4.0))
                 .bg(t.label_bg)
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .children(rows.into_iter().map(|r| {
                     div()
                         .flex()
@@ -2861,8 +2886,8 @@ impl ChartView {
         self.common.paints += 1;
         let scale = window.scale_factor();
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-        let plot_w = (w - AXIS_W).max(10.0);
-        let above_axis = (h - AXIS_H).max(10.0);
+        let plot_w = (w - axis_w()).max(10.0);
+        let above_axis = (h - axis_h()).max(10.0);
         // A sub-pane (cumulative delta) takes its share below the plot, above the time axis.
         self.split = (self.visibility.draws_studies() && self.studies.has_subpane())
             .then(|| crate::subpane::split_at_scale(above_axis, self.subpane_ratio, scale))
@@ -3185,7 +3210,8 @@ impl ChartView {
         } else {
             0.0
         };
-        let (x, h) = (ox + 4.0, TAG_H);
+        // The position tag doesn't zoom: its handles are lines-core's (`order_tags::handles`).
+        let (x, h) = (ox + 4.0, TAG_H_100);
         let top = oy + y - h * 0.5;
         let w = w_head + w_money + 12.0;
         window.paint_quad(fill(
@@ -3315,7 +3341,7 @@ impl ChartView {
             handles, layout_tags, tag_band, tags_fit, wanted_handles,
         };
         // The order tags' own height (their layout's), not the price labels'.
-        const TAG_H: f32 = lines_core::geometry::order_tags::TAG_H;
+        const ORDER_TAG_H: f32 = lines_core::geometry::order_tags::TAG_H;
         use lines_core::Qty;
         let t = self.theme;
         let fmt = self.instrument.price;
@@ -3537,14 +3563,14 @@ impl ChartView {
                 };
                 let w = head_w + pnl_w + 12.0;
                 let left = (pw - TAG_GAP_PX - w).max(0.0);
-                let top = (y - TAG_H * 0.5).clamp(0.0, (ph - TAG_H).max(0.0));
-                window.paint_quad(fill(rect(left, top, w, TAG_H), t.label_bg));
-                self.outline(rect(left, top, w, TAG_H), c, hair, window);
+                let top = (y - ORDER_TAG_H * 0.5).clamp(0.0, (ph - ORDER_TAG_H).max(0.0));
+                window.paint_quad(fill(rect(left, top, w, ORDER_TAG_H), t.label_bg));
+                self.outline(rect(left, top, w, ORDER_TAG_H), c, hair, window);
                 self.pos_glyphs.paint(
                     text.as_str(),
                     ox + left + 6.0,
                     oy + top,
-                    TAG_H,
+                    ORDER_TAG_H,
                     t.text_main,
                     true,
                     window,
@@ -3560,7 +3586,7 @@ impl ChartView {
                         pnl.as_str(),
                         ox + left + 6.0 + head_w + 8.0,
                         oy + top,
-                        TAG_H,
+                        ORDER_TAG_H,
                         tone,
                         true,
                         window,
@@ -3586,29 +3612,31 @@ impl ChartView {
             let pending = !mixed && m.style == MarkStyle::Pending;
             // Always on the label background (readable over candles); pending reads by its dim
             // text and outline only (no role bar), held by a dashed outline.
-            window.paint_quad(fill(rect(b.left, b.top, b.w, TAG_H), t.label_bg));
+            window.paint_quad(fill(rect(b.left, b.top, b.w, ORDER_TAG_H), t.label_bg));
             if !mixed && m.style == MarkStyle::Held {
-                self.dashed_outline(rect(b.left, b.top, b.w, TAG_H), c, hair, window);
+                self.dashed_outline(rect(b.left, b.top, b.w, ORDER_TAG_H), c, hair, window);
             } else {
-                self.outline(rect(b.left, b.top, b.w, TAG_H), c, hair, window);
+                self.outline(rect(b.left, b.top, b.w, ORDER_TAG_H), c, hair, window);
             }
             // The role's shape, as on the DOM: a notch on the top edge for a target, on the
             // bottom edge for a stop; entries plain. Never colour alone.
-            window.paint_quad(fill(rect(b.left, b.top, 2.0, TAG_H), c));
+            window.paint_quad(fill(rect(b.left, b.top, 2.0, ORDER_TAG_H), c));
             match MarkRole::of(&m) {
                 _ if mixed => {}
                 MarkRole::Target => window.paint_quad(fill(rect(b.left, b.top - 2.0, 8.0, 2.0), c)),
-                MarkRole::Stop => window.paint_quad(fill(rect(b.left, b.top + TAG_H, 8.0, 2.0), c)),
+                MarkRole::Stop => {
+                    window.paint_quad(fill(rect(b.left, b.top + ORDER_TAG_H, 8.0, 2.0), c))
+                }
                 MarkRole::Entry => {}
             }
-            window.paint_quad(fill(rect(b.close_left, b.top, hair, TAG_H), c));
+            window.paint_quad(fill(rect(b.close_left, b.top, hair, ORDER_TAG_H), c));
             let fg = if pending { t.text_dim } else { t.text_main };
             let head_w = self.pos_glyphs.width(tt.text.as_str(), fg, true, window);
             self.pos_glyphs.paint(
                 tt.text.as_str(),
                 ox + b.left + 6.0,
                 oy + b.top,
-                TAG_H,
+                ORDER_TAG_H,
                 fg,
                 true,
                 window,
@@ -3625,7 +3653,7 @@ impl ChartView {
                     tt.pnl.as_str(),
                     ox + b.left + 6.0 + head_w + 8.0,
                     oy + b.top,
-                    TAG_H,
+                    ORDER_TAG_H,
                     tone,
                     true,
                     window,
@@ -3637,7 +3665,7 @@ impl ChartView {
                 if group.is_some() { "▾" } else { "×" },
                 ox + b.close_left + CLOSE_W * 0.5 - 3.5,
                 oy + b.top,
-                TAG_H,
+                ORDER_TAG_H,
                 t.text_main,
                 true,
                 window,
@@ -3702,14 +3730,14 @@ impl ChartView {
                 ),
             ];
             for (x, w, text, colour) in parts {
-                let r = rect(x, b.top, w, TAG_H);
+                let r = rect(x, b.top, w, ORDER_TAG_H);
                 window.paint_quad(fill(r, t.panel));
                 self.outline(r, t.control_edge, hair, window);
                 self.pos_glyphs.paint(
                     text,
                     ox + x + 6.0,
                     oy + b.top,
-                    TAG_H,
+                    ORDER_TAG_H,
                     colour,
                     true,
                     window,
@@ -3726,13 +3754,13 @@ impl ChartView {
                 .ct
                 .mark(e.id)
                 .map_or(t.text_main, |m| self.mark_colour(m));
-            window.paint_quad(fill(rect(e.left, e.top, e.w, TAG_H), t.label_bg));
-            self.outline(rect(e.left, e.top, e.w, TAG_H), c, hair, window);
+            window.paint_quad(fill(rect(e.left, e.top, e.w, ORDER_TAG_H), t.label_bg));
+            self.outline(rect(e.left, e.top, e.w, ORDER_TAG_H), c, hair, window);
             self.pos_glyphs.paint(
                 text.as_str(),
                 ox + e.left + 6.0,
                 oy + e.top,
-                TAG_H,
+                ORDER_TAG_H,
                 t.text_main,
                 true,
                 window,
@@ -3770,9 +3798,17 @@ impl ChartView {
         // top left: inline and brief, never a dialog.
         if let Some(why) = self.trade.local_flash() {
             let w = self.pos_glyphs.width(why, t.on_warn, true, window) + 12.0;
-            window.paint_quad(fill(rect(4.0, 4.0, w, TAG_H), t.warn));
-            self.pos_glyphs
-                .paint(why, ox + 10.0, oy + 4.0, TAG_H, t.on_warn, true, window, cx);
+            window.paint_quad(fill(rect(4.0, 4.0, w, ORDER_TAG_H), t.warn));
+            self.pos_glyphs.paint(
+                why,
+                ox + 10.0,
+                oy + 4.0,
+                ORDER_TAG_H,
+                t.on_warn,
+                true,
+                window,
+                cx,
+            );
         }
     }
 
@@ -4027,7 +4063,7 @@ impl ChartView {
         window.paint_quad(fill(rect(pw, 0.0, hair, ph), t.axis_line));
         window.paint_quad(fill(rect(0.0, ph, pw, hair), t.axis_line));
 
-        let line_h = px(LABEL_PX * 1.3);
+        let line_h = px(label_px() * 1.3);
         // The tags drawn over the price axis below; a label any of them would cover isn't
         // drawn at all (a half-covered number reads as another price).
         let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
@@ -4051,11 +4087,11 @@ impl ChartView {
             }
         }
         let tags = [
-            last_y.map(|y| Span::around(y, TAG_H * 0.5)),
+            last_y.map(|y| Span::around(y, tag_h() * 0.5)),
             self.cross
                 .filter(|_| self.cross_in_sub.is_none())
-                .map(|c| Span::around(cross_tag_y(c.y, ph), TAG_H * 0.5)),
-            sync_price.map(|(y, _)| Span::around(cross_tag_y(y, ph), TAG_H * 0.5)),
+                .map(|c| Span::around(cross_tag_y(c.y, ph), tag_h() * 0.5)),
+            sync_price.map(|(y, _)| Span::around(cross_tag_y(y, ph), tag_h() * 0.5)),
         ];
         // The time tag (own crosshair, else the synced time) on the time axis: time labels
         // it would cover aren't drawn either.
@@ -4084,11 +4120,11 @@ impl ChartView {
             if l.y < 0.0 || l.y > ph {
                 continue;
             }
-            let span = Span::around(l.y, LABEL_PX * 0.65);
+            let span = Span::around(l.y, label_px() * 0.65);
             if !label_clear_of_tags(span, &tags) || !label_clear_of_tags(span, &drawing_tags) {
                 continue;
             }
-            let origin = point(px(ox + pw + 8.0), px(oy + l.y - LABEL_PX * 0.65));
+            let origin = point(px(ox + pw + 8.0), px(oy + l.y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::Price,
                 l.price.0,
@@ -4144,13 +4180,13 @@ impl ChartView {
         // zone yields that frame (the crosshair's tag still names it).
         let zone_span = Span {
             top: self.above_axis + 4.0,
-            bottom: self.above_axis + 4.0 + LABEL_PX * 1.3,
+            bottom: self.above_axis + 4.0 + label_px() * 1.3,
         };
         let corner_clear = label_clear_of_tags(zone_span, &tags)
             && label_clear_of_tags(zone_span, &drawing_tags)
             && (0..price_lines).all(|i| {
                 let y = self.scene.price_lines[i].y;
-                y < 0.0 || y > ph || !Span::around(y, LABEL_PX * 0.65).overlaps(zone_span)
+                y < 0.0 || y > ph || !Span::around(y, label_px() * 0.65).overlaps(zone_span)
             });
         if let Some(at) = self.scene.time_lines.last().map(|l| l.time)
             && !tf.is_daily()
@@ -4166,7 +4202,7 @@ impl ChartView {
                     .width,
             );
             let origin = point(
-                px(ox + pw + hair + (AXIS_W - w) * 0.5),
+                px(ox + pw + hair + (axis_w() - w) * 0.5),
                 px(oy + self.above_axis + 4.0),
             );
             self.paint_label(
@@ -4183,15 +4219,15 @@ impl ChartView {
         self.draw_drawing_tags(bounds, window, cx);
         if let (Some(p), Some(y)) = (self.last_trade, last_y) {
             window.paint_quad(fill(
-                rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
+                rect(pw + hair, y - tag_h() * 0.5, axis_w(), tag_h()),
                 t.last,
             ));
             crate::layout_rec::reserved(
                 window,
-                (ox + pw + hair, oy + y - TAG_H * 0.5, AXIS_W, TAG_H),
+                (ox + pw + hair, oy + y - tag_h() * 0.5, axis_w(), tag_h()),
                 "last-price-tag",
             );
-            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::LastPrice,
                 p.0,
@@ -4266,7 +4302,7 @@ impl ChartView {
             LabelKind::Indicator,
             0,
             origin,
-            px(LABEL_PX * 1.3),
+            px(label_px() * 1.3),
             accent,
             window,
             cx,
@@ -4349,10 +4385,10 @@ impl ChartView {
             } else {
                 0.0
             };
-            let (bx, by, bh) = (8.0, s.sub_top + 4.0, LABEL_PX * 1.6);
+            let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
             window.paint_quad(fill(rect(bx, by, tw + nw + 16.0, bh), t.label_bg));
-            let line_h = px(LABEL_PX * 1.3);
-            let ty = oy + by + bh * 0.5 - LABEL_PX * 0.65;
+            let line_h = px(label_px() * 1.3);
+            let ty = oy + by + bh * 0.5 - label_px() * 0.65;
             self.paint_label(
                 LabelKind::SubTitle,
                 key,
@@ -4381,7 +4417,7 @@ impl ChartView {
         window.paint_quad(fill(rect(pw, s.sub_top, hair, s.sub_h), t.axis_line));
         window.paint_quad(fill(rect(0.0, s.sub_top + s.sub_h, pw, hair), t.axis_line));
         let Some(sc) = scale else { return };
-        let line_h = px(LABEL_PX * 1.3);
+        let line_h = px(label_px() * 1.3);
         // Cumulative delta is a quantity: printed in the product's quantity format.
         let qty = self.instrument.qty;
         let value = |v: i64| {
@@ -4396,17 +4432,19 @@ impl ChartView {
         // The newest value's tag, and range labels only where it leaves them whole (as the
         // price axis: a half-covered number reads as another value).
         let newest = self.studies.subpane_last().map(|last| {
-            let y = (s.sub_top + sc.y(last as f64))
-                .clamp(s.sub_top + TAG_H * 0.5, s.sub_top + s.sub_h - TAG_H * 0.5);
+            let y = (s.sub_top + sc.y(last as f64)).clamp(
+                s.sub_top + tag_h() * 0.5,
+                s.sub_top + s.sub_h - tag_h() * 0.5,
+            );
             (last, y)
         });
-        let tag = newest.map(|(_, y)| Span::around(y, TAG_H * 0.5));
+        let tag = newest.map(|(_, y)| Span::around(y, tag_h() * 0.5));
         for v in [top, bottom] {
             let y = s.sub_top + sc.y(v as f64);
-            if !label_clear_of_tags(Span::around(y, LABEL_PX * 0.65), &[tag]) {
+            if !label_clear_of_tags(Span::around(y, label_px() * 0.65), &[tag]) {
                 continue;
             }
-            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubValue,
                 v,
@@ -4421,10 +4459,10 @@ impl ChartView {
         if let Some((last, y)) = newest {
             // A filled chip (inverted text colors), so it never reads as a range label.
             window.paint_quad(fill(
-                rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
+                rect(pw + hair, y - tag_h() * 0.5, axis_w(), tag_h()),
                 t.text_main,
             ));
-            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubLast,
                 last,
@@ -4439,13 +4477,15 @@ impl ChartView {
         // The pointer in the sub-pane: its value on the axis, in the crosshair tag's style.
         if let Some(cy) = self.cross_in_sub {
             let v = sc.value(cy).round() as i64;
-            let y =
-                (s.sub_top + cy).clamp(s.sub_top + TAG_H * 0.5, s.sub_top + s.sub_h - TAG_H * 0.5);
+            let y = (s.sub_top + cy).clamp(
+                s.sub_top + tag_h() * 0.5,
+                s.sub_top + s.sub_h - tag_h() * 0.5,
+            );
             window.paint_quad(fill(
-                rect(pw + hair, y - TAG_H * 0.5, AXIS_W, TAG_H),
+                rect(pw + hair, y - tag_h() * 0.5, axis_w(), tag_h()),
                 t.cross_tag,
             ));
-            let origin = point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65));
+            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubCross,
                 v,
@@ -4492,7 +4532,7 @@ impl ChartView {
             f32::from(self.plot.size.width),
             f32::from(self.plot.size.height),
         );
-        let line_h = px(LABEL_PX * 1.3);
+        let line_h = px(label_px() * 1.3);
         let fmt = self.instrument.price;
         let mut tags = [(Price(0), 0.0f32, lines_core::drawings::Style::DEFAULT); MAX_DRAWING_TAGS];
         let mut n = 0;
@@ -4543,7 +4583,7 @@ impl ChartView {
                 fill(
                     Bounds::new(
                         point(px(x0 + DRAWING_TAG_INSET), px(oy + top)),
-                        size(px(AXIS_W - DRAWING_TAG_INSET - 2.0), px(DRAWING_TAG_H)),
+                        size(px(axis_w() - DRAWING_TAG_INSET - 2.0), px(DRAWING_TAG_H)),
                     ),
                     t.bg,
                 )
@@ -4553,7 +4593,7 @@ impl ChartView {
             self.paint_label(
                 LabelKind::DrawingTag(crate::theme::rgb_of(text).to_u32()),
                 price.0,
-                point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65)),
+                point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65)),
                 line_h,
                 text,
                 window,
@@ -4583,21 +4623,21 @@ impl ChartView {
             f32::from(self.plot.size.width),
             f32::from(self.plot.size.height),
         );
-        let line_h = px(LABEL_PX * 1.3);
+        let line_h = px(label_px() * 1.3);
         let fmt = self.instrument.price;
         let y = cross_tag_y(y, ph);
-        let top = snap(f64::from(y - TAG_H * 0.5), scale);
+        let top = snap(f64::from(y - tag_h() * 0.5), scale);
         window.paint_quad(fill(
             Bounds::new(
                 point(px(ox + pw + hair), px(oy + top)),
-                size(px(AXIS_W), px(TAG_H)),
+                size(px(axis_w()), px(tag_h())),
             ),
             t.cross_tag,
         ));
         self.paint_label(
             LabelKind::CrossPrice,
             price.0,
-            point(px(ox + pw + 8.0), px(oy + y - LABEL_PX * 0.65)),
+            point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65)),
             line_h,
             t.on_cross_tag,
             window,
@@ -4623,7 +4663,7 @@ impl ChartView {
         let (time, date_time) = (w(1, "88:88"), w(2, "88-88 88:88"));
         let gap = time * 0.4 + 8.0;
         self.scene.space = GridSpace {
-            price_px: f64::from(LABEL_PX) * 2.5,
+            price_px: f64::from(label_px()) * 2.5,
             time_px: time + gap,
             date_time_px: date_time + gap,
         };
@@ -4650,8 +4690,8 @@ impl ChartView {
     fn paint_drawing_text(&mut self, origin: (f32, f32), window: &mut Window, cx: &mut App) {
         let t = self.theme;
         let (ox, oy) = origin;
-        let line_h = px(LABEL_PX * 1.3);
-        let box_h = LABEL_PX * 1.3 + NOTE_PAD;
+        let line_h = px(label_px() * 1.3);
+        let box_h = label_px() * 1.3 + NOTE_PAD;
         for i in 0..self.drawings.drawn().len() {
             let d = self.drawings.drawn()[i];
             if d.tool != Tool::Note {
@@ -4777,7 +4817,7 @@ impl ChartView {
         let Some((_, line)) = self.measure_lines.get(&key) else {
             return;
         };
-        let box_h = LABEL_PX * 1.3 + NOTE_PAD;
+        let box_h = label_px() * 1.3 + NOTE_PAD;
         let w = f32::from(line.width) + 2.0 * NOTE_PAD;
         let pw = f32::from(self.plot.size.width);
         let ph = f32::from(self.plot.size.height);
@@ -4788,8 +4828,8 @@ impl ChartView {
             t.panel,
         ));
         let at = point(px(ox + x + NOTE_PAD), px(oy + y + NOTE_PAD * 0.5));
-        let _ = line.paint(at, px(LABEL_PX * 1.3), TextAlign::Left, None, window, cx);
-        crate::layout_rec::line(window, line, at, px(LABEL_PX * 1.3), "");
+        let _ = line.paint(at, px(label_px() * 1.3), TextAlign::Left, None, window, cx);
+        crate::layout_rec::line(window, line, at, px(label_px() * 1.3), "");
     }
 
     /// Takes typed text now (symbol search, a timeframe, a note, a menu's filter): the
@@ -5036,7 +5076,7 @@ impl ChartView {
                     Some((StudyRef::Profile, _))
                         if pc.mode != crate::profile::ProfileMode::Off && !pc.hidden =>
                     {
-                        (area.0 - AXIS_W).max(0.0) * pc.width()
+                        (area.0 - axis_w()).max(0.0) * pc.width()
                     }
                     _ => 0.0,
                 };
@@ -5176,7 +5216,7 @@ impl ChartView {
                 .border_1()
                 .border_color(t.axis_line)
                 .text_color(t.text_main)
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .child(m.head.clone())
                 .child(m.text.clone())
                 .into_any_element(),
@@ -5235,7 +5275,7 @@ impl ChartView {
                         .border_1()
                         .border_color(if d.confirm_clear { t.warn } else { t.accent })
                         .text_color(t.text_main)
-                        .text_size(px(12.0))
+                        .text_size(crate::zoom::ui(12.0))
                         .child(text),
                 )
                 .into_any_element(),
@@ -5302,13 +5342,13 @@ impl ChartView {
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let line_h = px(LABEL_PX * 1.3);
+        let line_h = px(label_px() * 1.3);
         let text = self.time_tag_text(time);
         let (left, box_w) = self.time_tag_box(x, time, window);
         window.paint_quad(fill(
             Bounds::new(
                 point(px(ox + left), px(oy + self.above_axis + hair)),
-                size(px(box_w), px(AXIS_H - hair)),
+                size(px(box_w), px(axis_h() - hair)),
             ),
             t.cross_tag,
         ));
@@ -5361,7 +5401,7 @@ impl ChartView {
         };
         let scale = window.scale_factor();
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let box_h = LABEL_PX * 1.6;
+        let box_h = label_px() * 1.6;
         let (left, top) = (snap(6.0, scale), snap(6.0, scale));
         let box_w = snap(f64::from(f32::from(line.width) + 12.0), scale);
         window.paint_quad(fill(
@@ -5373,17 +5413,17 @@ impl ChartView {
         ));
         let origin = point(
             px(ox + left + 6.0),
-            px(oy + top + box_h * 0.5 - LABEL_PX * 0.65),
+            px(oy + top + box_h * 0.5 - label_px() * 0.65),
         );
         let _ = line.paint(
             origin,
-            px(LABEL_PX * 1.3),
+            px(label_px() * 1.3),
             TextAlign::Left,
             None,
             window,
             cx,
         );
-        crate::layout_rec::line(window, line, origin, px(LABEL_PX * 1.3), "");
+        crate::layout_rec::line(window, line, origin, px(label_px() * 1.3), "");
     }
 
     /// "tick bars from 11-05 09:32 ET" beside the first tick bar, at the plot's
@@ -5408,7 +5448,7 @@ impl ChartView {
         );
         let scale = window.scale_factor();
         let pw = f32::from(self.plot.size.width);
-        let box_h = LABEL_PX * 1.6;
+        let box_h = label_px() * 1.6;
         let box_w = w + 12.0;
         let left = snap(f64::from((x + 6.0).min(pw - box_w).max(0.0)), scale);
         let top = snap(f64::from(ph - box_h - 6.0), scale);
@@ -5424,9 +5464,9 @@ impl ChartView {
             from.0,
             point(
                 px(ox + left + 6.0),
-                px(oy + top + box_h * 0.5 - LABEL_PX * 0.65),
+                px(oy + top + box_h * 0.5 - label_px() * 0.65),
             ),
-            px(LABEL_PX * 1.3),
+            px(label_px() * 1.3),
             t.text_dim,
             window,
             cx,
@@ -5435,7 +5475,7 @@ impl ChartView {
     }
 
     fn shape(&self, text: &str, color: Hsla, window: &mut Window) -> ShapedLine {
-        self.shape_sized(text, color, LABEL_PX, window)
+        self.shape_sized(text, color, label_px(), window)
     }
 
     fn shape_sized(
@@ -5550,7 +5590,7 @@ impl ChartView {
         let Some(d) = self.store.try_read() else {
             // Feed busy this instant; refreshes next frame. Its height stays, or the plot would
             // move for a frame, and the option chart's rows with it.
-            return div().h(px(crate::pane::header_height(
+            return div().h(crate::zoom::ui(crate::pane::header_height(
                 crate::layout::PaneKind::Chart,
             )));
         };
@@ -5760,11 +5800,11 @@ impl ChartView {
                                 // Its whole text's width, shrinking from there (a wrapping
                                 // row's own width otherwise comes from the 48 px basis).
                                 .flex_basis(px(desc_w))
-                                .h(px(QUOTE_ROW_H))
-                                .line_height(px(QUOTE_ROW_H))
+                                .h(px(quote_row_h()))
+                                .line_height(px(quote_row_h()))
                                 .items_center()
                                 .overflow_hidden()
-                                .child(div().w(px(0.0)).h(px(QUOTE_ROW_H)))
+                                .child(div().w(px(0.0)).h(px(quote_row_h())))
                                 .child(
                                     div()
                                         .flex_basis(px(48.0))
@@ -5783,13 +5823,13 @@ impl ChartView {
                                 .flex_row()
                                 .flex_wrap()
                                 .min_w_0()
-                                .h(px(QUOTE_ROW_H))
-                                .line_height(px(QUOTE_ROW_H))
+                                .h(px(quote_row_h()))
+                                .line_height(px(quote_row_h()))
                                 .items_center()
                                 .overflow_hidden()
                                 // A zero-width first item: the first quote can wrap away too
                                 // (a line's first item never wraps).
-                                .child(div().w(px(0.0)).h(px(QUOTE_ROW_H)))
+                                .child(div().w(px(0.0)).h(px(quote_row_h())))
                                 .children(quotes),
                         )
                         .children(pane::stale_badge(&self.store, &t))
@@ -5906,7 +5946,7 @@ impl ChartView {
             .border_1()
             .border_color(accent)
             .rounded_sm()
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .children(
                 crate::layout_rec::on()
                     .then(|| {
@@ -5971,7 +6011,7 @@ impl ChartView {
                     .px_2()
                     .pt_1()
                     .text_color(t.text_dim)
-                    .text_size(px(11.0))
+                    .text_size(crate::zoom::ui(11.0))
                     .child("Or type 5, 1h, 500t, 500v, 10r, 30s + Enter"),
             )
             .into_any_element(),
@@ -5992,7 +6032,7 @@ impl ChartView {
         Some(
             div()
                 .absolute()
-                .bottom(px(AXIS_H + 8.0))
+                .bottom(px(axis_h() + 8.0))
                 .left(px(8.0))
                 .flex()
                 .flex_row()
@@ -6004,7 +6044,7 @@ impl ChartView {
                 .border_1()
                 .border_color(t.accent)
                 .rounded_sm()
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .child(div().text_color(t.text_dim).child("Timeframe"))
                 .child(
                     div()
@@ -6209,7 +6249,7 @@ fn drawing_tag_y(y: f32, last: Option<f32>, plot_h: f32) -> f32 {
     let Some(last) = last else {
         return at;
     };
-    let reach = (TAG_H + DRAWING_TAG_H) * 0.5 + 1.0;
+    let reach = (tag_h() + DRAWING_TAG_H) * 0.5 + 1.0;
     if (at - last).abs() >= reach {
         return at;
     }
@@ -6274,7 +6314,7 @@ fn drawing_tag_ys(lines: &[f32], last: Option<f32>, plot_h: f32, out: &mut [f32]
 /// label (tiny windows).
 fn last_tag_y(vp: &Viewport, p: Price, plot_h: f32) -> f32 {
     (vp.price_to_y(p.0 as f64) as f32)
-        .min(plot_h - LABEL_PX)
+        .min(plot_h - label_px())
         .max(0.0)
 }
 
@@ -6335,11 +6375,16 @@ fn saved_tool_styles(cx: &App) -> crate::chart_draw::ToolStyles {
 }
 
 fn cross_tag_y(y: f32, plot_h: f32) -> f32 {
-    y.min(plot_h - TAG_H * 0.5).max(TAG_H * 0.5)
+    y.min(plot_h - tag_h() * 0.5).max(tag_h() * 0.5)
 }
 
 /// The header's quote row: one line, its line height set to this (`text_sm` fits).
-const QUOTE_ROW_H: f32 = 20.0;
+const QUOTE_ROW_H_100: f32 = 20.0;
+/// [`QUOTE_ROW_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn quote_row_h() -> f32 {
+    crate::zoom::f(QUOTE_ROW_H_100)
+}
 
 /// A header quote: `bid 6005.25`, or `bid —` (and `true`: show it dimmed) without a value.
 fn quote_text(label: &str, p: Option<Price>, f: &lines_core::PriceFormat) -> (String, bool) {
@@ -6707,9 +6752,14 @@ fn feed_info(store: &ChartStore) -> lines_feed::indicators::FeedInfo {
     }
 }
 
-/// The OHLCV readout box's bottom (it sits 6 px from the top, `LABEL_PX × 1.6` tall), plus
+/// The OHLCV readout box's bottom (it sits 6 px from the top, `label_px() × 1.6` tall), plus
 /// a gap: the footprint keeps its numbers below it.
-const READOUT_BOTTOM: f32 = 6.0 + LABEL_PX * 1.6 + 4.0;
+const READOUT_BOTTOM_100: f32 = 6.0 + LABEL_PX_100 * 1.6 + 4.0;
+/// [`READOUT_BOTTOM_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn readout_bottom() -> f32 {
+    crate::zoom::f(READOUT_BOTTOM_100)
+}
 
 /// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
 const LEGEND_MAX_W: f32 = 360.0;
@@ -6719,7 +6769,8 @@ const HUD_COMPACT_BELOW_PX: f32 = 1_200.0;
 
 /// The latency HUD's compact form for a chart `w` px wide (0: not laid out yet).
 fn hud_compact(w: f32) -> bool {
-    w > 0.0 && w < HUD_COMPACT_BELOW_PX
+    // In 100 % units (`crate::zoom`): the header's text grows with the zoom.
+    w > 0.0 && w / crate::zoom::get() < HUD_COMPACT_BELOW_PX
 }
 
 /// Key and mouse hints for a focused chart, in the window's status line.
@@ -6727,6 +6778,16 @@ pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel o
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Text shaped at another UI zoom is the wrong size: shaped again on demand.
+        let zoom = crate::zoom::generation();
+        if zoom != self.zoom_generation {
+            self.zoom_generation = zoom;
+            self.labels.clear();
+            self.readout = None;
+            self.note_lines.clear();
+            self.note_entry_line = None;
+            self.measure_lines.clear();
+        }
         // A group's list closes when none of its orders is left.
         if self
             .ct
@@ -6990,7 +7051,7 @@ mod tests {
         let ph = 400.0;
         assert_eq!(drawing_tag_y(100.0, Some(300.0), ph), 100.0);
         assert_eq!(drawing_tag_y(100.0, None, ph), 100.0);
-        let reach = (TAG_H + DRAWING_TAG_H) * 0.5 + 1.0;
+        let reach = (TAG_H_100 + DRAWING_TAG_H) * 0.5 + 1.0;
         // Just above the last price: above its tag; just below: below.
         assert_eq!(drawing_tag_y(198.0, Some(200.0), ph), 200.0 - reach);
         assert_eq!(drawing_tag_y(203.0, Some(200.0), ph), 200.0 + reach);
@@ -7012,7 +7073,7 @@ mod tests {
     #[test]
     fn stepped_drawing_tags_clear_the_other_tags() {
         let ph = 400.0;
-        let reach = (TAG_H + DRAWING_TAG_H) * 0.5 + 1.0;
+        let reach = (TAG_H_100 + DRAWING_TAG_H) * 0.5 + 1.0;
         let gap = DRAWING_TAG_H + 1.0;
         // A line at the last price (steps above, the line's side: y <= last) and another
         // drawing's line exactly where it would land.
