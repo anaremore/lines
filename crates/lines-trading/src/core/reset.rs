@@ -145,7 +145,7 @@ impl TradingCore {
         // The day so far (the account is flat: all realised), for the daily-loss guardrail.
         let day_so_far = a.balance - a.tracker.day_open_balance;
         let a = self.accounts.get_mut(account).expect("checked");
-        a.guard.carried = a.guard.carried + day_so_far;
+        a.guard.carried += day_so_far;
         a.balance = start;
         a.positions.clear();
         // Prop-rule progress starts over: high-water mark, today's opening balance (so today's
