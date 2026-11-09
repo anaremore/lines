@@ -260,6 +260,10 @@ pub enum TradeCmd {
     EditBrackets,
     /// One bracket for the whole position, or a bracket per entry (per account and product).
     BracketMode,
+    /// Reset the pane's paper account (second press confirms; `crate::paper_reset`).
+    ResetPaper,
+    /// The same, clearing the account's journal too.
+    ResetPaperJournal,
     /// Trade on the next account.
     NextAccount,
     QtyUp,
@@ -312,12 +316,14 @@ impl TradeCmd {
     ];
 
     /// Trading commands with no key of their own (palette and the DOM's panel).
-    pub const PALETTE_ONLY: [TradeCmd; 5] = [
+    pub const PALETTE_ONLY: [TradeCmd; 7] = [
         TradeCmd::Enable,
         TradeCmd::Disable,
         TradeCmd::BracketUnits,
         TradeCmd::EditBrackets,
         TradeCmd::BracketMode,
+        TradeCmd::ResetPaper,
+        TradeCmd::ResetPaperJournal,
     ];
 
     /// The order a header button sends, for the order commands.
@@ -803,6 +809,12 @@ pub fn label(c: Command) -> String {
             TradeCmd::BracketUnits => "Trade: bracket units (ticks / points)",
             TradeCmd::EditBrackets => "Trade: edit bracket presets…",
             TradeCmd::BracketMode => "Trade: bracket for the whole position / per entry (switch)",
+            TradeCmd::ResetPaper => {
+                "Trade: Reset paper account (flattens first; keeps the journal)"
+            }
+            TradeCmd::ResetPaperJournal => {
+                "Trade: Reset paper account and clear its journal (flattens first)"
+            }
             TradeCmd::NextAccount => "Trade: Next account",
             TradeCmd::QtyUp => "Trade: Quantity up",
             TradeCmd::QtyDown => "Trade: Quantity down",

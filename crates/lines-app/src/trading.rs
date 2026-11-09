@@ -36,7 +36,7 @@
 //! header) is left as it is and nothing is written to it this run. A saved journal's trades
 //! also get a trade snapshot in `<config dir>/journal/shots/` (`crate::journal_shots`).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -189,6 +189,12 @@ pub struct TradeState {
     fills: VecDeque<lines_trading::FillEvent>,
     /// Bumped on every fill (charts rebuild their strategy markers on it).
     pub fills_seen: u64,
+    /// Paper accounts whose reset waits for its flatten (`Event::ResetWaiting`).
+    resets_waiting: HashSet<AccountId>,
+    /// Paper accounts whose reset also clears their journal, once it happens.
+    clear_on_reset: HashSet<AccountId>,
+    /// Journals to clear now (their reset happened): the pump sends them.
+    clears_due: Vec<AccountId>,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -335,6 +341,17 @@ impl TradeState {
             Event::Rebuilt { .. } => {
                 self.rebuilds += 1;
                 None
+            }
+            Event::ResetWaiting { account } => {
+                self.resets_waiting.insert(account.clone());
+                Some(account)
+            }
+            Event::AccountReset { account, .. } => {
+                self.resets_waiting.remove(&account);
+                if self.clear_on_reset.remove(&account) {
+                    self.clears_due.push(account.clone());
+                }
+                Some(account)
             }
             Event::Overfill {
                 account,
@@ -545,6 +562,11 @@ impl TradeState {
             .map(|(_, r)| r)
     }
 
+    /// Whether the account's reset waits for its flatten to fill.
+    pub fn resetting(&self, account: &AccountId) -> bool {
+        self.resets_waiting.contains(account)
+    }
+
     /// Recent rejections for this account (and contract, or the account's header).
     pub fn flashes<'a>(
         &'a self,
@@ -642,6 +664,9 @@ pub struct TradingSetup {
     pub prop_rules: BTreeMap<String, Option<lines_trading::rules::RulePreset>>,
     /// The trade journal's file and the source label in its header (`None`: in memory).
     pub journal: Option<(PathBuf, String)>,
+    /// The data source's name (`mock`, `databento`; empty: none), as a reset names the
+    /// account: "Reset Paper (mock)".
+    pub source: String,
     /// Broker extensions (decision 0020): each runs its own core beside the paper one.
     pub brokers: Vec<Arc<dyn BrokerExtension>>,
     /// Feed venues' cores the panes' market data even when the source isn't live (the
@@ -671,6 +696,7 @@ impl TradingSetup {
             brokers: Vec::new(),
             venue_marks_always: false,
             venue_dir: config_dir.map(|d| d.join("paper")),
+            source: source.to_owned(),
             journal: (!replay)
                 .then(|| {
                     config_dir.map(|d| {
@@ -727,6 +753,7 @@ impl TradingSetup {
             guardrails: BTreeMap::new(),
             prop_rules: BTreeMap::new(),
             journal: None,
+            source: String::new(),
             brokers: Vec::new(),
             venue_marks_always: false,
             venue_dir: None,
@@ -792,6 +819,10 @@ pub struct Trading {
     pub start_account: Option<AccountId>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
     pub journal: Arc<JournalShared>,
+    /// The data source's name, as a paper reset names its account ("Paper (mock)").
+    pub source: String,
+    /// A paper reset's first press, waiting for the second (`crate::paper_reset`).
+    pub reset_arm: Mutex<Option<crate::paper_reset::Arm>>,
     /// The folder of the journal's trade snapshots (`None`: the journal has no file).
     pub shots_dir: Option<PathBuf>,
     /// The feeds panes trade from, for the journal's trade snapshots.
@@ -1128,6 +1159,7 @@ impl Trading {
         let check_sessions = setup.check_sessions;
         let mut report = None;
         let journal_file = setup.journal.take();
+        let source = std::mem::take(&mut setup.source);
         let shots_dir = journal_file
             .as_ref()
             .and_then(|(p, _)| p.parent())
@@ -1303,6 +1335,7 @@ impl Trading {
             cache.clone(),
             None,
             Some((bridge.clone(), handle.clone())),
+            Some(journal.clone()),
         );
         // The full state as the first events.
         handle.rebuild();
@@ -1392,6 +1425,8 @@ impl Trading {
                 Some(ids.clone()),
                 // Triggers are paper only.
                 None,
+                // So are resets (and their journal clears).
+                None,
             );
             let source = ext.accounts();
             let status = Arc::new(RwLock::new(None));
@@ -1445,6 +1480,8 @@ impl Trading {
             check_sessions,
             start_account: None,
             journal,
+            source,
+            reset_arm: Mutex::new(None),
             shots_dir,
             shot_stores,
             clock: setup.clock,
@@ -1635,6 +1672,53 @@ impl Trading {
         }
     }
 
+    /// A press of Reset paper account for `account` (`journal`: its journal too). The first
+    /// arms it and returns its confirmation (`Ok(Some)`); a second within
+    /// `paper_reset::CONFIRM` sends it (`Ok(None)`): the core flattens and cancels first, then
+    /// resets. A broker account is refused (`Err`), never armed.
+    pub fn press_reset(
+        &self,
+        account: &AccountId,
+        journal: bool,
+        source: Source,
+    ) -> Result<Option<String>, String> {
+        use crate::paper_reset::{self, Press};
+        let Some(info) = self.account(account) else {
+            return Err("no account".into());
+        };
+        if !info.paper {
+            return Err(paper_reset::broker_refusal(&info.name));
+        }
+        let press = {
+            let mut arm = self.reset_arm.lock().unwrap_or_else(|e| e.into_inner());
+            paper_reset::press(&mut arm, account, journal, Instant::now(), || {
+                paper_reset::confirm_text(&info.name, &self.source, journal)
+            })
+        };
+        match press {
+            Press::Confirm(text) => Ok(Some(text)),
+            Press::Go => {
+                if journal {
+                    self.cache.read().clear_on_reset.insert(account.clone());
+                }
+                self.submit(
+                    source,
+                    Instant::now(),
+                    TradeCommand::ResetPaper {
+                        account: account.clone(),
+                    },
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Whether this reset's first press is waiting for its second.
+    pub fn reset_armed(&self, account: &AccountId, journal: bool) -> bool {
+        let arm = self.reset_arm.lock().unwrap_or_else(|e| e.into_inner());
+        crate::paper_reset::armed(&arm, account, journal, Instant::now())
+    }
+
     /// Send a command; returns at once. `issued`: the input event's time (the click).
     ///
     /// A command on a read-only account is refused here and never sent (DENIED, with the
@@ -1691,6 +1775,7 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::CancelOrder { account, .. } => (account.clone(), None, None),
         TradeCommand::CancelAll { account, contract }
         | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
+        TradeCommand::ResetPaper { account } => (account.clone(), None, None),
         TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
             (account.clone(), None, None)
         }
@@ -1802,6 +1887,7 @@ fn spawn_pump(
     cache: Arc<TradeCache>,
     ids: Option<Arc<Mutex<VenueIds>>>,
     trigger_feeds: Option<(FeedBridge, TradingHandle)>,
+    journal: Option<Arc<JournalShared>>,
 ) {
     // A venue's ids, translated into the shared cache's.
     let tag = ids
@@ -1872,6 +1958,12 @@ fn spawn_pump(
                         }
                         next = events.try_recv().ok();
                     }
+                    // A reset that asked for it: its journal goes now that it happened.
+                    for a in s.clears_due.drain(..) {
+                        if let Some(j) = &journal {
+                            j.clear_account(a);
+                        }
+                    }
                 }
                 hold_feeds(&mut touched);
                 for a in &touched {
@@ -1933,6 +2025,11 @@ pub enum Step {
     Print(ContractKey, Price, lines_core::Qty),
     /// Tag the newest closed trade (the journal's by-tag view).
     Tag(Vec<String>),
+    /// A press of Reset paper account (`crate::paper_reset`): once arms it, twice sends it.
+    Reset {
+        account: AccountId,
+        journal: bool,
+    },
 }
 
 #[cfg(any(test, feature = "screenshot"))]
@@ -1951,7 +2048,9 @@ pub enum Step {
 ///   round trips in a screenshot of a finished replay;
 /// - `strategy N` (add instance N on the account and contract, arm it, send what follows as
 ///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss), `future SYM`
-///   (another product's front month from there on, to hold several at once).
+///   (another product's front month from there on, to hold several at once);
+/// - `reset` / `reset journal`: a press of Reset paper account on the account (keeping, or
+///   clearing, its journal): once shows its confirmation armed, twice sends it.
 pub fn parse_script(
     s: &str,
     product: &lines_core::Product,
@@ -2099,6 +2198,14 @@ pub fn parse_script(
                 out.push(Step::Source(Source::Strategy(id)));
             }
             ["manual"] => out.push(Step::Source(Source::Test)),
+            ["reset"] => out.push(Step::Reset {
+                account: account.clone(),
+                journal: false,
+            }),
+            ["reset", "journal"] => out.push(Step::Reset {
+                account: account.clone(),
+                journal: true,
+            }),
             ["halt", n] => {
                 let id = lines_trading::StrategyId(
                     n.parse()
@@ -2257,6 +2364,11 @@ impl Trading {
                             tags: tags.clone(),
                             note: t.note,
                         });
+                    }
+                }
+                Step::Reset { account, journal } => {
+                    if let Err(e) = self.press_reset(account, *journal, Source::Palette) {
+                        tracing::warn!("script reset: {e}");
                     }
                 }
                 Step::Account(_) => {}
@@ -2519,6 +2631,7 @@ mod tests {
             guardrails: BTreeMap::new(),
             prop_rules: BTreeMap::new(),
             journal: None,
+            source: String::new(),
             brokers: Vec::new(),
             venue_marks_always: false,
             venue_dir: None,
@@ -2614,6 +2727,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Reset paper account: one press only arms it; the second sends it, the core flattens,
+    /// then the account is back at its starting balance, and (asked for) its journal is
+    /// cleared once the reset happened.
+    #[test]
+    fn a_second_press_resets_a_paper_account_and_clears_its_journal() {
+        let account = AccountId::new("paper");
+        let t = trading(vec![AccountConfig::paper("paper", 50_000)]);
+        let open = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap();
+        let book = |mid: f64| {
+            vec![
+                MarketInput::BookClear,
+                MarketInput::Book {
+                    side: lines_core::Side::Bid,
+                    price: px(mid - 0.25),
+                    qty: Qty(50),
+                },
+                MarketInput::Book {
+                    side: lines_core::Side::Ask,
+                    price: px(mid),
+                    qty: Qty(50),
+                },
+            ]
+        };
+        t.handle().advance_to(open);
+        t.handle().market(es(), book(6000.00));
+        let buy = |qty| {
+            TradeCommand::PlaceOrder(lines_trading::OrderSpec {
+                account: account.clone(),
+                contract: es(),
+                side: lines_trading::Side::Buy,
+                qty: Qty(qty),
+                kind: lines_trading::OrderKind::Market,
+            })
+        };
+        // A closed round trip (a journal trade), then a position left open.
+        t.submit(Source::Dom, Instant::now(), buy(1));
+        t.handle().advance_to(UtcMillis(open.0 + 100));
+        t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::Flatten {
+                account: account.clone(),
+                contract: None,
+            },
+        );
+        t.handle().advance_to(UtcMillis(open.0 + 200));
+        t.submit(Source::Dom, Instant::now(), buy(2));
+        t.handle().advance_to(UtcMillis(open.0 + 300));
+        t.handle().market(es(), book(5990.00));
+        t.settle();
+        t.journal.sync();
+        assert_eq!(t.journal.snapshot().unwrap().trades.len(), 1);
+        assert_eq!(
+            t.cache.read().position(&account, es()).map(|p| p.qty),
+            Some(2)
+        );
+
+        let first = t.press_reset(&account, true, Source::Palette).unwrap();
+        assert!(
+            first.is_some_and(|s| s.starts_with("Reset paper: flattens and clears")),
+            "the first press only arms it"
+        );
+        assert!(t.reset_armed(&account, true));
+        t.settle();
+        assert_eq!(
+            t.cache.read().position(&account, es()).map(|p| p.qty),
+            Some(2)
+        );
+
+        assert_eq!(t.press_reset(&account, true, Source::Palette), Ok(None));
+        t.handle().advance_to(UtcMillis(open.0 + 400));
+        t.settle();
+        t.journal.sync();
+        let s = t.cache.read();
+        assert!(!s.resetting(&account));
+        assert_eq!(s.position(&account, es()).map_or(0, |p| p.qty), 0);
+        let v = s.account(&account).unwrap();
+        assert_eq!(v.balance, Money::whole(50_000));
+        assert_eq!(v.day_pnl, Money::ZERO);
+        drop(s);
+        assert_eq!(
+            t.journal.snapshot().unwrap().trades.len(),
+            0,
+            "its journal cleared, the flatten's trade too"
+        );
     }
 
     /// Prop rules from settings reach the core at start: a tighter contract cap denies the

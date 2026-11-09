@@ -1461,6 +1461,30 @@ fn table() -> Vec<Setting> {
             },
             None,
         ),
+        s(
+            RESET_KEY,
+            Sec::Accounts,
+            "Reset paper account",
+            "Flattens and cancels everything on it, then back to its starting balance: today's P&L and prop progress cleared, guardrails and any lockout kept. The old file is kept as a dated .bak. Paper only.",
+            Scope::Account,
+            Trading,
+            Editor,
+            |_, t, f| {
+                let a = f
+                    .accounts
+                    .iter()
+                    .find(|a| Some(&a.id) == t.account.as_ref());
+                Value::Text(match a {
+                    None => "Choose an account".to_owned(),
+                    Some(a) if !a.paper => crate::paper_reset::broker_refusal(&a.name),
+                    Some(a) => match a.account_size {
+                        Some(n) => format!("{}: back to ${}", a.name, grouped(n)),
+                        None => a.name.clone(),
+                    },
+                })
+            },
+            None,
+        ),
         // Data.
         s(
             "data.store",
@@ -1769,6 +1793,9 @@ pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> 
 }
 
 /// Thousands separators: 1500 → "1,500".
+/// Settings › Accounts › Reset paper account (its buttons are the window's own).
+pub const RESET_KEY: &str = "accounts.reset";
+
 pub fn grouped(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();

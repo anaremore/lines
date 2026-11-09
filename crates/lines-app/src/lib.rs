@@ -46,6 +46,7 @@ mod pane;
 mod pane_columns;
 mod pane_menu;
 mod pane_window;
+mod paper_reset;
 mod persist;
 mod picker;
 mod picker_view;
