@@ -8,7 +8,8 @@
 //!
 //! A command passes, in order: validation (account, contract, quantity, tick grid, broker
 //! capabilities) → prop rules (blocked after a breach; contract cap) → pre-trade risk → the
-//! broker. Flatten, Cancel All and cancels skip rules and risk: they always work. The news
+//! broker. Flatten, Cancel All and cancels skip rules and risk: they always work, but for a
+//! Flatten with a position to close while the broker is disconnected (refused whole). The news
 //! blackout (roadmap 8b) reads the economic calendar given with
 //! [`TradingCore::set_econ_schedule`] (the bundled one by default) on the core's clock.
 //!
@@ -1718,11 +1719,15 @@ impl TradingCore {
                 }
             }
         }
+        // Disconnected, a Flatten is refused: not asked on every tick, the next one after
+        // reconnecting goes if the window is still open.
+        if !self.broker.connected() {
+            return;
+        }
         for (account, contract, at) in todo {
-            let id = self.submit(
+            let id = self.submit_internal(
                 now,
                 Source::Rule,
-                Instant::now(),
                 Command::Flatten {
                     account: account.clone(),
                     contract: Some(contract),

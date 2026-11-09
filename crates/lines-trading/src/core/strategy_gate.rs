@@ -241,8 +241,9 @@ impl TradingCore {
                 .collect();
             targets.sort();
             targets.dedup();
+            let mut refused = None;
             for (account, contract) in targets {
-                self.submit_internal(
+                let command = self.submit_internal(
                     now,
                     source,
                     Command::Flatten {
@@ -250,6 +251,18 @@ impl TradingCore {
                         contract: Some(contract),
                     },
                 );
+                refused = refused.or_else(|| {
+                    self.events.iter().rev().find_map(|e| match e {
+                        Event::Command {
+                            id, result: Err(r), ..
+                        } if *id == command => Some(r.clone()),
+                        _ => None,
+                    })
+                });
+            }
+            // Stopped all the same; the person hears that its position is still open.
+            if let Some(r) = refused {
+                return Err(r);
             }
         }
         Ok(Vec::new())
@@ -423,11 +436,15 @@ impl TradingCore {
         if self.strategy_day_pnl(now, id) > -limit {
             return;
         }
-        if let Some(i) = self.strategies.get_mut(&id) {
-            i.loss_closed = day;
-        }
         if state == StrategyState::Armed {
             self.pause_strategy(now, id, StrategyState::Paused, DAILY_LOSS.into());
+        }
+        // Disconnected, a Flatten is refused: the day isn't closed yet, the next look tries.
+        if !self.broker.connected() {
+            return;
+        }
+        if let Some(i) = self.strategies.get_mut(&id) {
+            i.loss_closed = day;
         }
         self.submit_internal(
             now,

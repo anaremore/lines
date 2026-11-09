@@ -12,8 +12,9 @@
 //!   (acked, working, partly filled) or whose outcome is unknown: the order stays as it is,
 //!   [`Event::CancelFailed`] says why, nothing resends on its own and a rule's cancel adds none
 //!   (a sweep would ask again forever), and a person's next command goes at once.
-//! - While the broker is disconnected nothing is sent and no send is spent: a command is
-//!   remembered and goes when it is back.
+//! - While the broker is disconnected nothing is sent and no send is spent: a Cancel or Cancel
+//!   All is remembered and goes when it is back (a Flatten with a position to close is refused
+//!   whole instead, in its arm).
 //! - An order is on its way out only while a cancel may still work: refused or out of sends, it
 //!   counts as live again ([`TradingCore::cancel_pending`]).
 
@@ -210,7 +211,8 @@ impl TradingCore {
         if !alive {
             return false;
         }
-        let Some(c) = self.cancelling.get_mut(&id) else {
+        // One remembered and never sent can't have been refused.
+        let Some(c) = self.cancelling.get_mut(&id).filter(|c| c.sends > 0) else {
             return false;
         };
         if !c.refused {
