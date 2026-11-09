@@ -419,8 +419,8 @@ struct Frame {
     ys: Vec<f32>,
     /// The scale `ys` were placed for.
     locked_key: Option<(f64, f64, f32, f64)>,
-    /// Where the window was when last looked at.
-    window_at: Option<(f32, f32)>,
+    /// The window's bounds when last looked at.
+    window_at: Option<(f32, f32, f32, f32)>,
     /// Where the table was last frame: position and width.
     table_at: Option<(f32, f32, f32)>,
     /// Where the chart's plot was last frame, if the rows are on its scale.
@@ -1023,11 +1023,17 @@ impl ChainView {
         }
     }
 
-    /// One-click ends if the window has moved: the pointer is over another cell. A move needn't
-    /// bring a paint, so a press looks too, before it can send.
+    /// One-click ends if the window has moved or changed size: the pointer can be over another
+    /// cell. The size counts because on Linux a top-edge resize or vertical maximize doesn't report
+    /// a new origin. A move needn't bring a paint, so a press looks too, before it can send.
     fn check_window_moved(&mut self, window: &Window) {
-        let origin = window.bounds().origin;
-        let at = (f(origin.x), f(origin.y));
+        let b = window.bounds();
+        let at = (
+            f(b.origin.x),
+            f(b.origin.y),
+            f(b.size.width),
+            f(b.size.height),
+        );
         if crate::chain_lock::table_moved(self.frame.window_at, at) {
             self.rows_moved();
         }
@@ -1910,7 +1916,11 @@ impl ChainView {
         if pane::unavailable_title(&self.feed).is_some() {
             return;
         }
+        let armed = self.one_click;
         self.check_window_moved(window);
+        if armed && !self.one_click {
+            cx.notify();
+        }
         let x = f(ev.position.x);
         let y = f(ev.position.y - self.bounds.origin.y);
         if y < HEAD_H {

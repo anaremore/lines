@@ -405,10 +405,17 @@ mod tests {
         assert!(table_moved(Some(at), (690.0, 40.0, 610.0)), "narrower");
         assert!(table_moved(Some(at), (800.0, 60.0, 700.0)), "lower");
         assert!(table_moved(Some(at), (780.0, 40.0, 700.0)), "sideways");
-        let window = (100.0, 200.0);
+        let window = (100.0, 200.0, 1600.0, 700.0);
         assert!(!table_moved(None, window), "the first look at the window");
         assert!(!table_moved(Some(window), window));
-        assert!(table_moved(Some(window), (100.0, 0.0)), "the window moved");
+        assert!(
+            table_moved(Some(window), (100.0, 0.0, 1600.0, 700.0)),
+            "the window moved"
+        );
+        assert!(
+            table_moved(Some(window), (100.0, 200.0, 1600.0, 900.0)),
+            "a vertical maximize where only the size is reported (X11, Wayland)"
+        );
     }
 
     #[test]
