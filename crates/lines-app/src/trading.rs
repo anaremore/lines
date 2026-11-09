@@ -1690,6 +1690,17 @@ impl Trading {
         journal: bool,
         source: Source,
     ) -> Result<Option<String>, String> {
+        self.press_reset_at(account, journal, source, Instant::now())
+    }
+
+    /// [`Trading::press_reset`] at a given time (tests and scripts: no sleeps).
+    pub fn press_reset_at(
+        &self,
+        account: &AccountId,
+        journal: bool,
+        source: Source,
+        now: Instant,
+    ) -> Result<Option<String>, String> {
         use crate::paper_reset::{self, Press};
         let Some(info) = self.account(account) else {
             return Err("no account".into());
@@ -1699,7 +1710,7 @@ impl Trading {
         }
         let press = {
             let mut arm = self.reset_arm.lock().unwrap_or_else(|e| e.into_inner());
-            paper_reset::press(&mut arm, account, journal, Instant::now(), || {
+            paper_reset::press(&mut arm, account, journal, now, || {
                 paper_reset::confirm_text(&info.name, &self.source, info.start_balance, journal)
             })
         };
@@ -2327,6 +2338,7 @@ impl Trading {
     pub fn run_script(&self, steps: &[Step], start: lines_core::UtcMillis, latency_ms: i64) {
         let mut t = start;
         let mut source = Source::Test;
+        let mut presses = 0u64;
         self.advance_to(t);
         for s in steps {
             match s {
@@ -2368,7 +2380,10 @@ impl Trading {
                     }
                 }
                 Step::Reset { account, journal } => {
-                    if let Err(e) = self.press_reset(account, *journal, Source::Palette) {
+                    // A second apart: a script's presses are never a double-click.
+                    presses += 1;
+                    let at = Instant::now() + Duration::from_secs(presses);
+                    if let Err(e) = self.press_reset_at(account, *journal, Source::Palette, at) {
                         tracing::warn!("script reset: {e}");
                     }
                 }
@@ -2787,7 +2802,10 @@ mod tests {
             Some(2)
         );
 
-        let first = t.press_reset(&account, true, Source::Palette).unwrap();
+        let pressed = Instant::now();
+        let first = t
+            .press_reset_at(&account, true, Source::Palette, pressed)
+            .unwrap();
         assert!(
             first.is_some_and(
                 |s| s.starts_with("Reset paper: flattens, then resets the balance to $50,000")
@@ -2801,7 +2819,16 @@ mod tests {
             Some(2)
         );
 
-        assert_eq!(t.press_reset(&account, true, Source::Palette), Ok(None));
+        // A second later (a double-click's second press wouldn't send it).
+        assert_eq!(
+            t.press_reset_at(
+                &account,
+                true,
+                Source::Palette,
+                pressed + Duration::from_secs(1)
+            ),
+            Ok(None)
+        );
         t.handle().advance_to(UtcMillis(open.0 + 400));
         t.settle();
         t.journal.sync();

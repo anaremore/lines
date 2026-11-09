@@ -1103,7 +1103,9 @@ impl TradingCore {
                 // A tighter daily loss applies to the next order: today's loss is checked
                 // now (a guardrail lock never liquidates, nor blocks exits).
                 if let Some((_, end)) = day {
-                    let day_pnl = a.balance + unrealised - a.tracker.day_open_balance;
+                    // With what a paper reset this trade date carried over.
+                    let day_pnl =
+                        a.balance + unrealised - a.tracker.day_open_balance + a.guard.carried;
                     a.guard.on_day_pnl(day_pnl, end);
                 }
                 self.guard_report(&account);
@@ -1918,8 +1920,10 @@ impl TradingCore {
             open_buy,
             open_sell,
             reference: self.marks.get(&spec.contract).and_then(Mark::price),
+            // The risk daily loss counts the day from before a paper reset too.
             day_pnl: self.equity(&spec.account)
-                - self.accounts[&spec.account].tracker.day_open_balance,
+                - self.accounts[&spec.account].tracker.day_open_balance
+                + self.accounts[&spec.account].guard.carried,
             recent_submits,
         };
         risk::check(

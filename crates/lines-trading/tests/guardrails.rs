@@ -368,6 +368,29 @@ fn a_reset_carries_the_days_loss_into_the_daily_loss_guardrail() {
     assert_eq!(ev.last().map(|e| e.0), Some(GuardState::Locked), "{ev:?}");
 }
 
+/// Tightening the daily loss after a reset counts the loss from before it too.
+#[test]
+fn a_tighter_daily_loss_after_a_reset_counts_the_day_before_it() {
+    let mut r = Rig::new(Guardrails::default());
+    r.market_fill(Side::Buy, 1);
+    r.book_at(5997.50, 5997.75);
+    r.market_fill(Side::Sell, 1);
+    r.cmd(Command::ResetPaper {
+        account: acct(),
+        clear_journal: false,
+    })
+    .unwrap();
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: Guardrails {
+            max_daily_loss: Some(100),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
+}
+
 /// A paper reset starts the account over but is no way out of a lock the trader set.
 #[test]
 fn a_reset_keeps_a_lockout() {
