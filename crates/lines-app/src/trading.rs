@@ -267,6 +267,24 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
+            Event::CancelFailed {
+                account,
+                contract,
+                order,
+                reason,
+                ..
+            } => {
+                let price = self.orders.get(&order).and_then(|o| first_price(&o.kind));
+                self.flashes.push_back(Flash {
+                    kind: FlashKind::Rejected,
+                    account: account.clone(),
+                    contract: Some(contract),
+                    price,
+                    message: format!("still working: {reason}"),
+                    at: now,
+                });
+                Some(account)
+            }
             // (Kept for the chain's armed rows and lines, decision 0029.) A restored one's notice.
             Event::Trigger(t) => {
                 let account = t.account.clone();
@@ -2219,6 +2237,32 @@ mod tests {
         assert!(
             matches!(s.result(CommandId(9)), Some(Err(_))),
             "the panel reads it"
+        );
+    }
+
+    /// A cancel that didn't happen reaches the person: the order is still live.
+    #[test]
+    fn a_failed_cancel_flashes() {
+        use lines_core::{ContractKey, Month, UtcMillis};
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let mut s = TradeState::default();
+        let account = AccountId::new("venue-1");
+        let touched = s.apply(
+            Event::CancelFailed {
+                account: account.clone(),
+                contract: k,
+                order: lines_trading::OrderId(7),
+                reason: "cancel refused: too late to cancel".into(),
+                at: UtcMillis(0),
+            },
+            Instant::now(),
+        );
+        assert_eq!(touched, Some(account));
+        let f = s.flashes.back().expect("a flash");
+        assert_eq!(f.kind, FlashKind::Rejected);
+        assert_eq!(
+            f.message,
+            "still working: cancel refused: too late to cancel"
         );
     }
 

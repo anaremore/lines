@@ -41,6 +41,7 @@ use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind
 
 /// The order id a fill made outside Lines carries ([`BrokerEvent::ExternalFill`]): no order.
 pub const EXTERNAL_ORDER: OrderId = OrderId(0);
+mod cancels;
 mod position_bracket;
 mod strategy_gate;
 mod trigger;
@@ -211,7 +212,7 @@ pub struct TradingCore {
     /// Terminal orders kept for display, oldest dropped first.
     finished: VecDeque<OrderId>,
     /// Orders with a cancel on its way (not sent twice).
-    cancelling: HashSet<OrderId>,
+    cancelling: HashMap<OrderId, cancels::SentCancel>,
     /// Expired option positions already sent to settle (one try per run).
     settled: HashSet<(AccountId, ContractKey)>,
     overfill: OverfillPolicy,
@@ -289,7 +290,7 @@ impl TradingCore {
             events: Vec::new(),
             broker_events: Vec::new(),
             finished: VecDeque::new(),
-            cancelling: HashSet::new(),
+            cancelling: HashMap::new(),
             settled: HashSet::new(),
             overfill: OverfillPolicy::default(),
             fill_ids: HashSet::new(),
@@ -796,7 +797,7 @@ impl TradingCore {
                 // re-add must pair the new exit, not leave it alone).
                 let cancelling = &self.cancelling;
                 let open = |id: Option<OrderId>, orders: &BTreeMap<OrderId, Order>| {
-                    id.filter(|i| !cancelling.contains(i))
+                    id.filter(|i| !cancelling.contains_key(i))
                         .and_then(|i| orders.get(&i))
                         .is_some_and(|o| o.is_open())
                 };
@@ -805,7 +806,7 @@ impl TradingCore {
                     .values()
                     .find(|o| {
                         o.is_open()
-                            && !cancelling.contains(&o.id)
+                            && !cancelling.contains_key(&o.id)
                             && o.reduce_only
                             && o.role != Role::Flatten
                             && !open(o.oco, &self.orders)
@@ -1104,9 +1105,7 @@ impl TradingCore {
             } => self.set_bracket_mode(env, now, &account, contract, mode, replace),
             Command::CancelOrder { order, .. } => {
                 self.open_order(&account, order)?;
-                if self.cancelling.insert(order) {
-                    self.send(env, now, BrokerRequest::Cancel { id: order });
-                }
+                self.send_cancel(env, now, order);
                 Ok(vec![order])
             }
             Command::CancelAll { contract, .. } => {
@@ -1232,15 +1231,29 @@ impl TradingCore {
                 // reduce-only. Refused or cancelled, it is no longer open and the next one goes;
                 // while its cancel is on its way it may yet fill, so nothing goes until that's known.
                 // A venue silent for [`FLATTEN_ANSWER_MS`] may have lost it: an exit is never dead,
-                // so from then on it is cancelled and replaced as any other order.
-                let closing: std::collections::BTreeSet<OrderId> = self
+                // so from then on it is cancelled and replaced as any other order. Unresolved (a
+                // rebuild came before the broker's answer) counts too: it may still fill.
+                let flattens: Vec<OrderId> = self
                     .orders
                     .values()
-                    .filter(|o| o.is_open() && o.role == Role::Flatten && o.account == account)
+                    .filter(|o| o.is_open() || o.state == OrderState::Unresolved)
+                    .filter(|o| o.role == Role::Flatten && o.account == account)
                     .filter(|o| positions.iter().any(|(k, _)| *k == o.contract))
-                    .filter(|o| now.0.saturating_sub(o.updated.0) < FLATTEN_ANSWER_MS)
                     .map(|o| o.id)
                     .collect();
+                let closing: std::collections::BTreeSet<OrderId> = flattens
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        now.0.saturating_sub(self.orders[id].updated.0) < FLATTEN_ANSWER_MS
+                    })
+                    .collect();
+                // An unresolved one past that isn't covered by the cancels below (not open).
+                for &id in &flattens {
+                    if !self.orders[&id].is_open() && !closing.contains(&id) {
+                        self.send_cancel(env, now, id);
+                    }
+                }
                 let mut ids = if positions.is_empty() {
                     self.cancel_all(env, now, &account, contract)
                 } else {
@@ -1315,9 +1328,7 @@ impl TradingCore {
             .map(|o| o.id)
             .collect();
         for &id in &ids {
-            if self.cancelling.insert(id) {
-                self.send(env, now, BrokerRequest::Cancel { id });
-            }
+            self.send_cancel(env, now, id);
         }
         ids
     }
@@ -1390,7 +1401,7 @@ impl TradingCore {
             .orders
             .values()
             .filter(|o| o.is_open() && expired(&o.contract))
-            .filter(|o| !self.cancelling.contains(&o.id))
+            .filter(|o| !self.cancelling.contains_key(&o.id))
             .map(|o| (o.account.clone(), o.id))
             .collect();
         for (account, order) in orders {
@@ -1942,6 +1953,7 @@ impl TradingCore {
         if self.settle_options(now) {
             self.poll(now);
         }
+        self.cancels_resend(now);
         self.news_flatten(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
@@ -1960,6 +1972,7 @@ impl TradingCore {
             .chain(cooldowns)
             .chain(news)
             .chain(self.triggers_wake())
+            .chain(self.cancels_wake())
             .min()
     }
 
@@ -2021,7 +2034,7 @@ impl TradingCore {
                 &o.account == account
                     && o.is_open()
                     && exit
-                    && !self.cancelling.contains(&o.id)
+                    && !self.cancel_on_its_way(now, o.id)
                     && (position == 0 || o.side.sign() == position.signum())
             })
             .map(|o| o.id)
@@ -2086,6 +2099,9 @@ impl TradingCore {
             }
             BrokerEvent::Working { id, at } => self.transition(id, OrderState::Working, at),
             BrokerEvent::Rejected { id, reason, at } => {
+                if self.cancel_refused(id, &reason, at) {
+                    return self.orders.get(&id).map(|o| o.account.clone());
+                }
                 self.transition(id, OrderState::Rejected { reason }, at)
             }
             BrokerEvent::Cancelled { id, at, .. } => self.transition(id, OrderState::Cancelled, at),
@@ -2578,6 +2594,7 @@ impl TradingCore {
                 self.events.push(Event::Order(o));
             }
         }
+        self.cancels_rebuilt();
         self.events.push(Event::Rebuilt {
             accounts: snap.accounts.len(),
             open_orders: open,

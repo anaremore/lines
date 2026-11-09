@@ -150,7 +150,7 @@ impl TradingCore {
 
     /// An order working and not on its way out.
     fn live_order(&self, id: Option<OrderId>) -> Option<OrderId> {
-        id.filter(|i| !self.cancelling.contains(i))
+        id.filter(|i| !self.cancelling.contains_key(i))
             .filter(|i| self.orders.get(i).is_some_and(Order::is_open))
     }
 
@@ -292,9 +292,7 @@ impl TradingCore {
             }
         } else {
             for id in exits {
-                if self.cancelling.insert(id) {
-                    self.send(env, now, BrokerRequest::Cancel { id });
-                }
+                self.send_cancel(env, now, id);
                 cancelled.push(id);
             }
         }
@@ -408,7 +406,7 @@ impl TradingCore {
         }
         let state = self.orders.get(&id).map(|o| o.state.clone());
         // Sent with no known outcome (a reconnect): never assumed gone, never placed again.
-        if matches!(state, Some(OrderState::Unresolved)) && !self.cancelling.contains(&id) {
+        if matches!(state, Some(OrderState::Unresolved)) && !self.cancelling.contains_key(&id) {
             return false;
         }
         leg.id = None;
