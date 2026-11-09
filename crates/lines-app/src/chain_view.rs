@@ -4405,7 +4405,8 @@ impl ChainView {
         let line = match (reason, stale) {
             (Some(why), _) => flagged("Can't send", why),
             (None, _) if others > 0 => flagged("Still working", leaves_working(others)),
-            (None, false) if when.is_some() => div(),
+            // The line's height stays, or a message arriving would move Send under the pointer.
+            (None, false) if when.is_some() => div().min_h(px(ROW_H)),
             (None, true) => flagged(
                 "Stale feed",
                 "no new data: this quote may be old".to_owned(),
