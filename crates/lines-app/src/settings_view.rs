@@ -1640,7 +1640,9 @@ impl SettingsWindow {
                 div()
                     .text_size(px(11.5))
                     .text_color(t.warn)
-                    .child(format!("Press again to reset. {text}")),
+                    // Armed shows by weight too, not only by color.
+                    .font_weight(FontWeight::BOLD)
+                    .child(text),
             );
         }
         if let Some((n, text, tone)) = self.note.as_ref().filter(|n| n.0 == i) {

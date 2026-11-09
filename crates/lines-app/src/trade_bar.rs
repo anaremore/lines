@@ -3910,7 +3910,13 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                             .font_weight(FontWeight::BOLD)
                             .child("PENDING"),
                     )
-                    .child(format!("Resetting {who}: waiting for the flatten to fill")),
+                    // Wraps inside the list's width (never past its edge).
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(format!("Resetting {who}: waiting for the flatten to fill")),
+                    ),
             );
         } else {
             let mut armed_text = None;

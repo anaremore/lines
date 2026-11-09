@@ -2814,7 +2814,7 @@ mod tests {
         let first = t.press_reset(&account, true, Source::Palette).unwrap();
         assert!(
             first.is_some_and(
-                |s| s.starts_with("Reset paper: flattens and clears balance (back to $50,000)")
+                |s| s.starts_with("Reset paper: flattens, then resets the balance to $50,000")
             ),
             "the first press only arms it"
         );

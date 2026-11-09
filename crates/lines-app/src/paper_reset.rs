@@ -45,15 +45,17 @@ pub fn account_words(name: &str, source: &str) -> String {
 pub fn confirm_text(name: &str, source: &str, start: Option<i64>, journal: bool) -> String {
     let who = account_words(name, source);
     let balance = match start {
-        Some(n) => format!("balance (back to ${})", crate::settings_schema::grouped(n)),
-        None => "balance (back to its start)".to_owned(),
+        Some(n) => format!("the balance to ${}", crate::settings_schema::grouped(n)),
+        None => "the balance to its start".to_owned(),
     };
     if journal {
         format!(
-            "Reset {who}: flattens and clears {balance}, positions, orders, today's P&L and its journal"
+            "Reset {who}: flattens, then resets {balance} and clears positions, orders, today's P&L and its journal"
         )
     } else {
-        format!("Reset {who}: flattens and clears {balance}, positions, orders and today's P&L")
+        format!(
+            "Reset {who}: flattens, then resets {balance} and clears positions, orders and today's P&L"
+        )
     }
 }
 
@@ -111,11 +113,11 @@ mod tests {
     fn the_words_name_the_account_and_source() {
         assert_eq!(
             confirm_text("Paper", "databento", Some(50_000), false),
-            "Reset Paper (databento): flattens and clears balance (back to $50,000), positions, orders and today's P&L"
+            "Reset Paper (databento): flattens, then resets the balance to $50,000 and clears positions, orders and today's P&L"
         );
         assert_eq!(
             confirm_text("Paper", "mock", Some(50_000), true),
-            "Reset Paper (mock): flattens and clears balance (back to $50,000), positions, orders, today's P&L and its journal"
+            "Reset Paper (mock): flattens, then resets the balance to $50,000 and clears positions, orders, today's P&L and its journal"
         );
         assert!(confirm_text("Paper", "", None, false).starts_with("Reset Paper: "));
         assert_eq!(
