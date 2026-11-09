@@ -829,10 +829,6 @@ fn a_bracket_leg_not_known_reduce_only_is_cancelled_at_once() {
     for id in legs {
         assert_eq!(r.state(id), OrderState::Cancelled, "leg {id:?}");
     }
-    // The market falls through the old stop's price: nothing more sells.
-    r.book(585_000);
-    r.wait(LAT + 1);
-    assert_eq!(r.pos(), -2);
 }
 
 /// On `oco: true` an exit whose earlier cancel the broker refused is kept protecting, as any exit

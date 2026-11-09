@@ -1,9 +1,11 @@
 //! Reverse as one step: close the position and open the same size on the other side.
 //!
 //! - Every order on the contract is cancelled (the position's brackets and exits too). Where the
-//!   broker honors reduce-only (`BrokerCaps::oco`), the position's protective exits stay until it
-//!   is flat, as a Flatten leaves them (`core/flatten.rs`): if the close can't happen they still
-//!   protect it, and reduce-only they can never add to the new side.
+//!   broker honors reduce-only (`BrokerCaps::oco`), the position's protective exits the core knows
+//!   are reduce-only stay until it is flat (`core/flatten.rs` keeps them by role; a Reverse asks
+//!   for the flag too, since one kept through the flip must never add to the new side): if the
+//!   close can't happen they still protect it. A leg the broker never reported reduce-only is
+//!   cancelled at once, so a close that then fails leaves the position without it.
 //! - Two market orders, never one of twice the size a stale exit could overfill: the close is a
 //!   Flatten's own (reduce-only, `Role::Flatten`), the opening a separate entry for the position's
 //!   size (with its bracket in per-entry mode). Neither can leave a doubled position: the close
@@ -133,7 +135,7 @@ impl TradingCore {
             })?;
         }
         // Every order on the contract goes, whoever placed it; where reduce-only holds, the
-        // position's exits stay until it is flat.
+        // position's reduce-only exits stay until it is flat.
         let cancel = self
             .orders
             .values()
