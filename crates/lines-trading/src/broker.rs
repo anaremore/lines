@@ -276,6 +276,12 @@ pub trait Broker: Send {
     fn settle(&mut self, now: UtcMillis, order: Order, price: Price) {
         let _ = (now, order, price);
     }
+    /// Reset a simulated account (`Command::ResetPaper`): `balance`, no positions. Asked only
+    /// once the account has nothing open. Only simulated brokers can; the default refuses.
+    fn reset_account(&mut self, now: UtcMillis, account: &AccountId, balance: Money) -> bool {
+        let _ = (now, account, balance);
+        false
+    }
     /// State to save locally (paper: its accounts and open orders; live brokers hold their
     /// own and return `None`).
     fn saved_state(&self) -> Option<serde_json::Value> {

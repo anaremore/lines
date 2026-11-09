@@ -337,6 +337,29 @@ fn max_trades_counts_round_trips_through_partial_fills() {
     r.denied(Side::Buy, 1);
 }
 
+/// A paper reset starts the account over but is no way out of a lock the trader set.
+#[test]
+fn a_reset_keeps_a_lockout() {
+    let mut r = Rig::new(Guardrails {
+        max_trades_per_day: Some(1),
+        ..Default::default()
+    });
+    r.losing_trade();
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
+    r.cmd(Command::ResetPaper { account: acct() }).unwrap();
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::AccountReset { .. })),
+        "the flat account reset"
+    );
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
+    assert!(
+        r.denied(Side::Buy, 1)
+            .starts_with("Locked: max 1 trade reached")
+    );
+}
+
 #[test]
 fn a_lockout_survives_a_restart_and_settings_cannot_clear_it() {
     let dir = std::env::temp_dir().join(format!("lines-guardrails-{}", std::process::id()));

@@ -57,6 +57,19 @@ pub enum Event {
     },
     /// A trigger on an underlying (decision 0029) after any change; [`crate::trigger`].
     Trigger(crate::trigger::TriggerView),
+    /// A paper account's reset was asked for: its flatten went out, and the reset waits until
+    /// the account is flat with nothing open (`core/reset.rs`).
+    ResetWaiting {
+        account: AccountId,
+    },
+    /// A paper account was reset: back to `balance` (its starting balance), nothing open, prop
+    /// progress and today's P&L cleared. Its guardrails, counts and any lockout are kept.
+    AccountReset {
+        account: AccountId,
+        balance: crate::types::Money,
+        #[serde(with = "time_serde")]
+        at: UtcMillis,
+    },
     /// A cancel didn't happen: the broker refused it, or never answered it. `reason` says which,
     /// and whether the order is still working or its outcome unknown. On a working order
     /// another Cancel, Cancel All or Flatten sends again.

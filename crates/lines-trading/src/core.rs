@@ -16,7 +16,7 @@
 //! Orders, positions and balances are the **broker's**; the core keeps a cache updated from
 //! broker events and replaced wholesale by [`TradingCore::rebuild`] after a (re)connect.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -46,6 +46,7 @@ mod cancels;
 mod flatten;
 mod position_bracket;
 mod reverse;
+mod reset;
 mod strategy_gate;
 mod trigger;
 
@@ -236,6 +237,8 @@ pub struct TradingCore {
     /// External fills for accounts not added yet (a broker can report executions before its
     /// accounts join): applied when they do. Oldest dropped past `KEEP_HELD`.
     held: VecDeque<BrokerEvent>,
+    /// Paper accounts whose reset waits for their flatten (`core/reset.rs`).
+    resets: BTreeSet<AccountId>,
     /// Strategy instances (decision 0025), and which instance placed each order.
     strategies: BTreeMap<StrategyId, Instance>,
     strategy_orders: HashMap<OrderId, StrategyId>,
@@ -315,6 +318,7 @@ impl TradingCore {
             fill_order: VecDeque::new(),
             adopted: HashSet::new(),
             held: VecDeque::new(),
+            resets: BTreeSet::new(),
             strategies: BTreeMap::new(),
             strategy_orders: HashMap::new(),
             position_brackets: BTreeMap::new(),
@@ -749,6 +753,7 @@ impl TradingCore {
         self.poll(now);
         self.flatten_pending(now);
         self.reverse_pending(now);
+        self.reset_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -1179,6 +1184,15 @@ impl TradingCore {
                 stop_loss,
                 ..
             } => self.reverse(env, now, &account, contract, take_profit, stop_loss),
+            Command::ResetPaper { .. } => {
+                if matches!(env.source, Source::Strategy(_)) {
+                    return Err(Reject::new(
+                        RejectCode::Strategy,
+                        "a strategy can't reset an account",
+                    ));
+                }
+                self.reset_start(now, env, &account)
+            }
             Command::Flatten { contract, .. } => {
                 let simulated = self.broker.simulated();
                 let positions: Vec<(ContractKey, i64)> = self.accounts[&account]
@@ -2065,6 +2079,7 @@ impl TradingCore {
         self.news_flatten(now);
         self.flatten_pending(now);
         self.reverse_pending(now);
+        self.reset_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -2447,6 +2462,7 @@ impl TradingCore {
         }
         self.flatten_pending(now);
         self.reverse_pending(now);
+        self.reset_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);

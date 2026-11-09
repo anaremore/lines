@@ -108,6 +108,12 @@ pub enum Command {
         )]
         stop_loss: Option<Price>,
     },
+    /// Reset a paper account (`core/reset.rs`): flatten and cancel everything on it now, then,
+    /// once it is flat with nothing open, back to its starting balance with today's P&L and
+    /// prop progress cleared. Refused on a broker account. Always allowed, as a Flatten.
+    ResetPaper {
+        account: AccountId,
+    },
     /// The trader's guardrails for the account (roadmap 8b): tighter rules apply at once,
     /// looser ones with the next trade date (`guardrails::GuardrailTracker::request`). Never
     /// clears a lockout.
@@ -218,6 +224,7 @@ impl Command {
             | Command::CancelAll { account, .. }
             | Command::Flatten { account, .. }
             | Command::Reverse { account, .. }
+            | Command::ResetPaper { account }
             | Command::SetGuardrails { account, .. }
             | Command::SetRules { account, .. }
             | Command::SetBracketMode { account, .. } => Some(account),
@@ -235,6 +242,7 @@ impl Command {
             self,
             Command::CancelAll { .. }
                 | Command::Flatten { .. }
+                | Command::ResetPaper { .. }
                 | Command::CancelOrder { .. }
                 | Command::CancelTrigger { .. }
                 | Command::StopStrategies { .. }

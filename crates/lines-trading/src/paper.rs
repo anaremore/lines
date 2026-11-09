@@ -1149,6 +1149,20 @@ impl Broker for PaperBroker {
         true
     }
 
+    /// Back to `balance` with no positions; an order the core no longer tracks goes too.
+    fn reset_account(&mut self, _now: UtcMillis, account: &AccountId, balance: Money) -> bool {
+        self.orders.retain(|_, o| &o.order.account != account);
+        self.pending.retain(|(_, r)| match r {
+            BrokerRequest::Place(o) => &o.account != account,
+            BrokerRequest::Bracket { entry, .. } => &entry.account != account,
+            _ => true,
+        });
+        let a = self.accounts.entry(account.clone()).or_default();
+        a.balance = balance;
+        a.positions.clear();
+        true
+    }
+
     fn capabilities(&self) -> BrokerCaps {
         BrokerCaps {
             market_orders: true,
