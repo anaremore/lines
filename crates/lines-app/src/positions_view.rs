@@ -261,6 +261,24 @@ impl PositionsView {
             self.note = Some("trading isn't running".to_owned());
             return;
         };
+        // A row drawn before its position closed: flat now, so nothing goes (a Flatten with
+        // nothing to close would cancel that contract's other orders).
+        let open: Vec<Row> = match t.cache.try_read() {
+            Some(st) => rows
+                .iter()
+                .filter(|r| {
+                    st.position(&r.account, r.contract)
+                        .is_some_and(|p| p.qty != 0)
+                })
+                .cloned()
+                .collect(),
+            None => rows.to_vec(),
+        };
+        if open.is_empty() {
+            self.note = Some("Already flat".to_owned());
+            return;
+        }
+        let rows = &open;
         for (r, cmd) in rows.iter().zip(model::flatten_all(rows)) {
             let id = t.submit(Source::Dom, Instant::now(), cmd);
             self.asked.push(Asked {
@@ -314,6 +332,9 @@ impl PositionsView {
                         cx.stop_propagation();
                         if this.guarded(ev) && !this.rows.is_empty() {
                             this.confirm = true;
+                            // The question's buttons appear under the pointer: a double-click's
+                            // second press lands on one, and must not answer it.
+                            crate::popover::mark_moved_under_pointer();
                         }
                         cx.notify();
                     }),
@@ -337,7 +358,9 @@ impl PositionsView {
                     MouseButton::Left,
                     cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        if this.guarded(ev) {
+                        if ev.click_count > 1 {
+                            this.note = Some("Press Flatten once to flatten them".to_owned());
+                        } else if this.guarded(ev) {
                             this.confirm = false;
                             crate::popover::close_any(cx);
                             let rows = this.rows.clone();
@@ -536,9 +559,20 @@ impl PositionsView {
         row
     }
 
-    /// A P&L as text, `stale` after it when its price is old: never shown frozen as live.
-    fn pnl_cell(&self, col: Col, pnl: lines_trading::Money, stale: bool, money: bool) -> gpui::Div {
+    /// A P&L as text, `stale` after it when its price is old: never shown frozen as live. With
+    /// no price at all: `no price`, never a zero.
+    fn pnl_cell(
+        &self,
+        col: Col,
+        pnl: lines_trading::Money,
+        stale: bool,
+        money: bool,
+        priced: bool,
+    ) -> gpui::Div {
         let t = self.theme;
+        if money && !priced {
+            return Self::cell(col).text_color(t.text_dim).child("no price");
+        }
         let mut s = String::new();
         if money {
             let _ = pnl::write_money(&mut s, pnl);
@@ -650,7 +684,7 @@ impl PositionsView {
                     .when(stale, |d| d.text_color(t.text_dim))
                     .child(price(r.last)),
                 Col::Exits => self.exits_cell(&r),
-                Col::Pnl => self.pnl_cell(c, r.pnl, stale, money),
+                Col::Pnl => self.pnl_cell(c, r.pnl, stale, money, r.marked_at.is_some()),
                 Col::Flatten => {
                     let row = r.clone();
                     // A read-only account (a venue that can't be traded here) says so, and a
@@ -726,7 +760,13 @@ impl PositionsView {
             }
             el = el.child(match c {
                 _ if i == 0 => Self::cell(c).child(model::count_words(count)),
-                Col::Pnl => self.pnl_cell(c, total, stale, money),
+                Col::Pnl => self.pnl_cell(
+                    c,
+                    total,
+                    stale,
+                    money,
+                    self.rows.iter().all(|r| r.marked_at.is_some()),
+                ),
                 _ => Self::cell(c),
             });
         }

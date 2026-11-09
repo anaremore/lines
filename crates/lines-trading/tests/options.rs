@@ -1016,3 +1016,32 @@ fn quotes_reach_their_own_series() {
     chains.apply(key, quote);
     assert_eq!(seed_option_quotes(catalog::SPY, &chains), [(call(), want)]);
 }
+
+/// An option's position says when its price was taken: a one-sided quote with no last keeps the
+/// mark it had, so it keeps that mark's time too (a P&L on an old mid never reads fresh).
+#[test]
+fn an_options_mark_keeps_its_time_through_a_one_sided_quote() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    let priced = r.t + 1;
+    r.quote(Some(240), Some(242));
+    r.limit(Side::Buy, 1, 242);
+    let marked = |r: &Rig| {
+        r.events.iter().rev().find_map(|e| match e {
+            Event::Position(p) if p.contract == call() => Some(p.marked_at),
+            _ => None,
+        })
+    };
+    assert_eq!(marked(&r), Some(Some(UtcMillis(priced))));
+    r.t += 5_000;
+    r.quote(None, Some(250));
+    assert_eq!(
+        marked(&r),
+        Some(Some(UtcMillis(priced))),
+        "the old mid's time"
+    );
+    r.t += 1_000;
+    let again = r.t + 1;
+    r.quote(Some(245), Some(247));
+    assert_eq!(marked(&r), Some(Some(UtcMillis(again))));
+}

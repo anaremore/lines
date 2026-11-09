@@ -1660,6 +1660,8 @@ impl WindowView {
             self.tabs.get(self.active).and_then(|t| t.focused_handle()),
         ) {
             (PaneKind::Chain, Some(h)) => (h.feed(cx).target_doc, h.link(cx)),
+            // Positions in the focused pane's link group: a row's click shows it there.
+            (PaneKind::Positions, Some(h)) => (None, h.link(cx)),
             _ => (None, None),
         };
         let tab = Self::build_tab(

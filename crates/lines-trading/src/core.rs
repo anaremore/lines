@@ -125,6 +125,9 @@ struct Mark {
     quoted_at: Option<UtcMillis>,
     /// When a bid or ask last came (a contract marked by its book alone).
     book_at: Option<UtcMillis>,
+    /// When an option's price last changed source: a two-sided quote or a new last. A one-sided
+    /// quote with no last keeps the mark it had, and its time.
+    priced_at: Option<UtcMillis>,
 }
 
 impl Mark {
@@ -2392,11 +2395,11 @@ impl TradingCore {
                     let held = m.price();
                     m.bid = b;
                     m.ask = a;
-                    m.last = if b.is_some() && a.is_some() {
-                        None
-                    } else {
-                        last.or(held)
-                    };
+                    let two_sided = b.is_some() && a.is_some();
+                    m.last = if two_sided { None } else { last.or(held) };
+                    if two_sided || last.is_some() {
+                        m.priced_at = Some(time);
+                    }
                     m.quoted_at = Some(time);
                 }
                 MarketInput::Bid(p) => {
@@ -2466,10 +2469,13 @@ impl TradingCore {
             _ => Money::ZERO,
         };
         // The time of the price `mark` uses: the last trade's, else the quote's.
-        let marked_at = self
-            .marks
-            .get(&contract)
-            .and_then(|m| m.last.and(m.last_at).or(m.quoted_at).or(m.book_at));
+        let marked_at = self.marks.get(&contract).and_then(|m| {
+            if contract.option_key().is_some() {
+                m.priced_at
+            } else {
+                m.last.and(m.last_at).or(m.book_at)
+            }
+        });
         self.events.push(Event::Position(PositionView {
             account: account.clone(),
             contract,
