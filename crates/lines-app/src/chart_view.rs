@@ -1789,7 +1789,10 @@ impl ChartView {
 
     /// Its price scale, once laid out: what the option chart's chain lines up with.
     pub fn locked_scale(&self) -> Option<crate::chain_lock::LockedScale> {
-        (f32::from(self.plot.size.height) > 1.0).then(|| crate::chain_lock::LockedScale {
+        // (Before a first fit its range says nothing: the chain stays a plain list.)
+        let ready =
+            f32::from(self.plot.size.height) > 1.0 && (self.vp.price_fitted || !self.vp.auto_price);
+        ready.then(|| crate::chain_lock::LockedScale {
             vp: self.vp,
             plot_top: f32::from(self.plot.origin.y),
         })

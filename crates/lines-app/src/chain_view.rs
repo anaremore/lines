@@ -2652,26 +2652,29 @@ impl ChainView {
                                 }),
                             )
                     }))
-                    .child({
-                        let on = self.chart.is_some();
-                        div()
-                            .id("chain-chart")
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .px_1()
-                            .border_1()
-                            .rounded_sm()
-                            .border_color(if on { t.accent } else { t.control_edge })
-                            .text_color(t.text_main)
-                            .child(if on { "Chart: on" } else { "Chart: off" })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_chart(cx);
-                                }),
-                            )
-                    })
+                    // Off, it costs a narrow header room for nothing: the chart wouldn't fit there.
+                    .children(
+                        (self.chart.is_some() || self.pane_w >= CHART_MIN_W).then(|| {
+                            let on = self.chart.is_some();
+                            div()
+                                .id("chain-chart")
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .px_1()
+                                .border_1()
+                                .rounded_sm()
+                                .border_color(if on { t.accent } else { t.control_edge })
+                                .text_color(t.text_main)
+                                .child(if on { "Chart: on" } else { "Chart: off" })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_chart(cx);
+                                    }),
+                                )
+                        }),
+                    )
                     .child(
                         div()
                             .id("chain-one-click")
