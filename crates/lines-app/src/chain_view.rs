@@ -4514,12 +4514,8 @@ impl ChainView {
                 &chip_date(key.expiry),
             ));
         }
-        if position.is_none() && orders.is_empty() {
-            row = row.child(div().text_color(t.text_dim).child(if key.is_some() {
-                "No position or orders here"
-            } else {
-                "Select a strike for its position and orders"
-            }));
+        if let Some(text) = strip_state(key.is_some(), position.is_some() || !orders.is_empty()) {
+            row = row.child(div().text_color(t.text_dim).child(text));
         }
         let key = key.unwrap_or(OptionKey {
             expiry: self.frame.expiry?,
@@ -5344,7 +5340,7 @@ impl ChainView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    // A reason wraps, whole; the hints give way at the edge.
+                    // A reason wraps, whole; a lasting state gives way at the edge.
                     .when(self.note.is_none(), |d| {
                         d.whitespace_nowrap().overflow_hidden()
                     })
@@ -5353,30 +5349,52 @@ impl ChainView {
                     } else {
                         t.text_dim
                     })
-                    // Narrow beside the exits there's no room for hints: only a message shows.
+                    // Narrow beside the exits there's no room for a lasting state: only a message
+                    // shows. With nothing to report the row stays, empty, at its height.
                     .when(
                         self.note.is_some()
                             || (self.ticket.is_none()
                                 && !(exits.is_some() && f(self.bounds.size.width) < NARROW_HEADER)),
-                        |d| d.child(self.footer_text(size)),
+                        |d| d.children(self.footer_text(size)),
                     ),
             )
             .children(exits)
     }
 
-    fn footer_text(&self, size: i64) -> String {
-        self.note.clone().unwrap_or_else(|| {
-                if self.one_click {
-                    return format!(
-                        "One-click ON: a click on a bid or ask sends {size} at once  ·  Shift+Up/Down: quantity"
-                    );
-                }
-                if self.chart.is_some() && !self.chart_shown() {
-                    return "Chart hidden: this pane is too narrow for both".to_owned();
-                }
-                "Click an ask to buy, a bid to sell, or Enter  ·  Up/Down: strike  ·  Left/Right: expiry  ·  Tab: calls / puts  ·  Shift+Tab: bid / ask  ·  Home: the money  ·  Shaded: in the money".to_owned()
-        })
+    /// What the footer reports: a message, or a state that changes what a click does or what shows.
+    /// No hints in the pane (the owner's no-clutter rule).
+    fn footer_text(&self, size: i64) -> Option<String> {
+        footer_state(
+            self.note.as_deref(),
+            self.one_click,
+            self.chart.is_some() && !self.chart_shown(),
+            size,
+        )
     }
+}
+
+/// The row strip's words beside a position or orders: state, not a hint, so with no strike selected
+/// it says nothing and stays, empty, at its height.
+fn strip_state(selected: bool, has_any: bool) -> Option<&'static str> {
+    (selected && !has_any).then_some("No position or orders here")
+}
+
+/// The footer's words, if it has any to report.
+fn footer_state(
+    note: Option<&str>,
+    one_click: bool,
+    chart_hidden: bool,
+    size: i64,
+) -> Option<String> {
+    if let Some(note) = note {
+        return Some(note.to_owned());
+    }
+    if one_click {
+        return Some(format!(
+            "One-click ON: a click on a bid or ask sends {size} at once  ·  Shift+Up/Down: quantity"
+        ));
+    }
+    chart_hidden.then(|| "Chart hidden: this pane is too narrow for both".to_owned())
 }
 
 /// The footer's message once One-click is switched: turned on, nothing may stand in front of its
@@ -5747,6 +5765,39 @@ impl Render for ChainView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strip reports a selected strike's state; with none selected it has nothing to say.
+    #[test]
+    fn the_strip_reports_state_and_no_hints() {
+        assert_eq!(
+            strip_state(false, false),
+            None,
+            "no hint to select a strike"
+        );
+        assert_eq!(strip_state(true, false), Some("No position or orders here"));
+        assert_eq!(
+            strip_state(true, true),
+            None,
+            "the position and orders say it"
+        );
+    }
+
+    /// The footer reports states and refusals, never a hint; with none, nothing.
+    #[test]
+    fn the_footer_reports_state_and_no_hints() {
+        assert_eq!(footer_state(None, false, false, 3), None, "no hint");
+        assert_eq!(
+            footer_state(Some("refused"), true, true, 3).unwrap(),
+            "refused"
+        );
+        let one_click = footer_state(None, true, true, 3).unwrap();
+        assert!(one_click.starts_with("One-click ON") && one_click.contains("sends 3"));
+        assert!(
+            footer_state(None, false, true, 3)
+                .unwrap()
+                .starts_with("Chart hidden")
+        );
+    }
 
     fn s(f: impl Fn(&mut String) -> std::fmt::Result) -> String {
         let mut out = String::new();
