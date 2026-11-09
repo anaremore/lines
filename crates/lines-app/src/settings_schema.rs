@@ -806,6 +806,30 @@ fn table() -> Vec<Setting> {
         ),
         with_default(
             s(
+                crate::display_zone::KEY,
+                Sec::Appearance,
+                "Time zone",
+                "The clock times show in: charts, time & sales, the journal, strategies. Sessions, the VWAP reset and expiries stay on the exchange's clock.",
+                Scope::App,
+                Normal,
+                Editor,
+                |p, _, _| {
+                    Value::Text(crate::display_zone::describe_saved(
+                        p.app.time_zone.as_deref(),
+                    ))
+                },
+                Some(|p, _, v| {
+                    let Value::Text(shown) = v else {
+                        return Err("not a time zone");
+                    };
+                    p.app.time_zone = crate::display_zone::saved_of(&shown);
+                    Ok(())
+                }),
+            ),
+            Value::Text(crate::display_zone::describe_saved(None)),
+        ),
+        with_default(
+            s(
                 "appearance.hints",
                 Sec::Appearance,
                 "Hint bar",
@@ -2028,6 +2052,10 @@ mod tests {
     fn every_look_setting_undoes_its_own_field() {
         let mut seen = Vec::new();
         for st in all().iter().filter(|s| s.section == Section::Appearance) {
+            if st.key == crate::display_zone::KEY {
+                // Its own settings field (no CLI look flag to keep apart): a plain undo.
+                continue;
+            }
             let Some(field) = LookField::of(st.key) else {
                 assert_eq!(st.scope, Scope::Workspace, "{}: not a look field", st.key);
                 continue;

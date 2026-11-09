@@ -21,12 +21,13 @@
 //! layers (and its tag on the axis). The POC and value-area edges are hairlines.
 //!
 //! Missing data shows as missing (docs/design.md §7): a profile whose session (or range)
-//! began before the first trade the store counted is labelled `partial from HH:MMZ`.
+//! began before the first trade the store counted is labelled `partial from HH:MM ET` (the display zone).
 //!
 //! Keys (chart focused): Alt+V cycles off → session → visible range → composite;
 //! Alt+R switches ETH/RTH; Alt+B toggles the buy/sell split; Alt+G cycles the grouping
 //! (auto, then the DOM presets).
 
+use lines_core::display_tz::DisplayTz;
 use std::fmt::Write as _;
 
 use gpui::{
@@ -326,16 +327,22 @@ fn auto_grouping(vp: &Viewport, tick: i64) -> u32 {
         .unwrap_or(GROUPING_PRESETS[GROUPING_PRESETS.len() - 1])
 }
 
-fn write_partial(s: &mut FixedStr<96>, from: UtcMillis) {
-    let (_, _, _, h, m, _) = from.to_civil();
-    let _ = write!(s, " · partial from {h:02}:{m:02}Z");
+fn write_partial(s: &mut FixedStr<96>, from: UtcMillis, zone: &DisplayTz) {
+    let _ = s.write_str(" · partial from ");
+    let _ = zone.write_hhmm(from, s);
+    let _ = s.write_char(' ');
+    let _ = zone.write_label(from, s);
 }
 
-/// ` · gap 15:02–15:40Z` (and ` +N` more): counted trades are missing inside the range.
-fn write_gap(s: &mut FixedStr<96>, (a, b): (i64, i64), more: u32) {
-    let (_, _, _, h1, m1, _) = UtcMillis(a).to_civil();
-    let (_, _, _, h2, m2, _) = UtcMillis(b).to_civil();
-    let _ = write!(s, " · gap {h1:02}:{m1:02}–{h2:02}:{m2:02}Z");
+/// ` · gap 10:02–10:40 ET` (on the display zone's clock; and ` +N` more): counted trades are
+/// missing inside the range.
+fn write_gap(s: &mut FixedStr<96>, (a, b): (i64, i64), more: u32, zone: &DisplayTz) {
+    let _ = s.write_str(" · gap ");
+    let _ = zone.write_hhmm(UtcMillis(a), s);
+    let _ = s.write_char('–');
+    let _ = zone.write_hhmm(UtcMillis(b), s);
+    let _ = s.write_char(' ');
+    let _ = zone.write_label(UtcMillis(b), s);
     if more > 0 {
         let _ = write!(s, " +{more}");
     }
@@ -401,11 +408,12 @@ impl ChartLayer for VolumeProfileLayer {
         // (`partial from`), or has holes (`gap`).
         let gaps = data.counted_gaps(from.0, to.0 - 1);
         if gaps.any {
+            let zone = lines_core::display_tz::current();
             if let Some(s) = gaps.data_from {
-                write_partial(&mut label, UtcMillis(s));
+                write_partial(&mut label, UtcMillis(s), &zone);
             }
             if let Some(g) = gaps.first_gap {
-                write_gap(&mut label, g, gaps.more_gaps);
+                write_gap(&mut label, g, gaps.more_gaps, &zone);
             }
         }
         self.label = label;
@@ -784,7 +792,10 @@ mod tests {
             &vp,
         );
         assert!(layer.active);
-        assert_eq!(layer.label.as_str(), "ETH 2026-11-05 · partial from 13:00Z");
+        assert_eq!(
+            layer.label.as_str(),
+            "ETH 2026-11-05 · partial from 13:00 UTC"
+        );
         assert_eq!(layer.rows.total, Qty(10));
         assert_eq!(
             layer.rows.row_price(layer.rows.poc.unwrap()),
@@ -840,7 +851,7 @@ mod tests {
         );
         assert_eq!(
             layer.label.as_str(),
-            "ETH 1 session (of 5) · partial from 13:00Z"
+            "ETH 1 session (of 5) · partial from 13:00 UTC"
         );
 
         layer.set_config(ProfileConfig {

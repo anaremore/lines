@@ -74,7 +74,8 @@ impl PnlDisplay {
 
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// The display setting changed: panes repaint on their next poll ([`display_epoch`]).
+/// A display setting changed (the P&L display, the time zone): panes repaint on their next
+/// poll ([`display_epoch`]).
 pub fn display_changed() {
     EPOCH.fetch_add(1, Ordering::Relaxed);
 }

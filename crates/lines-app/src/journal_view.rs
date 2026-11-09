@@ -206,18 +206,17 @@ pub(crate) fn decimal(v: f64, den: i64) -> String {
     }
 }
 
-/// `11-05 14:31:07` (UTC, like the chart's axis).
+/// `11-05 14:31:07` on the display zone's clock (like the chart's axis).
 pub fn clock_text(t: UtcMillis) -> String {
-    let d = CivilDate::from_utc(t);
-    let s = t.0.rem_euclid(86_400_000) / 1000;
-    format!(
-        "{:02}-{:02} {:02}:{:02}:{:02}",
-        d.month,
-        d.day,
-        s / 3600,
-        s / 60 % 60,
-        s % 60
-    )
+    let (_, mo, d, h, mi, s) = lines_core::display_tz::current().civil(t);
+    format!("{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
+/// The display zone's label at `t` ("ET", "UTC", "CET").
+pub fn zone_text(t: UtcMillis) -> String {
+    let mut s = String::new();
+    let _ = lines_core::display_tz::current().write_label(t, &mut s);
+    s
 }
 
 /// `45s`, `2m 05s`, `1h 03m`.

@@ -16,6 +16,7 @@ mod commands;
 #[cfg(feature = "screenshot")]
 mod demo_broker;
 mod diagnostics;
+mod display_zone;
 mod dom_orders;
 mod dom_trade;
 mod dom_trail;
@@ -362,6 +363,10 @@ struct Cli {
     /// Appearance, else up).
     #[arg(long, value_enum)]
     hollow: Option<HollowKind>,
+    /// The zone times show in: `exchange` (ET), `system`, `utc` or an IANA name like
+    /// `Europe/London` (default: Settings › Appearance, else exchange). For this run only.
+    #[arg(long, value_name = "ZONE")]
+    time_zone: Option<String>,
     /// A one-tab layout for this run only (the saved workspace is left alone). Screenshots
     /// default to `trading`.
     #[arg(long, value_enum)]
@@ -1341,6 +1346,15 @@ where
     };
     let theme =
         settings_schema::theme_for(&settings_schema::Appearance::default().with_flags(look_flags));
+    // The display time zone: `--time-zone` for this run, else (below) Settings › Appearance.
+    // Screenshots without the flag show the exchange's (ET).
+    let zone_flag = cli
+        .time_zone
+        .as_deref()
+        .map(display_zone::parse_flag)
+        .transpose()
+        .map_err(|e| anyhow!("--time-zone: {e}"))?;
+    let _ = display_zone::apply(zone_flag.as_ref().unwrap_or(&Default::default()));
 
     // The source's (or `--instrument`'s) product sizes `--large-print`.
     let large_print = match &cli.large_print {
@@ -1544,6 +1558,11 @@ where
         Some(writer.clone()),
     );
     let mut reports: Vec<String> = settings_report.into_iter().collect();
+    if zone_flag.is_none() {
+        reports.extend(display_zone::apply(
+            &lines_core::display_tz::ZoneChoice::from_saved(settings.settings.time_zone.as_deref()),
+        ));
+    }
     // `--instrument` and `--layout` are for this run only: don't save over the workspace.
     let ad_hoc = instrument.is_some() || cli.layout.is_some();
     let mut autosave = !ad_hoc && dir.is_some();

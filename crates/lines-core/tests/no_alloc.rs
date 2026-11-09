@@ -65,6 +65,15 @@ fn paint_path_does_not_allocate() {
     vp.set_size(1920.0, 1000.0);
     let mut scene = Scene::with_capacity(0);
     scene.ensure_capacity(vp.width); // done on resize, outside the paint path
+    // Display zones (made outside the paint path): a fixed label, and one whose label is the
+    // zone's own abbreviation at each instant.
+    let zones = [
+        lines_core::display_tz::DisplayTz::exchange(),
+        lines_core::display_tz::DisplayTz::resolve(&lines_core::display_tz::ZoneChoice::Named(
+            "Europe/Berlin".into(),
+        ))
+        .unwrap(),
+    ];
 
     let (mut hits, mut bar_hits) = (0usize, 0usize);
     let n = allocs_during(|| {
@@ -100,7 +109,8 @@ fn paint_path_does_not_allocate() {
             }
             // Frame.
             vp.on_data(series.bars(), fmt.tick);
-            scene.build(series.bars(), &vp, &fmt, 1.25, series.period_ms());
+            let zone = &zones[frame as usize % 2];
+            scene.build(series.bars(), &vp, &fmt, 1.25, series.period_ms(), zone);
             let mut label = FixedStr::<32>::new();
             for line in &scene.price_lines {
                 label.clear();
@@ -108,7 +118,7 @@ fn paint_path_does_not_allocate() {
             }
             for line in &scene.time_lines {
                 label.clear();
-                line.label.write(line.time, &mut label).unwrap();
+                line.label.write(line.time, zone, &mut label).unwrap();
             }
             std::hint::black_box(&label);
             // Crosshair: sweep the pointer across the plot (including outside it and past
@@ -136,7 +146,7 @@ fn paint_path_does_not_allocate() {
                 fmt.write(ch.price, &mut label).unwrap();
                 if let Some(t) = ch.time {
                     label.clear();
-                    t.write_crosshair_label(series.period_ms(), &mut label)
+                    t.write_crosshair_label(series.period_ms(), zone, &mut label)
                         .unwrap();
                 }
                 if let Some(i) = ch.bar {
@@ -197,6 +207,7 @@ fn dom_and_tape_paint_paths_do_not_allocate() {
     let mut visible = Vec::with_capacity(256);
     let mut view = LadderView::default();
     let mut s = FixedStr::<48>::new();
+    let zone = lines_core::display_tz::DisplayTz::exchange();
 
     let n = allocs_during(|| {
         for frame in 0..500i64 {
@@ -239,7 +250,7 @@ fn dom_and_tape_paint_paths_do_not_allocate() {
             }
             for p in &visible {
                 s.clear();
-                write_tape_time(p.time, &mut s).unwrap();
+                write_tape_time(p.time, &zone, &mut s).unwrap();
             }
             std::hint::black_box((&st, &s, &visible));
         }

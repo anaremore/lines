@@ -99,7 +99,7 @@ fn legend_and_levels_describe_the_same_frame() {
         None,
     );
     assert_eq!(
-        rows[i].text, "as of 13:00Z",
+        rows[i].text, "as of 13:00 UTC",
         "the legend sees the map drawn"
     );
     assert!(!rows[i].warn);
@@ -123,7 +123,7 @@ fn legend_and_levels_describe_the_same_frame() {
         &vp(),
         None,
     );
-    assert_eq!(layer.legend()[i].text, "as of 13:00Z");
+    assert_eq!(layer.legend()[i].text, "as of 13:00 UTC");
     assert!(layer.placed_per_source()[i] > 0);
 }
 
@@ -161,7 +161,7 @@ fn layer_places_filters_and_reports_freshness() {
         &["pivot", "resist", "support", "zone", "band", "anchor"]
     );
     let rows = layer.legend();
-    assert_eq!(rows[i].text, "as of 13:00Z");
+    assert_eq!(rows[i].text, "as of 13:00 UTC");
     assert!(!rows[i].warn);
 
     // Kinds and sources hide; labels move off the last-price row.

@@ -55,12 +55,13 @@ pub struct Mark {
 /// Fills kept for markers (the newest; older ones lose their markers).
 pub const KEEP_FILLS: usize = 4096;
 
-/// `level-touch #3 · Exit · 21:58:59 UTC` (UTC, like the chart's time axis).
+/// `level-touch #3 · Exit · 16:58:59 ET` (the display zone, like the chart's time axis).
 fn head(label: &str, what: &str, at: UtcMillis) -> String {
     let clock = crate::journal_view::clock_text(at);
     format!(
-        "{label} · {what} · {} UTC",
-        clock.get(6..).unwrap_or_default()
+        "{label} · {what} · {} {}",
+        clock.get(6..).unwrap_or_default(),
+        crate::journal_view::zone_text(at)
     )
 }
 

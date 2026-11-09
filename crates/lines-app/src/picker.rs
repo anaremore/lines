@@ -178,6 +178,10 @@ pub struct Settings {
         skip_serializing_if = "crate::settings_schema::Appearance::is_default"
     )]
     pub appearance: crate::settings_schema::Appearance,
+    /// The display time zone (Settings › Appearance; `lines_core::display_tz`): absent is
+    /// the exchange's (ET), "System" the OS zone, else an IANA name. Display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
     /// Defaults for panes created from now on (the Settings window). Optional.
     #[serde(
         default,
@@ -662,6 +666,22 @@ mod tests {
         s.order_sizes.insert("ES".to_owned(), 5);
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""order_sizes":{"ES":5}"#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn the_time_zone_is_an_optional_setting() {
+        // A file from before the setting: the exchange's (absent), no version bump needed.
+        let empty = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!empty.contains("time_zone"), "{empty}");
+        let old: Settings = serde_json::from_str(r#"{"recents":[1]}"#).unwrap();
+        assert_eq!(old.time_zone, None);
+        let s = Settings {
+            time_zone: Some("Asia/Tokyo".to_owned()),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""time_zone":"Asia/Tokyo""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
     }
 

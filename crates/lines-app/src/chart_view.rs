@@ -54,6 +54,7 @@ use gpui::{
     Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use lines_core::TickReset;
+use lines_core::display_tz::{self, DisplayTz};
 use lines_core::drawings::{Anchor, TimeAxis, Tool, snap_anchor, write_measure};
 use lines_core::geometry::{
     Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
@@ -374,6 +375,10 @@ pub struct ChartView {
     /// shaped once per distinct value.
     readout: Option<(Bar, bool, TickInfo, ShapedLine)>,
     labels: HashMap<(LabelKind, i64), ShapedLine>,
+    /// The display time zone the axis, the time tag and the readout are written in, and its
+    /// epoch (`lines_core::display_tz`): a change clears the cached labels.
+    zone: DisplayTz,
+    zone_epoch: u64,
     font: Option<Font>,
     rates: Rates,
     paint_time_ewma_us: f64,
@@ -648,6 +653,8 @@ impl ChartView {
             period_ms: 60_000,
             readout: None,
             labels: HashMap::with_capacity(MAX_CACHED_LABELS),
+            zone: display_tz::current(),
+            zone_epoch: display_tz::epoch(),
             font: None,
             rates: Rates {
                 at: Instant::now(),
@@ -2950,8 +2957,15 @@ impl ChartView {
             {
                 self.vp.zoom_price_at(self.vp.height * 0.5, f, fmt.tick);
             }
+            if display_tz::epoch() != self.zone_epoch {
+                // Times read in the new zone: cached time labels and the readout go.
+                self.zone = display_tz::current();
+                self.zone_epoch = display_tz::epoch();
+                self.labels.clear();
+                self.readout = None;
+            }
             self.scene
-                .build(bars, &self.vp, &fmt, scale, self.period_ms);
+                .build(bars, &self.vp, &fmt, scale, self.period_ms, &self.zone);
             // Tick bars: which drawn candles are partial or start a session, and where the
             // "tick bars from" label goes.
             self.tick_marks.clear();
@@ -4086,6 +4100,7 @@ impl ChartView {
         }
         let tf = self.timeframe;
         let calendar = lines_feed::catalog::sessions(self.instrument.id);
+        let zone = self.zone.clone();
         for i in 0..self.scene.time_lines.len() {
             let l = self.scene.time_lines[i];
             if l.x < 0.0 {
@@ -4104,7 +4119,7 @@ impl ChartView {
                     let d = bar_date(tf, calendar, l.time);
                     let _ = write!(s, "{:02}-{:02}", d.month, d.day);
                 } else {
-                    let _ = l.label.write(l.time, s);
+                    let _ = l.label.write(l.time, &zone, s);
                 }
             };
             let w = f32::from(self.label(kind, l.time.0, t.text_dim, window, text).width);
@@ -5183,6 +5198,7 @@ impl ChartView {
         let period = self.period_ms;
         let tf = self.timeframe;
         let calendar = lines_feed::catalog::sessions(self.instrument.id);
+        let zone = self.zone.clone();
         move |s: &mut FixedStr<32>| {
             const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
             match tf {
@@ -5198,12 +5214,10 @@ impl ChartView {
                 | Timeframe::Volume(_)
                 | Timeframe::Range(_)
                 | Timeframe::Seconds(_) => {
-                    let _ = time.write_crosshair_label(1_000, s);
-                    let _ = s.write_str(" UTC");
+                    let _ = time.write_crosshair_label(1_000, &zone, s);
                 }
                 _ => {
-                    let _ = time.write_crosshair_label(period, s);
-                    let _ = s.write_str(" UTC");
+                    let _ = time.write_crosshair_label(period, &zone, s);
                 }
             }
         }
@@ -5283,7 +5297,7 @@ impl ChartView {
                 // A tick bar: when it ran (first to last trade) and how many trades it holds
                 // ("partial (41 of 233 trades)" when cut short or still forming).
                 let _ = s.write_str("  ");
-                let _ = write_tick_span(bar.time, last, count, n, state, &mut s);
+                let _ = write_tick_span(bar.time, last, count, n, state, &self.zone, &mut s);
             } else if partial {
                 // Cut short by a session break (the close, or a holiday halt; tick bars: the
                 // session's last bar).
@@ -5564,8 +5578,15 @@ impl ChartView {
         let to_go = tick_bars.and_then(|b| b.to_go(now));
         if self.frozen {
             // Frozen clock: only data-derived time is shown, so screenshots are reproducible.
+            // On the display zone's clock, like every other time.
             if let Some(mt) = d.market_time {
-                let _ = write!(right, "  ·  {mt}");
+                let zone = display_tz::current();
+                let (y, mo, dd, h, mi, sec) = zone.civil(mt);
+                let _ = write!(
+                    right,
+                    "  ·  {y:04}-{mo:02}-{dd:02} {h:02}:{mi:02}:{sec:02} "
+                );
+                let _ = zone.write_label(mt, &mut right);
             }
         } else if self.perf_stats {
             // Debug detail, not data (docs/design.md §1): only behind "Performance stats".
@@ -6088,7 +6109,10 @@ impl Pane for ChartView {
 
     /// Charts don't show depth: a depth batch that leaves the quote alone doesn't repaint.
     fn revision(&self) -> u64 {
-        self.store.chart_revision()
+        // The display zone's epoch too: a new zone redraws the axis.
+        self.store
+            .chart_revision()
+            .wrapping_add(display_tz::epoch() << 48)
     }
 
     /// New indicator values (they arrive from the indicator thread after the store's), or new
@@ -6356,18 +6380,20 @@ const MARK_PARTIAL: u8 = 1;
 const MARK_SESSION: u8 = 2;
 
 /// A trade-built bar's span and size for the readout: "14:32:05 to 14:32:41  500 trades"
-/// (UTC, as the time axis); short tick bars "… partial (41 of 233 trades)" or "… forming (41
+/// (the display zone, as the time axis); short tick bars "… partial (41 of 233 trades)" or "… forming (41
 /// of 233 trades)"; other kinds (`n`: none) "… partial (41 trades)". Allocation-free.
+#[allow(clippy::too_many_arguments)]
 pub fn write_tick_span(
     first: UtcMillis,
     last: UtcMillis,
     count: u32,
     n: Option<u32>,
     state: TickState,
+    zone: &DisplayTz,
     out: &mut impl std::fmt::Write,
 ) -> std::fmt::Result {
-    let (_, _, _, h0, m0, s0) = first.to_civil();
-    let (_, _, _, h1, m1, s1) = last.to_civil();
+    let (_, _, _, h0, m0, s0) = zone.civil(first);
+    let (_, _, _, h1, m1, s1) = zone.civil(last);
     write!(out, "{h0:02}:{m0:02}:{s0:02} to {h1:02}:{m1:02}:{s1:02}  ")?;
     let word = match state {
         TickState::Full => "",
@@ -6550,7 +6576,7 @@ fn tick_span_text() {
     let b = UtcMillis::parse_iso("2026-11-05T14:32:41Z").unwrap();
     let text = |count, state| {
         let mut s = FixedStr::<64>::new();
-        write_tick_span(a, b, count, Some(233), state, &mut s).unwrap();
+        write_tick_span(a, b, count, Some(233), state, &DisplayTz::utc(), &mut s).unwrap();
         s.as_str().to_owned()
     };
     assert_eq!(

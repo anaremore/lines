@@ -98,9 +98,13 @@ impl Tape {
     }
 }
 
-/// `HH:MM:SS.mmm` (UTC), the tape's time column.
-pub fn write_tape_time<W: fmt::Write>(t: UtcMillis, out: &mut W) -> fmt::Result {
-    let (_, _, _, h, m, s) = t.to_civil();
+/// `HH:MM:SS.mmm` on `zone`'s clock, the tape's time column.
+pub fn write_tape_time<W: fmt::Write>(
+    t: UtcMillis,
+    zone: &crate::display_tz::DisplayTz,
+    out: &mut W,
+) -> fmt::Result {
+    let (_, _, _, h, m, s) = zone.civil(t);
     write!(out, "{h:02}:{m:02}:{s:02}.{:03}", t.0.rem_euclid(1000))
 }
 
@@ -141,9 +145,19 @@ mod tests {
         let mut s = FixedStr::<16>::new();
         write_tape_time(
             UtcMillis::parse_iso("2026-11-06T14:05:31.042Z").unwrap(),
+            &crate::display_tz::DisplayTz::utc(),
             &mut s,
         )
         .unwrap();
         assert_eq!(s.as_str(), "14:05:31.042");
+        s.clear();
+        let et = crate::display_tz::DisplayTz::exchange();
+        write_tape_time(
+            UtcMillis::parse_iso("2026-11-06T14:05:31.042Z").unwrap(),
+            &et,
+            &mut s,
+        )
+        .unwrap();
+        assert_eq!(s.as_str(), "09:05:31.042");
     }
 }

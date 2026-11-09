@@ -406,12 +406,15 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         esc(kind),
         esc(&contract),
     );
+    // The image outlives the setting: it names its zone.
+    let zone = lines_core::display_tz::current();
     let when = format!(
-        "Entry {}-{}  →  exit {}-{} UTC  ·  held {}",
-        CivilDate::from_utc(t.entry_time).year,
+        "Entry {}-{}  →  exit {}-{} {}  ·  held {}",
+        zone.civil(t.entry_time).0,
         crate::journal_view::clock_text(t.entry_time),
-        CivilDate::from_utc(t.exit_time).year,
+        zone.civil(t.exit_time).0,
         crate::journal_view::clock_text(t.exit_time),
+        crate::journal_view::zone_text(t.exit_time),
         crate::journal_view::duration_text(t.duration_ms())
     );
     let _ = writeln!(
@@ -481,10 +484,11 @@ fn slot_width(slots: usize) -> f32 {
     (PLOT_R - PLOT_L - LABEL_ROOM) / slots.max(34) as f32
 }
 
-/// `HH:MM`, UTC.
+/// `HH:MM` on the display zone's clock.
 fn hhmm(t: UtcMillis) -> String {
-    let secs = t.0.rem_euclid(86_400_000) / 1000;
-    format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
+    let mut s = String::new();
+    let _ = lines_core::display_tz::current().write_hhmm(t, &mut s);
+    s
 }
 
 /// Candles, axes, the trade's span, fills and averages.
@@ -534,25 +538,23 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
         "<line x1=\"{PLOT_L}\" x2=\"{PLOT_R}\" y1=\"{PLOT_B}\" y2=\"{PLOT_B}\" stroke-width=\"1\" {}/>",
         paint("stroke", th.axis_line)
     );
-    // Time axis: about one label per 110 px, HH:MM (UTC), the date where it changes.
+    // Time axis: about one label per 110 px, HH:MM (the display zone), the date where it
+    // changes.
+    let zone = lines_core::display_tz::current();
     let every = ((110.0 / slot).ceil() as usize).max(1);
     let mut last_day: Option<CivilDate> = None;
     for (i, b) in bars.iter().enumerate() {
         if i % every != 0 {
             continue;
         }
-        let day = CivilDate::from_utc(b.time);
-        let secs = b.time.0.rem_euclid(86_400_000) / 1000;
+        // Days on the display zone's clock, as the chart's axis.
+        let local = zone.local(b.time);
+        let day = CivilDate::from_utc(local);
+        let (_, _, _, h, mi, _) = local.to_civil();
         let label = if last_day != Some(day) {
-            format!(
-                "{:02}-{:02} {:02}:{:02}",
-                day.month,
-                day.day,
-                secs / 3600,
-                secs / 60 % 60
-            )
+            format!("{:02}-{:02} {h:02}:{mi:02}", day.month, day.day)
         } else {
-            format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
+            format!("{h:02}:{mi:02}")
         };
         last_day = Some(day);
         let _ = writeln!(
@@ -694,15 +696,17 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
     if let Some(b) = bars.first().filter(|b| t.entry_time < b.time) {
         let _ = write!(
             missing,
-            "No bars before {} UTC. Earlier fills are placed at the first bar.  ",
-            hhmm(b.time)
+            "No bars before {} {}. Earlier fills are placed at the first bar.  ",
+            hhmm(b.time),
+            crate::journal_view::zone_text(b.time)
         );
     }
     if let Some(b) = bars.last().filter(|_| e1 >= bars.len()) {
         let _ = write!(
             missing,
-            "No bars after {} UTC. Later fills are placed by their times.",
-            hhmm(b.time)
+            "No bars after {} {}. Later fills are placed by their times.",
+            hhmm(b.time),
+            crate::journal_view::zone_text(b.time)
         );
     }
     if !missing.is_empty() {
