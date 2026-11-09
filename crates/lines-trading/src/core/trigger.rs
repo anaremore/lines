@@ -767,7 +767,7 @@ impl TradingCore {
                 }
                 // That Flatten failed: what closes the position later isn't it.
                 if self.triggers.live.get(&id).is_some_and(|l| l.flattened)
-                    && !self.flatten_under_way(&account, contract)
+                    && !self.flatten_under_way(&account, contract, now)
                     && let Some(l) = self.triggers.live.get_mut(&id)
                 {
                     l.flattened = false;

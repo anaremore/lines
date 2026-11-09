@@ -1252,10 +1252,8 @@ impl TradingCore {
                 let closing: std::collections::BTreeSet<OrderId> = self
                     .orders
                     .values()
-                    .filter(|o| o.is_open() || o.state == OrderState::Unresolved)
-                    .filter(|o| o.role == Role::Flatten && o.account == account)
+                    .filter(|o| flatten::closes(o, now) && o.account == account)
                     .filter(|o| positions.iter().any(|(k, _)| *k == o.contract))
-                    .filter(|o| now.0.saturating_sub(o.updated.0) < FLATTEN_ANSWER_MS)
                     .map(|o| o.id)
                     .collect();
                 // An unresolved one not closing anything now (past that, or the position reads

@@ -2,8 +2,8 @@
 //! market order goes first and exits stay until the position is flat; on one that doesn't, orders
 //! are cancelled first and the market order waits for the answers. Cancel All is unchanged.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use lines_core::{CivilDate, ContractKey, Month, Price, Qty, Right, Side as BookSide, UtcMillis};
@@ -53,6 +53,10 @@ struct Venue {
     hold_places: Arc<AtomicBool>,
     /// The connection is down.
     down: Arc<AtomicBool>,
+    /// Lose cancels of these orders.
+    lose_ids: Arc<Mutex<Vec<OrderId>>>,
+    /// Events to report as if from the venue.
+    inject: Arc<Mutex<Vec<BrokerEvent>>>,
 }
 impl Broker for Venue {
     fn connected(&self) -> bool {
@@ -74,8 +78,11 @@ impl Broker for Venue {
                     return;
                 }
             }
-            BrokerRequest::Cancel { .. } => {
+            BrokerRequest::Cancel { id } => {
                 self.cancels.fetch_add(1, Ordering::Relaxed);
+                if self.lose_ids.lock().unwrap().contains(id) {
+                    return;
+                }
                 let left = self.lose_cancels.load(Ordering::Relaxed);
                 if left > 0 {
                     self.lose_cancels.store(left - 1, Ordering::Relaxed);
@@ -90,7 +97,8 @@ impl Broker for Venue {
         self.inner.market(now, contract, input)
     }
     fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
-        self.inner.poll(now, out)
+        self.inner.poll(now, out);
+        out.append(&mut self.inject.lock().unwrap());
     }
     fn next_wake(&self) -> Option<UtcMillis> {
         self.inner.next_wake()
@@ -112,6 +120,8 @@ struct Rig {
     cancels: Arc<AtomicUsize>,
     hold_places: Arc<AtomicBool>,
     down: Arc<AtomicBool>,
+    lose_ids: Arc<Mutex<Vec<OrderId>>>,
+    inject: Arc<Mutex<Vec<BrokerEvent>>>,
 }
 impl Rig {
     fn new(oco: bool, at: &str) -> Rig {
@@ -125,6 +135,8 @@ impl Rig {
         let cancels = Arc::new(AtomicUsize::new(0));
         let hold_places = Arc::new(AtomicBool::new(false));
         let down = Arc::new(AtomicBool::new(false));
+        let lose_ids = Arc::new(Mutex::new(Vec::new()));
+        let inject = Arc::new(Mutex::new(Vec::new()));
         let mut core = TradingCore::new(Box::new(Venue {
             inner,
             oco,
@@ -133,6 +145,8 @@ impl Rig {
             cancels: cancels.clone(),
             hold_places: hold_places.clone(),
             down: down.clone(),
+            lose_ids: lose_ids.clone(),
+            inject: inject.clone(),
         }));
         core.add_account(AccountConfig::paper("paper-1", 100_000), None);
         Rig {
@@ -144,6 +158,8 @@ impl Rig {
             cancels,
             hold_places,
             down,
+            lose_ids,
+            inject,
         }
     }
     fn now(&self) -> UtcMillis {
@@ -994,6 +1010,109 @@ fn without_reduce_only_an_unresolved_flatten_and_a_working_order_send_one_close(
     assert_eq!(r.core.position(&acct(), es()), 0, "flat, not reversed");
 }
 
+/// The first Flatten speaks up while the next waits: when the wait ends nothing goes beside it,
+/// as a press wouldn't. After 5 s of silence again, it's replaced.
+#[test]
+fn a_waiting_flatten_doesnt_go_beside_one_that_spoke_up() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(2);
+    let before = r.markets.load(Ordering::Relaxed);
+    r.hold_places.store(true, Ordering::Relaxed);
+    r.flatten(es());
+    let now = r.now();
+    r.core.rebuild(now);
+    r.collect();
+    let first = r
+        .events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::Order(o) if o.state == OrderState::Unresolved => Some(o.id),
+            _ => None,
+        })
+        .expect("the rebuild left it unresolved");
+    r.hold_places.store(false, Ordering::Relaxed);
+    let other = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: OrderKind::Limit {
+                price: Price(601_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    // Past 5 s: both get a cancel, and the other's is lost, so the next one waits.
+    *r.lose_ids.lock().unwrap() = vec![first, other];
+    r.wait(5_100);
+    r.flatten(es());
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1);
+    // The first speaks up, and the other's cancel is answered: the wait is over.
+    r.wait(500);
+    r.inject.lock().unwrap().push(BrokerEvent::Working {
+        id: first,
+        at: r.now(),
+    });
+    r.wait(1);
+    *r.lose_ids.lock().unwrap() = vec![first];
+    r.wait(1_600);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.order(other).unwrap().state, OrderState::Cancelled);
+    assert_eq!(
+        r.markets.load(Ordering::Relaxed),
+        before + 1,
+        "not beside the first"
+    );
+    // Silent for 5 s again: the wake comes, and it's replaced.
+    let wake = r.core.next_wake().expect("it looks again");
+    assert!(wake.0 > r.t, "not in a loop: {} vs {}", wake.0, r.t);
+    r.wait(5_000);
+    r.wait(LAT + 1);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 2);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// A rebuild comes before the venue lists an order being cancelled: it reads unresolved, its cancel
+/// is still unanswered, and it may still fill, so the close still waits.
+#[test]
+fn a_rebuild_doesnt_end_the_wait_for_a_cancel() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(2);
+    let other = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: OrderKind::Limit {
+                price: Price(601_000),
+            },
+        }))
+        .unwrap()[0];
+    let before = r.markets.load(Ordering::Relaxed);
+    r.lose_ids.lock().unwrap().push(other);
+    r.flatten(es());
+    let now = r.now();
+    r.core.rebuild(now);
+    r.collect();
+    assert_eq!(r.core.order(other).unwrap().state, OrderState::Unresolved);
+    r.wait(1_000);
+    assert_eq!(
+        r.markets.load(Ordering::Relaxed),
+        before,
+        "its cancel is unanswered"
+    );
+    // Answered on the resend: the close goes, and only that closes the position.
+    r.lose_ids.lock().unwrap().clear();
+    r.wait(1_000);
+    r.wait(LAT + 1);
+    r.wait(LAT + 1);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0, "flat, not reversed");
+}
+
 /// A Flatten waiting when the broker drops: a market order can't go, and the core doesn't spin on
 /// it. It goes when the broker is back, unless a person took it back.
 #[test]
@@ -1024,6 +1143,42 @@ fn a_waiting_flatten_holds_through_a_disconnect() {
     assert_eq!(r.markets.load(Ordering::Relaxed), before + 1);
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// An order placed during the wait goes when the position closes, as when the Flatten does: it
+/// could open a new one.
+#[test]
+fn an_order_placed_while_waiting_goes_when_the_position_closes() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(1);
+    r.book(es(), 600_000);
+    r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: OrderKind::Limit {
+            price: Price(600_000),
+        },
+    }))
+    .unwrap();
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.flatten(es());
+    let buy = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(590_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0, "the sell filled");
+    r.wait(LAT + 1);
+    assert_eq!(r.core.order(buy).unwrap().state, OrderState::Cancelled);
 }
 
 /// While it waits an exit may close the position: nothing more goes.

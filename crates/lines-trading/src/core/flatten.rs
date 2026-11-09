@@ -13,7 +13,7 @@ use lines_core::{ContractKey, Qty, UtcMillis};
 use super::{FLATTEN_ANSWER_MS, TradingCore};
 use crate::broker::BrokerRequest;
 use crate::command::{Envelope, OrderSpec};
-use crate::order::{Order, Role};
+use crate::order::{Order, OrderState, Role};
 use crate::types::{AccountId, OrderId, OrderKind, Side};
 
 /// A market order waiting for its contract's cancels.
@@ -34,6 +34,14 @@ fn manual(env: &Envelope) -> bool {
 fn protects(o: &Order) -> bool {
     o.role != Role::Flatten
         && (o.reduce_only || matches!(o.role, Role::TakeProfit | Role::StopLoss))
+}
+
+/// A Flatten's own order closing its position: live or unresolved, with a word in the last
+/// [`FLATTEN_ANSWER_MS`]. While it is, no second market order goes, however one is asked.
+pub(super) fn closes(o: &Order, now: UtcMillis) -> bool {
+    o.role == Role::Flatten
+        && (o.is_open() || o.state == OrderState::Unresolved)
+        && now.0.saturating_sub(o.updated.0) < FLATTEN_ANSWER_MS
 }
 
 impl TradingCore {
@@ -104,12 +112,13 @@ impl TradingCore {
         None
     }
 
-    /// A cancel this Flatten sent is still unanswered on the contract, on anything but an earlier
-    /// Flatten's order: past [`FLATTEN_ANSWER_MS`] that one is replaced at once (`docs/known-gaps.md`).
-    /// One whose cancel got nowhere (refused, or out of sends) has no answer to wait for.
+    /// A cancel this Flatten sent is still unanswered on the contract, even if a rebuild has left
+    /// the order unresolved since: it may still fill. Not an earlier Flatten's order: past
+    /// [`FLATTEN_ANSWER_MS`] that one is replaced at once (`docs/known-gaps.md`). One whose cancel
+    /// got nowhere (refused, or out of sends) has no answer to wait for.
     fn flatten_waits(&self, account: &AccountId, contract: ContractKey) -> bool {
         self.orders.values().any(|o| {
-            o.is_open()
+            !o.state.is_terminal()
                 && &o.account == account
                 && o.contract == contract
                 && o.role != Role::Flatten
@@ -129,17 +138,29 @@ impl TradingCore {
             let p = &self.pending_flattens[i];
             let (account, contract, since) = (p.account.clone(), p.contract, p.since);
             let qty = self.position(&account, contract);
+            // An earlier Flatten's order spoke up meanwhile: it's closing the position, so nothing
+            // goes beside it. If it ends without closing, this one still does.
+            if qty != 0
+                && self
+                    .orders
+                    .values()
+                    .any(|o| closes(o, now) && &o.account == &account && o.contract == contract)
+            {
+                self.pending_flattens[i].since = now;
+                i += 1;
+                continue;
+            }
             let late = now.0.saturating_sub(since.0) >= FLATTEN_ANSWER_MS;
             if qty != 0 && self.flatten_waits(&account, contract) && !late {
                 i += 1;
                 continue;
             }
             let mut p = self.pending_flattens.remove(i);
+            // Anything placed while it waited goes too: it could fill or open a position.
+            self.cancel_scoped(&p.env, now, &account, Some(contract), None);
             if qty != 0 {
                 // Click to sent counts from here: the wait is the broker's answers, not the core.
                 p.env.issued = std::time::Instant::now();
-                // Anything placed while it waited goes too: it could fill as well.
-                self.cancel_scoped(&p.env, now, &account, Some(contract), None);
                 self.flatten_send(&p.env, now, &account, contract, qty);
             }
         }
@@ -160,17 +181,20 @@ impl TradingCore {
         }
     }
 
-    /// A Flatten's market order is working, unresolved or waiting to go on this contract.
-    pub(super) fn flatten_under_way(&self, account: &AccountId, contract: ContractKey) -> bool {
+    /// A Flatten's market order is closing this contract, or waiting to go.
+    pub(super) fn flatten_under_way(
+        &self,
+        account: &AccountId,
+        contract: ContractKey,
+        now: UtcMillis,
+    ) -> bool {
         self.pending_flattens
             .iter()
             .any(|p| &p.account == account && p.contract == contract)
-            || self.orders.values().any(|o| {
-                !o.state.is_terminal()
-                    && o.role == Role::Flatten
-                    && &o.account == account
-                    && o.contract == contract
-            })
+            || self
+                .orders
+                .values()
+                .any(|o| closes(o, now) && &o.account == account && o.contract == contract)
     }
 
     /// When a waiting Flatten stops waiting for an answer.
