@@ -177,6 +177,8 @@ pub struct SettingsWindow {
 
 /// The window's size (logical px).
 pub const SIZE: (f32, f32) = (860.0, 620.0);
+/// The smallest the window can be made (logical px): every section's rows stay readable.
+pub const MIN_SIZE: (f32, f32) = (640.0, 420.0);
 
 #[cfg(feature = "screenshot")]
 fn section_named(name: &str) -> Option<Section> {
@@ -234,9 +236,10 @@ pub fn open_for_screenshot(
     section: &str,
     search: Option<&str>,
     set: &[String],
+    size: (f32, f32),
     cx: &mut App,
 ) -> Option<gpui::AnyWindowHandle> {
-    open(None, cx);
+    open_sized(None, size, cx);
     let h = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0)?;
     let section = section_named(section)?;
     let search = search.map(str::to_owned);
@@ -272,6 +275,11 @@ pub fn open_for_screenshot(
 
 /// Open the Settings window, or bring the open one forward; at setting `at` if given.
 pub fn open(at: Option<usize>, cx: &mut App) {
+    open_sized(at, SIZE, cx);
+}
+
+/// [`open`] at a given size (screenshots; the app opens at [`SIZE`]).
+fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
     if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
         let ok = h
             .update(cx, |v, window, cx| {
@@ -299,14 +307,15 @@ pub fn open(at: Option<usize>, cx: &mut App) {
             }),
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                 None,
-                gpui::size(px(SIZE.0), px(SIZE.1)),
+                gpui::size(px(size.0), px(size.1)),
                 cx,
             ))),
+            window_min_size: Some(gpui::size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
             icon: crate::window_icon(),
             ..Default::default()
         }
     } else {
-        crate::workspace::hidden_window("Lines (settings)", SIZE)
+        crate::workspace::hidden_window("Lines (settings)", size)
     };
     let facts = gather_facts(cx);
     // A shown window follows the core while idle (hidden ones, screenshots and tests, repaint

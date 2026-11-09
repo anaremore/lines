@@ -91,6 +91,8 @@ pub struct SettingsShot {
     pub section: String,
     pub search: Option<String>,
     pub set: Vec<String>,
+    /// The window's size (`--settings-size`; default `settings_view::SIZE`).
+    pub size: (f32, f32),
 }
 
 /// `--layout-report` for this process (set once by `run`).
@@ -384,8 +386,15 @@ fn capture(
             .map(|f| (f.at, lines_core::Price(f.price.0 + 100)));
         demo.attach(lines_trading::StrategyId(3), &fills, skip);
     }
+    let settings_size = settings_shot.as_ref().map(|s| s.size);
     let settings_window = settings_shot.map(|s| {
-        crate::settings_view::open_for_screenshot(&s.section, s.search.as_deref(), &s.set, cx)
+        crate::settings_view::open_for_screenshot(
+            &s.section,
+            s.search.as_deref(),
+            &s.set,
+            s.size,
+            cx,
+        )
     });
     cx.spawn(async move |cx| {
         let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
@@ -394,7 +403,8 @@ fn capture(
                 .file_stem()
                 .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
             let path = out.with_file_name(format!("{stem}-settings.png"));
-            wrote.push(shoot(cx, hw, crate::settings_view::SIZE, &path, scale).await);
+            let size = settings_size.unwrap_or(crate::settings_view::SIZE);
+            wrote.push(shoot(cx, hw, size, &path, scale).await);
         }
         // Popped-out panes: their windows opened (hidden) with the main window's tabs.
         // At the size each was opened at (a hidden window reports no size of its own).
