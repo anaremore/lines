@@ -8,7 +8,7 @@ use std::fmt::Write;
 use lines_core::{ContractKey, Price, Product, UtcMillis};
 use lines_trading::trigger::{TriggerKind, TriggerView};
 use lines_trading::types::ContractSpec;
-use lines_trading::{AccountId, Command, Money, Order, PositionView, Role};
+use lines_trading::{AccountId, Command, Money, Order, OrderId, OrderState, PositionView, Role};
 
 /// One open position, as the pane shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,10 +68,14 @@ pub fn last_price(
     Some(avg + pnl / (qty as f64 * per))
 }
 
-/// A position's stop and target: working exit orders, or, for an option, its triggers.
+/// A position's stop and target: working orders on the side that closes it (a bracket's legs, an
+/// exit, a DOM's plain stop), or, for an option, its triggers. A bracket's legs wait for their
+/// entry: while it's open they aren't this position's.
 pub fn exits<'a>(
     orders: impl Iterator<Item = &'a Order>,
     triggers: impl Iterator<Item = &'a TriggerView>,
+    position: i64,
+    entry_open: impl Fn(OrderId) -> bool,
 ) -> (Exit, Exit) {
     let (mut stop, mut target) = (Exit::None, Exit::None);
     let add = |e: &mut Exit, p: Price| {
@@ -81,12 +85,22 @@ pub fn exits<'a>(
         }
     };
     for o in orders {
+        if o.side.sign() != -position.signum() || o.parent.is_some_and(&entry_open) {
+            continue;
+        }
         let Some(p) = o.kind.prices().next() else {
             continue;
         };
+        let stop_kind = matches!(
+            o.kind,
+            lines_trading::OrderKind::Stop { .. } | lines_trading::OrderKind::StopLimit { .. }
+        );
         match o.role {
             Role::StopLoss => add(&mut stop, p),
             Role::TakeProfit => add(&mut target, p),
+            Role::Flatten | Role::Entry => {}
+            _ if stop_kind => add(&mut stop, p),
+            _ if o.reduce_only => add(&mut target, p),
             _ => {}
         }
     }
@@ -152,13 +166,17 @@ fn row(
     p: &PositionView,
 ) -> Row {
     let product = lines_feed::catalog::get(p.contract.product);
+    // No price yet: no Last to read back (the P&L is a placeholder zero).
     let last = product
         .as_ref()
+        .filter(|_| p.marked_at.is_some())
         .and_then(|pr| last_price(pr, p.contract, p.qty, p.avg_price, p.unrealised));
     let (stop, target) = exits(
         st.open_orders(account, p.contract),
         st.triggers()
             .filter(|t| &t.account == account && t.contract == p.contract),
+        p.qty,
+        |id| st.order(id).is_some_and(|o| o.is_open()),
     );
     Row {
         account: account.clone(),
@@ -172,6 +190,20 @@ fn row(
         marked_at: p.marked_at,
         stop,
         target,
+    }
+}
+
+/// What became of a Flatten's market order sent from the pane: `Some(word)` when it ended
+/// without closing (said in the header, the broker's own reason when it gave one), `None` when
+/// it closed or is still working. `open`: the position is still open; `replaced`: another
+/// Flatten works on it now.
+pub fn flatten_outcome(state: &OrderState, open: bool, replaced: bool) -> Option<String> {
+    match state {
+        OrderState::Rejected { reason } => Some(format!("couldn't close: {reason}")),
+        OrderState::Cancelled if open && !replaced => {
+            Some("Flatten canceled: the position is still open".to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -445,17 +477,66 @@ mod tests {
             order(Role::TakeProfit, 583_000),
             order(Role::Entry, 579_000),
         ];
-        let (stop, target) = exits(orders.iter(), [].iter());
+        let none = |_| false;
+        let (stop, target) = exits(orders.iter(), [].iter(), 1, none);
         assert_eq!(stop, Exit::Order(Price(580_000), 0));
         assert_eq!(target, Exit::Order(Price(582_000), 1), "and one more");
         let triggers = [
             trigger(TriggerKind::Stop, 68_250),
             trigger(TriggerKind::Target, 68_600),
         ];
-        let (stop, target) = exits([].iter(), triggers.iter());
+        let (stop, target) = exits([].iter(), triggers.iter(), 1, none);
         assert_eq!(stop, Exit::Trigger(Price(68_250)));
         assert_eq!(target, Exit::Trigger(Price(68_600)));
-        assert_eq!(exits([].iter(), [].iter()), (Exit::None, Exit::None));
+        assert_eq!(
+            exits([].iter(), [].iter(), 1, none),
+            (Exit::None, Exit::None)
+        );
+        // A DOM's plain stop on the closing side is the stop; one on the other side isn't.
+        let mut plain = order(Role::Single, 579_500);
+        plain.kind = OrderKind::Stop {
+            trigger: Price(579_500),
+        };
+        let (stop, _) = exits(std::iter::once(&plain), [].iter(), 1, none);
+        assert_eq!(stop, Exit::Order(Price(579_500), 0));
+        let (stop, _) = exits(std::iter::once(&plain), [].iter(), -1, none);
+        assert_eq!(stop, Exit::None, "a sell stop doesn't close a short");
+        // A bracket's leg whose entry is still open isn't this position's.
+        let mut leg = order(Role::StopLoss, 578_000);
+        leg.parent = Some(OrderId(1));
+        let (stop, _) = exits(std::iter::once(&leg), [].iter(), 1, |_| true);
+        assert_eq!(stop, Exit::None);
+        let (stop, _) = exits(std::iter::once(&leg), [].iter(), 1, none);
+        assert_eq!(stop, Exit::Order(Price(578_000), 0));
+    }
+
+    /// A Flatten from the pane that ends without closing is said, in the broker's words; one
+    /// that closed, still works, or was replaced by another Flatten isn't.
+    #[test]
+    fn a_flatten_that_cant_close_is_said() {
+        let rejected = OrderState::Rejected {
+            reason: "market closed".into(),
+        };
+        assert_eq!(
+            flatten_outcome(&rejected, true, false).as_deref(),
+            Some("couldn't close: market closed")
+        );
+        assert_eq!(
+            flatten_outcome(&OrderState::Cancelled, true, false).as_deref(),
+            Some("Flatten canceled: the position is still open")
+        );
+        assert_eq!(
+            flatten_outcome(&OrderState::Cancelled, false, false),
+            None,
+            "flat"
+        );
+        assert_eq!(
+            flatten_outcome(&OrderState::Cancelled, true, true),
+            None,
+            "replaced"
+        );
+        assert_eq!(flatten_outcome(&OrderState::Filled, false, false), None);
+        assert_eq!(flatten_outcome(&OrderState::Working, true, false), None);
     }
 
     #[test]

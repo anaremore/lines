@@ -2005,7 +2005,6 @@ pub fn parse_script(
                     .map_err(|_| anyhow!("wait {s:?}: seconds"))?
                     * 1000.0) as i64,
             )),
-            // The underlying of the option in hand, for a trigger to see.
             // Another product's front month from here on (a screenshot holding several).
             ["future", sym] => {
                 let p = lines_feed::catalog::by_symbol(sym)
@@ -2014,6 +2013,7 @@ pub fn parse_script(
                     .ok_or_else(|| anyhow!("future {sym:?}: no front month"))?;
                 product = p;
             }
+            // The underlying of the option in hand, for a trigger to see.
             ["under", p] => out.push(Step::Print(
                 ContractKey::equity(contract.product),
                 price(p)?,
@@ -3245,6 +3245,21 @@ mod tests {
         let es_product = catalog::get(catalog::ES).unwrap();
         let a = AccountId::new("paper");
         let open = parse_script("buy 1 mkt; ack", &es_product, es(), &a).unwrap();
+        // `future SYM` moves the rest of a script to that product's front month, priced on its
+        // own grid; an unknown symbol is refused.
+        let nq = catalog::get(catalog::NQ).unwrap();
+        let several = parse_script(
+            "future NQ; print 21000.25; buy 1 mkt",
+            &es_product,
+            es(),
+            &a,
+        )
+        .unwrap();
+        assert!(several.iter().any(|s| matches!(
+            s,
+            Step::Print(k, _, _) if Some(*k) == lines_feed::front_month(&nq, None)
+        )));
+        assert!(parse_script("future XX", &es_product, es(), &a).is_err());
         t.run_script(&open, start, 25);
         let opened = t.journal.revision();
         assert_eq!(t.journal.snapshot().unwrap().open, 1);

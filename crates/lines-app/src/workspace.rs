@@ -159,6 +159,9 @@ pub struct Workspace {
     /// What's wrong with a trigger, if anything (`chain_lines::trigger_status`), kept fresh by
     /// `start_trigger_watch`: true when it can't fire.
     trigger_status: Option<(String, bool)>,
+    /// Open positions on every listed account, for the footer's `N open` (kept fresh by the
+    /// trigger watch, as a position changes with no window redrawing).
+    open_positions: Option<usize>,
     /// Problems and refusals shown inline in the footer (`crate::notice`: repeats counted,
     /// refusals expire, problems that need action stay until dismissed).
     pub notices: Notices,
@@ -188,6 +191,7 @@ impl Workspace {
             closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
             last_chart: None,
             trigger_status: None,
+            open_positions: None,
             notices: Notices::default(),
             show_perf_stats: false,
             show_latency_hud: false,
@@ -2707,7 +2711,7 @@ impl WindowView {
         let ws = cx.global::<Workspace>();
         let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
         let trigger_status = ws.trigger_status.clone();
-        let open = crate::positions_view::open_count(cx).and_then(crate::positions::open_label);
+        let open = ws.open_positions.and_then(crate::positions::open_label);
         let is_first = ws.windows.first().map(|w| w.window_id());
         // What this tab isn't showing, as text that brings it back.
         let (hidden, detached) = match self.tabs.get(self.active) {
@@ -4146,9 +4150,13 @@ pub(crate) fn refresh_trigger_status(cx: &mut App) {
         |account, product| shown.iter().any(|(a, p)| a == account && *p == product),
     );
     drop(st);
+    let open = crate::positions_view::open_count(cx);
     let ws = cx.global_mut::<Workspace>();
-    if ws.trigger_status != status {
+    // Busy this instant: last time's count stands.
+    let open = open.or(ws.open_positions);
+    if ws.trigger_status != status || ws.open_positions != open {
         ws.trigger_status = status;
+        ws.open_positions = open;
         for w in ws.windows.clone() {
             let _ = w.update(cx, |_, _, cx| cx.notify());
         }

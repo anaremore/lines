@@ -15,7 +15,7 @@ use gpui::{
 };
 use lines_core::ContractKey;
 use lines_feed::store::ChartStore;
-use lines_trading::{AccountId, CommandId, OrderId, OrderState, Role, Source};
+use lines_trading::{AccountId, CommandId, OrderId, Role, Source};
 
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
@@ -64,6 +64,8 @@ pub struct PositionsView {
     note: Option<String>,
     /// The pane's width as last drawn, for the columns that fit.
     width: f32,
+    /// Accounts that can't be traded through Lines, and why.
+    read_only: Vec<(AccountId, String)>,
 }
 
 impl EventEmitter<FeedChanged> for PositionsView {}
@@ -131,6 +133,7 @@ impl PositionsView {
             watching: Vec::new(),
             note: None,
             width: 0.0,
+            read_only: Vec::new(),
         }
     }
 
@@ -150,11 +153,12 @@ impl PositionsView {
             self.rows.clear();
             return true;
         };
-        self.accounts = t
-            .accounts()
-            .into_iter()
-            .map(|a| (a.id, a.badge, a.name))
+        let infos = t.accounts();
+        self.read_only = infos
+            .iter()
+            .filter_map(|a| a.read_only.clone().map(|why| (a.id.clone(), why)))
             .collect();
+        self.accounts = infos.into_iter().map(|a| (a.id, a.badge, a.name)).collect();
         if self
             .filter
             .as_ref()
@@ -195,28 +199,19 @@ impl PositionsView {
             let Some(o) = st.order(w.order) else {
                 return true;
             };
-            match &o.state {
-                OrderState::Rejected { reason } => {
-                    notes.push(format!("{}: couldn't close: {reason}", w.label));
-                    false
-                }
-                OrderState::Cancelled => {
-                    let open = st
-                        .position(&w.account, w.contract)
-                        .is_some_and(|p| p.qty != 0);
-                    let replaced = st
-                        .open_orders(&w.account, w.contract)
-                        .any(|x| x.role == Role::Flatten && x.id != w.order);
-                    if open && !replaced {
-                        notes.push(format!(
-                            "{}: Flatten canceled: the position is still open",
-                            w.label
-                        ));
-                    }
-                    false
-                }
-                s => !s.is_terminal(),
+            if !o.state.is_terminal() {
+                return true;
             }
+            let open = st
+                .position(&w.account, w.contract)
+                .is_some_and(|p| p.qty != 0);
+            let replaced = st
+                .open_orders(&w.account, w.contract)
+                .any(|x| x.role == Role::Flatten && x.id != w.order);
+            if let Some(why) = model::flatten_outcome(&o.state, open, replaced) {
+                notes.push(format!("{}: {why}", w.label));
+            }
+            false
         });
         if !notes.is_empty() {
             self.note = Some(notes.join("; "));
@@ -233,6 +228,14 @@ impl PositionsView {
         }
         self.note = None;
         true
+    }
+
+    /// Why an account can't be traded through Lines (`None`: it can).
+    fn read_only(&self, account: &AccountId) -> Option<String> {
+        self.read_only
+            .iter()
+            .find(|(a, _)| a == account)
+            .map(|(_, why)| why.clone())
     }
 
     /// `ESZ6 · Paper`: what a note names.
@@ -516,6 +519,9 @@ impl PositionsView {
             .border_b_1()
             .border_color(t.grid);
         for &c in cols {
+            if c == Col::Flatten {
+                row = row.child(div().flex_1());
+            }
             row = row.child(Self::cell(c).child(c.title()));
         }
         row
@@ -604,6 +610,10 @@ impl PositionsView {
             .cursor_pointer()
             .hover(|s| s.bg(t.panel));
         for &c in cols {
+            // The Flatten column sits at the pane's right edge, under Flatten all.
+            if c == Col::Flatten {
+                el = el.child(div().flex_1());
+            }
             el = el.child(match c {
                 Col::Symbol => {
                     let mut name = String::new();
@@ -618,29 +628,39 @@ impl PositionsView {
                     .child(model::side_word(r.qty)),
                 Col::Qty => Self::cell(c).child(r.qty.abs().to_string()),
                 Col::Avg => Self::cell(c).child(price(r.avg)),
-                Col::Last => Self::cell(c).child(price(r.last)),
+                Col::Last => Self::cell(c)
+                    .when(stale, |d| d.text_color(t.text_dim))
+                    .child(price(r.last)),
                 Col::Exits => self.exits_cell(&r),
                 Col::Pnl => self.pnl_cell(c, r.pnl, stale, money),
                 Col::Flatten => {
                     let row = r.clone();
+                    // A read-only account (a venue that can't be traded here) says so, and a
+                    // press says why, as the DOM's Flatten does.
+                    let off = self.read_only(&r.account);
+                    let word = if off.is_some() {
+                        "Flatten off"
+                    } else {
+                        "Flatten"
+                    };
                     Self::cell(c)
                         .flex()
                         .justify_end()
                         .child(crate::popover::always_live(
-                            self.button(
-                                SharedString::from(format!("position-flatten-{n}")),
-                                "Flatten",
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    if this.guarded(ev) {
-                                        this.flatten(std::slice::from_ref(&row), cx);
-                                    }
-                                    cx.notify();
-                                }),
-                            ),
+                            self.button(SharedString::from(format!("position-flatten-{n}")), word)
+                                .when(off.is_some(), |b| b.text_color(t.text_dim))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(why) = this.read_only(&row.account) {
+                                            this.note = Some(why);
+                                        } else if this.guarded(ev) {
+                                            this.flatten(std::slice::from_ref(&row), cx);
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
                         ))
                 }
             });
@@ -675,8 +695,13 @@ impl PositionsView {
             .h(px(ROW_H))
             .items_center()
             .px_1()
+            .border_t_1()
+            .border_color(t.axis_line)
             .font_weight(FontWeight::SEMIBOLD);
         for (i, &c) in cols.iter().enumerate() {
+            if c == Col::Flatten {
+                el = el.child(div().flex_1());
+            }
             el = el.child(match c {
                 _ if i == 0 => Self::cell(c).child(model::count_words(count)),
                 Col::Pnl => self.pnl_cell(c, total, stale, money),

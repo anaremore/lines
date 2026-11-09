@@ -388,12 +388,16 @@ fn pane(m: &PaneMenu) -> MenuItem {
         MenuItem::of(Command::Split(crate::layout::Axis::Row), false),
         MenuItem::of(Command::Split(crate::layout::Axis::Column), false),
         row("Pop out", Command::PopOut),
-        MenuItem::of(Command::OpenPositions, false),
         MenuItem::sep(),
         // What the pane is (pick one); the top-level Show › is what a chart draws.
         MenuItem::header("Show as"),
     ];
-    for k in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
+    for k in [
+        PaneKind::Chart,
+        PaneKind::Dom,
+        PaneKind::Tape,
+        PaneKind::Positions,
+    ] {
         sub.push(pick(k.label(), Command::SetKind(k), k == m.kind));
     }
     sub.push(MenuItem::sep());
@@ -508,13 +512,14 @@ mod tests {
         }
     }
 
-    const KINDS: [PaneKind; 6] = [
+    const KINDS: [PaneKind; 7] = [
         PaneKind::Chart,
         PaneKind::Dom,
         PaneKind::Tape,
         PaneKind::Journal,
         PaneKind::Strategies,
         PaneKind::Chain,
+        PaneKind::Positions,
     ];
 
     fn labels(items: &[MenuItem]) -> Vec<&str> {
@@ -573,6 +578,7 @@ mod tests {
                 "Chart",
                 "DOM",
                 "Time & sales",
+                "Positions",
                 "---",
                 "Chart only",
                 "Linked DOM",
