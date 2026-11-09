@@ -590,3 +590,154 @@ fn the_style_command_says_why_it_cant_open() {
     r.d.set_hidden(true);
     assert!(r.d.style_unavailable().starts_with("Drawings are hidden"));
 }
+
+impl Rig {
+    fn shift_down(&mut self, x: f32, y: f32) -> bool {
+        self.frame(x, y);
+        let a = self.anchor(x, y);
+        self.d.quick_down(x, y, a)
+    }
+}
+
+/// Shift+drag measures from press to release with no tool chosen; the measure stays (temporary,
+/// as with Alt+U) until Esc or a click elsewhere, and Enter still pins it.
+#[test]
+fn shift_drag_measures_from_press_to_release() {
+    let mut r = Rig::new();
+    assert!(r.shift_down(200.0, 300.0));
+    r.frame(300.0, 200.0);
+    assert!(r.d.measure_shown().is_some(), "previewed while dragging");
+    assert!(r.up(400.0, 100.0));
+    assert_eq!(r.d.tool(), None, "no tool left chosen");
+    r.frame(0.0, 0.0);
+    let (_, stats) = r.d.measure_shown().expect("kept after the release");
+    assert!(stats.ticks > 0 && stats.bars > 0);
+    assert!(r.items().is_empty(), "temporary, not saved");
+    // Esc clears it.
+    assert_eq!(r.d.key("escape", None), Key::Handled);
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_none());
+    // Again, then a plain click elsewhere clears it and pans.
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    assert!(!r.down(600.0, 200.0), "the chart pans");
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_none());
+    // Enter pins one.
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    assert_eq!(r.d.key("enter", None), Key::Handled);
+    assert_eq!(r.items()[0].tool, Tool::Measure);
+}
+
+/// A Shift+click leaves nothing behind; no bars to anchor to, or a tool chosen: the press isn't
+/// the ruler's.
+#[test]
+fn a_shift_click_measures_nothing() {
+    let mut r = Rig::new();
+    assert!(r.shift_down(200.0, 300.0));
+    assert!(r.up(201.0, 301.0));
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_none());
+    assert_eq!(r.d.tool(), None);
+    assert!(
+        !r.d.quick_down(10.0, 10.0, None),
+        "no bars: nothing to anchor"
+    );
+    r.d.set_tool(Tool::Trend);
+    assert!(!r.shift_down(200.0, 300.0), "drawing mode keeps its press");
+    assert_eq!(r.d.tool(), Some(Tool::Trend));
+}
+
+/// A release off the plot ends where the pointer last was on it; a lost release ends there too.
+#[test]
+fn a_shift_drag_released_off_the_plot_or_lost_still_measures() {
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.frame(400.0, 100.0);
+    assert!(r.d.on_up(900.0, 100.0, None));
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_some());
+    r.d.cancel();
+    r.shift_down(200.0, 300.0);
+    r.frame(400.0, 100.0);
+    assert!(r.d.release_lost());
+    assert_eq!(r.d.tool(), None);
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_some());
+    // Esc mid-drag ends it with nothing.
+    r.d.cancel();
+    r.shift_down(200.0, 300.0);
+    assert!(r.d.cancel());
+    r.up(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_none());
+}
+
+/// What keeps its own press over Shift: Ctrl/Cmd or Alt, a chosen tool, an order's tag,
+/// marker or handle (or the position tag), a drawing or its handles.
+#[test]
+fn shift_measures_only_on_empty_plot_with_shift_alone() {
+    assert!(shift_measures(true, false, false, false, false));
+    assert!(
+        !shift_measures(false, false, false, false, false),
+        "plain drag pans"
+    );
+    assert!(
+        !shift_measures(true, true, false, false, false),
+        "Ctrl, Cmd or Alt"
+    );
+    assert!(
+        !shift_measures(true, false, true, false, false),
+        "drawing mode"
+    );
+    assert!(
+        !shift_measures(true, false, false, true, false),
+        "an order line"
+    );
+    assert!(
+        !shift_measures(true, false, false, false, true),
+        "a drawing"
+    );
+}
+
+/// Anything that ends a press mid-drag leaves no tool chosen and no stray measure.
+#[test]
+fn a_shift_drag_interrupted_leaves_nothing_armed() {
+    let es = catalog::get(catalog::ES).unwrap();
+    // Another tool chosen mid-drag: that tool, and the release does nothing.
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.d.set_tool(Tool::Trend);
+    assert_eq!(r.d.tool(), Some(Tool::Trend));
+    r.up(400.0, 100.0);
+    assert!(r.items().is_empty());
+    // Hidden mid-drag: the release ends it, nothing left armed.
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.d.set_hidden(true);
+    r.up(400.0, 100.0);
+    assert_eq!(r.d.tool(), None);
+    // Another product mid-drag: everything ends.
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.d.set_data(ProductDrawings::ephemeral(es, Vec::new()));
+    r.up(400.0, 100.0);
+    assert_eq!(r.d.tool(), None);
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_none());
+}
+
+/// A pending "Delete all" doesn't take the Enter that pins a Shift+drag's measure.
+#[test]
+fn enter_after_a_shift_drag_pins_and_never_deletes_all() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    assert_eq!(r.items().len(), 1);
+    r.d.confirm_clear = true;
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    assert_eq!(r.d.key("enter", None), Key::Handled);
+    assert_eq!(r.items().len(), 2, "pinned; nothing deleted");
+}

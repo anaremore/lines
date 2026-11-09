@@ -181,6 +181,9 @@ pub trait ChartLayer: 'static {
     );
 }
 
+/// A Shift+drag from one plot-local point to another (`--shift-drag`).
+pub type ShiftDrag = ((f32, f32), (f32, f32));
+
 /// Deterministic input for screenshot mode (decision 0009), standing in for the mouse.
 #[derive(Clone, Debug, Default)]
 pub struct Fixture {
@@ -189,6 +192,9 @@ pub struct Fixture {
     /// The position line dragged to this plot-local y (screenshots: `--drag-position Y`):
     /// the exit it would set is previewed, never placed.
     pub drag_position: Option<f32>,
+    /// A Shift+drag from the first plot-local point to the second, released (screenshots:
+    /// `--shift-drag X0,Y0:X1,Y1`): the measure it leaves, through the press path's own calls.
+    pub shift_drag: Option<ShiftDrag>,
     /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
     /// would (turns auto-scale off).
     pub price_zoom: Option<f64>,
@@ -411,6 +417,8 @@ pub struct ChartView {
     trading_cache: Option<Arc<crate::trading::TradeCache>>,
     /// Screenshot fixture: the position line held dragged to this plot-local y.
     drag_position: Option<f32>,
+    /// Screenshot fixture: a Shift+drag, replayed each frame.
+    shift_drag: Option<ShiftDrag>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
     /// groups: they share the market only.
     timeframe: Timeframe,
@@ -689,6 +697,7 @@ impl ChartView {
                 .map(|s| s.0.clone()),
             trading_cache: crate::trading::Trading::try_global(cx).map(|t| t.cache.clone()),
             drag_position: fixture.drag_position,
+            shift_drag: fixture.shift_drag,
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
             ticks: None,
@@ -1380,6 +1389,22 @@ impl ChartView {
                 && let Some(id) = self.drawings.double_click(x as f32, y as f32, ctrl)
                 && self.open_style_editor(id, cx)
             {
+                return;
+            }
+            // Shift+drag on empty plot measures (a quick second one too: never the view
+            // reset). An order line, tag or handle keeps its own press, as does a drawing (and
+            // its handles); Ctrl and Alt keep theirs. With no anchor this instant (the feed
+            // holds the store, or no bars) the press does nothing rather than pan.
+            if crate::chart_draw::shift_measures(
+                ev.modifiers.shift,
+                ctrl || ev.modifiers.alt,
+                self.drawings.tool().is_some(),
+                self.order_under(x, y),
+                self.drawings.hit_at(x as f32, y as f32).is_some(),
+            ) {
+                let anchor = self.drawing_anchor(x, y);
+                self.drawings.quick_down(x as f32, y as f32, anchor);
+                cx.notify();
                 return;
             }
             let anchor = self.drawing_anchor(x, y);
@@ -2441,6 +2466,25 @@ impl ChartView {
         true
     }
 
+    /// Whether an order's tag, marker or handle, or the position line's tag, is at plot-local
+    /// (`x`, `y`): what `order_pressed` would take.
+    fn order_under(&self, x: f64, y: f64) -> bool {
+        let n = self.ct.n_tags;
+        lines_core::geometry::order_tags::hit(
+            &self.ct.tags[..n],
+            &self.ct.markers,
+            &self.ct.handles,
+            x as f32,
+            y as f32,
+        )
+        .is_some()
+            || (self.ct.position.is_some()
+                && self
+                    .ct
+                    .pos_tag
+                    .is_some_and(|t| t.contains(x as f32, y as f32)))
+    }
+
     /// A press in the plot at plot-local (`x`, `y`) on an order tag, its `×`, a position
     /// handle or an edge marker (last frame's layout). Returns whether it was one of those.
     fn order_pressed(&mut self, x: f64, y: f64, cx: &mut Context<Self>) -> bool {
@@ -3081,6 +3125,17 @@ impl ChartView {
             }
             // Drawings: projected for this timeframe; previews and drags follow the pointer.
             let magnet = self.magnet();
+            // Replayed every frame (screenshots have no pointer), so the measure settles on
+            // the frame's final viewport, never a first frame's before the price fit.
+            if let Some((a, b)) = self.shift_drag {
+                let axis = TimeAxis::new(view);
+                let at = |(x, y): (f32, f32)| {
+                    snap_anchor(&axis, &self.vp, fmt.tick, magnet, x.into(), y.into())
+                };
+                let (from, to) = (at(a), at(b));
+                self.drawings.quick_down(a.0, a.1, from);
+                self.drawings.on_up(b.0, b.1, to);
+            }
             self.drawings.set_pointer(self.hover);
             self.drawings.prepare(
                 &TimeAxis::new(view),
@@ -6723,7 +6778,7 @@ fn hud_compact(w: f32) -> bool {
 }
 
 /// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  type a symbol: switch  ·  type 5, 15, 1h, 500t + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
+pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  Shift+drag measure  ·  type 5, 15, 1h, 500t + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

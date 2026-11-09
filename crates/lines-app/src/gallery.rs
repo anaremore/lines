@@ -787,6 +787,25 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     // continuous bars, footprints, the list with the tick presets (also on a short pane), and a
     // feed opened mid-session (the "tick bars from" label).
     let chart = |a: &str| args(&format!("--layout chart --size 1400x800 {a}"));
+    // Shift+drag: the measure it leaves (both themes; a narrow chart too).
+    v.push(s(
+        "chart-shift-measure",
+        true,
+        end,
+        chart("--theme dark --shift-drag 700,520:1150,180"),
+    ));
+    v.push(s(
+        "chart-shift-measure-light",
+        false,
+        end,
+        chart("--theme light --shift-drag 700,520:1150,180"),
+    ));
+    v.push(s(
+        "chart-shift-measure-narrow",
+        false,
+        end,
+        args("--layout chart --size 520x600 --theme dark --shift-drag 120,420:400,160"),
+    ));
     v.push(s(
         "chart-233t",
         true,
