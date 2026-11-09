@@ -236,10 +236,12 @@ pub fn serving(product: &Product) -> Vec<Arc<dyn LevelSource>> {
 
 static SERVING_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// A source's [`LevelSource::serves`] answers may have changed (e.g. it learned the products
-/// it serves from its service after charts were opened). Charts ask every source again
-/// ([`serving`]) and add or remove its layer; a source that doesn't serve a chart's product
-/// shows nothing there, not even a legend row. Cheap: call it only when an answer changed.
+/// Announce that a source's [`LevelSource::serves`] answers changed (e.g. it learned the
+/// products it serves from its service after charts were opened): first update what `serves`
+/// returns, then call this. Charts ask every source again ([`serving`]) and add or remove its
+/// layer; a source that doesn't serve a chart's product shows nothing there, not even a
+/// legend row. Only live runs ([`runtime::is_live`]) may change their answers this way.
+/// Cheap: call it only when an answer changed.
 pub fn serving_changed() {
     SERVING_GENERATION.fetch_add(1, Ordering::Release);
 }

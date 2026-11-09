@@ -412,3 +412,14 @@ fn serving_changed_bumps_the_generation() {
     serving_changed();
     assert!(serving_generation() > before);
 }
+
+#[test]
+fn only_live_modes_are_live() {
+    assert!(LevelMode::Live.is_live());
+    assert!(LevelMode::Record("x".into()).is_live());
+    assert!(!LevelMode::Replay("x".into()).is_live());
+    assert!(!LevelMode::NotRecorded.is_live());
+    assert!(!mode_for(true, None, None).is_live());
+    assert!(!mode_for(true, Some("r".into()), Some("x".into())).is_live());
+    assert!(mode_for(false, Some("r".into()), None).is_live());
+}

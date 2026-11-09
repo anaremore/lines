@@ -193,8 +193,9 @@ pub struct LevelsLayer {
     /// The chart's market clock as last seen under the store lock (freshness of replayed
     /// sources when a snapshot can't read the store).
     clock: Option<UtcMillis>,
-    /// The chart's store, to ask the sources again when their answers change.
-    store: Option<Arc<ChartStore>>,
+    /// The chart's store, product and contract as of [`Self::attach`], to ask the sources
+    /// again when their answers change (render time: never reads the store).
+    chart: Option<(Arc<ChartStore>, Product, Option<lines_core::ContractKey>)>,
     /// `levels::serving_generation()` when the sources were last asked.
     serving_gen: u64,
 }
@@ -214,27 +215,13 @@ impl LevelsLayer {
             vwap_cols: Vec::with_capacity(VWAP_COLUMNS),
             px_per_unit: 0.0,
             clock: None,
-            store: None,
+            chart: None,
             serving_gen: 0,
         }
     }
 
     /// Join every registered source that serves the chart's product (on a feed change).
     pub fn attach(&mut self, store: &Arc<ChartStore>) {
-        self.slots.clear();
-        self.vwap = None; // the new feed's node is acquired when a map needs it
-        self.store = Some(store.clone());
-        self.join_serving();
-    }
-
-    /// Ask the registered sources which serve the chart's product (`serves`), keep the slots
-    /// of those still serving, add the new ones and drop the rest: a source that doesn't
-    /// serve the product has no slot, so nothing drawn and no legend or menu row.
-    fn join_serving(&mut self) {
-        let Some(store) = self.store.clone() else {
-            return;
-        };
-        self.serving_gen = lines_feed::levels::serving_generation();
         let (product, contract): (Product, _) = {
             let d = store.read();
             self.feed = Some(FeedInfo {
@@ -245,6 +232,21 @@ impl LevelsLayer {
             });
             (d.product.clone(), d.contract)
         };
+        self.slots.clear();
+        self.vwap = None; // the new feed's node is acquired when a map needs it
+        self.chart = Some((store.clone(), product, contract));
+        self.join_serving();
+    }
+
+    /// Ask the registered sources which serve the chart's product (`serves`), keep the slots
+    /// of those still serving, add the new ones and drop the rest: a source that doesn't
+    /// serve the product has no slot, so nothing drawn and no legend or menu row. Uses what
+    /// [`Self::attach`] saved: never reads the store (it runs at render).
+    fn join_serving(&mut self) {
+        let Some((store, product, contract)) = self.chart.clone() else {
+            return;
+        };
+        self.serving_gen = lines_feed::levels::serving_generation();
         let mut old = std::mem::take(&mut self.slots);
         self.slots = lines_feed::levels::serving(&product)
             .into_iter()
@@ -315,11 +317,14 @@ impl LevelsLayer {
     /// Sum of the sources' revisions (repaint when it changes). A change in which sources
     /// serve the chart counts too (the next snapshot joins or drops them).
     pub fn revision(&self) -> u64 {
+        // The generation and the slot count weigh in apart from the sum, so a slot leaving
+        // (its revision gone from the sum) can't make the total repeat.
+        let start = lines_feed::levels::serving_generation()
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add((self.slots.len() as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
         self.slots
             .iter()
-            .fold(lines_feed::levels::serving_generation(), |a, s| {
-                a.wrapping_add(s.handle.cell().revision())
-            })
+            .fold(start, |a, s| a.wrapping_add(s.handle.cell().revision()))
     }
 
     /// This frame's view of every source (map, freshness, error), taken once per frame
@@ -653,6 +658,12 @@ impl LevelsLayer {
     #[cfg(test)]
     pub fn placed(&self, i: usize) -> &[Placed] {
         &self.slots[i].placed
+    }
+
+    /// Source `i`'s map as of the last snapshot (tests).
+    #[cfg(test)]
+    pub fn map(&self, i: usize) -> Option<&Arc<LevelMap>> {
+        self.slots[i].map.as_ref()
     }
 
     /// Override a source's freshness (tests: stale and missing rendering).

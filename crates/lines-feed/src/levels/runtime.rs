@@ -50,6 +50,21 @@ pub enum LevelMode {
     NotRecorded,
 }
 
+impl LevelMode {
+    /// Live data (recorded or not): sources may ask their services what they serve. In a
+    /// replay they may not: what a replay shows must not depend on a service running now.
+    pub fn is_live(&self) -> bool {
+        matches!(self, LevelMode::Live | LevelMode::Record(_))
+    }
+}
+
+/// Whether this run's levels are live ([`LevelMode::is_live`]). A source whose
+/// `LevelSource::serves` depends on what its service lists answers from its baseline
+/// otherwise, and never asks the service.
+pub fn is_live() -> bool {
+    mode().read().is_live()
+}
+
 /// Why a source shows as missing in a replay that has no batches recorded for it.
 pub const NOT_RECORDED: &str = "not recorded for this replay";
 

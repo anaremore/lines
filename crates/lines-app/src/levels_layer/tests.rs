@@ -272,26 +272,55 @@ impl lines_feed::levels::LevelSource for LateServing {
     }
 }
 
+/// Puts `LateServing` back to serving nothing (and tells charts) however the test ends, so a
+/// failure can't leave it on other tests' charts. (Sources can't be unregistered; one that
+/// serves nothing has no slot anywhere.)
+struct LateGuard;
+
+impl Drop for LateGuard {
+    fn drop(&mut self) {
+        LATE_SERVES.store(false, std::sync::atomic::Ordering::Release);
+        lines_feed::levels::serving_changed();
+    }
+}
+
 /// A source that doesn't serve the chart's product has no slot: nothing drawn, no legend or
 /// menu row. When its answer changes (`levels::serving_changed`), the next snapshot joins it,
-/// and drops it again when it stops serving, without a feed change.
+/// and drops it again when it stops serving, without a feed change. A source still serving
+/// keeps its slot through it: the same map, never "missing" for a frame.
 #[test]
 fn sources_join_and_leave_when_their_serving_changes() {
     use std::sync::atomic::Ordering;
     let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _reset = LateGuard;
     LATE_SERVES.store(false, Ordering::Release);
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
     lines_feed::levels::register(Arc::new(LateServing)).unwrap();
     let store = es_store();
     let mut layer = LevelsLayer::new(LevelsConfig::default());
     layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
     let has_late = |layer: &LevelsLayer| {
         let menu = layer.sources().iter().any(|(id, ..)| id == "late-serving");
         let legend = layer.legend().iter().any(|r| r.label == "Late");
         assert_eq!(menu, legend, "menu and legend agree");
         menu
     };
+    let demo = |layer: &LevelsLayer| {
+        let i = layer
+            .sources()
+            .iter()
+            .position(|(id, ..)| id == "demo")
+            .expect("demo serves ES");
+        let map = layer.map(i).cloned().expect("demo map");
+        assert_ne!(layer.legend()[i].text, "missing");
+        map
+    };
     layer.snapshot(None);
     assert!(!has_late(&layer), "not served: no row at all");
+    let demo_map = demo(&layer);
 
     let before = layer.revision();
     LATE_SERVES.store(true, Ordering::Release);
@@ -299,9 +328,11 @@ fn sources_join_and_leave_when_their_serving_changes() {
     assert_ne!(layer.revision(), before, "the chart repaints");
     layer.snapshot(None);
     assert!(has_late(&layer), "joined without a feed change");
+    assert!(Arc::ptr_eq(&demo(&layer), &demo_map), "demo kept its slot");
 
     LATE_SERVES.store(false, Ordering::Release);
     lines_feed::levels::serving_changed();
     layer.snapshot(None);
     assert!(!has_late(&layer), "left again");
+    assert!(Arc::ptr_eq(&demo(&layer), &demo_map), "demo kept its slot");
 }
