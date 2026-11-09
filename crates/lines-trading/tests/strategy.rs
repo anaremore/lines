@@ -435,8 +435,6 @@ fn daily_loss_closes_the_trade_and_pauses_for_the_trade_date() {
     r.wait(30);
     // The owner's rule: the trade is closed and its working orders are gone.
     assert_eq!(r.core.position(&acct(), es()), 0, "flattened");
-    // Its stop's cancel goes once it's flat.
-    r.wait(30);
     assert!(!r.core.order(stop).unwrap().is_open(), "its stop cancelled");
     // No entries for the rest of the trade date.
     assert!(
@@ -1022,8 +1020,6 @@ fn its_flatten_with_a_position_leaves_nothing_to_reopen_it() {
     .unwrap();
     r.wait(30);
     assert_eq!(r.core.position(&acct(), es()), 0);
-    // Its cancel goes once it's flat.
-    r.wait(30);
     assert!(
         !r.core.order(stop).unwrap().is_open(),
         "no stop left to open a short"

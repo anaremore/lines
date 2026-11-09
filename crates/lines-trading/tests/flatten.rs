@@ -294,6 +294,15 @@ fn a_flatten_with_no_bid_keeps_the_stop() {
     r.print(68_100);
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), call()), 0, "the Stop closed it");
+    let reason = r.events.iter().rev().find_map(|e| match e {
+        Event::Trigger(t) if t.state == TriggerState::Ended => t.reason.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        reason.as_deref(),
+        Some("closed"),
+        "the Stop's doing, so it's news"
+    );
     assert_eq!(r.fills(call()).last(), Some(&(Side::Sell, 100, 1)));
     assert_eq!(r.core.triggers().count(), 0);
 }
@@ -311,6 +320,16 @@ fn a_flatten_that_closes_ends_the_exits() {
     assert_eq!(r.core.position(&acct(), call()), 0);
     assert_eq!(r.fills(call()).last(), Some(&(Side::Sell, 240, 2)));
     assert_eq!(r.core.triggers().count(), 0, "closed, so they're over");
+    // It's what the person asked for, so no news: the reason the app stays quiet on.
+    let reasons: Vec<_> = r
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Trigger(t) if t.state == TriggerState::Ended => t.reason.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasons, ["you flattened", "you flattened"]);
     // A later print through a level does nothing.
     r.print(68_100);
     r.wait(LAT + 1);
@@ -596,66 +615,29 @@ source https://www.bls.gov/schedule/news_release/cpi.htm
     assert_eq!(r.core.position(&acct(), es()), 0);
 }
 
-/// A DOM's stop is a plain order, not a reduce-only one: a Flatten in a halt keeps it too, and it
-/// is cancelled once the position is flat, or it would open a new one. A plain limit isn't
-/// protection, and a stop larger than the position would open one, so those go at once.
+/// A DOM's stop is a plain order the broker doesn't cap: it could reverse the position in the
+/// moment after the fill, so a Flatten cancels it at once, as a plain limit (decisions 0025, 0027).
+/// In a halt that leaves the position without it: `docs/known-gaps.md`.
 #[test]
-fn a_flatten_keeps_a_plain_stop_until_flat() {
-    let plain = |r: &mut Rig, kind: OrderKind, qty: i64| {
-        r.cmd(Command::PlaceOrder(OrderSpec {
+fn a_flatten_cancels_a_plain_stop_at_once() {
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(2);
+    let id = r
+        .cmd(Command::PlaceOrder(OrderSpec {
             account: acct(),
             contract: es(),
             side: Side::Sell,
-            qty: Qty(qty),
-            kind,
+            qty: Qty(2),
+            kind: OrderKind::Stop {
+                trigger: Price(590_000),
+            },
         }))
-        .unwrap()[0]
-    };
-    let stop = OrderKind::Stop {
-        trigger: Price(590_000),
-    };
-    // In the halt: the close fails, the stop stays.
-    let mut r = Rig::new(true, CME_OPEN);
-    r.long_es(2);
-    let id = plain(&mut r, stop, 2);
-    r.wait(LAT + 1);
-    r.t = UtcMillis::parse_iso(CME_HALT).unwrap().0;
-    r.flatten(es());
-    r.wait(LAT + 1);
-    assert_eq!(r.core.position(&acct(), es()), 2);
-    assert!(r.core.order(id).unwrap().is_open(), "{:?}", r.state(id));
-
-    // Open: the close fills, and the stop goes with its position.
-    let mut r = Rig::new(true, CME_OPEN);
-    r.long_es(2);
-    let id = plain(&mut r, stop, 2);
-    let limit = plain(
-        &mut r,
-        OrderKind::Limit {
-            price: Price(601_000),
-        },
-        1,
-    );
-    let large = plain(
-        &mut r,
-        OrderKind::Stop {
-            trigger: Price(589_000),
-        },
-        3,
-    );
+        .unwrap()[0];
     r.wait(LAT + 1);
     r.flatten(es());
-    assert!(r.core.order(id).unwrap().is_open(), "not before it's flat");
     r.wait(LAT + 1);
-    assert_eq!(r.state(limit), OrderState::Cancelled);
-    assert_eq!(r.state(large), OrderState::Cancelled);
+    assert_eq!(r.state(id), OrderState::Cancelled);
     assert_eq!(r.core.position(&acct(), es()), 0);
-    r.wait(LAT + 1);
-    assert_eq!(
-        r.state(id),
-        OrderState::Cancelled,
-        "flat: it would open one"
-    );
     // The market falls through it: nothing opens.
     r.book(es(), 580_000);
     r.wait(LAT + 1);

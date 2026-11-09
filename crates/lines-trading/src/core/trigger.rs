@@ -45,6 +45,8 @@ struct Live {
     next_try: UtcMillis,
     /// The quote a fired exit last tried on: a Stop the broker couldn't fill waits for a new one.
     tried: Option<UtcMillis>,
+    /// A person's Flatten asked to close its position: if that's what ends it, it's no news.
+    flattened: bool,
 }
 
 fn underlying(contract: ContractKey) -> ContractKey {
@@ -329,6 +331,7 @@ impl TradingCore {
                 order: None,
                 next_try: UtcMillis(i64::MIN),
                 tried: None,
+                flattened: false,
             },
         );
     }
@@ -512,6 +515,16 @@ impl TradingCore {
             _ => return,
         };
         let flatten = matches!(env.command, Command::Flatten { .. });
+        if flatten {
+            for l in self.triggers.live.values_mut() {
+                if &l.view.account == account
+                    && contract.is_none_or(|c| c == l.view.contract)
+                    && l.view.kind.is_exit()
+                {
+                    l.flattened = true;
+                }
+            }
+        }
         let covered: Vec<TriggerId> = self
             .triggers
             .live
@@ -666,6 +679,8 @@ impl TradingCore {
             return;
         };
         l.view.state = TriggerState::Working;
+        // It closes the position now, if the Flatten didn't.
+        l.flattened = false;
         let (account, contract, word) =
             (l.view.account.clone(), l.view.contract, l.view.kind.word());
         let view = l.view.clone();
@@ -737,7 +752,10 @@ impl TradingCore {
             if kind.is_exit() {
                 let position = self.position(&account, contract);
                 if position == 0 {
-                    let why = if state == TriggerState::Working {
+                    let flattened = self.triggers.live.get(&id).is_some_and(|l| l.flattened);
+                    let why = if flattened {
+                        "you flattened"
+                    } else if state == TriggerState::Working {
                         "closed"
                     } else {
                         "the position closed"

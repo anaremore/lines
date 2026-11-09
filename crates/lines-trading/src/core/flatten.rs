@@ -29,15 +29,6 @@ fn manual(env: &Envelope) -> bool {
     crate::broker::Origin::of(env.source) == crate::broker::Origin::Manual
 }
 
-/// A plain stop closing the position (from a DOM): protection, not a reduce-only one, so it would
-/// open a position if left once this one is gone.
-fn plain_stop_closes(o: &Order, position: i64) -> bool {
-    !o.reduce_only
-        && matches!(o.kind, OrderKind::Stop { .. } | OrderKind::StopLimit { .. })
-        && position.signum() == -o.side.sign()
-        && o.remaining().0 <= position.abs()
-}
-
 /// An order protecting a position: it can only close it, so it is safe to leave working. A
 /// Flatten's own order isn't one: when it's left working at all it's because it's still `closing`.
 fn protects(o: &Order) -> bool {
@@ -47,64 +38,12 @@ fn protects(o: &Order) -> bool {
 
 impl TradingCore {
     /// Which orders a Flatten of these positions leaves working on a broker honoring reduce-only:
-    /// what protects them, until they're flat.
+    /// what protects them, and which the broker caps, until they're flat. A plain stop isn't: it
+    /// could reverse the position in the moment after the fill (decisions 0025, 0027).
     pub(super) fn flatten_keeps(&self, o: &Order, positions: &[(ContractKey, i64)]) -> bool {
         self.broker.capabilities().oco
-            && positions
-                .iter()
-                .find(|(k, _)| *k == o.contract)
-                .is_some_and(|(_, q)| protects(o) || plain_stop_closes(o, *q))
-    }
-
-    /// Plain stops a Flatten kept: nothing else ends them when the position is flat.
-    pub(super) fn flatten_note_kept(
-        &mut self,
-        account: &AccountId,
-        positions: &[(ContractKey, i64)],
-    ) {
-        if !self.broker.capabilities().oco {
-            return;
-        }
-        for o in self
-            .orders
-            .values()
-            .filter(|o| o.is_open() && &o.account == account)
-        {
-            let keep = positions
-                .iter()
-                .find(|(k, _)| *k == o.contract)
-                .is_some_and(|(_, q)| plain_stop_closes(o, *q));
-            if keep && !self.flatten_kept.contains(&o.id) {
-                self.flatten_kept.push(o.id);
-            }
-        }
-    }
-
-    /// A kept plain stop ends once its position is flat or on the stop's side: it would open one.
-    fn flatten_clean_up(&mut self, now: UtcMillis) {
-        if self.flatten_kept.is_empty() {
-            return;
-        }
-        let kept = std::mem::take(&mut self.flatten_kept);
-        let mut ending = Vec::new();
-        for id in kept {
-            let Some(o) = self.orders.get(&id).filter(|o| o.is_open()) else {
-                continue;
-            };
-            let position = self.position(&o.account, o.contract);
-            if position == 0 || position.signum() == o.side.sign() {
-                ending.push((o.account.clone(), id));
-            } else {
-                self.flatten_kept.push(id);
-            }
-        }
-        for (account, order) in ending {
-            self.submit_internal(
-                now,
-                crate::command::Source::Rule,
-                crate::command::Command::CancelOrder { account, order },
-            );
-        }
+            && protects(o)
+            && positions.iter().any(|(k, _)| *k == o.contract)
     }
 
     /// The market order closing a position, at once.
@@ -179,7 +118,6 @@ impl TradingCore {
     /// A Flatten waiting for its cancels goes once they're answered, or the venue has had long
     /// enough. It closes what the position is then: an exit may have filled meanwhile.
     pub(super) fn flatten_pending(&mut self, now: UtcMillis) {
-        self.flatten_clean_up(now);
         let mut i = 0;
         while i < self.pending_flattens.len() {
             let p = &self.pending_flattens[i];
