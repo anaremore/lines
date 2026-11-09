@@ -5,7 +5,8 @@
 //! it there, and if the market order is refused or finds nothing to fill on, they still protect
 //! it. A broker that doesn't honor it could fill both, so its orders are cancelled first and the
 //! market order waits for those answers (at most [`super::FLATTEN_ANSWER_MS`], for a venue that
-//! never answers). That protection is gone if the market order then fails: `docs/known-gaps.md`.
+//! never answers). That protection is gone if the market order then fails, and past that wait
+//! both could fill: `docs/known-gaps.md`. A person's Cancel All takes back a Flatten still waiting.
 
 use lines_core::{ContractKey, Qty, UtcMillis};
 
@@ -23,9 +24,11 @@ pub(super) struct PendingFlatten {
     since: UtcMillis,
 }
 
-/// An order protecting a position: it can only close it, so it is safe to leave working.
+/// An order protecting a position: it can only close it, so it is safe to leave working. A
+/// Flatten's own order isn't one: when it's left working at all it's because it's still `closing`.
 fn protects(o: &Order) -> bool {
-    o.reduce_only || matches!(o.role, Role::TakeProfit | Role::StopLoss)
+    o.role != Role::Flatten
+        && (o.reduce_only || matches!(o.role, Role::TakeProfit | Role::StopLoss))
 }
 
 impl TradingCore {
@@ -67,6 +70,9 @@ impl TradingCore {
         qty: i64,
     ) -> Option<OrderId> {
         if self.broker.capabilities().oco || !self.flatten_waits(account, contract) {
+            // It goes now, for whoever asked: one waiting for the same contract is this one.
+            self.pending_flattens
+                .retain(|p| !(&p.account == account && p.contract == contract));
             return Some(self.flatten_send(env, now, account, contract, qty));
         }
         let waiting = self
@@ -107,10 +113,23 @@ impl TradingCore {
                 i += 1;
                 continue;
             }
-            let p = self.pending_flattens.remove(i);
+            let mut p = self.pending_flattens.remove(i);
             if qty != 0 {
+                // Click to sent counts from here: the wait is the broker's answers, not the core.
+                p.env.issued = std::time::Instant::now();
                 self.flatten_send(&p.env, now, &account, contract, qty);
             }
+        }
+    }
+
+    /// A person's Cancel All takes back a Flatten still waiting: it leaves the position.
+    pub(super) fn flatten_take_back(&mut self, env: &Envelope) {
+        if crate::broker::Origin::of(env.source) != crate::broker::Origin::Manual {
+            return;
+        }
+        if let crate::command::Command::CancelAll { account, contract } = &env.command {
+            self.pending_flattens
+                .retain(|p| !(&p.account == account && contract.is_none_or(|c| c == p.contract)));
         }
     }
 

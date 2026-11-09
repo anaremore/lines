@@ -714,6 +714,7 @@ impl TradingCore {
         self.bracket_note_cancel(&env, &result);
         if result.is_ok() {
             self.trigger_person_acted(&env);
+            self.flatten_take_back(&env);
         }
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());

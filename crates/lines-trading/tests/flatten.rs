@@ -3,7 +3,7 @@
 //! are cancelled first and the market order waits for the answers. Cancel All is unchanged.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use lines_core::{CivilDate, ContractKey, Month, Price, Qty, Right, Side as BookSide, UtcMillis};
@@ -47,6 +47,10 @@ struct Venue {
     lose_cancels: Arc<AtomicUsize>,
     /// Market orders placed.
     markets: Arc<AtomicUsize>,
+    /// Cancels asked for.
+    cancels: Arc<AtomicUsize>,
+    /// Lose market orders placed, as a venue that never answers.
+    hold_places: Arc<AtomicBool>,
 }
 impl Broker for Venue {
     fn name(&self) -> &str {
@@ -61,8 +65,12 @@ impl Broker for Venue {
         match &req {
             BrokerRequest::Place(o) if matches!(o.kind, OrderKind::Market) => {
                 self.markets.fetch_add(1, Ordering::Relaxed);
+                if self.hold_places.load(Ordering::Relaxed) {
+                    return;
+                }
             }
             BrokerRequest::Cancel { .. } => {
+                self.cancels.fetch_add(1, Ordering::Relaxed);
                 let left = self.lose_cancels.load(Ordering::Relaxed);
                 if left > 0 {
                     self.lose_cancels.store(left - 1, Ordering::Relaxed);
@@ -96,6 +104,8 @@ struct Rig {
     events: Vec<Event>,
     lose_cancels: Arc<AtomicUsize>,
     markets: Arc<AtomicUsize>,
+    cancels: Arc<AtomicUsize>,
+    hold_places: Arc<AtomicBool>,
 }
 impl Rig {
     fn new(oco: bool, at: &str) -> Rig {
@@ -106,11 +116,15 @@ impl Rig {
         inner.open_account(acct(), Money::whole(100_000));
         let lose_cancels = Arc::new(AtomicUsize::new(0));
         let markets = Arc::new(AtomicUsize::new(0));
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let hold_places = Arc::new(AtomicBool::new(false));
         let mut core = TradingCore::new(Box::new(Venue {
             inner,
             oco,
             lose_cancels: lose_cancels.clone(),
             markets: markets.clone(),
+            cancels: cancels.clone(),
+            hold_places: hold_places.clone(),
         }));
         core.add_account(AccountConfig::paper("paper-1", 100_000), None);
         Rig {
@@ -119,6 +133,8 @@ impl Rig {
             events: Vec::new(),
             lose_cancels,
             markets,
+            cancels,
+            hold_places,
         }
     }
     fn now(&self) -> UtcMillis {
@@ -519,6 +535,130 @@ fn a_lost_cancel_doesnt_hold_the_flatten_back() {
     assert_eq!(r.markets.load(Ordering::Relaxed), before + 1);
     r.wait(LAT + 1);
     assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// A rule's Flatten arriving just as a waiting one's cancels are answered: one market order, not
+/// two, which would reverse the position on a broker that doesn't honor reduce-only.
+#[test]
+fn a_rule_flatten_and_a_waiting_one_send_one_order() {
+    use lines_trading::guardrails::Guardrails;
+    use lines_trading::news::{NewsAction, NewsBlackout};
+    const SCHEDULE: &str = "\
+format 1
+version 2026-11-01
+zone America/New_York
+release cpi
+name CPI
+agency BLS
+importance high
+affects ES MES NQ MNQ ZN
+coverage 2026-03-01 2026-12-31 verified
+source https://www.bls.gov/schedule/news_release/cpi.htm
+2026-11-10 08:30 verified October 2026
+";
+    // The news window opens two minutes before 08:30 ET.
+    let window = UtcMillis::parse_iso("2026-11-10T13:28:00Z").unwrap().0;
+    let mut r = Rig::new(false, "2026-11-10T13:00:00Z");
+    r.core.set_econ_schedule(Some(Arc::new(
+        lines_core::econ::EconSchedule::parse(SCHEDULE).unwrap(),
+    )));
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: Guardrails {
+            news: Some(NewsBlackout::new(NewsAction::Flatten)),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    r.long_es(1);
+    r.book(es(), 600_000);
+    r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: OrderKind::Limit {
+            price: Price(601_000),
+        },
+    }))
+    .unwrap();
+    r.wait(LAT + 1);
+    let before = r.markets.load(Ordering::Relaxed);
+    r.t = window - 10;
+    r.flatten(es());
+    assert_eq!(r.markets.load(Ordering::Relaxed), before, "it waits");
+    // The cancel's answer and the window's start in one tick.
+    r.wait(LAT);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1, "one");
+    r.wait(LAT + 1);
+    r.wait(6_000);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1, "still one");
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// A person's Cancel All takes back a Flatten still waiting: it leaves the position.
+#[test]
+fn cancel_all_takes_back_a_waiting_flatten() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(1);
+    r.book(es(), 600_000);
+    r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: OrderKind::Limit {
+            price: Price(601_000),
+        },
+    }))
+    .unwrap();
+    r.wait(LAT + 1);
+    let before = r.markets.load(Ordering::Relaxed);
+    r.flatten(es());
+    r.cmd(Command::CancelAll {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(LAT + 1);
+    r.wait(6_000);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before, "taken back");
+    assert_eq!(r.core.position(&acct(), es()), 1);
+}
+
+/// On a broker honoring reduce-only, a Flatten order silent past its answer time is cancelled and
+/// replaced as any other order: it isn't kept as if it were an exit.
+#[test]
+fn a_silent_flatten_order_is_replaced_not_kept() {
+    let mut r = Rig::new(true, RTH);
+    r.long_call(1);
+    // Asked with no bid and its answer never reported: the order stays open.
+    r.hold_places.store(true, Ordering::Relaxed);
+    r.flatten(call());
+    let first = *r
+        .events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::Command {
+                result: Ok(ids), ..
+            } => Some(ids),
+            _ => None,
+        })
+        .unwrap()
+        .last()
+        .unwrap();
+    r.wait(1);
+    assert!(r.core.order(first).unwrap().is_open());
+    r.hold_places.store(false, Ordering::Relaxed);
+    r.t += 5_001;
+    r.flatten(call());
+    assert!(
+        r.cancels.load(Ordering::Relaxed) >= 1,
+        "the silent one is canceled"
+    );
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0);
 }
 
 /// While it waits an exit may close the position: nothing more goes.

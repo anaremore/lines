@@ -419,8 +419,6 @@ pub struct ChainView {
     tag_money: Option<f64>,
     /// A press on the armed rows waits for the pointer after they change.
     rows_guard: crate::chain_lines::RowsGuard,
-    /// A Flatten took a position's Stop, for what it says if it can't fill.
-    flatten_took_stop: bool,
     /// Where the armed rows were, so a press knows when they've moved.
     armed_tops: Vec<f32>,
     /// The triggers as last seen, so a busy instant redraws them rather than dropping the rows.
@@ -994,7 +992,6 @@ impl ChainView {
             seen_ended: None,
             tag_money: None,
             rows_guard: crate::chain_lines::RowsGuard::default(),
-            flatten_took_stop: false,
             armed_tops: Vec::new(),
             armed_views: Vec::new(),
             shot_drag: None,
@@ -1675,9 +1672,6 @@ impl ChainView {
         if !flatten && let Some(m) = crate::chain_lines::no_stop_message(&removed) {
             self.note = Some(m);
         }
-        // Until nothing's left: a Flatten tried again has no Stop left to take, and it's still so.
-        self.flatten_took_stop =
-            !contracts.is_empty() && (self.flatten_took_stop || (flatten && !removed.is_empty()));
         self.line_drag = None;
         self.drafts.clear();
         cx.notify();
@@ -2323,15 +2317,11 @@ impl ChainView {
                     false
                 }
                 OrderState::Cancelled if flatten => {
-                    // Flatten already took its triggers: what it leaves has no stop.
-                    let stop = if self.flatten_took_stop {
-                        " with no stop"
-                    } else {
-                        ""
-                    };
-                    note = Some(format!(
-                        "Flatten found no usable quote on its side: the position is still open{stop}"
-                    ));
+                    // Its exits are still working: only Cancel All takes those.
+                    note = Some(
+                        "Flatten found no usable quote on its side: the position is still open"
+                            .to_owned(),
+                    );
                     false
                 }
                 OrderState::Submitted => true,
