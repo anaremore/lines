@@ -211,7 +211,7 @@ pub struct TradingCore {
     broker_events: Vec<BrokerEvent>,
     /// Terminal orders kept for display, oldest dropped first.
     finished: VecDeque<OrderId>,
-    /// Orders with a cancel on its way (not sent twice).
+    /// Cancels sent and not answered yet (`core/cancels.rs`).
     cancelling: HashMap<OrderId, cancels::SentCancel>,
     /// Expired option positions already sent to settle (one try per run).
     settled: HashSet<(AccountId, ContractKey)>,
@@ -795,9 +795,8 @@ impl TradingCore {
                 );
                 // A sibling still holding the pair: open and not being cancelled (× then a quick
                 // re-add must pair the new exit, not leave it alone).
-                let cancelling = &self.cancelling;
                 let open = |id: Option<OrderId>, orders: &BTreeMap<OrderId, Order>| {
-                    id.filter(|i| !cancelling.contains_key(i))
+                    id.filter(|i| !self.cancel_pending(*i))
                         .and_then(|i| orders.get(&i))
                         .is_some_and(|o| o.is_open())
                 };
@@ -806,7 +805,7 @@ impl TradingCore {
                     .values()
                     .find(|o| {
                         o.is_open()
-                            && !cancelling.contains_key(&o.id)
+                            && !self.cancel_pending(o.id)
                             && o.reduce_only
                             && o.role != Role::Flatten
                             && !open(o.oco, &self.orders)
@@ -1233,26 +1232,27 @@ impl TradingCore {
                 // A venue silent for [`FLATTEN_ANSWER_MS`] may have lost it: an exit is never dead,
                 // so from then on it is cancelled and replaced as any other order. Unresolved (a
                 // rebuild came before the broker's answer) counts too: it may still fill.
-                let flattens: Vec<OrderId> = self
+                let closing: std::collections::BTreeSet<OrderId> = self
                     .orders
                     .values()
                     .filter(|o| o.is_open() || o.state == OrderState::Unresolved)
                     .filter(|o| o.role == Role::Flatten && o.account == account)
                     .filter(|o| positions.iter().any(|(k, _)| *k == o.contract))
+                    .filter(|o| now.0.saturating_sub(o.updated.0) < FLATTEN_ANSWER_MS)
                     .map(|o| o.id)
                     .collect();
-                let closing: std::collections::BTreeSet<OrderId> = flattens
-                    .iter()
-                    .copied()
-                    .filter(|id| {
-                        now.0.saturating_sub(self.orders[id].updated.0) < FLATTEN_ANSWER_MS
-                    })
+                // An unresolved one not closing anything now (past that, or the position reads
+                // flat) may still fill, and the cancels below only cover open orders.
+                let unresolved: Vec<OrderId> = self
+                    .orders
+                    .values()
+                    .filter(|o| o.state == OrderState::Unresolved && o.role == Role::Flatten)
+                    .filter(|o| o.account == account && contract.is_none_or(|c| c == o.contract))
+                    .filter(|o| !closing.contains(&o.id))
+                    .map(|o| o.id)
                     .collect();
-                // An unresolved one past that isn't covered by the cancels below (not open).
-                for &id in &flattens {
-                    if !self.orders[&id].is_open() && !closing.contains(&id) {
-                        self.send_cancel(env, now, id);
-                    }
+                for id in unresolved {
+                    self.send_cancel(env, now, id);
                 }
                 let mut ids = if positions.is_empty() {
                     self.cancel_all(env, now, &account, contract)
@@ -1401,7 +1401,7 @@ impl TradingCore {
             .orders
             .values()
             .filter(|o| o.is_open() && expired(&o.contract))
-            .filter(|o| !self.cancelling.contains_key(&o.id))
+            .filter(|o| !self.cancel_on_its_way(now, o.id))
             .map(|o| (o.account.clone(), o.id))
             .collect();
         for (account, order) in orders {

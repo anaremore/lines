@@ -744,7 +744,7 @@ pub fn position_row(avg_price: f64, tick: i64, units: i64) -> i64 {
 /// full message stays in the header). Known reasons by their wording, else the message's
 /// first word, at most 9 characters.
 pub fn short_reason(message: &str) -> &str {
-    const KNOWN: [(&str, &str); 16] = [
+    const KNOWN: [(&str, &str); 18] = [
         ("market is closed", "closed"),
         ("tick grid", "tick"),
         ("trading halted", "halted"),
@@ -760,6 +760,8 @@ pub fn short_reason(message: &str) -> &str {
         ("no market price", "no price"),
         ("liquidity", "no liq"),
         ("entries locked", "disabled"),
+        ("cancel refused", "no cancel"),
+        ("cancels", "no cancel"),
         ("filled", "filled"),
     ];
     let lower = message.to_ascii_lowercase();

@@ -1,13 +1,15 @@
 //! Cancels and Flatten on a broker that loses requests, ignores reduce-only and answers late (a
 //! venue with `oco: false`), with the paper broker underneath and time passed in.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use lines_core::{ContractKey, Month, Price, Qty, Side as BookSide, UtcMillis};
 use lines_feed::catalog;
-use lines_trading::broker::{BrokerEvent, BrokerRequest, BrokerSnapshot};
+use lines_trading::broker::{
+    BrokerEvent, BrokerRequest, BrokerSnapshot, ContractSelection, PaneContext, RequestContext,
+};
 use lines_trading::{
     AccountConfig, AccountId, Broker, BrokerCaps, Command, Event, MarketInput, Money, OrderId,
     OrderKind, OrderSpec, OrderState, PaperBroker, PaperConfig, Side, Source, TradingCore,
@@ -35,6 +37,11 @@ struct Venue {
     /// Refuse cancels, as a broker that says "too late to cancel" would.
     refuse_cancels: Arc<AtomicBool>,
     refused: Vec<BrokerEvent>,
+    /// Holds a stop or target as reduce-only itself? (`false`: only the core's sweep ends one.)
+    honors_exits: Arc<AtomicBool>,
+    up: Arc<AtomicBool>,
+    /// The context of each cancel that reached it.
+    contexts: Arc<Mutex<Vec<RequestContext>>>,
 }
 
 impl Broker for Venue {
@@ -43,8 +50,17 @@ impl Broker for Venue {
     }
     fn capabilities(&self) -> BrokerCaps {
         let mut c = self.inner.capabilities();
-        c.oco = false;
+        c.oco = self.honors_exits.load(Ordering::Relaxed);
         c
+    }
+    fn request_in_context(&mut self, now: UtcMillis, req: BrokerRequest, ctx: &RequestContext) {
+        if matches!(req, BrokerRequest::Cancel { .. }) {
+            self.contexts.lock().unwrap().push(*ctx);
+        }
+        self.request(now, req);
+    }
+    fn connected(&self) -> bool {
+        self.up.load(Ordering::Relaxed)
     }
     fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
         let req = match req {
@@ -55,6 +71,11 @@ impl Broker for Venue {
                 if self.lose_market.swap(false, Ordering::Relaxed) {
                     return;
                 }
+                o.reduce_only = false;
+                BrokerRequest::Place(o)
+            }
+            // An exit the broker won't end by itself.
+            BrokerRequest::Place(mut o) => {
                 o.reduce_only = false;
                 BrokerRequest::Place(o)
             }
@@ -108,6 +129,9 @@ struct Rig {
     lose_cancels: Arc<AtomicUsize>,
     lose_market: Arc<AtomicBool>,
     refuse_cancels: Arc<AtomicBool>,
+    honors_exits: Arc<AtomicBool>,
+    up: Arc<AtomicBool>,
+    contexts: Arc<Mutex<Vec<RequestContext>>>,
 }
 
 impl Rig {
@@ -122,6 +146,9 @@ impl Rig {
         let lose_cancels = Arc::new(AtomicUsize::new(0));
         let lose_market = Arc::new(AtomicBool::new(false));
         let refuse_cancels = Arc::new(AtomicBool::new(false));
+        let honors_exits = Arc::new(AtomicBool::new(false));
+        let up = Arc::new(AtomicBool::new(true));
+        let contexts = Arc::new(Mutex::new(Vec::new()));
         let mut core = TradingCore::new(Box::new(Venue {
             inner,
             flattens: flattens.clone(),
@@ -130,6 +157,9 @@ impl Rig {
             lose_market: lose_market.clone(),
             refuse_cancels: refuse_cancels.clone(),
             refused: Vec::new(),
+            honors_exits: honors_exits.clone(),
+            up: up.clone(),
+            contexts: contexts.clone(),
         }));
         core.add_account(AccountConfig::paper("paper-1", 100_000), None);
         let mut r = Rig {
@@ -142,6 +172,9 @@ impl Rig {
             lose_cancels,
             lose_market,
             refuse_cancels,
+            honors_exits,
+            up,
+            contexts,
         };
         r.t += 1;
         let book = [
@@ -278,6 +311,16 @@ fn a_rebuild_during_a_flatten_never_lets_a_second_one_reverse() {
     r.long(5);
     r.flatten();
     r.rebuild();
+    let first = r
+        .events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::Order(o) if o.state == OrderState::Unresolved => Some(o.id),
+            _ => None,
+        })
+        .expect("the rebuild left it unresolved");
+    assert_eq!(r.state(first), OrderState::Unresolved);
     r.flatten();
     for _ in 0..5 {
         r.wait(LAT);
@@ -395,7 +438,7 @@ fn a_cancel_nobody_answers_is_reported_once_and_left_to_the_person() {
         r.wait(2_000);
     }
     assert_eq!(r.sent_cancels(), 3, "no more on its own");
-    assert_eq!(r.failures(), ["no answer to 3 cancels"]);
+    assert_eq!(r.failures(), ["still working: no answer to 3 cancels"]);
     assert_eq!(r.state(id), OrderState::Working, "never assumed gone");
     assert!(r.core.next_wake().is_none(), "no wake loop");
     // A venue's rebuilds neither send it again nor say it again.
@@ -449,7 +492,10 @@ fn a_refused_cancel_leaves_the_order_working_and_says_why() {
         OrderState::Working,
         "never Rejected: it is live"
     );
-    assert_eq!(r.failures(), ["cancel refused: too late to cancel"]);
+    assert_eq!(
+        r.failures(),
+        ["still working: cancel refused: too late to cancel"]
+    );
     r.wait(10_000);
     assert_eq!(r.sent_cancels(), 1, "refused isn't resent on its own");
     r.refuse_cancels.store(false, Ordering::Relaxed);
@@ -483,4 +529,163 @@ fn a_rejected_order_with_a_cancel_on_its_way_is_rejected() {
         r.state(id)
     );
     assert!(r.failures().is_empty());
+}
+
+/// A stranded exit whose cancel the broker refuses: the sweep doesn't ask forever (a rule adds
+/// no sends), and a person's command still goes at once.
+#[test]
+fn a_refused_cancel_on_a_stranded_exit_isnt_asked_forever() {
+    let mut r = Rig::new();
+    r.honors_exits.store(true, Ordering::Relaxed);
+    r.long(1);
+    let stop = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(1),
+            kind: OrderKind::Stop {
+                trigger: Price(590_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    assert_eq!(r.state(stop), OrderState::Working);
+    r.refuse_cancels.store(true, Ordering::Relaxed);
+    r.flatten();
+    for _ in 0..20 {
+        r.wait(LAT + 1);
+    }
+    assert_eq!(r.pos(), 0);
+    assert_eq!(r.sent_cancels(), 1, "one refusal is the answer");
+    assert_eq!(r.failures().len(), 1);
+    r.wait(10_000);
+    assert_eq!(r.sent_cancels(), 1);
+    r.refuse_cancels.store(false, Ordering::Relaxed);
+    r.cancel(stop);
+    r.wait(LAT + 1);
+    assert_eq!(r.state(stop), OrderState::Cancelled);
+}
+
+/// A cancel for an order a rebuild left unresolved stays on its way: it may still be at the
+/// broker.
+#[test]
+fn a_cancel_survives_its_order_becoming_unresolved() {
+    let mut r = Rig::new();
+    r.lose_cancels.store(100, Ordering::Relaxed);
+    let id = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(590_000),
+            },
+        }))
+        .unwrap()[0];
+    r.cancel(id);
+    r.lose_market.store(false, Ordering::Relaxed);
+    r.rebuild();
+    assert_eq!(r.state(id), OrderState::Unresolved);
+    r.wait(2_000);
+    assert_eq!(r.sent_cancels(), 2, "sent again");
+}
+
+/// The replacement's cancel for a lost Flatten goes on until answered, then says so: never
+/// fire-and-forget, and the order isn't called working.
+#[test]
+fn the_cancel_of_an_unresolved_flatten_is_sent_again_and_reported() {
+    let mut r = Rig::new();
+    r.long(5);
+    r.lose_market.store(true, Ordering::Relaxed);
+    r.flatten();
+    r.rebuild();
+    r.wait(5_100);
+    r.lose_cancels.store(100, Ordering::Relaxed);
+    r.flatten();
+    let first = r.sent_cancels();
+    for _ in 0..3 {
+        r.wait(2_000);
+    }
+    assert_eq!(r.sent_cancels(), first + 2);
+    assert_eq!(r.failures(), ["outcome unknown: no answer to 3 cancels"]);
+}
+
+/// Even when the position reads flat, a Flatten gets the cancel to an unresolved one: if it
+/// fills on a broker ignoring reduce-only, the account would end up short.
+#[test]
+fn flatten_cancels_an_unresolved_one_when_the_position_reads_flat() {
+    let mut r = Rig::new();
+    r.long(1);
+    r.lose_market.store(true, Ordering::Relaxed);
+    r.flatten();
+    r.rebuild();
+    // Closed elsewhere: another market order the broker does take.
+    r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: OrderKind::Market,
+    }))
+    .unwrap();
+    r.wait(LAT + 1);
+    assert_eq!(r.pos(), 0);
+    let before = r.sent_cancels();
+    r.flatten();
+    assert_eq!(r.sent_cancels(), before + 1);
+}
+
+/// While the broker is disconnected nothing is sent and no send is spent, without a wake loop;
+/// back up, the cancel goes.
+#[test]
+fn a_disconnect_spends_no_sends() {
+    let mut r = Rig::new();
+    let id = r.resting();
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.cancel(id);
+    r.up.store(false, Ordering::Relaxed);
+    for _ in 0..6 {
+        r.wait(2_000);
+        let wake = r.core.next_wake().expect("it still looks");
+        assert!(wake.0 > r.t, "no wake loop: {} vs {}", wake.0, r.t);
+    }
+    assert_eq!(r.sent_cancels(), 1);
+    assert!(r.failures().is_empty(), "{:?}", r.failures());
+    r.up.store(true, Ordering::Relaxed);
+    r.wait(2_000);
+    assert_eq!(r.sent_cancels(), 2);
+    r.wait(LAT + 1);
+    assert_eq!(r.state(id), OrderState::Cancelled);
+}
+
+/// A resend reaches the broker as the first send did: same source, same pane (a venue routes a
+/// cancel by the pane's contract).
+#[test]
+fn a_resend_keeps_the_source_and_the_pane() {
+    let mut r = Rig::new();
+    let id = r.resting();
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    let pane = PaneContext {
+        contract: es(),
+        selection: ContractSelection::Pinned,
+        front_month: Some(es()),
+    };
+    r.core.submit_from_pane(
+        r.now(),
+        Source::Dom,
+        Instant::now(),
+        Some(pane),
+        Command::CancelOrder {
+            account: acct(),
+            order: id,
+        },
+    );
+    r.wait(2_000);
+    let sent = r.contexts.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0], sent[1]);
+    assert_eq!(sent[1].source, Source::Dom);
+    assert_eq!(sent[1].pane, Some(pane));
 }

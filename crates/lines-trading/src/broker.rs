@@ -79,6 +79,11 @@ pub enum BrokerEvent {
         #[serde(with = "time_serde")]
         at: UtcMillis,
     },
+    /// The broker refused a request. For an order not yet working, it ends the order. For a
+    /// working or partly filled order with a cancel on its way, it is the cancel that was
+    /// refused: the order stays live (`core/cancels.rs`). Otherwise (a refused modify on a live
+    /// order) only logged. A refused modify arriving while a cancel is on its way reads as a
+    /// refused cancel: a person's next command sends again.
     Rejected {
         id: OrderId,
         reason: String,

@@ -8,8 +8,12 @@
 //! - A rebuild keeps them (the venue watcher rebuilds on every revision, so clearing would
 //!   stop the resend each time), but the next command sends at once: the broker's list is new.
 //! - A broker refuses a cancel by sending `BrokerEvent::Rejected` for an order that is working
-//!   or partly filled: the order is live and stays as it is (it can't become Rejected), the
-//!   cancel is forgotten, the next one goes at once, and [`Event::CancelFailed`] says why.
+//!   or partly filled: the order is live and stays as it is (it can't become Rejected),
+//!   [`Event::CancelFailed`] says why, nothing resends on its own and a rule's cancel adds none
+//!   (a sweep would ask again forever), and a person's next command goes at once.
+//! - While the broker is disconnected nothing is sent and no send is spent.
+//! - An order is on its way out only while a cancel may still work: refused or out of sends, it
+//!   counts as live again ([`TradingCore::cancel_pending`]).
 
 use std::time::Instant;
 
@@ -19,7 +23,7 @@ use super::TradingCore;
 use crate::broker::{BrokerRequest, Origin, PaneContext};
 use crate::command::{Command, Envelope, Source};
 use crate::event::Event;
-use crate::order::{Order, OrderState};
+use crate::order::OrderState;
 use crate::types::{CommandId, OrderId};
 
 /// How long a cancel waits for an answer before it goes again.
@@ -36,6 +40,8 @@ pub(super) struct SentCancel {
     rebuilt: bool,
     /// Out of sends, and that was said.
     said: bool,
+    /// The broker refused it.
+    refused: bool,
     /// Who asked, so a resend reaches the broker as the first send did.
     source: Source,
     pane: Option<PaneContext>,
@@ -45,6 +51,11 @@ impl SentCancel {
     fn due(&self, now: UtcMillis) -> bool {
         now.0.saturating_sub(self.at.0) >= CANCEL_RESEND_MS
     }
+
+    /// Whether anyone but a person may send it again now.
+    fn may_send_again(&self, now: UtcMillis) -> bool {
+        !self.refused && (self.rebuilt || self.due(now)) && self.sends < CANCEL_SENDS
+    }
 }
 
 impl TradingCore {
@@ -53,10 +64,9 @@ impl TradingCore {
         let person = Origin::of(env.source) == Origin::Manual;
         let sends = match self.cancelling.get(&id) {
             None => 1,
-            Some(c) if !(c.rebuilt || c.due(now)) => return,
-            Some(_) if person => 1,
-            Some(c) if c.sends < CANCEL_SENDS => c.sends + 1,
-            // Out of sends: only a person's command starts again, never a rebuild.
+            Some(c) if person && (c.refused || c.rebuilt || c.due(now)) => 1,
+            // Refused or out of sends: only a person's command starts again, never a rebuild.
+            Some(c) if !person && c.may_send_again(now) => c.sends + 1,
             Some(_) => return,
         };
         self.cancelling.insert(
@@ -66,6 +76,7 @@ impl TradingCore {
                 sends,
                 rebuilt: false,
                 said: false,
+                refused: false,
                 source: env.source,
                 pane: env.pane,
             },
@@ -73,24 +84,32 @@ impl TradingCore {
         self.send(env, now, BrokerRequest::Cancel { id });
     }
 
-    /// Whether a cancel for this order is on its way and nothing more should be sent for now
-    /// (the sweep for stranded exits; a person's command goes through [`Self::send_cancel`]).
+    /// Whether a rule or sweep should leave this order alone for now: a cancel is on its way,
+    /// or it was refused or ran out of sends (only a person's command goes then).
     pub(super) fn cancel_on_its_way(&self, now: UtcMillis, id: OrderId) -> bool {
         self.cancelling
             .get(&id)
-            .is_some_and(|c| !((c.rebuilt || c.due(now)) && c.sends < CANCEL_SENDS))
+            .is_some_and(|c| !c.may_send_again(now))
+    }
+
+    /// Whether this order is on its way out: a cancel was sent and may still work. Refused or
+    /// out of sends, the order is as live as any other.
+    pub(super) fn cancel_pending(&self, id: OrderId) -> bool {
+        self.cancelling
+            .get(&id)
+            .is_some_and(|c| !c.refused && !c.said)
     }
 
     /// Cancels unanswered for too long: sent again, or reported once they are out of sends.
     pub(super) fn cancels_resend(&mut self, now: UtcMillis) {
-        // Finished without passing through `finish` (a rebuild): nothing left to cancel.
-        let orders = &self.orders;
-        self.cancelling
-            .retain(|id, _| orders.get(id).is_some_and(Order::is_open));
+        self.cancels_forget_finished();
+        if !self.broker.connected() {
+            return;
+        }
         let due: Vec<OrderId> = self
             .cancelling
             .iter()
-            .filter(|(_, c)| !c.said && c.due(now))
+            .filter(|(_, c)| !c.said && !c.refused && c.due(now))
             .map(|(id, _)| *id)
             .collect();
         for id in due {
@@ -130,19 +149,32 @@ impl TradingCore {
 
     /// When a cancel next goes again or is reported.
     pub(super) fn cancels_wake(&self) -> Option<UtcMillis> {
-        self.cancelling
+        let next = self
+            .cancelling
             .values()
-            .filter(|c| !c.said)
+            .filter(|c| !c.said && !c.refused)
             .map(|c| UtcMillis(c.at.0.saturating_add(CANCEL_RESEND_MS)))
-            .min()
+            .min()?;
+        // Disconnected, what is due stays due: look again later, not in a loop.
+        Some(if self.broker.connected() {
+            next
+        } else {
+            UtcMillis(self.seen_now.0.saturating_add(CANCEL_RESEND_MS))
+        })
+    }
+
+    /// Finished (a rebuild's don't pass through `finish`): nothing left to cancel. An unresolved
+    /// order isn't finished: it may still be at the broker.
+    fn cancels_forget_finished(&mut self) {
+        let orders = &self.orders;
+        self.cancelling
+            .retain(|id, _| orders.get(id).is_some_and(|o| !o.state.is_terminal()));
     }
 
     /// After a rebuild: what the broker no longer lists needs no cancel; the next command for
     /// what it does list sends at once.
     pub(super) fn cancels_rebuilt(&mut self) {
-        let orders = &self.orders;
-        self.cancelling
-            .retain(|id, _| orders.get(id).is_some_and(Order::is_open));
+        self.cancels_forget_finished();
         for c in self.cancelling.values_mut() {
             c.rebuilt = true;
         }
@@ -155,9 +187,13 @@ impl TradingCore {
             .orders
             .get(&id)
             .is_some_and(|o| matches!(o.state, OrderState::Working | OrderState::PartiallyFilled));
-        if !live || self.cancelling.remove(&id).is_none() {
+        if !live {
             return false;
         }
+        let Some(c) = self.cancelling.get_mut(&id).filter(|c| !c.refused) else {
+            return false;
+        };
+        c.refused = true;
         self.cancel_failed(id, format!("cancel refused: {reason}"), at);
         true
     }
@@ -165,6 +201,11 @@ impl TradingCore {
     fn cancel_failed(&mut self, id: OrderId, reason: String, at: UtcMillis) {
         let Some(o) = self.orders.get(&id) else {
             return;
+        };
+        let reason = if o.is_open() {
+            format!("still working: {reason}")
+        } else {
+            format!("outcome unknown: {reason}")
         };
         tracing::warn!(target: "lines::trading", order = id.0, "cancel failed: {reason}");
         self.events.push(Event::CancelFailed {

@@ -290,7 +290,7 @@ impl TradingCore {
         let entries: Vec<OrderId> = mine
             .into_iter()
             .filter_map(|o| self.orders.get(&o))
-            .filter(|o| o.is_open() && !self.cancelling.contains_key(&o.id) && Some(o.id) != keep)
+            .filter(|o| o.is_open() && !self.cancel_on_its_way(now, o.id) && Some(o.id) != keep)
             .filter(|o| match o.role {
                 Role::Entry => true,
                 // A single order that only closes part of the position is an exit.
