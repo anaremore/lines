@@ -54,14 +54,16 @@ use std::sync::Arc;
 
 use gpui::{
     App, Bounds, Context, EventEmitter, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Render, Styled, Window, canvas, div, fill, point,
-    prelude::*, px, size,
+    MouseDownEvent, MouseUpEvent, ParentElement, Pixels, Render, Styled, Window, canvas, div, fill,
+    point, prelude::*, px, size,
 };
 use lines_core::{
-    CivilDate, ContractKey, FixedStr, OptionChain, OptionKey, OptionQuote, Price, Product, Right,
+    CivilDate, ContractKey, FixedStr, OptionChain, OptionKey, OptionQuote, Price, Product, Qty,
+    Right,
 };
 use lines_feed::catalog::Target;
 use lines_feed::store::ChartStore;
+use lines_trading::trigger::{TriggerKind, TriggerView};
 use lines_trading::{AccountId, CommandId, OrderId, Side};
 
 use crate::chain_ticket::{self as ticket, Cell, ShotTicket, Ticket};
@@ -89,6 +91,10 @@ const HEAD_H: f32 = 2.0 * ROW_H;
 /// The strips at the top and foot of the option chart's rows, for what the account has past them.
 /// Always kept clear of rows, so a marker appearing never covers one or takes its press.
 const MARKER_H: f32 = MIN_HIT;
+/// How far from a line a press takes hold of it.
+const LINE_GRAB: f32 = 4.0;
+/// A line's tag.
+const TAG_H: f32 = 18.0;
 /// Expiry chips in the header.
 const MAX_EXPIRIES: usize = 8;
 /// The widest thing the Pos column's text shows.
@@ -385,6 +391,23 @@ pub struct ChainView {
     _chart_feed: Option<gpui::Subscription>,
     /// The pane's width as of the last frame.
     pane_w: f32,
+    /// The main area's top in the window, for the chart's line handles.
+    main_top: f32,
+    /// Lines on the underlying's price (decision 0029), refreshed each render (capacity kept), and
+    /// where each was painted last frame: its y and its tag on the chart.
+    lines: Vec<crate::chain_lines::Line>,
+    line_ys: [f32; crate::chain_lines::MAX_LINES],
+    tag_boxes: [(f32, f32, f32); crate::chain_lines::MAX_LINES],
+    /// Stops and Targets not armed yet.
+    drafts: Vec<crate::chain_lines::Line>,
+    line_drag: Option<LineDrag>,
+    /// How many triggers had ended when last looked, for the reasons of those since.
+    seen_ended: Option<u64>,
+    /// Currency per price unit of one contract, for a tag's estimated P&L; `None`: don't show it.
+    tag_money: Option<f64>,
+    /// Screenshot fixtures.
+    shot_drag: Option<(String, Price)>,
+    shot_restored: bool,
     /// The top of what's under the rows (strip, ticket, footer), this frame, beside a chart.
     foot_top: f32,
 }
@@ -431,6 +454,14 @@ struct Frame {
     /// The markers as painted.
     markers: [Option<crate::chain_lock::MarkerHit>; 2],
     picked: Vec<crate::chain_lock::Candidate>,
+}
+
+/// A line being dragged: nothing is sent until it's released on the plot, and only if it can go.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct LineDrag {
+    line: crate::chain_lines::Line,
+    to: Price,
+    refused: Option<&'static str>,
 }
 
 /// What the account has on one option series.
@@ -819,6 +850,8 @@ impl Pane for ChainView {
         self.quotes_stale = false;
         self.one_click = false;
         self.note = None;
+        self.line_drag = None;
+        self.drafts.clear();
         self.trade.feed_changed(&self.store, follow, cx);
         if let Some(chart) = self.chart.clone() {
             let next = self.feed.clone();
@@ -885,6 +918,16 @@ impl ChainView {
             chart: None,
             _chart_feed: None,
             pane_w: 0.0,
+            main_top: 0.0,
+            lines: Vec::with_capacity(crate::chain_lines::MAX_LINES),
+            line_ys: [f32::NAN; crate::chain_lines::MAX_LINES],
+            tag_boxes: [(0.0, 0.0, 0.0); crate::chain_lines::MAX_LINES],
+            drafts: Vec::new(),
+            line_drag: None,
+            seen_ended: None,
+            tag_money: None,
+            shot_drag: None,
+            shot_restored: false,
             foot_top: f32::INFINITY,
             frame: Frame {
                 ys: Vec::with_capacity(MAX_ROWS),
@@ -918,6 +961,16 @@ impl ChainView {
     /// scale, or the plain chain again.
     pub fn toggle_chart(&mut self, cx: &mut Context<Self>) {
         self.rows_moved();
+        self.line_drag = None;
+        self.drafts.clear();
+        // A level needs its line.
+        let rules = self.rules();
+        let q = self.ticket.as_ref().and_then(|t| self.live_quote(t.key));
+        if let (Some(t), Some(rules)) = (self.ticket.as_mut(), rules)
+            && t.when.is_some()
+        {
+            t.set_when(None, q.as_ref(), rules);
+        }
         self.frame.release();
         self.frame.locked = false;
         self.frame.locked_key = None;
@@ -1013,6 +1066,8 @@ impl ChainView {
     /// Every row just moved without the trader aiming at the new place: the next click must not
     /// send at once. Says so, since nothing else would.
     fn rows_moved(&mut self) {
+        // A drag can't be aimed either: where it was is no longer that price.
+        self.line_drag = None;
         if std::mem::take(&mut self.one_click) {
             // A message already showing may be a refusal: it stays, and the chip says off.
             self.note
@@ -1058,6 +1113,8 @@ impl ChainView {
             self.trade.account = next;
             self.leave_ticket();
             self.one_click = false;
+            self.line_drag = None;
+            self.drafts.clear();
             self.note = self
                 .trade
                 .account
@@ -1347,10 +1404,28 @@ impl ChainView {
                 self.product.symbol
             ));
         }
+        // The owner's ruling: Cancel all takes armed triggers and leaves the position. When that
+        // takes a position's Stop, the screen says the position has none now.
+        let no_stop = if flatten {
+            None
+        } else {
+            self.trade.try_cache().and_then(|st| {
+                crate::chain_lines::no_stop_message(&crate::chain_lines::stops_removed(
+                    st.triggers(),
+                    &account,
+                    &contracts,
+                    |c| st.position(&account, c).map_or(0, |p| p.qty),
+                ))
+            })
+        };
         for cmd in ticket::exit_commands(&account, &contracts, flatten) {
             let id = t.submit(source, std::time::Instant::now(), cmd);
             self.remember(id);
         }
+        if let Some(m) = no_stop {
+            self.note = Some(m);
+        }
+        self.drafts.clear();
         cx.notify();
     }
 
@@ -1364,7 +1439,10 @@ impl ChainView {
             let held = ticket::held_contracts(&st, account, self.product.id);
             let orders = held
                 .iter()
-                .any(|c| st.open_orders(account, *c).next().is_some());
+                .any(|c| st.open_orders(account, *c).next().is_some())
+                || st
+                    .triggers()
+                    .any(|t| &t.account == account && held.contains(&t.contract));
             (orders, !held.is_empty())
         };
         if !held {
@@ -1439,6 +1517,10 @@ impl ChainView {
             return;
         }
         let (key, side, close, price) = (t.key, t.side, t.close, t.price);
+        if t.when.is_some() {
+            self.arm_ticket(cx);
+            return;
+        }
         if self.refusal_of(key, side, price, close, cx).is_some() {
             return; // already on the ticket, in the core's words
         }
@@ -1471,6 +1553,354 @@ impl ChainView {
             t.sent = id;
             t.refused = None;
         }
+    }
+
+    /// The ticket's "When SPY": arm an entry. The core asks again, and asks every new-order check
+    /// when it fires; an order goes out only then.
+    fn arm_ticket(&mut self, cx: &mut Context<Self>) {
+        if self.when_refusal().is_some() {
+            return; // already on the ticket
+        }
+        let Some(account) = self.trade.account.clone() else {
+            return;
+        };
+        let size = self.size(cx);
+        let built = self
+            .ticket
+            .as_ref()
+            .map(|t| ticket::when_trigger(t, account, self.contract(t.key), size));
+        match built {
+            Some(Ok(cmd)) => {
+                let id = self.submit(cmd, cx);
+                self.sent_at = Some(std::time::Instant::now());
+                if let Some(t) = self.ticket.as_mut() {
+                    t.sent = id;
+                    t.refused = None;
+                }
+            }
+            Some(Err(why)) => {
+                if let Some(t) = self.ticket.as_mut() {
+                    t.refused = Some(why);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Why the ticket's level can't arm, in the words a drag would use.
+    fn when_refusal(&self) -> Option<String> {
+        let t = self.ticket.as_ref()?;
+        let level = t.when?;
+        let line = self.ticket_line()?;
+        if let Some(why) = crate::chain_lines::refusal(&line, level, &self.around(&line)) {
+            return Some(why.to_owned());
+        }
+        if t.price.is_none() {
+            return Some("type a max price".to_owned());
+        }
+        None
+    }
+
+    /// The ticket's entry as a line, while it's "When SPY".
+    fn ticket_line(&self) -> Option<crate::chain_lines::Line> {
+        let t = self.ticket.as_ref()?;
+        Some(crate::chain_lines::Line {
+            kind: TriggerKind::Entry {
+                qty: Qty(1),
+                max_price: t.price.unwrap_or(Price(0)),
+            },
+            contract: self.contract(t.key),
+            level: t.when?,
+            source: crate::chain_lines::LineSource::Ticket,
+            fires: None,
+            working: false,
+            stale: false,
+        })
+    }
+
+    /// The ticket to "When SPY" or back.
+    fn set_when(&mut self, on: bool, cx: &mut Context<Self>) {
+        let (Some(rules), Some(key)) = (self.rules(), self.ticket.as_ref().map(|t| t.key)) else {
+            return;
+        };
+        let q = self.live_quote(key);
+        let last = self.store.try_read().and_then(|d| d.last_trade);
+        let tick = self.product.price.tick;
+        let level = match (on, last) {
+            (true, Some(l)) => Some(crate::chain_lines::default_entry_level(key.right, l, tick)),
+            (true, None) => {
+                self.note = Some("Not yet: no price of the underlying".to_owned());
+                cx.notify();
+                return;
+            }
+            (false, _) => None,
+        };
+        if let Some(t) = self.ticket.as_mut() {
+            t.set_when(level, q.as_ref(), rules);
+        }
+        cx.notify();
+    }
+
+    /// What a line's place is checked against: the market, the position and its series' others.
+    fn around(&self, line: &crate::chain_lines::Line) -> crate::chain_lines::Around {
+        let mut a = crate::chain_lines::Around {
+            last: self.store.try_read().and_then(|d| d.last_trade),
+            position: line.contract.option_key().map_or(0, |k| self.position(k)),
+            ..Default::default()
+        };
+        for l in self.lines.iter().filter(|l| l.contract == line.contract) {
+            if l.source == line.source && l.kind == line.kind {
+                continue;
+            }
+            match l.kind {
+                TriggerKind::Stop => a.stop = Some(l.level),
+                TriggerKind::Target => a.target = Some(l.level),
+                TriggerKind::Entry { .. } => a.entry = Some(l.level),
+            }
+        }
+        a
+    }
+
+    /// The lines as they stand, from the core's triggers, the ticket and the drafts.
+    fn refresh_lines(&mut self, cx: &App) {
+        use crate::chain_lines::{Line, MAX_LINES};
+        self.lines.clear();
+        let money = crate::picker_view::settings(cx).pnl_display.money();
+        self.tag_money = None;
+        // A position gone leaves nothing for a draft to close.
+        if !self.drafts.is_empty() {
+            let drafts = std::mem::take(&mut self.drafts);
+            self.drafts = drafts
+                .into_iter()
+                .filter(|d| {
+                    d.contract
+                        .option_key()
+                        .is_some_and(|k| self.position(k) != 0)
+                })
+                .collect();
+        }
+        if let (Some(account), Some(st)) = (self.trade.account.as_ref(), self.trade.try_cache()) {
+            for v in st
+                .triggers()
+                .filter(|v| &v.account == account && v.contract.product == self.product.id)
+                .take(MAX_LINES)
+            {
+                let line = Line::of(v);
+                self.lines.push(line);
+            }
+        }
+        for d in &self.drafts {
+            if self.lines.len() < MAX_LINES {
+                self.lines.push(*d);
+            }
+        }
+        if let Some(l) = self.ticket_line()
+            && self.lines.len() < MAX_LINES
+        {
+            self.lines.push(l);
+        }
+        if money && let Some(l) = self.lines.first() {
+            self.tag_money = ticket::premium(&self.product, l.contract, 1, Price(1))
+                .map(|m| m.0 as f64 / lines_trading::Money::UNITS_PER_WHOLE as f64);
+        }
+    }
+
+    /// New words about triggers that ended by themselves.
+    fn take_ended(&mut self) {
+        let (seen, note) = {
+            let Some(st) = self.trade.try_cache() else {
+                return;
+            };
+            let count = st.triggers_ended_count();
+            let mut note = None;
+            if let Some(since) = self.seen_ended
+                && let Some(account) = self.trade.account.as_ref()
+            {
+                for v in st
+                    .triggers_ended_since(since)
+                    .filter(|v| &v.account == account && v.contract.product == self.product.id)
+                {
+                    if let Some(m) = crate::chain_lines::ended_message(v) {
+                        note = Some(m);
+                    }
+                }
+            }
+            (count, note)
+        };
+        self.seen_ended = Some(seen);
+        if note.is_some() {
+            self.note = note;
+        }
+    }
+
+    /// The chart's scale, while the rows are on it.
+    fn chart_scale(&self, cx: &App) -> Option<crate::chain_lock::LockedScale> {
+        self.chart
+            .as_ref()
+            .filter(|_| self.chart_shown())
+            .and_then(|c| c.read(cx).locked_scale())
+    }
+
+    /// Take hold of a line.
+    fn grab_line(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(line) = self.lines.get(n).copied().filter(|l| l.draggable()) else {
+            return;
+        };
+        self.focus.focus(window, cx);
+        self.note = None;
+        self.line_drag = Some(LineDrag {
+            line,
+            to: line.level,
+            refused: None,
+        });
+        cx.notify();
+    }
+
+    fn on_line_move(&mut self, ev: &gpui::MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.line_drag else {
+            return;
+        };
+        // The button came up where we couldn't see it.
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.line_drag = None;
+            cx.notify();
+            return;
+        }
+        let Some(scale) = self.chart_scale(cx) else {
+            return;
+        };
+        let y = f64::from(f(ev.position.y) - scale.plot_top);
+        let price = scale.vp.y_to_price(y.clamp(0.0, scale.vp.height));
+        let to = crate::chain_lines::snap(price, self.product.price.tick);
+        let refused = crate::chain_lines::refusal(&drag.line, to, &self.around(&drag.line));
+        self.line_drag = Some(LineDrag {
+            to,
+            refused,
+            ..drag
+        });
+        cx.notify();
+    }
+
+    /// A release on the plot puts the line there, if it can go there.
+    fn on_line_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.line_drag.take() else {
+            return;
+        };
+        cx.notify();
+        let Some(scale) = self.chart_scale(cx) else {
+            return;
+        };
+        let y = f(ev.position.y);
+        if y < scale.plot_top || y > scale.bottom() {
+            return; // off the plot: as on the DOM, it aborts
+        }
+        if drag.to == drag.line.level {
+            return;
+        }
+        // Asked again: what's true at the release, not what was at the last move.
+        if let Some(why) =
+            crate::chain_lines::refusal(&drag.line, drag.to, &self.around(&drag.line))
+        {
+            self.note = Some(format!("Not moved: {why}"));
+            return;
+        }
+        use crate::chain_lines::LineSource;
+        match drag.line.source {
+            LineSource::Ticket => {
+                if let Some(t) = self.ticket.as_mut() {
+                    t.set_level(drag.to);
+                }
+            }
+            LineSource::Draft => {
+                for d in self.drafts.iter_mut().filter(|d| d.kind == drag.line.kind) {
+                    d.level = drag.to;
+                }
+            }
+            LineSource::Armed(id) => {
+                let Some(account) = self.trade.account.clone() else {
+                    return;
+                };
+                for cmd in crate::chain_lines::move_commands(account, &drag.line, id, drag.to) {
+                    self.ask(cmd, cx);
+                }
+            }
+        }
+    }
+
+    /// A release off the pane: nothing happened.
+    fn on_line_up_out(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.line_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A new Stop or Target for the series, on its own side of the market, not armed yet.
+    fn add_draft(&mut self, kind: TriggerKind, key: OptionKey, cx: &mut Context<Self>) {
+        let position = self.position(key);
+        let last = self.store.try_read().and_then(|d| d.last_trade);
+        let Some(last) = last else {
+            self.note = Some("Not yet: no price of the underlying".to_owned());
+            cx.notify();
+            return;
+        };
+        if position == 0 {
+            return;
+        }
+        let contract = self.contract(key);
+        self.drafts
+            .retain(|d| d.contract != contract || d.kind != kind);
+        let tick = self.product.price.tick;
+        self.drafts.push(crate::chain_lines::Line {
+            kind,
+            contract,
+            level: crate::chain_lines::default_exit_level(kind, key.right, position, last, tick),
+            source: crate::chain_lines::LineSource::Draft,
+            fires: None,
+            working: false,
+            stale: false,
+        });
+        cx.notify();
+    }
+
+    /// Arm a draft where it is. The core asks again, and its refusal shows in the footer.
+    fn arm_draft(&mut self, n: usize, cx: &mut Context<Self>) {
+        let Some(line) = self.drafts.get(n).copied() else {
+            return;
+        };
+        if let Some(why) = crate::chain_lines::refusal(&line, line.level, &self.around(&line)) {
+            self.note = Some(format!("Not armed: {why}"));
+            cx.notify();
+            return;
+        }
+        let Some(account) = self.trade.account.clone() else {
+            return;
+        };
+        self.note = None;
+        self.drafts.remove(n);
+        self.ask(crate::chain_lines::arm(account, &line, line.level), cx);
+        cx.notify();
+    }
+
+    /// A person's Cancel on one armed row. A position's Stop going says what that leaves.
+    fn cancel_trigger(&mut self, view: &TriggerView, cx: &mut Context<Self>) {
+        let Some(account) = self.trade.account.clone() else {
+            return;
+        };
+        self.note = None;
+        if view.kind == TriggerKind::Stop {
+            let position = view.contract.option_key().map_or(0, |k| self.position(k));
+            if position != 0 {
+                self.note = crate::chain_lines::no_stop_message(&[view.contract]);
+            }
+        }
+        self.ask(
+            lines_trading::Command::CancelTrigger {
+                account,
+                id: view.id,
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     /// The row's Close: reduce-only, the whole position, at the mid.
@@ -1633,8 +2063,18 @@ impl ChainView {
                 }
             }
             "up" | "down" => {
+                let tick = self.product.price.tick;
                 if let Some(t) = self.ticket.as_mut() {
-                    t.step(k.key == "up", rules);
+                    if t.when.is_some() && t.on_level {
+                        t.step_level(k.key == "up", 5 * tick.max(1));
+                    } else {
+                        t.step(k.key == "up", rules);
+                    }
+                }
+            }
+            "tab" if self.ticket.as_ref().is_some_and(|t| t.when.is_some()) => {
+                if let Some(t) = self.ticket.as_mut() {
+                    t.on_level = !t.on_level;
                 }
             }
             "tab" => self.toggle_close(cx),
@@ -1683,6 +2123,12 @@ impl ChainView {
         let Some(shot) = self.shot.clone() else {
             return;
         };
+        self.shot_restored = shot.restored;
+        if let Some((kind, level)) = shot.drag.clone()
+            && let Ok(units) = self.product.price.scale.parse_decimal(&level)
+        {
+            self.shot_drag = Some((kind, Price(units)));
+        }
         let expiry = match self.store.try_read() {
             Some(d) => d.chains.expiries().next(),
             None => return,
@@ -1691,7 +2137,7 @@ impl ChainView {
             return;
         };
         self.one_click = shot.one_click;
-        let Some((cell, strike, right)) = shot.open else {
+        let Some((cell, strike, right)) = shot.open.clone() else {
             self.shot = None;
             return;
         };
@@ -1704,7 +2150,7 @@ impl ChainView {
             right,
         };
         // A Close needs the scripted position, which arrives after the first frames.
-        if shot.close && self.position(key) == 0 {
+        if (shot.close || shot.draft.is_some()) && self.position(key) == 0 {
             return;
         }
         self.shot = None;
@@ -1720,6 +2166,46 @@ impl ChainView {
             && let Some(t) = self.ticket.as_mut()
         {
             t.set_price(Price(units));
+        }
+        if let Some(when) = shot.when
+            && let Ok(units) = self.product.price.scale.parse_decimal(&when)
+        {
+            self.set_when(true, cx);
+            if let Some(t) = self.ticket.as_mut() {
+                t.set_level(Price(units));
+            }
+        }
+        if let Some((kind, level)) = shot.draft
+            && let Ok(units) = self.product.price.scale.parse_decimal(&level)
+        {
+            let kind = if kind == "stop" {
+                TriggerKind::Stop
+            } else {
+                TriggerKind::Target
+            };
+            self.add_draft(kind, key, cx);
+            for d in self.drafts.iter_mut().filter(|d| d.kind == kind) {
+                d.level = Price(units);
+            }
+            // The fixture shows the draft, not the ticket that named the series.
+            self.ticket = None;
+        }
+    }
+
+    /// The screenshot fixture for a line being dragged, once that line exists.
+    fn apply_shot_drag(&mut self) {
+        let Some((kind, to)) = self.shot_drag.clone() else {
+            return;
+        };
+        let found = self
+            .lines
+            .iter()
+            .copied()
+            .find(|l| l.kind.word().eq_ignore_ascii_case(&kind));
+        // Kept: the first frames' layout counts as the plot moving, which ends a drag.
+        if let Some(line) = found {
+            let refused = crate::chain_lines::refusal(&line, to, &self.around(&line));
+            self.line_drag = Some(LineDrag { line, to, refused });
         }
     }
 
@@ -1795,6 +2281,15 @@ impl ChainView {
         }
         let k = &ev.keystroke;
         let m = k.modifiers;
+        // Esc aborts a line's drag, as an order's on the DOM; nothing else acts during one.
+        if self.line_drag.is_some() {
+            if k.key == "escape" {
+                self.line_drag = None;
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
             let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
@@ -1931,6 +2426,19 @@ impl ChainView {
         {
             self.bring_into_view(hit, cx);
             return;
+        }
+        // A line, between rows: a row always keeps its press.
+        if self.frame.locked && self.frame.locked_at(f(ev.position.y)).is_none() {
+            let py = f(ev.position.y);
+            let near = self
+                .line_ys
+                .iter()
+                .take(self.lines.len())
+                .position(|y| (y - py).abs() <= LINE_GRAB);
+            if let Some(n) = near {
+                self.grab_line(n, window, cx);
+                return;
+            }
         }
         // The row as painted: a series arriving since can't shift the press onto another strike.
         let strike = if self.frame.locked {
@@ -2084,7 +2592,7 @@ impl ChainView {
                             window.mouse_position(),
                             window.is_window_hovered(),
                             self.one_click,
-                        );
+                        ) || self.line_drag.is_some();
                         self.frame.hold = hold;
                         if let Some(chart) = &self.chart {
                             chart.update(cx, |c, _| c.hold_scale(hold));
@@ -2325,6 +2833,10 @@ impl ChainView {
             line_at,
         };
         let mut s = FixedStr::<24>::new();
+        // A line runs across the chain and never covers a cell.
+        if let Some(s) = &scale {
+            self.paint_chain_lines(s, bounds, (x0, x), window);
+        }
         for n in 0..self.frame.rows.len() {
             let row = self.frame.rows[n];
             let row = &row;
@@ -2609,6 +3121,208 @@ impl ChainView {
             self.paint_markers(s, bounds, window, cx);
         }
         pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
+    }
+
+    /// A line's level, the drag's while it's the one being dragged.
+    fn line_level(&self, line: &crate::chain_lines::Line) -> Price {
+        match self.line_drag {
+            Some(d) if d.line.source == line.source && d.line.kind == line.kind => d.to,
+            _ => line.level,
+        }
+    }
+
+    fn line_color(&self, line: &crate::chain_lines::Line) -> gpui::Hsla {
+        let t = &self.theme;
+        if line.stale {
+            return t.warn;
+        }
+        match self.line_drag {
+            Some(d)
+                if d.refused.is_some()
+                    && d.line.source == line.source
+                    && d.line.kind == line.kind =>
+            {
+                t.warn
+            }
+            _ => match line.kind {
+                TriggerKind::Stop => t.order_stop,
+                TriggerKind::Target => t.order_target,
+                TriggerKind::Entry { .. } => t.accent,
+            },
+        }
+    }
+
+    /// A line across `x0..x1`: solid once armed, dashed until then or while it can't fire.
+    fn paint_line(
+        &self,
+        line: &crate::chain_lines::Line,
+        x0: f32,
+        x1: f32,
+        y: f32,
+        window: &mut Window,
+    ) {
+        let color = self.line_color(line);
+        let armed = matches!(line.source, crate::chain_lines::LineSource::Armed(_));
+        if armed && !line.stale {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(x0), px(y - 0.5)),
+                    size(px((x1 - x0).max(0.0)), px(1.0)),
+                ),
+                color,
+            ));
+            return;
+        }
+        // Dashes by count, never by adding to a float.
+        let dashes = ((x1 - x0) / 10.0).ceil().clamp(0.0, 1_000.0) as usize;
+        for k in 0..dashes {
+            let dx = x0 + k as f32 * 10.0;
+            window.paint_quad(fill(
+                Bounds::new(point(px(dx), px(y - 0.5)), size(px(6.0), px(1.0))),
+                color,
+            ));
+        }
+    }
+
+    /// The lines' stretch across the table, and where a press finds them. On a row's band only
+    /// the margins beside the cells: the row's text stays readable.
+    fn paint_chain_lines(
+        &mut self,
+        scale: &crate::chain_lock::LockedScale,
+        bounds: Bounds<Pixels>,
+        cells: (f32, f32),
+        window: &mut Window,
+    ) {
+        let (x0, x1) = (
+            f(bounds.origin.x),
+            f(bounds.origin.x) + f(bounds.size.width),
+        );
+        let (top, bottom) = self.frame.area;
+        for n in 0..self.lines.len() {
+            let line = self.lines[n];
+            let y = scale.y(self.line_level(&line));
+            self.line_ys[n] = y;
+            if y < top || y > bottom {
+                continue;
+            }
+            let on_row = self.frame.ys.iter().any(|t| y >= *t && y < *t + ROW_H);
+            if on_row {
+                self.paint_line(&line, x0, cells.0, y, window);
+                self.paint_line(&line, cells.1, x1, y, window);
+            } else {
+                self.paint_line(&line, x0, x1, y, window);
+            }
+        }
+    }
+
+    /// A line's tag: `Stop SPY 682.75 684C ≈ 1.25 -$40`. The value and P&L are estimates, always
+    /// marked ≈, and text only (`option_estimate`); a line that can't fire says that first.
+    fn write_tag(&self, out: &mut impl std::fmt::Write, line: &crate::chain_lines::Line) {
+        let level = self.line_level(line);
+        let refused = match self.line_drag {
+            Some(d) if d.line.source == line.source && d.line.kind == line.kind => d.refused,
+            _ => None,
+        };
+        if line.stale {
+            let _ = out.write_str("STALE FEED  ");
+        }
+        let _ = write!(out, "{} ", line.kind.word());
+        if !matches!(line.source, crate::chain_lines::LineSource::Armed(_)) {
+            let _ = out.write_str("(not armed) ");
+        }
+        let _ = write!(out, "{} ", self.product.symbol);
+        let _ = self.product.price.write(level, out);
+        let _ = out.write_char(' ');
+        let _ = crate::chain_lines::write_series(out, line.contract);
+        if let Some(why) = refused {
+            let _ = write!(out, "  {why}");
+            return;
+        }
+        let Some(key) = line.contract.option_key() else {
+            return;
+        };
+        let q = self.quote(key);
+        let under = self.frame.last;
+        let Some(e) =
+            crate::option_estimate::estimate(line.contract, q.as_ref(), under, level, self.now)
+        else {
+            return;
+        };
+        let _ = out.write_str(" ≈ ");
+        let _ = e.write(out, &self.product);
+        if let (Some(per_unit), Some(m)) = (
+            self.tag_money,
+            self.frame
+                .mark(key.strike, key.right)
+                .filter(|m| m.position != 0),
+        ) && let Some(avg) = m.avg
+        {
+            let _ = out.write_char(' ');
+            let _ = e.write_pnl(out, m.position, avg, per_unit);
+        }
+    }
+
+    /// The lines over the chart, with their tags at the plot's right edge. Tags spread so none
+    /// overlap; each stays as near its line as it can.
+    fn paint_chart_lines(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let Some(chart) = self.chart.as_ref().filter(|_| self.chart_shown()) else {
+            return;
+        };
+        let Some(scale) = chart.read(cx).locked_scale() else {
+            return;
+        };
+        let n = self.lines.len().min(crate::chain_lines::MAX_LINES);
+        let x0 = f(bounds.origin.x);
+        let plot_right = x0 + scale.vp.width as f32;
+        let right = plot_right - 4.0;
+        // Top first; those off the plot have no line and no tag (their armed row says where).
+        let mut order = [0usize; crate::chain_lines::MAX_LINES];
+        let mut centers = [0.0f32; crate::chain_lines::MAX_LINES];
+        let mut shown = 0;
+        for i in 0..n {
+            self.tag_boxes[i] = (0.0, 0.0, 0.0);
+            let line = self.lines[i];
+            let y = scale.y(self.line_level(&line));
+            if y < scale.plot_top || y > scale.bottom() {
+                continue;
+            }
+            // To the plot's edge: the axis keeps its labels readable.
+            self.paint_line(&line, x0, plot_right, y, window);
+            let mut at = shown;
+            while at > 0 && centers[at - 1] > y {
+                centers[at] = centers[at - 1];
+                order[at] = order[at - 1];
+                at -= 1;
+            }
+            centers[at] = y;
+            order[at] = i;
+            shown += 1;
+        }
+        crate::chain_lines::spread_tags(
+            &mut centers[..shown],
+            TAG_H + 2.0,
+            scale.plot_top,
+            scale.bottom(),
+        );
+        let t = self.theme;
+        for k in 0..shown {
+            let line = self.lines[order[k]];
+            let mut s = FixedStr::<128>::new();
+            self.write_tag(&mut s, &line);
+            let w = self.glyphs.width(s.as_str(), t.text_main, true, window) + 2.0 * PAD;
+            let x = (right - w).max(x0);
+            let y = centers[k] - TAG_H / 2.0;
+            let chip = Bounds::new(point(px(x), px(y)), size(px(w), px(TAG_H)));
+            window.paint_quad(fill(chip, t.panel));
+            window.paint_quad(gpui::outline(
+                chip,
+                self.line_color(&line),
+                gpui::BorderStyle::Solid,
+            ));
+            self.glyphs
+                .paint(s.as_str(), x + PAD, y, TAG_H, t.text_main, true, window, cx);
+            self.tag_boxes[order[k]] = (x - x0, y, w);
+        }
     }
 
     /// What the account has past the rows, at the edge it's past: nothing it holds or works goes
@@ -3180,7 +3894,10 @@ impl ChainView {
                 .account
                 .as_ref()
                 .is_some_and(|a| self.closing(a, tk.key));
-        let live = if tk.close && closable.is_none() {
+        let when = tk.when;
+        let live = if when.is_some() {
+            self.when_refusal()
+        } else if tk.close && closable.is_none() {
             Some("no position to close".to_owned())
         } else if closing_now {
             Some("a close is already working; Cancel it first".to_owned())
@@ -3260,12 +3977,20 @@ impl ChainView {
             .and_then(|p| ticket::premium(&product, contract, qty, p))
             .map(|m| {
                 let word = match tk.side {
+                    Side::Buy if when.is_some() => "Up to",
                     Side::Buy => "Cost",
                     Side::Sell => "Credit",
                 };
                 format!("{word} {}", trade_bar::money_grouped(m))
             });
-        let send = ticket::send_label(&product, tk.side, tk.close, qty, tk.price);
+        let send = match when {
+            Some(level) => format!(
+                "Arm: buy {qty} when {} hits {}",
+                product.symbol,
+                product.price.format::<32>(level).as_str()
+            ),
+            None => ticket::send_label(&product, tk.side, tk.close, qty, tk.price),
+        };
         let side_color = match tk.side {
             Side::Buy => t.up,
             Side::Sell => t.down,
@@ -3312,6 +4037,40 @@ impl ChainView {
                     }),
                 )
             }))
+            // Now, or when the underlying gets there (decision 0029): a line needs the chart.
+            .children((self.chart_shown() && tk.can_be_when()).then(|| {
+                let symbol = product.symbol;
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .child(
+                        chip("ticket-now".into(), when.is_none(), "Now".to_owned()).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.focus.focus(window, cx);
+                                this.set_when(false, cx);
+                            }),
+                        ),
+                    )
+                    .child(
+                        chip(
+                            "ticket-when".into(),
+                            when.is_some(),
+                            format!("When {symbol}"),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.focus.focus(window, cx);
+                                this.set_when(true, cx);
+                            }),
+                        ),
+                    )
+            }))
             .children(account_name.map(|n| div().text_color(t.text_dim).child(n)));
         let mut controls = div().flex().flex_row().flex_wrap().items_center().gap_2();
         if let Some(chips) = qty_chips {
@@ -3345,11 +4104,70 @@ impl ChainView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
-                    .child(div().text_color(t.text_dim).child("Limit"))
+                    .child(div().text_color(t.text_dim).child(if when.is_some() {
+                        "Max"
+                    } else {
+                        "Limit"
+                    }))
                     .children(price_chips),
             )
+            // The level, when there is one: Tab or a press chooses which field keys go to.
+            .children(when.map(|level| {
+                let text = tk
+                    .level_typed
+                    .clone()
+                    .unwrap_or_else(|| product.price.format::<32>(level).as_str().to_owned());
+                div()
+                    .id("ticket-level")
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .child(div().text_color(t.text_dim).child(product.symbol))
+                    .child(
+                        div()
+                            .min_w(px(56.0))
+                            .h(px(MIN_HIT))
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .border_1()
+                            .rounded_sm()
+                            .border_color(if tk.on_level { t.accent } else { t.text_dim })
+                            .text_color(t.text_main)
+                            .child(text),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.focus.focus(window, cx);
+                            if let Some(t) = this.ticket.as_mut() {
+                                t.on_level = true;
+                            }
+                            cx.notify();
+                        }),
+                    )
+            }))
             .child(
                 div()
+                    .id("ticket-price")
+                    .when(when.is_some(), |d| {
+                        d.cursor_pointer().on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.focus.focus(window, cx);
+                                if let Some(t) = this.ticket.as_mut() {
+                                    t.on_level = false;
+                                }
+                                cx.notify();
+                            }),
+                        )
+                    })
                     .flex_shrink_0()
                     .min_w(px(56.0))
                     .h(px(MIN_HIT))
@@ -3359,7 +4177,11 @@ impl ChainView {
                     .justify_end()
                     .border_1()
                     .rounded_sm()
-                    .border_color(t.text_dim)
+                    .border_color(if when.is_some() && !tk.on_level {
+                        t.accent
+                    } else {
+                        t.text_dim
+                    })
                     .text_color(t.text_main)
                     .child(price_text),
             )
@@ -3444,6 +4266,9 @@ impl ChainView {
         let line = match (reason, stale) {
             (Some(why), _) => flagged("Can't send", why),
             (None, _) if others > 0 => flagged("Still working", leaves_working(others)),
+            (None, false) if when.is_some() => div().text_color(t.text_dim).child(
+                "↑↓ the outlined field  ·  Tab: the other field  ·  Drag its line  ·  Enter arm  ·  Esc dismiss",
+            ),
             (None, true) => flagged(
                 "Stale feed",
                 "no new data: this quote may be old".to_owned(),
@@ -3474,8 +4299,217 @@ impl ChainView {
                 .child(top)
                 .child(controls)
                 .child(line)
+                // The limit, and what it does when it fires (decision 0029).
+                .children(when.map(|_| {
+                    div().text_color(t.text_dim).child(format!(
+                        "{}. It sends a limit at the ask and doesn't chase: an ask over your max ends it.",
+                        crate::chain_lines::LIMIT
+                    ))
+                }))
                 .into_any_element(),
         )
+    }
+
+    /// A row for each trigger, with its Cancel, and each states the limit (decision 0029): the
+    /// loud part first if it can't fire. Beside a chart: Stop and Target to add for the selection.
+    fn armed_rows(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        use crate::chain_lines::{Line, row_warning};
+        let t = self.theme;
+        let account = self.trade.account.clone()?;
+        let views: Vec<TriggerView> = {
+            let st = self.trade.try_cache()?;
+            st.triggers()
+                .filter(|v| v.account == account && v.contract.product == self.product.id)
+                .cloned()
+                .collect()
+        };
+        let scale = self.chart_scale(cx);
+        let off_chart = |level: Price| {
+            scale
+                .as_ref()
+                .is_some_and(|s| s.y(level) < s.plot_top || s.y(level) > s.bottom())
+        };
+        let button = |id: String, word: &'static str| {
+            div()
+                .id(gpui::SharedString::from(id))
+                .flex_shrink_0()
+                .cursor_pointer()
+                .px_1()
+                .h(px(MIN_HIT))
+                .flex()
+                .items_center()
+                .border_1()
+                .rounded_sm()
+                .border_color(t.control_edge)
+                .text_color(t.text_main)
+                .child(word)
+        };
+        let row = |swatch: gpui::Hsla, text: String| {
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_x_2()
+                .px_2()
+                .py(px(2.0))
+                .bg(t.panel)
+                .border_t_1()
+                .border_color(t.axis_line)
+                .text_size(px(12.0))
+                .text_color(t.text_main)
+                .child(div().flex_shrink_0().size(px(8.0)).bg(swatch))
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(text))
+        };
+        let limit = || {
+            div()
+                .text_color(t.text_dim)
+                .child(crate::chain_lines::LIMIT)
+        };
+        let warned = |word: &'static str, text: String| {
+            div()
+                .flex()
+                .flex_row()
+                .gap_1()
+                .items_start()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .px_1()
+                        .bg(t.warn)
+                        .text_color(t.on_warn)
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(word),
+                )
+                .child(div().min_w_0().child(text))
+        };
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for v in views {
+            let mut v = v;
+            v.restored |= self.shot_restored && v.kind.is_exit();
+            let mut line = Line::of(&v);
+            line.stale = false;
+            let mut text = FixedStr::<128>::new();
+            self.write_tag(&mut text, &line);
+            let mut text = text.as_str().to_owned();
+            if let TriggerKind::Entry { qty, max_price } = v.kind {
+                text.push_str(&format!(
+                    ": buy {} at the ask, max {}",
+                    qty.0,
+                    self.product.price.format::<32>(max_price).as_str()
+                ));
+            }
+            if v.state == lines_trading::trigger::TriggerState::Working {
+                text.push_str(": closing the position");
+            }
+            if off_chart(v.level) {
+                text.push_str(" (off the chart)");
+            }
+            line.stale = v.stale;
+            let view = v.clone();
+            let color = self.line_color(&line);
+            rows.push(
+                row(color, text)
+                    .children(row_warning(&v).map(|(word, why)| warned(word, why)))
+                    .child(limit())
+                    .child(
+                        button(format!("trigger-cancel-{}", v.id.0), "Cancel").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.focus.focus(window, cx);
+                                this.cancel_trigger(&view, cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        for n in 0..self.drafts.len() {
+            let line = self.drafts[n];
+            let mut text = FixedStr::<128>::new();
+            self.write_tag(&mut text, &line);
+            let color = self.line_color(&line);
+            rows.push(
+                row(color, text.as_str().to_owned())
+                    .child(limit())
+                    .child(button(format!("draft-arm-{n}"), "Arm").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.focus.focus(window, cx);
+                            this.arm_draft(n, cx);
+                        }),
+                    ))
+                    .child(button(format!("draft-drop-{n}"), "Discard").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.focus.focus(window, cx);
+                            if n < this.drafts.len() {
+                                this.drafts.remove(n);
+                            }
+                            cx.notify();
+                        }),
+                    ))
+                    .into_any_element(),
+            );
+        }
+        // The selection's position can have a Stop and a Target, each a line to drag first.
+        if self.chart_shown()
+            && let Some(key) = self.selected_key().filter(|k| self.position(*k) != 0)
+        {
+            let contract = self.contract(key);
+            let missing = |kind: TriggerKind| {
+                !self
+                    .lines
+                    .iter()
+                    .any(|l| l.contract == contract && l.kind == kind)
+            };
+            let add = [
+                (TriggerKind::Stop, "Set Stop"),
+                (TriggerKind::Target, "Set Target"),
+            ]
+            .into_iter()
+            .filter(|(kind, _)| missing(*kind))
+            .map(|(kind, word)| {
+                button(format!("draft-add-{word}"), word).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.focus.focus(window, cx);
+                        this.note = None;
+                        this.add_draft(kind, key, cx);
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+            if !add.is_empty() {
+                let mut series = String::new();
+                let _ = crate::chain_lines::write_series(&mut series, contract);
+                rows.push(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py(px(2.0))
+                        .bg(t.panel)
+                        .border_t_1()
+                        .border_color(t.axis_line)
+                        .text_size(px(12.0))
+                        .text_color(t.text_main)
+                        .child(
+                            div().child(format!("Exits for {series}, on {}:", self.product.symbol)),
+                        )
+                        .children(add)
+                        .into_any_element(),
+                );
+            }
+        }
+        (!rows.is_empty()).then(|| div().flex().flex_col().children(rows).into_any_element())
     }
 
     fn footer(&self, size: i64, exits: Option<gpui::Div>) -> impl IntoElement {
@@ -3622,9 +4656,13 @@ impl Render for ChainView {
             self.stale_after_ms = i.option_guard.stale_after_ms;
         }
         self.apply_shot(cx);
+        self.refresh_lines(cx);
+        self.apply_shot_drag();
+        self.take_ended();
         let size = self.size(cx);
         let strip = self.row_strip(cx);
         let dock = self.ticket_dock(cx);
+        let armed = self.armed_rows(cx);
         let footer_exits = if self.exits_in_header() {
             None
         } else {
@@ -3666,6 +4704,7 @@ impl Render for ChainView {
                 move |bounds, window, cx| {
                     let w = f(bounds.size.width);
                     entity.update(cx, |v, _| {
+                        v.main_top = f(bounds.origin.y);
                         // (A notify during this draw wouldn't bring another.)
                         if (v.pane_w >= CHART_MIN_W) != (w >= CHART_MIN_W) {
                             window.on_next_frame(|window, _| window.refresh());
@@ -3696,6 +4735,7 @@ impl Render for ChainView {
         let below = div()
             .flex()
             .flex_col()
+            .children(armed)
             .children(strip)
             .children(dock)
             .children(footer)
@@ -3712,16 +4752,105 @@ impl Render for ChainView {
                 .size_full()
             });
         let header = self.header(cx);
-        let root = div().size_full().flex().flex_col().bg(t.bg).child(header);
-        match shown_chart {
+        let root = div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(t.bg)
+            .child(header);
+        // The chart's lines, over it and under its handles.
+        let chart_lines = {
+            let entity = cx.entity();
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    entity.update(cx, |v, cx| v.paint_chart_lines(bounds, window, cx));
+                },
+            )
+            .absolute()
+            .size_full()
+        };
+        // Taking hold of a line on the chart: the line itself and its tag. Each takes the press
+        // from the chart, which would otherwise pan. Where they were last frame, and unmoved
+        // unless the plot changed, which redraws.
+        let mut handles = Vec::new();
+        if let Some(s) = self.chart_scale(cx) {
+            let handle = |id: String, n: usize, cx: &mut Context<Self>| {
+                div()
+                    .id(gpui::SharedString::from(id))
+                    .absolute()
+                    .occlude()
+                    .cursor_row_resize()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.grab_line(n, window, cx);
+                        }),
+                    )
+            };
+            for n in 0..self.lines.len() {
+                let line = self.lines[n];
+                if !line.draggable() {
+                    continue;
+                }
+                let y = s.y(self.line_level(&line));
+                if y < s.plot_top || y > s.bottom() {
+                    continue;
+                }
+                handles.push(
+                    handle(format!("line-grab-{n}"), n, cx)
+                        .left_0()
+                        .top(px(y - self.main_top - LINE_GRAB))
+                        .w(px(s.vp.width as f32))
+                        .h(px(2.0 * LINE_GRAB)),
+                );
+                let (x, top, w) = self.tag_boxes[n];
+                if w > 0.0 {
+                    handles.push(
+                        handle(format!("tag-grab-{n}"), n, cx)
+                            .left(px(x))
+                            .top(px(top - self.main_top))
+                            .w(px(w))
+                            .h(px(TAG_H)),
+                    );
+                }
+            }
+        }
+        // While dragging, everything in the pane is the drag's: a release off it aborts.
+        let capture = self.line_drag.map(|_| {
+            div()
+                .id("line-drag")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .cursor_row_resize()
+                .on_mouse_move(cx.listener(Self::on_line_move))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_line_up))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_line_up_out))
+        });
+        let pane = match shown_chart {
             // The strip, the ticket and a long message cover the column's foot rather than push
             // the plot up: a taller foot would move every row under the pointer. Its usual two lines are
             // always kept clear of rows.
             Some(chart) => root.child(
                 // Cached, as a workspace pane's view is: chain quotes don't repaint the chart.
-                main.child(div().flex_1().min_w_0().h_full().child(
-                    gpui::AnyView::from(chart).cached(gpui::StyleRefinement::default().size_full()),
-                ))
+                main.child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(
+                            gpui::AnyView::from(chart)
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        )
+                        .child(chart_lines)
+                        .children(handles),
+                )
                 .child(
                     div()
                         .relative()
@@ -3745,7 +4874,8 @@ impl Render for ChainView {
                 ),
             ),
             None => root.child(main.child(table)).child(below.flex_shrink_0()),
-        }
+        };
+        pane.children(capture)
     }
 }
 

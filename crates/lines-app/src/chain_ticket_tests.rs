@@ -446,3 +446,226 @@ fn the_exits_say_what_they_act_on() {
     assert_eq!(exit_label("SPY", true), "Flatten SPY options");
     assert_eq!(exit_label("SPY", false), "Cancel SPY options");
 }
+
+fn arm(r: &mut Rig, contract: ContractKey, kind: lines_trading::trigger::TriggerKind, level: i64) {
+    r.send(Command::ArmTrigger(lines_trading::trigger::TriggerSpec {
+        account: account(),
+        contract,
+        kind,
+        level: Price(level),
+    }));
+}
+
+fn live_triggers(r: &Rig) -> usize {
+    r.t.cache.read().triggers().count()
+}
+
+fn underlying_print(r: &mut Rig, cents: i64) {
+    let time = UtcMillis(r.now);
+    r.t.handle().market(
+        ContractKey::equity(catalog::SPY),
+        vec![lines_trading::MarketInput::Trade {
+            time,
+            price: Price(cents),
+            qty: Qty(1),
+        }],
+    );
+    r.t.settle();
+}
+
+/// The owner's ruling: Cancel All takes armed triggers and leaves the position, and the message
+/// says so. It reaches a series with only a trigger on it, and the chain's buttons act on it.
+#[test]
+fn cancel_all_takes_the_stop_and_leaves_the_position_saying_so() {
+    use lines_trading::trigger::TriggerKind;
+    let mut r = Rig::new();
+    let k = key(684, Right::Call);
+    let c = contract_of(k);
+    r.quote(k, 240, 242);
+    r.hold(c, 2, 242);
+    underlying_print(&mut r, 68_300);
+    arm(&mut r, c, TriggerKind::Stop, 68_000);
+    // Only a trigger on this one.
+    let other = contract_of(key(690, Right::Put));
+    arm(
+        &mut r,
+        other,
+        TriggerKind::Entry {
+            qty: Qty(1),
+            max_price: Price(500),
+        },
+        68_000,
+    );
+    assert_eq!(live_triggers(&r), 2);
+    let (contracts, message) = {
+        let st = r.t.cache.read();
+        let contracts = held_contracts(&st, &account(), catalog::SPY);
+        assert!(contracts.contains(&c));
+        assert!(contracts.contains(&other), "a trigger alone counts");
+        let removed =
+            crate::chain_lines::stops_removed(st.triggers(), &account(), &contracts, |x| {
+                st.position(&account(), x).map_or(0, |p| p.qty)
+            });
+        (contracts, crate::chain_lines::no_stop_message(&removed))
+    };
+    let message = message.expect("a position's Stop is going");
+    assert!(message.contains("still open with no stop"), "{message}");
+    for cmd in exit_commands(&account(), &contracts, false) {
+        r.send(cmd);
+    }
+    r.wait(LATENCY_MS);
+    assert_eq!(r.position(c), 2, "the position stays");
+    assert_eq!(live_triggers(&r), 0, "triggers count as orders");
+}
+
+/// Flatten cancels everything and closes, with no message about a stop: nothing is left to stop.
+#[test]
+fn flatten_ends_the_triggers_and_closes() {
+    use lines_trading::trigger::TriggerKind;
+    let mut r = Rig::new();
+    let k = key(684, Right::Call);
+    let c = contract_of(k);
+    r.quote(k, 240, 242);
+    r.hold(c, 2, 242);
+    underlying_print(&mut r, 68_300);
+    arm(&mut r, c, TriggerKind::Stop, 68_000);
+    arm(&mut r, c, TriggerKind::Target, 69_000);
+    assert_eq!(live_triggers(&r), 2);
+    let contracts = held_contracts(&r.t.cache.read(), &account(), catalog::SPY);
+    for cmd in exit_commands(&account(), &contracts, true) {
+        r.send(cmd);
+    }
+    r.wait(LATENCY_MS);
+    assert_eq!(r.position(c), 0, "closed");
+    assert_eq!(live_triggers(&r), 0, "and its triggers end");
+}
+
+/// A dragged Stop is the core's swap: one Stop afterward, at the new level, and if the new level
+/// is refused the old one stays.
+#[test]
+fn moving_a_stop_goes_through_the_core() {
+    use crate::chain_lines::{Line, LineSource, move_commands};
+    use lines_trading::trigger::TriggerKind;
+    let mut r = Rig::new();
+    let k = key(684, Right::Call);
+    let c = contract_of(k);
+    r.quote(k, 240, 242);
+    r.hold(c, 2, 242);
+    underlying_print(&mut r, 68_300);
+    arm(&mut r, c, TriggerKind::Stop, 68_000);
+    let armed = |r: &Rig| -> Vec<_> { r.t.cache.read().triggers().cloned().collect() };
+    let v = armed(&r);
+    assert_eq!(v.len(), 1);
+    let line = Line::of(&v[0]);
+    assert_eq!(line.source, LineSource::Armed(v[0].id));
+    for cmd in move_commands(account(), &line, v[0].id, Price(68_100)) {
+        r.send(cmd);
+    }
+    let after = armed(&r);
+    assert_eq!(after.len(), 1, "replaced");
+    assert_eq!(after[0].level, Price(68_100));
+    // Past the market: the core refuses and the Stop that was there stays.
+    let line = Line::of(&after[0]);
+    for cmd in move_commands(account(), &line, after[0].id, Price(68_400)) {
+        r.send(cmd);
+    }
+    let kept = armed(&r);
+    assert_eq!(kept.len(), 1, "still protected");
+    assert_eq!(kept[0].level, Price(68_100));
+    // An ordinary replacement isn't news, and what ended is told once.
+    let st = r.t.cache.read();
+    assert!(st.triggers_ended_count() >= 1);
+    assert!(
+        st.triggers_ended_since(0)
+            .all(|v| crate::chain_lines::ended_message(v).is_none())
+    );
+    assert_eq!(
+        st.triggers_ended_since(st.triggers_ended_count()).count(),
+        0
+    );
+}
+
+/// "When SPY" is the same ticket: an entry at the level with the ticket's size and its price as
+/// the max, and never a second order path. Only a buy can wait.
+#[test]
+fn a_when_ticket_arms_an_entry_with_its_max() {
+    use lines_trading::trigger::TriggerKind;
+    let k = key(684, Right::Call);
+    let q = OptionQuote {
+        bid: Some(Price(240)),
+        ask: Some(Price(244)),
+        last: None,
+        volume: Qty(0),
+        open_interest: 0,
+        iv_bp: None,
+        delta_e4: None,
+        time: UtcMillis(0),
+    };
+    let mut t = Ticket::new(k, Side::Buy, Some(&q), rules());
+    assert!(t.can_be_when());
+    assert!(
+        when_trigger(&t, account(), contract_of(k), 1).is_err(),
+        "no level"
+    );
+    t.set_when(Some(Price(68_500)), Some(&q), rules());
+    assert_eq!(t.price, Some(Price(244)), "the max starts at the ask");
+    let Ok(Command::ArmTrigger(spec)) = when_trigger(&t, account(), contract_of(k), 3) else {
+        panic!("an entry");
+    };
+    assert_eq!(spec.level, Price(68_500));
+    assert_eq!(
+        spec.kind,
+        TriggerKind::Entry {
+            qty: Qty(3),
+            max_price: Price(244)
+        }
+    );
+    assert!(when_trigger(&t, account(), contract_of(k), 0).is_err());
+    // Back to now: at the mid again, with no level.
+    t.set_when(None, Some(&q), rules());
+    assert_eq!(t.when, None);
+    assert_eq!(t.price, Some(Price(242)));
+    // A sell can't.
+    let sell = Ticket::new(k, Side::Sell, Some(&q), rules());
+    assert!(!sell.can_be_when());
+    // A close ends "When".
+    let mut close = Ticket::new(k, Side::Buy, Some(&q), rules());
+    close.set_when(Some(Price(68_500)), Some(&q), rules());
+    close.set_close(true, Some(&q), rules());
+    assert_eq!(close.when, None);
+    assert!(!close.can_be_when());
+}
+
+/// Keys go to the field in use. The level never reads as nothing while it's typed: its line
+/// doesn't vanish. (A half-typed one is far from the market, which `chain_lines` refuses.)
+#[test]
+fn a_when_tickets_keys_go_to_the_field_in_use() {
+    let p = catalog::get(catalog::SPY).unwrap();
+    let k = key(684, Right::Call);
+    let mut t = Ticket::new(k, Side::Buy, None, rules());
+    t.set_when(Some(Price(68_500)), None, rules());
+    assert!(t.on_level, "the level first");
+    for c in "686.5".chars() {
+        assert!(t.type_char(c, &p));
+    }
+    assert_eq!(t.when, Some(Price(68_650)));
+    assert_eq!(t.price, None, "the max isn't touched");
+    for _ in 0..5 {
+        assert!(t.backspace(&p));
+    }
+    assert!(t.when.is_some(), "empty: the last that read stays");
+    for c in "686.5".chars() {
+        assert!(t.type_char(c, &p));
+    }
+    assert_eq!(t.when, Some(Price(68_650)));
+    t.step_level(true, 5);
+    assert_eq!(t.when, Some(Price(68_655)));
+    t.step_level(false, 5);
+    assert_eq!(t.when, Some(Price(68_650)));
+    t.on_level = false;
+    for c in "1.25".chars() {
+        assert!(t.type_char(c, &p));
+    }
+    assert_eq!(t.price, Some(Price(125)));
+    assert_eq!(t.when, Some(Price(68_650)));
+}

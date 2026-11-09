@@ -424,6 +424,75 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
+    // Entry, Stop and Target lines (decision 0029): armed with their rows; a ticket's "When SPY";
+    // a Stop not armed yet; a drag that refuses; and rows after a restart.
+    let armed = "under 683.59; option 2026-11-09 684 call; buy 2 @ 0.65; ack; trigger stop 682.50; trigger target 686.00; option 2026-11-09 680 put; trigger entry 681.50 max 0.25 1";
+    let long = "under 683.59; option 2026-11-09 684 call; buy 2 @ 0.65; ack";
+    let stale = format!("{armed}; wait 11");
+    let lines: [(&str, bool, &str, Option<&str>, &str, &str); 9] = [
+        ("chain-lines-stale", false, &stale, None, "1600x800", "dark"),
+        ("chain-lines", true, armed, None, "1600x800", "dark"),
+        ("chain-lines-light", false, armed, None, "1600x800", "light"),
+        ("chain-lines-narrow", false, armed, None, "800x640", "dark"),
+        (
+            "chain-lines-when",
+            true,
+            long,
+            Some("buy 685 call when 685.00"),
+            "1600x800",
+            "dark",
+        ),
+        (
+            "chain-lines-when-narrow",
+            false,
+            long,
+            Some("buy 685 call when 685.00"),
+            "800x640",
+            "dark",
+        ),
+        (
+            "chain-lines-draft",
+            false,
+            long,
+            Some("buy 684 call draft stop 682.50"),
+            "1600x800",
+            "dark",
+        ),
+        (
+            "chain-lines-refused",
+            false,
+            armed,
+            Some("drag stop 685.00"),
+            "1600x800",
+            "dark",
+        ),
+        (
+            "chain-lines-restored",
+            false,
+            armed,
+            Some("restored"),
+            "1600x800",
+            "dark",
+        ),
+    ];
+    for (name, quick, script, shot, size, theme) in lines {
+        let mut a = vec![
+            "--workspace".to_owned(),
+            ws("chain-chart.json"),
+            "--size".to_owned(),
+            size.to_owned(),
+            "--theme".to_owned(),
+            theme.to_owned(),
+            "--paper".to_owned(),
+            script.to_owned(),
+        ];
+        if let Some(shot) = shot {
+            a.extend(["--chain-ticket".to_owned(), shot.to_owned()]);
+        }
+        let mut sc = s(name, quick, CHAIN_AT, a);
+        sc.chain = true;
+        v.push(sc);
+    }
     // The ticket covers the chain's foot and moves no row.
     let mut foot = s(
         "chain-chart-ticket",
