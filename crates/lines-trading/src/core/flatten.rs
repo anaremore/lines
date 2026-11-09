@@ -104,20 +104,26 @@ impl TradingCore {
         None
     }
 
-    /// A cancel this Flatten sent is still unanswered on the contract.
+    /// A cancel this Flatten sent is still unanswered on the contract, on anything but an earlier
+    /// Flatten's order: past [`FLATTEN_ANSWER_MS`] that one is replaced at once (`docs/known-gaps.md`).
+    /// One whose cancel got nowhere (refused, or out of sends) has no answer to wait for.
     fn flatten_waits(&self, account: &AccountId, contract: ContractKey) -> bool {
         self.orders.values().any(|o| {
             o.is_open()
                 && &o.account == account
                 && o.contract == contract
                 && o.role != Role::Flatten
-                && self.cancelling.contains(&o.id)
+                && self.cancel_pending(o.id)
         })
     }
 
     /// A Flatten waiting for its cancels goes once they're answered, or the venue has had long
     /// enough. It closes what the position is then: an exit may have filled meanwhile.
+    /// With the broker disconnected its market order can't go: it holds until the broker is back.
     pub(super) fn flatten_pending(&mut self, now: UtcMillis) {
+        if !self.broker.connected() {
+            return;
+        }
         let mut i = 0;
         while i < self.pending_flattens.len() {
             let p = &self.pending_flattens[i];
@@ -154,13 +160,13 @@ impl TradingCore {
         }
     }
 
-    /// A Flatten's market order is working or waiting to go on this contract.
+    /// A Flatten's market order is working, unresolved or waiting to go on this contract.
     pub(super) fn flatten_under_way(&self, account: &AccountId, contract: ContractKey) -> bool {
         self.pending_flattens
             .iter()
             .any(|p| &p.account == account && p.contract == contract)
             || self.orders.values().any(|o| {
-                o.is_open()
+                !o.state.is_terminal()
                     && o.role == Role::Flatten
                     && &o.account == account
                     && o.contract == contract
@@ -169,9 +175,16 @@ impl TradingCore {
 
     /// When a waiting Flatten stops waiting for an answer.
     pub(super) fn flatten_wake(&self) -> Option<UtcMillis> {
-        self.pending_flattens
+        let next = self
+            .pending_flattens
             .iter()
             .map(|p| UtcMillis(p.since.0 + FLATTEN_ANSWER_MS))
-            .min()
+            .min()?;
+        // Disconnected, what is due stays due: look again later, not in a loop.
+        Some(if self.broker.connected() {
+            next
+        } else {
+            UtcMillis(self.seen_now.0.saturating_add(FLATTEN_ANSWER_MS))
+        })
     }
 }
