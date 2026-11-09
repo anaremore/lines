@@ -4401,9 +4401,7 @@ impl ChainView {
         let line = match (reason, stale) {
             (Some(why), _) => flagged("Can't send", why),
             (None, _) if others > 0 => flagged("Still working", leaves_working(others)),
-            (None, false) if when.is_some() => div().text_color(t.text_dim).child(
-                "↑↓ the outlined field  ·  Tab: the other field  ·  Drag its line  ·  Enter arm  ·  Esc dismiss",
-            ),
+            (None, false) if when.is_some() => div(),
             (None, true) => flagged(
                 "Stale feed",
                 "no new data: this quote may be old".to_owned(),
