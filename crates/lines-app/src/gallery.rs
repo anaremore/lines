@@ -1040,9 +1040,13 @@ fn write_workspaces(dir: &Path) -> Result<()> {
     )
     .context("chain.json")?;
     // A chart of the same underlying, with no chain to show its triggers.
+    let chart_only = chain.replacen(r#""kind": "chain""#, r#""kind": "chart""#, 1);
     std::fs::write(
         dir.join("chart-only.json"),
-        chain.replacen(r#""kind": "chain""#, r#""kind": "chart""#, 1),
+        format!(
+            r#"{{ "version": 6, "name": "gallery", "crosshair_sync": false,
+  "windows": [ {{ "active_tab": 0, "tabs": [ {{ "focused": 0, "layout": {chart_only} }} ] }} ] }}"#
+        ),
     )
     .context("chart-only.json")?;
     // The option chart (decision 0029): the same pane with its chart on.
