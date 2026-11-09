@@ -43,6 +43,7 @@ use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind
 /// The order id a fill made outside Lines carries ([`BrokerEvent::ExternalFill`]): no order.
 pub const EXTERNAL_ORDER: OrderId = OrderId(0);
 mod cancels;
+mod flatten;
 mod position_bracket;
 mod strategy_gate;
 mod trigger;
@@ -242,6 +243,8 @@ pub struct TradingCore {
     join_guards: JoinGuards,
     /// Triggers on options' underlyings (decision 0029).
     triggers: trigger::Triggers,
+    /// Market orders of a Flatten waiting for their contract's cancels (`core/flatten.rs`).
+    pending_flattens: Vec<flatten::PendingFlatten>,
 }
 
 /// Saved guardrail progress (by id) and settings (by name or id) for accounts that join.
@@ -306,6 +309,7 @@ impl TradingCore {
             seen_now: UtcMillis(i64::MIN),
             join_guards: JoinGuards::default(),
             triggers: trigger::Triggers::default(),
+            pending_flattens: Vec::new(),
         }
     }
 
@@ -725,6 +729,7 @@ impl TradingCore {
         });
         // Requests may complete at once (zero latency): apply what the broker has.
         self.poll(now);
+        self.flatten_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -1270,10 +1275,14 @@ impl TradingCore {
                 let mut ids = if positions.is_empty() {
                     self.cancel_all(env, now, &account, contract)
                 } else {
+                    // A position's exits stay until it's flat, where the broker honors
+                    // reduce-only: if the close can't happen, they still protect it.
+                    let contracts: Vec<ContractKey> = positions.iter().map(|(k, _)| *k).collect();
                     let others = self
                         .orders
                         .values()
                         .filter(|o| o.account == account && !closing.contains(&o.id))
+                        .filter(|o| !self.flatten_keeps(o, &contracts))
                         .map(|o| o.id)
                         .collect();
                     self.cancel_scoped(env, now, &account, contract, Some(others))
@@ -1282,16 +1291,7 @@ impl TradingCore {
                     if closing.iter().any(|id| self.orders[id].contract == k) {
                         continue;
                     }
-                    let spec = OrderSpec {
-                        account: account.clone(),
-                        contract: k,
-                        side: if q > 0 { Side::Sell } else { Side::Buy },
-                        qty: Qty(q.abs()),
-                        kind: OrderKind::Market,
-                    };
-                    let o = self.new_order(now, &spec, Role::Flatten, None);
-                    ids.push(o.id);
-                    self.send(env, now, BrokerRequest::Place(o));
+                    ids.extend(self.flatten_close(env, now, &account, k, q));
                 }
                 Ok(ids)
             }
@@ -1972,6 +1972,7 @@ impl TradingCore {
         }
         self.cancels_resend(now);
         self.news_flatten(now);
+        self.flatten_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -1990,6 +1991,7 @@ impl TradingCore {
             .chain(news)
             .chain(self.triggers_wake())
             .chain(self.cancels_wake())
+            .chain(self.flatten_wake())
             .min()
     }
 
@@ -2330,6 +2332,7 @@ impl TradingCore {
             self.position_event(&a, contract);
             self.account_changed(now, &a);
         }
+        self.flatten_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);

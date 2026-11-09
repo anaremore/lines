@@ -625,7 +625,7 @@ fn the_chase_stops_when_told_or_when_the_position_goes() {
                 .any(|o| o.side == Side::Sell && o.is_open())
         );
     }
-    // A person's Flatten closes it and ends everything on the series.
+    // A person's Flatten closes it, and that's what ends the chase: flat, never short.
     let mut r = Rig::long_call(1);
     let id = r.arm(call(), TriggerKind::Target, 68_500);
     r.quote(Some(300), Some(900));
@@ -636,9 +636,12 @@ fn the_chase_stops_when_told_or_when_the_position_goes() {
         contract: Some(call()),
     })
     .unwrap();
-    assert_eq!(r.state(id), TriggerState::Ended);
+    assert_eq!(r.state(id), TriggerState::Working, "until it's flat");
     r.wait(LAT + 1);
     assert_eq!(r.position(call()), 0);
+    assert_eq!(r.state(id), TriggerState::Ended);
+    r.wait(CHASE * 2);
+    assert_eq!(r.position(call()), 0, "nothing more went");
 }
 
 /// Stop and Target are one-cancels-other, and one print can't fire both: levels on the same or

@@ -484,9 +484,10 @@ impl TradingCore {
         }
     }
 
-    /// A person's Cancel All or Flatten ends the triggers it covers: they would open or close
-    /// what was just cancelled or closed. A person cancelling a chasing Target's order stops
-    /// the chase. Internal commands (`Source::Rule`) never do.
+    /// A person's Cancel All ends the triggers it covers. A person's Flatten ends only entries,
+    /// which would reopen what it closes: a Stop or Target ends by itself once the position is
+    /// flat, so a Flatten that can't close leaves it protecting the position. A person cancelling
+    /// a chasing Target's order stops the chase. Internal commands (`Source::Rule`) never do.
     pub(super) fn trigger_person_acted(&mut self, env: &Envelope) {
         if crate::broker::Origin::of(env.source) != crate::broker::Origin::Manual {
             return;
@@ -510,11 +511,13 @@ impl TradingCore {
             }
             _ => return,
         };
+        let flatten = matches!(env.command, Command::Flatten { .. });
         let covered: Vec<TriggerId> = self
             .triggers
             .live
             .values()
             .filter(|l| &l.view.account == account && contract.is_none_or(|c| c == l.view.contract))
+            .filter(|l| !(flatten && l.view.kind.is_exit()))
             .map(|l| l.view.id)
             .collect();
         let why = match env.command {

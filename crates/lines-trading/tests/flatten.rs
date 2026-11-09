@@ -1,0 +1,552 @@
+//! A Flatten that can't close leaves the protection in place. On a broker honoring reduce-only the
+//! market order goes first and exits stay until the position is flat; on one that doesn't, orders
+//! are cancelled first and the market order waits for the answers. Cancel All is unchanged.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+
+use lines_core::{CivilDate, ContractKey, Month, Price, Qty, Right, Side as BookSide, UtcMillis};
+use lines_feed::catalog;
+use lines_trading::broker::{BrokerEvent, BrokerRequest, BrokerSnapshot};
+use lines_trading::trigger::{TriggerKind, TriggerSpec, TriggerState};
+use lines_trading::{
+    AccountConfig, AccountId, Broker, BrokerCaps, Command, Event, MarketInput, Money, OrderId,
+    OrderKind, OrderSpec, OrderState, PaperBroker, PaperConfig, Side, Source, TradingCore,
+};
+
+const LAT: i64 = 20;
+const CME_OPEN: &str = "2026-11-10T15:00:00Z";
+/// The CME's daily halt, the same day.
+const CME_HALT: &str = "2026-11-10T22:30:00Z";
+const RTH: &str = "2026-11-09T15:00:00Z";
+
+fn es() -> ContractKey {
+    ContractKey::monthly(catalog::ES, 2026, Month::new(12).unwrap())
+}
+fn call() -> ContractKey {
+    ContractKey::option(
+        catalog::SPY,
+        CivilDate::new(2026, 11, 9).unwrap(),
+        Price(68_400),
+        Right::Call,
+    )
+}
+fn spy() -> ContractKey {
+    ContractKey::equity(catalog::SPY)
+}
+fn acct() -> AccountId {
+    AccountId::new("paper-1")
+}
+
+/// The paper broker, optionally saying it doesn't honor reduce-only, and able to hold back cancels.
+struct Venue {
+    inner: PaperBroker,
+    oco: bool,
+    /// Cancels to lose before answering any.
+    lose_cancels: Arc<AtomicUsize>,
+    /// Market orders placed.
+    markets: Arc<AtomicUsize>,
+}
+impl Broker for Venue {
+    fn name(&self) -> &str {
+        "venue"
+    }
+    fn capabilities(&self) -> BrokerCaps {
+        let mut c = self.inner.capabilities();
+        c.oco = self.oco;
+        c
+    }
+    fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
+        match &req {
+            BrokerRequest::Place(o) if matches!(o.kind, OrderKind::Market) => {
+                self.markets.fetch_add(1, Ordering::Relaxed);
+            }
+            BrokerRequest::Cancel { .. } => {
+                let left = self.lose_cancels.load(Ordering::Relaxed);
+                if left > 0 {
+                    self.lose_cancels.store(left - 1, Ordering::Relaxed);
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.inner.request(now, req)
+    }
+    fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput) {
+        self.inner.market(now, contract, input)
+    }
+    fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
+        self.inner.poll(now, out)
+    }
+    fn next_wake(&self) -> Option<UtcMillis> {
+        self.inner.next_wake()
+    }
+    fn snapshot(&self) -> BrokerSnapshot {
+        self.inner.snapshot()
+    }
+    fn simulated(&self) -> bool {
+        true
+    }
+}
+
+struct Rig {
+    core: TradingCore,
+    t: i64,
+    events: Vec<Event>,
+    lose_cancels: Arc<AtomicUsize>,
+    markets: Arc<AtomicUsize>,
+}
+impl Rig {
+    fn new(oco: bool, at: &str) -> Rig {
+        let mut inner = PaperBroker::new(PaperConfig {
+            latency_ms: LAT,
+            ..Default::default()
+        });
+        inner.open_account(acct(), Money::whole(100_000));
+        let lose_cancels = Arc::new(AtomicUsize::new(0));
+        let markets = Arc::new(AtomicUsize::new(0));
+        let mut core = TradingCore::new(Box::new(Venue {
+            inner,
+            oco,
+            lose_cancels: lose_cancels.clone(),
+            markets: markets.clone(),
+        }));
+        core.add_account(AccountConfig::paper("paper-1", 100_000), None);
+        Rig {
+            core,
+            t: UtcMillis::parse_iso(at).unwrap().0,
+            events: Vec::new(),
+            lose_cancels,
+            markets,
+        }
+    }
+    fn now(&self) -> UtcMillis {
+        UtcMillis(self.t)
+    }
+    fn collect(&mut self) {
+        self.events.extend(self.core.drain());
+    }
+    fn cmd(&mut self, c: Command) -> Result<Vec<OrderId>, lines_trading::Reject> {
+        let id = self.core.submit(self.now(), Source::Dom, Instant::now(), c);
+        self.collect();
+        self.events
+            .iter()
+            .find_map(|e| match e {
+                Event::Command { id: i, result, .. } if *i == id => Some(result.clone()),
+                _ => None,
+            })
+            .expect("answered")
+    }
+    fn wait(&mut self, ms: i64) {
+        self.t += ms;
+        self.core.tick(self.now());
+        self.collect();
+    }
+    fn book(&mut self, c: ContractKey, bid: i64) {
+        self.t += 1;
+        let i = [
+            MarketInput::BookClear,
+            MarketInput::Book {
+                side: BookSide::Bid,
+                price: Price(bid),
+                qty: Qty(500),
+            },
+            MarketInput::Book {
+                side: BookSide::Ask,
+                price: Price(bid + 25),
+                qty: Qty(500),
+            },
+        ];
+        self.core.market(self.now(), c, &i);
+        self.collect();
+    }
+    fn long_es(&mut self, q: i64) {
+        self.book(es(), 600_000);
+        self.cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(q),
+            kind: OrderKind::Market,
+        }))
+        .unwrap();
+        self.wait(LAT + 1);
+        assert_eq!(self.core.position(&acct(), es()), q);
+    }
+    fn es_stop(&mut self, q: i64) -> OrderId {
+        let id = self
+            .cmd(Command::PlaceExit(OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Sell,
+                qty: Qty(q),
+                kind: OrderKind::Stop {
+                    trigger: Price(590_000),
+                },
+            }))
+            .unwrap()[0];
+        self.wait(LAT + 1);
+        id
+    }
+    fn flatten(&mut self, c: ContractKey) {
+        self.cmd(Command::Flatten {
+            account: acct(),
+            contract: Some(c),
+        })
+        .unwrap();
+    }
+    fn quote(&mut self, bid: Option<i64>, ask: Option<i64>) {
+        self.t += 1;
+        let time = self.now();
+        self.core.market(
+            self.now(),
+            call(),
+            &[MarketInput::OptionQuote {
+                bid: bid.map(Price),
+                ask: ask.map(Price),
+                last: None,
+                time,
+            }],
+        );
+        self.collect();
+    }
+    fn print(&mut self, cents: i64) {
+        self.t += 1;
+        let time = self.now();
+        self.core.market(
+            self.now(),
+            spy(),
+            &[MarketInput::Trade {
+                price: Price(cents),
+                qty: Qty(1),
+                time,
+            }],
+        );
+        self.collect();
+    }
+    fn long_call(&mut self, q: i64) {
+        self.print(68_300);
+        self.quote(Some(240), Some(242));
+        self.cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: call(),
+            side: Side::Buy,
+            qty: Qty(q),
+            kind: OrderKind::Limit { price: Price(242) },
+        }))
+        .unwrap();
+        self.wait(LAT + 1);
+        assert_eq!(self.core.position(&acct(), call()), q);
+    }
+    fn arm(&mut self, kind: TriggerKind, level: i64) {
+        self.cmd(Command::ArmTrigger(TriggerSpec {
+            account: acct(),
+            contract: call(),
+            kind,
+            level: Price(level),
+        }))
+        .unwrap();
+    }
+    fn state(&self, id: OrderId) -> OrderState {
+        self.core.order(id).unwrap().state.clone()
+    }
+    fn fills(&self, c: ContractKey) -> Vec<(Side, i64, i64)> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Fill(f) if f.contract == c => Some((f.side, f.price.0, f.qty.0)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Long 1 with a Stop, the bid gone, Flatten: the position stays, so the Stop does, and it still
+/// fires when the level is reached.
+#[test]
+fn a_flatten_with_no_bid_keeps_the_stop() {
+    let mut r = Rig::new(true, RTH);
+    r.long_call(1);
+    r.arm(TriggerKind::Stop, 68_200);
+    r.quote(None, Some(242));
+    r.flatten(call());
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 1, "no bid to fill on");
+    assert_eq!(r.core.triggers().count(), 1, "still protected");
+    r.quote(Some(100), Some(102));
+    r.print(68_100);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0, "the Stop closed it");
+    assert_eq!(r.fills(call()).last(), Some(&(Side::Sell, 100, 1)));
+    assert_eq!(r.core.triggers().count(), 0);
+}
+
+/// A Flatten that closes: the exits end by themselves once the position is flat.
+#[test]
+fn a_flatten_that_closes_ends_the_exits() {
+    let mut r = Rig::new(true, RTH);
+    r.long_call(2);
+    r.arm(TriggerKind::Stop, 68_200);
+    r.arm(TriggerKind::Target, 68_500);
+    r.flatten(call());
+    assert_eq!(r.core.triggers().count(), 2, "not until it's flat");
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0);
+    assert_eq!(r.fills(call()).last(), Some(&(Side::Sell, 240, 2)));
+    assert_eq!(r.core.triggers().count(), 0, "closed, so they're over");
+    // A later print through a level does nothing.
+    r.print(68_100);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 0);
+}
+
+/// A Flatten ends an armed entry at once, closing or not: it mustn't reopen what's being closed.
+#[test]
+fn a_flatten_ends_entries_whatever_happens() {
+    let mut r = Rig::new(true, RTH);
+    r.long_call(1);
+    r.arm(TriggerKind::Stop, 68_200);
+    r.arm(
+        TriggerKind::Entry {
+            qty: Qty(1),
+            max_price: Price(300),
+        },
+        68_400,
+    );
+    r.quote(None, Some(242));
+    r.flatten(call());
+    let left: Vec<_> = r.core.triggers().map(|t| t.kind).collect();
+    assert_eq!(left, [TriggerKind::Stop], "the entry went, the Stop didn't");
+    r.wait(LAT + 1);
+    r.quote(Some(240), Some(242));
+    r.print(68_400);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 1, "nothing bought");
+}
+
+/// Cancel All keeps its rule: it ends a position's Stop, and leaves the position.
+#[test]
+fn cancel_all_still_ends_the_stop_and_leaves_the_position() {
+    let mut r = Rig::new(true, RTH);
+    r.long_call(1);
+    r.arm(TriggerKind::Stop, 68_200);
+    r.cmd(Command::CancelAll {
+        account: acct(),
+        contract: Some(call()),
+    })
+    .unwrap();
+    assert_eq!(r.core.triggers().count(), 0);
+    let reason = r.events.iter().rev().find_map(|e| match e {
+        Event::Trigger(t) if t.state == TriggerState::Ended => t.reason.clone(),
+        _ => None,
+    });
+    assert_eq!(reason.as_deref(), Some("you canceled all"));
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), call()), 1);
+
+    // On futures too: its stop goes, the position stays.
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(1);
+    let stop = r.es_stop(1);
+    r.cmd(Command::CancelAll {
+        account: acct(),
+        contract: Some(es()),
+    })
+    .unwrap();
+    r.wait(LAT + 1);
+    assert_eq!(r.state(stop), OrderState::Cancelled);
+    assert_eq!(r.core.position(&acct(), es()), 1);
+}
+
+/// Flatten in the CME's daily halt: the market order is refused, the stop stays.
+#[test]
+fn a_flatten_in_a_halt_keeps_the_stop() {
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(2);
+    let stop = r.es_stop(2);
+    r.t = UtcMillis::parse_iso(CME_HALT).unwrap().0;
+    r.flatten(es());
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert!(r.core.order(stop).unwrap().is_open(), "{:?}", r.state(stop));
+    assert_eq!(r.core.open_orders(&acct()).count(), 1, "the stop alone");
+}
+
+/// A Flatten that closes futures: the market order goes first, fills, and the stop is cleaned up.
+/// A plain working order goes at once: it isn't protection, and could reopen the position.
+#[test]
+fn a_flatten_that_closes_cleans_up_after_itself() {
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(2);
+    let stop = r.es_stop(2);
+    r.book(es(), 600_000);
+    let plain = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(601_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    r.flatten(es());
+    assert!(
+        r.core.order(stop).unwrap().is_open(),
+        "not before it's flat"
+    );
+    r.wait(LAT + 1);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    assert_eq!(r.state(plain), OrderState::Cancelled);
+    assert!(!r.core.order(stop).unwrap().is_open(), "flat: cleaned up");
+    assert_eq!(r.core.open_orders(&acct()).count(), 0);
+    assert_eq!(
+        r.markets.load(Ordering::Relaxed),
+        2,
+        "one to open, one to close"
+    );
+}
+
+/// An exit older than the Flatten doesn't hold the position's budget against it, and the Flatten
+/// doesn't take it from the exit: the market order fills, and until then the exit still covers.
+#[test]
+fn a_flatten_and_an_exit_dont_compete_for_the_position() {
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(2);
+    let target = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: OrderKind::Limit {
+                price: Price(610_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    r.flatten(es());
+    r.wait(LAT + 1);
+    assert_eq!(
+        r.core.position(&acct(), es()),
+        0,
+        "the older exit didn't block it"
+    );
+    assert_eq!(r.state(target), OrderState::Cancelled);
+    let sold: i64 = r
+        .fills(es())
+        .iter()
+        .filter(|f| f.0 == Side::Sell)
+        .map(|f| f.2)
+        .sum();
+    assert_eq!(sold, 2, "closed once");
+}
+
+/// A broker that doesn't honor reduce-only: orders go first, and the market order only after the
+/// answers, so a working exit can't fill too and reverse the position.
+#[test]
+fn without_reduce_only_the_market_order_waits_for_the_cancels() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(2);
+    // `PlaceExit` needs OCO: a plain working sell stands in for what could fill too.
+    r.book(es(), 600_000);
+    let plain = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(2),
+            kind: OrderKind::Limit {
+                price: Price(601_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    let before = r.markets.load(Ordering::Relaxed);
+    r.flatten(es());
+    assert_eq!(r.markets.load(Ordering::Relaxed), before, "not yet");
+    // Asked again while it waits: still one.
+    r.flatten(es());
+    r.wait(LAT + 1);
+    assert_eq!(r.state(plain), OrderState::Cancelled);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1, "now");
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0, "closed, not reversed");
+}
+
+/// With nothing else working, it doesn't wait for anything.
+#[test]
+fn without_reduce_only_and_nothing_working_it_goes_at_once() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(1);
+    let before = r.markets.load(Ordering::Relaxed);
+    r.flatten(es());
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// A venue that never answers a cancel can't hold the exit back forever.
+#[test]
+fn a_lost_cancel_doesnt_hold_the_flatten_back() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(1);
+    r.book(es(), 600_000);
+    r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: OrderKind::Limit {
+            price: Price(601_000),
+        },
+    }))
+    .unwrap();
+    r.wait(LAT + 1);
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    let before = r.markets.load(Ordering::Relaxed);
+    r.flatten(es());
+    r.wait(LAT + 1);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before, "still waiting");
+    let wake = r.core.next_wake().expect("a time to stop waiting");
+    assert!(wake.0 > r.t && wake.0 - r.t <= 5_000);
+    r.t = wake.0;
+    r.wait(0);
+    assert_eq!(r.markets.load(Ordering::Relaxed), before + 1);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// While it waits an exit may close the position: nothing more goes.
+#[test]
+fn a_position_closed_while_waiting_sends_nothing() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(1);
+    r.book(es(), 600_000);
+    r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: es(),
+        side: Side::Sell,
+        qty: Qty(1),
+        kind: OrderKind::Limit {
+            price: Price(600_000),
+        },
+    }))
+    .unwrap();
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.flatten(es());
+    let before = r.markets.load(Ordering::Relaxed);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0, "the sell filled");
+    r.wait(6_000);
+    assert_eq!(
+        r.markets.load(Ordering::Relaxed),
+        before,
+        "nothing to close"
+    );
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
