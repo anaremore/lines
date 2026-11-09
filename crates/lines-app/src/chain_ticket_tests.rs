@@ -675,8 +675,8 @@ fn a_when_ticket_arms_an_entry_with_its_max() {
     assert!(!close.can_be_when());
 }
 
-/// Keys go to the field in use. The level never reads as nothing while it's typed: its line
-/// doesn't vanish. (A half-typed one is far from the market, which `chain_lines` refuses.)
+/// Keys go to the field in use. The level never reads as nothing while it's typed, so its line
+/// doesn't vanish; it can be far off, which `chain_lines` won't arm.
 #[test]
 fn a_when_tickets_keys_go_to_the_field_in_use() {
     let p = catalog::get(catalog::SPY).unwrap();

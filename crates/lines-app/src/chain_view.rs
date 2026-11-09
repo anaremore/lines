@@ -94,7 +94,7 @@ const MARKER_H: f32 = MIN_HIT;
 /// How far from a line a press takes hold of it.
 const LINE_GRAB: f32 = 4.0;
 /// A line's tag.
-const TAG_H: f32 = 18.0;
+const TAG_H: f32 = MIN_HIT;
 /// The armed rows' most height before they scroll.
 const ARMED_MAX_H: f32 = 200.0;
 /// Expiry chips in the header.
@@ -409,8 +409,10 @@ pub struct ChainView {
     tag_money: Option<f64>,
     /// A press on the armed rows waits for the pointer after they change.
     rows_guard: crate::chain_lines::RowsGuard,
+    /// The last Flatten took a position's Stop, for what it says if it can't fill.
+    flatten_took_stop: bool,
     /// A moved entry's next step: its cancel's id, and the arm that waits for that answer.
-    moving_entry: Option<(CommandId, lines_trading::Command)>,
+    moving_entry: Option<(CommandId, crate::chain_lines::Line, Price)>,
     /// Its arm, once sent, whose refusal means the entry is gone.
     moved_entry: Option<CommandId>,
     /// The triggers as last seen, so a busy instant redraws them rather than dropping the rows.
@@ -472,6 +474,8 @@ struct LineDrag {
     line: crate::chain_lines::Line,
     to: Price,
     refused: Option<&'static str>,
+    /// Where it was taken hold of.
+    press_y: f32,
 }
 
 /// What the account has on one option series.
@@ -939,6 +943,7 @@ impl ChainView {
             seen_ended: None,
             tag_money: None,
             rows_guard: crate::chain_lines::RowsGuard::default(),
+            flatten_took_stop: false,
             moving_entry: None,
             moved_entry: None,
             armed_views: Vec::new(),
@@ -1411,19 +1416,13 @@ impl ChainView {
         // so and let the press be repeated (the lock is held only for an update).
         // The owner's ruling: Cancel all takes armed triggers and leaves the position. When that
         // takes a position's Stop, the screen says the position has none now.
-        let Some((contracts, no_stop)) = self.trade.try_cache().map(|st| {
+        let Some((contracts, removed)) = self.trade.try_cache().map(|st| {
             let contracts = ticket::held_contracts(&st, &account, self.product.id);
-            let no_stop = if flatten {
-                None
-            } else {
-                crate::chain_lines::no_stop_message(&crate::chain_lines::stops_removed(
-                    st.triggers(),
-                    &account,
-                    &contracts,
-                    |c| st.position(&account, c).map_or(0, |p| p.qty),
-                ))
-            };
-            (contracts, no_stop)
+            let removed =
+                crate::chain_lines::stops_removed(st.triggers(), &account, &contracts, |c| {
+                    st.position(&account, c).map_or(0, |p| p.qty)
+                });
+            (contracts, removed)
         }) else {
             self.note = Some(format!("{what}: trading state busy; press again"));
             cx.notify();
@@ -1439,9 +1438,11 @@ impl ChainView {
             let id = t.submit(source, std::time::Instant::now(), cmd);
             self.remember(id);
         }
-        if let Some(m) = no_stop {
+        if !flatten && let Some(m) = crate::chain_lines::no_stop_message(&removed) {
             self.note = Some(m);
         }
+        self.flatten_took_stop = flatten && !removed.is_empty();
+        self.line_drag = None;
         self.drafts.clear();
         // What's on its way doesn't come back after this.
         self.moving_entry = None;
@@ -1639,7 +1640,11 @@ impl ChainView {
 
     /// The ticket to "When SPY" or back.
     fn set_when(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.ticket.as_ref().is_some_and(|t| t.when.is_some() == on) {
+        if self
+            .ticket
+            .as_ref()
+            .is_some_and(|t| t.when.is_some() == on || t.sent.is_some())
+        {
             return;
         }
         let (Some(rules), Some(key)) = (self.rules(), self.ticket.as_ref().map(|t| t.key)) else {
@@ -1759,14 +1764,24 @@ impl ChainView {
         let cancel = self
             .moving_entry
             .as_ref()
-            .and_then(|(id, _)| st.result(*id).cloned());
+            .and_then(|(id, ..)| st.result(*id).cloned());
         let arm = self.moved_entry.and_then(|id| st.result(id).cloned());
         drop(st);
         if let Some(answer) = cancel {
             let waiting = self.moving_entry.take();
             if crate::chain_lines::arm_after_cancel(&answer) {
-                if let Some((_, arm)) = waiting {
-                    self.moved_entry = self.submit(arm, cx);
+                if let (Some((_, line, to)), Some(account)) = (waiting, self.trade.account.clone())
+                {
+                    // The market may have moved since the release: asked once more, so it keeps
+                    // the way it fired.
+                    if let Some(why) = crate::chain_lines::refusal(&line, to, &self.around(&line)) {
+                        self.note = Some(format!(
+                            "The Entry's move was refused, so it's no longer armed: {why}"
+                        ));
+                    } else {
+                        let arm = crate::chain_lines::arm(account, &line, to);
+                        self.moved_entry = self.submit(arm, cx);
+                    }
                 }
             } else if let Err(e) = answer {
                 self.note = Some(format!("The Entry wasn't moved: {}", e.message));
@@ -1823,16 +1838,23 @@ impl ChainView {
     }
 
     /// Take hold of a line.
-    fn grab_line(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn grab_line(&mut self, n: usize, press_y: f32, window: &mut Window, cx: &mut Context<Self>) {
         let Some(line) = self.lines.get(n).copied().filter(|l| l.draggable()) else {
             return;
         };
+        // What's on its way to arm is what the core has: it holds until the answer.
+        if line.source == crate::chain_lines::LineSource::Ticket
+            && self.ticket.as_ref().is_some_and(|t| t.sent.is_some())
+        {
+            return;
+        }
         self.focus.focus(window, cx);
         self.note = None;
         self.line_drag = Some(LineDrag {
             line,
             to: line.level,
             refused: None,
+            press_y,
         });
         cx.notify();
     }
@@ -1851,10 +1873,18 @@ impl ChainView {
         let Some(scale) = self.chart_scale(cx) else {
             return;
         };
-        let y = f64::from(f(ev.position.y) - scale.plot_top);
-        let price = scale.vp.y_to_price(y.clamp(0.0, scale.vp.height));
-        let to = crate::chain_lines::snap(price, self.product.price.tick);
-        let refused = crate::chain_lines::refusal(&drag.line, to, &self.around(&drag.line));
+        let at =
+            crate::chain_lines::dragged_y(scale.y(drag.line.level), drag.press_y, f(ev.position.y));
+        // Under the threshold it's a click so far: the line stays where it was.
+        let (to, refused) = match at {
+            None => (drag.line.level, None),
+            Some(y) => {
+                let y = f64::from(y - scale.plot_top).clamp(0.0, scale.vp.height);
+                let to = crate::chain_lines::snap(scale.vp.y_to_price(y), self.product.price.tick);
+                let refused = crate::chain_lines::refusal(&drag.line, to, &self.around(&drag.line));
+                (to, refused)
+            }
+        };
         self.line_drag = Some(LineDrag {
             to,
             refused,
@@ -1912,9 +1942,9 @@ impl ChainView {
                 let (first, then) = (cmds.next(), cmds.next());
                 match (first, then) {
                     // An entry: the arm waits for the answer to its cancel.
-                    (Some(cancel), Some(arm)) => {
+                    (Some(cancel), Some(_)) => {
                         if let Some(id) = self.submit(cancel, cx) {
-                            self.moving_entry = Some((id, arm));
+                            self.moving_entry = Some((id, drag.line, drag.to));
                         }
                     }
                     (Some(arm), None) => self.ask(arm, cx),
@@ -2112,10 +2142,15 @@ impl ChainView {
                     false
                 }
                 OrderState::Cancelled if flatten => {
-                    note = Some(
-                        "Flatten found no usable quote on its side: the position is still open"
-                            .to_owned(),
-                    );
+                    // Flatten already took its triggers: what it leaves has no stop.
+                    let stop = if self.flatten_took_stop {
+                        " with no stop"
+                    } else {
+                        ""
+                    };
+                    note = Some(format!(
+                        "Flatten found no usable quote on its side: the position is still open{stop}"
+                    ));
                     false
                 }
                 OrderState::Submitted => true,
@@ -2320,7 +2355,12 @@ impl ChainView {
         // Kept: the first frames' layout counts as the plot moving, which ends a drag.
         if let Some(line) = found {
             let refused = crate::chain_lines::refusal(&line, to, &self.around(&line));
-            self.line_drag = Some(LineDrag { line, to, refused });
+            self.line_drag = Some(LineDrag {
+                line,
+                to,
+                refused,
+                press_y: 0.0,
+            });
         }
     }
 
@@ -2555,7 +2595,7 @@ impl ChainView {
                 .take(self.lines.len())
                 .position(|y| (y - py).abs() <= LINE_GRAB);
             if let Some(n) = near {
-                self.grab_line(n, window, cx);
+                self.grab_line(n, py, window, cx);
                 return;
             }
         }
@@ -3443,6 +3483,7 @@ impl ChainView {
             scale.bottom(),
         );
         let t = self.theme;
+        let before = self.tag_boxes;
         for k in 0..shown {
             let line = self.lines[order[k]];
             let mut s = FixedStr::<128>::new();
@@ -3466,6 +3507,10 @@ impl ChainView {
             self.glyphs
                 .paint(s.as_str(), x + PAD, y, TAG_H, t.text_main, true, window, cx);
             self.tag_boxes[order[k]] = (x - x0, y, w);
+        }
+        // The handles are built before this paints: a tag that moved needs them built again.
+        if self.tag_boxes != before {
+            window.on_next_frame(|window, _| window.refresh());
         }
     }
 
@@ -4923,6 +4968,9 @@ impl Render for ChainView {
                                 v.rows_moved();
                                 window.on_next_frame(|window, _| window.refresh());
                             }
+                            if v.foot_top != top {
+                                v.rows_guard.moved_under_pointer();
+                            }
                             v.foot_top = top;
                         });
                     },
@@ -4968,9 +5016,9 @@ impl Render for ChainView {
                     .cursor_row_resize()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.grab_line(n, window, cx);
+                            this.grab_line(n, f(ev.position.y), window, cx);
                         }),
                     )
             };

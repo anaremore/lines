@@ -234,7 +234,8 @@ impl Ticket {
         true
     }
 
-    /// What's typed so far, if it reads; the last good level otherwise, so a line never jumps.
+    /// What's typed so far, if it reads; the last that read otherwise, so the line stays. It can
+    /// be far off while it's typed: `chain_lines::refusal` won't arm that.
     fn read_level(&mut self, product: &Product) {
         self.refused = None;
         if let Some(l) = self

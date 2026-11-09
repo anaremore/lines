@@ -218,6 +218,17 @@ pub fn default_entry_level(right: Right, last: Price, tick: i64) -> Price {
     }
 }
 
+/// How far a pointer must move before a press on a line is a drag: less is a click, as on a chart
+/// order's tag, and sends nothing.
+pub const DRAG_PX: f32 = 4.0;
+
+/// Where a dragged line's y goes: it keeps its distance from the pointer, wherever it was taken
+/// hold of (a tag can sit away from its line). `None`: not moved enough to be a drag.
+pub fn dragged_y(line_y: f32, press_y: f32, pointer_y: f32) -> Option<f32> {
+    let delta = pointer_y - press_y;
+    (delta.abs() >= DRAG_PX).then_some(line_y + delta)
+}
+
 /// The price nearest `price` on the underlying's grid.
 pub fn snap(price: f64, tick: i64) -> Price {
     let tick = tick.max(1);
@@ -342,6 +353,11 @@ impl RowsGuard {
 
     pub fn pointer_moved(&mut self) {
         self.changed = false;
+    }
+
+    /// The rows moved without changing: something below them grew, or a row wrapped.
+    pub fn moved_under_pointer(&mut self) {
+        self.changed = true;
     }
 
     /// Whether a press now means what's under it.
@@ -729,6 +745,25 @@ mod tests {
         assert!(!g.may_press(), "a draft came");
         g.pointer_moved();
         assert!(g.may_press());
+        g.moved_under_pointer();
+        assert!(!g.may_press(), "the same rows in another place");
+        g.pointer_moved();
+        assert!(g.may_press());
+    }
+
+    /// A click with a little jitter moves nothing, and a tag taken away from its line doesn't
+    /// jump the line to the pointer.
+    #[test]
+    fn a_drag_starts_past_the_threshold_and_keeps_its_offset() {
+        assert_eq!(dragged_y(300.0, 330.0, 330.0), None, "still");
+        assert_eq!(dragged_y(300.0, 330.0, 331.0), None, "jitter");
+        assert_eq!(dragged_y(300.0, 330.0, 326.5), None, "under the threshold");
+        assert_eq!(dragged_y(300.0, 330.0, 326.0), Some(296.0));
+        assert_eq!(
+            dragged_y(300.0, 330.0, 350.0),
+            Some(320.0),
+            "keeps its 30 px"
+        );
     }
 
     #[test]
