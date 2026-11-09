@@ -236,6 +236,13 @@ impl Pane for DomView {
     }
 
     fn changed(&mut self) -> bool {
+        // A source can refuse depth while the feed runs (read here, off the paint path).
+        if let Some(d) = self.store.try_read() {
+            self.has_depth = d.capabilities.depth;
+            if d.depth_note != self.depth_note {
+                self.depth_note.clone_from(&d.depth_note);
+            }
+        }
         let shown = self.cols.set.is_shown(DomCol::Trail.index());
         self.trade.changed() | self.trail.wants_frame(&self.store, shown)
     }
@@ -251,6 +258,7 @@ impl Pane for DomView {
             let d = self.store.read();
             self.product = d.product.clone();
             self.has_depth = d.capabilities.depth;
+            self.depth_note.clone_from(&d.depth_note);
         }
         let follow = feed.sub.is_some();
         self.orders = OrdersLayer::default();
@@ -279,9 +287,13 @@ impl DomView {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = feed.store().clone();
-        let (product, has_depth) = {
+        let (product, has_depth, depth_note) = {
             let d = store.read();
-            (d.product.clone(), d.capabilities.depth)
+            (
+                d.product.clone(),
+                d.capabilities.depth,
+                d.depth_note.clone(),
+            )
         };
         pane::watch_store(cx);
         if feed.sub.is_some()
@@ -304,7 +316,7 @@ impl DomView {
             seen_revision: u64::MAX,
             product,
             has_depth,
-            depth_note: None,
+            depth_note,
             grouping: opts.grouping.max(1),
             view: LadderView::default(),
             rows: Vec::with_capacity(MAX_ROWS),
@@ -433,14 +445,7 @@ impl DomView {
     }
 
     fn visible_rows(&self) -> usize {
-        // A source's note about its book takes one row under the ladder.
-        let note = if self.depth_note.is_some() {
-            ROW_H
-        } else {
-            0.0
-        };
-        (((f(self.bounds.size.height) - HEADER_ROW_H - note) / ROW_H).floor() as usize)
-            .clamp(1, MAX_ROWS)
+        (((f(self.bounds.size.height) - HEADER_ROW_H) / ROW_H).floor() as usize).clamp(1, MAX_ROWS)
     }
 
     /// A window position in table coordinates (from the header row's top-left).
@@ -908,11 +913,6 @@ impl DomView {
             !self.frozen && window.is_window_hovered() && bounds.contains(&window.mouse_position());
         let units = self.row_units();
         if let Some(d) = self.store.try_read() {
-            // A source can refuse depth while the feed runs. Copied only when it changes.
-            self.has_depth = d.capabilities.depth;
-            if d.depth_note != self.depth_note {
-                self.depth_note.clone_from(&d.depth_note);
-            }
             self.trail.prepare(&d, units, self.store.feed_clock());
             let inside = inside_row(&d.book, d.last_trade, units);
             self.view.follow(inside, rows, hovered);
@@ -1188,15 +1188,24 @@ impl DomView {
             );
         }
         self.cols.paint_rules(&t, body, window);
-        // A thin book must not read as the market's real depth: say so, under the last row.
-        let note_y = oy + self.rows.len() as f32 * ROW_H;
+        // A thin book must not read as the market's real depth: say so on the bottom row, so
+        // no price the trader aims at moves when the note comes or goes.
         if let Some(note) = self.depth_note.as_deref()
-            && note_y + ROW_H <= top + h + 0.5
+            && let Some(last) = self.rows.len().checked_sub(1).filter(|&n| n > 0)
         {
-            window.paint_quad(fill(rect(ox, note_y, w, ROW_H), t.bg));
-            crate::layout_rec::set_owner("dom-note");
-            self.glyphs
-                .paint(note, ox + PAD, note_y, ROW_H, t.text_dim, false, window, cx);
+            let note_y = oy + last as f32 * ROW_H;
+            window.paint_quad(fill(rect(ox, note_y, w, top + h - note_y), t.bg));
+            crate::layout_rec::set_owner("dom-price");
+            self.glyphs.paint(
+                note,
+                table_l + PAD,
+                note_y,
+                ROW_H,
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
             crate::layout_rec::set_owner("");
         }
     }
@@ -1295,7 +1304,6 @@ fn ladder_shows(has_panel: bool, rows_ladder: bool, height: f32) -> bool {
     (!has_panel || rows_ladder) && height >= trade_bar::LADDER_MIN_H
 }
 
-/// The trail column is shown exactly while the trail is on (unless a saved file hid it).
 /// What an empty ladder says: the source's reason if it gave one.
 fn empty_ladder_text(has_depth: bool, note: Option<&str>) -> &str {
     match note {
@@ -1304,6 +1312,8 @@ fn empty_ladder_text(has_depth: bool, note: Option<&str>) -> &str {
         None => "no depth from this source",
     }
 }
+
+/// The trail column is shown exactly while the trail is on (unless a saved file hid it).
 
 fn sync_trail_column(cols: &mut Columns, trail: &DomTrail, hidden: bool) {
     let i = DomCol::Trail.index();

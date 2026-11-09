@@ -110,11 +110,27 @@ pub fn from_events(events: &[MarketEvent]) -> Vec<MarketInput> {
             MarketEvent::BookLevel {
                 side, price, qty, ..
             } => Some(MarketInput::Book { side, price, qty }),
-            MarketEvent::BookClear => Some(MarketInput::BookClear),
+            // A source dropping its depth empties the book: paper never fills against levels
+            // the feed no longer shows.
+            MarketEvent::BookClear | MarketEvent::DepthUnavailable { .. } => {
+                Some(MarketInput::BookClear)
+            }
             MarketEvent::Bid(p) => Some(MarketInput::Bid(p)),
             MarketEvent::Ask(p) => Some(MarketInput::Ask(p)),
             MarketEvent::LastPrice(p) => Some(MarketInput::Last(p)),
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    #[test]
+    fn a_source_dropping_depth_clears_the_paper_book() {
+        let reason = "Top of book only".to_owned();
+        let inputs = from_events(&[MarketEvent::DepthUnavailable { reason }]);
+        assert!(matches!(inputs[..], [MarketInput::BookClear]), "{inputs:?}");
+    }
 }
