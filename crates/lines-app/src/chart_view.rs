@@ -2001,11 +2001,15 @@ impl ChartView {
             let el = if dim { el.opacity(0.4) } else { el };
             strip = strip.child(el.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |v, _, window, cx| {
+                cx.listener(move |v, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     // The chart takes focus, so Esc reaches an armed pick.
                     v.focus.focus(window, cx);
-                    v.strip_pressed(o, cx);
+                    // Recorded for what's pressed next; its verdict can't refuse more than this.
+                    let _ = crate::popover::second_press(ev.click_count, ev.position);
+                    if crate::chart_trade::strip_press_acts(o, ev.click_count) {
+                        v.strip_pressed(o, cx);
+                    }
                 }),
             ));
         }

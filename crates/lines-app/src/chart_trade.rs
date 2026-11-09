@@ -511,6 +511,19 @@ pub const LINK_TO_TRADE: &str = "Link this chart to a DOM to place orders from i
 /// A strip order with no linked DOM enabled.
 pub const ENABLE_TO_ORDER: &str = "Enable trading on the linked DOM to place orders from the chart";
 
+/// Whether a press on a strip button acts. A market button sends at once, so never on a
+/// double-click's second: one double-click on BUY MKT is one market order, not two (and two
+/// brackets with a bracket on). `popover::second_press` isn't enough here: it lets a second press
+/// on the same spot through. So two quick presses within the system's double-click time are one
+/// order; after a pause, each is its own. A limit button only arms a pick and a press on it again
+/// disarms it, so it always acts: a quick change of mind must not leave a pick armed.
+pub fn strip_press_acts(o: StripOrder, click_count: usize) -> bool {
+    match o {
+        StripOrder::BuyMarket | StripOrder::SellMarket => click_count <= 1,
+        StripOrder::BuyLimit | StripOrder::SellLimit => true,
+    }
+}
+
 /// The command for a strip button: the DOM's own intents (market as its BUY/SELL MKT, a limit
 /// as a click in its bid/ask column at that price), with the chart's quantity and bracket. A
 /// chart shows no switch: the window sends this only when a linked DOM has trading enabled,
@@ -840,6 +853,21 @@ mod tests {
         assert_eq!(tag(&entry, &g), "Buy lmt 3 ×3 @ 5790.00");
         let g = group(MIXED_KEY, 5, 5, 5790.00, 5823.00, 0);
         assert_eq!(tag(&target, &g), "Orders 5 ×5 @ 5790.00–5823.00");
+    }
+
+    /// One double-click on a market button is one order, however long the run; a press after a
+    /// pause counts 1. A limit button only arms, and a second press must still disarm.
+    #[test]
+    fn a_double_click_sends_one_market_order_and_a_limit_can_still_disarm() {
+        for o in [StripOrder::BuyMarket, StripOrder::SellMarket] {
+            assert!(strip_press_acts(o, 1), "the first");
+            assert!(!strip_press_acts(o, 2), "a double-click's second");
+            assert!(!strip_press_acts(o, 3), "nor a third");
+        }
+        for o in [StripOrder::BuyLimit, StripOrder::SellLimit] {
+            assert!(strip_press_acts(o, 1));
+            assert!(strip_press_acts(o, 2), "a change of mind disarms");
+        }
     }
 
     /// Cancel all takes two presses, and the second answers the count on screen: an order
