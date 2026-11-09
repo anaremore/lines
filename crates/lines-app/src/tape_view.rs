@@ -1,6 +1,6 @@
 //! The time & sales pane (roadmap 5): the newest prints, newest on top.
 //!
-//! Each row: time (UTC, ms), price, size, and the aggressor shown by colour *and* a marker
+//! Each row: time (the display zone, ms), price, size, and the aggressor shown by colour *and* a marker
 //! (▲ buyer lifted the offer, ▼ seller hit the bid, · unknown), so it never relies on colour
 //! alone (docs/design.md §4). Prints at or above the large-print size get a highlighted row
 //! and bold text.
@@ -110,9 +110,11 @@ impl Pane for TapeView {
         &mut self.seen_revision
     }
 
-    /// Prints only: depth below the touch doesn't change the tape.
+    /// Prints only (depth below the touch doesn't change the tape), and the display zone.
     fn revision(&self) -> u64 {
-        self.store.chart_revision()
+        self.store
+            .chart_revision()
+            .wrapping_add(lines_core::display_tz::epoch() << 48)
     }
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
@@ -320,15 +322,21 @@ impl TapeView {
         let fmt = self.product.price;
         let qf = self.product.qty;
         let mut s = FixedStr::<48>::new();
+        let zone = lines_core::display_tz::current();
 
         // What each column must hold this frame: its title and its widest text (large prints
         // are bold, the wider face). Columns are laid out from these: never narrower.
+        self.cols.name_zone(
+            self.prints
+                .first()
+                .map_or_else(lines_feed::now_utc, |p| p.time),
+        );
         self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
         let n = self.prints.len().min(rows);
         for i in 0..n {
             let p = self.prints[i];
             s.clear();
-            let _ = write_tape_time(p.time, &mut s);
+            let _ = write_tape_time(p.time, &zone, &mut s);
             let tw = self.glyphs.width(s.as_str(), t.text_dim, false, window);
             self.cols.need(TapeCol::Time.index(), tw, PAD);
             s.clear();
@@ -391,7 +399,7 @@ impl TapeView {
             };
             if let Some((x, _)) = time {
                 s.clear();
-                let _ = write_tape_time(p.time, &mut s);
+                let _ = write_tape_time(p.time, &zone, &mut s);
                 self.glyphs
                     .paint(s.as_str(), x + PAD, y, ROW_H, t.text_dim, false, window, cx);
             }

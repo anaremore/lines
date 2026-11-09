@@ -311,6 +311,9 @@ pub enum Table {
     Journal,
 }
 
+/// The Time header's room: "Time " and the longest zone name (a city: "DumontDUrville").
+const TIME_HEADER_CAP: usize = 40;
+
 /// A pane's columns: the trader's choices, this frame's layout, and what the content needs.
 #[derive(Clone, Debug)]
 pub struct Columns {
@@ -322,6 +325,9 @@ pub struct Columns {
     pub needed: [f32; MAX_COLS],
     /// A divider being dragged.
     pub drag: Option<Drag>,
+    /// The Time column's header with the display zone ("Time ET"; [`Columns::name_zone`]).
+    /// Kept within its capacity, so writing it each frame never allocates.
+    time_header: String,
 }
 
 /// A divider drag, kept absolute (start width + pointer offset) so moves that arrive between
@@ -361,6 +367,21 @@ impl Columns {
             cells: [Cell::default(); MAX_COLS],
             needed: [0.0; MAX_COLS],
             drag: None,
+            time_header: String::with_capacity(TIME_HEADER_CAP),
+        }
+    }
+
+    /// Name the display zone in the Time column's header ("Time ET", "Time Chicago"): a time
+    /// & sales or journal pane on its own still says which clock its times are on. A name that
+    /// holds all year (`DisplayTz::write_name`): the rows can span a DST change. `at` only for
+    /// a zone without a name.
+    pub fn name_zone(&mut self, at: lines_core::UtcMillis) {
+        let mut label = lines_core::FixedStr::<{ TIME_HEADER_CAP - 5 }>::new();
+        let _ = lines_core::display_tz::current().write_name(at, &mut label);
+        if self.time_header.get(5..) != Some(label.as_str()) {
+            self.time_header.clear();
+            self.time_header.push_str("Time ");
+            self.time_header.push_str(label.as_str());
         }
     }
 
@@ -582,8 +603,13 @@ impl Columns {
         }
     }
 
-    fn header(&self, i: usize) -> &'static str {
+    fn header(&self, i: usize) -> &str {
         match self.column(i) {
+            Some(Column::Tape(TapeCol::Time) | Column::Journal(JournalCol::Time))
+                if !self.time_header.is_empty() =>
+            {
+                self.time_header.as_str()
+            }
             Some(Column::Dom(c)) => c.header(),
             Some(Column::Tape(c)) => c.header(),
             Some(Column::Journal(c)) => c.header(),
@@ -746,6 +772,21 @@ impl Columns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_time_header_names_the_display_zone() {
+        let mut c = Columns::new(Table::Tape);
+        let time = (0..c.set.len())
+            .find(|&i| c.column(i) == Some(Column::Tape(TapeCol::Time)))
+            .unwrap();
+        assert_eq!(c.header(time), "Time", "before a zone is named");
+        // The process-wide zone is UTC in tests (only the app sets it).
+        c.name_zone(lines_core::UtcMillis(0));
+        assert_eq!(c.header(time), "Time UTC");
+        let cap = c.time_header.capacity();
+        c.name_zone(lines_core::UtcMillis(1));
+        assert_eq!(c.time_header.capacity(), cap, "no reallocation");
+    }
 
     #[test]
     fn dom_defaults_show_the_orders_column() {

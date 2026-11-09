@@ -650,8 +650,12 @@ impl LevelsLayer {
                         (format!("stale · {}", age(age_ms)), true)
                     }
                     (LevelStatus::Current, Some(m)) => {
-                        let (_, _, _, h, mi, _) = m.as_of.to_civil();
-                        (format!("as of {h:02}:{mi:02}Z"), false)
+                        let mut s = "as of ".to_owned();
+                        let zone = lines_core::display_tz::current();
+                        let _ = zone.write_hhmm(m.as_of, &mut s);
+                        s.push(' ');
+                        let _ = zone.write_label(m.as_of, &mut s);
+                        (s, false)
                     }
                     (LevelStatus::Current, None) => (String::new(), false),
                 };

@@ -206,18 +206,17 @@ pub(crate) fn decimal(v: f64, den: i64) -> String {
     }
 }
 
-/// `11-05 14:31:07` (UTC, like the chart's axis).
+/// `11-05 14:31:07` on the display zone's clock (like the chart's axis).
 pub fn clock_text(t: UtcMillis) -> String {
-    let d = CivilDate::from_utc(t);
-    let s = t.0.rem_euclid(86_400_000) / 1000;
-    format!(
-        "{:02}-{:02} {:02}:{:02}:{:02}",
-        d.month,
-        d.day,
-        s / 3600,
-        s / 60 % 60,
-        s % 60
-    )
+    let (_, mo, d, h, mi, s) = lines_core::display_tz::current().civil(t);
+    format!("{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
+/// The display zone's label at `t` ("ET", "UTC", "CET").
+pub fn zone_text(t: UtcMillis) -> String {
+    let mut s = String::new();
+    let _ = lines_core::display_tz::current().write_label(t, &mut s);
+    s
 }
 
 /// `45s`, `2m 05s`, `1h 03m`.
@@ -885,7 +884,9 @@ impl JournalView {
             &self.badges,
         );
         self.stats_today = stats_items(
-            &format!("Today {today}"),
+            // The trade date the stats count (the exchange's), not the display zone's day: a
+            // Tokyo evening trade is the next morning there. It says whose date it is.
+            &format!("Trade date {today} (exchange)"),
             &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
             snap.open,
             mode,
@@ -1070,6 +1071,7 @@ impl JournalView {
             self.paint_groups(bounds, hair, window, cx);
             return;
         }
+        self.cols.name_zone(lines_feed::now_utc());
         self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
         let rows = self.visible_rows();
         let end = (self.scroll + rows).min(self.rows.len());
@@ -1749,15 +1751,15 @@ mod tests {
         let j = Journal::from_records([Record::Trade(Box::new(trade()))]);
         let s = j.stats(|_| true);
         assert_eq!(
-            stats_text("Today 2026-11-05", &s, 1, PnlDisplay::Both),
-            "Today 2026-11-05: 1 trade  ·  net +$310.02  ·  max drawdown $0.00  ·  win 100%  ·  avg win +$310.02  ·  avg loss —  ·  expectancy +$310.02  ·  profit factor —  ·  1 win in a row  ·  1 open"
+            stats_text("Trade date 2026-11-05", &s, 1, PnlDisplay::Both),
+            "Trade date 2026-11-05: 1 trade  ·  net +$310.02  ·  max drawdown $0.00  ·  win 100%  ·  avg win +$310.02  ·  avg loss —  ·  expectancy +$310.02  ·  profit factor —  ·  1 win in a row  ·  1 open"
         );
         // Net P&L is the loudest item, colored by its sign (and signed).
         let items = stats_items("Today", &s, 0, PnlDisplay::Both);
         assert!(items[1].strong && items[1].tone == 1);
         assert_eq!(
-            stats_text("Today 2026-11-05", &s, 0, PnlDisplay::Off),
-            "Today 2026-11-05: 1 trade  ·  win 100%  ·  1 win in a row"
+            stats_text("Trade date 2026-11-05", &s, 0, PnlDisplay::Off),
+            "Trade date 2026-11-05: 1 trade  ·  win 100%  ·  1 win in a row"
         );
         assert_eq!(
             stats_text("All dates", &Stats::default(), 0, PnlDisplay::Both),

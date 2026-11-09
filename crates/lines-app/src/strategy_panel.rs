@@ -131,7 +131,7 @@ pub struct Row {
     pub position: String,
     /// `3 trades today`.
     pub trades: String,
-    /// Its own limits: `max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York`
+    /// Its own limits: `max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 ET`
     /// (no money while the P&L display hides it).
     pub limits: String,
     /// Today's net P&L as the P&L display allows (`None`: off, or nothing to show).
@@ -248,11 +248,13 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         (None, 0)
     };
     let last = info.decisions.last().map(|d| {
+        // The zone named: the line above gives the strategy's window in its own zone.
         format!(
-            "{}  {}",
+            "{} {}  {}",
             crate::journal_view::clock_text(d.at)
                 .get(6..)
                 .unwrap_or_default(),
+            crate::journal_view::zone_text(d.at),
             d.decision.reason
         )
     });
@@ -281,7 +283,12 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         .map(|w| format!("{}-{}", w.start, w.end))
         .collect();
     if !hours.is_empty() {
-        limits.push_str(&format!(" · {} {}", hours.join(", "), l.hours.tz));
+        // New York's hours as "ET", as the display zone names it; any other zone by its name.
+        let tz = match l.hours.tz.as_str() {
+            lines_core::display_tz::EXCHANGE => "ET",
+            z => z,
+        };
+        limits.push_str(&format!(" · {} {tz}", hours.join(", ")));
     }
     Row {
         id: info.id,
@@ -617,7 +624,7 @@ mod tests {
         );
         assert_eq!(
             rows[0].limits,
-            "max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 America/New_York"
+            "max 2 contracts · daily loss $500 · 6 entries/min · 09:30-16:00 ET"
         );
         let mut one = i[0].clone();
         one.limits.max_position = 1;

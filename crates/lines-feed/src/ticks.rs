@@ -39,7 +39,7 @@
 //! to hand each chunk over and for the last few.
 //!
 //! **Labels.** Bars whose first session isn't covered from its open say from when they begin
-//! ([`TickStatus::From`]: "tick bars from 11-05 14:32 UTC"): after trading the 1-minute bars
+//! ([`TickStatus::From`]: "tick bars from 11-05 09:32 ET"): after trading the 1-minute bars
 //! show in that session (continuous bars: after any 1-minute bar), or, when the 1-minute bars
 //! don't reach back before that session (nothing to compare), more than [`OPEN_SLACK_MS`] after
 //! the open.
@@ -231,13 +231,13 @@ pub enum TickStatus {
 }
 
 impl TickStatus {
-    /// The text: "building tick bars", "tick bars from 11-05 14:32 UTC" ([`write_from`]).
-    pub fn label(&self) -> Option<String> {
+    /// The text: "building tick bars", "tick bars from 11-05 09:32 ET" ([`write_from`]).
+    pub fn label(&self, zone: &lines_core::display_tz::DisplayTz) -> Option<String> {
         match *self {
             TickStatus::Building => Some("building tick bars".into()),
             TickStatus::From(t) => {
                 let mut s = String::new();
-                let _ = write_from(t, &mut s);
+                let _ = write_from(t, zone, &mut s);
                 Some(s)
             }
             TickStatus::Complete => None,
@@ -245,11 +245,17 @@ impl TickStatus {
     }
 }
 
-/// "tick bars from 11-05 14:32 UTC": date and zone as the crosshair's time tag gives them (the
-/// bars may begin on an earlier day than the ones in view). Allocation-free.
-pub fn write_from(t: UtcMillis, out: &mut impl std::fmt::Write) -> std::fmt::Result {
-    let (_, mo, d, h, m, _) = t.to_civil();
-    write!(out, "tick bars from {mo:02}-{d:02} {h:02}:{m:02} UTC")
+/// "tick bars from 11-05 09:32 ET": date and zone on the display zone's clock, as the
+/// crosshair's time tag gives them (the bars may begin on an earlier day than the ones in
+/// view). Allocation-free.
+pub fn write_from(
+    t: UtcMillis,
+    zone: &lines_core::display_tz::DisplayTz,
+    out: &mut impl std::fmt::Write,
+) -> std::fmt::Result {
+    let (_, mo, d, h, m, _) = zone.civil(t);
+    write!(out, "tick bars from {mo:02}-{d:02} {h:02}:{m:02} ")?;
+    zone.write_label(t, out)
 }
 
 impl TickSet {

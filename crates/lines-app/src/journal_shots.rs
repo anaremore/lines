@@ -19,9 +19,11 @@
 //!
 //! SVG because nothing can render the app's own chart off the UI thread (GPUI paints in a
 //! window, its image readback is test-only), and SVG needs no new dependency, opens in any
-//! browser and is small. Times are UTC, like the chart's axis and the journal's table. The look
-//! (theme, palette, P&L display) is the app's as the file is drawn.
+//! browser and is small. Times are on the display zone's clock, like the chart's axis and the
+//! journal's table, and the header names it. The look (theme, palette, P&L display) is the
+//! app's as the file is drawn.
 
+use lines_core::display_tz::DisplayTz;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
@@ -406,12 +408,16 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         esc(kind),
         esc(&contract),
     );
+    // The image outlives the setting: it names its zone (one read: the header and the plot
+    // agree even if the setting changes mid-render).
+    let zone = lines_core::display_tz::current();
     let when = format!(
-        "Entry {}-{}  →  exit {}-{} UTC  ·  held {}",
-        CivilDate::from_utc(t.entry_time).year,
-        crate::journal_view::clock_text(t.entry_time),
-        CivilDate::from_utc(t.exit_time).year,
-        crate::journal_view::clock_text(t.exit_time),
+        "Entry {}-{}  →  exit {}-{} {}  ·  held {}",
+        zone.civil(t.entry_time).0,
+        clock_text(t.entry_time, &zone),
+        zone.civil(t.exit_time).0,
+        clock_text(t.exit_time, &zone),
+        zone_text(t.exit_time, &zone),
         crate::journal_view::duration_text(t.duration_ms())
     );
     let _ = writeln!(
@@ -458,7 +464,7 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         s.push_str("</svg>\n");
         return s;
     };
-    plot(&mut s, t, d, product, th);
+    plot(&mut s, t, d, product, th, &zone);
     s.push_str("</svg>\n");
     s
 }
@@ -481,14 +487,29 @@ fn slot_width(slots: usize) -> f32 {
     (PLOT_R - PLOT_L - LABEL_ROOM) / slots.max(34) as f32
 }
 
-/// `HH:MM`, UTC.
-fn hhmm(t: UtcMillis) -> String {
-    let secs = t.0.rem_euclid(86_400_000) / 1000;
-    format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
+/// `HH:MM` on `zone`'s clock.
+fn hhmm(t: UtcMillis, zone: &DisplayTz) -> String {
+    let mut s = String::new();
+    let _ = zone.write_hhmm(t, &mut s);
+    s
+}
+
+/// `zone`'s label at `t`.
+fn zone_text(t: UtcMillis, zone: &DisplayTz) -> String {
+    let mut s = String::new();
+    let _ = zone.write_label(t, &mut s);
+    s
+}
+
+/// `11-05 14:31:07` on `zone`'s clock.
+fn clock_text(t: UtcMillis, zone: &DisplayTz) -> String {
+    let (_, mo, d, h, mi, s) = zone.civil(t);
+    format!("{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 
 /// Candles, axes, the trade's span, fills and averages.
-fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) {
+/// Drawn on `zone`'s clock, the one the header names.
+fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme, zone: &DisplayTz) {
     let bars = &d.bars;
     let mut lo = bars.iter().map(|b| b.low.0).min().unwrap_or(0);
     let mut hi = bars.iter().map(|b| b.high.0).max().unwrap_or(0);
@@ -534,25 +555,22 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
         "<line x1=\"{PLOT_L}\" x2=\"{PLOT_R}\" y1=\"{PLOT_B}\" y2=\"{PLOT_B}\" stroke-width=\"1\" {}/>",
         paint("stroke", th.axis_line)
     );
-    // Time axis: about one label per 110 px, HH:MM (UTC), the date where it changes.
+    // Time axis: about one label per 110 px, HH:MM (the display zone), the date where it
+    // changes.
     let every = ((110.0 / slot).ceil() as usize).max(1);
     let mut last_day: Option<CivilDate> = None;
     for (i, b) in bars.iter().enumerate() {
         if i % every != 0 {
             continue;
         }
-        let day = CivilDate::from_utc(b.time);
-        let secs = b.time.0.rem_euclid(86_400_000) / 1000;
+        // Days on the display zone's clock, as the chart's axis.
+        let local = zone.local(b.time);
+        let day = CivilDate::from_utc(local);
+        let (_, _, _, h, mi, _) = local.to_civil();
         let label = if last_day != Some(day) {
-            format!(
-                "{:02}-{:02} {:02}:{:02}",
-                day.month,
-                day.day,
-                secs / 3600,
-                secs / 60 % 60
-            )
+            format!("{:02}-{:02} {h:02}:{mi:02}", day.month, day.day)
         } else {
-            format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
+            format!("{h:02}:{mi:02}")
         };
         last_day = Some(day);
         let _ = writeln!(
@@ -576,7 +594,7 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
                 x(i),
                 PLOT_B + 18.0,
                 paint("fill", th.text_dim),
-                hhmm(at)
+                hhmm(at, zone)
             );
         }
     }
@@ -694,15 +712,17 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
     if let Some(b) = bars.first().filter(|b| t.entry_time < b.time) {
         let _ = write!(
             missing,
-            "No bars before {} UTC. Earlier fills are placed at the first bar.  ",
-            hhmm(b.time)
+            "No bars before {} {}. Earlier fills are placed at the first bar.  ",
+            hhmm(b.time, zone),
+            zone_text(b.time, zone)
         );
     }
     if let Some(b) = bars.last().filter(|_| e1 >= bars.len()) {
         let _ = write!(
             missing,
-            "No bars after {} UTC. Later fills are placed by their times.",
-            hhmm(b.time)
+            "No bars after {} {}. Later fills are placed by their times.",
+            hhmm(b.time, zone),
+            zone_text(b.time, zone)
         );
     }
     if !missing.is_empty() {

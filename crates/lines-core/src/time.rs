@@ -1,5 +1,6 @@
 //! UTC timestamps in milliseconds. Everything is UTC; exchange-local time exists only inside
-//! [`crate::sessions`].
+//! [`crate::sessions`], and the trader's display zone only where times are written
+//! ([`crate::display_tz`]).
 
 use std::fmt;
 
@@ -88,17 +89,24 @@ impl UtcMillis {
         (self.0.div_euclid(86_400_000) + 4).rem_euclid(7) as u32
     }
 
-    /// Write the full crosshair time tag, "Fri 2026-11-06 14:05" (plus ":SS" for bar periods
-    /// that aren't whole minutes), without allocating.
-    pub fn write_crosshair_label<W: fmt::Write>(self, period_ms: i64, out: &mut W) -> fmt::Result {
+    /// Write the full crosshair time tag on `zone`'s clock, "Fri 2026-11-06 14:05 ET" (plus
+    /// ":SS" for bar periods that aren't whole minutes), without allocating.
+    pub fn write_crosshair_label<W: fmt::Write>(
+        self,
+        period_ms: i64,
+        zone: &crate::display_tz::DisplayTz,
+        out: &mut W,
+    ) -> fmt::Result {
         const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        let (y, mo, d, h, mi, s) = self.to_civil();
-        let day = DAYS[self.weekday() as usize];
+        let local = zone.local(self);
+        let (y, mo, d, h, mi, s) = local.to_civil();
+        let day = DAYS[local.weekday() as usize];
         write!(out, "{day} {y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")?;
         if period_ms % Self::MINUTE != 0 {
             write!(out, ":{s:02}")?;
         }
-        Ok(())
+        out.write_char(' ')?;
+        zone.write_label(self, out)
     }
 }
 
@@ -189,11 +197,19 @@ mod tests {
     fn crosshair_label() {
         let t = UtcMillis::parse_iso("2026-11-06T14:05:07Z").unwrap();
         let mut s = crate::FixedStr::<32>::new();
-        t.write_crosshair_label(60_000, &mut s).unwrap();
-        assert_eq!(s.as_str(), "Fri 2026-11-06 14:05");
+        t.write_crosshair_label(60_000, &crate::display_tz::DisplayTz::utc(), &mut s)
+            .unwrap();
+        assert_eq!(s.as_str(), "Fri 2026-11-06 14:05 UTC");
         s.clear();
-        t.write_crosshair_label(5_000, &mut s).unwrap();
-        assert_eq!(s.as_str(), "Fri 2026-11-06 14:05:07");
+        t.write_crosshair_label(5_000, &crate::display_tz::DisplayTz::utc(), &mut s)
+            .unwrap();
+        assert_eq!(s.as_str(), "Fri 2026-11-06 14:05:07 UTC");
+        // The exchange's clock: 03:30Z on Saturday is still Friday evening in New York.
+        s.clear();
+        let et = crate::display_tz::DisplayTz::exchange();
+        let late = UtcMillis::parse_iso("2026-11-07T03:30:00Z").unwrap();
+        late.write_crosshair_label(60_000, &et, &mut s).unwrap();
+        assert_eq!(s.as_str(), "Fri 2026-11-06 22:30 ET");
         assert_eq!(UtcMillis(0).weekday(), 4, "1970-01-01 was a Thursday");
         assert_eq!(UtcMillis(-1).weekday(), 3);
     }

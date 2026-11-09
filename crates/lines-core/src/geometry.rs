@@ -14,6 +14,7 @@
 pub mod order_tags;
 
 use crate::bars::Bar;
+use crate::display_tz::DisplayTz;
 use crate::price::{DisplayStyle, Price, PriceFormat};
 use crate::qty::QtyFormat;
 use crate::time::UtcMillis;
@@ -88,6 +89,7 @@ impl Scene {
         fmt: &PriceFormat,
         scale_factor: f32,
         period_ms: i64,
+        zone: &DisplayTz,
     ) {
         build_candles(bars, vp, scale_factor, &mut self.candles);
         build_price_grid(
@@ -103,6 +105,7 @@ impl Scene {
             period_ms,
             scale_factor,
             &self.space,
+            zone,
             &mut self.time_lines,
         );
     }
@@ -345,9 +348,14 @@ pub enum TimeLabel {
 }
 
 impl TimeLabel {
-    /// Write the label for `t` (UTC, as the axis), without allocating.
-    pub fn write<W: std::fmt::Write>(self, t: UtcMillis, out: &mut W) -> std::fmt::Result {
-        let (_, mo, d, h, mi, sec) = t.to_civil();
+    /// Write the label for `t` on `zone`'s clock (as the axis), without allocating.
+    pub fn write<W: std::fmt::Write>(
+        self,
+        t: UtcMillis,
+        zone: &DisplayTz,
+        out: &mut W,
+    ) -> std::fmt::Result {
+        let (_, mo, d, h, mi, sec) = zone.civil(t);
         match self {
             TimeLabel::Time => write!(out, "{h:02}:{mi:02}"),
             TimeLabel::TimeSeconds => write!(out, "{h:02}:{mi:02}:{sec:02}"),
@@ -379,7 +387,8 @@ pub fn time_step(vp: &Viewport, period_ms: i64, min_px: f64) -> i64 {
     s
 }
 
-/// Start of the step-`step_ms` bucket holding `t`. Weeks start on Monday 00:00 UTC.
+/// Start of the step-`step_ms` bucket holding `t` (a wall clock, [`DisplayTz::local`]).
+/// Weeks start on Monday 00:00.
 fn time_bucket(t: UtcMillis, step_ms: i64) -> i64 {
     if step_ms >= WEEK && step_ms % WEEK == 0 {
         // 1970-01-01 was a Thursday: the first Monday is 4 days later.
@@ -392,14 +401,16 @@ fn time_bucket(t: UtcMillis, step_ms: i64) -> i64 {
 
 /// Fill `out` (within capacity) with vertical grid lines at round times: the first bar of
 /// each step bucket (bars missing in a gap move the line to the next bar), where its label
-/// clears the previous one. The first line of the view and the first of each new UTC day
-/// carry the date ([`TimeLabel`]); the rest show only the time.
+/// clears the previous one. Steps and days follow `zone`'s clock: the first line of the view
+/// and the first of each new day there carry the date ([`TimeLabel`]); the rest show only
+/// the time.
 pub fn build_time_grid(
     bars: &[Bar],
     vp: &Viewport,
     period_ms: i64,
     scale_factor: f32,
     space: &GridSpace,
+    zone: &DisplayTz,
     out: &mut Vec<TimeGridLine>,
 ) {
     out.clear();
@@ -410,8 +421,10 @@ pub fn build_time_grid(
             break;
         }
         let t = bars[i].time;
-        let is_boundary = t.0 - time_bucket(t, step) == 0
-            || (i > 0 && time_bucket(bars[i - 1].time, step) != time_bucket(t, step));
+        let local = zone.local(t);
+        let is_boundary = local.0 - time_bucket(local, step) == 0
+            || (i > 0
+                && time_bucket(zone.local(bars[i - 1].time), step) != time_bucket(local, step));
         if !is_boundary {
             continue;
         }
@@ -421,14 +434,14 @@ pub fn build_time_grid(
         {
             continue;
         }
-        let day = t.0.div_euclid(DAY);
+        let day = local.0.div_euclid(DAY);
         let label = if last.is_some_and(|(_, _, d)| d == day) {
             if step < MIN {
                 TimeLabel::TimeSeconds
             } else {
                 TimeLabel::Time
             }
-        } else if step >= DAY || t.0.rem_euclid(DAY) == 0 {
+        } else if step >= DAY || local.0.rem_euclid(DAY) == 0 {
             TimeLabel::Date
         } else {
             TimeLabel::DateTime
@@ -718,7 +731,7 @@ mod tests {
         let mut vp = Viewport::default();
         vp.on_data(&b, 25);
         let mut scene = Scene::with_capacity(Scene::candles_needed(vp.width));
-        scene.build(&b, &vp, &es(), 1.5, 60_000);
+        scene.build(&b, &vp, &es(), 1.5, 60_000, &DisplayTz::utc());
         assert!(!scene.candles.is_empty());
         for c in &scene.candles {
             assert!(c.wick_top <= c.body_top, "{c:?}");
@@ -775,7 +788,7 @@ mod tests {
         vp.on_data(&b, 25);
         let mut out = Vec::with_capacity(MAX_GRID_LINES);
         let space = GridSpace::default();
-        build_time_grid(&b, &vp, 60_000, 1.0, &space, &mut out);
+        build_time_grid(&b, &vp, 60_000, 1.0, &space, &DisplayTz::utc(), &mut out);
         assert!(out.len() >= 2);
         for w in out.windows(2) {
             let room = match w[0].label {
@@ -897,12 +910,14 @@ mod tests {
         assert_eq!(time_step(&vp, 30_000, 56.0), 30 * SEC);
         let mut s = String::new();
         let t = UtcMillis::parse_iso("2026-11-05T18:53:30Z").unwrap();
-        TimeLabel::TimeSeconds.write(t, &mut s).unwrap();
+        TimeLabel::TimeSeconds
+            .write(t, &DisplayTz::utc(), &mut s)
+            .unwrap();
         assert_eq!(s, "18:53:30");
         s.clear();
         // A step of a minute or more keeps `HH:MM`, even for a bar starting off the minute
         // (tick, volume and range bars start at a trade).
-        TimeLabel::Time.write(t, &mut s).unwrap();
+        TimeLabel::Time.write(t, &DisplayTz::utc(), &mut s).unwrap();
         assert_eq!(s, "18:53");
         // The grid picks the seconds label only under a minute.
         let b: Vec<Bar> = (0..40)
@@ -920,7 +935,15 @@ mod tests {
         vp.on_data(&b, 90);
         vp.bar_px = 90.0;
         let mut out = Vec::with_capacity(MAX_GRID_LINES);
-        build_time_grid(&b, &vp, 30_000, 1.0, &GridSpace::default(), &mut out);
+        build_time_grid(
+            &b,
+            &vp,
+            30_000,
+            1.0,
+            &GridSpace::default(),
+            &DisplayTz::utc(),
+            &mut out,
+        );
         assert!(
             out.iter()
                 .skip(1)
@@ -956,12 +979,20 @@ mod tests {
         };
         vp.on_data(&b, 25);
         let mut out = Vec::with_capacity(MAX_GRID_LINES);
-        build_time_grid(&b, &vp, MIN, 1.0, &GridSpace::default(), &mut out);
+        build_time_grid(
+            &b,
+            &vp,
+            MIN,
+            1.0,
+            &GridSpace::default(),
+            &DisplayTz::utc(),
+            &mut out,
+        );
         let labels: Vec<(String, TimeLabel)> = out
             .iter()
             .map(|l| {
                 let mut s = String::new();
-                l.label.write(l.time, &mut s).unwrap();
+                l.label.write(l.time, &DisplayTz::utc(), &mut s).unwrap();
                 (s, l.label)
             })
             .collect();
@@ -981,11 +1012,51 @@ mod tests {
         vp.bar_px = 1.0;
         let b = minute_bars(start, 6 * 1440);
         vp.on_data(&b, 25);
-        build_time_grid(&b, &vp, MIN, 1.0, &GridSpace::default(), &mut out);
+        build_time_grid(
+            &b,
+            &vp,
+            MIN,
+            1.0,
+            &GridSpace::default(),
+            &DisplayTz::utc(),
+            &mut out,
+        );
         assert!(
             out.iter()
                 .all(|l| l.label != TimeLabel::DateTime || l == &out[0])
         );
+    }
+
+    /// Grid lines in ET through both US DST transitions: every line on a whole hour of the
+    /// New York clock, the date on New York's midnight (not UTC's).
+    #[test]
+    fn the_grid_follows_the_display_zone_through_both_dst_transitions() {
+        let et = DisplayTz::exchange();
+        for (y, m, d) in [(2026, 3, 7), (2026, 10, 31)] {
+            // 18:00Z the day before a transition, for 30 hours of one-minute bars.
+            let start = crate::time::days_from_civil(y, m, d) * DAY + 18 * HOUR;
+            let b = minute_bars(start, 30 * 60);
+            let mut vp = Viewport {
+                width: 2400.0,
+                bar_px: 1.0,
+                ..Viewport::default()
+            };
+            vp.on_data(&b, 25);
+            let mut out = Vec::with_capacity(MAX_GRID_LINES);
+            build_time_grid(&b, &vp, MIN, 1.0, &GridSpace::default(), &et, &mut out);
+            assert!(out.len() > 5, "{out:?}");
+            let mut days = Vec::new();
+            for l in &out {
+                let (_, mo, dd, h, mi, _) = et.civil(l.time);
+                assert_eq!(mi, 0, "{l:?} is {h:02}:{mi:02} ET");
+                if l.label == TimeLabel::Date {
+                    assert_eq!(h, 0, "{l:?}");
+                    days.push((mo, dd));
+                }
+            }
+            // One new New York day in the 30 hours, starting at its midnight.
+            assert_eq!(days.len(), 1, "{out:?}");
+        }
     }
 
     #[test]
@@ -1319,7 +1390,7 @@ mod tests {
             vp.on_data(&b, 25);
             vp.zoom_at(400.0, 1.37, b.len());
             let mut scene = Scene::with_capacity(Scene::candles_needed(vp.width));
-            scene.build(&b, &vp, &es(), s, 60_000);
+            scene.build(&b, &vp, &es(), s, 60_000, &DisplayTz::utc());
             assert!(!scene.price_lines.is_empty() && !scene.time_lines.is_empty());
             for l in &scene.price_lines {
                 assert!(on_device_grid(l.y, s), "{l:?} at {s}");

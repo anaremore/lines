@@ -19,6 +19,7 @@ use gpui::{
 };
 
 use crate::brackets::{self, EditorKey};
+use crate::display_zone;
 use crate::picker_view::{settings, update_settings};
 use crate::settings_schema::{
     self as schema, AccountFact, Facts, Kind, Prefs, Safety, Scope, Section, Target, Value,
@@ -165,6 +166,8 @@ pub struct SettingsWindow {
     undo: Vec<UndoEntry>,
     editor: Option<brackets::Editor>,
     editor_msg: Option<String>,
+    /// The time zone's searchable list, while open (`crate::display_zone`).
+    zone_pick: Option<display_zone::Pick>,
     /// The settings list's scroll (keeps the selected row in view).
     scroll: gpui::ScrollHandle,
     /// Risk changes the trading core hasn't answered yet, oldest first.
@@ -230,12 +233,20 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
             Section::ALL.map(|s| s.name().to_lowercase()).join(", ")
         );
     }
-    // `account=NAME` picks the window's account (by name or id); the rest are settings.
-    for s in set.iter().filter(|s| !s.starts_with("account=")) {
+    // `account=NAME` picks the window's account (by name or id), `appearance.time_zone=list:Q`
+    // opens the time zone's list with Q typed; the rest are settings.
+    for s in set
+        .iter()
+        .filter(|s| !s.starts_with("account=") && !s.starts_with(ZONE_LIST))
+    {
         parse_set(s).map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }
+
+/// `--settings-set` prefix: the time zone's list, open, with the rest typed in it.
+#[cfg(feature = "screenshot")]
+const ZONE_LIST: &str = "appearance.time_zone=list:";
 
 /// Screenshots: open the window (hidden) at `section`, with a search and changes made.
 #[cfg(feature = "screenshot")]
@@ -263,6 +274,18 @@ pub fn open_for_screenshot(
                 {
                     v.target.account = Some(a.id.clone());
                     v.target.account_name = Some(a.name.clone());
+                }
+                continue;
+            }
+            if let Some(q) = s.strip_prefix(ZONE_LIST) {
+                if let Some(i) = schema::index_of(display_zone::KEY) {
+                    v.select(i);
+                    v.open_zone_pick(cx);
+                    if let Some(p) = v.zone_pick.as_mut() {
+                        for ch in q.chars() {
+                            p.key("", Some(ch.encode_utf8(&mut [0; 4])));
+                        }
+                    }
                 }
                 continue;
             }
@@ -378,7 +401,17 @@ pub fn run(c: schema::SettingCmd, cx: &mut App) -> Result<Option<String>, &'stat
             Ok(Some(format!("{}: {}", st.name, st.value_text(&v))))
         }
         None => {
-            open(Some(c.index as usize), cx);
+            let i = c.index as usize;
+            open(Some(i), cx);
+            if st.key == crate::display_zone::KEY
+                && let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0)
+            {
+                // The time zone's palette command opens its list, ready to type in.
+                let _ = h.update(cx, |w, _, cx| {
+                    w.open_zone_pick(cx);
+                    cx.notify();
+                });
+            }
             Ok(None)
         }
     }
@@ -448,6 +481,15 @@ fn commit(
                 });
             }
         });
+    }
+    if after.app.time_zone != before.app.time_zone {
+        let problem = crate::display_zone::apply(&lines_core::display_tz::ZoneChoice::from_saved(
+            after.app.time_zone.as_deref(),
+        ));
+        if let Some(p) = problem {
+            crate::workspace::notice(p, cx);
+        }
+        cx.refresh_windows();
     }
     if after.app.pnl_display != before.app.pnl_display {
         crate::pnl::display_changed();
@@ -601,6 +643,7 @@ impl SettingsWindow {
             undo: Vec::new(),
             editor: None,
             editor_msg: None,
+            zone_pick: None,
             scroll: gpui::ScrollHandle::new(),
             scrolled: None,
             awaiting: Vec::new(),
@@ -698,6 +741,7 @@ impl SettingsWindow {
         self.cancel_pending();
         self.editor = None;
         self.editor_msg = None;
+        self.zone_pick = None;
     }
 
     /// Show setting `i`: its section, selected, the search cleared.
@@ -947,6 +991,44 @@ impl SettingsWindow {
         self.drop_unfinished();
     }
 
+    /// Open the time zone's list, on the zone in force.
+    fn open_zone_pick(&mut self, cx: &App) {
+        let saved = settings(cx).time_zone.clone();
+        self.zone_pick = Some(display_zone::Pick::new(
+            &lines_core::display_tz::ZoneChoice::from_saved(saved.as_deref()),
+        ));
+    }
+
+    /// A key while the time zone's list is open: it filters, moves, chooses or closes.
+    fn zone_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        let Some(p) = self.zone_pick.as_mut() else {
+            return;
+        };
+        match p.key(k.key.as_str(), k.key_char.as_deref()) {
+            display_zone::PickKey::Typing | display_zone::PickKey::Ignored => {}
+            display_zone::PickKey::Cancel => self.zone_pick = None,
+            display_zone::PickKey::Choose(c) => self.choose_zone(&c, cx),
+        }
+        cx.notify();
+    }
+
+    fn choose_zone(&mut self, c: &lines_core::display_tz::ZoneChoice, cx: &mut Context<Self>) {
+        self.zone_pick = None;
+        if let Some(i) = schema::index_of(display_zone::KEY) {
+            self.set(i, Value::Text(c.describe()), false, cx);
+        }
+    }
+
+    /// The editor a setting of kind `Editor` opens.
+    fn open_editor_for(&mut self, i: usize, cx: &App) {
+        if schema::all()[i].key == display_zone::KEY {
+            self.open_zone_pick(cx);
+        } else {
+            self.open_editor(cx);
+        }
+    }
+
     fn open_editor(&mut self, cx: &App) {
         let (Some(a), Some(sym)) = (&self.target.account, &self.target.product) else {
             self.editor_msg = Some("Choose an account and a product".to_owned());
@@ -1004,6 +1086,10 @@ impl SettingsWindow {
         cx.stop_propagation();
         if self.editor.is_some() {
             self.editor_key(ev, cx);
+            return;
+        }
+        if self.zone_pick.is_some() {
+            self.zone_key(ev, cx);
             return;
         }
         let k = &ev.keystroke;
@@ -1144,7 +1230,7 @@ impl SettingsWindow {
             (Kind::Number { .. }, Value::Number(n)) => {
                 self.edit = Some(n.map(|n| n.to_string()).unwrap_or_default());
             }
-            (Kind::Editor, _) => self.open_editor(cx),
+            (Kind::Editor, _) => self.open_editor_for(i, cx),
             _ => {}
         }
     }
@@ -1315,12 +1401,16 @@ impl SettingsWindow {
                 .border_1()
                 .border_color(t.axis_line)
                 .cursor_pointer()
-                .child("Edit…")
+                .child(if schema::all()[i].key == display_zone::KEY {
+                    "Change…"
+                } else {
+                    "Edit…"
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |v, _, _, cx| {
                         v.select(i);
-                        v.open_editor(cx);
+                        v.open_editor_for(i, cx);
                         cx.notify();
                     }),
                 )
@@ -1692,6 +1782,72 @@ impl SettingsWindow {
         );
         Some(v.into_any_element())
     }
+
+    /// The time zone's list: what's typed, then the matching zones around the selection.
+    fn zone_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.theme;
+        let p = self.zone_pick.as_ref()?;
+        let mut v = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .mx_2()
+            .my_1()
+            .p_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(t.accent)
+            .child(
+                div()
+                    .px_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(t.axis_line)
+                    .child(format!("Search zones: {}▏", p.query)),
+            );
+        let top = p.top();
+        for (r, &k) in p.hits.iter().enumerate().skip(top).take(display_zone::ROWS) {
+            let on = r == p.sel;
+            let choice = &display_zone::options()[k];
+            let mut row = div()
+                .id(("zone", k))
+                .px_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(if on {
+                    t.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .cursor_pointer()
+                .child(display_zone::option_text(choice));
+            if on {
+                row = row.font_weight(FontWeight::BOLD);
+            }
+            v = v.child(row.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, _, cx| {
+                    v.choose_zone(&display_zone::options()[k], cx);
+                    cx.notify();
+                }),
+            ));
+        }
+        let shown = p.hits.len().min(display_zone::ROWS);
+        v = v.child(
+            div()
+                .text_size(px(11.5))
+                .text_color(t.text_dim)
+                .child(if p.hits.is_empty() {
+                    "No zone matches · Backspace edits · Esc closes".to_owned()
+                } else {
+                    format!(
+                        "{shown} of {} · ↑↓ choose · Enter sets · Esc closes",
+                        p.hits.len()
+                    )
+                }),
+        );
+        Some(v.into_any_element())
+    }
 }
 
 impl Render for SettingsWindow {
@@ -1806,6 +1962,12 @@ impl Render for SettingsWindow {
             child += 1;
             if schema::all()[i].key == "trading.brackets"
                 && let Some(e) = self.editor_view()
+            {
+                main = main.child(e);
+                child += 1;
+            }
+            if schema::all()[i].key == display_zone::KEY
+                && let Some(e) = self.zone_view(cx)
             {
                 main = main.child(e);
                 child += 1;

@@ -49,8 +49,9 @@ thiserror = "2"
 parking_lot = "0.12"
 # Time zones for trading-session calendars (lines-core::sessions). The tz database is compiled
 # in (`tzdb-bundle-always`), never read from the OS, so session boundaries are identical on every
-# machine and replays stay deterministic. No system-tz or zoneinfo lookups.
-jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
+# machine and replays stay deterministic. `tz-system` only names the OS zone for the display
+# time zone's "System" choice (lines-core::display_tz); sessions never read it.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 clap = { version = "4.6", features = ["derive"] }
 
 [profile.dev.package."*"]
