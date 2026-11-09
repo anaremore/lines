@@ -596,6 +596,185 @@ source https://www.bls.gov/schedule/news_release/cpi.htm
     assert_eq!(r.core.position(&acct(), es()), 0);
 }
 
+/// A DOM's stop is a plain order, not a reduce-only one: a Flatten in a halt keeps it too, and it
+/// is cancelled once the position is flat, or it would open a new one. A plain limit isn't
+/// protection, and a stop larger than the position would open one, so those go at once.
+#[test]
+fn a_flatten_keeps_a_plain_stop_until_flat() {
+    let plain = |r: &mut Rig, kind: OrderKind, qty: i64| {
+        r.cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(qty),
+            kind,
+        }))
+        .unwrap()[0]
+    };
+    let stop = OrderKind::Stop {
+        trigger: Price(590_000),
+    };
+    // In the halt: the close fails, the stop stays.
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(2);
+    let id = plain(&mut r, stop, 2);
+    r.wait(LAT + 1);
+    r.t = UtcMillis::parse_iso(CME_HALT).unwrap().0;
+    r.flatten(es());
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert!(r.core.order(id).unwrap().is_open(), "{:?}", r.state(id));
+
+    // Open: the close fills, and the stop goes with its position.
+    let mut r = Rig::new(true, CME_OPEN);
+    r.long_es(2);
+    let id = plain(&mut r, stop, 2);
+    let limit = plain(
+        &mut r,
+        OrderKind::Limit {
+            price: Price(601_000),
+        },
+        1,
+    );
+    let large = plain(
+        &mut r,
+        OrderKind::Stop {
+            trigger: Price(589_000),
+        },
+        3,
+    );
+    r.wait(LAT + 1);
+    r.flatten(es());
+    assert!(r.core.order(id).unwrap().is_open(), "not before it's flat");
+    r.wait(LAT + 1);
+    assert_eq!(r.state(limit), OrderState::Cancelled);
+    assert_eq!(r.state(large), OrderState::Cancelled);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    r.wait(LAT + 1);
+    assert_eq!(
+        r.state(id),
+        OrderState::Cancelled,
+        "flat: it would open one"
+    );
+    // The market falls through it: nothing opens.
+    r.book(es(), 580_000);
+    r.wait(LAT + 1);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
+/// A person's Cancel All doesn't take back a rule's waiting Flatten, which asks only once; and a
+/// rule asking while a person's waits makes it the rule's.
+#[test]
+fn cancel_all_leaves_a_rules_waiting_flatten() {
+    use lines_trading::guardrails::Guardrails;
+    use lines_trading::news::{NewsAction, NewsBlackout};
+    const SCHEDULE: &str = "\
+format 1
+version 2026-11-01
+zone America/New_York
+release cpi
+name CPI
+agency BLS
+importance high
+affects ES MES NQ MNQ ZN
+coverage 2026-03-01 2026-12-31 verified
+source https://www.bls.gov/schedule/news_release/cpi.htm
+2026-11-10 08:30 verified October 2026
+";
+    let window = UtcMillis::parse_iso("2026-11-10T13:28:00Z").unwrap().0;
+    for person_first in [false, true] {
+        let mut r = Rig::new(false, "2026-11-10T13:00:00Z");
+        r.core.set_econ_schedule(Some(Arc::new(
+            lines_core::econ::EconSchedule::parse(SCHEDULE).unwrap(),
+        )));
+        r.cmd(Command::SetGuardrails {
+            account: acct(),
+            guardrails: Guardrails {
+                news: Some(NewsBlackout::new(NewsAction::Flatten)),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        r.long_es(1);
+        r.book(es(), 600_000);
+        r.cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(601_000),
+            },
+        }))
+        .unwrap();
+        r.wait(LAT + 1);
+        let before = r.markets.load(Ordering::Relaxed);
+        r.t = window;
+        if person_first {
+            r.flatten(es());
+        }
+        // The window's start: the rule's Flatten waits for the cancel.
+        r.wait(0);
+        assert_eq!(r.markets.load(Ordering::Relaxed), before, "it waits");
+        r.cmd(Command::CancelAll {
+            account: acct(),
+            contract: Some(es()),
+        })
+        .unwrap();
+        r.wait(LAT + 1);
+        assert_eq!(
+            r.markets.load(Ordering::Relaxed),
+            before + 1,
+            "still goes (person first: {person_first})"
+        );
+        r.wait(LAT + 1);
+        assert_eq!(r.core.position(&acct(), es()), 0);
+    }
+}
+
+/// An order placed while a Flatten waits isn't waited for, but it goes when the market order does.
+#[test]
+fn an_order_placed_while_waiting_doesnt_hold_it_and_goes_too() {
+    let mut r = Rig::new(false, CME_OPEN);
+    r.long_es(1);
+    r.book(es(), 600_000);
+    let first = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(601_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    let before = r.markets.load(Ordering::Relaxed);
+    r.flatten(es());
+    let late = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(602_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    assert_eq!(r.state(first), OrderState::Cancelled);
+    assert_eq!(
+        r.markets.load(Ordering::Relaxed),
+        before + 1,
+        "not held for 5 s"
+    );
+    r.wait(LAT + 1);
+    assert_eq!(r.state(late), OrderState::Cancelled);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+}
+
 /// A person's Cancel All takes back a Flatten still waiting: it leaves the position.
 #[test]
 fn cancel_all_takes_back_a_waiting_flatten() {

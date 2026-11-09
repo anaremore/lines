@@ -24,6 +24,20 @@ pub(super) struct PendingFlatten {
     since: UtcMillis,
 }
 
+/// Whether the one asking is a person: their Cancel All can take it back, a rule's can't be.
+fn manual(env: &Envelope) -> bool {
+    crate::broker::Origin::of(env.source) == crate::broker::Origin::Manual
+}
+
+/// A plain stop closing the position (from a DOM): protection, not a reduce-only one, so it would
+/// open a position if left once this one is gone.
+fn plain_stop_closes(o: &Order, position: i64) -> bool {
+    !o.reduce_only
+        && matches!(o.kind, OrderKind::Stop { .. } | OrderKind::StopLimit { .. })
+        && position.signum() == -o.side.sign()
+        && o.remaining().0 <= position.abs()
+}
+
 /// An order protecting a position: it can only close it, so it is safe to leave working. A
 /// Flatten's own order isn't one: when it's left working at all it's because it's still `closing`.
 fn protects(o: &Order) -> bool {
@@ -32,9 +46,65 @@ fn protects(o: &Order) -> bool {
 }
 
 impl TradingCore {
-    /// Which orders a Flatten of these contracts leaves working on a broker honoring reduce-only.
-    pub(super) fn flatten_keeps(&self, o: &Order, contracts: &[ContractKey]) -> bool {
-        self.broker.capabilities().oco && protects(o) && contracts.contains(&o.contract)
+    /// Which orders a Flatten of these positions leaves working on a broker honoring reduce-only:
+    /// what protects them, until they're flat.
+    pub(super) fn flatten_keeps(&self, o: &Order, positions: &[(ContractKey, i64)]) -> bool {
+        self.broker.capabilities().oco
+            && positions
+                .iter()
+                .find(|(k, _)| *k == o.contract)
+                .is_some_and(|(_, q)| protects(o) || plain_stop_closes(o, *q))
+    }
+
+    /// Plain stops a Flatten kept: nothing else ends them when the position is flat.
+    pub(super) fn flatten_note_kept(
+        &mut self,
+        account: &AccountId,
+        positions: &[(ContractKey, i64)],
+    ) {
+        if !self.broker.capabilities().oco {
+            return;
+        }
+        for o in self
+            .orders
+            .values()
+            .filter(|o| o.is_open() && &o.account == account)
+        {
+            let keep = positions
+                .iter()
+                .find(|(k, _)| *k == o.contract)
+                .is_some_and(|(_, q)| plain_stop_closes(o, *q));
+            if keep && !self.flatten_kept.contains(&o.id) {
+                self.flatten_kept.push(o.id);
+            }
+        }
+    }
+
+    /// A kept plain stop ends once its position is flat or on the stop's side: it would open one.
+    fn flatten_clean_up(&mut self, now: UtcMillis) {
+        if self.flatten_kept.is_empty() {
+            return;
+        }
+        let kept = std::mem::take(&mut self.flatten_kept);
+        let mut ending = Vec::new();
+        for id in kept {
+            let Some(o) = self.orders.get(&id).filter(|o| o.is_open()) else {
+                continue;
+            };
+            let position = self.position(&o.account, o.contract);
+            if position == 0 || position.signum() == o.side.sign() {
+                ending.push((o.account.clone(), id));
+            } else {
+                self.flatten_kept.push(id);
+            }
+        }
+        for (account, order) in ending {
+            self.submit_internal(
+                now,
+                crate::command::Source::Rule,
+                crate::command::Command::CancelOrder { account, order },
+            );
+        }
     }
 
     /// The market order closing a position, at once.
@@ -77,9 +147,14 @@ impl TradingCore {
         }
         let waiting = self
             .pending_flattens
-            .iter()
-            .any(|p| &p.account == account && p.contract == contract);
-        if !waiting {
+            .iter_mut()
+            .find(|p| &p.account == account && p.contract == contract);
+        if let Some(p) = waiting {
+            // A rule asking too: a person's Cancel All can no longer take it back.
+            if manual(&p.env) && !manual(env) {
+                p.env = env.clone();
+            }
+        } else {
             self.pending_flattens.push(PendingFlatten {
                 account: account.clone(),
                 contract,
@@ -90,19 +165,21 @@ impl TradingCore {
         None
     }
 
-    /// Something other than a Flatten's own order still works on the contract.
+    /// A cancel this Flatten sent is still unanswered on the contract.
     fn flatten_waits(&self, account: &AccountId, contract: ContractKey) -> bool {
         self.orders.values().any(|o| {
             o.is_open()
                 && &o.account == account
                 && o.contract == contract
                 && o.role != Role::Flatten
+                && self.cancelling.contains(&o.id)
         })
     }
 
     /// A Flatten waiting for its cancels goes once they're answered, or the venue has had long
     /// enough. It closes what the position is then: an exit may have filled meanwhile.
     pub(super) fn flatten_pending(&mut self, now: UtcMillis) {
+        self.flatten_clean_up(now);
         let mut i = 0;
         while i < self.pending_flattens.len() {
             let p = &self.pending_flattens[i];
@@ -117,19 +194,25 @@ impl TradingCore {
             if qty != 0 {
                 // Click to sent counts from here: the wait is the broker's answers, not the core.
                 p.env.issued = std::time::Instant::now();
+                // Anything placed while it waited goes too: it could fill as well.
+                self.cancel_scoped(&p.env, now, &account, Some(contract), None);
                 self.flatten_send(&p.env, now, &account, contract, qty);
             }
         }
     }
 
-    /// A person's Cancel All takes back a Flatten still waiting: it leaves the position.
+    /// A person's Cancel All takes back a person's Flatten still waiting: it leaves the position.
+    /// A rule's stays: a news window or a breach asks once.
     pub(super) fn flatten_take_back(&mut self, env: &Envelope) {
-        if crate::broker::Origin::of(env.source) != crate::broker::Origin::Manual {
+        if !manual(env) {
             return;
         }
         if let crate::command::Command::CancelAll { account, contract } = &env.command {
-            self.pending_flattens
-                .retain(|p| !(&p.account == account && contract.is_none_or(|c| c == p.contract)));
+            self.pending_flattens.retain(|p| {
+                !(manual(&p.env)
+                    && &p.account == account
+                    && contract.is_none_or(|c| c == p.contract))
+            });
         }
     }
 

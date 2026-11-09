@@ -245,6 +245,8 @@ pub struct TradingCore {
     triggers: trigger::Triggers,
     /// Market orders of a Flatten waiting for their contract's cancels (`core/flatten.rs`).
     pending_flattens: Vec<flatten::PendingFlatten>,
+    /// Plain stops a Flatten left working, to end when their position is flat.
+    flatten_kept: Vec<OrderId>,
 }
 
 /// Saved guardrail progress (by id) and settings (by name or id) for accounts that join.
@@ -310,6 +312,7 @@ impl TradingCore {
             join_guards: JoinGuards::default(),
             triggers: trigger::Triggers::default(),
             pending_flattens: Vec::new(),
+            flatten_kept: Vec::new(),
         }
     }
 
@@ -1236,8 +1239,9 @@ impl TradingCore {
                         "the broker is disconnected: nothing was sent, your orders stand; flatten when it is back",
                     ));
                 }
-                // Closing a position cancels every order on it, whoever placed it: a trader's
-                // stop left working after the position is gone would open a new one. With
+                // Closing a position ends every order on it, whoever placed it: a trader's stop
+                // left working after the position is gone would open a new one. Protection goes
+                // when it is flat (`core/flatten.rs`), everything else now. With
                 // nothing to close, a strategy's Flatten is its Cancel All (its own orders).
                 //
                 // A Flatten already on its way for a position stays, and no second one goes: it is
@@ -1278,12 +1282,12 @@ impl TradingCore {
                 } else {
                     // A position's exits stay until it's flat, where the broker honors
                     // reduce-only: if the close can't happen, they still protect it.
-                    let contracts: Vec<ContractKey> = positions.iter().map(|(k, _)| *k).collect();
+                    self.flatten_note_kept(&account, &positions);
                     let others = self
                         .orders
                         .values()
                         .filter(|o| o.account == account && !closing.contains(&o.id))
-                        .filter(|o| !self.flatten_keeps(o, &contracts))
+                        .filter(|o| !self.flatten_keeps(o, &positions))
                         .map(|o| o.id)
                         .collect();
                     self.cancel_scoped(env, now, &account, contract, Some(others))
