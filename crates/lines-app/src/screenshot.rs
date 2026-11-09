@@ -314,6 +314,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             cx.set_global(crate::strategy_panel::Strategies(s.clone()));
         }
         let mut settings = AppSettings::ephemeral();
+        // `--ui-zoom` as Settings › Appearance would have saved it (its row shows it).
+        settings.settings.ui_zoom = ui_zoom.and_then(crate::zoom::saved);
         settings.settings.new_panes.default_qty = order_size;
         if let Some(m) = pnl {
             settings.settings.pnl_display = m;
