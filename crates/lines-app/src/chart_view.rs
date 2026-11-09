@@ -1798,6 +1798,13 @@ impl ChartView {
         })
     }
 
+    /// A scale the trader chose (a double-click on the plot or price axis goes back to the fit).
+    pub fn set_price_range(&mut self, lo: f64, hi: f64) {
+        self.vp.price_lo = lo;
+        self.vp.price_hi = hi;
+        self.vp.auto_price = false;
+    }
+
     /// Hold the view against new data while something aligned to it is under the pointer. The
     /// trader's own zoom and pan still apply, and whatever is aligned follows them.
     pub fn hold_scale(&mut self, on: bool) {

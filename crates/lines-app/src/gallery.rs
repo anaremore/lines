@@ -397,6 +397,33 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         sc.chain = true;
         v.push(sc);
     }
+    // Held and worked strikes past the rows: a marker at each edge, and at a pane barely wide
+    // enough with the ticket covering the foot, both in one.
+    let far = "option 2026-11-09 697 put; buy 2 @ 13.48; ack; option 2026-11-09 670 call; buy 1 @ 13.71; ack; option 2026-11-09 672 call; buy 3 @ 1.00; ack";
+    for (name, quick, size, ticket) in [
+        ("chain-chart-markers", true, "1600x700", None),
+        (
+            "chain-chart-markers-narrow",
+            false,
+            "780x560",
+            Some("buy 684 put"),
+        ),
+    ] {
+        let mut a = vec![
+            "--workspace".to_owned(),
+            ws("chain-chart.json"),
+            "--size".to_owned(),
+            size.to_owned(),
+            "--paper".to_owned(),
+            far.to_owned(),
+        ];
+        if let Some(open) = ticket {
+            a.extend(["--chain-ticket".to_owned(), open.to_owned()]);
+        }
+        let mut sc = s(name, quick, CHAIN_AT, a);
+        sc.chain = true;
+        v.push(sc);
+    }
     // The ticket covers the chain's foot and moves no row.
     let mut foot = s(
         "chain-chart-ticket",

@@ -86,6 +86,9 @@ const TEXT_PX: f32 = 12.0;
 const PAD: f32 = 8.0;
 /// The CALLS / PUTS row and the column titles.
 const HEAD_H: f32 = 2.0 * ROW_H;
+/// The strips at the top and foot of the option chart's rows, for what the account has past them.
+/// Always kept clear of rows, so a marker appearing never covers one or takes its press.
+const MARKER_H: f32 = MIN_HIT;
 /// Expiry chips in the header.
 const MAX_EXPIRIES: usize = 8;
 /// The widest thing the Pos column's text shows.
@@ -415,6 +418,10 @@ struct Frame {
     /// The scale `ys` were placed for.
     locked_key: Option<(f64, f64, f32, f64)>,
     candidates: Vec<crate::chain_lock::Candidate>,
+    /// The band the rows may use, in window coordinates.
+    area: (f32, f32),
+    /// The markers as painted.
+    markers: [Option<crate::chain_lock::MarkerHit>; 2],
     picked: Vec<crate::chain_lock::Candidate>,
 }
 
@@ -640,6 +647,38 @@ impl Frame {
         }
         self.locked_key = Some(key);
         self.holding = self.hold;
+    }
+
+    /// What the account has that no row shows, as the rows now stand (a hold can keep a new
+    /// strike out). Marks are per series, so a strike can count twice: two series.
+    fn off_rows(&self, scale: &crate::chain_lock::LockedScale) -> crate::chain_lock::OffRows {
+        let mut off = crate::chain_lock::OffRows::default();
+        for m in &self.marks {
+            if !self.rows.iter().any(|r| r.strike == m.strike) {
+                crate::chain_lock::tally(
+                    &mut off,
+                    m.strike,
+                    scale.y(m.strike),
+                    ROW_H,
+                    self.area,
+                    m.position != 0,
+                    m.orders,
+                );
+            }
+        }
+        off
+    }
+
+    /// The marker at this window point, unless a row is there (one never is: its press wins).
+    fn marker_at(&self, x: f32, y: f32) -> Option<crate::chain_lock::MarkerHit> {
+        if self.locked_at(y).is_some() {
+            return None;
+        }
+        self.markers
+            .iter()
+            .flatten()
+            .find(|h| h.contains(x, y))
+            .copied()
     }
 
     /// The strike whose row is at window y, if any.
@@ -1825,6 +1864,12 @@ impl ChainView {
         if y < HEAD_H {
             return;
         }
+        if self.frame.locked
+            && let Some(hit) = self.frame.marker_at(x, f(ev.position.y))
+        {
+            self.bring_into_view(hit, cx);
+            return;
+        }
         // The row as painted: a series arriving since can't shift the press onto another strike.
         let strike = if self.frame.locked {
             self.frame.locked_at(f(ev.position.y))
@@ -1902,6 +1947,7 @@ impl ChainView {
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         self.common.paints += 1;
         self.bounds = bounds;
+        self.frame.markers = [None, None];
         let t = self.theme;
         self.now = Trading::try_global(cx).and_then(|tr| tr.now(&self.store));
         window.paint_quad(fill(bounds, t.bg));
@@ -1960,8 +2006,10 @@ impl ChainView {
                         if let Some(chart) = &self.chart {
                             chart.update(cx, |c, _| c.hold_scale(hold));
                         }
-                        let band = top + HEAD_H;
-                        let bottom = f(bounds.origin.y + bounds.size.height);
+                        let band = top + HEAD_H + MARKER_H;
+                        let table_bottom = f(bounds.origin.y + bounds.size.height);
+                        let bottom = s.bottom().min(table_bottom) - MARKER_H;
+                        self.frame.area = (band, bottom);
                         self.frame.refresh_locked(
                             chain,
                             d.last_trade,
@@ -2411,8 +2459,8 @@ impl ChainView {
         let line_y = match (&scale, last) {
             // At its price on the chart, when that is in the chain's view.
             (Some(s), Some(l)) => {
-                let bottom = s.bottom().min(f(bounds.origin.y + bounds.size.height));
-                Some(s.y(l)).filter(|y| *y >= top + HEAD_H + 8.0 && *y < bottom - 8.0)
+                let (t, b) = self.frame.area;
+                Some(s.y(l)).filter(|y| *y >= t + 8.0 && *y < b - 8.0)
             }
             _ => line_at.map(|v| top + HEAD_H + v as f32 * ROW_H + ROW_H / 2.0),
         };
@@ -2461,7 +2509,133 @@ impl ChainView {
                 );
             }
         }
+        if let Some(s) = &scale {
+            self.paint_markers(s, bounds, window, cx);
+        }
         pane::paint_stale_veil(&self.store, bounds, &self.theme, window);
+    }
+
+    /// What the account has past the rows, at the edge it's past: nothing it holds or works goes
+    /// unseen on the view it trades from. The foot's marker joins the top's while the ticket or
+    /// a long message covers the foot.
+    fn paint_markers(
+        &mut self,
+        scale: &crate::chain_lock::LockedScale,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use crate::chain_lock::Off;
+        let off = self.frame.off_rows(scale);
+        let none = Off::default();
+        let top_y = f(bounds.origin.y) + HEAD_H;
+        let foot_y = self.frame.area.1;
+        if self.ticket.is_some() || self.note.is_some() {
+            let above = off.above.nearest.is_some();
+            let target = off.above.nearest.or(off.below.nearest);
+            self.paint_marker(
+                0,
+                off.above,
+                off.below,
+                off.between,
+                top_y,
+                target,
+                above,
+                bounds,
+                window,
+                cx,
+            );
+        } else {
+            let above = off.above.nearest;
+            let below = off.below.nearest;
+            self.paint_marker(
+                0, off.above, none, none, top_y, above, true, bounds, window, cx,
+            );
+            self.paint_marker(
+                1,
+                none,
+                off.below,
+                off.between,
+                foot_y,
+                below,
+                false,
+                bounds,
+                window,
+                cx,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_marker(
+        &mut self,
+        slot: usize,
+        above: crate::chain_lock::Off,
+        below: crate::chain_lock::Off,
+        between: crate::chain_lock::Off,
+        y: f32,
+        target: Option<Price>,
+        target_above: bool,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if !above.any() && !below.any() && !between.any() {
+            return;
+        }
+        let t = self.theme;
+        let (ox, w) = (f(bounds.origin.x), f(bounds.size.width));
+        let mut s = FixedStr::<96>::new();
+        crate::chain_lock::write_marker(&mut s, above, below, between, false);
+        let mut tw = self.glyphs.width(s.as_str(), t.text_main, true, window);
+        if tw + 2.0 * PAD > w {
+            s = FixedStr::<96>::new();
+            crate::chain_lock::write_marker(&mut s, above, below, between, true);
+            tw = self.glyphs.width(s.as_str(), t.text_main, true, window);
+        }
+        let chip_w = (tw + 2.0 * PAD).min(w);
+        let x = ox + (w - chip_w) / 2.0;
+        let chip = Bounds::new(point(px(x), px(y)), size(px(chip_w), px(MARKER_H)));
+        window.paint_quad(fill(chip, t.panel));
+        let edge = if target.is_some() {
+            t.control_edge
+        } else {
+            t.axis_line
+        };
+        window.paint_quad(gpui::outline(chip, edge, gpui::BorderStyle::Solid));
+        self.glyphs.paint(
+            s.as_str(),
+            x + PAD,
+            y,
+            MARKER_H,
+            t.text_main,
+            true,
+            window,
+            cx,
+        );
+        self.frame.markers[slot] = target.map(|target| crate::chain_lock::MarkerHit {
+            x: (x, x + chip_w),
+            y: (y, y + MARKER_H),
+            target,
+            above: target_above,
+        });
+    }
+
+    /// A press on a marker: the chart's scale widens to take in the nearest strike past that
+    /// edge. It's the trader's own scale change, as a zoom is, and the rows follow.
+    fn bring_into_view(&mut self, hit: crate::chain_lock::MarkerHit, cx: &mut Context<Self>) {
+        let area = self.frame.area;
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |c, cx| {
+                let range = c.locked_scale().and_then(|s| {
+                    crate::chain_lock::range_showing(&s, hit.target, area, ROW_H, hit.above)
+                });
+                if let Some((lo, hi)) = range {
+                    c.set_price_range(lo, hi);
+                    cx.notify();
+                }
+            });
+        }
     }
 
     fn header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3635,6 +3809,57 @@ mod tests {
         assert!(!hold_rows(table, on, false, false), "left the window");
         assert!(hold_rows(table, chart, true, true), "One-click, anywhere");
         assert!(hold_rows(table, chart, false, true), "One-click, anywhere");
+    }
+
+    /// A marker counts what no row shows, and its strips never hold a row, so it can't take a
+    /// row's press: a row at the same y would win anyway.
+    #[test]
+    fn a_marker_counts_what_no_row_shows_and_never_takes_a_rows_press() {
+        let day = CivilDate::new(2026, 11, 9).unwrap();
+        let chains = key_chain(day, 670, 690);
+        let s = locked_scale();
+        let mut f = locked_frame();
+        f.locked = true;
+        let area = (116.0, 480.0);
+        f.area = area;
+        f.refresh_locked(
+            chains.chain(day),
+            Some(Price(68_050)),
+            None,
+            &s,
+            area.0,
+            area.1,
+        );
+        assert!(f.ys.iter().all(|y| *y >= area.0 && y + ROW_H <= area.1));
+        let mark = |k: i64, position: i64, orders: u32| Mark {
+            strike: Price(k),
+            right: Right::Call,
+            position,
+            avg: None,
+            order: None,
+            orders,
+        };
+        let shown = f.rows[0].strike.0;
+        f.marks.push(mark(shown, 2, 0));
+        f.marks.push(mark(68_950, 1, 0)); // past the top on this scale
+        f.marks.push(mark(67_010, 0, 3)); // past the foot
+        let off = f.off_rows(&s);
+        assert_eq!((off.above.held, off.above.working), (1, 0));
+        assert_eq!((off.below.held, off.below.working), (0, 3));
+        assert_eq!(off.between.held + off.between.working, 0, "a row shows it");
+        // A marker over a row can't happen; if it did, the row keeps its press.
+        let y = f.ys[0] + 1.0;
+        f.markers[0] = Some(crate::chain_lock::MarkerHit {
+            x: (0.0, 1_000.0),
+            y: (y - 5.0, y + 5.0),
+            target: Price(68_950),
+            above: true,
+        });
+        assert_eq!(f.marker_at(500.0, y), None);
+        assert!(
+            f.marker_at(500.0, y - 3.0 - ROW_H).is_none(),
+            "off the marker"
+        );
     }
 
     /// The chain's foot is below the table, so a strike behind it has no row to press.

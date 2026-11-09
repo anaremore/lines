@@ -81,11 +81,279 @@ pub fn price_mark(y: f32, row_tops: &[f32], row_h: f32, tag_h: f32) -> (bool, bo
     (line, tag)
 }
 
+/// What the account has on strikes past one edge of the rows.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Off {
+    /// Series with a position.
+    pub held: u32,
+    /// Working orders.
+    pub working: u32,
+    /// The strike nearest the rows.
+    pub nearest: Option<Price>,
+}
+
+impl Off {
+    pub fn any(&self) -> bool {
+        self.held > 0 || self.working > 0
+    }
+}
+
+/// What the account has that no row shows.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct OffRows {
+    pub above: Off,
+    pub below: Off,
+    /// In the rows' range without a row: crowded out, or new while the rows hold.
+    pub between: Off,
+}
+
+/// Which of those a strike's mark counts toward, by the same test that places a row, so a strike
+/// is either a row's or on this list. `area` is the rows' band.
+pub fn tally(
+    off: &mut OffRows,
+    strike: Price,
+    y: f32,
+    row_h: f32,
+    area: (f32, f32),
+    held: bool,
+    working: u32,
+) {
+    let top = y - row_h / 2.0;
+    let side = if top < area.0 {
+        off.above.nearest = Some(off.above.nearest.map_or(strike, |n| n.min(strike)));
+        &mut off.above
+    } else if top + row_h > area.1 {
+        off.below.nearest = Some(off.below.nearest.map_or(strike, |n| n.max(strike)));
+        &mut off.below
+    } else {
+        &mut off.between
+    };
+    side.held += u32::from(held);
+    side.working += working;
+}
+
+/// The marker's words: each count named, or when that won't fit, one count per edge.
+pub fn write_marker(
+    out: &mut impl std::fmt::Write,
+    above: Off,
+    below: Off,
+    between: Off,
+    short: bool,
+) {
+    let mut first = true;
+    let mut sep = |out: &mut dyn std::fmt::Write| {
+        let word = if first { "" } else { "  ·  " };
+        first = false;
+        out.write_str(word)
+    };
+    if short {
+        let _ = out.write_str("Held or working: ");
+    }
+    for (off, word) in [
+        (above, "above"),
+        (below, "below"),
+        (between, "without a row"),
+    ] {
+        if !off.any() {
+            continue;
+        }
+        let _ = sep(out);
+        if short {
+            let _ = write!(out, "{} {word}", off.held + off.working);
+            continue;
+        }
+        if off.held > 0 {
+            let _ = write!(out, "{} held", off.held);
+        }
+        if off.held > 0 && off.working > 0 {
+            let _ = out.write_str(", ");
+        }
+        if off.working > 0 {
+            let _ = write!(out, "{} working", off.working);
+        }
+        let _ = write!(out, " {word}");
+    }
+}
+
+/// Where a marker can be pressed, and the strike a press brings into view.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MarkerHit {
+    pub x: (f32, f32),
+    pub y: (f32, f32),
+    pub target: Price,
+    pub above: bool,
+}
+
+impl MarkerHit {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x.0 && x < self.x.1 && y >= self.y.0 && y < self.y.1
+    }
+}
+
+/// The price range that keeps everything now in view and adds `strike`, just inside the rows'
+/// band. `None` when the plot has no room to.
+pub fn range_showing(
+    scale: &LockedScale,
+    strike: Price,
+    area: (f32, f32),
+    row_h: f32,
+    above: bool,
+) -> Option<(f64, f64)> {
+    let (lo, hi, k) = (scale.vp.price_lo, scale.vp.price_hi, strike.0 as f64);
+    let height = scale.vp.height;
+    // (A pixel's margin: rounding must not leave it just outside the band.)
+    let margin = row_h / 2.0 + 1.0;
+    let target = if above {
+        area.0 + margin
+    } else {
+        area.1 - margin
+    };
+    let to = f64::from(target - scale.plot_top);
+    if !(to > 0.0 && to < height) {
+        return None;
+    }
+    let range = if above {
+        let r = to / height;
+        ((k - lo * r) / (1.0 - r), lo)
+    } else {
+        (hi, hi - (hi - k) * height / to)
+    };
+    let (hi, lo) = range;
+    (lo.is_finite() && hi.is_finite() && hi > lo).then_some((lo, hi))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const ROW: f32 = 18.0;
+
+    /// A strike is a row's, or counted past the edge it's beyond, by the test that places rows.
+    #[test]
+    fn a_mark_without_a_row_is_counted_on_its_side() {
+        let area = (100.0, 500.0);
+        let mut off = OffRows::default();
+        tally(&mut off, Price(690), 50.0, ROW, area, true, 0);
+        tally(&mut off, Price(695), 20.0, ROW, area, false, 2);
+        tally(&mut off, Price(670), 600.0, ROW, area, true, 1);
+        tally(&mut off, Price(660), 900.0, ROW, area, true, 0);
+        tally(&mut off, Price(680), 300.0, ROW, area, true, 0);
+        assert_eq!(
+            off.above,
+            Off {
+                held: 1,
+                working: 2,
+                nearest: Some(Price(690))
+            }
+        );
+        assert_eq!(
+            off.below,
+            Off {
+                held: 2,
+                working: 1,
+                nearest: Some(Price(670))
+            }
+        );
+        assert_eq!(
+            off.between,
+            Off {
+                held: 1,
+                working: 0,
+                nearest: None
+            }
+        );
+        // At the very edge of the band: a row fits, so this isn't past it.
+        let mut edge = OffRows::default();
+        tally(&mut edge, Price(1), 100.0 + ROW / 2.0, ROW, area, true, 0);
+        tally(&mut edge, Price(2), 500.0 - ROW / 2.0, ROW, area, true, 0);
+        assert_eq!(edge.between.held, 2);
+    }
+
+    #[test]
+    fn the_marker_says_what_is_past_the_edge() {
+        let say = |a: Off, b: Off, m: Off, short: bool| {
+            let mut s = String::new();
+            write_marker(&mut s, a, b, m, short);
+            s
+        };
+        let (none, held, both) = (
+            Off::default(),
+            Off {
+                held: 2,
+                working: 0,
+                nearest: None,
+            },
+            Off {
+                held: 1,
+                working: 3,
+                nearest: None,
+            },
+        );
+        assert_eq!(say(held, none, none, false), "2 held above");
+        assert_eq!(say(none, both, none, false), "1 held, 3 working below");
+        assert_eq!(
+            say(
+                none,
+                Off {
+                    held: 0,
+                    working: 1,
+                    nearest: None
+                },
+                held,
+                false
+            ),
+            "1 working below  ·  2 held without a row"
+        );
+        assert_eq!(
+            say(held, both, none, true),
+            "Held or working: 2 above  ·  4 below"
+        );
+    }
+
+    /// A press widens the range just enough: the strike gets a row's room in the band, and what
+    /// was in view stays there.
+    #[test]
+    fn a_press_brings_the_strike_inside_the_rows() {
+        let s = scale(68_000.0, 69_000.0, 600.0);
+        let area = (80.0, 600.0);
+        for (strike, above) in [
+            (70_000, true),
+            (65_000, false),
+            (69_010, true),
+            (67_990, false),
+        ] {
+            let (lo, hi) = range_showing(&s, Price(strike), area, ROW, above).unwrap();
+            assert!(lo <= 68_000.0 && hi >= 69_000.0, "{lo} {hi}");
+            let mut after = s;
+            after.vp.price_lo = lo;
+            after.vp.price_hi = hi;
+            let y = after.y(Price(strike));
+            assert!(
+                y - ROW / 2.0 >= area.0 && y + ROW / 2.0 <= area.1,
+                "{strike} {y}"
+            );
+            let mut off = OffRows::default();
+            tally(&mut off, Price(strike), y, ROW, area, true, 0);
+            assert_eq!(off.between.held, 1, "{strike}");
+        }
+        assert_eq!(
+            range_showing(&s, Price(70_000), (0.0, 600.0), ROW, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_marker_takes_a_press_only_on_itself() {
+        let hit = MarkerHit {
+            x: (100.0, 200.0),
+            y: (50.0, 70.0),
+            target: Price(1),
+            above: true,
+        };
+        assert!(hit.contains(150.0, 60.0));
+        assert!(!hit.contains(99.0, 60.0) && !hit.contains(200.0, 60.0));
+        assert!(!hit.contains(150.0, 49.0) && !hit.contains(150.0, 70.0));
+    }
 
     /// The tag never covers a strike or a quote: near a row it goes, on a row the line does too.
     #[test]
