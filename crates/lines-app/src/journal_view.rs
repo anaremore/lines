@@ -885,8 +885,8 @@ impl JournalView {
         );
         self.stats_today = stats_items(
             // The trade date the stats count (the exchange's), not the display zone's day: a
-            // Tokyo evening trade is the next morning there.
-            &format!("Trade date {today}"),
+            // Tokyo evening trade is the next morning there. It says whose date it is.
+            &format!("Trade date {today} (exchange)"),
             &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
             snap.open,
             mode,

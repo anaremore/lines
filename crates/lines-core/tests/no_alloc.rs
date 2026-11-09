@@ -75,6 +75,10 @@ fn paint_path_does_not_allocate() {
         .unwrap(),
     ];
 
+    // The app sets a named zone: paint clones it out of the lock (this test binary's own
+    // process-wide zone).
+    lines_core::display_tz::set_current(zones[1].clone());
+
     let (mut hits, mut bar_hits) = (0usize, 0usize);
     let n = allocs_during(|| {
         for frame in 0..500 {

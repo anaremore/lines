@@ -326,9 +326,11 @@ impl TapeView {
 
         // What each column must hold this frame: its title and its widest text (large prints
         // are bold, the wider face). Columns are laid out from these: never narrower.
-        if let Some(p) = self.prints.first() {
-            self.cols.name_zone(p.time);
-        }
+        self.cols.name_zone(
+            self.prints
+                .first()
+                .map_or_else(lines_feed::now_utc, |p| p.time),
+        );
         self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
         let n = self.prints.len().min(rows);
         for i in 0..n {

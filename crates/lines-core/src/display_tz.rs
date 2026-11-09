@@ -181,6 +181,26 @@ impl DisplayTz {
         }
     }
 
+    /// A name that holds all year, for a header over many times: "ET", "UTC", or the IANA
+    /// city ("Chicago", "Port of Spain"); an abbreviation ("CST") would be wrong for the
+    /// rows on the other side of a DST change. A zone without a name: its label at `t`.
+    pub fn write_name<W: fmt::Write>(&self, t: UtcMillis, out: &mut W) -> fmt::Result {
+        match (self.label, self.tz.iana_name()) {
+            (Label::Fixed(s), _) => out.write_str(s),
+            (Label::Abbrev, Some(n)) => {
+                let city = n.rsplit('/').next().unwrap_or(n);
+                for (i, part) in city.split('_').enumerate() {
+                    if i > 0 {
+                        out.write_char(' ')?;
+                    }
+                    out.write_str(part)?;
+                }
+                Ok(())
+            }
+            (Label::Abbrev, None) => self.write_label(t, out),
+        }
+    }
+
     /// `HH:MM:SS` on this zone's clock.
     pub fn write_clock<W: fmt::Write>(&self, t: UtcMillis, out: &mut W) -> fmt::Result {
         let (_, _, _, h, m, s) = self.civil(t);
@@ -319,6 +339,29 @@ mod tests {
             clock(&DisplayTz::utc(), at("2026-11-05T21:59:00Z")),
             "21:59:00 UTC"
         );
+    }
+
+    #[test]
+    fn a_header_name_holds_all_year() {
+        let name = |z: &DisplayTz, t: &str| {
+            let mut s = String::new();
+            z.write_name(at(t), &mut s).unwrap();
+            s
+        };
+        let chi = DisplayTz::resolve(&ZoneChoice::Named("America/Chicago".into())).unwrap();
+        assert_eq!(name(&chi, "2026-07-15T18:30:00Z"), "Chicago");
+        assert_eq!(name(&chi, "2026-12-15T18:30:00Z"), "Chicago");
+        let pos = DisplayTz::resolve(&ZoneChoice::Named("America/Port_of_Spain".into())).unwrap();
+        assert_eq!(name(&pos, "2026-07-15T18:30:00Z"), "Port of Spain");
+        assert_eq!(name(&DisplayTz::exchange(), "2026-07-15T18:30:00Z"), "ET");
+        assert_eq!(name(&DisplayTz::utc(), "2026-07-15T18:30:00Z"), "UTC");
+    }
+
+    #[test]
+    fn new_york_from_the_os_reads_et() {
+        let z = DisplayTz::of(TimeZone::get(EXCHANGE).unwrap());
+        assert_eq!(z, DisplayTz::exchange());
+        assert_eq!(clock(&z, at("2026-07-15T18:30:00Z")), "14:30:00 ET");
     }
 
     #[test]

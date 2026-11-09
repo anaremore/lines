@@ -311,8 +311,8 @@ pub enum Table {
     Journal,
 }
 
-/// The Time header's room: "Time " and the longest zone label ("+0545").
-const TIME_HEADER_CAP: usize = 16;
+/// The Time header's room: "Time " and the longest zone name (a city: "Dumont DUrville").
+const TIME_HEADER_CAP: usize = 40;
 
 /// A pane's columns: the trader's choices, this frame's layout, and what the content needs.
 #[derive(Clone, Debug)]
@@ -371,11 +371,13 @@ impl Columns {
         }
     }
 
-    /// Name the display zone at `at` in the Time column's header ("Time ET", "Time JST"):
-    /// a time & sales or journal pane on its own still says which clock its times are on.
+    /// Name the display zone in the Time column's header ("Time ET", "Time Chicago"): a time
+    /// & sales or journal pane on its own still says which clock its times are on. A name that
+    /// holds all year (`DisplayTz::write_name`): the rows can span a DST change. `at` only for
+    /// a zone without a name.
     pub fn name_zone(&mut self, at: lines_core::UtcMillis) {
         let mut label = lines_core::FixedStr::<{ TIME_HEADER_CAP - 5 }>::new();
-        let _ = lines_core::display_tz::current().write_label(at, &mut label);
+        let _ = lines_core::display_tz::current().write_name(at, &mut label);
         if self.time_header.get(5..) != Some(label.as_str()) {
             self.time_header.clear();
             self.time_header.push_str("Time ");

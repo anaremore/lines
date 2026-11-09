@@ -19,8 +19,9 @@
 //!
 //! SVG because nothing can render the app's own chart off the UI thread (GPUI paints in a
 //! window, its image readback is test-only), and SVG needs no new dependency, opens in any
-//! browser and is small. Times are on the display zone's clock, like the chart's axis and the journal's table, and the header names it. The look
-//! (theme, palette, P&L display) is the app's as the file is drawn.
+//! browser and is small. Times are on the display zone's clock, like the chart's axis and the
+//! journal's table, and the header names it. The look (theme, palette, P&L display) is the
+//! app's as the file is drawn.
 
 use lines_core::display_tz::DisplayTz;
 use std::fmt::Write as _;
