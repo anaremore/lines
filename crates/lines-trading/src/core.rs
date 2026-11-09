@@ -1220,6 +1220,15 @@ impl TradingCore {
                     .map(|(k, p)| (*k, p.qty()))
                     .filter(|(_, q)| *q != 0)
                     .collect();
+                // A broker that can't be reached can't close anything. Refused whole, before any
+                // cancel is remembered: otherwise the stop's cancel would go on reconnect, with
+                // the market order long failed, and strip the position's protection.
+                if !positions.is_empty() && !self.broker.connected() {
+                    return Err(Reject::new(
+                        RejectCode::Broker,
+                        "the broker is disconnected: nothing was sent, your orders stand; flatten when it is back",
+                    ));
+                }
                 // Closing a position cancels every order on it, whoever placed it: a trader's
                 // stop left working after the position is gone would open a new one. With
                 // nothing to close, a strategy's Flatten is its Cancel All (its own orders).

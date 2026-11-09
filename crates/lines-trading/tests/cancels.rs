@@ -37,6 +37,8 @@ struct Venue {
     /// Refuse cancels, as a broker that says "too late to cancel" would.
     refuse_cancels: Arc<AtomicBool>,
     refused: Vec<BrokerEvent>,
+    /// Events to report on the next poll.
+    inject: Arc<Mutex<Vec<BrokerEvent>>>,
     /// Holds a stop or target as reduce-only itself? (`false`: only the core's sweep ends one.)
     honors_exits: Arc<AtomicBool>,
     up: Arc<AtomicBool>,
@@ -107,6 +109,7 @@ impl Broker for Venue {
     }
     fn poll(&mut self, now: UtcMillis, out: &mut Vec<BrokerEvent>) {
         out.append(&mut self.refused);
+        out.append(&mut self.inject.lock().unwrap());
         self.inner.poll(now, out)
     }
     fn next_wake(&self) -> Option<UtcMillis> {
@@ -132,6 +135,7 @@ struct Rig {
     honors_exits: Arc<AtomicBool>,
     up: Arc<AtomicBool>,
     contexts: Arc<Mutex<Vec<RequestContext>>>,
+    inject: Arc<Mutex<Vec<BrokerEvent>>>,
 }
 
 impl Rig {
@@ -149,6 +153,7 @@ impl Rig {
         let honors_exits = Arc::new(AtomicBool::new(false));
         let up = Arc::new(AtomicBool::new(true));
         let contexts = Arc::new(Mutex::new(Vec::new()));
+        let inject = Arc::new(Mutex::new(Vec::new()));
         let mut core = TradingCore::new(Box::new(Venue {
             inner,
             flattens: flattens.clone(),
@@ -160,6 +165,7 @@ impl Rig {
             honors_exits: honors_exits.clone(),
             up: up.clone(),
             contexts: contexts.clone(),
+            inject: inject.clone(),
         }));
         core.add_account(AccountConfig::paper("paper-1", 100_000), None);
         let mut r = Rig {
@@ -175,6 +181,7 @@ impl Rig {
             honors_exits,
             up,
             contexts,
+            inject,
         };
         r.t += 1;
         let book = [
@@ -792,4 +799,113 @@ fn rebuilds_dont_let_a_rule_burn_the_sends() {
         .unwrap();
     }
     assert_eq!(r.sent_cancels(), 1);
+}
+
+/// A Flatten while the broker is disconnected is refused whole: the stop stays, now and after
+/// reconnecting, whatever became of the market order it would have sent.
+#[test]
+fn a_flatten_while_disconnected_never_strips_the_stop() {
+    let mut r = Rig::new();
+    r.honors_exits.store(true, Ordering::Relaxed);
+    r.long(5);
+    let stop = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(5),
+            kind: OrderKind::Stop {
+                trigger: Price(590_000),
+            },
+        }))
+        .unwrap()[0];
+    r.wait(LAT + 1);
+    r.up.store(false, Ordering::Relaxed);
+    let no = r
+        .cmd(Command::Flatten {
+            account: acct(),
+            contract: Some(es()),
+        })
+        .unwrap_err();
+    assert!(no.message.contains("disconnected"), "{}", no.message);
+    assert_eq!(r.flattens.load(Ordering::Relaxed), 0);
+    r.wait(2_000);
+    r.up.store(true, Ordering::Relaxed);
+    r.wait(10_000);
+    assert_eq!(r.sent_cancels(), 0, "nothing remembered to send");
+    assert_eq!(r.state(stop), OrderState::Working, "the stop stands");
+    assert_eq!(r.pos(), 5);
+}
+
+/// Two refusals of an unresolved order's cancels leave it unresolved, and say so once.
+#[test]
+fn a_second_refusal_doesnt_end_an_unresolved_order() {
+    let mut r = Rig::new();
+    let id = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(590_000),
+            },
+        }))
+        .unwrap()[0];
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.cancel(id);
+    r.rebuild();
+    assert_eq!(r.state(id), OrderState::Unresolved);
+    // Unresolved: the broker refuses the cancel, twice over (a resend was outstanding).
+    let refusal = BrokerEvent::Rejected {
+        id,
+        reason: "too late to cancel".into(),
+        at: UtcMillis(r.t),
+    };
+    r.inject.lock().unwrap().extend([refusal.clone(), refusal]);
+    r.wait(1);
+    assert_eq!(r.state(id), OrderState::Unresolved);
+    assert_eq!(r.failures().len(), 1);
+}
+
+/// A refused cancel on an acked order leaves it alive: a held bracket exit, or an order between
+/// ack and working, is still at the broker. Without a cancel sent, `Rejected` is the order's own.
+#[test]
+fn a_refused_cancel_on_an_acked_order_leaves_it_alive() {
+    let mut r = Rig::new();
+    let place = |r: &mut Rig| {
+        r.cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(590_000),
+            },
+        }))
+        .unwrap()[0]
+    };
+    let (kept, ended) = (place(&mut r), place(&mut r));
+    let at = UtcMillis(r.t);
+    r.inject.lock().unwrap().extend([
+        BrokerEvent::Acked { id: kept, at },
+        BrokerEvent::Acked { id: ended, at },
+    ]);
+    r.wait(1);
+    assert_eq!(r.state(kept), OrderState::Acked);
+    r.lose_cancels.store(1, Ordering::Relaxed);
+    r.cancel(kept);
+    let refused = |id| BrokerEvent::Rejected {
+        id,
+        reason: "too late to cancel".into(),
+        at,
+    };
+    r.inject
+        .lock()
+        .unwrap()
+        .extend([refused(kept), refused(ended)]);
+    r.wait(1);
+    assert_eq!(r.state(kept), OrderState::Acked, "the cancel was refused");
+    assert!(matches!(r.state(ended), OrderState::Rejected { .. }));
+    assert_eq!(r.failures().len(), 1);
 }

@@ -8,8 +8,8 @@
 //! - A rebuild keeps them (the venue watcher rebuilds on every revision, so clearing would
 //!   stop the resend each time), but a person's next command sends at once: the broker's list
 //!   is new. Rules wait for the 2 s, or rebuilds would burn the sends in a moment.
-//! - A broker refuses a cancel by sending `BrokerEvent::Rejected` for an order that is working
-//!   or partly filled: the order is live and stays as it is (it can't become Rejected),
+//! - A broker refuses a cancel by sending `BrokerEvent::Rejected` for an order it has answered
+//!   (acked, working, partly filled) or whose outcome is unknown: the order stays as it is,
 //!   [`Event::CancelFailed`] says why, nothing resends on its own and a rule's cancel adds none
 //!   (a sweep would ask again forever), and a person's next command goes at once.
 //! - While the broker is disconnected nothing is sent and no send is spent: a command is
@@ -194,23 +194,29 @@ impl TradingCore {
         }
     }
 
-    /// The broker's `Rejected` for a live order (or one whose outcome is unknown) with a cancel
-    /// on its way: the cancel was refused, not the order. Returns whether that is what this was.
+    /// The broker's `Rejected` for an order past its first answer (or one whose outcome is
+    /// unknown) with a cancel sent: the cancel was refused, not the order, which stays as it is.
+    /// Returns whether that is what this was (a repeat is too, said once).
     pub(super) fn cancel_refused(&mut self, id: OrderId, reason: &str, at: UtcMillis) -> bool {
-        let live = self.orders.get(&id).is_some_and(|o| {
+        let alive = self.orders.get(&id).is_some_and(|o| {
             matches!(
                 o.state,
-                OrderState::Working | OrderState::PartiallyFilled | OrderState::Unresolved
+                OrderState::Acked
+                    | OrderState::Working
+                    | OrderState::PartiallyFilled
+                    | OrderState::Unresolved
             )
         });
-        if !live {
+        if !alive {
             return false;
         }
-        let Some(c) = self.cancelling.get_mut(&id).filter(|c| !c.refused) else {
+        let Some(c) = self.cancelling.get_mut(&id) else {
             return false;
         };
-        c.refused = true;
-        self.cancel_failed(id, format!("cancel refused: {reason}"), at);
+        if !c.refused {
+            c.refused = true;
+            self.cancel_failed(id, format!("cancel refused: {reason}"), at);
+        }
         true
     }
 

@@ -57,8 +57,9 @@ pub enum Event {
     },
     /// A trigger on an underlying (decision 0029) after any change; [`crate::trigger`].
     Trigger(crate::trigger::TriggerView),
-    /// A cancel didn't happen: the broker refused it, or never answered it. The order is still
-    /// live (`reason` says which); another Cancel, Cancel All or Flatten sends again.
+    /// A cancel didn't happen: the broker refused it, or never answered it. `reason` says which,
+    /// and whether the order is still working or its outcome unknown. On a working order
+    /// another Cancel, Cancel All or Flatten sends again.
     CancelFailed {
         account: AccountId,
         #[serde(with = "contract_serde")]

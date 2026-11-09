@@ -747,7 +747,7 @@ pub fn short_reason(message: &str) -> &str {
     const KNOWN: [(&str, &str); 18] = [
         // First: whatever else it mentions, the cancel is what failed.
         ("cancel refused", "no cancel"),
-        ("cancels", "no cancel"),
+        ("no answer to", "no cancel"),
         ("market is closed", "closed"),
         ("tick grid", "tick"),
         ("trading halted", "halted"),
@@ -1776,6 +1776,11 @@ mod tests {
         assert_eq!(
             short_reason("still working: no answer to 3 cancels"),
             "no cancel"
+        );
+        // Other refusals that mention the word keep their own tag.
+        assert_eq!(
+            short_reason("venue can't hold a stop and a target as one-cancels-other"),
+            "venue"
         );
         assert_eq!(short_reason("insufficient margin"), "insuffici");
         assert_eq!(short_reason(""), "");
