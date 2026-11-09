@@ -132,6 +132,9 @@ enum LabelKind {
     DrawingTag(u32),
     /// "tick bars from 14:32" at a tick chart's first bar (keyed by that time).
     TickFrom,
+    /// The display zone ("ET", "JST") in the corner under the price axis (keyed by its
+    /// offset: an abbreviation changes with it).
+    Zone,
 }
 
 /// Drawing price tags on the axis considered per frame (labels they cover aren't drawn).
@@ -2959,8 +2962,9 @@ impl ChartView {
             }
             if display_tz::epoch() != self.zone_epoch {
                 // Times read in the new zone: cached time labels and the readout go.
-                self.zone = display_tz::current();
+                // The epoch first: a change between the reads shows on the next frame.
                 self.zone_epoch = display_tz::epoch();
+                self.zone = display_tz::current();
                 self.labels.clear();
                 self.readout = None;
             }
@@ -4134,6 +4138,35 @@ impl ChartView {
             }
             let origin = point(px(ox + left), px(oy + self.above_axis + 4.0));
             self.paint_label(kind, l.time.0, origin, line_h, t.text_dim, window, cx, text);
+        }
+        // The axis's zone, once, in the corner under the price axis (not for days and weeks:
+        // they are trade dates).
+        if let Some(at) = self.scene.time_lines.last().map(|l| l.time)
+            && !tf.is_daily()
+        {
+            let zone = self.zone.clone();
+            let key = zone.offset_ms(at);
+            let text = |s: &mut FixedStr<32>| {
+                let _ = zone.write_label(at, s);
+            };
+            let w = f32::from(
+                self.label(LabelKind::Zone, key, t.text_dim, window, text)
+                    .width,
+            );
+            let origin = point(
+                px(ox + pw + hair + (AXIS_W - w) * 0.5),
+                px(oy + self.above_axis + 4.0),
+            );
+            self.paint_label(
+                LabelKind::Zone,
+                key,
+                origin,
+                line_h,
+                t.text_dim,
+                window,
+                cx,
+                text,
+            );
         }
         self.draw_drawing_tags(bounds, window, cx);
         if let (Some(p), Some(y)) = (self.last_trade, last_y) {
@@ -5584,14 +5617,13 @@ impl ChartView {
         let to_go = tick_bars.and_then(|b| b.to_go(now));
         if self.frozen {
             // Frozen clock: only data-derived time is shown, so screenshots are reproducible.
-            // On the display zone's clock, like every other time.
+            // On the display zone's clock, like every other time, and short ("16:58:59 ET": the
+            // axis has the date) so a narrow header keeps its zone.
             if let Some(mt) = d.market_time {
                 let zone = display_tz::current();
-                let (y, mo, dd, h, mi, sec) = zone.civil(mt);
-                let _ = write!(
-                    right,
-                    "  ·  {y:04}-{mo:02}-{dd:02} {h:02}:{mi:02}:{sec:02} "
-                );
+                let _ = right.write_str("  ·  ");
+                let _ = zone.write_clock(mt, &mut right);
+                let _ = right.write_char(' ');
                 let _ = zone.write_label(mt, &mut right);
             }
         } else if self.perf_stats {

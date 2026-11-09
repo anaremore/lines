@@ -884,13 +884,9 @@ impl JournalView {
             &self.badges,
         );
         self.stats_today = stats_items(
-            // Off the exchange's clock, a row's date can differ from the trade date the stats
-            // count (a Tokyo evening trade is the next morning there): name it.
-            &if lines_core::display_tz::current().is_exchange() {
-                format!("Today {today}")
-            } else {
-                format!("Trade date {today}")
-            },
+            // The trade date the stats count (the exchange's), not the display zone's day: a
+            // Tokyo evening trade is the next morning there.
+            &format!("Trade date {today}"),
             &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
             snap.open,
             mode,
@@ -1754,15 +1750,15 @@ mod tests {
         let j = Journal::from_records([Record::Trade(Box::new(trade()))]);
         let s = j.stats(|_| true);
         assert_eq!(
-            stats_text("Today 2026-11-05", &s, 1, PnlDisplay::Both),
-            "Today 2026-11-05: 1 trade  ·  net +$310.02  ·  max drawdown $0.00  ·  win 100%  ·  avg win +$310.02  ·  avg loss —  ·  expectancy +$310.02  ·  profit factor —  ·  1 win in a row  ·  1 open"
+            stats_text("Trade date 2026-11-05", &s, 1, PnlDisplay::Both),
+            "Trade date 2026-11-05: 1 trade  ·  net +$310.02  ·  max drawdown $0.00  ·  win 100%  ·  avg win +$310.02  ·  avg loss —  ·  expectancy +$310.02  ·  profit factor —  ·  1 win in a row  ·  1 open"
         );
         // Net P&L is the loudest item, colored by its sign (and signed).
         let items = stats_items("Today", &s, 0, PnlDisplay::Both);
         assert!(items[1].strong && items[1].tone == 1);
         assert_eq!(
-            stats_text("Today 2026-11-05", &s, 0, PnlDisplay::Off),
-            "Today 2026-11-05: 1 trade  ·  win 100%  ·  1 win in a row"
+            stats_text("Trade date 2026-11-05", &s, 0, PnlDisplay::Off),
+            "Trade date 2026-11-05: 1 trade  ·  win 100%  ·  1 win in a row"
         );
         assert_eq!(
             stats_text("All dates", &Stats::default(), 0, PnlDisplay::Both),

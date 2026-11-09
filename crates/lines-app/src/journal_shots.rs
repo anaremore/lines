@@ -22,6 +22,7 @@
 //! browser and is small. Times are UTC, like the chart's axis and the journal's table. The look
 //! (theme, palette, P&L display) is the app's as the file is drawn.
 
+use lines_core::display_tz::DisplayTz;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
@@ -406,15 +407,16 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         esc(kind),
         esc(&contract),
     );
-    // The image outlives the setting: it names its zone.
+    // The image outlives the setting: it names its zone (one read: the header and the plot
+    // agree even if the setting changes mid-render).
     let zone = lines_core::display_tz::current();
     let when = format!(
         "Entry {}-{}  →  exit {}-{} {}  ·  held {}",
         zone.civil(t.entry_time).0,
-        crate::journal_view::clock_text(t.entry_time),
+        clock_text(t.entry_time, &zone),
         zone.civil(t.exit_time).0,
-        crate::journal_view::clock_text(t.exit_time),
-        crate::journal_view::zone_text(t.exit_time),
+        clock_text(t.exit_time, &zone),
+        zone_text(t.exit_time, &zone),
         crate::journal_view::duration_text(t.duration_ms())
     );
     let _ = writeln!(
@@ -461,7 +463,7 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         s.push_str("</svg>\n");
         return s;
     };
-    plot(&mut s, t, d, product, th);
+    plot(&mut s, t, d, product, th, &zone);
     s.push_str("</svg>\n");
     s
 }
@@ -484,15 +486,29 @@ fn slot_width(slots: usize) -> f32 {
     (PLOT_R - PLOT_L - LABEL_ROOM) / slots.max(34) as f32
 }
 
-/// `HH:MM` on the display zone's clock.
-fn hhmm(t: UtcMillis) -> String {
+/// `HH:MM` on `zone`'s clock.
+fn hhmm(t: UtcMillis, zone: &DisplayTz) -> String {
     let mut s = String::new();
-    let _ = lines_core::display_tz::current().write_hhmm(t, &mut s);
+    let _ = zone.write_hhmm(t, &mut s);
     s
 }
 
+/// `zone`'s label at `t`.
+fn zone_text(t: UtcMillis, zone: &DisplayTz) -> String {
+    let mut s = String::new();
+    let _ = zone.write_label(t, &mut s);
+    s
+}
+
+/// `11-05 14:31:07` on `zone`'s clock.
+fn clock_text(t: UtcMillis, zone: &DisplayTz) -> String {
+    let (_, mo, d, h, mi, s) = zone.civil(t);
+    format!("{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
 /// Candles, axes, the trade's span, fills and averages.
-fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) {
+/// Drawn on `zone`'s clock, the one the header names.
+fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme, zone: &DisplayTz) {
     let bars = &d.bars;
     let mut lo = bars.iter().map(|b| b.low.0).min().unwrap_or(0);
     let mut hi = bars.iter().map(|b| b.high.0).max().unwrap_or(0);
@@ -540,7 +556,6 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
     );
     // Time axis: about one label per 110 px, HH:MM (the display zone), the date where it
     // changes.
-    let zone = lines_core::display_tz::current();
     let every = ((110.0 / slot).ceil() as usize).max(1);
     let mut last_day: Option<CivilDate> = None;
     for (i, b) in bars.iter().enumerate() {
@@ -578,7 +593,7 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
                 x(i),
                 PLOT_B + 18.0,
                 paint("fill", th.text_dim),
-                hhmm(at)
+                hhmm(at, zone)
             );
         }
     }
@@ -697,16 +712,16 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme) 
         let _ = write!(
             missing,
             "No bars before {} {}. Earlier fills are placed at the first bar.  ",
-            hhmm(b.time),
-            crate::journal_view::zone_text(b.time)
+            hhmm(b.time, zone),
+            zone_text(b.time, zone)
         );
     }
     if let Some(b) = bars.last().filter(|_| e1 >= bars.len()) {
         let _ = write!(
             missing,
             "No bars after {} {}. Later fills are placed by their times.",
-            hhmm(b.time),
-            crate::journal_view::zone_text(b.time)
+            hhmm(b.time, zone),
+            zone_text(b.time, zone)
         );
     }
     if !missing.is_empty() {

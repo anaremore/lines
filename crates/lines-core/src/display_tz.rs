@@ -63,10 +63,7 @@ impl ZoneChoice {
     pub fn describe(&self) -> String {
         match self {
             ZoneChoice::Exchange => "Exchange (ET)".to_owned(),
-            ZoneChoice::System => match TimeZone::try_system()
-                .ok()
-                .and_then(|z| z.iana_name().map(str::to_owned))
-            {
+            ZoneChoice::System => match system_name() {
                 Some(n) => format!("System ({n})"),
                 None => "System".to_owned(),
             },
@@ -145,11 +142,6 @@ impl DisplayTz {
         }
     }
 
-    /// Whether this is the default exchange zone (labeled "ET").
-    pub fn is_exchange(&self) -> bool {
-        self.label == Label::Fixed("ET")
-    }
-
     /// The zone's IANA name, if it has one.
     pub fn iana_name(&self) -> Option<&str> {
         self.tz.iana_name()
@@ -196,6 +188,17 @@ impl DisplayTz {
         let (_, _, _, h, m, _) = self.civil(t);
         write!(out, "{h:02}:{m:02}")
     }
+}
+
+/// The OS zone's IANA name, read once (the Settings window asks every frame).
+fn system_name() -> Option<&'static str> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        TimeZone::try_system()
+            .ok()
+            .and_then(|z| z.iana_name().map(str::to_owned))
+    })
+    .as_deref()
 }
 
 fn is_utc(n: &str) -> bool {
