@@ -1870,6 +1870,12 @@ fn pane_header_h() -> f32 {
     crate::pane::header_height(crate::layout::PaneKind::Dom)
 }
 
+/// A pane's height as the rows reckon it: layout snaps to device pixels, so at 150% a pane held at
+/// the minimum measures 90.67 and must still count as its 91.
+fn reckoned_h(pane_h: f32) -> f32 {
+    pane_h.ceil()
+}
+
 /// The rows with the bracket editor and confirmation closed. With three ladder rows kept: the order
 /// buttons go first (the ladder and keys still enter). Then the ladder with quantity and bracket,
 /// whole: a click on it uses them, so it never shows without them. Then the rule meters, the status
@@ -1907,6 +1913,7 @@ pub fn panel_rows(width: f32, pane_h: f32, editing: bool) -> PanelRows {
     if pane_h <= 0.0 {
         return PanelRows::ALL;
     }
+    let pane_h = reckoned_h(pane_h);
     let mut r = closed_rows(width, pane_h);
     if editing && editor_fits(width, pane_h) {
         (r.entry, r.buttons) = (true, true);
@@ -1921,9 +1928,16 @@ pub fn editor_fits(width: f32, pane_h: f32) -> bool {
     if pane_h <= 0.0 {
         return true;
     }
+    let pane_h = reckoned_h(pane_h);
     let mut r = closed_rows(width, pane_h);
     (r.entry, r.buttons) = (true, true);
     r.account && pane_header_h() + r.height(width) <= pane_h
+}
+
+/// Whether a button of the utility row shows: BE and Reverse (`entry`) need the account row, because
+/// they act on a position and an account the pane no longer names without it.
+fn util_shows(entry: bool, rows: PanelRows) -> bool {
+    !entry || rows.account
 }
 
 /// Whether the bracket editor or confirmation is open: see [`panel_rows`].
@@ -2540,7 +2554,18 @@ pub fn dom_bar<V: TradePane>(
         (TradeCmd::Flatten, "Flatten", labels[3], false),
     ];
     let mut row = div().flex().flex_row().items_center().gap_1().h(px(UTIL_H));
+    if !rows.account {
+        // Paper or live is always in view (docs/design.md §3): the account row's badge moves here.
+        let waiting = pt.account.is_some();
+        let word = data
+            .as_ref()
+            .map_or(if waiting { "LIVE" } else { "PAPER" }, |d| d.badge);
+        row = row.child(account_badge(word, t).flex_shrink_0());
+    }
     for (i, (cmd, name, label, entry)) in util.into_iter().enumerate() {
+        if !util_shows(entry, rows) {
+            continue;
+        }
         // BE and Reverse size to their words; Cancel all and Flatten take the rest. On a
         // read-only account those two read "off" and refuse with the reason when clicked.
         let off = !entry && locked.is_some();
@@ -4998,8 +5023,19 @@ mod tests {
             let short = panel_rows(width, MIN_DOM_PANE_H - 1.0, false);
             assert!(!short.account);
             assert!(header + short.height(width) <= 57.0);
+            // Without the account row, BE and Reverse go: they'd act on what nothing names.
+            assert!(util_shows(false, short) && !util_shows(true, short));
+            assert!(util_shows(true, panel_rows(width, MIN_DOM_PANE_H, false)));
+            // Snapped to device pixels at 150% and 175%, a pane held at the minimum still is one.
+            assert!(panel_rows(width, 136.0 / 1.5, false).account);
+            assert!(panel_rows(width, 159.0 / 1.75, false).account);
         }
         assert_eq!(pane_header_h(), 27.0, "MIN_DOM_PANE_H counts it");
+        // The exits' buttons, centered in their row under the header, are whole from 53 px.
+        assert_eq!(
+            pane_header_h() + (UTIL_H - (MIN_HIT + 2.0)) / 2.0 + MIN_HIT + 2.0,
+            53.0
+        );
     }
 
     /// Where each row goes, in the order docs/known-gaps.md and the PR state: a wide panel, and

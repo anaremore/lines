@@ -620,7 +620,7 @@ fn cut(r: Rect, axis: Axis, ratio: f32, min_first: f32, min_second: f32) -> (Rec
         Axis::Column => {
             let a = (r.h * ratio)
                 .round()
-                .min(r.h - min_second)
+                .min((r.h - min_second).floor())
                 .max(min_first)
                 .min(r.h);
             (
