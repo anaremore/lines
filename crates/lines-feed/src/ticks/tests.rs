@@ -723,14 +723,28 @@ fn bars_starting_late_are_labelled() {
     let status = d.ticks.status(lease.key(), &d.series, &product);
     assert_eq!(status, TickStatus::From(t("2026-11-05T16:15:20Z")));
     assert_eq!(
-        status.label().as_deref(),
+        status
+            .label(&lines_core::display_tz::DisplayTz::utc())
+            .as_deref(),
         Some("tick bars from 11-05 16:15 UTC")
     );
+    // On the display zone's clock: 16:15Z is 11:15 in New York (EST).
     assert_eq!(
-        TickStatus::Building.label().as_deref(),
+        status
+            .label(&lines_core::display_tz::DisplayTz::exchange())
+            .as_deref(),
+        Some("tick bars from 11-05 11:15 ET")
+    );
+    assert_eq!(
+        TickStatus::Building
+            .label(&lines_core::display_tz::DisplayTz::utc())
+            .as_deref(),
         Some("building tick bars")
     );
-    assert_eq!(TickStatus::Complete.label(), None);
+    assert_eq!(
+        TickStatus::Complete.label(&lines_core::display_tz::DisplayTz::utc()),
+        None
+    );
 }
 
 /// Bars from the session open: nothing to say. Continuous bars from the same open say from

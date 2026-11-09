@@ -822,7 +822,7 @@ fn table() -> Vec<Setting> {
                     let Value::Text(shown) = v else {
                         return Err("not a time zone");
                     };
-                    p.app.time_zone = crate::display_zone::saved_of(&shown);
+                    p.app.time_zone = crate::display_zone::saved_of(&shown)?;
                     Ok(())
                 }),
             ),

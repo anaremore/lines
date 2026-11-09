@@ -5077,7 +5077,12 @@ impl ChartView {
         let Some(state) = trading.try_read() else {
             return false; // busy this instant: the next poll
         };
-        let key = (source.revision(), state.fills_seen, contract);
+        // The display zone's epoch too: a marker's text names its time in that zone.
+        let key = (
+            source.revision().wrapping_add(display_tz::epoch() << 48),
+            state.fills_seen,
+            contract,
+        );
         let product = &self.instrument;
         self.marks.update(key, || {
             crate::strategy_marks::build(
@@ -5336,7 +5341,7 @@ impl ChartView {
         crate::layout_rec::line(window, line, origin, px(LABEL_PX * 1.3), "");
     }
 
-    /// "tick bars from 11-05 14:32 UTC" beside the first tick bar, at the plot's
+    /// "tick bars from 11-05 09:32 ET" beside the first tick bar, at the plot's
     /// bottom: the bars begin after their session's open, so earlier trading has none.
     fn draw_tick_from(
         &mut self,
@@ -5348,8 +5353,9 @@ impl ChartView {
         cx: &mut App,
     ) {
         let t = self.theme;
-        let text = move |s: &mut FixedStr<32>| {
-            let _ = lines_feed::ticks::write_from(from, s);
+        let zone = self.zone.clone();
+        let text = |s: &mut FixedStr<32>| {
+            let _ = lines_feed::ticks::write_from(from, &zone, s);
         };
         let w = f32::from(
             self.label(LabelKind::TickFrom, from.0, t.text_dim, window, text)
@@ -5568,7 +5574,7 @@ impl ChartView {
         if let Some(st) = tick_status
             && (st == lines_feed::ticks::TickStatus::Building
                 || tick_bars.is_none_or(|b| b.is_empty()))
-            && let Some(l) = st.label()
+            && let Some(l) = st.label(&display_tz::current())
         {
             let _ = write!(right, "  ·  {l}");
         }

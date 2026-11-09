@@ -248,11 +248,13 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
         (None, 0)
     };
     let last = info.decisions.last().map(|d| {
+        // The zone named: the line above gives the strategy's window in its own zone.
         format!(
-            "{}  {}",
+            "{} {}  {}",
             crate::journal_view::clock_text(d.at)
                 .get(6..)
                 .unwrap_or_default(),
+            crate::journal_view::zone_text(d.at),
             d.decision.reason
         )
     });

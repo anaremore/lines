@@ -19,7 +19,9 @@ use jiff::tz::TimeZone;
 
 use crate::time::UtcMillis;
 
-/// The exchange zone: CME's sessions, settlement and the VWAP reset are on US Eastern time.
+/// The default display zone, US Eastern ("Exchange (ET)", the owner's choice): the 18:00 ET
+/// VWAP reset and the equity sessions are on it (CME's Globex hours are kept in Central time
+/// by `crate::sessions`, whatever this is).
 pub const EXCHANGE: &str = "America/New_York";
 
 /// What the trader chose (`settings.json`'s `time_zone`; absent is the exchange's).
@@ -141,6 +143,11 @@ impl DisplayTz {
             tz,
             label: Label::Abbrev,
         }
+    }
+
+    /// Whether this is the default exchange zone (labeled "ET").
+    pub fn is_exchange(&self) -> bool {
+        self.label == Label::Fixed("ET")
     }
 
     /// The zone's IANA name, if it has one.

@@ -884,7 +884,13 @@ impl JournalView {
             &self.badges,
         );
         self.stats_today = stats_items(
-            &format!("Today {today}"),
+            // Off the exchange's clock, a row's date can differ from the trade date the stats
+            // count (a Tokyo evening trade is the next morning there): name it.
+            &if lines_core::display_tz::current().is_exchange() {
+                format!("Today {today}")
+            } else {
+                format!("Trade date {today}")
+            },
             &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
             snap.open,
             mode,

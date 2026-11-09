@@ -42,16 +42,19 @@ pub fn describe_saved(saved: Option<&str>) -> String {
     ZoneChoice::from_saved(saved).describe()
 }
 
-/// The saved text for what the setting shows (the inverse of [`describe_saved`]).
-pub fn saved_of(shown: &str) -> Option<String> {
+/// The saved text for what the setting shows (the inverse of [`describe_saved`]): a zone
+/// this tzdb knows, by its IANA spelling. An unknown zone is refused.
+pub fn saved_of(shown: &str) -> Result<Option<String>, &'static str> {
     let c = if shown == ZoneChoice::Exchange.describe() {
         ZoneChoice::Exchange
     } else if shown == "System" || shown.starts_with("System (") {
         ZoneChoice::System
     } else {
-        ZoneChoice::Named(shown.to_owned())
+        let z = DisplayTz::resolve(&ZoneChoice::Named(shown.trim().to_owned()))
+            .map_err(|_| "unknown time zone")?;
+        ZoneChoice::Named(z.iana_name().unwrap_or("UTC").to_owned())
     };
-    c.to_saved()
+    Ok(c.to_saved())
 }
 
 /// Every choice the list offers: the exchange's, the system's, then UTC and every city.
@@ -276,8 +279,14 @@ mod tests {
     #[test]
     fn the_shown_text_maps_back_to_the_saved_text() {
         for saved in [None, Some("System"), Some("Asia/Tokyo"), Some("UTC")] {
-            assert_eq!(saved_of(&describe_saved(saved)).as_deref(), saved);
+            assert_eq!(
+                saved_of(&describe_saved(saved)),
+                Ok(saved.map(str::to_owned))
+            );
         }
+        // Saved by its IANA spelling; an unknown zone is refused.
+        assert_eq!(saved_of("asia/tokyo"), Ok(Some("Asia/Tokyo".to_owned())));
+        assert!(saved_of("Mars/Olympus").is_err());
     }
 
     #[test]
