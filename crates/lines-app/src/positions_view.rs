@@ -69,6 +69,8 @@ pub struct PositionsView {
     width: f32,
     /// Accounts that can't be traded through Lines, and why.
     read_only: Vec<(AccountId, String)>,
+    /// Paper accounts (options close only there).
+    paper: Vec<AccountId>,
     /// A row's Flatten waits for the pointer after the rows move.
     press_guard: model::PressGuard,
 }
@@ -139,6 +141,7 @@ impl PositionsView {
             note: None,
             width: 0.0,
             read_only: Vec::new(),
+            paper: Vec::new(),
             press_guard: model::PressGuard::default(),
         }
     }
@@ -163,6 +166,11 @@ impl PositionsView {
         self.read_only = infos
             .iter()
             .filter_map(|a| a.read_only.clone().map(|why| (a.id.clone(), why)))
+            .collect();
+        self.paper = infos
+            .iter()
+            .filter(|a| a.paper)
+            .map(|a| a.id.clone())
             .collect();
         self.accounts = infos.into_iter().map(|a| (a.id, a.badge, a.name)).collect();
         if self
@@ -238,12 +246,15 @@ impl PositionsView {
         true
     }
 
-    /// Why an account can't be traded through Lines (`None`: it can).
-    fn read_only(&self, account: &AccountId) -> Option<String> {
-        self.read_only
-            .iter()
-            .find(|(a, _)| a == account)
-            .map(|(_, why)| why.clone())
+    /// Why a row's Flatten can't close it here (`None`: it can): a read-only account, or an
+    /// option on an account that isn't paper (options trade on paper only; the core's Flatten
+    /// would cancel the option's orders, its stop too, and close nothing).
+    fn off_reason(&self, row: &Row) -> Option<String> {
+        if let Some((_, why)) = self.read_only.iter().find(|(a, _)| *a == row.account) {
+            return Some(why.clone());
+        }
+        let paper = self.paper.contains(&row.account);
+        model::option_flatten_off(row.contract, paper).map(str::to_owned)
     }
 
     /// `ESZ6 · Paper`: what a note names.
@@ -274,8 +285,20 @@ impl PositionsView {
                 .collect(),
             None => rows.to_vec(),
         };
+        // What can't close here is left, and said (its orders untouched).
+        let (open, off): (Vec<Row>, Vec<Row>) =
+            open.into_iter().partition(|r| self.off_reason(r).is_none());
+        if let Some(r) = off.first() {
+            let why = self.off_reason(r).unwrap_or_default();
+            self.note = Some(match off.len() {
+                1 => format!("{}: {why}", Self::label(r)),
+                n => format!("{n} positions not flattened: {why}"),
+            });
+        }
         if open.is_empty() {
-            self.note = Some("Already flat".to_owned());
+            if off.is_empty() {
+                self.note = Some("Already flat".to_owned());
+            }
             return;
         }
         let rows = &open;
@@ -689,7 +712,7 @@ impl PositionsView {
                     let row = r.clone();
                     // A read-only account (a venue that can't be traded here) says so, and a
                     // press says why, as the DOM's Flatten does.
-                    let off = self.read_only(&r.account);
+                    let off = self.off_reason(&r);
                     let word = if off.is_some() {
                         "Flatten off"
                     } else {
@@ -705,7 +728,7 @@ impl PositionsView {
                                     MouseButton::Left,
                                     cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                                         cx.stop_propagation();
-                                        if let Some(why) = this.read_only(&row.account) {
+                                        if let Some(why) = this.off_reason(&row) {
                                             this.note = Some(why);
                                         } else if !this.press_guard.may_press() {
                                             // Said once; the next press is the trader's own.

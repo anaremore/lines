@@ -242,6 +242,13 @@ impl PressGuard {
     }
 }
 
+/// Why an option's Flatten can't close it on this account: options trade on paper only here
+/// (decision 0028), and the core's Flatten would cancel its orders and close nothing.
+pub fn option_flatten_off(contract: ContractKey, paper: bool) -> Option<&'static str> {
+    (contract.option_key().is_some() && !paper)
+        .then_some("options close on paper only here: close it at the broker")
+}
+
 /// How many are open, and their P&L together.
 pub fn totals(rows: &[Row]) -> (usize, Money) {
     let pnl = rows.iter().fold(Money::ZERO, |a, r| Money(a.0 + r.pnl.0));
@@ -701,6 +708,14 @@ mod tests {
         o.marked_at = Some(t);
         assert!(!stale(&o, UtcMillis(t.0 + 10_000)));
         assert!(stale(&o, UtcMillis(t.0 + 10_001)));
+    }
+
+    /// An option on an account that isn't paper can't be flattened here; anything else can.
+    #[test]
+    fn an_option_off_paper_says_why_its_flatten_is_off() {
+        assert!(option_flatten_off(call(), false).is_some());
+        assert_eq!(option_flatten_off(call(), true), None);
+        assert_eq!(option_flatten_off(es(), false), None);
     }
 
     /// Rows that move under a still pointer hold a press until it moves.

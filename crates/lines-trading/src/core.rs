@@ -2396,8 +2396,10 @@ impl TradingCore {
                     m.bid = b;
                     m.ask = a;
                     let two_sided = b.is_some() && a.is_some();
+                    // A last trade repeated on every quote isn't a new price.
+                    let new_last = last.is_some() && last != m.last;
                     m.last = if two_sided { None } else { last.or(held) };
-                    if two_sided || last.is_some() {
+                    if two_sided || new_last {
                         m.priced_at = Some(time);
                     }
                     m.quoted_at = Some(time);
