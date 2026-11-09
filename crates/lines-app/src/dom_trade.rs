@@ -745,6 +745,9 @@ pub fn position_row(avg_price: f64, tick: i64, units: i64) -> i64 {
 /// first word, at most 9 characters.
 pub fn short_reason(message: &str) -> &str {
     const KNOWN: [(&str, &str); 18] = [
+        // First: whatever else it mentions, the cancel is what failed.
+        ("cancel refused", "no cancel"),
+        ("cancels", "no cancel"),
         ("market is closed", "closed"),
         ("tick grid", "tick"),
         ("trading halted", "halted"),
@@ -760,8 +763,6 @@ pub fn short_reason(message: &str) -> &str {
         ("no market price", "no price"),
         ("liquidity", "no liq"),
         ("entries locked", "disabled"),
-        ("cancel refused", "no cancel"),
-        ("cancels", "no cancel"),
         ("filled", "filled"),
     ];
     let lower = message.to_ascii_lowercase();
@@ -1768,6 +1769,14 @@ mod tests {
         );
         // Unknown: the first word, at most 9 characters.
         assert_eq!(short_reason(ENABLE_TO_TRADE), "disabled");
+        assert_eq!(
+            short_reason("still working: cancel refused: market is closed"),
+            "no cancel"
+        );
+        assert_eq!(
+            short_reason("still working: no answer to 3 cancels"),
+            "no cancel"
+        );
         assert_eq!(short_reason("insufficient margin"), "insuffici");
         assert_eq!(short_reason(""), "");
         for m in [

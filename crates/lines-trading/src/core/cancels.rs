@@ -6,12 +6,14 @@
 //! - A person's Cancel, Cancel All or Flatten sends again once the last send is that old, with a
 //!   new budget. A rule's or strategy's doesn't add to the budget.
 //! - A rebuild keeps them (the venue watcher rebuilds on every revision, so clearing would
-//!   stop the resend each time), but the next command sends at once: the broker's list is new.
+//!   stop the resend each time), but a person's next command sends at once: the broker's list
+//!   is new. Rules wait for the 2 s, or rebuilds would burn the sends in a moment.
 //! - A broker refuses a cancel by sending `BrokerEvent::Rejected` for an order that is working
 //!   or partly filled: the order is live and stays as it is (it can't become Rejected),
 //!   [`Event::CancelFailed`] says why, nothing resends on its own and a rule's cancel adds none
 //!   (a sweep would ask again forever), and a person's next command goes at once.
-//! - While the broker is disconnected nothing is sent and no send is spent.
+//! - While the broker is disconnected nothing is sent and no send is spent: a command is
+//!   remembered and goes when it is back.
 //! - An order is on its way out only while a cancel may still work: refused or out of sends, it
 //!   counts as live again ([`TradingCore::cancel_pending`]).
 
@@ -54,7 +56,7 @@ impl SentCancel {
 
     /// Whether anyone but a person may send it again now.
     fn may_send_again(&self, now: UtcMillis) -> bool {
-        !self.refused && (self.rebuilt || self.due(now)) && self.sends < CANCEL_SENDS
+        !self.refused && self.due(now) && self.sends < CANCEL_SENDS
     }
 }
 
@@ -62,26 +64,36 @@ impl TradingCore {
     /// Ask the broker to cancel an order, unless a cancel for it is on its way.
     pub(super) fn send_cancel(&mut self, env: &Envelope, now: UtcMillis, id: OrderId) {
         let person = Origin::of(env.source) == Origin::Manual;
-        let sends = match self.cancelling.get(&id) {
+        let before = self.cancelling.get(&id);
+        let sends = match before {
             None => 1,
             Some(c) if person && (c.refused || c.rebuilt || c.due(now)) => 1,
             // Refused or out of sends: only a person's command starts again, never a rebuild.
             Some(c) if !person && c.may_send_again(now) => c.sends + 1,
             Some(_) => return,
         };
+        // A rule's send doesn't change who asked: its later resends go as the first did.
+        let (source, pane) = match before {
+            Some(c) if !person => (c.source, c.pane),
+            _ => (env.source, env.pane),
+        };
+        // Disconnected: remembered, not sent, no send spent (it goes when the broker is back).
+        let up = self.broker.connected();
         self.cancelling.insert(
             id,
             SentCancel {
                 at: now,
-                sends,
+                sends: if up { sends } else { sends - 1 },
                 rebuilt: false,
                 said: false,
                 refused: false,
-                source: env.source,
-                pane: env.pane,
+                source,
+                pane,
             },
         );
-        self.send(env, now, BrokerRequest::Cancel { id });
+        if up {
+            self.send(env, now, BrokerRequest::Cancel { id });
+        }
     }
 
     /// Whether a rule or sweep should leave this order alone for now: a cancel is on its way,
@@ -90,6 +102,13 @@ impl TradingCore {
         self.cancelling
             .get(&id)
             .is_some_and(|c| !c.may_send_again(now))
+    }
+
+    /// Whether a cancel for this order was tried and got nowhere (refused, or out of sends).
+    pub(super) fn cancel_gave_up(&self, id: OrderId) -> bool {
+        self.cancelling
+            .get(&id)
+            .is_some_and(|c| c.refused || c.said)
     }
 
     /// Whether this order is on its way out: a cancel was sent and may still work. Refused or
@@ -137,13 +156,8 @@ impl TradingCore {
                 command: Command::CancelOrder { account, order: id },
                 pane,
             };
+            // No `Event::Command`: nobody asked, and a strategy would read it as an answer.
             self.send(&env, now, BrokerRequest::Cancel { id });
-            self.events.push(Event::Command {
-                id: command,
-                source,
-                at: now,
-                result: Ok(vec![id]),
-            });
         }
     }
 
@@ -180,13 +194,15 @@ impl TradingCore {
         }
     }
 
-    /// The broker's `Rejected` for a live order with a cancel on its way: the cancel was
-    /// refused, not the order. Returns whether that is what this was.
+    /// The broker's `Rejected` for a live order (or one whose outcome is unknown) with a cancel
+    /// on its way: the cancel was refused, not the order. Returns whether that is what this was.
     pub(super) fn cancel_refused(&mut self, id: OrderId, reason: &str, at: UtcMillis) -> bool {
-        let live = self
-            .orders
-            .get(&id)
-            .is_some_and(|o| matches!(o.state, OrderState::Working | OrderState::PartiallyFilled));
+        let live = self.orders.get(&id).is_some_and(|o| {
+            matches!(
+                o.state,
+                OrderState::Working | OrderState::PartiallyFilled | OrderState::Unresolved
+            )
+        });
         if !live {
             return false;
         }
@@ -202,7 +218,8 @@ impl TradingCore {
         let Some(o) = self.orders.get(&id) else {
             return;
         };
-        let reason = if o.is_open() {
+        // Acknowledged, it is at the broker; sent and never answered, nobody knows.
+        let reason = if o.is_open() && o.state != OrderState::Submitted {
             format!("still working: {reason}")
         } else {
             format!("outcome unknown: {reason}")

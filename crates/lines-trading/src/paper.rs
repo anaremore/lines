@@ -740,6 +740,13 @@ impl PaperBroker {
 
     fn cancel(&mut self, now: UtcMillis, id: OrderId, reason: &str) {
         let Some(po) = self.orders.remove(&id) else {
+            // Not here: finished (the core ignores this then), or never arrived, and then this
+            // is what ends an order whose outcome the core didn't know.
+            self.out.push(BrokerEvent::Cancelled {
+                id,
+                reason: "no such open order".into(),
+                at: now,
+            });
             return;
         };
         self.out.push(BrokerEvent::Cancelled {

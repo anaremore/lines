@@ -585,11 +585,10 @@ fn a_cancel_survives_its_order_becoming_unresolved() {
         }))
         .unwrap()[0];
     r.cancel(id);
-    r.lose_market.store(false, Ordering::Relaxed);
     r.rebuild();
     assert_eq!(r.state(id), OrderState::Unresolved);
     r.wait(2_000);
-    assert_eq!(r.sent_cancels(), 2, "sent again");
+    assert_eq!(r.sent_cancels(), 2, "the rebuild didn't drop it");
 }
 
 /// The replacement's cancel for a lost Flatten goes on until answered, then says so: never
@@ -688,4 +687,109 @@ fn a_resend_keeps_the_source_and_the_pane() {
     assert_eq!(sent[0], sent[1]);
     assert_eq!(sent[1].source, Source::Dom);
     assert_eq!(sent[1].pane, Some(pane));
+}
+
+/// A Flatten order lost for good isn't asked about again on every Flatten after: one failure,
+/// no more sends, however many Flattens follow.
+#[test]
+fn a_dead_unresolved_flatten_is_reported_once() {
+    let mut r = Rig::new();
+    r.long(5);
+    r.lose_market.store(true, Ordering::Relaxed);
+    r.flatten();
+    r.rebuild();
+    r.wait(5_100);
+    r.lose_cancels.store(100, Ordering::Relaxed);
+    r.flatten(); // replaced: flat
+    for _ in 0..3 {
+        r.wait(2_000);
+    }
+    assert_eq!(r.pos(), 0);
+    assert_eq!(r.failures().len(), 1);
+    let sent = r.sent_cancels();
+    for _ in 0..3 {
+        r.flatten();
+        r.wait(2_000);
+    }
+    assert_eq!(r.sent_cancels(), sent, "no more cancels for it");
+    assert_eq!(r.failures().len(), 1, "no more warnings");
+}
+
+/// The paper broker answers a cancel for an order it never got, so the unresolved order ends.
+#[test]
+fn paper_ends_an_order_it_never_got() {
+    let mut r = Rig::new();
+    r.long(1);
+    r.lose_market.store(true, Ordering::Relaxed);
+    r.flatten();
+    r.rebuild();
+    let lost = r
+        .events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::Order(o) if o.state == OrderState::Unresolved => Some(o.id),
+            _ => None,
+        })
+        .unwrap();
+    r.wait(5_100);
+    r.flatten();
+    r.wait(LAT + 1);
+    assert_eq!(r.state(lost), OrderState::Cancelled);
+    assert_eq!(r.pos(), 0);
+    assert!(r.failures().is_empty());
+}
+
+/// A cancel asked for while disconnected is remembered, sent when the broker is back, and
+/// spends nothing; a rule's too, and a rule's send doesn't change who asked.
+#[test]
+fn commands_while_disconnected_spend_nothing_and_rules_keep_who_asked() {
+    let mut r = Rig::new();
+    let id = r.resting();
+    r.up.store(false, Ordering::Relaxed);
+    r.cancel(id);
+    assert_eq!(r.sent_cancels(), 0);
+    r.wait(2_000);
+    r.cmd_from(
+        Source::Rule,
+        Command::CancelOrder {
+            account: acct(),
+            order: id,
+        },
+    )
+    .unwrap();
+    r.wait(6_000);
+    assert_eq!(r.sent_cancels(), 0);
+    assert!(r.failures().is_empty(), "{:?}", r.failures());
+    r.up.store(true, Ordering::Relaxed);
+    r.wait(2_000);
+    assert_eq!(r.sent_cancels(), 1);
+    assert_eq!(
+        r.contexts.lock().unwrap()[0].source,
+        Source::Dom,
+        "as the person asked"
+    );
+    r.wait(LAT + 1);
+    assert_eq!(r.state(id), OrderState::Cancelled);
+}
+
+/// Rebuilds don't let a rule burn the sends: it waits the 2 s like any resend.
+#[test]
+fn rebuilds_dont_let_a_rule_burn_the_sends() {
+    let mut r = Rig::new();
+    let id = r.resting();
+    r.lose_cancels.store(100, Ordering::Relaxed);
+    r.cancel(id);
+    for _ in 0..3 {
+        r.rebuild();
+        r.cmd_from(
+            Source::Rule,
+            Command::CancelOrder {
+                account: acct(),
+                order: id,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(r.sent_cancels(), 1);
 }

@@ -1243,12 +1243,15 @@ impl TradingCore {
                     .collect();
                 // An unresolved one not closing anything now (past that, or the position reads
                 // flat) may still fill, and the cancels below only cover open orders.
+                // Once: a cancel that got nowhere isn't asked again on every Flatten after.
+                let scope = self.cancel_scope(env.source);
                 let unresolved: Vec<OrderId> = self
                     .orders
                     .values()
                     .filter(|o| o.state == OrderState::Unresolved && o.role == Role::Flatten)
                     .filter(|o| o.account == account && contract.is_none_or(|c| c == o.contract))
-                    .filter(|o| !closing.contains(&o.id))
+                    .filter(|o| scope.as_ref().is_none_or(|s| s.contains(&o.id)))
+                    .filter(|o| !closing.contains(&o.id) && !self.cancel_gave_up(o.id))
                     .map(|o| o.id)
                     .collect();
                 for id in unresolved {
