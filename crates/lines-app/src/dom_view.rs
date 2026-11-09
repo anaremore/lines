@@ -135,6 +135,8 @@ pub struct DomView {
     /// Whether the columns have been measured once: a ladder first painted under the pointer has
     /// to be.
     cols_measured: bool,
+    /// The UI zoom generation the columns were measured at (`crate::zoom`).
+    cols_zoom: u32,
     /// Whether the bracket editor was open as last painted: its closing moves rows.
     was_editing: bool,
     /// Whether this pane has a trade panel, whose rows decide if the ladder shows.
@@ -347,6 +349,7 @@ impl DomView {
             pane_w: 0.0,
             was_editing: false,
             cols_measured: false,
+            cols_zoom: crate::zoom::generation(),
             has_panel: false,
             trail,
         }
@@ -619,7 +622,7 @@ impl DomView {
             return;
         };
         if col == DomColumn::Orders {
-            let width = f(self.bounds.size.width);
+            let width = f(self.bounds.size.width) / crate::zoom::get();
             match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
                 Ok(None) => return,
@@ -774,7 +777,7 @@ impl DomView {
         if self.column_at(ev.position) == Some(DomColumn::Orders)
             && let Some(price) = self.row_at(ev.position)
         {
-            let width = f(self.bounds.size.width);
+            let width = f(self.bounds.size.width) / crate::zoom::get();
             match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => {
                     if let (Some(account), Some(t)) =
@@ -971,6 +974,11 @@ impl DomView {
         // pointer leaves.
         let hovered =
             !self.frozen && window.is_window_hovered() && bounds.contains(&window.mouse_position());
+        // Every row moves on a zoom change anyway: measure again, hovered or not.
+        if self.cols_zoom != crate::zoom::generation() {
+            self.cols_zoom = crate::zoom::generation();
+            self.cols_measured = false;
+        }
         let measure = measures_columns(hovered, self.cols_measured);
         self.cols_measured |= measure;
         if measure {

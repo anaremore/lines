@@ -56,9 +56,7 @@ use crate::wsdoc::{JournalGroup, JournalState, PaneDoc};
 const ROW_H_100: f32 = 18.0;
 
 /// [`ROW_H_100`] at the UI zoom (`crate::zoom`).
-
 #[inline]
-
 fn row_h() -> f32 {
     crate::zoom::f(ROW_H_100)
 }

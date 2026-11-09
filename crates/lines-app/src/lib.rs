@@ -497,7 +497,7 @@ struct Cli {
     context_menu: Option<pane_menu::ShotMenu>,
     /// Screenshot: the UI zoom in percent (80, 90, 100, 110, 125, 150), as Settings ›
     /// Appearance sets it; the chart's own time and price zoom are unchanged.
-    #[arg(long, requires = "screenshot")]
+    #[arg(long, requires = "screenshot", value_parser = zoom::parse_step)]
     ui_zoom: Option<u16>,
     /// Screenshot: keep the journal in DIR (`screenshot.jsonl`) instead of in memory, so trades
     /// a `--paper` script closes get their trade snapshots in DIR/shots/. Evidence only: nothing of

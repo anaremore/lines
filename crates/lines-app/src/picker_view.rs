@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Context, FontFeatures, FontWeight, Global, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Styled, div, prelude::*, px,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Styled, div, prelude::*,
 };
 use lines_core::{CivilDate, ProductId};
 use lines_feed::availability::Availability;
@@ -260,7 +260,7 @@ impl PickerUi {
             // A full list reserves all its lines, so a window shown one short (it won't end
             // on a heading with no row) keeps the same height.
             .when(p.hits.len() >= PICKER_ROWS, |d| {
-                d.h(px(PICKER_ROWS as f32 * LINE_H + 8.0))
+                d.h(crate::zoom::ui(PICKER_ROWS as f32 * LINE_H + 8.0))
             });
         let lines =
             picker::visible_lines(&self.entries, &p.hits, &p.query, p.selected, PICKER_ROWS);
