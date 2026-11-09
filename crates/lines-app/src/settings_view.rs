@@ -1498,7 +1498,10 @@ impl SettingsWindow {
                             .child(
                                 div()
                                     .id(("reset", i))
-                                    .w(px(16.0))
+                                    // A 20 px hit, the minimum.
+                                    .w(px(20.0))
+                                    .flex()
+                                    .justify_center()
                                     .flex_none()
                                     .text_color(t.text_dim)
                                     .when(changed, |d| {
@@ -1736,16 +1739,22 @@ impl Render for SettingsWindow {
         if per_account {
             child += 1;
             main = main.child(
+                // Wraps in a narrow window; a long account name ends in "…" (the window's width).
                 div()
                     .flex()
                     .flex_row()
-                    .gap_2()
+                    .flex_wrap()
+                    .gap_x_2()
+                    .gap_y_1()
                     .pb_1()
                     .text_size(px(12.0))
                     .text_color(t.text_dim)
                     .child(
                         div()
                             .id("account-step")
+                            .min_w_0()
+                            .max_w_full()
+                            .truncate()
                             .px_1()
                             .border_1()
                             .border_color(t.axis_line)
@@ -1905,7 +1914,7 @@ mod tests {
         let body = MIN_SIZE.0 - NAV_W - 1.0 - 2.0 * 12.0 - 2.0 * 8.0 - 3.0 - 8.0 - 2.0;
         const { assert!(MIN_SIZE.0 <= SIZE.0 && MIN_SIZE.1 <= SIZE.1) };
         // A number control, the widest scope chip, the reset slot and the gaps.
-        let group = 72.0 + SCOPE_MAX_W + 16.0 + 2.0 * 8.0;
+        let group = 72.0 + SCOPE_MAX_W + 20.0 + 2.0 * 8.0;
         assert!(body >= LABEL_MIN_W, "{body}");
         assert!(body >= group, "the control group fits its own line: {body}");
     }
