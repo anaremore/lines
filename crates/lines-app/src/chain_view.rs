@@ -407,6 +407,8 @@ pub struct ChainView {
     seen_ended: Option<u64>,
     /// Currency per price unit of one contract, for a tag's estimated P&L; `None`: don't show it.
     tag_money: Option<f64>,
+    /// A press on the armed rows waits for the pointer after they change.
+    rows_guard: crate::chain_lines::RowsGuard,
     /// A moved entry's next step: its cancel's id, and the arm that waits for that answer.
     moving_entry: Option<(CommandId, lines_trading::Command)>,
     /// Its arm, once sent, whose refusal means the entry is gone.
@@ -832,7 +834,9 @@ impl Pane for ChainView {
     /// The account's orders and positions moved, or the core answered.
     fn changed(&mut self) -> bool {
         let moved = self.trade.changed();
-        self.take_answers() || moved
+        // A moved entry waits on the core's answer, so keep looking.
+        let waiting = self.moving_entry.is_some() || self.moved_entry.is_some();
+        self.take_answers() || moved || waiting
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -934,6 +938,7 @@ impl ChainView {
             line_drag: None,
             seen_ended: None,
             tag_money: None,
+            rows_guard: crate::chain_lines::RowsGuard::default(),
             moving_entry: None,
             moved_entry: None,
             armed_views: Vec::new(),
@@ -1438,6 +1443,8 @@ impl ChainView {
             self.note = Some(m);
         }
         self.drafts.clear();
+        // What's on its way doesn't come back after this.
+        self.moving_entry = None;
         cx.notify();
     }
 
@@ -1714,6 +1721,9 @@ impl ChainView {
         }
         drop(st);
         self.drafts = kept;
+        let drafts = self.drafts.len();
+        self.rows_guard
+            .see(self.armed_views.iter().map(|v| v.id), drafts);
         // What's being dragged has ended (it fired, say): there's nothing left to move.
         if let Some(d) = self.line_drag
             && matches!(d.line.source, crate::chain_lines::LineSource::Armed(_))
@@ -1789,7 +1799,10 @@ impl ChainView {
                     .filter(|v| &v.account == account && v.contract.product == self.product.id)
                 {
                     if let Some(m) = crate::chain_lines::ended_message(v) {
-                        note = Some(m);
+                        note = Some(match note {
+                            Some(before) => format!("{before}  ·  {m}"),
+                            None => m,
+                        });
                     }
                 }
             }
@@ -1834,6 +1847,7 @@ impl ChainView {
             cx.notify();
             return;
         }
+        let drag = self.drag_now(drag);
         let Some(scale) = self.chart_scale(cx) else {
             return;
         };
@@ -1854,6 +1868,7 @@ impl ChainView {
         let Some(drag) = self.line_drag.take() else {
             return;
         };
+        let drag = self.drag_now(drag);
         cx.notify();
         let Some(scale) = self.chart_scale(cx) else {
             return;
@@ -1888,6 +1903,10 @@ impl ChainView {
                 let Some(account) = self.trade.account.clone() else {
                     return;
                 };
+                if self.moving_entry.is_some() || self.moved_entry.is_some() {
+                    self.note = Some("Another move is still on its way: try again".to_owned());
+                    return;
+                }
                 let mut cmds =
                     crate::chain_lines::move_commands(account, &drag.line, id, drag.to).into_iter();
                 let (first, then) = (cmds.next(), cmds.next());
@@ -1903,6 +1922,24 @@ impl ChainView {
                 }
             }
         }
+    }
+
+    /// A drag with its line as the line is now: a feed can go stale while the button is down.
+    fn drag_now(&self, mut drag: LineDrag) -> LineDrag {
+        if let Some(line) = self.lines.iter().find(|l| l.same(&drag.line)) {
+            drag.line = *line;
+        }
+        drag
+    }
+
+    /// A press on the armed rows counts, or says why it didn't.
+    fn rows_guard_ok(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.rows_guard.may_press() {
+            return true;
+        }
+        self.note = Some("The rows just changed: check them and press again".to_owned());
+        cx.notify();
+        false
     }
 
     /// A release off the pane: nothing happened.
@@ -3221,13 +3258,7 @@ impl ChainView {
             return t.warn;
         }
         match self.line_drag {
-            Some(d)
-                if d.refused.is_some()
-                    && d.line.source == line.source
-                    && d.line.kind == line.kind =>
-            {
-                t.warn
-            }
+            Some(d) if d.refused.is_some() && d.line.same(line) => t.warn,
             _ => match line.kind {
                 TriggerKind::Stop => t.order_stop,
                 TriggerKind::Target => t.order_target,
@@ -3262,7 +3293,10 @@ impl ChainView {
         for k in 0..dashes {
             let dx = x0 + k as f32 * 10.0;
             window.paint_quad(fill(
-                Bounds::new(point(px(dx), px(y - 0.5)), size(px(6.0), px(1.0))),
+                Bounds::new(
+                    point(px(dx), px(y - 0.5)),
+                    size(px(6.0f32.min(x1 - dx).max(0.0)), px(1.0)),
+                ),
                 color,
             ));
         }
@@ -3333,7 +3367,8 @@ impl ChainView {
             let _ = write_chip_date(out, key.expiry);
         }
         if let Some(why) = refused {
-            let _ = write!(out, "  {why}");
+            // Short: its armed row or ticket has the reason.
+            let _ = write!(out, "  {}", if short { "can't go there" } else { why });
             return;
         }
         if short {
@@ -3366,6 +3401,11 @@ impl ChainView {
         let Some(chart) = self.chart.as_ref().filter(|_| self.chart_shown()) else {
             return;
         };
+        // The chart's own menu or field is on top of what's drawn over it.
+        if chart.read(cx).overlay_open() {
+            self.tag_boxes = [(0.0, 0.0, 0.0); crate::chain_lines::MAX_LINES];
+            return;
+        }
         let Some(scale) = chart.read(cx).locked_scale() else {
             return;
         };
@@ -4516,7 +4556,7 @@ impl ChainView {
                             cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
                                 this.focus.focus(window, cx);
-                                if ev.click_count <= 1 {
+                                if ev.click_count <= 1 && this.rows_guard_ok(cx) {
                                     this.cancel_trigger(&view, cx);
                                 }
                             }),
@@ -4538,7 +4578,7 @@ impl ChainView {
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             this.focus.focus(window, cx);
-                            if ev.click_count <= 1 {
+                            if ev.click_count <= 1 && this.rows_guard_ok(cx) {
                                 this.arm_draft(n, cx);
                             }
                         }),
@@ -4548,7 +4588,10 @@ impl ChainView {
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             this.focus.focus(window, cx);
-                            if ev.click_count <= 1 && n < this.drafts.len() {
+                            if ev.click_count <= 1
+                                && this.rows_guard_ok(cx)
+                                && n < this.drafts.len()
+                            {
                                 this.drafts.remove(n);
                             }
                             cx.notify();
@@ -4581,7 +4624,7 @@ impl ChainView {
                         cx.stop_propagation();
                         this.focus.focus(window, cx);
                         this.note = None;
-                        if ev.click_count <= 1 {
+                        if ev.click_count <= 1 && this.rows_guard_ok(cx) {
                             this.add_draft(kind, key, cx);
                         }
                     }),
@@ -4853,6 +4896,9 @@ impl Render for ChainView {
         let below = div()
             .flex()
             .flex_col()
+            .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, _| {
+                this.rows_guard.pointer_moved();
+            }))
             .children(armed)
             .children(strip)
             .children(dock)
@@ -4909,7 +4955,11 @@ impl Render for ChainView {
         // from the chart, which would otherwise pan. Where they were last frame, and unmoved
         // unless the plot changed, which redraws.
         let mut handles = Vec::new();
-        if let Some(s) = self.chart_scale(cx) {
+        let chart_free = !self
+            .chart
+            .as_ref()
+            .is_some_and(|c| c.read(cx).overlay_open());
+        if let Some(s) = self.chart_scale(cx).filter(|_| chart_free) {
             let handle = |id: String, n: usize, cx: &mut Context<Self>| {
                 div()
                     .id(gpui::SharedString::from(id))

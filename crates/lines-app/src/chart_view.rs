@@ -1791,6 +1791,11 @@ impl ChartView {
         })
     }
 
+    /// Something of the chart's own is open over its plot: what's drawn over the chart gives way.
+    pub fn overlay_open(&self) -> bool {
+        self.takes_text() || self.tf_menu
+    }
+
     /// No smallest price range yet: setting one refits, even under a hold.
     pub fn no_min_price_span(&self) -> bool {
         self.vp.min_price_span == 0.0

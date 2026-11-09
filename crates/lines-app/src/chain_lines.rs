@@ -307,6 +307,49 @@ pub fn ended_message(v: &TriggerView) -> Option<String> {
     Some(format!("{} on {series} ended: {why}", v.kind.word()))
 }
 
+/// The armed rows' presses: rows slide when one ends or a new one comes, and the foot can grow over
+/// a still pointer, so what was under it isn't what it was aimed at. A press counts only once the
+/// pointer has moved since the rows last changed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RowsGuard {
+    rows: Vec<TriggerId>,
+    drafts: usize,
+    changed: bool,
+}
+
+impl RowsGuard {
+    /// The rows as they stand, each render.
+    pub fn see(&mut self, rows: impl Iterator<Item = TriggerId>, drafts: usize) {
+        let mut same = self.drafts == drafts;
+        let mut n = 0;
+        for id in rows {
+            if self.rows.get(n) != Some(&id) {
+                same = false;
+                self.rows.truncate(n);
+                self.rows.push(id);
+            }
+            n += 1;
+        }
+        if self.rows.len() != n {
+            same = false;
+            self.rows.truncate(n);
+        }
+        self.drafts = drafts;
+        if !same {
+            self.changed = true;
+        }
+    }
+
+    pub fn pointer_moved(&mut self) {
+        self.changed = false;
+    }
+
+    /// Whether a press now means what's under it.
+    pub fn may_press(&self) -> bool {
+        !self.changed
+    }
+}
+
 /// Tag tops spread so none overlap, keeping order and staying as near their lines as they can.
 /// `ys` are the tags' centers, top first; they come back moved.
 pub fn spread_tags(ys: &mut [f32], tag_h: f32, top: f32, bottom: f32) {
@@ -662,6 +705,30 @@ mod tests {
         };
         assert_eq!(write(68_400, Right::Call), "684C");
         assert_eq!(write(68_450, Right::Put), "684.5P");
+    }
+
+    /// One press must not cancel the row that slid under a still pointer: rows changing makes it
+    /// wait for the pointer to move, and that's all it takes.
+    #[test]
+    fn a_press_waits_for_the_pointer_after_the_rows_change() {
+        let ids = |v: &[u64]| v.iter().map(|i| TriggerId(*i)).collect::<Vec<_>>();
+        let mut g = RowsGuard::default();
+        g.see(ids(&[5, 6, 7]).into_iter(), 0);
+        assert!(!g.may_press(), "new rows, the pointer hasn't moved");
+        g.pointer_moved();
+        assert!(g.may_press());
+        g.see(ids(&[5, 6, 7]).into_iter(), 0);
+        assert!(g.may_press(), "the same rows");
+        g.see(ids(&[5, 6]).into_iter(), 0);
+        assert!(!g.may_press(), "one ended: the others slid");
+        g.pointer_moved();
+        g.see(ids(&[6, 8]).into_iter(), 0);
+        assert!(!g.may_press(), "a moved Stop has a new id");
+        g.pointer_moved();
+        g.see(ids(&[6, 8]).into_iter(), 1);
+        assert!(!g.may_press(), "a draft came");
+        g.pointer_moved();
+        assert!(g.may_press());
     }
 
     #[test]

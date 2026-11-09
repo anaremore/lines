@@ -718,7 +718,7 @@ pub fn parse_shot(s: &str) -> Result<ShotTicket, String> {
     }
     if out.open.is_none() && !out.one_click && out.drag.is_none() && !out.restored {
         return Err(format!(
-            "--chain-ticket {s:?}: expected `buy|sell STRIKE call|put [at PRICE] [close] [one-click]`"
+            "--chain-ticket {s:?}: expected `buy|sell STRIKE call|put [at PRICE] [close] [when LEVEL] [draft KIND LEVEL]`, `drag KIND LEVEL`, `restored` or `one-click`"
         ));
     }
     Ok(out)
