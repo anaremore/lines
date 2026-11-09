@@ -504,6 +504,10 @@ struct Cli {
     /// confirmation. Repeatable.
     #[arg(long, requires = "settings")]
     settings_set: Vec<String>,
+    /// Screenshot: the Settings window's size, WxH logical px (default 860x620; the window
+    /// can't be made smaller than 640x420).
+    #[arg(long, requires = "settings", value_parser = parse_size)]
+    settings_size: Option<(f32, f32)>,
     /// Screenshot: read this economic calendar (the bundled file's format) instead of the
     /// bundled one, for the app and its trading cores (synthetic releases on synthetic data).
     #[arg(long, requires = "screenshot")]
@@ -1505,6 +1509,12 @@ where
                         section,
                         search: cli.settings_search.clone(),
                         set: cli.settings_set.clone(),
+                        size: cli.settings_size.map_or(settings_view::SIZE, |(w, h)| {
+                            (
+                                w.max(settings_view::MIN_SIZE.0),
+                                h.max(settings_view::MIN_SIZE.1),
+                            )
+                        }),
                     }),
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;

@@ -177,6 +177,15 @@ pub struct SettingsWindow {
 
 /// The window's size (logical px).
 pub const SIZE: (f32, f32) = (860.0, 620.0);
+/// The smallest the window can be made (logical px): every section's rows stay readable.
+pub const MIN_SIZE: (f32, f32) = (640.0, 420.0);
+/// A row's label and description never get narrower than this (logical px): a control that
+/// doesn't fit beside them moves to its own line below, and a choice's chips wrap.
+pub const LABEL_MIN_W: f32 = 240.0;
+/// A scope chip's widest (an account's name and product: "…" past it).
+const SCOPE_MAX_W: f32 = 160.0;
+/// The section list's width (logical px).
+const NAV_W: f32 = 150.0;
 
 #[cfg(feature = "screenshot")]
 fn section_named(name: &str) -> Option<Section> {
@@ -234,9 +243,10 @@ pub fn open_for_screenshot(
     section: &str,
     search: Option<&str>,
     set: &[String],
+    size: (f32, f32),
     cx: &mut App,
 ) -> Option<gpui::AnyWindowHandle> {
-    open(None, cx);
+    open_sized(None, size, cx);
     let h = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0)?;
     let section = section_named(section)?;
     let search = search.map(str::to_owned);
@@ -272,6 +282,11 @@ pub fn open_for_screenshot(
 
 /// Open the Settings window, or bring the open one forward; at setting `at` if given.
 pub fn open(at: Option<usize>, cx: &mut App) {
+    open_sized(at, SIZE, cx);
+}
+
+/// [`open`] at a given size (screenshots; the app opens at [`SIZE`]).
+fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
     if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
         let ok = h
             .update(cx, |v, window, cx| {
@@ -299,14 +314,15 @@ pub fn open(at: Option<usize>, cx: &mut App) {
             }),
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                 None,
-                gpui::size(px(SIZE.0), px(SIZE.1)),
+                gpui::size(px(size.0), px(size.1)),
                 cx,
             ))),
+            window_min_size: Some(gpui::size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
             icon: crate::window_icon(),
             ..Default::default()
         }
     } else {
-        crate::workspace::hidden_window("Lines (settings)", SIZE)
+        crate::workspace::hidden_window("Lines (settings)", size)
     };
     let facts = gather_facts(cx);
     // A shown window follows the core while idle (hidden ones, screenshots and tests, repaint
@@ -1153,7 +1169,7 @@ impl SettingsWindow {
         let mut nav = div()
             .flex()
             .flex_col()
-            .w(px(150.0))
+            .w(px(NAV_W))
             .flex_none()
             .py_2()
             .border_r_1()
@@ -1195,10 +1211,12 @@ impl SettingsWindow {
         let selected = self.selected() == Some(i);
         match (st.kind, value) {
             (Kind::Choice(c), Value::Choice(k)) => {
+                // Wraps onto more lines when the row is narrower than its chips.
                 let mut seg = div()
                     .flex()
                     .flex_row()
-                    .flex_none()
+                    .flex_wrap()
+                    .min_w_0()
                     .border_1()
                     .border_color(t.axis_line)
                     .rounded_sm();
@@ -1207,6 +1225,8 @@ impl SettingsWindow {
                     seg = seg.child(
                         div()
                             .id(("choice", i * 64 + j))
+                            .flex_none()
+                            .whitespace_nowrap()
                             .px_2()
                             .cursor_pointer()
                             .when(on, |d| d.bg(t.accent).text_color(t.bg))
@@ -1322,7 +1342,8 @@ impl SettingsWindow {
         let value = (st.get)(prefs, &self.target, &self.facts);
         let selected = self.selected() == Some(i);
         let searching = !self.query.trim().is_empty();
-        let mut name = div().flex().flex_row().items_center().gap_2();
+        // Wraps in the label column (a search's section prefix, the name, the TRADING chip).
+        let mut name = div().flex().flex_row().flex_wrap().items_center().gap_x_2();
         if searching {
             name = name.child(
                 div()
@@ -1335,6 +1356,7 @@ impl SettingsWindow {
         if st.safety == Safety::Trading {
             name = name.child(
                 div()
+                    .flex_none()
                     .px_1()
                     .text_size(px(10.0))
                     .font_weight(FontWeight::BOLD)
@@ -1348,8 +1370,9 @@ impl SettingsWindow {
         let mut left = div()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_w_0()
+            .flex_grow_1()
+            .flex_basis(px(LABEL_MIN_W))
+            .min_w(px(LABEL_MIN_W))
             .child(name)
             .child(
                 div()
@@ -1434,37 +1457,72 @@ impl SettingsWindow {
                         .when(selected, |b| b.bg(t.accent)),
                 )
             })
-            .child(left)
-            .child(self.control(i, &value, cx))
             .child(
+                // Label and description, then the control group: beside them when it fits,
+                // else on its own line below (right-aligned). Nothing squeezes the label.
                 div()
-                    .flex_none()
-                    .px_1()
-                    .text_size(px(10.5))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(t.axis_line)
-                    .text_color(t.text_dim)
-                    .child(scope),
-            )
-            .child(
-                div()
-                    .id(("reset", i))
-                    .w(px(16.0))
-                    .flex_none()
-                    .text_color(t.text_dim)
-                    .when(changed, |d| {
-                        crate::tooltip::tip_div(d, "Reset to default (Ctrl+R)", None, &t)
-                            .cursor_pointer()
-                            .child("↺")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |v, _, _, cx| {
-                                    v.select(i);
-                                    v.reset(i, cx);
-                                }),
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_x_2()
+                    .gap_y_1()
+                    .child(left)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap_2()
+                            .ml_auto()
+                            .min_w_0()
+                            .max_w_full()
+                            .child(self.control(i, &value, cx))
+                            // An account's name can be long: "…" past its share of the row.
+                            .child(
+                                div()
+                                    // Never narrower than its words; "…" only past the cap.
+                                    .flex_none()
+                                    .max_w(px(SCOPE_MAX_W))
+                                    .truncate()
+                                    .px_1()
+                                    .text_size(px(10.5))
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(t.axis_line)
+                                    .text_color(t.text_dim)
+                                    .child(scope),
                             )
-                    }),
+                            .child(
+                                div()
+                                    .id(("reset", i))
+                                    // A 20 px hit, the minimum.
+                                    .w(px(20.0))
+                                    .flex()
+                                    .justify_center()
+                                    .flex_none()
+                                    .text_color(t.text_dim)
+                                    .when(changed, |d| {
+                                        crate::tooltip::tip_div(
+                                            d,
+                                            "Reset to default (Ctrl+R)",
+                                            None,
+                                            &t,
+                                        )
+                                        .cursor_pointer()
+                                        .child("↺")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |v, _, _, cx| {
+                                                v.select(i);
+                                                v.reset(i, cx);
+                                            }),
+                                        )
+                                    }),
+                            ),
+                    ),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -1681,16 +1739,22 @@ impl Render for SettingsWindow {
         if per_account {
             child += 1;
             main = main.child(
+                // Wraps in a narrow window; a long account name ends in "…" (the window's width).
                 div()
                     .flex()
                     .flex_row()
-                    .gap_2()
+                    .flex_wrap()
+                    .gap_x_2()
+                    .gap_y_1()
                     .pb_1()
                     .text_size(px(12.0))
                     .text_color(t.text_dim)
                     .child(
                         div()
                             .id("account-step")
+                            .min_w_0()
+                            .max_w_full()
+                            .truncate()
                             .px_1()
                             .border_1()
                             .border_color(t.axis_line)
@@ -1809,22 +1873,29 @@ impl Render for SettingsWindow {
                     .child(main),
             )
             .child(
+                // Two whole texts: the second wraps below the first in a narrow window.
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .justify_between()
+                    .gap_x_4()
                     .px_3()
                     .py_1()
                     .border_t_1()
                     .border_color(t.axis_line)
                     .text_size(px(11.5))
                     .text_color(t.text_dim)
-                    .child("↑↓ settings · ←→ change · Enter edit · Tab sections · Ctrl+Z undo · Ctrl+R reset")
-                    .child(if self.section == Section::Risk && self.query.trim().is_empty() {
-                        "Tighter applies at once · looser waits for the next session"
-                    } else {
-                        "Changes apply at once · every setting is also a palette command"
-                    }),
+                    .child(div().flex_none().whitespace_nowrap().child(
+                        "↑↓ settings · ←→ change · Enter edit · Tab sections · Ctrl+Z undo · Ctrl+R reset",
+                    ))
+                    .child(div().flex_none().whitespace_nowrap().child(
+                        if self.section == Section::Risk && self.query.trim().is_empty() {
+                            "Tighter applies at once · looser waits for the next session"
+                        } else {
+                            "Changes apply at once · every setting is also a palette command"
+                        },
+                    )),
             )
     }
 }
@@ -1832,6 +1903,21 @@ impl Render for SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At its smallest the window leaves a row's label column its full width beside the
+    /// widest scope chip and the reset slot (the control may wrap below; the label never
+    /// collapses to letters).
+    #[test]
+    fn the_smallest_window_keeps_the_label_column() {
+        // The nav and its border, the main column's padding (px_3), the row's (px_2), a trading
+        // row's bar, its gap and the row's border.
+        let body = MIN_SIZE.0 - NAV_W - 1.0 - 2.0 * 12.0 - 2.0 * 8.0 - 3.0 - 8.0 - 2.0;
+        const { assert!(MIN_SIZE.0 <= SIZE.0 && MIN_SIZE.1 <= SIZE.1) };
+        // A number control, the widest scope chip, the reset slot and the gaps.
+        let group = 72.0 + SCOPE_MAX_W + 20.0 + 2.0 * 8.0;
+        assert!(body >= LABEL_MIN_W, "{body}");
+        assert!(body >= group, "the control group fits its own line: {body}");
+    }
     use std::collections::BTreeMap;
 
     /// A refused change goes back by the entry it wrote (name or id key), and not over a
