@@ -44,8 +44,11 @@ fn command(cmd: Command) -> Option<Command> {
     match cmd {
         Command::PopOut | Command::Reattach => Some(Command::Reattach),
         Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
-        // A chart's drawing style editor (the rest of the drawing keys: main windows).
-        Command::Draw(crate::commands::DrawCmd::Style) => Some(cmd),
+        // A chart's drawing style editor, and deleting the selected drawing (its menu's
+        // Delete; the rest of the drawing keys: main windows).
+        Command::Draw(
+            crate::commands::DrawCmd::Style | crate::commands::DrawCmd::DeleteSelected,
+        ) => Some(cmd),
         // Stop all strategies works from every window (decision 0025's kill switch).
         Command::Strategy(
             crate::commands::StrategyCmd::StopAll
@@ -209,11 +212,10 @@ impl PaneWindow {
             PaneHandle::Chart(chart) => chart.update(cx, |c, _| c.take_menu_object()),
             _ => None,
         };
-        let items = match object {
-            Some(o) => runnable(crate::pane_menu::object_items(&o)),
-            None => self.pane_items(cx),
-        };
-        self.menu = Some(Menu::new(at, items));
+        self.menu = Some(match object {
+            Some(o) => Menu::new(at, runnable(crate::pane_menu::object_items(&o))).unselected(),
+            None => Menu::new(at, self.pane_items(cx)),
+        });
         cx.notify();
     }
 

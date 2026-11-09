@@ -775,7 +775,14 @@ mod tests {
             ("bg", t.bg, "down", t.down),
             ("bg", t.bg, "order_target", t.order_target),
             ("bg", t.bg, "order_stop", t.order_stop),
-            // Menus: a destructive row, also when selected (`crate::menu`).
+            // Menus: a value or shortcut on the selected row; a destructive row, also when
+            // selected (`crate::menu`).
+            (
+                "text_dim",
+                t.text_dim,
+                "selected row",
+                over(t.accent.opacity(0.16), t.panel),
+            ),
             ("destructive", t.destructive, "panel", t.panel),
             (
                 "destructive",

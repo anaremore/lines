@@ -36,6 +36,7 @@ pub struct ChartMenu {
     /// The chart has level sources: (levels shown, labels shown).
     pub levels: Option<(bool, bool)>,
     pub studies_shown: bool,
+    pub study_labels_shown: bool,
     pub strategy_marks_shown: bool,
     pub clean: bool,
     pub order_strip: bool,
@@ -79,8 +80,8 @@ pub struct PaneMenu {
 /// The thing under the pointer at a right click.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuObject {
-    /// A working order's tag: its id, its tag's text, and whether it is a protective stop of
-    /// an open position (Move to breakeven).
+    /// A working order's tag: its id, its tag's text and P&L, and whether breakeven would move
+    /// it ([`offers_breakeven`]).
     Order { id: u64, title: String, stop: bool },
     /// A drawing (now the selection): what it is.
     Drawing { title: String },
@@ -126,6 +127,12 @@ pub fn parse_shot_menu(s: &str) -> Result<ShotMenu, String> {
     Ok(ShotMenu { order, sub, at })
 }
 
+/// Whether an order's menu offers "Move stops to breakeven": a stop order against an open
+/// position (a long's sell stops, a short's buy stops), what `trade_bar::protective` moves.
+pub fn offers_breakeven(stop_order: bool, sells: bool, position: Option<i64>) -> bool {
+    stop_order && position.is_some_and(|q| q != 0 && sells == (q > 0))
+}
+
 fn row(label: &str, cmd: Command) -> MenuItem {
     MenuItem::named(label, cmd, false)
 }
@@ -138,11 +145,11 @@ fn toggle(label: &str, cmd: Command, on: bool) -> MenuItem {
 pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
     match o {
         MenuObject::Order { id, title, stop } => {
-            let mut v = vec![MenuItem::header(title)];
+            let mut v = vec![MenuItem::title(title)];
             if *stop {
                 // The position's stops, through the modify path (`TradeCmd::Breakeven`).
                 v.push(row(
-                    "Move to breakeven",
+                    "Move stops to breakeven",
                     Command::Order(OrderCmd::Breakeven),
                 ));
             }
@@ -152,7 +159,7 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
             v
         }
         MenuObject::Drawing { title } => vec![
-            MenuItem::header(title),
+            MenuItem::title(title),
             row("Style…", Command::Draw(DrawCmd::Style)),
             MenuItem::sep(),
             row("Delete", Command::Draw(DrawCmd::DeleteSelected)).destructive(),
@@ -253,6 +260,11 @@ fn chart_show(c: &ChartMenu) -> MenuItem {
     }
     sub.push(toggle("Studies", Command::ToggleStudies, c.studies_shown));
     sub.push(toggle(
+        "Study labels",
+        Command::ToggleStudyLabels,
+        c.study_labels_shown,
+    ));
+    sub.push(toggle(
         "Strategy markers",
         Command::Strategy(StrategyCmd::ToggleMarks),
         c.strategy_marks_shown,
@@ -294,11 +306,14 @@ fn pane(m: &PaneMenu) -> MenuItem {
         MenuItem::of(Command::Split(crate::layout::Axis::Row), false),
         MenuItem::of(Command::Split(crate::layout::Axis::Column), false),
         row("Pop out", Command::PopOut),
-        MenuItem::header("Show"),
+        MenuItem::sep(),
+        // What the pane is (pick one); the top-level Show › is what a chart draws.
+        MenuItem::header("Show as"),
     ];
     for k in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
         sub.push(toggle(k.label(), Command::SetKind(k), k == m.kind));
     }
+    sub.push(MenuItem::sep());
     if let Some(c) = &m.chart {
         sub.push(toggle("Chart only", Command::ChartOnly, c.chart_only));
     }
@@ -374,6 +389,7 @@ mod tests {
             tick_continuous: false,
             levels: Some((true, true)),
             studies_shown: true,
+            study_labels_shown: false,
             strategy_marks_shown: true,
             clean: false,
             order_strip: false,
@@ -455,6 +471,7 @@ mod tests {
                 "Level labels",
                 "Level types…",
                 "Studies",
+                "Study labels",
                 "Strategy markers",
                 "---",
                 "Clean chart"
@@ -466,10 +483,12 @@ mod tests {
                 "Split right",
                 "Split down",
                 "Pop out",
-                "Show",
+                "---",
+                "Show as",
                 "Chart",
                 "DOM",
                 "Time & sales",
+                "---",
                 "Chart only",
                 "Linked DOM",
                 "Linked time & sales",
@@ -556,7 +575,7 @@ mod tests {
             labels(&v),
             [
                 "Stop 2 @ 7562.00",
-                "Move to breakeven",
+                "Move stops to breakeven",
                 "Change size…",
                 "---",
                 "Cancel order"
@@ -573,7 +592,7 @@ mod tests {
             stop: false,
         });
         assert!(
-            !labels(&target).contains(&"Move to breakeven"),
+            !labels(&target).contains(&"Move stops to breakeven"),
             "only a stop"
         );
         let d = object_items(&MenuObject::Drawing {
@@ -581,6 +600,25 @@ mod tests {
         });
         assert_eq!(labels(&d), ["Trend line", "Style…", "---", "Delete"]);
         assert!(d.last().unwrap().destructive);
+    }
+
+    #[test]
+    fn breakeven_is_offered_for_the_stops_it_moves() {
+        assert!(offers_breakeven(true, true, Some(2)), "a long's sell stop");
+        assert!(
+            offers_breakeven(true, false, Some(-1)),
+            "a short's buy stop"
+        );
+        assert!(!offers_breakeven(true, true, None), "flat: nothing to move");
+        assert!(!offers_breakeven(true, true, Some(0)));
+        assert!(
+            !offers_breakeven(true, false, Some(2)),
+            "a buy stop adds to a long"
+        );
+        assert!(
+            !offers_breakeven(false, true, Some(2)),
+            "a limit is no stop"
+        );
     }
 
     #[test]

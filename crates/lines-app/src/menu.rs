@@ -41,6 +41,9 @@ pub struct MenuItem {
     pub header: bool,
     /// Drawn in `Theme::destructive` (delete, close, cancel).
     pub destructive: bool,
+    /// A header in the main text color: an object menu's name and value (a section's name is
+    /// dim).
+    pub title: bool,
 }
 
 impl MenuItem {
@@ -68,6 +71,7 @@ impl MenuItem {
             sub: Vec::new(),
             header: false,
             destructive: false,
+            title: false,
         }
     }
 
@@ -77,6 +81,14 @@ impl MenuItem {
             label: label.to_owned(),
             header: true,
             ..MenuItem::sep()
+        }
+    }
+
+    /// An object menu's first row: what the menu acts on ("Stop 2 @ 7562.00 · -8.0 t").
+    pub fn title(label: &str) -> MenuItem {
+        MenuItem {
+            title: true,
+            ..MenuItem::header(label)
         }
     }
 
@@ -170,6 +182,13 @@ impl Menu {
         }
     }
 
+    /// Nothing highlighted until a key or the pointer picks a row: an object's menu, where the
+    /// first row may move or cancel an order, never runs on a stray Enter.
+    pub fn unselected(mut self) -> Menu {
+        self.selected = usize::MAX;
+        self
+    }
+
     /// The open submenu's rows.
     pub fn sub_items(&self) -> &[MenuItem] {
         self.open
@@ -199,9 +218,16 @@ impl Menu {
         self.in_sub = false;
     }
 
-    /// The pointer over row `i`: it is selected, and opens its submenu (another one closes).
+    /// The pointer over row `i`: it is selected, and opens its submenu (another one closes;
+    /// one closed by ← opens again as the pointer moves on its row).
     pub fn hover(&mut self, i: usize) -> bool {
-        if self.selected == i && !self.in_sub && self.open.is_none_or(|o| o == i) {
+        let has_sub = self.items.get(i).is_some_and(|r| !r.sub.is_empty());
+        let open_as_it_should = if has_sub {
+            self.open == Some(i)
+        } else {
+            self.open.is_none()
+        };
+        if self.selected == i && !self.in_sub && open_as_it_should {
             return false;
         }
         if !self.items.get(i).is_some_and(MenuItem::selectable) {
@@ -251,6 +277,16 @@ impl Menu {
         }
         match key {
             "escape" => MenuKey::Close,
+            "down" | "up" if self.selected >= self.items.len() => {
+                // Nothing selected yet: the first row, or the last.
+                let n = self.items.len();
+                self.selected = if key == "down" {
+                    step(&self.items, n.saturating_sub(1), 1)
+                } else {
+                    step(&self.items, 0, -1)
+                };
+                MenuKey::Moved
+            }
             "down" | "up" => {
                 self.selected = step(
                     &self.items,
@@ -260,6 +296,7 @@ impl Menu {
                 self.close_sub();
                 MenuKey::Moved
             }
+            "enter" if self.selected >= self.items.len() => MenuKey::Ignored,
             "right" | "enter" if self.open_sub(self.selected, true) => MenuKey::Moved,
             "enter" => self
                 .items
@@ -419,10 +456,12 @@ fn rows<V: 'static>(
                     .h(px(ROW_H))
                     .flex_none()
                     .px_2()
-                    .pl(px(28.0))
+                    // Level with the rows' labels: padding, the 2 px edge, the check column
+                    // and the gap.
+                    .pl(px(30.0))
                     .flex()
                     .items_center()
-                    .text_color(t.text_dim)
+                    .text_color(if item.title { t.text_main } else { t.text_dim })
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(item.label.clone()),
@@ -584,6 +623,43 @@ mod tests {
         assert!(m.in_sub);
         assert_eq!(m.key("escape"), MenuKey::Moved, "Esc steps back out first");
         assert_eq!(m.key("escape"), MenuKey::Close);
+    }
+
+    #[test]
+    fn an_object_menu_opens_with_nothing_selected() {
+        let mut m = menu(vec![
+            MenuItem::title("Stop 2 @ 7562.00"),
+            MenuItem::of(Command::NewTab, false),
+            MenuItem::sep(),
+            MenuItem::of(Command::ClosePane, false),
+        ])
+        .unselected();
+        assert_eq!(
+            m.key("enter"),
+            MenuKey::Ignored,
+            "a stray Enter runs nothing"
+        );
+        assert_eq!(m.key("down"), MenuKey::Moved);
+        assert_eq!(m.selected, 1, "↓: the first row");
+        let mut m = menu(vec![
+            MenuItem::title("x"),
+            MenuItem::of(Command::NewTab, false),
+            MenuItem::of(Command::ClosePane, false),
+        ])
+        .unselected();
+        m.key("up");
+        assert_eq!(m.selected, 2, "↑: the last row");
+    }
+
+    #[test]
+    fn a_submenu_closed_by_left_opens_again_on_the_pointer() {
+        let mut m = with_sub();
+        m.hover(1);
+        m.key("right");
+        m.key("left");
+        assert_eq!(m.open, None);
+        assert!(m.hover(1), "the pointer moving on its row opens it again");
+        assert_eq!(m.open, Some(1));
     }
 
     #[test]

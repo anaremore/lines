@@ -2099,7 +2099,10 @@ impl WindowView {
         if let PaneHandle::Chart(chart) = &h
             && let Some(o) = chart.update(cx, |c, _| c.take_menu_object())
         {
-            self.show_menu(Menu::new(at, crate::pane_menu::object_items(&o)), cx);
+            self.show_menu(
+                Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
+                cx,
+            );
             return;
         }
         let m = self.pane_menu(&h, cx);
@@ -2129,6 +2132,7 @@ impl WindowView {
                     levels: (!c.level_sources().is_empty())
                         .then_some((!lc.hidden, !lc.hide_labels)),
                     studies_shown: !v.hide_studies,
+                    study_labels_shown: !v.hide_study_labels,
                     strategy_marks_shown: !c.strategy_marks_hidden(),
                     clean: v.hide_study_labels && hide_hints,
                     order_strip: c.order_strip(),
@@ -2164,10 +2168,7 @@ impl WindowView {
             chart,
             dom,
             journal,
-            pnl: cx
-                .try_global::<crate::picker_view::AppSettings>()
-                .map(|s| s.settings.pnl_display)
-                .unwrap_or_default(),
+            pnl: pnl_mode(cx),
             linked_dom: tabstate::kind_shown(&leaves, tab.focused, PaneKind::Dom),
             linked_tape: tabstate::kind_shown(&leaves, tab.focused, PaneKind::Tape),
             hidden_panes: !tab.in_state(PaneState::is_hidden).is_empty(),
@@ -2796,11 +2797,9 @@ impl WindowView {
             )
     }
 
-    /// Screenshots (`--hover-header`): show the focused pane's header controls as if the
-    /// pointer were over it.
-    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     /// Screenshot: open this menu once its pane can show it (an order's: once the chart has
     /// one).
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     pub(crate) fn screenshot_menu(
         &mut self,
         m: crate::pane_menu::ShotMenu,
@@ -2817,10 +2816,14 @@ impl WindowView {
             let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
                 return true;
             };
-            let Some(o) = chart.read(cx).first_order_object() else {
+            let mode = pnl_mode(cx);
+            let Some(o) = chart.read(cx).first_order_object(mode) else {
                 return false;
             };
-            self.show_menu(Menu::new(at, crate::pane_menu::object_items(&o)), cx);
+            self.show_menu(
+                Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
+                cx,
+            );
         } else {
             self.open_menu(at, cx);
         }
@@ -2832,6 +2835,9 @@ impl WindowView {
         true
     }
 
+    /// Screenshots (`--hover-header`): show the focused pane's header controls as if the
+    /// pointer were over it.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     pub(crate) fn hover_focused_pane(&mut self, cx: &mut Context<Self>) {
         self.hover_pane = Some(self.tab().focused);
         self.hover_pinned = true;
@@ -4182,4 +4188,11 @@ fn clear_synced_times(cx: &mut App) {
             }
         }
     });
+}
+
+/// The app's P&L display (menus show and set it).
+fn pnl_mode(cx: &App) -> crate::pnl::PnlDisplay {
+    cx.try_global::<crate::picker_view::AppSettings>()
+        .map(|s| s.settings.pnl_display)
+        .unwrap_or_default()
 }
