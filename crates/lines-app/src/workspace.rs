@@ -2208,54 +2208,19 @@ impl WindowView {
         self.show_menu(Menu::new(at, items), cx);
     }
 
-    /// A tab's menu: tab, layout and workspace actions.
+    /// A tab's menu (`pane_menu::tab_items`): tab, layout and workspace actions.
     fn open_tab_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let sync = cx.global::<Workspace>().crosshair_sync;
-        let reopen = !cx.global::<Workspace>().closed_tabs.is_empty();
-        let it = MenuItem::of;
-        let mut items = vec![it(Command::NewTab, false), it(Command::CloseTab, false)];
-        if reopen {
-            items.push(it(Command::ReopenTab, false));
-        }
-        if self.tabs.len() > 1 {
-            items.push(it(Command::TabToNewWindow, false));
-        }
-        items.push(MenuItem::sep());
-        for p in Preset::ALL {
-            items.push(it(Command::Preset(p), false));
-        }
-        items.push(MenuItem::sep());
-        items.push(MenuItem::named(
-            "Crosshair sync (link group)",
-            Command::ToggleCrosshairSync,
-            sync,
-        ));
-        items.push(MenuItem::named(
-            "Crosshair sync: price too (same product)",
-            Command::ToggleCrosshairSyncPrice,
-            cx.global::<Workspace>().crosshair_sync_price,
-        ));
-        items.push(it(Command::SaveAs, false));
-        items.push(it(Command::Open, false));
-        items.push(MenuItem::named(
-            "Key hints",
-            Command::ToggleHints,
-            !cx.global::<Workspace>().hide_hints,
-        ));
-        items.push(MenuItem::named(
-            "Performance stats",
-            Command::TogglePerfStats,
-            cx.global::<Workspace>().show_perf_stats,
-        ));
-        items.push(MenuItem::named(
-            "Latency HUD",
-            Command::ToggleLatencyHud,
-            cx.global::<Workspace>().show_latency_hud,
-        ));
-        items.push(MenuItem::of(Command::ExportDiagnostics, false));
-        items.push(MenuItem::named("Settings…", Command::Settings, false));
-        items.push(MenuItem::named("All commands…", Command::Palette, false));
-        self.show_menu(Menu::new(at, items), cx);
+        let ws = cx.global::<Workspace>();
+        let m = crate::pane_menu::TabMenu {
+            tabs: self.tabs.len(),
+            closed_tabs: !ws.closed_tabs.is_empty(),
+            crosshair_sync: ws.crosshair_sync,
+            crosshair_sync_price: ws.crosshair_sync_price,
+            key_hints: !ws.hide_hints,
+            perf_stats: ws.show_perf_stats,
+            latency_hud: ws.show_latency_hud,
+        };
+        self.show_menu(Menu::new(at, crate::pane_menu::tab_items(&m)), cx);
     }
 
     fn menu_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2814,7 +2779,7 @@ impl WindowView {
         let at = point(px(m.at.0), px(m.at.1));
         if m.order {
             let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
-                return true;
+                shot_menu_failed("`order` needs a focused chart");
             };
             let mode = pnl_mode(cx);
             let Some(o) = chart.read(cx).first_order_object(mode) else {
@@ -2824,12 +2789,15 @@ impl WindowView {
                 Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
                 cx,
             );
+        } else if m.tab {
+            self.open_tab_menu(at, cx);
         } else {
             self.open_menu(at, cx);
         }
-        if let (Some(sub), Some(menu)) = (&m.sub, self.menu.as_mut())
-            && let Some(i) = menu.items.iter().position(|i| i.label == *sub)
-        {
+        if let (Some(sub), Some(menu)) = (&m.sub, self.menu.as_mut()) {
+            let Some(i) = menu.items.iter().position(|i| i.label == *sub) else {
+                shot_menu_failed(&format!("no row \"{sub}\" opens a submenu"));
+            };
             menu.open_sub(i, true);
         }
         true
@@ -4195,4 +4163,11 @@ fn pnl_mode(cx: &App) -> crate::pnl::PnlDisplay {
     cx.try_global::<crate::picker_view::AppSettings>()
         .map(|s| s.settings.pnl_display)
         .unwrap_or_default()
+}
+
+/// `--context-menu` asked for what can't be shown: no image (a screenshot's failures exit
+/// non-zero with no file).
+fn shot_menu_failed(why: &str) -> ! {
+    eprintln!("screenshot failed: --context-menu: {why}");
+    std::process::exit(1)
 }

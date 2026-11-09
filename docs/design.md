@@ -45,8 +45,8 @@ Context menus follow these rules (`crates/lines-app/src/menu.rs`, `pane_menu.rs`
 1. About 12 top-level rows at most. Submenus go one level deep, never deeper.
 2. A set is a submenu, and its row shows the current value on the right: Timeframe › 5m, Link › A.
 3. Never one row per instance (per level type, per source): one row opens the panel that lists them.
-4. Show/hide pairs are checkmark toggles (under Show ›), never "Hide X / Show X" labels that flip.
-5. Right-clicking an object (an order's tag, a drawing) gives that object's menu, its name and value as a non-clickable header: "Stop 2 @ 7562.00", then what can be done to it.
+4. Show/hide pairs are switches (under Show ›), drawn as a box that is checked when on, never "Hide X / Show X" labels that flip. One of a set (a timeframe, a link group) has a plain check on the one in force. Section names inside a menu are small capitals.
+5. Right-clicking an object (an order's tag, a drawing) gives that object's menu, its name and value as a non-clickable header above a divider: "Stop 2 @ 7562.00", then what can be done to it. It opens with nothing highlighted, so a stray Enter never acts on an order.
 6. Delete, cancel and close go last, in `Theme::destructive`, and say what they do. Bulk deletes confirm first.
 7. Shortcuts show right-aligned, from `commands::BINDINGS`. "All commands…" is the last row of a pane menu, and every row's action is also in the palette (tested), except an object's own rows, which act on the thing under the pointer and have direct controls too.
 

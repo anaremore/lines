@@ -484,9 +484,9 @@ struct Cli {
     /// pane (no OS pointer involved).
     #[arg(long, requires = "screenshot")]
     hover_header: bool,
-    /// Screenshot: open a context menu, as a right click would (`pane` or `order`, the focused
-    /// chart's first working order), `:Label` with that row's submenu open, `@X,Y` where
-    /// (logical px): `--context-menu pane:Show@1400,300`.
+    /// Screenshot: open a context menu, as a right click would: `pane`, `tab`, or `order` (the
+    /// focused chart's first working order, a stop if any); `:Label` with that row's submenu
+    /// open; `@X,Y` where (logical px): `--context-menu pane:Show@1400,300`.
     #[arg(long, requires = "screenshot", value_parser = pane_menu::parse_shot_menu)]
     context_menu: Option<pane_menu::ShotMenu>,
     /// Screenshot: keep the journal in DIR (`screenshot.jsonl`) instead of in memory, so trades

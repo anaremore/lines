@@ -42,8 +42,11 @@ pub struct MenuItem {
     /// Drawn in `Theme::destructive` (delete, close, cancel).
     pub destructive: bool,
     /// A header in the main text color: an object menu's name and value (a section's name is
-    /// dim).
+    /// small capitals, dim).
     pub title: bool,
+    /// An on/off switch: drawn as a box (checked when on), told apart from one of a set (a
+    /// check on the one in force) and from an action.
+    pub toggle: bool,
 }
 
 impl MenuItem {
@@ -72,6 +75,7 @@ impl MenuItem {
             header: false,
             destructive: false,
             title: false,
+            toggle: false,
         }
     }
 
@@ -105,6 +109,11 @@ impl MenuItem {
 
     pub fn checked(mut self, on: bool) -> MenuItem {
         self.checked = on;
+        self
+    }
+
+    pub fn switch(mut self) -> MenuItem {
+        self.toggle = true;
         self
     }
 
@@ -451,20 +460,26 @@ fn rows<V: 'static>(
             continue;
         }
         if item.header {
+            // Level with the rows' labels: padding, the 2 px edge, the check column and the
+            // gap. An object's title in the main text, a section's name in small capitals.
+            let (color, size, text) = if item.title {
+                (t.text_main, 12.0, item.label.clone())
+            } else {
+                (t.text_dim, 10.5, item.label.to_uppercase())
+            };
             list = list.child(
                 div()
                     .h(px(ROW_H))
                     .flex_none()
                     .px_2()
-                    // Level with the rows' labels: padding, the 2 px edge, the check column
-                    // and the gap.
                     .pl(px(30.0))
                     .flex()
                     .items_center()
-                    .text_color(if item.title { t.text_main } else { t.text_dim })
+                    .text_size(px(size))
+                    .text_color(color)
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(item.label.clone()),
+                    .child(text),
             );
             continue;
         }
@@ -474,15 +489,37 @@ fn rows<V: 'static>(
         } else {
             t.text_main
         };
-        let right = if item.sub.is_empty() {
-            div().text_color(t.text_dim).child(item.hint.clone())
+        // Shortcut or value, then the submenu's chevron in a column every row keeps, so all
+        // of them end at one edge.
+        let right = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(div().text_color(t.text_dim).child(item.hint.clone()))
+            .child(
+                div()
+                    .w(px(8.0))
+                    .text_color(t.text_main)
+                    .child(if item.sub.is_empty() { "" } else { "›" }),
+            );
+        let mark = if item.toggle {
+            // A switch: a box, checked when on.
+            div()
+                .size(px(11.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .border_color(t.control_edge)
+                .rounded_sm()
+                .text_size(px(10.0))
+                .text_color(t.text_main)
+                .child(if item.checked { "✓" } else { "" })
         } else {
             div()
-                .flex()
-                .flex_row()
-                .gap_2()
-                .child(div().text_color(t.text_dim).child(item.hint.clone()))
-                .child(div().text_color(t.text_main).child("›"))
+                .text_color(t.text_main)
+                .child(if item.checked { "✓" } else { "" })
         };
         let cmd = item.cmd;
         let has_sub = !item.sub.is_empty();
@@ -503,13 +540,7 @@ fn rows<V: 'static>(
                     gpui::transparent_black()
                 })
                 .when(lit, |d| d.bg(t.accent.opacity(0.16)))
-                .child(
-                    div()
-                        .w(px(12.0))
-                        .flex_none()
-                        .text_color(t.text_main)
-                        .child(if item.checked { "✓" } else { "" }),
-                )
+                .child(div().w(px(12.0)).flex_none().child(mark))
                 .child(
                     div()
                         .flex_1()

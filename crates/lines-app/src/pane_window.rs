@@ -190,6 +190,10 @@ impl PaneWindow {
                 }
             }
             Some(Command::Order(o)) => {
+                // The size field needs the chart's focus (it closes without it).
+                if matches!(o, crate::commands::OrderCmd::Resize(_)) {
+                    self.handle.focus(window, cx);
+                }
                 if let PaneHandle::Chart(chart) = &self.handle {
                     chart.update(cx, |c, cx| c.order_command(o, cx));
                 }
@@ -230,11 +234,14 @@ impl PaneWindow {
                     false,
                 ));
             }
-            items.push(MenuItem::named(
-                "Strategy markers",
-                Command::Strategy(commands::StrategyCmd::ToggleMarks),
-                !c.strategy_marks_hidden(),
-            ));
+            items.push(
+                MenuItem::named(
+                    "Strategy markers",
+                    Command::Strategy(commands::StrategyCmd::ToggleMarks),
+                    !c.strategy_marks_hidden(),
+                )
+                .switch(),
+            );
             items.push(MenuItem::sep());
         }
         items.push(MenuItem::named(

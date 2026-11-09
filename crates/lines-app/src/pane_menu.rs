@@ -92,11 +92,13 @@ pub enum MenuObject {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShotMenu {
     pub order: bool,
+    /// The tab's menu (`tab`).
+    pub tab: bool,
     pub sub: Option<String>,
     pub at: (f32, f32),
 }
 
-/// `pane` or `order`, then `:Label` to open the submenu of that row, then `@X,Y` (logical px;
+/// `pane`, `order` or `tab`, then `:Label` to open the submenu of that row, then `@X,Y` (logical px;
 /// default 200,120): `pane:Show@1400,300`.
 pub fn parse_shot_menu(s: &str) -> Result<ShotMenu, String> {
     let (rest, at) = match s.split_once('@') {
@@ -119,15 +121,21 @@ pub fn parse_shot_menu(s: &str) -> Result<ShotMenu, String> {
         Some((w, sub)) => (w, Some(sub.to_owned())),
         None => (rest, None),
     };
-    let order = match what {
-        "pane" => false,
-        "order" => true,
-        other => return Err(format!("{other}: expected pane or order")),
+    let (order, tab) = match what {
+        "pane" => (false, false),
+        "order" => (true, false),
+        "tab" => (false, true),
+        other => return Err(format!("{other}: expected pane, order or tab")),
     };
-    Ok(ShotMenu { order, sub, at })
+    Ok(ShotMenu {
+        order,
+        tab,
+        sub,
+        at,
+    })
 }
 
-/// Whether an order's menu offers "Move stops to breakeven": a stop order against an open
+/// Whether an order's menu offers "Move all stops to breakeven": a stop order against an open
 /// position (a long's sell stops, a short's buy stops), what `trade_bar::protective` moves.
 pub fn offers_breakeven(stop_order: bool, sells: bool, position: Option<i64>) -> bool {
     stop_order && position.is_some_and(|q| q != 0 && sells == (q > 0))
@@ -137,7 +145,13 @@ fn row(label: &str, cmd: Command) -> MenuItem {
     MenuItem::named(label, cmd, false)
 }
 
+/// An on/off switch: a box, checked when on.
 fn toggle(label: &str, cmd: Command, on: bool) -> MenuItem {
+    MenuItem::named(label, cmd, on).switch()
+}
+
+/// One of a set (a timeframe, a link group): a check on the one in force.
+fn pick(label: &str, cmd: Command, on: bool) -> MenuItem {
     MenuItem::named(label, cmd, on)
 }
 
@@ -145,11 +159,11 @@ fn toggle(label: &str, cmd: Command, on: bool) -> MenuItem {
 pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
     match o {
         MenuObject::Order { id, title, stop } => {
-            let mut v = vec![MenuItem::title(title)];
+            let mut v = vec![MenuItem::title(title), MenuItem::sep()];
             if *stop {
                 // The position's stops, through the modify path (`TradeCmd::Breakeven`).
                 v.push(row(
-                    "Move stops to breakeven",
+                    "Move all stops to breakeven",
                     Command::Order(OrderCmd::Breakeven),
                 ));
             }
@@ -160,6 +174,7 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
         }
         MenuObject::Drawing { title } => vec![
             MenuItem::title(title),
+            MenuItem::sep(),
             row("Style…", Command::Draw(DrawCmd::Style)),
             MenuItem::sep(),
             row("Delete", Command::Draw(DrawCmd::DeleteSelected)).destructive(),
@@ -202,7 +217,7 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
             &capitalized(m.pnl.label()),
             PnlDisplay::ALL
                 .iter()
-                .map(|&p| toggle(&capitalized(p.label()), Command::SetPnl(p), p == m.pnl))
+                .map(|&p| pick(&capitalized(p.label()), Command::SetPnl(p), p == m.pnl))
                 .collect(),
         ));
         v.push(MenuItem::sep());
@@ -210,7 +225,7 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
     if let Some(j) = &m.journal {
         let mut show: Vec<MenuItem> = JournalGroup::ALL
             .iter()
-            .map(|&g| toggle(g.label(), Command::JournalGroup(g), g == j.group))
+            .map(|&g| pick(g.label(), Command::JournalGroup(g), g == j.group))
             .collect();
         show.push(MenuItem::sep());
         show.push(toggle("All dates", Command::JournalAllDates, j.all_dates));
@@ -227,14 +242,81 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
     v
 }
 
+/// A tab's state, as its menu shows it.
+#[derive(Clone, Debug)]
+pub struct TabMenu {
+    pub tabs: usize,
+    pub closed_tabs: bool,
+    pub crosshair_sync: bool,
+    pub crosshair_sync_price: bool,
+    pub key_hints: bool,
+    pub perf_stats: bool,
+    pub latency_hud: bool,
+}
+
+/// A tab's menu: tab, layout and workspace actions; Close tab last.
+pub fn tab_items(m: &TabMenu) -> Vec<MenuItem> {
+    let mut v = vec![MenuItem::of(Command::NewTab, false)];
+    if m.closed_tabs {
+        v.push(MenuItem::of(Command::ReopenTab, false));
+    }
+    if m.tabs > 1 {
+        v.push(MenuItem::of(Command::TabToNewWindow, false));
+    }
+    v.push(MenuItem::sep());
+    v.push(MenuItem::submenu(
+        "Layout",
+        "",
+        crate::layout::Preset::ALL
+            .iter()
+            .map(|&p| MenuItem::of(Command::Preset(p), false))
+            .collect(),
+    ));
+    v.push(MenuItem::submenu(
+        "Show",
+        "",
+        vec![
+            toggle(
+                "Crosshair sync",
+                Command::ToggleCrosshairSync,
+                m.crosshair_sync,
+            ),
+            toggle(
+                "Crosshair price sync",
+                Command::ToggleCrosshairSyncPrice,
+                m.crosshair_sync_price,
+            ),
+            MenuItem::sep(),
+            toggle("Key hints", Command::ToggleHints, m.key_hints),
+            toggle("Performance stats", Command::TogglePerfStats, m.perf_stats),
+            toggle("Latency HUD", Command::ToggleLatencyHud, m.latency_hud),
+        ],
+    ));
+    v.push(MenuItem::submenu(
+        "Workspace",
+        "",
+        vec![
+            MenuItem::of(Command::SaveAs, false),
+            MenuItem::of(Command::Open, false),
+        ],
+    ));
+    v.push(MenuItem::sep());
+    v.push(MenuItem::of(Command::ExportDiagnostics, false));
+    v.push(row("Settings…", Command::Settings));
+    v.push(row("All commands…", Command::Palette));
+    v.push(MenuItem::sep());
+    v.push(MenuItem::of(Command::CloseTab, false).destructive());
+    v
+}
+
 fn timeframe(c: &ChartMenu) -> MenuItem {
     let tf = c.timeframe;
     let mut sub: Vec<MenuItem> = QUICK_TIMEFRAMES
         .iter()
-        .map(|&t| toggle(&t.to_string(), Command::Timeframe(t), t == tf))
+        .map(|&t| pick(&t.to_string(), Command::Timeframe(t), t == tf))
         .collect();
     if !QUICK_TIMEFRAMES.contains(&tf) {
-        sub.push(toggle(&tf.to_string(), Command::Timeframe(tf), true));
+        sub.push(pick(&tf.to_string(), Command::Timeframe(tf), true));
     }
     sub.push(MenuItem::sep());
     sub.push(row("All timeframes…", Command::TimeframeMenu));
@@ -311,7 +393,7 @@ fn pane(m: &PaneMenu) -> MenuItem {
         MenuItem::header("Show as"),
     ];
     for k in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
-        sub.push(toggle(k.label(), Command::SetKind(k), k == m.kind));
+        sub.push(pick(k.label(), Command::SetKind(k), k == m.kind));
     }
     sub.push(MenuItem::sep());
     if let Some(c) = &m.chart {
@@ -344,7 +426,7 @@ fn pane(m: &PaneMenu) -> MenuItem {
     }
     sub.push(MenuItem::sep());
     if m.chart.is_none() {
-        sub.push(row(&format!("Hide {}", m.kind.label()), Command::HidePane));
+        sub.push(MenuItem::of(Command::HidePane, false));
     }
     sub.push(MenuItem::of(Command::ClosePane, false).destructive());
     MenuItem::submenu("Pane", m.kind.label(), sub)
@@ -357,7 +439,7 @@ fn link(l: LinkGroup) -> MenuItem {
             None => "Unlinked".to_owned(),
             Some(_) => format!("Group {}", link_letter(g)),
         };
-        let mut r = toggle(&label, Command::SetLink(g), g == l);
+        let mut r = pick(&label, Command::SetLink(g), g == l);
         if g.is_none() {
             r.hint = crate::commands::hint(Command::CycleLink);
         }
@@ -575,7 +657,8 @@ mod tests {
             labels(&v),
             [
                 "Stop 2 @ 7562.00",
-                "Move stops to breakeven",
+                "---",
+                "Move all stops to breakeven",
                 "Change size…",
                 "---",
                 "Cancel order"
@@ -592,14 +675,60 @@ mod tests {
             stop: false,
         });
         assert!(
-            !labels(&target).contains(&"Move stops to breakeven"),
+            !labels(&target).contains(&"Move all stops to breakeven"),
             "only a stop"
         );
         let d = object_items(&MenuObject::Drawing {
             title: "Trend line".into(),
         });
-        assert_eq!(labels(&d), ["Trend line", "Style…", "---", "Delete"]);
+        assert_eq!(labels(&d), ["Trend line", "---", "Style…", "---", "Delete"]);
         assert!(d.last().unwrap().destructive);
+    }
+
+    #[test]
+    fn switches_show_a_box_and_sets_a_check() {
+        let v = items(&pane_of(PaneKind::Chart));
+        let strip = v.iter().find(|i| i.label == "Order strip").unwrap();
+        assert!(strip.toggle && !strip.checked, "off, and shown as a switch");
+        let pane = v.iter().find(|i| i.label == "Pane").unwrap();
+        let chart = pane.sub.iter().find(|i| i.label == "Chart").unwrap();
+        assert!(!chart.toggle && chart.checked, "one of a set: a check");
+        let link = v.iter().find(|i| i.label == "Link").unwrap();
+        assert!(link.sub.iter().all(|i| !i.toggle));
+        let show = v.iter().find(|i| i.label == "Show").unwrap();
+        assert!(
+            show.sub
+                .iter()
+                .filter(|i| i.cmd.is_some())
+                .all(|i| i.toggle || i.label.ends_with('…'))
+        );
+    }
+
+    #[test]
+    fn the_tab_menu_keeps_the_rules() {
+        let m = TabMenu {
+            tabs: 2,
+            closed_tabs: true,
+            crosshair_sync: true,
+            crosshair_sync_price: false,
+            key_hints: true,
+            perf_stats: false,
+            latency_hud: false,
+        };
+        let v = tab_items(&m);
+        assert!(v.iter().filter(|i| !i.is_sep()).count() <= 12);
+        let last = v.last().unwrap();
+        assert!(last.destructive && last.cmd == Some(Command::CloseTab));
+        let palette = crate::commands::palette();
+        for i in &v {
+            for s in std::iter::once(i).chain(&i.sub) {
+                if let Some(cmd) = s.cmd
+                    && cmd != Command::Palette
+                {
+                    assert!(palette.contains(&cmd), "{cmd:?} not in the palette");
+                }
+            }
+        }
     }
 
     #[test]
@@ -627,6 +756,7 @@ mod tests {
             parse_shot_menu("pane:Show@1400,300"),
             Ok(ShotMenu {
                 order: false,
+                tab: false,
                 sub: Some("Show".into()),
                 at: (1400.0, 300.0)
             })
@@ -635,7 +765,8 @@ mod tests {
             parse_shot_menu("order").map(|m| (m.order, m.at)),
             Ok((true, (200.0, 120.0)))
         );
-        assert!(parse_shot_menu("tab").is_err());
+        assert_eq!(parse_shot_menu("tab").map(|m| m.tab), Ok(true));
+        assert!(parse_shot_menu("tabs").is_err());
         assert!(parse_shot_menu("pane@1,").is_err());
         assert!(parse_shot_menu("pane@-1,4").is_err());
     }

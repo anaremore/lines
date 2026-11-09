@@ -150,7 +150,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # --paper "option 2026-11-09 682 call; buy 2 @ 1.89; ack" for orders on a series.
 # Paper trading evidence (in-memory core, manual clock): --paper "account paper-eval; buy 2 mkt; ack; buy 1 @ 5807.00;
 #   buy 1 @ 5808.00 bracket 4/8; ack; buy 1 @ 5806.50" (orders after the last `ack` stay pending), --enable-trading (DOMs start with trading enabled; `--arm` is the old name), --enable-hotkeys (DOMs start with order hotkeys on). --pnl off|ticks|currency|both.
-#   --bracket-units ticks|points (every account), --bracket-editor (DOMs open their bracket-preset editor), --hover-header (the focused pane's header controls show as if hovered).
+#   --bracket-units ticks|points (every account), --bracket-editor (DOMs open their bracket-preset editor), --hover-header (the focused pane's header controls show as if hovered), --context-menu pane|order|tab[:Label][@X,Y] (a context menu opens as a right click would: the focused pane's, the focused chart's first working order's (a stop if any), or the tab's; `:Label` opens that row's submenu; fails with no image if it can't).
 #   --bracket-position on|ask: one bracket for the whole position (on: saved for every account on the recording's product; ask: DOMs switch to it as the trader would, after --paper, showing the confirmation when exits work).
 #   `wait SECONDS` and `print PRICE [QTY]` (a market trade only the trading core sees) make round trips on a finished
 #   replay, e.g. for the journal: --workspace FILE with a `journal` pane, --paper "buy 2 mkt; ack; print 6011.50; wait 20;
