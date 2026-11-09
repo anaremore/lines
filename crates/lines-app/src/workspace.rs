@@ -2306,6 +2306,72 @@ impl WindowView {
         cx.notify();
     }
 
+    /// Enter in the open prompt (or a click on a row): save, open the selected workspace, run
+    /// the selected command.
+    fn prompt_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.prompt.as_mut() {
+            Some(Prompt::SaveAs { text, error }) => match wsdoc::valid_name(text) {
+                Ok(name) => {
+                    save_named(&name, cx);
+                    self.prompt = None;
+                }
+                Err(e) => *error = Some(e),
+            },
+            Some(Prompt::Open {
+                items,
+                selected,
+                error,
+            }) => {
+                if let Some(name) = items.get(*selected).cloned() {
+                    match load_named(&name, cx) {
+                        Ok(doc) => {
+                            self.prompt = None;
+                            let me = window.window_handle();
+                            cx.defer(move |cx| switch_workspace(doc, me, cx));
+                        }
+                        Err(e) => *error = Some(e),
+                    }
+                }
+            }
+            Some(Prompt::Palette {
+                shown, selected, ..
+            }) => {
+                if let Some(cmd) = shown.get(*selected).copied() {
+                    self.prompt = None;
+                    self.run(cmd, window, cx);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// A click on row `i` of the open list: as Enter on it.
+    fn prompt_pick(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        crate::popover::mark_moved_under_pointer();
+        match self.prompt.as_mut() {
+            Some(Prompt::Open { selected, .. } | Prompt::Palette { selected, .. }) => *selected = i,
+            _ => return,
+        }
+        self.prompt_enter(window, cx);
+        cx.notify();
+    }
+
+    /// The wheel over the open list: the selection moves `rows` (the list follows it).
+    fn prompt_wheel(&mut self, rows: isize) {
+        let (selected, n) = match self.prompt.as_mut() {
+            Some(Prompt::Open {
+                items, selected, ..
+            }) => (selected, items.len()),
+            Some(Prompt::Palette {
+                shown, selected, ..
+            }) => (selected, shown.len()),
+            _ => return,
+        };
+        *selected = selected
+            .saturating_add_signed(rows)
+            .min(n.saturating_sub(1));
+    }
+
     fn prompt_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let key = k.key.as_str();
@@ -2314,15 +2380,13 @@ impl WindowView {
             cx.notify();
             return;
         }
+        if key == "enter" {
+            self.prompt_enter(window, cx);
+            cx.notify();
+            return;
+        }
         match self.prompt.as_mut() {
             Some(Prompt::SaveAs { text, error }) => match key {
-                "enter" => match wsdoc::valid_name(text) {
-                    Ok(name) => {
-                        save_named(&name, cx);
-                        self.prompt = None;
-                    }
-                    Err(e) => *error = Some(e),
-                },
                 "backspace" => {
                     text.pop();
                     *error = None;
@@ -2338,24 +2402,10 @@ impl WindowView {
                 }
             },
             Some(Prompt::Open {
-                items,
-                selected,
-                error,
+                items, selected, ..
             }) => match key {
                 "down" => *selected = (*selected + 1) % items.len().max(1),
                 "up" => *selected = (*selected + items.len().max(1) - 1) % items.len().max(1),
-                "enter" => {
-                    if let Some(name) = items.get(*selected).cloned() {
-                        match load_named(&name, cx) {
-                            Ok(doc) => {
-                                self.prompt = None;
-                                let me = window.window_handle();
-                                cx.defer(move |cx| switch_workspace(doc, me, cx));
-                            }
-                            Err(e) => *error = Some(e),
-                        }
-                    }
-                }
                 _ => {}
             },
             Some(Prompt::Palette {
@@ -2368,12 +2418,6 @@ impl WindowView {
                 match key {
                     "down" => *selected = (*selected + 1) % n,
                     "up" => *selected = (*selected + n - 1) % n,
-                    "enter" => {
-                        if let Some(cmd) = shown.get(*selected).copied() {
-                            self.prompt = None;
-                            self.run(cmd, window, cx);
-                        }
-                    }
                     "backspace" => {
                         query.pop();
                         *shown = commands::filter(query, items);
@@ -2840,6 +2884,36 @@ impl WindowView {
     /// Screenshot: open this menu once its pane can show it (an order's: once the chart has
     /// one).
     #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    /// Screenshots: open a prompt (`--prompt palette[:QUERY]|open|save`).
+    pub(crate) fn screenshot_prompt(
+        &mut self,
+        which: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let (kind, query) = which.split_once(':').unwrap_or((which, ""));
+        let cmd = match kind {
+            "palette" => Command::Palette,
+            "open" => Command::Open,
+            "save" => Command::SaveAs,
+            _ => anyhow::bail!("--prompt: expected palette[:QUERY], open or save"),
+        };
+        self.run(cmd, window, cx);
+        if let Some(Prompt::Palette {
+            query: q,
+            items,
+            shown,
+            selected,
+        }) = self.prompt.as_mut()
+        {
+            *q = query.to_owned();
+            *shown = commands::filter(q, items);
+            *selected = 0;
+        }
+        cx.notify();
+        Ok(())
+    }
+
     pub(crate) fn screenshot_menu(
         &mut self,
         m: crate::pane_menu::ShotMenu,
@@ -3098,11 +3172,38 @@ impl WindowView {
         ))
     }
 
-    fn prompt_overlay(&self) -> Option<AnyElement> {
+    fn prompt_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.prompt.as_ref()?;
         let t = self.theme;
-        let (title, body, error, hint) = match p {
+        let row = |id: &'static str, i: usize, sel: bool, cx: &mut Context<Self>| {
+            div()
+                .id((id, i))
+                .px_2()
+                .py_1()
+                .flex()
+                .flex_row()
+                .justify_between()
+                .gap_2()
+                .border_l_2()
+                .border_color(if sel {
+                    t.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .when(sel, |d| d.bg(t.accent.opacity(0.16)))
+                .when(!sel, |d| d.hover(|s| s.bg(t.accent.opacity(0.08))))
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.prompt_pick(i, window, cx);
+                    }),
+                )
+        };
+        let (panel, title, body, error) = match p {
             Prompt::SaveAs { text, error } => (
+                crate::popover::Panel::SaveAs,
                 "Save workspace as",
                 div()
                     .flex()
@@ -3123,7 +3224,6 @@ impl WindowView {
                             .bg(t.accent),
                     ),
                 error.clone(),
-                "Enter save   Esc cancel",
             ),
             Prompt::Open {
                 items,
@@ -3131,23 +3231,13 @@ impl WindowView {
                 error,
             } => {
                 let mut list = div().flex().flex_col().py_1();
-                for (i, name) in items.iter().enumerate() {
+                // A window of rows around the selection (the wheel and keys move it).
+                let first = selected.saturating_sub(13);
+                for (i, name) in items.iter().enumerate().skip(first).take(14) {
                     let sel = i == *selected;
                     let builtin = wsdoc::is_builtin(name);
                     list = list.child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .flex()
-                            .flex_row()
-                            .justify_between()
-                            .border_l_2()
-                            .border_color(if sel {
-                                t.accent
-                            } else {
-                                gpui::transparent_black()
-                            })
-                            .when(sel, |d| d.bg(t.accent.opacity(0.16)))
+                        row("open-row", i, sel, cx)
                             .child(div().text_color(t.text_main).child(name.clone()))
                             .child(div().text_color(t.text_dim).child(if builtin {
                                 "built-in"
@@ -3157,10 +3247,10 @@ impl WindowView {
                     );
                 }
                 (
+                    crate::popover::Panel::OpenWorkspace,
                     "Open workspace",
                     list,
                     error.clone(),
-                    "↑↓ select   Enter open   Esc cancel",
                 )
             }
             Prompt::Palette {
@@ -3175,20 +3265,7 @@ impl WindowView {
                 for (i, cmd) in shown.iter().enumerate().skip(first).take(14) {
                     let sel = i == *selected;
                     list = list.child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .flex()
-                            .flex_row()
-                            .justify_between()
-                            .gap_2()
-                            .border_l_2()
-                            .border_color(if sel {
-                                t.accent
-                            } else {
-                                gpui::transparent_black()
-                            })
-                            .when(sel, |d| d.bg(t.accent.opacity(0.16)))
+                        row("palette-row", i, sel, cx)
                             .child(div().text_color(t.text_main).child(commands::label(*cmd)))
                             .child(div().text_color(t.text_dim).child(commands::hint(*cmd))),
                     );
@@ -3223,10 +3300,10 @@ impl WindowView {
                             .bg(t.accent),
                     );
                 (
+                    crate::popover::Panel::Palette,
                     "Commands",
                     div().flex().flex_col().child(input).child(list),
                     None,
-                    "↑↓ select   Enter run   Esc close",
                 )
             }
         };
@@ -3239,43 +3316,48 @@ impl WindowView {
                 .flex()
                 .justify_center()
                 .child(
-                    div()
-                        .id("prompt")
-                        .occlude()
-                        .w(crate::zoom::ui(460.0))
-                        .flex()
-                        .flex_col()
-                        .bg(t.panel)
-                        .border_1()
-                        .border_color(t.axis_line)
-                        .rounded_md()
-                        .text_size(crate::zoom::ui(13.0))
-                        .child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(t.axis_line)
-                                .text_color(t.text_dim)
-                                .child(title),
-                        )
-                        .child(body)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .justify_between()
-                                .px_3()
-                                .py_1()
-                                .border_t_1()
-                                .border_color(t.axis_line)
-                                .text_size(crate::zoom::ui(11.0))
-                                .text_color(t.text_dim)
-                                .child(hint)
-                                .when_some(error, |d, e| {
-                                    d.child(div().text_color(t.text_main).child(e))
-                                }),
-                        ),
+                    crate::popover::floating(
+                        panel,
+                        title,
+                        &t,
+                        div()
+                            .id("prompt")
+                            .occlude()
+                            .w(crate::zoom::ui(460.0))
+                            .flex()
+                            .flex_col()
+                            .bg(t.panel)
+                            .border_1()
+                            .border_color(t.axis_line)
+                            .rounded_b_md()
+                            .text_size(crate::zoom::ui(13.0))
+                            .on_scroll(cx.listener(|this, ev: &gpui::ScrollEvent, window, cx| {
+                                let n = crate::popover::wheel_rows(ev, window);
+                                if n != 0 {
+                                    this.prompt_wheel(n);
+                                    cx.notify();
+                                }
+                            }))
+                            .child(body)
+                            .when_some(error, |d, e| {
+                                d.child(
+                                    div()
+                                        .px_3()
+                                        .py_1()
+                                        .border_t_1()
+                                        .border_color(t.axis_line)
+                                        .text_size(crate::zoom::ui(11.0))
+                                        .text_color(t.text_main)
+                                        .child(e),
+                                )
+                            }),
+                        Box::new(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.prompt = None;
+                            cx.notify();
+                        })),
+                    )
+                    // Above any open header dropdown, which would otherwise cover it.
+                    .priority(crate::dropdown::OVERLAY_PRIORITY),
                 )
                 .into_any_element(),
         )
@@ -3397,10 +3479,7 @@ impl Render for WindowView {
                     .child(status)
             }))
             .children(menu)
-            .children(self.prompt_overlay().map(|p| {
-                // Above any open header dropdown, which would otherwise cover it.
-                gpui::deferred(p).with_priority(crate::dropdown::OVERLAY_PRIORITY)
-            }))
+            .children(self.prompt_overlay(cx))
             .children(self.drag_ghost())
     }
 }

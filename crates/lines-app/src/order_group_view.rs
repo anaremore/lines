@@ -230,21 +230,12 @@ pub fn layer(
         .bg(t.panel)
         .border_1()
         .border_color(t.axis_line)
-        .rounded_md()
+        .rounded_b_md()
         .text_size(px(12.0))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
             cx.stop_propagation()
         })
-        .child(
-            div()
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .font_weight(FontWeight::BOLD)
-                .text_color(t.text_main)
-                .child(menu.title.clone()),
-        )
         .child(
             div()
                 .id("group-orders")
@@ -258,7 +249,16 @@ pub fn layer(
         .child(cancel);
     let dismiss: popover::OnDismiss =
         Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::OrderGroup, cx)));
-    Some(popover::layer(list, dismiss).into_any_element())
+    Some(
+        popover::floating(
+            popover::Panel::OrderGroup,
+            menu.title.clone(),
+            t,
+            list,
+            dismiss,
+        )
+        .into_any_element(),
+    )
 }
 
 #[cfg(test)]

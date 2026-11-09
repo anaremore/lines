@@ -100,6 +100,11 @@ pub(crate) fn update_settings(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     }
 }
 
+/// A pane with a symbol picker: the shared overlay reaches it for the wheel and closing.
+pub trait PickerHost {
+    fn picker_ui(&mut self) -> &mut PickerUi;
+}
+
 /// What a key press in the open picker did.
 pub enum PickerKey {
     /// Handled; redraw.
@@ -234,9 +239,17 @@ impl PickerUi {
         update_settings(cx, |s| s.push_recent(product));
     }
 
-    /// The open picker: query line, ranked rows, key hints. Built only while open. Row clicks
-    /// call `on_row(view, row, cx)`.
-    pub fn overlay<V: 'static>(
+    /// The wheel over the open list: the selection moves a row per notch (the list follows it).
+    pub fn wheel(&mut self, rows: isize) {
+        if let Some(p) = self.picker.as_mut() {
+            p.move_selection(rows);
+        }
+    }
+
+    /// The open picker in its panel (`popover::floating`): query line and ranked rows. Built
+    /// only while open. Row clicks call `on_row(view, row, cx)`; the wheel, the × and a press
+    /// outside reach the pane's picker through [`PickerHost`].
+    pub fn overlay<V: PickerHost + 'static>(
         &self,
         theme: &Theme,
         availability: &Availability,
@@ -354,12 +367,9 @@ impl PickerUi {
                         gpui::transparent_black()
                     })
                     .when(selected, |d| d.bg(t.accent.opacity(0.16)))
-                    .child(
-                        div()
-                            .w(crate::zoom::ui(12.0))
-                            .text_color(t.text_dim)
-                            .child(star),
-                    )
+                    .when(!selected, |d| d.hover(|s| s.bg(t.accent.opacity(0.08))))
+                    .cursor_pointer()
+                    .child(div().w(crate::zoom::ui(12.0)).text_color(t.text_dim).child(star))
                     .child(
                         div()
                             .flex_none()
@@ -402,21 +412,33 @@ impl PickerUi {
         } else {
             div().text_color(t.text_main).child(p.query.clone())
         };
-        let hints = div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .justify_between()
-            .px_3()
-            .py_1()
-            .border_t_1()
-            .border_color(t.axis_line)
-            .text_size(crate::zoom::ui(11.0))
-            .text_color(t.text_dim)
-            .child("↑↓ select   Tab month   Alt+M micro/mini   Ctrl+D favorite   Enter open   Esc close")
-            .when_some(self.error.clone(), |d, err| {
-                d.child(div().text_color(t.text_main).child(err))
-            });
+        // A refusal (an unavailable contract) says why; no key hints (the title bar carries the
+        // panel).
+        let error = self.error.clone().map(|err| {
+            div()
+                .flex_none()
+                .px_3()
+                .py_1()
+                .border_t_1()
+                .border_color(t.axis_line)
+                .text_size(crate::zoom::ui(11.0))
+                .text_color(t.text_main)
+                .child(err)
+        });
+        let rows = rows.on_scroll(
+            cx.listener(|v: &mut V, ev: &gpui::ScrollEvent, window, cx| {
+                let n = crate::popover::wheel_rows(ev, window);
+                if n != 0 {
+                    v.picker_ui().wheel(n);
+                    cx.notify();
+                }
+            }),
+        );
+        let dismiss: crate::popover::OnDismiss =
+            Box::new(cx.listener(|v: &mut V, _: &MouseDownEvent, _, cx| {
+                v.picker_ui().close();
+                cx.notify();
+            }));
         Some(
             div()
                 .absolute()
@@ -427,7 +449,10 @@ impl PickerUi {
                 .flex()
                 .justify_center()
                 .items_start()
-                .child(
+                .child(crate::popover::floating(
+                    crate::popover::Panel::Picker,
+                    "Symbol",
+                    &t,
                     div()
                         .id("symbol-picker")
                         .occlude()
@@ -439,7 +464,7 @@ impl PickerUi {
                         .bg(t.panel)
                         .border_1()
                         .border_color(t.axis_line)
-                        .rounded_md()
+                        .rounded_b_md()
                         .text_size(crate::zoom::ui(13.0))
                         .font_features(self.tnum.clone())
                         .child(
@@ -462,8 +487,9 @@ impl PickerUi {
                                 ),
                         )
                         .child(rows)
-                        .child(hints),
-                )
+                        .children(error),
+                    dismiss,
+                ))
                 .into_any_element(),
         )
     }

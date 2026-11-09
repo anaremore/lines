@@ -257,7 +257,7 @@ pub fn render(
                 .bg(t.panel)
                 .border_1()
                 .border_color(t.axis_line)
-                .rounded_md()
+                .rounded_b_md()
                 .text_size(crate::zoom::ui(13.0))
                 .child(
                     div()
@@ -269,28 +269,9 @@ pub fn render(
                         .items_center()
                         .border_b_1()
                         .border_color(t.axis_line)
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(t.text_main)
-                                .child("Studies"),
-                        )
                         .child(div().flex_1().min_w_0().truncate().child(query)),
                 )
-                .child(body)
-                .child(
-                    // One short line, never wrapped.
-                    div()
-                        .px_3()
-                        .py_1()
-                        .border_t_1()
-                        .border_color(t.axis_line)
-                        .text_size(crate::zoom::ui(11.0))
-                        .text_color(t.text_dim)
-                        .whitespace_nowrap()
-                        .truncate()
-                        .child("↑↓ move · Enter edit/add · Space hide · Del remove · Esc back"),
-                ),
+                .child(body),
         )
         .into_any_element()
 }

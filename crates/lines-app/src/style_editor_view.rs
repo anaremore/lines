@@ -1,5 +1,5 @@
 //! Rendering of the style editor (`crate::style_editor` is the model): a popover over the
-//! chart (`crate::popover::layer`: a press outside closes it and does nothing else), render
+//! chart (`crate::popover::floating`: a press outside closes it and does nothing else), render
 //! time only. Every control is clickable and maps to the same model calls as the keys.
 //!
 //! State never relies on color alone (WCAG 1.4.1, 1.4.11): a selected choice has a check mark,
@@ -179,7 +179,8 @@ fn tabs_height(e: &StyleEditor) -> f32 {
 /// What doesn't scroll: header, tabs and footer (title, "Save as default", the key hint, full
 /// or short) and the borders.
 fn chrome_height(e: &StyleEditor) -> f32 {
-    let title = 16.0 + line_h(13.0) + 1.0;
+    // The title is the panel's title bar (`popover::floating`), above the box.
+    let title = crate::popover::TITLE_H;
     let save = if e.default_label.is_some() {
         4.0 + 28.0
     } else {
@@ -925,26 +926,15 @@ pub fn render(
                 .id("style-editor")
                 .occlude()
                 .w(px(at.w))
-                .max_h(px(at.h))
+                .max_h(px((at.h - crate::popover::TITLE_H).max(0.0)))
                 .overflow_hidden()
                 .flex()
                 .flex_col()
                 .bg(t.panel)
                 .border_1()
                 .border_color(t.axis_line)
-                .rounded_md()
+                .rounded_b_md()
                 .text_size(crate::zoom::ui(13.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .px(crate::zoom::ui(12.0))
-                        .py(crate::zoom::ui(8.0))
-                        .border_b_1()
-                        .border_color(t.axis_line)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(t.text_main)
-                        .child(e.title.clone()),
-                )
                 .children(tabs_strip)
                 .child(body)
                 .child(footer),

@@ -205,6 +205,10 @@ pub struct Settings {
     /// Risk section). Optional: an account without an entry keeps its rules.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub prop_rules: std::collections::BTreeMap<String, crate::settings_schema::PropRulesDoc>,
+    /// Where each pop-up panel was last dragged (`crate::popover::Panel::key`), window
+    /// logical px of its top-left. Optional: a panel without one opens where it always has.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub panel_places: std::collections::BTreeMap<String, (i32, i32)>,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]

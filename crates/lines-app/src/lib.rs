@@ -505,6 +505,14 @@ struct Cli {
     /// Appearance sets it; the chart's own time and price zoom are unchanged.
     #[arg(long, requires = "screenshot", value_parser = zoom::parse_step)]
     ui_zoom: Option<u16>,
+    /// Screenshot: open a workspace prompt: `palette` (`palette:QUERY` typed into it), `open`
+    /// (Open workspace) or `save` (Save workspace as).
+    #[arg(long, requires = "screenshot")]
+    prompt: Option<String>,
+    /// Screenshot: every pop-up panel as if dragged to X,Y (window logical px of its top-left;
+    /// kept inside the window).
+    #[arg(long, requires = "screenshot", value_parser = parse_point)]
+    panel_at: Option<(f32, f32)>,
     /// Screenshot: keep the journal in DIR (`screenshot.jsonl`) instead of in memory, so trades
     /// a `--paper` script closes get their trade snapshots in DIR/shots/. Evidence only: nothing of
     /// the user's is read or written unless DIR is theirs.
@@ -1539,6 +1547,8 @@ where
                 hover_header: cli.hover_header,
                 context_menu: cli.context_menu.clone(),
                 ui_zoom: cli.ui_zoom,
+                prompt: cli.prompt.clone(),
+                panel_at: cli.panel_at,
                 journal_dir: cli.journal_dir.clone(),
                 depth_note: cli.depth_note.clone(),
                 layout_report: cli.layout_report,

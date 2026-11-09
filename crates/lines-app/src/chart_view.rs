@@ -5147,12 +5147,16 @@ impl ChartView {
         if self.editor_scroll.follow(&e) {
             cx.notify();
         }
+        let title = e.title.clone();
         let editor =
             crate::style_editor_view::render(&e, t, &warnings, at, h, &self.editor_scroll, cx);
         let dismiss: popover::OnDismiss = Box::new(
             cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_popover(Kind::StyleEditor, cx)),
         );
-        Some(popover::layer(editor, dismiss).into_any_element())
+        Some(
+            popover::floating(popover::Panel::StyleEditor, title, t, editor, dismiss)
+                .into_any_element(),
+        )
     }
 
     /// Pick up per-tool defaults saved since this chart last looked (on any chart).
@@ -6954,7 +6958,7 @@ impl Render for ChartView {
                                 Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| {
                                     v.close_popover(Kind::Studies, cx)
                                 }));
-                            popover::layer(menu, dismiss)
+                            popover::floating(popover::Panel::Studies, "Studies", &t, menu, dismiss)
                         }),
                         |d, m| d.child(m),
                     )
@@ -6993,6 +6997,12 @@ const PICKER_CLOSES: [Kind; 5] = [
     Kind::StyleEditor,
     Kind::OrderGroup,
 ];
+
+impl crate::picker_view::PickerHost for ChartView {
+    fn picker_ui(&mut self) -> &mut crate::picker_view::PickerUi {
+        &mut self.picker
+    }
+}
 
 #[cfg(test)]
 mod tests {
