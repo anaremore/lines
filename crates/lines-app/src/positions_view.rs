@@ -27,6 +27,8 @@ use crate::wsdoc::PaneDoc;
 
 const MIN_HIT: f32 = 20.0;
 const ROW_H: f32 = 22.0;
+/// A press refused because the rows moved under a still pointer.
+const ROWS_MOVED: &str = "The rows just changed: check the row and press again";
 
 /// A Flatten sent from here, until its outcome is known (or a minute passes with none).
 struct Asked {
@@ -663,28 +665,25 @@ impl PositionsView {
                         .flex()
                         .justify_end()
                         .child(crate::popover::always_live(
-                        self.button(SharedString::from(format!("position-flatten-{n}")), word)
-                            .when(off.is_some(), |b| b.text_color(t.text_dim))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(why) = this.read_only(&row.account) {
-                                        this.note = Some(why);
-                                    } else if !this.press_guard.may_press() {
-                                        // Said once; the next press is the trader's own.
-                                        this.press_guard.pointer_moved();
-                                        this.note = Some(
-                                            "The rows just changed: check the row and press again"
-                                                .to_owned(),
-                                        );
-                                    } else if this.guarded(ev) {
-                                        this.flatten(std::slice::from_ref(&row), cx);
-                                    }
-                                    cx.notify();
-                                }),
-                            ),
-                    ))
+                            self.button(SharedString::from(format!("position-flatten-{n}")), word)
+                                .when(off.is_some(), |b| b.text_color(t.text_dim))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(why) = this.read_only(&row.account) {
+                                            this.note = Some(why);
+                                        } else if !this.press_guard.may_press() {
+                                            // Said once; the next press is the trader's own.
+                                            this.press_guard.pointer_moved();
+                                            this.note = Some(ROWS_MOVED.to_owned());
+                                        } else if this.guarded(ev) {
+                                            this.flatten(std::slice::from_ref(&row), cx);
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
+                        ))
                 }
             });
         }
