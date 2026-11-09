@@ -43,6 +43,7 @@ mod order_group_view;
 mod order_resize;
 mod pane;
 mod pane_columns;
+mod pane_menu;
 mod pane_window;
 mod persist;
 mod picker;
@@ -483,6 +484,11 @@ struct Cli {
     /// pane (no OS pointer involved).
     #[arg(long, requires = "screenshot")]
     hover_header: bool,
+    /// Screenshot: open a context menu, as a right click would: `pane`, `tab`, or `order` (the
+    /// focused chart's first working order, a stop if any); `:Label` with that row's submenu
+    /// open; `@X,Y` where (logical px): `--context-menu pane:Show@1400,300`.
+    #[arg(long, requires = "screenshot", value_parser = pane_menu::parse_shot_menu)]
+    context_menu: Option<pane_menu::ShotMenu>,
     /// Screenshot: keep the journal in DIR (`screenshot.jsonl`) instead of in memory, so trades
     /// a `--paper` script closes get their trade snapshots in DIR/shots/. Evidence only: nothing of
     /// the user's is read or written unless DIR is theirs.
@@ -1499,6 +1505,7 @@ where
                 bracket_editor: cli.bracket_editor,
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
+                context_menu: cli.context_menu.clone(),
                 journal_dir: cli.journal_dir.clone(),
                 depth_note: cli.depth_note.clone(),
                 layout_report: cli.layout_report,

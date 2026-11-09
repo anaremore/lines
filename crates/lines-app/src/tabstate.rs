@@ -151,6 +151,24 @@ pub fn toggle_kind<Id: Copy + Eq + Hash>(
     keep_one(order, leaves, changes)
 }
 
+/// What `toggle_kind` would act on for `kind`, from `focused`: shown (it would hide them),
+/// hidden (it would show them), or nothing (`None`). For a menu's checkmark.
+pub fn kind_shown<Id: Copy + Eq + Hash>(
+    leaves: &HashMap<Id, Leaf>,
+    focused: Id,
+    kind: PaneKind,
+) -> Option<bool> {
+    let f = leaves.get(&focused)?;
+    if f.kind == kind && f.state.is_shown() {
+        return Some(true);
+    }
+    let mut candidates = leaves.values().filter(|l| {
+        l.kind == kind && l.state != PaneState::Detached && (f.link.is_none() || l.link == f.link)
+    });
+    let first = candidates.next()?;
+    Some(first.state.is_shown() || candidates.any(|l| l.state.is_shown()))
+}
+
 /// Whether `chart`'s "chart only" is on: some DOM or tape in its link group is hidden by it.
 pub fn is_chart_only<Id: Copy + Eq + Hash>(leaves: &HashMap<Id, Leaf>, chart: Id) -> bool {
     let Some(c) = leaves.get(&chart).filter(|c| c.kind == PaneKind::Chart) else {
@@ -419,6 +437,26 @@ mod tests {
 
     fn order(l: &Layout<u32>) -> Vec<u32> {
         l.leaves().into_iter().copied().collect()
+    }
+
+    /// The pane menu's "Linked DOM" check says what the toggle would do.
+    #[test]
+    fn kind_shown_matches_what_the_toggle_acts_on() {
+        let (l, mut leaves) = pair();
+        assert_eq!(kind_shown(&leaves, 1, PaneKind::Dom), Some(true));
+        let changes = toggle_kind(&order(&l), &leaves, 1, PaneKind::Dom).unwrap();
+        apply(&mut leaves, changes);
+        assert_eq!(kind_shown(&leaves, 1, PaneKind::Dom), Some(false));
+        assert_eq!(
+            kind_shown(&leaves, 4, PaneKind::Dom),
+            Some(true),
+            "group B's DOM is still shown"
+        );
+        assert_eq!(
+            kind_shown(&leaves, 1, PaneKind::Journal),
+            None,
+            "none to toggle"
+        );
     }
 
     #[test]

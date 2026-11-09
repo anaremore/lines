@@ -78,6 +78,8 @@ pub struct Shot {
     pub bracket_position: Option<crate::BracketPositionArg>,
     /// The focused pane's header controls show (`--hover-header`).
     pub hover_header: bool,
+    /// A context menu opens (`--context-menu`).
+    pub context_menu: Option<crate::pane_menu::ShotMenu>,
     /// Keep the journal in this folder, so a script's trades get trade snapshots (`--journal-dir`).
     pub journal_dir: Option<PathBuf>,
     /// Show the replay's book as a source without depth would: only the inside, with this note
@@ -186,6 +188,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         bracket_editor,
         bracket_position,
         hover_header,
+        context_menu,
         journal_dir,
         depth_note: _,
         layout_report,
@@ -346,6 +349,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             scale,
             script,
             hover_header,
+            context_menu,
             settings_shot,
             strategies,
         ) {
@@ -378,6 +382,7 @@ fn capture(
     scale: Option<f32>,
     script: Option<(Vec<crate::trading::Step>, lines_core::UtcMillis)>,
     hover_header: bool,
+    context_menu: Option<crate::pane_menu::ShotMenu>,
     settings_shot: Option<SettingsShot>,
     strategies: Option<std::sync::Arc<crate::strategy_panel::DemoStrategies>>,
 ) -> Result<()> {
@@ -388,6 +393,9 @@ fn capture(
     )?;
     if hover_header {
         handle.update(cx, |v, _, cx| v.hover_focused_pane(cx))?;
+    }
+    if let Some(m) = context_menu {
+        handle.update(cx, |v, _, cx| v.screenshot_menu(m, cx))?;
     }
     // The panes now follow their feeds (the core has the book): run the script and wait for
     // its events to reach the panes.

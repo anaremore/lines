@@ -137,6 +137,10 @@ pub struct Theme {
     /// up/down colour). Text on them is `bg`. They also differ by letter (T / S) and shape.
     pub order_target: Hsla,
     pub order_stop: Hsla,
+    /// A menu's destructive rows (Delete, Close pane, Cancel order), always last and always
+    /// named for what they do, so the color is never the only cue. AA on `panel`, also under
+    /// the selected row's tint. Not up/down, not the accent.
+    pub destructive: Hsla,
 }
 
 /// A dash pattern, logical px: `on` drawn, `off` skipped.
@@ -549,6 +553,7 @@ impl Theme {
             on_paper_badge: c(brand::INK),
             order_target: c(0x67d0e0),
             order_stop: c(0xe3a3f5),
+            destructive: c(0xff8a80),
         }
     }
 
@@ -605,6 +610,7 @@ impl Theme {
             on_paper_badge: c(brand::PAPER),
             order_target: c(0x006b7a),
             order_stop: c(0x86399f),
+            destructive: c(0x9c1f19),
         }
     }
 
@@ -769,6 +775,21 @@ mod tests {
             ("bg", t.bg, "down", t.down),
             ("bg", t.bg, "order_target", t.order_target),
             ("bg", t.bg, "order_stop", t.order_stop),
+            // Menus: a value or shortcut on the selected row; a destructive row, also when
+            // selected (`crate::menu`).
+            (
+                "text_dim",
+                t.text_dim,
+                "selected row",
+                over(t.accent.opacity(0.16), t.panel),
+            ),
+            ("destructive", t.destructive, "panel", t.panel),
+            (
+                "destructive",
+                t.destructive,
+                "selected row",
+                over(t.accent.opacity(0.16), t.panel),
+            ),
         ]
     }
 

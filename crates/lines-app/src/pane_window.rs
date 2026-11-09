@@ -44,8 +44,11 @@ fn command(cmd: Command) -> Option<Command> {
     match cmd {
         Command::PopOut | Command::Reattach => Some(Command::Reattach),
         Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
-        // A chart's drawing style editor (the rest of the drawing keys: main windows).
-        Command::Draw(crate::commands::DrawCmd::Style) => Some(cmd),
+        // A chart's drawing style editor, and deleting the selected drawing (its menu's
+        // Delete; the rest of the drawing keys: main windows).
+        Command::Draw(
+            crate::commands::DrawCmd::Style | crate::commands::DrawCmd::DeleteSelected,
+        ) => Some(cmd),
         // Stop all strategies works from every window (decision 0025's kill switch).
         Command::Strategy(
             crate::commands::StrategyCmd::StopAll
@@ -54,8 +57,29 @@ fn command(cmd: Command) -> Option<Command> {
         ) => Some(cmd),
         // Trading keys act on this window's pane, as in main windows.
         Command::Trade(_) => Some(cmd),
+        // An order tag's menu (no key reaches here with one).
+        Command::Order(_) => Some(cmd),
         _ => None,
     }
+}
+
+/// `items` without the rows this window can't run (`command`), and without separators left
+/// at an end or doubled.
+fn runnable(items: Vec<MenuItem>) -> Vec<MenuItem> {
+    let mut out: Vec<MenuItem> = Vec::with_capacity(items.len());
+    for i in items {
+        if i.cmd.is_some_and(|c| command(c).is_none()) {
+            continue;
+        }
+        if i.is_sep() && out.last().is_none_or(MenuItem::is_sep) {
+            continue;
+        }
+        out.push(i);
+    }
+    while out.last().is_some_and(MenuItem::is_sep) {
+        out.pop();
+    }
+    out
 }
 
 impl PaneWindow {
@@ -165,11 +189,22 @@ impl PaneWindow {
                     chart.update(cx, |c, cx| c.drawing_command(d, cx));
                 }
             }
+            Some(Command::Order(o)) => {
+                // The size field needs the chart's focus (it closes without it).
+                if matches!(o, crate::commands::OrderCmd::Resize(_)) {
+                    self.handle.focus(window, cx);
+                }
+                if let PaneHandle::Chart(chart) = &self.handle {
+                    chart.update(cx, |c, cx| c.order_command(o, cx));
+                }
+            }
             _ => {}
         }
         cx.notify();
     }
 
+    /// The window's menu (`crate::menu` rules): an object's after a right click on an order's
+    /// tag or a drawing, else the pane's, with what this window can run (`command`).
     fn open_menu(&mut self, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         // Any other popover closes (`crate::popover`).
         crate::popover::opened(cx, crate::popover::Kind::Menu, |this: &mut Self, cx| {
@@ -177,22 +212,37 @@ impl PaneWindow {
                 cx.notify();
             }
         });
-        let mut items = Vec::with_capacity(5);
-        if let PaneHandle::Chart(chart) = &self.handle
-            && chart.read(cx).drawing_selected()
-        {
-            let style = Command::Draw(crate::commands::DrawCmd::Style);
-            let mut row = MenuItem::named("Drawing style…", style, false);
-            row.hint = commands::hint(style);
-            items.push(row);
-            items.push(MenuItem::sep());
-        }
+        let object = match &self.handle {
+            PaneHandle::Chart(chart) => chart.update(cx, |c, _| c.take_menu_object()),
+            _ => None,
+        };
+        self.menu = Some(match object {
+            Some(o) => Menu::new(at, runnable(crate::pane_menu::object_items(&o))).unselected(),
+            None => Menu::new(at, self.pane_items(cx)),
+        });
+        cx.notify();
+    }
+
+    fn pane_items(&self, cx: &Context<Self>) -> Vec<MenuItem> {
+        let mut items = Vec::with_capacity(7);
         if let PaneHandle::Chart(chart) = &self.handle {
-            items.push(MenuItem::named(
-                "Hide strategy markers on this chart",
-                Command::Strategy(commands::StrategyCmd::ToggleMarks),
-                chart.read(cx).strategy_marks_hidden(),
-            ));
+            let c = chart.read(cx);
+            if c.drawing_selected() {
+                items.push(MenuItem::named(
+                    "Drawing style…",
+                    Command::Draw(crate::commands::DrawCmd::Style),
+                    false,
+                ));
+            }
+            items.push(
+                MenuItem::named(
+                    "Strategy markers",
+                    Command::Strategy(commands::StrategyCmd::ToggleMarks),
+                    !c.strategy_marks_hidden(),
+                )
+                .switch(),
+            );
+            items.push(MenuItem::sep());
         }
         items.push(MenuItem::named(
             "Re-attach to its previous spot",
@@ -200,9 +250,10 @@ impl PaneWindow {
             false,
         ));
         items.push(MenuItem::of(Command::DockBesideChart, false));
+        items.push(MenuItem::sep());
+        // This window has no command palette: Settings stays here.
         items.push(MenuItem::named("Settings…", Command::Settings, false));
-        self.menu = Some(Menu::new(at, items));
-        cx.notify();
+        items
     }
 
     fn on_key_capture(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

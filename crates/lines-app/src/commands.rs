@@ -83,10 +83,6 @@ pub enum Command {
     ToggleLevels,
     /// The focused chart: hide (or show) level labels and level legend rows.
     ToggleLevelLabels,
-    /// The focused chart: hide (or show) one level source (index into its sources).
-    ToggleLevelSource(u8),
-    /// The focused chart: hide (or show) one kind of one source (indices).
-    ToggleLevelKind(u8, u8),
     /// Show or hide the chart headers' performance stats (feed msgs/s, updates/s, paints/s,
     /// paint time): a workspace preference, off by default. No key: palette and menu only.
     TogglePerfStats,
@@ -143,6 +139,20 @@ pub enum Command {
     Draw(DrawCmd),
     /// Strategies (decision 0025; `crate::strategy_view`).
     Strategy(StrategyCmd),
+    /// One working order on the focused chart, from its tag's menu (`crate::pane_menu`). Not
+    /// in the palette or the keymap: it needs the order under the pointer.
+    Order(OrderCmd),
+}
+
+/// What an order's tag menu does: the same paths as its tag's controls and the DOM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderCmd {
+    /// Move the position's stops to breakeven (`TradeCmd::Breakeven`).
+    Breakeven,
+    /// Type a new size for this order (the tag's size field).
+    Resize(u64),
+    /// Cancel this order (the tag's ×).
+    Cancel(u64),
 }
 
 /// Strategy controls. Stop all acts on every instance from anywhere and is never gated;
@@ -700,10 +710,6 @@ pub fn label(c: Command) -> String {
         Command::Columns(ColumnCmd::Width(c, w)) => format!("Set {} width to {w} px", c.label()),
         Command::ToggleLevels => "Chart: hide/show levels".into(),
         Command::ToggleLevelLabels => "Chart: hide/show level labels".into(),
-        Command::ToggleLevelSource(i) => format!("Chart: hide/show level source {}", i + 1),
-        Command::ToggleLevelKind(i, k) => {
-            format!("Chart: hide/show level kind {} of source {}", k + 1, i + 1)
-        }
         Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
         Command::ToggleLatencyHud => "Latency HUD on/off (chart headers)".into(),
         Command::DomTrail => "DOM: price trail on/off".into(),
@@ -758,6 +764,12 @@ pub fn label(c: Command) -> String {
             StrategyCmd::Start => "Strategies: start the selected strategy (paper)",
             StrategyCmd::Stop => "Strategies: stop the selected strategy (flatten)",
             StrategyCmd::ToggleMarks => "Chart: show/hide strategy markers",
+        }
+        .into(),
+        Command::Order(o) => match o {
+            OrderCmd::Breakeven => "Move to breakeven",
+            OrderCmd::Resize(_) => "Change size…",
+            OrderCmd::Cancel(_) => "Cancel order",
         }
         .into(),
         Command::Trade(t) => match t {

@@ -39,13 +39,12 @@ use lines_feed::availability::Availability;
 
 use crate::chain_view::ChainView;
 use crate::chart_view::{self, ChartView, CrosshairTime, Fixture};
-use crate::commands::{self, Command, DrawCmd, StrategyCmd};
+use crate::commands::{self, Command, StrategyCmd};
 use crate::dom_view::{DomOptions, DomView};
 use crate::feeds::{Feeds, PaneFeed};
 use crate::journal_view::JournalView;
 use crate::layout::{
-    Axis, Direction, Layout, LinkGroup, PaneKind, Preset, Rect, link_letter, next_link,
-    trading_group,
+    Axis, Direction, Layout, LinkGroup, PaneKind, Preset, Rect, next_link, trading_group,
 };
 use crate::menu::{Menu, MenuItem, MenuKey};
 use crate::notice::Notices;
@@ -683,6 +682,8 @@ pub struct WindowView {
     hover_pane: Option<PaneId>,
     /// Screenshots (`--hover-header`): the hovered pane is fixed, not the pointer's.
     hover_pinned: bool,
+    /// Screenshot: a menu to open once its pane can show it (`--context-menu`).
+    shot_menu: Option<crate::pane_menu::ShotMenu>,
     hover_tab: Option<usize>,
     menu: Option<Menu>,
     prompt: Option<Prompt>,
@@ -727,6 +728,7 @@ impl WindowView {
             pane_drag: None,
             hover_pane: None,
             hover_pinned: false,
+            shot_menu: None,
             hover_tab: None,
             menu: None,
             prompt: None,
@@ -1405,6 +1407,12 @@ impl WindowView {
                     notice("tick bars: focus a chart first".into(), cx);
                 }
             }
+            // An order tag's menu: that order, on the focused chart (where it was opened).
+            Command::Order(o) => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.order_command(o, cx));
+                }
+            }
             // Drawings are on charts; they belong to the chart's product.
             Command::Draw(d) => match self.tab().focused_handle().cloned() {
                 Some(PaneHandle::Chart(chart)) => {
@@ -1412,33 +1420,16 @@ impl WindowView {
                 }
                 _ => self.refuse("Drawings are on charts: focus a chart first", cx),
             },
-            Command::ToggleLevels
-            | Command::ToggleLevelLabels
-            | Command::ToggleLevelSource(_)
-            | Command::ToggleLevelKind(..) => {
+            // A source's own switches and its types are in the studies menu.
+            Command::ToggleLevels | Command::ToggleLevelLabels => {
                 let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
                     return; // levels are on charts only
                 };
-                let (sources, mut c) = {
-                    let v = chart.read(cx);
-                    (v.level_sources(), v.levels_config())
-                };
-                match cmd {
-                    Command::ToggleLevels => c.hidden = !c.hidden,
-                    Command::ToggleLevelLabels => c.hide_labels = !c.hide_labels,
-                    Command::ToggleLevelSource(i) => {
-                        if let Some((id, ..)) = sources.get(i as usize) {
-                            c.toggle_source(id);
-                        }
-                    }
-                    Command::ToggleLevelKind(i, k) => {
-                        if let Some((id, _, kinds)) = sources.get(i as usize)
-                            && let Some(kind) = kinds.get(k as usize)
-                        {
-                            c.toggle_kind(id, kind);
-                        }
-                    }
-                    _ => {}
+                let mut c = chart.read(cx).levels_config();
+                if cmd == Command::ToggleLevels {
+                    c.hidden = !c.hidden;
+                } else {
+                    c.hide_labels = !c.hide_labels;
                 }
                 chart.update(cx, |v, cx| v.set_levels_config(c, cx));
             }
@@ -2099,220 +2090,91 @@ impl WindowView {
         cx.notify();
     }
 
-    /// The focused pane's menu: pane actions (layout and workspace actions are on the tab's).
+    /// The focused pane's menu (`crate::pane_menu`); after a right click on an order's tag or a
+    /// drawing, that object's menu instead. Layout and workspace actions are on the tab's.
     fn open_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(h) = self.tab().focused_handle().cloned() else {
             return;
         };
+        if let PaneHandle::Chart(chart) = &h
+            && let Some(o) = chart.update(cx, |c, _| c.take_menu_object())
+        {
+            self.show_menu(
+                Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
+                cx,
+            );
+            return;
+        }
+        let m = self.pane_menu(&h, cx);
+        self.show_menu(Menu::new(at, crate::pane_menu::items(&m)), cx);
+    }
+
+    /// The focused pane's state, as its menu shows it.
+    fn pane_menu(&self, h: &PaneHandle, cx: &mut Context<Self>) -> crate::pane_menu::PaneMenu {
+        use crate::pane_menu::{ChartMenu, DomMenu, JournalMenu, PaneMenu};
         let kind = h.kind();
-        let link = h.link(cx);
         let tab = self.tab();
         let leaves = tab.leaves(cx);
-        let it = MenuItem::of;
-        let mut items = vec![
-            it(Command::Split(Axis::Row), false),
-            it(Command::Split(Axis::Column), false),
-            it(Command::PopOut, false),
-            it(Command::ClosePane, false),
-            MenuItem::sep(),
-        ];
-        if kind == PaneKind::Chart {
-            let on = tabstate::is_chart_only(&leaves, tab.focused);
-            items.push(MenuItem::named(
-                "Chart only (hide linked DOM and T&S)",
-                Command::ChartOnly,
-                on,
-            ));
-            if let PaneHandle::Chart(chart) = &h {
-                if chart.read(cx).drawing_selected() {
-                    let mut row =
-                        MenuItem::named("Drawing style…", Command::Draw(DrawCmd::Style), false);
-                    row.hint = commands::hint(Command::Draw(DrawCmd::Style));
-                    items.insert(0, row);
-                    items.insert(1, MenuItem::sep());
-                }
-                let v = chart.read(cx).visibility();
-                let hints_hidden = cx.global::<Workspace>().hide_hints;
-                let tf = chart.read(cx).timeframe();
-                items.push(MenuItem::named(
-                    &format!("Timeframe: {tf}…"),
-                    Command::TimeframeMenu,
-                    false,
-                ));
-                if chart.read(cx).on_ticks() {
-                    items.push(MenuItem::named(
-                        "Trade-built bars run continuously (no session reset)",
-                        Command::TickBarsContinuous,
-                        chart.read(cx).tick_continuous(),
-                    ));
-                }
-                items.push(MenuItem::named("Studies…", Command::Studies, false));
-                let (hidden, symbol) = {
-                    let c = chart.read(cx);
-                    (c.drawings_hidden(), c.product_symbol())
-                };
-                items.push(MenuItem::named(
-                    "Hide drawings on this chart",
-                    Command::Draw(DrawCmd::ToggleVisible),
-                    hidden,
-                ));
-                items.push(MenuItem::named(
-                    &format!("Delete all drawings for {symbol}…"),
-                    Command::Draw(DrawCmd::DeleteAll),
-                    false,
-                ));
-                items.push(MenuItem::named(
-                    "Hide strategy markers on this chart",
-                    Command::Strategy(StrategyCmd::ToggleMarks),
-                    chart.read(cx).strategy_marks_hidden(),
-                ));
-                items.push(MenuItem::named(
-                    "Magnet crosshair (snap to OHLC)",
-                    Command::ToggleMagnet,
-                    chart.read(cx).magnet(),
-                ));
-                items.push(MenuItem::named(
-                    "Order strip (market, limit at the crosshair)",
-                    Command::ToggleOrderStrip,
-                    chart.read(cx).order_strip(),
-                ));
-                items.push(MenuItem::named(
-                    "Hide study labels",
-                    Command::ToggleStudyLabels,
-                    v.hide_study_labels,
-                ));
-                items.push(MenuItem::named(
-                    "Hide studies",
-                    Command::ToggleStudies,
-                    v.hide_studies,
-                ));
-                items.push(MenuItem::named(
-                    "Clean chart (no study labels, no key hints)",
-                    Command::CleanChart,
-                    v.hide_study_labels && hints_hidden,
-                ));
-                // External levels: all, labels, then each source and its kinds.
-                let (sources, lc) = {
-                    let c = chart.read(cx);
-                    (c.level_sources(), c.levels_config())
-                };
-                if !sources.is_empty() {
-                    items.push(MenuItem::sep());
-                    items.push(MenuItem::named("Levels", Command::ToggleLevels, !lc.hidden));
-                    items.push(MenuItem::named(
-                        "Level labels",
-                        Command::ToggleLevelLabels,
-                        !lc.hide_labels,
-                    ));
-                    for (i, (id, label, kinds)) in sources.iter().enumerate().take(16) {
-                        items.push(MenuItem::named(
-                            &format!("Levels: {label}"),
-                            Command::ToggleLevelSource(i as u8),
-                            lc.source_shown(id),
-                        ));
-                        for (k, kind) in kinds.iter().enumerate().take(32) {
-                            items.push(MenuItem::named(
-                                &format!("    {label} · {kind}"),
-                                Command::ToggleLevelKind(i as u8, k as u8),
-                                lc.kind_shown(id, kind),
-                            ));
-                        }
-                    }
-                }
+        let link = h.link(cx);
+        let (hide_hints, closed_tabs) = {
+            let ws = cx.global::<Workspace>();
+            (ws.hide_hints, !ws.closed_tabs.is_empty())
+        };
+        let chart = match h {
+            PaneHandle::Chart(chart) => {
+                let c = chart.read(cx);
+                let v = c.visibility();
+                let lc = c.levels_config();
+                Some(ChartMenu {
+                    timeframe: c.timeframe(),
+                    on_ticks: c.on_ticks(),
+                    tick_continuous: c.tick_continuous(),
+                    levels: (!c.level_sources().is_empty())
+                        .then_some((!lc.hidden, !lc.hide_labels)),
+                    studies_shown: !v.hide_studies,
+                    study_labels_shown: !v.hide_study_labels,
+                    strategy_marks_shown: !c.strategy_marks_hidden(),
+                    clean: v.hide_study_labels && hide_hints,
+                    order_strip: c.order_strip(),
+                    magnet: c.magnet(),
+                    drawings_shown: !c.drawings_hidden(),
+                    drawing_selected: c.drawing_selected(),
+                    symbol: c.product_symbol().to_string(),
+                    chart_only: tabstate::is_chart_only(&leaves, tab.focused),
+                })
             }
-        } else {
-            items.push(MenuItem::named(
-                &format!("Hide {}", kind.label()),
-                Command::HidePane,
-                false,
-            ));
-            if let PaneHandle::Dom(dom) = &h {
-                let tr = dom.read(cx).trail();
-                let (on, hl) = (tr.enabled(), tr.half_life_ms());
-                items.push(MenuItem::named("Price trail", Command::DomTrail, on));
-                items.push(MenuItem::named(
-                    &format!("Trail half-life: {:.1} s (next)", f64::from(hl) / 1000.0),
-                    Command::DomTrailHalfLife,
-                    false,
-                ));
+            _ => None,
+        };
+        let dom = match h {
+            PaneHandle::Dom(d) => {
+                let tr = d.read(cx).trail();
+                Some(DomMenu {
+                    trail: tr.enabled(),
+                    half_life_ms: tr.half_life_ms(),
+                })
             }
-            if let PaneHandle::Journal(j) = &h {
-                let all = j.read(cx).all_dates();
-                let group = j.read(cx).group();
-                for g in crate::wsdoc::JournalGroup::ALL {
-                    items.push(MenuItem::named(
-                        &format!("Show: {}", g.label().to_lowercase()),
-                        Command::JournalGroup(g),
-                        g == group,
-                    ));
-                }
-                items.push(MenuItem::named(
-                    "Edit tags and note",
-                    Command::JournalEdit,
-                    false,
-                ));
-                items.push(MenuItem::named(
-                    "Open the selected trade's snapshot",
-                    Command::JournalOpenChart,
-                    false,
-                ));
-                items.push(MenuItem::named(
-                    "Stats: all dates",
-                    Command::JournalAllDates,
-                    all,
-                ));
-                items.push(MenuItem::of(Command::ExportJournal, false));
-            }
+            _ => None,
+        };
+        let journal = match h {
+            PaneHandle::Journal(j) => Some(JournalMenu {
+                group: j.read(cx).group(),
+                all_dates: j.read(cx).all_dates(),
+            }),
+            _ => None,
+        };
+        PaneMenu {
+            kind,
+            link,
+            chart,
+            dom,
+            journal,
+            pnl: pnl_mode(cx),
+            linked_dom: tabstate::kind_shown(&leaves, tab.focused, PaneKind::Dom),
+            linked_tape: tabstate::kind_shown(&leaves, tab.focused, PaneKind::Tape),
+            hidden_panes: !tab.in_state(PaneState::is_hidden).is_empty(),
+            detached_panes: !tab.in_state(|s| s == PaneState::Detached).is_empty(),
+            closed_tabs,
         }
-        if kind == PaneKind::Dom {
-            // P&L display (app-wide): each mode, the current one checked.
-            let current = cx
-                .try_global::<crate::picker_view::AppSettings>()
-                .map(|s| s.settings.pnl_display)
-                .unwrap_or_default();
-            items.push(MenuItem::sep());
-            for m in crate::pnl::PnlDisplay::ALL {
-                items.push(MenuItem::named(
-                    &format!("P&L: {}", m.label()),
-                    Command::SetPnl(m),
-                    m == current,
-                ));
-            }
-        }
-        items.push(it(Command::Toggle(PaneKind::Dom), false));
-        items.push(it(Command::Toggle(PaneKind::Tape), false));
-        if !tab.in_state(PaneState::is_hidden).is_empty() {
-            items.push(it(Command::ShowHidden, false));
-        }
-        if !tab.in_state(|s| s == PaneState::Detached).is_empty() {
-            items.push(it(Command::Reattach, false));
-        }
-        items.push(MenuItem::sep());
-        for k in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
-            items.push(MenuItem::named(k.label(), Command::SetKind(k), k == kind));
-        }
-        items.push(MenuItem::sep());
-        for l in [None, Some(0), Some(1), Some(2), Some(3)] {
-            let label = match l {
-                None => "Unlinked".to_owned(),
-                Some(_) => format!("Link group {}", link_letter(l)),
-            };
-            let mut row = MenuItem::named(&label, Command::SetLink(l), l == link);
-            if l.is_none() {
-                row.hint = commands::hint(Command::CycleLink);
-            }
-            items.push(row);
-        }
-        items.push(MenuItem::sep());
-        // Tab actions here too: with one tab there is no tab bar (and no tab menu).
-        items.push(MenuItem::of(Command::NewTab, false));
-        if !cx.global::<Workspace>().closed_tabs.is_empty() {
-            items.push(MenuItem::of(Command::ReopenTab, false));
-        }
-        items.push(MenuItem::of(Command::ExportDiagnostics, false));
-        items.push(MenuItem::named("Settings…", Command::Settings, false));
-        items.push(MenuItem::named("All commands…", Command::Palette, false));
-        self.show_menu(Menu::new(at, items), cx);
     }
 
     /// A DOM's or tape's column menu (right-click on its header row): show or hide each
@@ -2346,54 +2208,19 @@ impl WindowView {
         self.show_menu(Menu::new(at, items), cx);
     }
 
-    /// A tab's menu: tab, layout and workspace actions.
+    /// A tab's menu (`pane_menu::tab_items`): tab, layout and workspace actions.
     fn open_tab_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let sync = cx.global::<Workspace>().crosshair_sync;
-        let reopen = !cx.global::<Workspace>().closed_tabs.is_empty();
-        let it = MenuItem::of;
-        let mut items = vec![it(Command::NewTab, false), it(Command::CloseTab, false)];
-        if reopen {
-            items.push(it(Command::ReopenTab, false));
-        }
-        if self.tabs.len() > 1 {
-            items.push(it(Command::TabToNewWindow, false));
-        }
-        items.push(MenuItem::sep());
-        for p in Preset::ALL {
-            items.push(it(Command::Preset(p), false));
-        }
-        items.push(MenuItem::sep());
-        items.push(MenuItem::named(
-            "Crosshair sync (link group)",
-            Command::ToggleCrosshairSync,
-            sync,
-        ));
-        items.push(MenuItem::named(
-            "Crosshair sync: price too (same product)",
-            Command::ToggleCrosshairSyncPrice,
-            cx.global::<Workspace>().crosshair_sync_price,
-        ));
-        items.push(it(Command::SaveAs, false));
-        items.push(it(Command::Open, false));
-        items.push(MenuItem::named(
-            "Key hints",
-            Command::ToggleHints,
-            !cx.global::<Workspace>().hide_hints,
-        ));
-        items.push(MenuItem::named(
-            "Performance stats",
-            Command::TogglePerfStats,
-            cx.global::<Workspace>().show_perf_stats,
-        ));
-        items.push(MenuItem::named(
-            "Latency HUD",
-            Command::ToggleLatencyHud,
-            cx.global::<Workspace>().show_latency_hud,
-        ));
-        items.push(MenuItem::of(Command::ExportDiagnostics, false));
-        items.push(MenuItem::named("Settings…", Command::Settings, false));
-        items.push(MenuItem::named("All commands…", Command::Palette, false));
-        self.show_menu(Menu::new(at, items), cx);
+        let ws = cx.global::<Workspace>();
+        let m = crate::pane_menu::TabMenu {
+            tabs: self.tabs.len(),
+            closed_tabs: !ws.closed_tabs.is_empty(),
+            crosshair_sync: ws.crosshair_sync,
+            crosshair_sync_price: ws.crosshair_sync_price,
+            key_hints: !ws.hide_hints,
+            perf_stats: ws.show_perf_stats,
+            latency_hud: ws.show_latency_hud,
+        };
+        self.show_menu(Menu::new(at, crate::pane_menu::tab_items(&m)), cx);
     }
 
     fn menu_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2935,6 +2762,47 @@ impl WindowView {
             )
     }
 
+    /// Screenshot: open this menu once its pane can show it (an order's: once the chart has
+    /// one).
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub(crate) fn screenshot_menu(
+        &mut self,
+        m: crate::pane_menu::ShotMenu,
+        cx: &mut Context<Self>,
+    ) {
+        self.shot_menu = Some(m);
+        cx.notify();
+    }
+
+    /// The screenshot's menu, if its pane can show it now: whether it's done.
+    fn open_shot_menu(&mut self, m: &crate::pane_menu::ShotMenu, cx: &mut Context<Self>) -> bool {
+        let at = point(px(m.at.0), px(m.at.1));
+        if m.order {
+            let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+                shot_menu_failed("`order` needs a focused chart");
+            };
+            let mode = pnl_mode(cx);
+            let Some(o) = chart.read(cx).first_order_object(mode) else {
+                return false;
+            };
+            self.show_menu(
+                Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
+                cx,
+            );
+        } else if m.tab {
+            self.open_tab_menu(at, cx);
+        } else {
+            self.open_menu(at, cx);
+        }
+        if let (Some(sub), Some(menu)) = (&m.sub, self.menu.as_mut()) {
+            let i = menu.items.iter().position(|i| i.label == *sub);
+            if !i.is_some_and(|i| menu.open_sub(i, true)) {
+                shot_menu_failed(&format!("no row \"{sub}\" opens a submenu"));
+            }
+        }
+        true
+    }
+
     /// Screenshots (`--hover-header`): show the focused pane's header controls as if the
     /// pointer were over it.
     #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
@@ -3360,6 +3228,11 @@ impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         self.screen = screen_rect(window);
+        if let Some(m) = self.shot_menu.clone()
+            && self.open_shot_menu(&m, cx)
+        {
+            self.shot_menu = None;
+        }
         if !window.is_window_hovered() && !self.hover_pinned {
             // GPUI on Windows sends no exit event: the pointer left, so nothing is hovered.
             self.hover_pane = None;
@@ -4283,4 +4156,18 @@ fn clear_synced_times(cx: &mut App) {
             }
         }
     });
+}
+
+/// The app's P&L display (menus show and set it).
+fn pnl_mode(cx: &App) -> crate::pnl::PnlDisplay {
+    cx.try_global::<crate::picker_view::AppSettings>()
+        .map(|s| s.settings.pnl_display)
+        .unwrap_or_default()
+}
+
+/// `--context-menu` asked for what can't be shown: no image (a screenshot's failures exit
+/// non-zero with no file).
+fn shot_menu_failed(why: &str) -> ! {
+    eprintln!("screenshot failed: --context-menu: {why}");
+    std::process::exit(1)
 }
