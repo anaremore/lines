@@ -1297,23 +1297,26 @@ fn a_stop_after_a_gap_sells_on_the_new_quote() {
     assert_eq!(sold, Some(Price(20)));
 }
 
-/// The same for an Entry, with a live underlying and quotes gone quiet: it doesn't buy on the old
-/// ask. Past the same-day limit is enough.
+/// The same for an Entry, with a live underlying and quotes gone quiet for 14 minutes, and for
+/// just past the same-day limit: it doesn't buy on the old ask, and says the quote is stale even
+/// when the old ask is above its max.
 #[test]
 fn an_entry_doesnt_fire_on_an_old_ask() {
-    let mut r = Rig::new();
-    r.print(68_300);
-    r.quote(Some(240), Some(242));
-    let id = r.arm(call(), entry(1, 300), 68_900);
-    for _ in 0..3 {
-        r.wait(5_000);
-        r.print(68_310);
+    for (steps, max) in [(168, 300), (3, 300), (3, 200)] {
+        let mut r = Rig::new();
+        r.print(68_300);
+        r.quote(Some(240), Some(242));
+        let id = r.arm(call(), entry(1, max), 68_900);
+        for _ in 0..steps {
+            r.wait(5_000);
+            r.print(68_310);
+        }
+        r.print(68_900);
+        r.wait(LAT + 1);
+        assert_eq!(r.core.position(&acct(), call()), 0);
+        assert!(r.orders(call()).is_empty());
+        assert!(r.reason(id).contains("stale"), "{}", r.reason(id));
     }
-    r.print(68_900);
-    r.wait(LAT + 1);
-    assert_eq!(r.core.position(&acct(), call()), 0);
-    assert!(r.orders(call()).is_empty());
-    assert!(r.reason(id).contains("stale"), "{}", r.reason(id));
 }
 
 /// A stale underlying never fires one, and says so. When data returns past a level, an exit

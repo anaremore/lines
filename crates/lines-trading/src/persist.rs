@@ -446,6 +446,11 @@ mod tests {
         });
         let migrated = migrate(v).unwrap();
         assert_eq!(migrated["version"], json!(VERSION));
+        // On the migrated value: reading the file would drop unknown keys anyway.
+        assert!(migrated["paper"].get("option_quote_stale_ms").is_none());
+        let saved = &migrated["accounts"][0]["config"]["limits"]["option_guard"];
+        assert!(saved.get("stale_after_ms").is_none(), "{saved}");
+        assert_eq!(saved["max_from_mid_pct"], json!(5));
         let f: TradingFile = serde_json::from_value(migrated).unwrap();
         let guard = f.accounts[0].config.limits.option_guard.clone().unwrap();
         assert_eq!(guard.max_from_mid_pct, 5);

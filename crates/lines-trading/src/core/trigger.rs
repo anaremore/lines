@@ -647,7 +647,13 @@ impl TradingCore {
             self.trigger_end(id, "no ask to buy at");
             return;
         };
-        if ask > max_price {
+        // A stale ask is no reason to give: the order check below says it's stale.
+        let fresh = self
+            .marks
+            .get(&contract)
+            .and_then(|m| m.quoted_at)
+            .is_some_and(|t| now.0 - t.0 <= crate::risk::option_quote_stale_ms(contract, now));
+        if fresh && ask > max_price {
             let why = format!(
                 "the ask {} is above your max {}",
                 cs_price(ask, self),
