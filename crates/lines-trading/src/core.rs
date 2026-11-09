@@ -756,6 +756,12 @@ impl TradingCore {
         match env.command.clone() {
             Command::ArmTrigger(spec) => self.trigger_arm(now, env, spec),
             Command::CancelTrigger { id, .. } => self.trigger_cancel(now, &account, id),
+            Command::MoveTrigger {
+                id,
+                level,
+                contract,
+                ..
+            } => self.trigger_move(now, env, contract, id, level),
             Command::PlaceOrder(spec) => {
                 self.check_new(now, &spec)?;
                 let o = self.new_order(now, &spec, Role::Single, None);

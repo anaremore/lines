@@ -125,6 +125,12 @@ pub struct Ticket {
     pub sent: Option<CommandId>,
     /// The core's refusal of what was sent, until the ticket changes.
     pub refused: Option<String>,
+    /// "When SPY": an entry trigger at this price of the underlying rather than an order now
+    /// (decision 0029), and `price` is its max. A buy that doesn't close only.
+    pub when: Option<Price>,
+    /// Keys go to the level rather than the max, and what's typed so far.
+    pub on_level: bool,
+    pub level_typed: Option<String>,
 }
 
 impl Ticket {
@@ -137,6 +143,42 @@ impl Ticket {
             close: false,
             sent: None,
             refused: None,
+            when: None,
+            on_level: false,
+            level_typed: None,
+        }
+    }
+
+    /// Whether this ticket may be "When SPY": an entry only buys, and a close is an order now.
+    pub fn can_be_when(&self) -> bool {
+        self.side == Side::Buy && !self.close
+    }
+
+    /// To "When SPY" at `level`, its max starting at the ask; or back to now, at the mid.
+    pub fn set_when(&mut self, level: Option<Price>, q: Option<&OptionQuote>, rules: OptionRules) {
+        self.when = level;
+        self.on_level = level.is_some();
+        self.level_typed = None;
+        self.typed = None;
+        self.refused = None;
+        self.price = if level.is_some() {
+            sides(q).1.or(self.price)
+        } else {
+            default_limit(self.side, q, rules)
+        };
+    }
+
+    pub fn set_level(&mut self, level: Price) {
+        self.when = Some(level);
+        self.level_typed = None;
+        self.refused = None;
+    }
+
+    /// A move of the level by the arrow keys: `step` units, on the underlying's price.
+    pub fn step_level(&mut self, up: bool, step: i64) {
+        if let Some(l) = self.when {
+            let to = if up { l.0 + step } else { l.0 - step };
+            self.set_level(Price(to.max(step)));
         }
     }
 
@@ -157,6 +199,14 @@ impl Ticket {
         if !c.is_ascii_digit() && c != '.' {
             return false;
         }
+        if self.when.is_some() && self.on_level {
+            let t = self.level_typed.get_or_insert_with(String::new);
+            if c != '.' || !t.contains('.') {
+                t.push(c);
+            }
+            self.read_level(product);
+            return true;
+        }
         let t = self.typed.get_or_insert_with(String::new);
         if c == '.' && t.contains('.') {
             return true;
@@ -168,12 +218,34 @@ impl Ticket {
 
     /// Take the last typed character off; `false` when nothing is being typed.
     pub fn backspace(&mut self, product: &Product) -> bool {
+        if self.when.is_some() && self.on_level {
+            let Some(t) = self.level_typed.as_mut() else {
+                return false;
+            };
+            t.pop();
+            self.read_level(product);
+            return true;
+        }
         let Some(t) = self.typed.as_mut() else {
             return false;
         };
         t.pop();
         self.read_typed(product);
         true
+    }
+
+    /// What's typed so far, if it reads; the last that read otherwise, so the line stays. It can
+    /// be far off while it's typed: `chain_lines::refusal` won't arm that.
+    fn read_level(&mut self, product: &Product) {
+        self.refused = None;
+        if let Some(l) = self
+            .level_typed
+            .as_deref()
+            .and_then(|t| product.price.scale.parse_decimal(t).ok())
+            .filter(|p| *p > 0)
+        {
+            self.when = Some(Price(l));
+        }
     }
 
     fn read_typed(&mut self, product: &Product) {
@@ -188,6 +260,8 @@ impl Ticket {
     /// Close the position instead of trading `side`, priced at the mid again (or back).
     pub fn set_close(&mut self, close: bool, q: Option<&OptionQuote>, rules: OptionRules) {
         self.close = close;
+        self.when = None;
+        self.level_typed = None;
         self.price = if close {
             close_limit(self.side, q, rules)
         } else {
@@ -315,6 +389,35 @@ pub fn ticket_order(
     Ok(command(account, contract, t.side, qty, price, t.close))
 }
 
+/// What a "When SPY" ticket arms: the same ticket and size as an order now, as an entry trigger.
+/// No order is sent until it fires, and then the core asks every new-order check again.
+pub fn when_trigger(
+    t: &Ticket,
+    account: AccountId,
+    contract: ContractKey,
+    size: i64,
+) -> Result<Command, String> {
+    let level = t
+        .when
+        .ok_or_else(|| "set the price of the underlying".to_owned())?;
+    let max_price = t.price.ok_or_else(|| "type a max price".to_owned())?;
+    if !t.can_be_when() {
+        return Err("only a buy can wait for the underlying".to_owned());
+    }
+    if size <= 0 {
+        return Err("quantity must be positive".to_owned());
+    }
+    Ok(Command::ArmTrigger(lines_trading::trigger::TriggerSpec {
+        account,
+        contract,
+        kind: lines_trading::trigger::TriggerKind::Entry {
+            qty: Qty(size),
+            max_price,
+        },
+        level,
+    }))
+}
+
 /// The order a One-click press is: the clicked side's own price; `None` on a missing side.
 pub fn click_order(
     account: AccountId,
@@ -337,7 +440,13 @@ pub fn held_contracts(
     let contracts = st
         .positions_of(account)
         .map(|p| p.contract)
-        .chain(st.open_orders_of(account).map(|o| o.contract));
+        .chain(st.open_orders_of(account).map(|o| o.contract))
+        // Triggers count as orders (the owner's ruling): Cancel all takes them too.
+        .chain(
+            st.triggers()
+                .filter(|t| &t.account == account)
+                .map(|t| t.contract),
+        );
     for c in contracts {
         if c.product == product && c.option_key().is_some() && !out.contains(&c) {
             out.push(c);
@@ -544,6 +653,14 @@ pub struct ShotTicket {
     pub at: Option<String>,
     pub close: bool,
     pub one_click: bool,
+    /// The ticket is "When SPY" at this level.
+    pub when: Option<String>,
+    /// A line of this kind (`stop`, `target`, `entry`) is being dragged to this level.
+    pub drag: Option<(String, String)>,
+    /// A Stop or Target not armed yet, on the open ticket's series.
+    pub draft: Option<(String, String)>,
+    /// Armed rows read as after a restart.
+    pub restored: bool,
 }
 
 #[cfg(any(test, feature = "screenshot"))]
@@ -581,12 +698,28 @@ pub fn parse_shot(s: &str) -> Result<ShotTicket, String> {
                 out.one_click = true;
                 rest = more;
             }
+            ("when", [p, more @ ..]) => {
+                out.when = Some((*p).to_owned());
+                rest = more;
+            }
+            ("drag", [kind, p, more @ ..]) => {
+                out.drag = Some(((*kind).to_owned(), (*p).to_owned()));
+                rest = more;
+            }
+            ("draft", [kind, p, more @ ..]) => {
+                out.draft = Some(((*kind).to_owned(), (*p).to_owned()));
+                rest = more;
+            }
+            ("restored", more) => {
+                out.restored = true;
+                rest = more;
+            }
             _ => return Err(format!("--chain-ticket {s:?}: unexpected {first:?}")),
         }
     }
-    if out.open.is_none() && !out.one_click {
+    if out.open.is_none() && !out.one_click && out.drag.is_none() && !out.restored {
         return Err(format!(
-            "--chain-ticket {s:?}: expected `buy|sell STRIKE call|put [at PRICE] [close] [one-click]`"
+            "--chain-ticket {s:?}: expected `buy|sell STRIKE call|put [at PRICE] [close] [when LEVEL] [draft KIND LEVEL]`, `drag KIND LEVEL`, `restored` or `one-click`"
         ));
     }
     Ok(out)

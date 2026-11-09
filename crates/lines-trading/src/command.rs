@@ -101,6 +101,19 @@ pub enum Command {
     /// Arm a trigger on an option, at a price of its underlying (decision 0029). A person's, not
     /// a strategy's yet.
     ArmTrigger(crate::trigger::TriggerSpec),
+    /// Move an armed trigger to another price of the underlying, as one step: refused, it stays
+    /// where it was; a trigger that has fired or ended is refused, so a move can never arm a new
+    /// one. An entry keeps its id and the way it fires. A Stop or Target is armed again, which
+    /// replaces it.
+    MoveTrigger {
+        account: AccountId,
+        /// The trigger's option: it has to match, and a refusal's note names it.
+        #[serde(with = "crate::types::contract_serde")]
+        contract: ContractKey,
+        id: crate::trigger::TriggerId,
+        #[serde(with = "crate::types::price_serde")]
+        level: Price,
+    },
     /// Disarm one, or stop a fired Target's chase and cancel its order.
     CancelTrigger {
         account: AccountId,
@@ -169,7 +182,9 @@ impl Command {
             Command::PlaceOrder(o) | Command::PlaceExit(o) => Some(&o.account),
             Command::PlaceBracket(b) => Some(&b.entry.account),
             Command::ArmTrigger(t) => Some(&t.account),
-            Command::CancelTrigger { account, .. } => Some(account),
+            Command::CancelTrigger { account, .. } | Command::MoveTrigger { account, .. } => {
+                Some(account)
+            }
             Command::ModifyOrder { account, .. }
             | Command::CancelOrder { account, .. }
             | Command::CancelAll { account, .. }

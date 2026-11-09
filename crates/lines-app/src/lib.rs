@@ -4,6 +4,7 @@
 
 mod bench;
 mod brackets;
+mod chain_lines;
 mod chain_lock;
 mod chain_ticket;
 mod chain_view;
@@ -36,6 +37,7 @@ mod levels_layer;
 mod logs;
 mod menu;
 mod notice;
+mod option_estimate;
 mod order_group_view;
 mod order_resize;
 mod pane;

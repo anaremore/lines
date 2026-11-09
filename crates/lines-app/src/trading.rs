@@ -172,6 +172,9 @@ pub struct TradeState {
     notes: HashMap<CommandId, Note>,
     /// The triggers the core has alive (decision 0029).
     triggers: BTreeMap<lines_trading::trigger::TriggerId, lines_trading::trigger::TriggerView>,
+    /// The last few that ended, for their reasons, and how many have ever ended.
+    triggers_ended: std::collections::VecDeque<lines_trading::trigger::TriggerView>,
+    triggers_ended_count: u64,
     /// Rebuilds seen (from the broker after a (re)connect).
     pub rebuilds: u64,
     /// Each account's guardrail state (roadmap 8b), from `Event::Guardrail`.
@@ -264,11 +267,16 @@ impl TradeState {
                 Some(account)
             }
             Event::Breach { account, .. } => Some(account),
-            // No UI yet (decision 0029's build order), but kept for it: a restored one's notice.
+            // (Kept for the chain's armed rows and lines, decision 0029.) A restored one's notice.
             Event::Trigger(t) => {
                 let account = t.account.clone();
                 if t.state == lines_trading::trigger::TriggerState::Ended {
                     self.triggers.remove(&t.id);
+                    if self.triggers_ended.len() == 32 {
+                        self.triggers_ended.pop_front();
+                    }
+                    self.triggers_ended.push_back(t);
+                    self.triggers_ended_count += 1;
                 } else {
                     self.triggers.insert(t.id, t);
                 }
@@ -479,8 +487,22 @@ impl TradeState {
             .filter(|g| g.state != GuardState::Active)
     }
 
+    /// How many triggers have ever ended, to compare with [`Self::triggers_ended_since`].
+    pub fn triggers_ended_count(&self) -> u64 {
+        self.triggers_ended_count
+    }
+
+    /// The triggers that ended after `seen` had (the last few only), oldest first.
+    pub fn triggers_ended_since(
+        &self,
+        seen: u64,
+    ) -> impl Iterator<Item = &lines_trading::trigger::TriggerView> {
+        let new = self.triggers_ended_count.saturating_sub(seen) as usize;
+        let skip = self.triggers_ended.len().saturating_sub(new);
+        self.triggers_ended.iter().skip(skip)
+    }
+
     /// The triggers the core has alive, as last reported.
-    #[cfg(test)]
     pub fn triggers(&self) -> impl Iterator<Item = &lines_trading::trigger::TriggerView> {
         self.triggers.values()
     }
@@ -1627,6 +1649,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         }
         TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
         TradeCommand::CancelTrigger { account, .. } => (account.clone(), None, None),
+        TradeCommand::MoveTrigger {
+            account, contract, ..
+        } => (account.clone(), Some(*contract), None),
         TradeCommand::SetBracketMode {
             account, contract, ..
         } => {
@@ -1897,6 +1922,43 @@ pub fn parse_script(
                     .map_err(|_| anyhow!("wait {s:?}: seconds"))?
                     * 1000.0) as i64,
             )),
+            // The underlying of the option in hand, for a trigger to see.
+            ["under", p] => out.push(Step::Print(
+                ContractKey::equity(contract.product),
+                price(p)?,
+                lines_core::Qty(1),
+            )),
+            ["trigger", kind @ ("stop" | "target"), level] => {
+                let kind = if *kind == "stop" {
+                    lines_trading::trigger::TriggerKind::Stop
+                } else {
+                    lines_trading::trigger::TriggerKind::Target
+                };
+                out.push(Step::Command(TradeCommand::ArmTrigger(
+                    lines_trading::trigger::TriggerSpec {
+                        account: account.clone(),
+                        contract,
+                        kind,
+                        level: price(level)?,
+                    },
+                )));
+            }
+            ["trigger", "entry", level, "max", max, qty] => {
+                out.push(Step::Command(TradeCommand::ArmTrigger(
+                    lines_trading::trigger::TriggerSpec {
+                        account: account.clone(),
+                        contract,
+                        kind: lines_trading::trigger::TriggerKind::Entry {
+                            qty: lines_core::Qty(
+                                qty.parse()
+                                    .map_err(|_| anyhow!("trigger quantity {qty:?}"))?,
+                            ),
+                            max_price: price(max)?,
+                        },
+                        level: price(level)?,
+                    },
+                )));
+            }
             ["print", p, rest @ ..] => {
                 let q = match rest {
                     [] => 1,
