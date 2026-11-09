@@ -123,7 +123,8 @@ pub fn business_days_before(mut d: CivilDate, n: u32) -> CivilDate {
     d
 }
 
-/// The month before; `None` before year 0 (a key nobody lists, e.g. a typed `CLF0000`).
+/// The month before. `None` for January of year 0 (no month precedes it): such a key gets no
+/// expiry or roll date rather than an underflow.
 fn prev_month(y: u16, m: u8) -> Option<(u16, u8)> {
     if m == 1 {
         Some((y.checked_sub(1)?, 12))

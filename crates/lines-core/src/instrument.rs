@@ -359,6 +359,10 @@ impl Ratio {
     }
 }
 
+/// Micro contracts a full-size future without a micro partner counts as in prop caps (the
+/// mini/micro ratio of every CME pair: ES 10 MES, CL 10 MCL, GC 10 MGC).
+pub const FULL_SIZE_MICROS: i64 = 10;
+
 /// Micro/mini equivalence (decisions 0006, 0013). Expressed in *micro* units so caps stay
 /// integers: NQ = 10 MNQ, MNQ = 1 MNQ. A product without a micro is its own unit (1).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -445,6 +449,18 @@ impl Product {
             return None;
         }
         Some((m.micro, Qty(qty.0.checked_mul(m.per_contract as i64)?)))
+    }
+
+    /// A position of `qty` in micro contracts, for prop caps (decisions 0006, 0013): a product
+    /// with a micro relation uses it (NQ 10, MNQ 1); every other future is full size and
+    /// counts 10 (ZB, NG, 6E have no micro partner, but one of them is never one micro); spot,
+    /// perpetuals and equities count their quantity as it is. Saturates rather than overflows.
+    pub fn micro_units(&self, qty: Qty) -> i64 {
+        match (self.micro, self.kind) {
+            (Some(m), _) => qty.0.saturating_mul(i64::from(m.per_contract)),
+            (None, ProductKind::Future { .. }) => qty.0.saturating_mul(FULL_SIZE_MICROS),
+            (None, _) => qty.0,
+        }
     }
 
     /// No delivery months and no expiry (crypto spot and perpetuals). Equities are not spot:
@@ -733,5 +749,25 @@ mod tests {
         let es = es();
         assert_eq!(es.micro_equivalent(Qty(3)), Some((ProductId(4), Qty(30))));
         assert_eq!(btc().micro_equivalent(Qty(1)), None);
+        // Prop-cap units: a mini by its relation, a micro 1, a future with no partner 10,
+        // spot and equities as they are.
+        assert_eq!(es.micro_units(Qty(3)), 30);
+        let mes = Product {
+            micro: Some(MicroEquivalent {
+                micro: ProductId(4),
+                per_contract: 1,
+            }),
+            ..es.clone()
+        };
+        assert_eq!(mes.micro_units(Qty(3)), 3);
+        let zb = Product {
+            micro: None,
+            ..es.clone()
+        };
+        assert_eq!(zb.micro_units(Qty(5)), 50);
+        assert_eq!(zb.micro_units(Qty(-6)), -60);
+        assert_eq!(zb.micro_units(Qty(i64::MAX)), i64::MAX, "saturates");
+        assert_eq!(btc().micro_units(Qty(7)), 7);
+        assert_eq!(spy().micro_units(Qty(300)), 300);
     }
 }

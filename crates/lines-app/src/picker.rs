@@ -84,8 +84,8 @@ pub enum Line {
 
 /// The lines the list shows: at most `n`, headings counted as lines, always including the
 /// selected row (at the bottom when scrolled down, as before headings). It never ends on a
-/// heading with no row under it: that heading gives way to one more line above, or, at the top
-/// of the list, to nothing (the view reserves the height of `n` lines, so it stays put).
+/// heading with no row under it: that can only happen in the top window, which then shows one
+/// line fewer (the view reserves the height of `n` lines, so the list stays put).
 pub fn visible_lines(
     entries: &[Entry],
     hits: &[Hit],
@@ -104,13 +104,12 @@ pub fn visible_lines(
         }
         lines.push(Line::Row(i));
     }
-    let start = (at + 1).saturating_sub(n);
-    let end = (start + n).min(lines.len());
-    let mut start = end.saturating_sub(n);
-    let mut end = end;
+    // Scrolled (the selected row is past the first `n` lines), the window ends on it; only the
+    // top window can end on a heading, and that heading is dropped.
+    let mut end = (at + 1).max(n).min(lines.len());
+    let start = end.saturating_sub(n);
     if end > start && matches!(lines[end - 1], Line::Heading(_)) {
         end -= 1;
-        start = start.saturating_sub(1);
     }
     lines[start..end].to_vec()
 }

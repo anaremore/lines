@@ -1915,9 +1915,9 @@ impl TradingCore {
                 }
             }
             let worst = (pos + b).abs().max((pos - s).abs());
-            let micro = lines_feed::catalog::get(k.product)
-                .and_then(|p| p.micro_equivalent(Qty(worst)).map(|(_, q)| q.0))
-                .unwrap_or(worst);
+            // Full-size futures without a micro partner (ZB, NG, 6E) count 10 each.
+            let micro =
+                lines_feed::catalog::get(k.product).map_or(worst, |p| p.micro_units(Qty(worst)));
             total = total.saturating_add(micro.clamp(0, u32::MAX as i64) as u32);
         }
         total

@@ -296,25 +296,29 @@ impl PickerUi {
             } else {
                 t.text_main
             };
+            // One line: in a narrow pane each part shrinks to "…" (after the description, which
+            // gives way first), never wraps or clips mid-glyph.
+            let part = || div().min_w_0().truncate();
             let mut right = div()
-                .flex_none()
-                .whitespace_nowrap()
+                .flex_shrink(1.0)
+                .min_w_0()
+                .overflow_hidden()
                 .flex()
                 .flex_row()
                 .gap_2()
                 .text_color(t.text_dim);
             match (&unavailable, &row) {
-                (Some(reason), _) => right = right.child(reason.clone()),
+                (Some(reason), _) => right = right.child(part().child(reason.clone())),
                 (None, Some(r)) => {
-                    right = right.child(div().text_color(fg).child(r.label.as_str().to_owned()));
+                    right = right.child(part().text_color(fg).child(r.label.as_str().to_owned()));
                     if r.is_front && !e.product.is_spot() && !e.product.is_equity() {
-                        right = right.child("front");
+                        right = right.child(part().child("front"));
                     }
                     if let Some(x) = r.expiry {
-                        right = right.child(format!("exp {x}"));
+                        right = right.child(part().child(format!("exp {x}")));
                     }
                     if let Some(d) = r.days_to_roll {
-                        let roll = div().child(if r.roll_soon {
+                        let roll = part().child(if r.roll_soon {
                             format!("roll soon · {d}d")
                         } else {
                             format!("roll {d}d")

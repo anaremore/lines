@@ -698,6 +698,63 @@ fn contract_cap_counts_micro_equivalents() {
     assert!(e.message.contains("26 micro"), "{}", e.message);
 }
 
+/// A full-size future with no micro partner (ZB, NG, ZN) counts 10 micros, like a mini: a
+/// 50-micro cap allows 5 of them, not 50.
+#[test]
+fn contract_cap_counts_full_size_futures_without_a_micro_as_ten() {
+    let cap = |n| RulePreset {
+        name: "cap".into(),
+        label: APPROXIMATION.into(),
+        account_size: 50_000,
+        trailing_drawdown: None,
+        daily_loss_limit: None,
+        max_micro_contracts: Some(n),
+        profit_target: None,
+        consistency: None,
+        liquidate_on_breach: false,
+        on_breach: Default::default(),
+        news: None,
+    };
+    let dec = |p| ContractKey::monthly(p, 2026, Month::new(12).unwrap());
+    let order = |contract, qty, price| {
+        Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract,
+            side: Side::Buy,
+            qty: Qty(qty),
+            kind: OrderKind::Limit {
+                price: Price(price),
+            },
+        })
+    };
+    // ZB (unit 1/32): 5 = 50 micros, allowed; 6 = 60, refused.
+    let zb = (dec(catalog::ZB), 110 * 32);
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(cap(50)));
+    let e = r.cmd(order(zb.0, 6, zb.1)).unwrap_err();
+    assert_eq!(e.code, RejectCode::PropRule);
+    assert!(e.message.contains("60 micro"), "{}", e.message);
+    r.cmd(order(zb.0, 5, zb.1)).expect("5 ZB = 50 micros");
+    // ZN, which had no micro before either: 6 = 60, refused.
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(cap(50)));
+    let e = r.cmd(order(dec(catalog::ZN), 6, 110 * 128)).unwrap_err();
+    assert_eq!(e.code, RejectCode::PropRule);
+    // 5 NG (50) and 1 MCL (1) = 51 against 50: the MCL is refused.
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(cap(50)));
+    r.cmd(order(dec(catalog::NG), 5, 3_000))
+        .expect("5 NG = 50 micros");
+    let mcl = ContractKey::monthly(catalog::MCL, 2027, Month::new(1).unwrap());
+    let e = r.cmd(order(mcl, 1, 6_000)).unwrap_err();
+    assert_eq!(e.code, RejectCode::PropRule);
+    assert!(e.message.contains("51 micro"), "{}", e.message);
+    // Unchanged for a mini and its micro: 4 ES (40) + 10 MES = 50, allowed; 1 more refused.
+    let mut r = Rig::with(FillModel::TradeThrough, prop_account(cap(50)));
+    r.cmd(order(es(), 4, 590_000)).expect("4 ES = 40 micros");
+    let mes = dec(catalog::MES);
+    r.cmd(order(mes, 10, 590_000)).expect("+10 MES = 50");
+    let e = r.cmd(order(mes, 1, 590_000)).unwrap_err();
+    assert!(e.message.contains("51 micro"), "{}", e.message);
+}
+
 #[test]
 fn trading_file_round_trips_and_migrates_v0() {
     let dir = std::env::temp_dir().join(format!("lines-trading-file-{}", std::process::id()));
