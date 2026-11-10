@@ -1680,10 +1680,12 @@ impl ChartView {
         }
         // A trade marker: remembered, and the pan starts as usual; a click opens the trade in
         // the journal on release (`on_mouse_up`).
-        self.trade_press = (region == Region::Plot && self.trade_marks.shown())
-            .then(|| self.trade_marks.hit(x as f32, y as f32))
-            .flatten()
-            .map(|(t, _)| (ev.position, t.id.clone()));
+        // Never with Ctrl (chart trading's, and the scale drag).
+        self.trade_press =
+            (region == Region::Plot && !ev.modifiers.control && self.trade_marks.shown())
+                .then(|| self.trade_marks.hit(x as f32, y as f32))
+                .flatten()
+                .map(|(t, _)| (ev.position, t.id.clone()));
         let drag = match region {
             Region::Plot if ev.modifiers.control => {
                 Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Free, x, y))

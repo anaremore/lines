@@ -1818,8 +1818,6 @@ mod tests {
         );
     }
 
-    /// P&L by account and by tag (best net first, untagged last; a trade with two
-    /// tags counts in each); money only in a currency mode.
     #[test]
     fn a_trade_opened_from_a_chart_scrolls_into_view() {
         // 10 rows in view from 0: row 150 is brought to the bottom, row 3 stays put,
@@ -1830,6 +1828,8 @@ mod tests {
         assert_eq!(reveal_scroll(0, 5, 0), 5, "no size yet: the row itself");
     }
 
+    /// P&L by account and by tag (best net first, untagged last; a trade with two
+    /// tags counts in each); money only in a currency mode.
     #[test]
     fn groups_by_account_and_tag() {
         let win = trade(); // +$310.02, tags breakout and A+, account "paper"

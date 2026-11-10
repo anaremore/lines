@@ -253,16 +253,31 @@ pub fn build(
             result.push(pnl.clone());
         }
         result.push(duration.clone());
+        // An entry or exit filled at several prices is an average, and says so (as its label).
+        let avg_of = |entry_side: bool| {
+            let mut prices = t
+                .fills
+                .iter()
+                .filter(|f| (f.side == t.side) == entry_side)
+                .map(|f| f.price);
+            let first = prices.next();
+            if prices.any(|p| Some(p) != first) {
+                "avg "
+            } else {
+                ""
+            }
+        };
+        let (entry_avg, exit_avg) = (avg_of(true), avg_of(false));
         out.trades.push(TradeText {
             id: t.id.clone(),
             lines: vec![
                 summary,
                 format!(
-                    "Entry {entry} · {}",
+                    "Entry {entry_avg}{entry} · {}",
                     crate::journal_view::clock_text(t.entry_time)
                 ),
                 format!(
-                    "Exit {exit} · {}",
+                    "Exit {exit_avg}{exit} · {}",
                     crate::journal_view::clock_text(t.exit_time)
                 ),
                 result.join(" · "),
@@ -865,6 +880,12 @@ mod tests {
             "{}",
             b.marks[0].label
         );
+        assert!(
+            b.trades[0].lines[1].starts_with("Entry avg "),
+            "{}",
+            b.trades[0].lines[1]
+        );
+        assert!(!b.trades[0].lines[2].contains("avg"), "one exit price");
         // Ticks only: said once, not as a trade total and again per contract.
         let result = &b.trades[0].lines[3];
         assert_eq!(result.matches(" t").count(), 1, "{result}");
