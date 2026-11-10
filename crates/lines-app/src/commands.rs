@@ -85,6 +85,9 @@ pub enum Command {
     ShowSourceInTab,
     /// Write a diagnostics zip (logs, versions, redacted settings, feed and frame stats).
     ExportDiagnostics,
+    /// The "Download days…" window (decision 0030 §8): whole past trade dates from a source
+    /// that can download them, into the local store. No key: palette only.
+    DownloadDays,
     /// The focused chart: hide (or show) all external levels (decision 0022).
     ToggleLevels,
     /// The focused chart: hide (or show) level labels and level legend rows.
@@ -740,6 +743,7 @@ pub fn label(c: Command) -> String {
         Command::RollBackUpdate => "Roll back the last update".into(),
         Command::ResetPanels => "Reset pop-up panel positions".into(),
         Command::ExportDiagnostics => "Export diagnostics…".into(),
+        Command::DownloadDays => "Download days…".into(),
         Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
         Command::ToggleStudies => "Chart: hide/show studies".into(),
         Command::CleanChart => "Clean chart (no study labels, no key hints)".into(),
@@ -953,6 +957,7 @@ pub fn palette() -> Vec<Command> {
     v.push(Command::CyclePnl);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
+    v.push(Command::DownloadDays);
     v.extend([Command::ZoomIn, Command::ZoomOut, Command::ZoomReset]);
     v.extend(Timeframe::ALL.map(Command::Timeframe));
     v.extend(DrawCmd::ALL.map(Command::Draw));

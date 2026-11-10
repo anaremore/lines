@@ -1,5 +1,6 @@
 //! Retention: keep the store under a size budget by deleting the oldest trade dates first
-//! (decision 0019). Segments being written are never deleted.
+//! (decision 0019). Segments being written and downloaded days (`day::PINNED`, decision 0030
+//! §8: a paid day is fetched once) are never deleted; they still count toward the budget.
 //!
 //! Only segment files count and are evicted; the bar index and coverage files are small and
 //! stay (the bar index is a cache; coverage claims for trades are always read together with
@@ -26,6 +27,19 @@ fn is_active(path: &Path) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .contains(path)
+}
+
+/// A downloaded day (listed in its contract's `downloaded` file): never evicted.
+fn is_pinned(path: &Path) -> bool {
+    let (Some(dir), Some(date)) = (
+        path.parent(),
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(super::parse_date),
+    ) else {
+        return false;
+    };
+    super::day::pinned(dir).contains(&date)
 }
 
 /// Every segment under `root`: (trade date `YYYY-MM-DD` from the file name, path, bytes).
@@ -61,7 +75,8 @@ pub struct Evicted {
 }
 
 /// Delete the oldest trade dates (across all contracts) until the store fits `budget` bytes.
-/// Files being written are skipped; a file that can't be deleted (e.g. open elsewhere) stays.
+/// Files being written and downloaded days (pinned) are skipped, though they count; a file
+/// that can't be deleted (e.g. open elsewhere) stays.
 pub fn enforce(root: &Path, budget: u64) -> Evicted {
     let mut segs = segments(root);
     let mut total: u64 = segs.iter().map(|s| s.2).sum();
@@ -72,7 +87,7 @@ pub fn enforce(root: &Path, budget: u64) -> Evicted {
         if total <= budget {
             break;
         }
-        if is_active(&path) {
+        if is_active(&path) || is_pinned(&path) {
             continue;
         }
         match std::fs::remove_file(&path) {

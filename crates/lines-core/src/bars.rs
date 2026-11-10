@@ -249,6 +249,33 @@ impl BarSeries {
         self.trim();
     }
 
+    /// Put complete bars older than the oldest held in front, in one step: only bars older
+    /// than the oldest held are taken, sorted by time with one bar per time. The series keeps
+    /// its own buffer (its reserved capacity, which `capacity()` reports and the chart's
+    /// derived series size by): only the newest of them that fit go in, and beyond `max_len`
+    /// the oldest go, as always.
+    pub fn prepend_older(&mut self, older: &[Bar]) {
+        let first = self.bars.first().map(|b| b.time);
+        let mut take: Vec<Bar> = older
+            .iter()
+            .filter(|b| first.is_none_or(|f| b.time < f))
+            .copied()
+            .collect();
+        take.sort_by_key(|b| b.time);
+        take.dedup_by_key(|b| b.time);
+        let room = self.bars.capacity() - self.bars.len();
+        if take.len() > room {
+            take.drain(..take.len() - room);
+        }
+        let Some(oldest) = take.first().map(|b| b.time) else {
+            return;
+        };
+        self.bars.splice(0..0, take);
+        self.revision += 1;
+        self.note_change(oldest.0);
+        self.trim();
+    }
+
     /// Index of the bar containing `time`, or where it would be inserted.
     pub fn index_at(&self, time: UtcMillis) -> Result<usize, usize> {
         let bucket = time.floor_to(self.period_ms);
@@ -274,6 +301,19 @@ mod tests {
 
     fn t(ms: i64) -> UtcMillis {
         UtcMillis(ms)
+    }
+
+    #[test]
+    fn older_bars_go_in_front_in_one_step() {
+        let mut s = BarSeries::new(M, 100);
+        s.apply_trade(t(10 * M), Price(100), Qty(1));
+        let rev = s.revision();
+        let bar = |m: i64| Bar::from_trade(t(m * M), Price(90), Qty(1));
+        s.prepend_older(&[bar(3), bar(1), bar(10), bar(12), bar(3)]);
+        let times: Vec<i64> = s.bars().iter().map(|b| b.time.0 / M).collect();
+        assert_eq!(times, vec![1, 3, 10], "only older ones, sorted, once");
+        assert_eq!(s.bars()[2].close, Price(100), "the held bar is untouched");
+        assert_eq!(s.revision(), rev + 1);
     }
 
     #[test]
@@ -373,6 +413,40 @@ mod tests {
         assert_eq!(s.last().unwrap().time, t(999 * M));
         assert_eq!(s.bars.capacity(), cap);
         assert_eq!(s.trimmed() as usize + s.len(), 1000);
+    }
+
+    /// prepend_older keeps the series' buffer: no reallocation, onto an empty series and with
+    /// more older bars than the series holds.
+    #[test]
+    fn prepend_older_keeps_the_reserved_capacity() {
+        let bar = |m: i64| Bar::from_trade(t(m * M), Price(90), Qty(1));
+        let mut s = BarSeries::new(M, 8);
+        let cap = s.capacity();
+        s.prepend_older(&[bar(2), bar(1)]);
+        assert_eq!(s.capacity(), cap, "onto an empty series");
+        assert_eq!(s.len(), 2);
+        let mut s = BarSeries::new(M, 8);
+        s.apply_trade(t(1000 * M), Price(100), Qty(1));
+        let older: Vec<Bar> = (0..100).map(bar).collect();
+        s.prepend_older(&older);
+        assert_eq!(s.capacity(), cap, "more older bars than fit");
+        assert!(s.len() <= cap);
+        assert_eq!(
+            s.last().unwrap().time,
+            t(1000 * M),
+            "the held bar stays newest"
+        );
+        let times: Vec<i64> = s.bars().iter().map(|b| b.time.0 / M).collect();
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "in order: {times:?}");
+        assert_eq!(
+            times[times.len() - 2],
+            99,
+            "the newest of the older ones kept"
+        );
+        for i in 0..50 {
+            s.apply_trade(t((1001 + i) * M), Price(100), Qty(1));
+        }
+        assert_eq!(s.capacity(), cap, "later updates don't reallocate");
     }
 
     #[test]
