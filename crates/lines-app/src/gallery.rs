@@ -800,6 +800,41 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     e.args
         .extend(["--studies-menu".into(), "style:vwap:0:2".into()]);
     v.push(e);
+    // Volume (owner-approved 2026-11-09): plain bars in a lower pane under cumulative delta's
+    // (two stacked lower panes, quick set); colored by candle, split and averaged (light,
+    // colorblind); as an overlay; its editor open.
+    let volume = |name, quick, opts: &str, theme: &str, extra: &str| {
+        let mut a = args(&format!(
+            "--layout chart --size 1400x800 --theme {theme} --volume {opts}{extra}"
+        ));
+        if name == "volume-with-delta-dark" {
+            a.push("--study-set".into());
+            a.push(ws("delta-only.json"));
+        }
+        s(name, quick, end, a)
+    };
+    v.push(volume("volume-with-delta-dark", true, "pane", "dark", ""));
+    v.push(volume(
+        "volume-split-average-light-cb",
+        false,
+        "color,split,avg",
+        "light",
+        " --palette cb",
+    ));
+    v.push(volume(
+        "volume-overlay-dark",
+        false,
+        "overlay,avg",
+        "dark",
+        "",
+    ));
+    v.push(volume(
+        "volume-editor-dark",
+        false,
+        "color,avg",
+        "dark",
+        " --studies-menu edit:volume:0",
+    ));
     // An unstyled VWAP with ±1σ ±2σ ±3σ bands: its fills now sit under the candles.
     for theme in ["light", "dark"] {
         let mut a = args(&format!(
@@ -1096,6 +1131,8 @@ fn write_workspaces(dir: &Path) -> Result<()> {
                            "poc": { "color": "#f719cb", "width": 2, "line": "dashed" },
                            "va": { "color": "p3", "opacity": 75 } } } }"##;
     std::fs::write(dir.join("studies-styled.json"), studies).context("studies-styled.json")?;
+    let delta = r##"{ "indicators": [ { "kind": "cum_delta", "reset": "eth" } ] }"##;
+    std::fs::write(dir.join("delta-only.json"), delta).context("delta-only.json")?;
     let bands = r##"{ "indicators": [ { "kind": "vwap", "reset": "eth", "bands": 7 } ] }"##;
     std::fs::write(dir.join("vwap-bands-unstyled.json"), bands)
         .context("vwap-bands-unstyled.json")?;

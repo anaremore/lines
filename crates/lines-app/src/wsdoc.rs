@@ -390,6 +390,10 @@ pub struct ChartState {
     /// the default. Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subpane: Option<f32>,
+    /// Every lower pane's share, top to bottom, when there are several and one below the first
+    /// was moved (`subpane` still holds the first, for older builds). Optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subpanes: Vec<f32>,
     /// The product's drawings hidden on this chart (roadmap 11; the drawings themselves live
     /// in `drawings/<PRODUCT>.json`, never here). Optional: written only when set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1043,6 +1047,7 @@ mod tests {
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
+            subpanes: Vec::new(),
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""indicators""#), "{json}");
@@ -1063,6 +1068,7 @@ mod tests {
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
+            subpanes: Vec::new(),
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -1202,6 +1208,7 @@ mod tests {
                             footprint: Default::default(),
                             styles: Default::default(),
                             subpane: None,
+                            subpanes: Vec::new(),
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -1295,6 +1302,7 @@ mod tests {
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
+            subpanes: Vec::new(),
         };
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(
@@ -1405,6 +1413,7 @@ mod tests {
                 footprint: Default::default(),
                 styles: Default::default(),
                 subpane: None,
+                subpanes: Vec::new(),
             }),
             ..PaneDoc::new(PaneKind::Chart, None, None)
         };
@@ -1445,6 +1454,7 @@ mod tests {
             footprint: Default::default(),
             styles: Default::default(),
             subpane: None,
+            subpanes: Vec::new(),
         };
         let json = serde_json::to_string(&both).unwrap();
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
@@ -1522,6 +1532,7 @@ mod tests {
                 footprint: Default::default(),
                 styles: Default::default(),
                 subpane: None,
+                subpanes: Vec::new(),
             })
         );
         assert_eq!(

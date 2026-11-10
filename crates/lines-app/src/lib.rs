@@ -577,7 +577,7 @@ struct Cli {
     study_set: Option<PathBuf>,
     /// Screenshot: render with the studies menu open: `open`, or `edit:STUDY` for that
     /// study's editor, or `style:STUDY[:TAB]` for the style editor on its parts (tab 0 =
-    /// first). STUDY: `vwap:N`, `delta:N`, `profile`, `footprint`, `levels:ID`.
+    /// first). STUDY: `vwap:N`, `delta:N`, `volume:N`, `profile`, `footprint`, `levels:ID`.
     #[arg(long, requires = "screenshot")]
     studies_menu: Option<String>,
     /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
@@ -634,6 +634,12 @@ struct Cli {
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
     #[arg(long, value_parser = parse_vwap)]
     vwap: Vec<lines_indicators::VwapSpec>,
+    /// Add Volume to the first chart: plain bars in their own pane, or with options, comma
+    /// separated: `color` (by candle), `avg` or `avgN` (an average over N bars, 20 by default),
+    /// `split` (by buy/sell), `overlay` (along the plot's bottom). E.g. `--volume color,avg20`.
+    /// In the app: Studies… (Ctrl+I) › Add › Volume.
+    #[arg(long, value_parser = parse_volume, num_args = 0..=1, default_missing_value = "pane")]
+    volume: Option<lines_indicators::VolumeSpec>,
     /// The first chart's timeframe: 1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w (a bare number is
     /// minutes; bars align to the product's session open), or bars built from counted trades
     /// (reset at each session open): tick `500t` (100t 233t 500t 1000t 2000t, any 1t to
@@ -731,6 +737,39 @@ where
 {
     let mut matches = command(ext).try_get_matches_from(args)?;
     Cli::from_arg_matches_mut(&mut matches)
+}
+
+fn parse_volume(s: &str) -> Result<lines_indicators::VolumeSpec, String> {
+    use lines_indicators::VolumeSpec;
+    let mut v = VolumeSpec::default();
+    for o in s.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+        match o.to_ascii_lowercase().as_str() {
+            "pane" => v.overlay = false,
+            "overlay" => v.overlay = true,
+            "color" => v.color_by_candle = true,
+            "split" => v.split = true,
+            o => match o.strip_prefix("avg") {
+                Some(n) => {
+                    v.average = true;
+                    if !n.is_empty() {
+                        v.average_len = n
+                            .parse::<u16>()
+                            .ok()
+                            .filter(|n| (1..=VolumeSpec::MAX_LEN).contains(n))
+                            .ok_or_else(|| {
+                                format!("average length {n:?}: 1 to {}", VolumeSpec::MAX_LEN)
+                            })?;
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "unknown Volume option {o:?} (pane, overlay, color, split, avg, avgN)"
+                    ));
+                }
+            },
+        }
+    }
+    Ok(v)
 }
 
 fn parse_vwap(s: &str) -> Result<lines_indicators::VwapSpec, String> {
@@ -1458,6 +1497,14 @@ where
                     display: Default::default(),
                     style: Default::default(),
                 })
+                .chain(
+                    cli.volume
+                        .map(|spec| lines_indicators::IndicatorConfig::Volume {
+                            spec,
+                            display: Default::default(),
+                            style: Default::default(),
+                        }),
+                )
                 .collect(),
             profile: ProfileConfig {
                 mode: match cli.profile {
@@ -1858,6 +1905,18 @@ mod tests {
     fn window_icon_decodes() {
         let icon = window_icon().expect("embedded PNG decodes");
         assert_eq!(icon.dimensions(), (256, 256));
+    }
+
+    #[test]
+    fn volume_flag_parses() {
+        let v = parse_volume("pane").unwrap();
+        assert_eq!(v, lines_indicators::VolumeSpec::default());
+        let v = parse_volume("color,avg,split,overlay").unwrap();
+        assert!(v.color_by_candle && v.average && v.split && v.overlay);
+        assert_eq!(v.average_len, 20);
+        assert_eq!(parse_volume("avg50").unwrap().average_len, 50);
+        assert!(parse_volume("avg0").is_err());
+        assert!(parse_volume("bars").is_err());
     }
 
     #[test]

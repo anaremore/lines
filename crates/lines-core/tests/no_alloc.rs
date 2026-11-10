@@ -355,6 +355,51 @@ fn footprint_cells_do_not_allocate() {
     assert_eq!(n, 0, "footprint cells allocated {n} times");
 }
 
+/// The Volume study's bars (totals, sides from the footprint, the average) on 1-minute and
+/// 15-minute bars.
+#[test]
+fn volume_bars_do_not_allocate() {
+    use lines_core::profile::Footprint;
+    use lines_core::volume::{VolumeFrame, VolumeOptions};
+    use lines_core::{Aggressor, Derived, Timeframe};
+
+    let mut fp = Footprint::new(60_000, 10_000);
+    let mut series = BarSeries::new(60_000, 10_000);
+    for k in 0..60_000i64 {
+        let price = Price(600_000 + (k * 37 % 120 - 60) * 25);
+        let side = match k % 5 {
+            0 => None,
+            1 | 3 => Some(Aggressor::Buy),
+            _ => Some(Aggressor::Sell),
+        };
+        let t = UtcMillis(k * 250);
+        fp.add(t, price, Qty(k % 7 + 1), side);
+        series.apply_trade(t, price, Qty(k % 7 + 1));
+    }
+    let mut derived = Derived::new(Timeframe::Minutes(15), series.capacity());
+    derived.update(&series, None);
+    let mut frame = VolumeFrame::with_capacity(1_602);
+    let mut vp = Viewport::default();
+    vp.set_size(1600.0, 300.0);
+    vp.bar_px = 6.0;
+    let view1 = lines_core::BarsView::fixed(series.bars(), 60_000);
+    let mut bars = 0;
+    let n = allocs_during(|| {
+        for f in 0..200usize {
+            vp.right_index = 249.0 - (f % 40) as f64;
+            let view = if f % 2 == 0 { view1 } else { derived.view() };
+            let opts = VolumeOptions {
+                split: f % 3 != 0,
+                average: (f % 4 != 0).then_some(20),
+            };
+            frame.build(&fp, view, vp.visible_range(view.len()), opts);
+            bars += frame.bars.len();
+        }
+    });
+    assert!(bars > 0);
+    assert_eq!(n, 0, "volume bars allocated {n} times");
+}
+
 #[test]
 fn column_layout_and_resizing_do_not_allocate() {
     use lines_core::columns::{Cell, ColumnSet, ColumnSpec, MAX_COLS};

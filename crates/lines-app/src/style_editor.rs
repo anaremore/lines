@@ -63,6 +63,8 @@ pub enum OwnToken {
     UpDown,
     /// The theme's neutral (dim text) shade: footprint cells.
     Neutral,
+    /// The Volume study's neutral bars (`Theme::volume`).
+    Volume,
     Text,
     ProfileBuy,
     ProfileSell,

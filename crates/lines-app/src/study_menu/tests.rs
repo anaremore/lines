@@ -105,6 +105,109 @@ fn cumulative_delta_and_footprint_are_studies() {
     assert_eq!(set.indicators.len(), 1);
 }
 
+/// Volume (owner-approved 2026-11-09): added from the catalog as plain bars in a lower pane,
+/// one per chart; each option is a control in its editor, off by default; the average's
+/// length is 20 when first turned on; it sits beside cumulative delta (each in its own pane).
+#[test]
+fn volume_is_a_study_with_its_options() {
+    use lines_indicators::{DeltaReset, IndicatorConfig, VolumeSpec};
+    let src = sources();
+    let mut set = StudySet::default();
+    let items = StudyMenu::default().items(&input(&set, &src, &[]));
+    let add = items
+        .iter()
+        .position(|i| matches!(i, Item::Action { label, .. } if label == "Volume"))
+        .expect("in the catalog");
+    let mut m = StudyMenu::default();
+    let Some(MenuCmd::Set(a)) = m.activate(&items, add) else {
+        panic!("a study action")
+    };
+    set.apply(&a);
+    set.apply(&StudyAction::AddVolume); // one per chart
+    set.apply(&StudyAction::AddDelta(DeltaReset::Eth));
+    assert_eq!(set.indicators.len(), 2);
+    assert_eq!(
+        set.indicators.iter().filter(|c| c.in_subpane()).count(),
+        2,
+        "each in its own lower pane"
+    );
+    let IndicatorConfig::Volume { spec, .. } = set.indicators[0] else {
+        panic!("volume")
+    };
+    assert_eq!(spec, VolumeSpec::default());
+    let l = labels(&m.items(&input(&set, &src, &[])));
+    assert!(l.contains(&"Volume".to_owned()), "{l:?}");
+    assert!(!l.contains(&"+ Volume".to_owned()), "not offered twice");
+    // Its editor: every option off; the length only once the average is on.
+    m.editing = Some(StudyRef::Volume(0));
+    let l = labels(&m.items(&input(&set, &src, &[])));
+    for want in [
+        "  Color: By candle",
+        "  Average: Show",
+        "  Split: Buy / sell",
+        "  Display: Pane *",
+        "  Display: Overlay",
+        "  Label: Show title *",
+        "  Style: Style…",
+    ] {
+        assert!(l.contains(&want.to_owned()), "{want}: {l:?}");
+    }
+    assert!(!l.iter().any(|x| x.starts_with("  Length")));
+    // Turn each on through its control's own command.
+    for label in ["By candle", "Show", "Buy / sell", "Overlay"] {
+        let items = m.items(&input(&set, &src, &[]));
+        let i = items
+            .iter()
+            .position(|it| matches!(it, Item::Control { label: x, .. } if x == label))
+            .unwrap();
+        let Some(MenuCmd::Set(a)) = m.activate(&items, i) else {
+            panic!("{label}")
+        };
+        set.apply(&a);
+    }
+    let IndicatorConfig::Volume { spec, .. } = set.indicators[0] else {
+        panic!("volume")
+    };
+    assert!(spec.color_by_candle && spec.average && spec.split && spec.overlay);
+    assert_eq!(spec.average_len, 20, "20 when first turned on");
+    assert!(
+        !set.indicators[0].in_subpane(),
+        "an overlay is in the price plot"
+    );
+    let l = labels(&m.items(&input(&set, &src, &[])));
+    assert!(l.contains(&"  Length: 20 *".to_owned()), "{l:?}");
+    assert!(l.contains(&"  Label: Show in legend *".to_owned()), "{l:?}");
+    assert!(
+        l.contains(&"Volume · by candle · buy/sell · average 20 · overlay".to_owned()),
+        "{l:?}"
+    );
+    set.apply(&StudyAction::SetVolume(
+        0,
+        VolumeSpec {
+            average_len: 50,
+            ..spec
+        },
+    ));
+    // Hidden, styled, saved and removed like the others.
+    set.apply(&StudyAction::ToggleHidden(StudyRef::Volume(0)));
+    assert!(set.indicators[0].display().hidden);
+    let mut looks = crate::study_style::Look::defaults(&crate::study_style::VOLUME);
+    if let crate::style_editor::PartStyle::Fill(f) =
+        &mut looks[crate::study_style::VOLUME_BARS].style
+    {
+        f.opacity = 60;
+    }
+    set.apply(&StudyAction::SetStyle(StudyRef::Volume(0), looks.to_vec()));
+    assert_eq!(set.indicators[0].style()["bars"]["opacity"], 60);
+    let back: StudySet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+    assert_eq!(back, set);
+    set.apply(&StudyAction::Remove(StudyRef::Volume(0)));
+    assert!(matches!(
+        set.indicators.as_slice(),
+        [IndicatorConfig::CumDelta { .. }]
+    ));
+}
+
 #[test]
 fn menu_lists_studies_catalog_and_templates() {
     let src = sources();
@@ -127,6 +230,7 @@ fn menu_lists_studies_catalog_and_templates() {
             "+ VWAP · weekly",
             "+ VWAP · monthly",
             "+ Anchored VWAP (click a bar)",
+            "+ Volume",
             "+ Cumulative delta · ETH session",
             "+ Cumulative delta · RTH session",
             "+ Cumulative delta · no reset",

@@ -60,6 +60,65 @@ pub enum IndicatorConfig {
         #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
         style: PartStyles,
     },
+    /// Traded volume per bar: summed from the chart's own bars (the same trades as the
+    /// candles), drawn in its own lower pane or along the plot's bottom. Needs no engine node.
+    Volume {
+        #[serde(flatten)]
+        spec: VolumeSpec,
+        #[serde(flatten, default)]
+        display: Display,
+        /// User styles of its bars, up/buy and down/sell bars and average line. Optional.
+        #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
+        style: PartStyles,
+    },
+}
+
+/// The Volume study's options; every one off by default (plain bars in their own pane).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VolumeSpec {
+    /// Bars in candle colors: rising filled, falling hollow.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub color_by_candle: bool,
+    /// An average line over `average_len` bars.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub average: bool,
+    #[serde(skip_serializing_if = "VolumeSpec::default_len")]
+    pub average_len: u16,
+    /// Stacked by aggressor side (trades without a side count only toward the total).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub split: bool,
+    /// Short bars along the bottom of the price plot instead of a lower pane.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub overlay: bool,
+}
+
+impl VolumeSpec {
+    /// The average's length when first turned on.
+    pub const DEFAULT_LEN: u16 = 20;
+    /// Lengths kept in range (a damaged file never asks for an empty or huge window).
+    pub const MAX_LEN: u16 = 500;
+
+    fn default_len(n: &u16) -> bool {
+        *n == Self::DEFAULT_LEN
+    }
+
+    /// The average's length, in range.
+    pub fn len(&self) -> usize {
+        usize::from(self.average_len.clamp(1, Self::MAX_LEN))
+    }
+}
+
+impl Default for VolumeSpec {
+    fn default() -> Self {
+        VolumeSpec {
+            color_by_candle: false,
+            average: false,
+            average_len: Self::DEFAULT_LEN,
+            split: false,
+            overlay: false,
+        }
+    }
 }
 
 /// How a study is shown on a chart. Hiding keeps the study (and its configuration); a hidden
@@ -101,30 +160,34 @@ impl IndicatorConfig {
     /// How it is shown (every kind has one).
     pub fn display(&self) -> &Display {
         match self {
-            IndicatorConfig::Vwap { display, .. } | IndicatorConfig::CumDelta { display, .. } => {
-                display
-            }
+            IndicatorConfig::Vwap { display, .. }
+            | IndicatorConfig::CumDelta { display, .. }
+            | IndicatorConfig::Volume { display, .. } => display,
         }
     }
 
     pub fn display_mut(&mut self) -> &mut Display {
         match self {
-            IndicatorConfig::Vwap { display, .. } | IndicatorConfig::CumDelta { display, .. } => {
-                display
-            }
+            IndicatorConfig::Vwap { display, .. }
+            | IndicatorConfig::CumDelta { display, .. }
+            | IndicatorConfig::Volume { display, .. } => display,
         }
     }
 
     /// Its user styles (every kind has them).
     pub fn style(&self) -> &PartStyles {
         match self {
-            IndicatorConfig::Vwap { style, .. } | IndicatorConfig::CumDelta { style, .. } => style,
+            IndicatorConfig::Vwap { style, .. }
+            | IndicatorConfig::CumDelta { style, .. }
+            | IndicatorConfig::Volume { style, .. } => style,
         }
     }
 
     pub fn style_mut(&mut self) -> &mut PartStyles {
         match self {
-            IndicatorConfig::Vwap { style, .. } | IndicatorConfig::CumDelta { style, .. } => style,
+            IndicatorConfig::Vwap { style, .. }
+            | IndicatorConfig::CumDelta { style, .. }
+            | IndicatorConfig::Volume { style, .. } => style,
         }
     }
 
@@ -144,22 +207,29 @@ impl IndicatorConfig {
         unstyled(self) == unstyled(other)
     }
 
-    /// Drawn in a sub-pane below the price plot (not in it).
+    /// Drawn in a lower pane below the price plot (not in it): the study's own declaration,
+    /// which is all the chart's lower-pane stack needs (`lines-app` `subpane`).
     pub fn in_subpane(&self) -> bool {
-        matches!(self, IndicatorConfig::CumDelta { .. })
+        match self {
+            IndicatorConfig::Vwap { .. } => false,
+            IndicatorConfig::CumDelta { .. } => true,
+            IndicatorConfig::Volume { spec, .. } => !spec.overlay,
+        }
     }
 
-    /// The graph spec for a chart of bar period `period_ms`.
-    pub fn spec(&self, period_ms: i64) -> Spec {
+    /// The graph spec for a chart of bar period `period_ms`; `None` for a study drawn from
+    /// the chart's own bars (Volume), which holds no engine node.
+    pub fn spec(&self, period_ms: i64) -> Option<Spec> {
         match self {
-            IndicatorConfig::Vwap { spec, .. } => Spec::Vwap {
+            IndicatorConfig::Vwap { spec, .. } => Some(Spec::Vwap {
                 period_ms,
                 vwap: *spec,
-            },
-            IndicatorConfig::CumDelta { spec, .. } => Spec::CumDelta {
+            }),
+            IndicatorConfig::CumDelta { spec, .. } => Some(Spec::CumDelta {
                 period_ms,
                 delta: *spec,
-            },
+            }),
+            IndicatorConfig::Volume { .. } => None,
         }
     }
 }
@@ -242,6 +312,48 @@ mod tests {
         assert!(
             matches!(bare, IndicatorConfig::CumDelta { spec, .. } if spec.reset == DeltaReset::Eth)
         );
+    }
+
+    /// Volume: every option is optional and off by default (`{"kind":"volume"}`); the
+    /// average's length is written only when not 20, and a damaged one is kept in range.
+    #[test]
+    fn volume_options_are_optional() {
+        let plain = IndicatorConfig::Volume {
+            spec: VolumeSpec::default(),
+            display: Default::default(),
+            style: Default::default(),
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"kind":"volume"}"#
+        );
+        let bare: IndicatorConfig = serde_json::from_str(r#"{"kind":"volume"}"#).unwrap();
+        assert_eq!(bare, plain);
+        assert!(plain.in_subpane() && plain.spec(60_000).is_none());
+        let all = IndicatorConfig::Volume {
+            spec: VolumeSpec {
+                color_by_candle: true,
+                average: true,
+                average_len: 50,
+                split: true,
+                overlay: true,
+            },
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let json = serde_json::to_string(&all).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"volume","color_by_candle":true,"average":true,"average_len":50,"split":true,"overlay":true}"#
+        );
+        assert_eq!(serde_json::from_str::<IndicatorConfig>(&json).unwrap(), all);
+        assert!(!all.in_subpane(), "an overlay draws in the price plot");
+        let zero: IndicatorConfig =
+            serde_json::from_str(r#"{"kind":"volume","average":true,"average_len":0}"#).unwrap();
+        let IndicatorConfig::Volume { spec, .. } = zero else {
+            unreachable!()
+        };
+        assert_eq!(spec.len(), 1);
     }
 
     /// Styles are an optional nested field: a config without them writes none and loads as

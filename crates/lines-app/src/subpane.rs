@@ -1,16 +1,26 @@
-//! Chart sub-panes (roadmap 10e: cumulative delta is the first): a strip below the price plot
-//! that shares the plot's time axis and crosshair, with its own value scale. Pure layout,
-//! tested here; the chart draws from it.
+//! Chart lower panes (sub-panes; roadmap 10e: cumulative delta was the first, Volume the
+//! second): strips below the price plot that share the plot's time axis and crosshair, each
+//! with its own value scale. Pure layout, tested here; the chart draws from it.
 //!
-//! - The chart's height above the time axis is split between the price plot and the sub-pane
-//!   by a **ratio** (the sub-pane's share), saved with the chart (`ChartState::subpane`).
-//! - A **divider** between them is dragged to change the ratio; neither side gets smaller
-//!   than its minimum (the price plot's is larger).
-//! - The time axis stays at the bottom, under the sub-pane; bars line up because both use the
-//!   chart's viewport for x.
+//! The mechanism is reusable: a study declares that it draws in a lower pane
+//! (`IndicatorConfig::in_subpane`), and the chart stacks one pane per such shown study, top
+//! to bottom in the studies' order ([`stack_at_scale`]), up to [`MAX_PANES`].
+//!
+//! - The chart's height above the time axis is shared between the price plot and the lower
+//!   panes, each pane by a **ratio** (its share), saved with the chart (`ChartState::subpane`
+//!   for the first, `ChartState::subpanes` for all when there are more).
+//! - A **divider** above each pane is dragged to change the ratios: the top one trades height
+//!   with the price plot, a lower one with the pane above it ([`drag_stack`]); no pane gets
+//!   smaller than its minimum (the price plot's is larger).
+//! - The time axis stays at the bottom, under the last pane; bars line up because every pane
+//!   uses the chart's viewport for x.
 
 /// The sub-pane's share of the height when first shown.
 pub const DEFAULT_RATIO: f32 = 0.25;
+/// A second or later lower pane's share when first shown (the price plot keeps the most).
+pub const DEFAULT_MORE_RATIO: f32 = 0.18;
+/// Lower panes shown at once (more shown studies than this: the rest wait for room).
+pub const MAX_PANES: usize = 4;
 /// Ratios outside this range are clamped (saved files, drags).
 pub const MIN_RATIO: f32 = 0.08;
 pub const MAX_RATIO: f32 = 0.7;
@@ -49,6 +59,152 @@ impl Split {
     }
 }
 
+/// Pane `i`'s share when first shown.
+pub fn default_ratio(i: usize) -> f32 {
+    if i == 0 {
+        DEFAULT_RATIO
+    } else {
+        DEFAULT_MORE_RATIO
+    }
+}
+
+/// The price plot and up to [`MAX_PANES`] lower panes stacked under it (plot-local; fixed
+/// size, no allocation).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Stack {
+    pub price_h: f32,
+    panes: [Split; MAX_PANES],
+    n: usize,
+}
+
+impl Stack {
+    /// The panes shown, top to bottom (each one's `price_h` is the price plot's).
+    pub fn panes(&self) -> &[Split] {
+        &self.panes[..self.n]
+    }
+
+    /// The pane whose divider is at plot-local `y`.
+    pub fn divider_at(&self, y: f32) -> Option<usize> {
+        self.panes().iter().position(|s| s.on_divider(y))
+    }
+
+    /// The pane plot-local `y` is in.
+    pub fn pane_at(&self, y: f32) -> Option<usize> {
+        self.panes().iter().position(|s| s.in_sub(y))
+    }
+
+    /// Each shown pane's share of the height as drawn (the minimums may have clamped the
+    /// saved ratios): a drag starts from these, so a divider follows the pointer at once.
+    pub fn ratios(&self, total: f32) -> [f32; MAX_PANES] {
+        let avail = (total - self.n as f32 * DIVIDER_PX).max(1.0);
+        let mut r = [0.0; MAX_PANES];
+        for (k, s) in self.panes().iter().enumerate() {
+            r[k] = s.sub_h / avail;
+        }
+        r
+    }
+}
+
+/// Stack `ratios.len()` lower panes (at most [`MAX_PANES`]) under the price plot in `total` px
+/// above the time axis, at a display scale (heights are whole device pixels). Panes that don't
+/// fit at their minimums are left out from the bottom; `None` when not even one fits. Each
+/// pane takes its ratio of the height left after the dividers, shrunk together when they
+/// would leave the price plot under its minimum.
+pub fn stack_at_scale(total: f32, ratios: &[f32], scale: f32) -> Option<Stack> {
+    let s = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let mut n = ratios.len().min(MAX_PANES);
+    while n > 0 && total - n as f32 * (DIVIDER_PX + MIN_SUB_PX) < MIN_PRICE_PX {
+        n -= 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    let avail = total - n as f32 * DIVIDER_PX;
+    let room = avail - MIN_PRICE_PX;
+    let mut want = [0.0f32; MAX_PANES];
+    let mut sum = 0.0;
+    for k in 0..n {
+        want[k] = (avail * clamp_ratio(ratios[k])).max(MIN_SUB_PX);
+        sum += want[k];
+    }
+    // Too tall together: each gives up the same share of its height above the minimum.
+    if sum > room {
+        let extra: f32 = want[..n].iter().map(|w| w - MIN_SUB_PX).sum();
+        let over = sum - room;
+        let keep = if extra > 0.0 {
+            (1.0 - over / extra).max(0.0)
+        } else {
+            0.0
+        };
+        for w in &mut want[..n] {
+            *w = MIN_SUB_PX + (*w - MIN_SUB_PX) * keep;
+        }
+    }
+    let mut hs = [0.0f32; MAX_PANES];
+    let mut used = 0.0;
+    for k in 0..n {
+        // Whole device pixels, never past what is left for the panes below and the price.
+        let left = room - used - (n - k - 1) as f32 * MIN_SUB_PX;
+        hs[k] = ((want[k] * s).round() / s).clamp(MIN_SUB_PX, left.max(MIN_SUB_PX));
+        used += hs[k];
+    }
+    let price_h = avail - used;
+    let mut panes = [Split {
+        price_h,
+        divider_top: 0.0,
+        sub_top: 0.0,
+        sub_h: 0.0,
+    }; MAX_PANES];
+    let mut top = price_h;
+    for k in 0..n {
+        panes[k].divider_top = top;
+        panes[k].sub_top = top + DIVIDER_PX;
+        panes[k].sub_h = hs[k];
+        top = panes[k].sub_top + hs[k];
+    }
+    Some(Stack { price_h, panes, n })
+}
+
+/// The ratios after dragging divider `k` by `dy` px (down = pane `k` smaller) from where a
+/// drag started at `start` (the shown panes' shares, [`Stack::ratios`]) with `n` panes: the
+/// top divider trades height with the price plot (the other panes keep theirs), a lower one
+/// with the pane above it. Every pane keeps its minimum, the price plot its own.
+pub fn drag_stack(
+    total: f32,
+    n: usize,
+    start: [f32; MAX_PANES],
+    k: usize,
+    dy: f32,
+) -> [f32; MAX_PANES] {
+    let n = n.min(MAX_PANES);
+    let mut out = start;
+    if k >= n {
+        return out;
+    }
+    let avail = (total - n as f32 * DIVIDER_PX).max(1.0);
+    let lo = (MIN_SUB_PX / avail).max(MIN_RATIO);
+    if k == 0 {
+        let others: f32 = start[1..n].iter().sum();
+        let hi = ((avail - MIN_PRICE_PX) / avail - others).min(MAX_RATIO);
+        if lo <= hi {
+            out[0] = (start[0] - dy / avail).clamp(lo, hi);
+        }
+    } else {
+        // The pair keeps its sum: the divider moves between the two panes.
+        let pair = start[k - 1] + start[k];
+        let hi = (pair - lo).min(MAX_RATIO);
+        if lo <= hi {
+            out[k] = (start[k] - dy / avail).clamp(lo, hi);
+            out[k - 1] = pair - out[k];
+        }
+    }
+    out
+}
+
 pub fn clamp_ratio(r: f32) -> f32 {
     if r.is_finite() {
         r.clamp(MIN_RATIO, MAX_RATIO)
@@ -66,7 +222,8 @@ pub fn split(total: f32, ratio: f32) -> Option<Split> {
 
 /// [`split`] at a display scale: the sub-pane's height is a whole number of device pixels,
 /// so its top (and every snapped edge drawn from it) sits on a device pixel when `total`
-/// does.
+/// does. One pane of [`stack_at_scale`] (tests hold the two the same).
+#[cfg(test)]
 pub fn split_at_scale(total: f32, ratio: f32, scale: f32) -> Option<Split> {
     let avail = total - DIVIDER_PX;
     if avail < MIN_PRICE_PX + MIN_SUB_PX {
@@ -89,7 +246,9 @@ pub fn split_at_scale(total: f32, ratio: f32, scale: f32) -> Option<Split> {
 }
 
 /// The ratio after dragging the divider by `dy` px (down = a smaller sub-pane) from where a
-/// drag started at `start_ratio`, kept within both panes' minimums.
+/// drag started at `start_ratio`, kept within both panes' minimums. One pane of
+/// [`drag_stack`].
+#[cfg(test)]
 pub fn drag(total: f32, start_ratio: f32, dy: f32) -> f32 {
     let avail = (total - DIVIDER_PX).max(1.0);
     let sub_h = avail * clamp_ratio(start_ratio) - dy;
@@ -130,6 +289,17 @@ impl Scale {
     /// The value at sub-pane-local `y` (the inverse of [`Scale::y`]).
     pub fn value(&self, y: f32) -> f64 {
         self.hi - f64::from(y) / f64::from(self.height.max(1.0)) * (self.hi - self.lo)
+    }
+
+    /// A scale from zero at the pane's bottom edge to `hi` (padded at the top only): bars
+    /// that grow from a baseline (volume) keep it on the pane's edge.
+    pub fn from_zero(hi: i64, height: f32) -> Scale {
+        let hi = hi.max(1) as f64;
+        Scale {
+            lo: 0.0,
+            hi: hi * 1.08,
+            height,
+        }
     }
 
     pub fn contains(&self, v: f64) -> bool {
@@ -173,6 +343,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One pane stacks exactly as the single split always did (saved charts look the same).
+    #[test]
+    fn one_pane_stacks_as_the_single_split() {
+        for (total, ratio, scale) in [(606.0, 0.25, 1.0), (606.0, 0.0, 1.0), (600.0, 0.33, 1.5)] {
+            let st = stack_at_scale(total, &[ratio], scale).unwrap();
+            assert_eq!(st.panes(), &[split_at_scale(total, ratio, scale).unwrap()]);
+        }
+        assert_eq!(
+            stack_at_scale(MIN_PRICE_PX + MIN_SUB_PX + DIVIDER_PX - 1.0, &[0.25], 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn several_panes_stack_under_the_price_plot() {
+        let st = stack_at_scale(612.0, &[0.25, 0.2], 1.0).unwrap();
+        let p = st.panes();
+        assert_eq!(p.len(), 2);
+        // 600 px after two dividers: 150 + 120, the price plot the rest.
+        assert_eq!((p[0].sub_h, p[1].sub_h), (150.0, 120.0));
+        assert_eq!(st.price_h, 330.0);
+        assert_eq!(p[0].divider_top, 330.0);
+        assert_eq!(p[1].divider_top, p[0].sub_top + p[0].sub_h);
+        assert_eq!(
+            p[1].sub_top + p[1].sub_h,
+            612.0,
+            "the last pane ends at the axis"
+        );
+        assert_eq!(st.pane_at(p[1].sub_top + 1.0), Some(1));
+        assert_eq!(st.divider_at(p[1].divider_top + 1.0), Some(1));
+        assert_eq!(st.pane_at(10.0), None);
+        // Too tall together: shrunk, the price plot keeps its minimum.
+        let st = stack_at_scale(412.0, &[0.7, 0.7, 0.7], 1.0).unwrap();
+        assert!(st.price_h >= MIN_PRICE_PX - 1e-3, "{}", st.price_h);
+        assert!(st.panes().iter().all(|s| s.sub_h >= MIN_SUB_PX));
+        // Too small for every pane: the bottom ones wait for room.
+        let st = stack_at_scale(
+            MIN_PRICE_PX + 2.0 * (MIN_SUB_PX + DIVIDER_PX),
+            &[0.3; 4],
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(st.panes().len(), 2);
+        // Device pixels at 1.5: every top on one.
+        let st = stack_at_scale(600.0, &[0.25, 0.18, 0.2], 1.5).unwrap();
+        for s in st.panes() {
+            let dev = s.sub_top * 1.5;
+            assert!((dev - dev.round()).abs() < 1e-3, "{}", s.sub_top);
+        }
+    }
+
+    #[test]
+    fn dragging_a_divider_trades_with_its_neighbor() {
+        let total = 612.0;
+        let st = stack_at_scale(total, &[0.25, 0.2], 1.0).unwrap();
+        let r = st.ratios(total);
+        // The top divider up 60 px: the first pane grows, the second keeps its height.
+        let up = drag_stack(total, 2, r, 0, -60.0);
+        let after = stack_at_scale(total, &up[..2], 1.0).unwrap();
+        assert_eq!(after.panes()[0].sub_h, 210.0);
+        assert_eq!(after.panes()[1].sub_h, 120.0);
+        assert_eq!(after.price_h, st.price_h - 60.0);
+        // The divider between them down 30 px: the first grows, the second shrinks, the
+        // price plot stays.
+        let mid = drag_stack(total, 2, r, 1, 30.0);
+        let after = stack_at_scale(total, &mid[..2], 1.0).unwrap();
+        assert_eq!(after.panes()[0].sub_h, 180.0);
+        assert_eq!(after.panes()[1].sub_h, 90.0);
+        assert_eq!(after.price_h, st.price_h);
+        // Far: minimums hold.
+        let far = drag_stack(total, 2, r, 1, 1_000.0);
+        let after = stack_at_scale(total, &far[..2], 1.0).unwrap();
+        assert!(after.panes()[1].sub_h >= MIN_SUB_PX);
+        let far = drag_stack(total, 2, r, 0, -1_000.0);
+        let after = stack_at_scale(total, &far[..2], 1.0).unwrap();
+        assert!(after.price_h >= MIN_PRICE_PX - 1e-3);
+        // One pane: the same as the single divider's drag.
+        let one = stack_at_scale(606.0, &[0.25], 1.0).unwrap().ratios(606.0);
+        assert!((drag_stack(606.0, 1, one, 0, -60.0)[0] - drag(606.0, 0.25, -60.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_zero_based_scale_keeps_zero_on_the_bottom_edge() {
+        let s = Scale::from_zero(1_000, 100.0);
+        assert_eq!(s.y(0.0), 100.0);
+        assert!(s.y(1_000.0) > 0.0, "padded at the top");
+        assert!(Scale::from_zero(0, 100.0).hi > 0.0);
     }
 
     #[test]
