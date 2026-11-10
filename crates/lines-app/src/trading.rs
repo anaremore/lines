@@ -651,6 +651,17 @@ impl TradeCache {
     }
 }
 
+/// An account's largest order at start: `--max-order-qty` (every account, this run) over its
+/// setting (saved under its name, else its id).
+pub fn wanted_max_order(
+    flag: Option<i64>,
+    saved: &BTreeMap<String, i64>,
+    name: &str,
+    id: &str,
+) -> Option<i64> {
+    flag.or_else(|| saved.get(name).or_else(|| saved.get(id)).copied())
+}
+
 /// Where the trading state comes from and goes.
 pub struct TradingSetup {
     /// Paper state file (`None`: in memory only).
@@ -671,6 +682,11 @@ pub struct TradingSetup {
     /// `settings.json` (resolved; `None`: no prop rules). Sent at start like guardrails:
     /// tighter now, looser from the next trade date.
     pub prop_rules: BTreeMap<String, Option<lines_trading::rules::RulePreset>>,
+    /// The largest order per paper account, keyed by name (else id), from `settings.json`.
+    /// Sent at start through the command path, like guardrails.
+    pub max_order_qty: BTreeMap<String, i64>,
+    /// `--max-order-qty`: every paper account's largest order this run, over the setting.
+    pub max_order_flag: Option<i64>,
     /// The trade journal's file and the source label in its header (`None`: in memory).
     pub journal: Option<(PathBuf, String)>,
     /// The data source's name (`mock`, `databento`; empty: none), as a reset names the
@@ -701,6 +717,8 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            max_order_qty: BTreeMap::new(),
+            max_order_flag: None,
             prop_rules: BTreeMap::new(),
             brokers: Vec::new(),
             venue_marks_always: false,
@@ -760,6 +778,8 @@ impl TradingSetup {
             accounts: None,
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            max_order_qty: BTreeMap::new(),
+            max_order_flag: None,
             prop_rules: BTreeMap::new(),
             journal: None,
             source: String::new(),
@@ -1269,6 +1289,37 @@ impl Trading {
                     account,
                     guardrails,
                 },
+            );
+            sent.push((id, name));
+        }
+        // The largest order per paper account: `--max-order-qty` for every account this run,
+        // else the account's setting; sent for every account, so the setting (none included)
+        // is what holds, never a value an earlier run left in the paper file.
+        let wanted: Vec<(AccountId, Option<i64>)> = core
+            .accounts()
+            .map(|(c, _)| {
+                (
+                    c.id.clone(),
+                    wanted_max_order(
+                        setup.max_order_flag,
+                        &setup.max_order_qty,
+                        &c.name,
+                        c.id.0.as_str(),
+                    ),
+                )
+            })
+            .collect();
+        for (account, max) in wanted {
+            let name = if setup.max_order_flag.is_some() {
+                format!("--max-order-qty for {account}")
+            } else {
+                format!("largest order for {account}")
+            };
+            let id = core.submit(
+                at,
+                Source::Api,
+                Instant::now(),
+                TradeCommand::SetMaxOrderQty { account, max },
             );
             sent.push((id, name));
         }
@@ -1795,9 +1846,9 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::CancelAll { account, contract }
         | TradeCommand::Flatten { account, contract } => (account.clone(), *contract, None),
         TradeCommand::ResetPaper { account, .. } => (account.clone(), None, None),
-        TradeCommand::SetGuardrails { account, .. } | TradeCommand::SetRules { account, .. } => {
-            (account.clone(), None, None)
-        }
+        TradeCommand::SetGuardrails { account, .. }
+        | TradeCommand::SetRules { account, .. }
+        | TradeCommand::SetMaxOrderQty { account, .. } => (account.clone(), None, None),
         TradeCommand::ArmTrigger(t) => (t.account.clone(), Some(t.contract), None),
         TradeCommand::Reverse {
             account, contract, ..
@@ -2524,6 +2575,25 @@ mod tests {
     use lines_trading::{Money, OrderSpec, OrderState, RejectCode, RiskLimits, Side};
 
     use super::*;
+
+    /// `--max-order-qty` wins over the setting for its run; else the setting, by name or id.
+    #[test]
+    fn the_flag_overrides_the_largest_order_setting() {
+        let mut saved = BTreeMap::new();
+        saved.insert("Paper".to_owned(), 5);
+        saved.insert("paper-2".to_owned(), 7);
+        assert_eq!(wanted_max_order(None, &saved, "Paper", "paper-1"), Some(5));
+        assert_eq!(wanted_max_order(None, &saved, "Other", "paper-2"), Some(7));
+        assert_eq!(wanted_max_order(None, &saved, "Other", "paper-3"), None);
+        assert_eq!(
+            wanted_max_order(Some(2), &saved, "Paper", "paper-1"),
+            Some(2)
+        );
+        assert_eq!(
+            wanted_max_order(Some(2), &BTreeMap::new(), "X", "x"),
+            Some(2)
+        );
+    }
     use crate::dom_trade::{self, ArmEvent, ArmPrefs, Arming, DomColumn, EntryCtx};
 
     fn es() -> ContractKey {
@@ -2647,6 +2717,8 @@ mod tests {
             accounts: Some(accounts),
             check_sessions: true,
             guardrails: BTreeMap::new(),
+            max_order_qty: BTreeMap::new(),
+            max_order_flag: None,
             prop_rules: BTreeMap::new(),
             journal: None,
             source: String::new(),

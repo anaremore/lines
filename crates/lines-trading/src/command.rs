@@ -133,6 +133,15 @@ pub enum Command {
         account: AccountId,
         rules: Option<crate::rules::RulePreset>,
     },
+    /// The account's largest order (`RiskLimits::max_order_qty`; `None`: no limit), the
+    /// trader's setting (Settings › Accounts › Largest order). Applies to the next order and
+    /// the next resize; working orders keep the size they were accepted at. Never from a
+    /// strategy.
+    SetMaxOrderQty {
+        account: AccountId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<i64>,
+    },
     /// Arm a trigger on an option, at a price of its underlying (decision 0029). A person's, not
     /// a strategy's yet.
     ArmTrigger(crate::trigger::TriggerSpec),
@@ -231,6 +240,7 @@ impl Command {
             | Command::ResetPaper { account, .. }
             | Command::SetGuardrails { account, .. }
             | Command::SetRules { account, .. }
+            | Command::SetMaxOrderQty { account, .. }
             | Command::SetBracketMode { account, .. } => Some(account),
             Command::AddStrategy(c) => Some(&c.account),
             Command::RemoveStrategy { .. }

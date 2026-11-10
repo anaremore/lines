@@ -223,17 +223,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     if let Some(m) = pnl {
         crate::journal_shots::set_pnl(m);
     }
-    if let Some(max) = max_order_qty {
-        setup.accounts = Some(
-            crate::trading::default_accounts()
-                .into_iter()
-                .map(|(mut c, _)| {
-                    c.limits.max_order_qty = Some(max);
-                    c
-                })
-                .collect(),
-        );
-    }
+    // The flag wins over any setting for this run (screenshots read none anyway).
+    setup.max_order_flag = max_order_qty;
     if demo_broker {
         let d = feeds
             .iter()

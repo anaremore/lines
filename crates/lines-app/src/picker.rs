@@ -224,6 +224,11 @@ pub struct Settings {
     /// absent is automatic.
     #[serde(default, skip_serializing_if = "crate::update::UpdateMode::is_default")]
     pub updates: crate::update::UpdateMode,
+    /// The largest order per paper account, keyed by the account's name (or id), as
+    /// Settings › Accounts › Largest order sets it (the core's `max_order_qty`). Optional: an
+    /// account without one has no limit. `--max-order-qty` wins for its run.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub max_order_qty: std::collections::BTreeMap<String, i64>,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]
