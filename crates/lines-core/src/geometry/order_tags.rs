@@ -67,21 +67,32 @@ impl Metrics {
         text_pad: TEXT_PAD,
     };
 
-    /// The sizes at `scale` (a non-finite or non-positive one is 100 %).
+    /// The sizes at `scale` (a non-finite or non-positive one is 100 %), each in whole logical
+    /// px and the tag's height even, so a tag centered on its (snapped) line and everything
+    /// placed from it keeps its edges on device pixels (`docs/design.md`: crisp at every DPI).
     pub fn at(scale: f32) -> Metrics {
         if !(scale.is_finite() && scale > 0.0) {
             return Metrics::BASE;
         }
+        let px = |v: f32| (v * scale).round();
         Metrics {
             scale,
-            tag_h: TAG_H * scale,
-            close_w: CLOSE_W * scale,
-            tag_gap: TAG_GAP * scale,
-            handle_w: HANDLE_W * scale,
-            handle_h: HANDLE_H * scale,
-            handle_gap: HANDLE_GAP * scale,
-            text_pad: TEXT_PAD * scale,
+            tag_h: (TAG_H * scale * 0.5).round() * 2.0,
+            close_w: px(CLOSE_W),
+            tag_gap: px(TAG_GAP),
+            handle_w: px(HANDLE_W),
+            handle_h: px(HANDLE_H),
+            handle_gap: px(HANDLE_GAP),
+            text_pad: px(TEXT_PAD),
         }
+    }
+}
+
+impl Metrics {
+    /// The sizes at the UI zoom `zoom`: hit targets never under their 100 % size (`zoom::hit`'s
+    /// rule), so below 100 % only the text shrinks.
+    pub fn for_ui_zoom(zoom: f32) -> Metrics {
+        Metrics::at(zoom.max(1.0))
     }
 }
 
@@ -926,8 +937,28 @@ mod tests {
         let z = Metrics::at(1.5);
         assert_eq!(Metrics::at(1.0), Metrics::BASE);
         assert_eq!(Metrics::at(f32::NAN), Metrics::BASE);
+        assert_eq!(
+            Metrics::for_ui_zoom(0.8),
+            Metrics::BASE,
+            "never under 100 %"
+        );
+        assert_eq!(Metrics::for_ui_zoom(1.5), z);
         assert_eq!((z.tag_h, z.close_w, z.tag_gap), (30.0, 33.0, 3.0));
-        assert_eq!((z.handle_w, z.handle_h, z.handle_gap), (39.0, 30.0, 4.5));
+        assert_eq!((z.handle_w, z.handle_h, z.handle_gap), (39.0, 30.0, 5.0));
+        // Every size is whole and the tag's height even at any zoom (crisp edges).
+        for pct in 80..=150 {
+            let m = Metrics::at(pct as f32 / 100.0);
+            for v in [
+                m.tag_h * 0.5,
+                m.close_w,
+                m.tag_gap,
+                m.handle_w,
+                m.handle_h,
+                m.handle_gap,
+            ] {
+                assert_eq!(v, v.round(), "{pct} %: {m:?}");
+            }
+        }
         let v = vp();
         let mut out = [TagBox::default(); 4];
         let n = layout_tags(
@@ -965,11 +996,11 @@ mod tests {
             hit(tags, &none, &no_h, t.close_left - 0.5, t.top + 1.0),
             Some(TagHit::Body(9))
         );
-        // Handles: 39 × 30, 4.5 px off the tag.
+        // Handles: 39 × 30, 5 px off the tag.
         let h = handles(&t, [true, true], &z);
         let (up, down) = (h[0].unwrap(), h[1].unwrap());
-        assert_eq!((up.w, up.h, up.top), (39.0, 30.0, t.top - 4.5 - 30.0));
-        assert_eq!(down.top, t.top + 30.0 + 4.5);
+        assert_eq!((up.w, up.h, up.top), (39.0, 30.0, t.top - 5.0 - 30.0));
+        assert_eq!(down.top, t.top + 30.0 + 5.0);
         assert_eq!(
             hit(tags, &none, &h, up.left + 38.0, up.top + 29.0),
             Some(TagHit::Handle(true))

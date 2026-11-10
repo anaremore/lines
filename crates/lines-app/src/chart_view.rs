@@ -154,6 +154,10 @@ const TAG_H_100: f32 = LABEL_PX_100 * 1.5;
 fn tag_h() -> f32 {
     crate::zoom::f(TAG_H_100)
 }
+/// An order tag's height at the UI zoom (`order_tags::Metrics::for_ui_zoom`).
+fn tag_h_now() -> f32 {
+    lines_core::geometry::order_tags::Metrics::for_ui_zoom(crate::zoom::get()).tag_h
+}
 /// Shown in the price-axis corner while price auto-scale is off.
 const MANUAL_LABEL: &str = "manual";
 
@@ -2710,7 +2714,7 @@ impl ChartView {
                 let bottom = self.ct.tags[..n]
                     .iter()
                     .find(|b| b.id == id)
-                    .map_or(y as f32, |b| b.top + b.h);
+                    .map_or(y as f32 + tag_h_now(), |b| b.top + b.h);
                 self.open_order_group(id, bottom, cx);
             }
             // Moving and cancelling need no arming, as on the DOM.
@@ -3097,7 +3101,7 @@ impl ChartView {
                 let bottom = self.ct.tags[..self.ct.n_tags]
                     .iter()
                     .find(|b| b.id == g.id)
-                    .map_or(0.0, |b| b.top + b.h);
+                    .map_or(tag_h_now(), |b| b.top + b.h);
                 self.open_order_group(g.id, bottom, cx);
             }
             cx.notify();
@@ -4499,7 +4503,7 @@ impl ChartView {
         }
         // Order and position tags at the UI zoom, one size for layout, paint and (through the
         // boxes they store) hit tests. Hit targets: never under their 100 % size.
-        let tm = lines_core::geometry::order_tags::Metrics::at(crate::zoom::get().max(1.0));
+        let tm = lines_core::geometry::order_tags::Metrics::for_ui_zoom(crate::zoom::get());
         let mut pos_tag = None;
         if let Some(pos) = position {
             let y = self.vp.price_to_y(pos.1) as f32;
