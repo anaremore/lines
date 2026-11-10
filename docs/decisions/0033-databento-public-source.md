@@ -1,6 +1,6 @@
 # 0033: Databento is a public data source
 
-**Status:** Proposed (draft for the owner)
+**Status:** Accepted (owner accepted 2026-11-09)
 
 **Context:** Decisions 0014 and 0020 put live vendor connectors in the private `lines-connectors` repo. Databento's connector (`lines-databento`: history import, cost check, live market data) went there by default. As a result:
 - the public, self-updating release (0031) can't use Databento;
