@@ -160,7 +160,7 @@ impl TradingCore {
         let members = self.groups[i].members.clone();
         let mut results = Vec::with_capacity(members.len());
         let mut ids = Vec::new();
-        for account in members {
+        for (n, account) in members.into_iter().enumerate() {
             let id = CommandId(self.next_internal);
             self.next_internal += 1;
             debug_assert!(id.0 >= INTERNAL_COMMAND_IDS);
@@ -169,7 +169,14 @@ impl TradingCore {
                 Envelope {
                     id,
                     source: env.source,
-                    issued: env.issued,
+                    // The first member is timed from the input; each later one from when its
+                    // own handling starts, so the latency samples don't add up the earlier
+                    // members' work.
+                    issued: if n == 0 {
+                        env.issued
+                    } else {
+                        std::time::Instant::now()
+                    },
                     command: member(account.clone()),
                     pane: env.pane.clone(),
                 },

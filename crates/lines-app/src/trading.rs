@@ -1887,7 +1887,8 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         | TradeCommand::ArmStrategy { .. }
         | TradeCommand::PauseStrategy { .. }
         | TradeCommand::StopStrategies { .. } => return None,
-        // Group commands name no one account (no UI yet).
+        // Group commands name no one account (no UI yet). They go to the paper core with the
+        // rest (`Trading::submit`), so a group holds paper accounts only for now (known gap).
         TradeCommand::CreateGroup { .. }
         | TradeCommand::RenameGroup { .. }
         | TradeCommand::DeleteGroup { .. }

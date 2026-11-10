@@ -97,7 +97,10 @@ pub fn migrate(mut v: Value) -> Result<Value> {
 }
 
 /// v5 → v6: each account's optional `config.group` becomes a member of a group of that name in
-/// the new `groups` list (one per name, first seen first, members in account order).
+/// the new `groups` list (one per name, first seen first, members in account order). Names that
+/// v6 counts as one (`group::same_name`: trimmed, ignoring case) are merged under the first
+/// one's spelling, and a name v6 can't keep (`group::clean_name`) is cut down to one it can, so
+/// no membership is dropped on load.
 fn v5_to_v6(mut v: Value) -> Result<Value> {
     let o = v.as_object_mut().context("v5 file is not an object")?;
     let Some(accounts) = o.get_mut("accounts").and_then(Value::as_array_mut) else {
@@ -112,7 +115,11 @@ fn v5_to_v6(mut v: Value) -> Result<Value> {
         let (Some(Value::String(name)), Some(id)) = (group, config.get("id").cloned()) else {
             continue;
         };
-        match groups.iter_mut().find(|(n, _)| *n == name) {
+        let name = keepable_group_name(&name);
+        match groups
+            .iter_mut()
+            .find(|(n, _)| crate::group::same_name(n, &name))
+        {
             Some((_, members)) => members.push(id),
             None => groups.push((name, vec![id])),
         }
@@ -126,6 +133,24 @@ fn v5_to_v6(mut v: Value) -> Result<Value> {
     }
     o.insert("version".into(), json!(6));
     Ok(v)
+}
+
+/// A v5 group name as v6 can keep it: control characters become spaces, then trimmed and cut
+/// to `group::MAX_NAME_CHARS`; an empty one is "Group".
+fn keepable_group_name(name: &str) -> String {
+    let spaced: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cut: String = spaced
+        .trim()
+        .chars()
+        .take(crate::group::MAX_NAME_CHARS)
+        .collect();
+    match cut.trim() {
+        "" => "Group".to_owned(),
+        n => n.to_owned(),
+    }
 }
 
 /// v4 → v5: the 15 minutes every file holds (and any hand-set age) go, for the function by expiry.
@@ -534,7 +559,9 @@ mod tests {
             ("a", Some("Evals")),
             ("b", None),
             ("c", Some("Funded")),
-            ("d", Some("Evals")),
+            // v6 counts these as "Evals" (case, spaces): merged, never dropped.
+            ("d", Some("evals ")),
+            ("e", Some("  ")),
         ] {
             let mut a = account.clone();
             a["config"]["id"] = json!(id);
@@ -550,7 +577,16 @@ mod tests {
             name: n.into(),
             members: m.iter().map(|s| crate::types::AccountId::new(s)).collect(),
         };
-        assert_eq!(f.groups, vec![g("Evals", &["a", "d"]), g("Funded", &["c"])]);
+        assert_eq!(
+            f.groups,
+            vec![
+                g("Evals", &["a", "d"]),
+                g("Funded", &["c"]),
+                g("Group", &["e"])
+            ]
+        );
+        // What loads is what the core keeps: nothing for `restore_groups` to drop.
+        assert_eq!(crate::group::restored(f.groups.clone()), f.groups);
         let again = serde_json::to_value(&f).unwrap();
         assert!(
             again["accounts"]
