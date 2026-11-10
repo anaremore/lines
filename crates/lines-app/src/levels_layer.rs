@@ -330,7 +330,7 @@ impl Slot {
 
     /// Level `l`'s label text color (see [`Slot::label_colors`]); `fills`: the zone fills
     /// under the labels, as drawn.
-    fn label_color(&self, theme: &Theme, l: &Level, hair: f32, fills: &[Hsla]) -> Hsla {
+    fn label_color(&self, theme: &Theme, l: &Level, hair: f32, fills: &[Paint]) -> Paint {
         let wants = self
             .type_look(l)
             .map_or(LabelColor::Level, |t| t.label.color);
@@ -1502,7 +1502,7 @@ fn shaped_in<'a>(
             v.len() - 1
         }
     };
-    &shaped[text][at]
+    &shaped[text][at].1
 }
 
 /// `text`'s width as a label (shaped once per distinct text and kept; a cache miss

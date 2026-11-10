@@ -515,8 +515,8 @@ fn types_resolve_hide_and_label_with_the_price() {
         .collect();
     assert!(texts.contains(&"Pivot 6010 : 6010.00"), "{texts:?}");
     assert!(
-        texts.contains(&"Supply : 6022.50"),
-        "a zone: its upper edge"
+        texts.contains(&"Supply : 6017.50"),
+        "a zone: the edge its label sits at (the demo's: the low edge)"
     );
     assert!(
         texts.contains(&"VWAP ±7.50"),
@@ -714,9 +714,9 @@ fn too_narrow_for_labels_no_labels_at_all() {
     let g = frame(&mut layer, 800.0);
     assert!(g > 0.0);
     assert!(layer.placed(i).iter().any(|p| p.label_y.is_some()));
-    // 40 % of 100 px (40) is under the shortest cut ("X…" and its chip, `LABEL_CHROME` wide,
+    // 40 % of 60 px (24) is under the shortest cut ("X…" and its chip, `LABEL_CHROME` wide,
     // in whole steps).
-    let g = frame(&mut layer, 100.0);
+    let g = frame(&mut layer, 60.0);
     assert_eq!(g, 0.0, "no gutter");
     assert!(
         layer.placed(i).iter().all(|p| p.label_y.is_none()),
@@ -1042,9 +1042,10 @@ fn a_series_only_push_keeps_label_state() {
 #[test]
 fn theme_change_drops_shaped_labels_only() {
     let mut layer = LevelsLayer::new(LevelsConfig::default());
-    layer
-        .shaped
-        .insert("Pivot 6010".into(), gpui::ShapedLine::default());
+    layer.shaped.insert(
+        "Pivot 6010".into(),
+        vec![(gpui::Hsla::default(), gpui::ShapedLine::default())],
+    );
     layer
         .cuts
         .insert("Pivot 6010".into(), (40.0, "P… 6010".into()));
