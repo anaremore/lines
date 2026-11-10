@@ -193,7 +193,7 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
                     _ => false,
                 };
                 let label = if hidden {
-                    format!("{} (P&L display: off)", p.label())
+                    format!("{} (P&L display: {})", p.label(), pnl.label())
                 } else {
                     p.label().to_owned()
                 };
@@ -723,6 +723,19 @@ mod tests {
         assert_eq!(labels(&off)[2], "Ticks (P&L display: off)");
         assert_eq!(labels(&off)[4], "P&L / contract (P&L display: off)");
         assert_eq!(labels(&off)[3], "Points");
+        // Ticks only: P&L is the hidden one, and the row names the mode.
+        let ticks = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Ticks,
+        });
+        assert_eq!(labels(&ticks)[2], "Ticks");
+        assert_eq!(labels(&ticks)[4], "P&L / contract (P&L display: ticks)");
+        let money = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Currency,
+        });
+        assert_eq!(labels(&money)[2], "Ticks (P&L display: currency)");
+        assert_eq!(labels(&money)[4], "P&L / contract");
     }
 
     #[test]

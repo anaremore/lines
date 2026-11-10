@@ -921,6 +921,21 @@ fn a_resize_never_collapses_the_box() {
         slot(a.time) + 1,
         "one bar short, not back where it began"
     );
+    // a's horizontal edge (the bottom) dragged onto b's: one tick below it.
+    r.frame(0.0, 0.0);
+    let (p, _) = r.d.measure_shown().unwrap();
+    let (a3, b3) = r.measure();
+    let (ex, ey) = ((p.p0.0 + p.p1.0) / 2.0, p.p0.1);
+    assert!(r.measure_down(ex, ey));
+    r.frame(ex, p.p1.1);
+    r.up(ex, p.p1.1);
+    let (a4, b4) = r.measure();
+    assert_eq!(b4, b3);
+    assert_eq!(
+        (a4.time, a4.price.0),
+        (a3.time, b3.price.0 - 25),
+        "one tick under b"
+    );
 }
 
 /// A tool chosen or hidden drawings: a press on the box isn't the measure's.

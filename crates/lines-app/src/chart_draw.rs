@@ -1229,13 +1229,15 @@ impl MeasureDrag {
             }
             Grip::Resize { time, price } => {
                 // An edge on the opposite one stops a bar or a tick short of it, on the side
-                // it came from: the box never collapses to no width or height (it couldn't be
+                // it started from (at the press): the box never collapses to no width or height (it couldn't be
                 // widened back by an edge). Past it, the box flips, as a ruler drawn back.
                 let mut ends = [a, b];
                 if let Some(i) = time {
                     let i = usize::from(i);
                     let other = ends[1 - i].time;
-                    ends[i].time = if at.time == other {
+                    // Same bar (an anchor can sit inside its bar after a timeframe change).
+                    let slot = |t| axis.index_of(t).map(|s| s.floor() as i64);
+                    ends[i].time = if slot(at.time).is_some() && slot(at.time) == slot(other) {
                         let step = if ends[i].time > other { 1.0 } else { -1.0 };
                         axis.index_of(other)
                             .and_then(|s| axis.slot_time(s.floor() as i64 + step as i64))
