@@ -284,7 +284,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         false,
         end,
         args(
-            "--layout trading --size 480x600 --theme light --ui-zoom 150 --enable-trading              --show-recording 724",
+            "--layout trading --size 480x600 --theme light --ui-zoom 150 --enable-trading --show-recording 724",
         ),
     ));
     // In-app updates (decision 0031) on the status line: ready (Restart to update), held by a

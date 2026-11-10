@@ -36,7 +36,7 @@ pub struct Safety {
     pub feeds: Vec<(String, &'static str)>,
     /// Recording: its elapsed time ("12:04").
     pub recording: Option<String>,
-    /// An update is staged: "Restart to update" (its version, for the tooltip).
+    /// An update is staged: "Restart to update" (the update's own words, for the tooltip).
     pub restart: Option<String>,
     /// A notice that needs action (a report, an update problem, an option trigger without its
     /// feed): its full text.
@@ -120,7 +120,7 @@ impl Safety {
                 kind: SafetyKind::Restart,
                 full: "Restart to update".to_owned(),
                 short: "Restart".to_owned(),
-                tip: format!("Update {version} is ready: restart to update"),
+                tip: version.clone(),
                 extra: 0.0,
             });
         }
@@ -241,6 +241,29 @@ pub struct Fit {
     pub links: usize,
     /// The ⋯ menu shows (some links folded).
     pub more: bool,
+    /// Even the short safety words don't fit beside the other zones (an extreme width): the
+    /// safety items take the whole footer as one flow, in order, with ⋯ last, wrapping onto
+    /// [`Fit::rows`] rows; nothing is clipped or dropped.
+    pub wrapped: bool,
+    /// Rows the footer takes (more than 1 only when wrapped).
+    pub rows: usize,
+}
+
+/// Lines needed to lay out `widths` (in order) within `width`, `gap` apart: a greedy wrap,
+/// one item at least per line.
+pub fn wrap_rows(widths: &[f32], width: f32, gap: f32) -> usize {
+    let mut rows = 1;
+    let mut x = 0.0f32;
+    for w in widths {
+        let need = if x == 0.0 { *w } else { gap + w };
+        if x > 0.0 && x + need > width {
+            rows += 1;
+            x = *w;
+        } else {
+            x += need;
+        }
+    }
+    rows
 }
 
 /// Fit the footer into `width` (logical px, at the zoom `measure` uses). Links fold first
@@ -294,6 +317,8 @@ pub fn fit(
                 activity: act,
                 links: k,
                 more: k < n,
+                wrapped: false,
+                rows: 1,
             };
         }
     }
@@ -311,15 +336,43 @@ pub fn fit(
                 activity: act,
                 links: 0,
                 more: n > 0,
+                wrapped: false,
+                rows: 1,
             };
         }
     }
-    // Too narrow even for that: the safety items in short words (and ⋯ to reach the links).
+    // Too narrow even for that: the safety items in short words wrap onto more rows, in
+    // order, with ⋯ last to reach the links. Nothing is clipped or dropped.
+    let mut widths: Vec<f32> = safety
+        .iter()
+        .map(|i| measure(&i.short) + i.extra * zoom)
+        .collect();
+    if n > 0 {
+        widths.push(measure(MORE));
+    }
     Fit {
         short_safety: true,
         activity: None,
         links: 0,
         more: n > 0,
+        wrapped: true,
+        rows: wrap_rows(&widths, width, gap),
+    }
+}
+
+/// Where the update's word goes: (restart: "Restart to update", its tooltip the label; a
+/// notice that needs action; background news for the activity line). `label` is
+/// `update::status_label`'s (text, loud, link).
+pub fn route_update(
+    label: Option<(String, bool, Option<crate::commands::Command>)>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    use crate::commands::Command;
+    match label {
+        None => (None, None, None),
+        Some((text, _, Some(Command::RestartToUpdate))) => (Some(text), None, None),
+        Some((text, true, _)) => (None, Some(text), None),
+        // Held until positions close, or available: news, not an action.
+        Some((text, false, _)) => (None, None, Some(text)),
     }
 }
 
@@ -345,36 +398,65 @@ pub fn feed_word(stale: bool, status: &lines_feed::store::FeedStatus) -> Option<
 /// Gather the safety zone's accounts, armed DOMs and feeds (every window and tab, hidden
 /// panes included), and the activity line's background work. The rest (recording, restart,
 /// notices) comes from the workspace.
-pub(crate) fn gather(cx: &gpui::App) -> (Safety, Option<Activity>) {
-    let mut safety = Safety::default();
-    let doms = crate::workspace::dom_switches(cx, None);
-    safety.armed = doms.iter().filter(|d| d.3).count();
+/// The armed DOM count and the account word, from every DOM's switch (`dom_switches`). The
+/// word is the most real account among the armed DOMs, so an idle LIVE DOM beside an armed
+/// paper one never reads as live trading; with none armed, the most real of all.
+pub(crate) fn accounts(
+    doms: &[crate::workspace::DomSwitch],
+    cx: &gpui::App,
+) -> (usize, Option<&'static str>) {
     let trading = crate::trading::Trading::try_global(cx);
-    for (_, account, _, _) in &doms {
+    let armed = doms.iter().filter(|d| d.3).count();
+    let mut account = None;
+    for (_, id, _, on) in doms {
+        if armed > 0 && !on {
+            continue;
+        }
         // As the DOM's own badge reads: no account is paper; a broker's account not listed
         // yet is LIVE until it says otherwise (never shown as simulated).
-        let word = match account {
+        let word = match id {
             None => "PAPER",
             Some(id) => trading
                 .and_then(|t| t.account(id))
                 .map_or("LIVE", |a| a.badge),
         };
-        safety.account = Some(safety.account.map_or(word, |w| more_real(w, word)));
+        account = Some(account.map_or(word, |w| more_real(w, word)));
     }
+    (armed, account)
+}
+
+/// Gather the safety zone's accounts, armed DOMs and feeds (every window and tab, hidden
+/// panes included), and the activity line's background work. Never waits on a feed: a store
+/// busy this instant keeps the words `prev` had (the UI never blocks on a feed). The rest
+/// (recording, restart, notices) comes from the workspace.
+pub(crate) fn gather(cx: &gpui::App, prev: &Safety) -> (Safety, Option<Activity>) {
+    let mut safety = Safety::default();
+    let doms = crate::workspace::dom_switches(cx, None);
+    (safety.armed, safety.account) = accounts(&doms, cx);
+    let mut busy = false;
     for store in crate::feeds::Feeds::registry(cx).stores() {
         let stale = store.stale_for().is_some();
-        let (label, word) = {
-            let d = store.read();
-            let label = d
-                .contract_label()
-                .map(|l| l.as_str().to_owned())
-                .unwrap_or_else(|| d.product.symbol.to_owned());
-            (label, feed_word(stale, &d.status))
+        let Some(d) = store.try_read() else {
+            busy = true;
+            continue;
         };
+        let label = d
+            .contract_label()
+            .map(|l| l.as_str().to_owned())
+            .unwrap_or_else(|| d.product.symbol.to_owned());
+        let word = feed_word(stale, &d.status);
+        drop(d);
         if let Some(word) = word
             && !safety.feeds.iter().any(|(l, _)| *l == label)
         {
             safety.feeds.push((label, word));
+        }
+    }
+    if busy {
+        for f in &prev.feeds {
+            if !safety.feeds.iter().any(|(l, _)| *l == f.0) {
+                safety.feeds.push(f.clone());
+            }
         }
     }
     safety.feeds.sort();
@@ -427,28 +509,6 @@ mod tests {
         ]
     }
 
-    /// The width a fit takes, laid out as the window does: three zones, two gaps between
-    /// them, items within a zone a gap apart.
-    fn width_of(f: &Fit, s: &[Item<SafetyKind>], a: Option<&Activity>, l: &[String]) -> f32 {
-        let zone = |ws: Vec<f32>| -> f32 {
-            ws.iter().sum::<f32>() + GAP * ws.len().saturating_sub(1) as f32
-        };
-        let safety = zone(
-            s.iter()
-                .map(|i| tw(if f.short_safety { &i.short } else { &i.full }) + i.extra)
-                .collect(),
-        );
-        let act = match (a, f.activity) {
-            (Some(a), Some(short)) => tw(if short { &a.short } else { &a.full }),
-            _ => 0.0,
-        };
-        let mut links: Vec<f32> = l[..f.links].iter().map(|x| tw(x)).collect();
-        if f.more {
-            links.push(tw(MORE));
-        }
-        safety + act + zone(links) + 2.0 * GAP
-    }
-
     /// The safety items are present, in their fixed order, at every width: shortened, never
     /// dropped.
     #[test]
@@ -460,27 +520,107 @@ mod tests {
         assert_eq!(kinds, sorted, "fixed order");
         assert_eq!(kinds.len(), 6);
         let a = Activity::progress("↓", "Download days", 62, 100);
-        for w in (100..=2400).step_by(20) {
-            let f = fit(w as f32, &items, Some(&a), &links(), GAP, 1.0, &tw);
-            // Every safety item is drawn whatever the fit says about the rest.
-            let used = width_of(&f, &items, Some(&a), &links());
-            let safety_alone = width_of(
-                &Fit {
-                    activity: None,
-                    links: 0,
-                    more: false,
-                    ..f
-                },
-                &items,
-                None,
-                &links(),
-            );
-            assert!(
-                used <= w as f32 || (f.short_safety && f.activity.is_none() && f.links == 0),
-                "{w}: {f:?} needs {used}"
-            );
-            assert!(f.short_safety || safety_alone <= w as f32, "{w}: {f:?}");
+        // From the widest single item (no width can show less) up.
+        let widest = items
+            .iter()
+            .map(|i| tw(&i.short) + i.extra)
+            .fold(0.0f32, f32::max);
+        for zoom in [1.0f32, 1.5] {
+            let z = |s: &str| tw(s) * zoom;
+            for w in (widest * zoom).ceil() as usize..=2400 {
+                let w = w as f32;
+                let f = fit(w, &items, Some(&a), &links(), GAP * zoom, zoom, &z);
+                if !f.wrapped {
+                    assert_eq!(f.rows, 1);
+                    // One row: everything shown fits; nothing overlaps.
+                    let used = width_scaled(&f, &items, Some(&a), &links(), zoom);
+                    assert!(used <= w, "{w} at {zoom}: {f:?} needs {used}");
+                } else {
+                    // Wrapped: every row holds its items, in order, nothing else shows.
+                    assert!(
+                        f.short_safety && f.activity.is_none() && f.links == 0,
+                        "{f:?}"
+                    );
+                    let mut widths: Vec<f32> =
+                        items.iter().map(|i| z(&i.short) + i.extra * zoom).collect();
+                    widths.push(z(MORE));
+                    assert_eq!(f.rows, wrap_rows(&widths, w, GAP * zoom));
+                    for x in &widths {
+                        assert!(*x <= w, "an item wider than the row at {w}");
+                    }
+                }
+            }
         }
+    }
+
+    fn width_scaled(
+        f: &Fit,
+        s: &[Item<SafetyKind>],
+        a: Option<&Activity>,
+        l: &[String],
+        zoom: f32,
+    ) -> f32 {
+        let tw = |x: &str| tw(x) * zoom;
+        let gap = GAP * zoom;
+        let zone = |ws: Vec<f32>| -> f32 {
+            ws.iter().sum::<f32>() + gap * ws.len().saturating_sub(1) as f32
+        };
+        let safety = zone(
+            s.iter()
+                .map(|i| tw(if f.short_safety { &i.short } else { &i.full }) + i.extra * zoom)
+                .collect(),
+        );
+        let act = match (a, f.activity) {
+            (Some(a), Some(short)) => tw(if short { &a.short } else { &a.full }),
+            _ => 0.0,
+        };
+        let mut links: Vec<f32> = l[..f.links].iter().map(|x| tw(x)).collect();
+        if f.more {
+            links.push(tw(MORE));
+        }
+        safety + act + zone(links) + 2.0 * gap
+    }
+
+    #[test]
+    fn rows_wrap_in_order() {
+        assert_eq!(wrap_rows(&[10.0, 10.0, 10.0], 100.0, 5.0), 1);
+        assert_eq!(wrap_rows(&[10.0, 10.0, 10.0], 25.0, 5.0), 2);
+        assert_eq!(wrap_rows(&[10.0, 10.0, 10.0], 12.0, 5.0), 3);
+        assert_eq!(wrap_rows(&[], 12.0, 5.0), 1);
+    }
+
+    /// The update's word: a staged update is "Restart to update" with its label as the tip; a
+    /// problem (loud) is a notice; held or available is background news.
+    #[test]
+    fn update_words_go_where_they_belong() {
+        use crate::commands::Command;
+        let ready = "Update ready: v0.4.0 · Restart to update".to_owned();
+        let (restart, notice, news) =
+            route_update(Some((ready.clone(), false, Some(Command::RestartToUpdate))));
+        assert_eq!(
+            (restart.as_deref(), notice, news),
+            (Some(ready.as_str()), None, None)
+        );
+        let s = Safety {
+            restart,
+            ..Default::default()
+        };
+        let item = &s.items()[0];
+        assert_eq!(
+            (item.full.as_str(), item.tip.as_str()),
+            ("Restart to update", ready.as_str())
+        );
+        let roll = "This version failed to start twice: Roll back to v0.3.13".to_owned();
+        assert_eq!(
+            route_update(Some((roll.clone(), true, Some(Command::RollBackUpdate)))),
+            (None, Some(roll), None)
+        );
+        let held = "Update ready: v0.4.0 · Waits: 1 open position".to_owned();
+        assert_eq!(
+            route_update(Some((held.clone(), false, None))),
+            (None, None, Some(held))
+        );
+        assert_eq!(route_update(None), (None, None, None));
     }
 
     /// The safety words shorten only after every link folded and the activity shortened.

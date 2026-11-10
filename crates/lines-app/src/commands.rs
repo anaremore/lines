@@ -830,7 +830,7 @@ pub fn label(c: Command) -> String {
         Command::DownloadDays => "Download days…".into(),
         Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
         Command::ToggleStudies => "Chart: hide/show studies".into(),
-        Command::CleanChart => "Clean chart (no study labels, no key hints)".into(),
+        Command::CleanChart => "Clean chart (no study labels)".into(),
         Command::ShowKeys => "Keyboard shortcuts…".into(),
         Command::FooterLink(k) => k.name().into(),
         Command::Columns(ColumnCmd::Toggle(c)) => format!("Show/hide {}", c.label()),

@@ -791,6 +791,8 @@ pub struct WindowView {
     rec_shown: bool,
     /// A one-second re-render is scheduled (the REC time).
     rec_tick: bool,
+    /// Rows the footer took last frame (1 unless an extreme width wrapped its safety zone).
+    footer_rows: usize,
     menu: Option<Menu>,
     prompt: Option<Prompt>,
     /// The replay bar, while a replay plays (`crate::replay_bar`).
@@ -840,6 +842,7 @@ impl WindowView {
             hover_tab: None,
             rec_shown: false,
             rec_tick: false,
+            footer_rows: 1,
             menu: None,
             prompt: None,
             replay_bar: None,
@@ -1173,10 +1176,9 @@ impl WindowView {
         }
     }
 
-    /// The footer's recording indicator: a red dot, "REC" and the elapsed time (never the dot
-    /// alone), and "Stop recording" one click away. While recording the window re-renders once
+    /// Recording: its elapsed time, for the footer's REC item (a red dot, "REC" and the time,
+    /// never the dot alone, and Stop one click away). While recording the window re-renders once
     /// a second for the time (render, not paint: the bars and books paint as before).
-    /// Recording: its elapsed time ("12:04"), ticking once a second while it shows.
     fn recording_label(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let (status, now) = match crate::recording::fixture() {
             Some(f) => f,
@@ -1293,14 +1295,16 @@ impl WindowView {
     fn content_area(&self, window: &Window, cx: &App) -> Rect {
         let vs = window.viewport_size();
         let (w, h) = (f32::from(vs.width), f32::from(vs.height));
-        // The footer is always there: its safety zone never hides (docs/design.md §3).
+        // The footer is always there: its safety zone never hides (docs/design.md §3). It is
+        // one row unless an extreme width wraps it (`footer::Fit::rows`).
         let _ = cx;
         let replay = if self.replay_bar.is_some() {
             crate::replay_bar::bar_h()
         } else {
             0.0
         };
-        Rect::new(0.0, 0.0, w, (h - self.bar_h() - footer_h() - replay).max(0.0))
+        let foot = footer_h() * self.footer_rows.max(1) as f32;
+        Rect::new(0.0, 0.0, w, (h - self.bar_h() - foot - replay).max(0.0))
     }
 
     fn focus_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -2983,27 +2987,23 @@ impl WindowView {
         let ws = cx.global::<Workspace>();
         let mut safety = ws.safety.clone();
         safety.recording = recording;
+        // Armed DOMs and the account word from this frame (an arm shows at once).
+        let doms = dom_switches(cx, Some((self.window_id, &self.tabs)));
+        (safety.armed, safety.account) = footer::accounts(&doms, cx);
+        let ws = cx.global::<Workspace>();
         // Notices that need action: reports, a loud update word, a trigger that can't fire.
         let mut notices: Vec<String> = Vec::new();
         let first = ws.windows.first().map(|w| w.window_id());
         let reports = ws.notices.text().filter(|_| first.is_some());
         notices.extend(reports.clone());
-        let mut update_cmd = None;
-        let mut available = None;
-        if let Some((text, loud, cmd)) = ws.update_label.clone() {
-            match cmd {
-                Some(Command::RestartToUpdate) => {
-                    safety.restart = Some(text);
-                    update_cmd = cmd;
-                }
-                _ if loud => {
-                    notices.push(text);
-                    update_cmd = cmd;
-                }
-                // Held until positions close, or available: background news.
-                _ => available = Some(text),
-            }
-        }
+        // A loud update word's action (roll back) runs from the notice.
+        let update_cmd = ws
+            .update_label
+            .as_ref()
+            .and_then(|(_, loud, cmd)| cmd.filter(|_| *loud));
+        let (restart, update_notice, available) = footer::route_update(ws.update_label.clone());
+        safety.restart = restart;
+        notices.extend(update_notice);
         let mut quiet_trigger = None;
         if let Some((text, loud)) = ws.trigger_status.clone() {
             if loud {
@@ -3085,7 +3085,9 @@ impl WindowView {
         // link measured bold only folds a little early, never overflows.
         let mut font = window.text_style().font();
         font.weight = FontWeight::BOLD;
-        let measure = |s: &str| -> f32 {
+        // Measured once per string this frame (`fit` asks for each many times).
+        let seen: std::cell::RefCell<Vec<(String, f32)>> = Default::default();
+        let measure_text = |s: &str| -> f32 {
             let run = gpui::TextRun {
                 len: s.len(),
                 font: font.clone(),
@@ -3101,6 +3103,14 @@ impl WindowView {
                 None,
             );
             f32::from(line.width).ceil()
+        };
+        let measure = |s: &str| -> f32 {
+            if let Some((_, w)) = seen.borrow().iter().find(|(t, _)| t == s) {
+                return *w;
+            }
+            let w = measure_text(s);
+            seen.borrow_mut().push((s.to_owned(), w));
+            w
         };
         // Each item's own padding counts as part of its text.
         let pad = crate::zoom::f(8.0);
@@ -3126,11 +3136,13 @@ impl WindowView {
                 .px_1()
                 .whitespace_nowrap()
         };
+        let wrapped = fit.wrapped;
         let mut left = div()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
+            .when(wrapped, |d| d.flex_1().flex_wrap())
             .gap(crate::zoom::ui(footer::GAP));
         for item in &items {
             let words = if fit.short_safety {
@@ -3178,7 +3190,7 @@ impl WindowView {
                         div()
                             .id("recording-stop")
                             // At least the 20 px hit target (docs/design.md), within the footer.
-                            .min_h(crate::zoom::hit(20.0).min(crate::zoom::ui(20.0)))
+                            .min_h(crate::zoom::ui(20.0))
                             .flex()
                             .items_center()
                             .px_2()
@@ -3237,6 +3249,8 @@ impl WindowView {
             };
             left = left.child(el);
         }
+        // Wrapped (an extreme width): the safety zone takes the footer, ⋯ last in its flow.
+        let rows = fit.rows;
         let center = div()
             .flex_1()
             .min_w_0()
@@ -3320,9 +3334,21 @@ impl WindowView {
                     ),
             );
         }
+        // Wrapped: the safety flow takes the whole footer, ⋯ last in it, with no empty zones
+        // beside it (their gaps would narrow it and wrap it once more than `fit` counted).
+        let zones = if wrapped {
+            vec![left.child(right).into_any_element()]
+        } else {
+            vec![
+                left.into_any_element(),
+                center.into_any_element(),
+                right.into_any_element(),
+            ]
+        };
+        self.footer_rows = rows;
         div()
             .id("footer")
-            .h(px(footer_h()))
+            .h(px(footer_h() * rows as f32))
             .flex_none()
             .flex()
             .flex_row()
@@ -3335,9 +3361,16 @@ impl WindowView {
             .bg(t.panel)
             .border_t_1()
             .border_color(t.axis_line)
-            .child(left)
-            .child(center)
-            .child(right)
+            // A right click anywhere on the footer opens its menu (show or hide each link),
+            // so a hidden link always has a way back.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, e: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.open_footer_menu(e.position, None, cx);
+                }),
+            )
+            .children(zones)
             .into_any_element()
     }
 
@@ -3961,6 +3994,8 @@ impl Render for WindowView {
             self.hover_pane = None;
             self.hover_tab = None;
         }
+        // The footer first: its rows set the content's height this frame.
+        let footer = self.footer_bar(window, cx);
         let area = self.content_area(window, cx);
         let content = if self.tabs.is_empty() {
             Vec::new()
@@ -3971,7 +4006,6 @@ impl Render for WindowView {
         let bar = self
             .shows_bar()
             .then(|| self.tab_bar(cx).into_any_element());
-        let footer = self.footer_bar(window, cx);
         div()
             .size_full()
             .relative()
@@ -4829,7 +4863,8 @@ pub(crate) fn refresh_trigger_status(cx: &mut App) {
     let mode = crate::picker_view::settings(cx).updates;
     crate::update::set_mode(mode, cx);
     let update = crate::update::status_label(cx);
-    let (safety, activity) = crate::footer::gather(cx);
+    let prev = cx.global::<Workspace>().safety.clone();
+    let (safety, activity) = crate::footer::gather(cx, &prev);
     let ws = cx.global_mut::<Workspace>();
     // Busy this instant: last time's count stands.
     let open = open.or(ws.open_positions);
