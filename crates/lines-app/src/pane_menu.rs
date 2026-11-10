@@ -483,15 +483,15 @@ fn chart_trades(c: &ChartMenu) -> MenuItem {
     let mut sub = vec![
         toggle("Show trades", Command::ToggleTrades, !t.hidden),
         toggle("Entry–exit lines", Command::ToggleTradeLines, !t.no_lines),
-        toggle("P&L labels", Command::ToggleTradeLabels, !t.no_labels),
-        MenuItem::sep(),
+        toggle("Labels", Command::ToggleTradeLabels, !t.no_labels),
+        MenuItem::header("Account"),
         pick(
             "This pane's account",
             Command::TradeAccounts(false),
             !t.all_accounts,
         ),
         pick("All accounts", Command::TradeAccounts(true), t.all_accounts),
-        MenuItem::sep(),
+        MenuItem::header("Period"),
     ];
     for p in crate::trade_marks::Period::ALL {
         sub.push(pick(p.label(), Command::TradePeriod(p), t.period == p));
@@ -811,14 +811,14 @@ mod tests {
             [
                 "Show trades",
                 "Entry–exit lines",
-                "P&L labels",
-                "---",
+                "Labels",
+                "Account",
                 "This pane's account",
                 "All accounts",
-                "---",
+                "Period",
                 "Today",
                 "This week",
-                "All"
+                "All dates"
             ]
         );
         let show = &v[2].sub;

@@ -82,6 +82,17 @@ pub struct Row {
     pub shot: Option<String>,
 }
 
+/// The scroll that shows row `i` with `visible` rows in view, moving as little as it can.
+fn reveal_scroll(scroll: usize, i: usize, visible: usize) -> usize {
+    if i < scroll {
+        i
+    } else if i >= scroll + visible {
+        i + 1 - visible.max(1)
+    } else {
+        scroll
+    }
+}
+
 fn money_text(m: Money) -> String {
     let mut s = String::new();
     let _ = pnl::write_money(&mut s, m);
@@ -614,6 +625,8 @@ pub struct JournalView {
     selected: Option<String>,
     /// First row shown.
     scroll: usize,
+    /// Bring the selected trade into view at the next paint (`select_trade`).
+    reveal: bool,
     editor: Option<Editor>,
     glyphs: Glyphs,
     cols: Columns,
@@ -720,6 +733,7 @@ impl JournalView {
             all_dates: false,
             selected: None,
             scroll: 0,
+            reveal: false,
             editor: None,
             glyphs: Glyphs::new(TEXT_PX),
             cols: Columns::new(Table::Journal),
@@ -796,9 +810,8 @@ impl JournalView {
     pub fn select_trade(&mut self, id: &str, cx: &mut Context<Self>) {
         self.group = JournalGroup::Trades;
         self.selected = Some(id.to_owned());
-        if let Some(i) = self.selected_index() {
-            self.scroll = self.scroll.min(i);
-        }
+        // Scrolled to at paint: a journal opened for it has no rows or size yet.
+        self.reveal = true;
         cx.notify();
     }
 
@@ -1084,6 +1097,13 @@ impl JournalView {
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         self.common.paints += 1;
         self.bounds = bounds;
+        // A trade selected from a chart: brought into view once its row exists.
+        if self.reveal
+            && let Some(i) = self.selected_index()
+        {
+            self.scroll = reveal_scroll(self.scroll, i, self.visible_rows());
+            self.reveal = false;
+        }
         let t = self.theme;
         let hair = 1.0 / window.scale_factor();
         let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
@@ -1800,6 +1820,16 @@ mod tests {
 
     /// P&L by account and by tag (best net first, untagged last; a trade with two
     /// tags counts in each); money only in a currency mode.
+    #[test]
+    fn a_trade_opened_from_a_chart_scrolls_into_view() {
+        // 10 rows in view from 0: row 150 is brought to the bottom, row 3 stays put,
+        // a row above the view goes to the top.
+        assert_eq!(reveal_scroll(0, 150, 10), 141);
+        assert_eq!(reveal_scroll(0, 3, 10), 0);
+        assert_eq!(reveal_scroll(40, 12, 10), 12);
+        assert_eq!(reveal_scroll(0, 5, 0), 5, "no size yet: the row itself");
+    }
+
     #[test]
     fn groups_by_account_and_tag() {
         let win = trade(); // +$310.02, tags breakout and A+, account "paper"

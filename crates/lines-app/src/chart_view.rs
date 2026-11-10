@@ -717,6 +717,7 @@ impl ChartView {
             self.measure_lines.clear();
             self.profile.theme_changed();
             self.levels.theme_changed();
+            self.trade_marks.theme_changed();
         }
         self.theme = theme;
     }
@@ -3466,6 +3467,10 @@ impl ChartView {
                 self.trade_tip_seen = tip;
                 cx.notify();
             }
+            // The hovered marker's label steps aside while its hover text (rendered from these
+            // positions) is open.
+            let tip_open = tip.filter(|_| self.trade_mark_tip_allowed());
+            self.trade_marks.set_hovered(tip_open);
             // The legend says why footprint bars are candles: re-render when that changes.
             let fb = self.footprint.fallbacks();
             if fb != self.fp_seen {
@@ -6277,17 +6282,21 @@ impl ChartView {
         self.trade_marks.config
     }
 
-    /// The hovered trade marker's text, beside it.
-    fn trade_mark_tip(&self, t: &Theme) -> Option<AnyElement> {
-        if self.drag.is_some()
+    /// Whether a trade marker's hover text may open (no drag, edit or pick under way).
+    fn trade_mark_tip_allowed(&self) -> bool {
+        !(self.drag.is_some()
             || self.ct.drag.is_some()
             || self.ct.adding.is_some()
             || self.ct.pos_drag
             || self.ct.strip_pick.is_some()
             || self.anchoring.is_some()
             || self.drawings.active()
-            || self.takes_text()
-        {
+            || self.takes_text())
+    }
+
+    /// The hovered trade marker's text, beside it.
+    fn trade_mark_tip(&self, t: &Theme) -> Option<AnyElement> {
+        if !self.trade_mark_tip_allowed() {
             return None;
         }
         let (x, y) = self.hover?;
@@ -6299,7 +6308,6 @@ impl ChartView {
             f32::from(self.plot.size.height),
         );
         let (first, rest) = trade.lines.split_first()?;
-        let (hint, rest) = rest.split_last()?;
         let mut tip = div()
             .absolute()
             .left(px(left))
@@ -6324,10 +6332,7 @@ impl ChartView {
                 .child(div().text_color(t.text_dim).child("This order's fills"))
                 .children(mark.fills.iter().map(|f| div().child(f.clone())));
         }
-        Some(
-            tip.child(div().text_color(t.text_dim).child(hint.clone()))
-                .into_any_element(),
-        )
+        Some(tip.into_any_element())
     }
 
     /// Rebuild the strategy markers when the instances, the fills or the contract moved (the

@@ -64,6 +64,12 @@ fn command(cmd: Command) -> Option<Command> {
         ) => Some(cmd),
         // Trading keys act on this window's pane, as in main windows.
         Command::Trade(_) => Some(cmd),
+        // A popped-out chart's trade history (Alt+E, its menu's switch).
+        Command::ToggleTrades
+        | Command::ToggleTradeLines
+        | Command::ToggleTradeLabels
+        | Command::TradeAccounts(_)
+        | Command::TradePeriod(_) => Some(cmd),
         // An order tag's menu (no key reaches here with one).
         Command::Order(_) => Some(cmd),
         // The UI zoom is app-wide: its keys work from every window.
@@ -155,6 +161,20 @@ impl PaneWindow {
             }
             Some(c @ (Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)) => {
                 cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
+            }
+            Some(
+                c @ (Command::ToggleTrades
+                | Command::ToggleTradeLines
+                | Command::ToggleTradeLabels
+                | Command::TradeAccounts(_)
+                | Command::TradePeriod(_)),
+            ) => {
+                if let PaneHandle::Chart(chart) = &self.handle {
+                    chart.update(cx, |ch, cx| {
+                        let t = crate::trade_marks::apply(c, ch.trades_config());
+                        ch.set_trades(t, cx);
+                    });
+                }
             }
             // Every strategy command by name: hiding markers must never fall through to a stop.
             Some(Command::Strategy(c)) => {
@@ -283,6 +303,14 @@ impl PaneWindow {
                     "Strategy markers",
                     Command::Strategy(commands::StrategyCmd::ToggleMarks),
                     !c.strategy_marks_hidden(),
+                )
+                .switch(),
+            );
+            items.push(
+                MenuItem::named(
+                    "Show trades",
+                    Command::ToggleTrades,
+                    !c.trades_config().hidden,
                 )
                 .switch(),
             );
@@ -491,6 +519,13 @@ mod tests {
         // A popped-out chart's menu toggles its markers.
         let marks = Command::Strategy(StrategyCmd::ToggleMarks);
         assert_eq!(command(marks), Some(marks));
+        // Trade history on a popped-out chart, too.
+        for c in [
+            Command::ToggleTrades,
+            Command::TradePeriod(crate::trade_marks::Period::Week),
+        ] {
+            assert_eq!(command(c), Some(c));
+        }
         // Starting stays in main windows (the strategy panel).
         assert_eq!(command(Command::Strategy(StrategyCmd::Start)), None);
     }

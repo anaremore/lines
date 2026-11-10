@@ -1497,20 +1497,10 @@ impl WindowView {
             Command::ToggleTrades
             | Command::ToggleTradeLines
             | Command::ToggleTradeLabels
-            | Command::ToggleTradeAccounts
             | Command::TradeAccounts(_)
             | Command::TradePeriod(_) => match self.tab().focused_handle().cloned() {
                 Some(PaneHandle::Chart(chart)) => chart.update(cx, |c, cx| {
-                    let mut t = c.trades_config();
-                    match cmd {
-                        Command::ToggleTrades => t.hidden = !t.hidden,
-                        Command::ToggleTradeLines => t.no_lines = !t.no_lines,
-                        Command::ToggleTradeLabels => t.no_labels = !t.no_labels,
-                        Command::ToggleTradeAccounts => t.all_accounts = !t.all_accounts,
-                        Command::TradeAccounts(all) => t.all_accounts = all,
-                        Command::TradePeriod(p) => t.period = p,
-                        _ => {}
-                    }
+                    let t = crate::trade_marks::apply(cmd, c.trades_config());
                     c.set_trades(t, cx);
                 }),
                 _ => self.refuse("focus a chart first", cx),

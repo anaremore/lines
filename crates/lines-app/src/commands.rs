@@ -86,8 +86,6 @@ pub enum Command {
     ToggleTradeLines,
     /// Its labels, on or off.
     ToggleTradeLabels,
-    /// Every account's trades, or only this pane's.
-    ToggleTradeAccounts,
     /// Every account's trades (`true`) or only this pane's (the menu's picks).
     TradeAccounts(bool),
     /// Which trades, by trade date.
@@ -864,7 +862,6 @@ pub fn label(c: Command) -> String {
         Command::ToggleTrades => "Show trades on the chart".into(),
         Command::ToggleTradeLines => "Trades: entry–exit lines".into(),
         Command::ToggleTradeLabels => "Trades: labels".into(),
-        Command::ToggleTradeAccounts => "Trades: all accounts".into(),
         Command::TradeAccounts(true) => "Trades: all accounts".into(),
         Command::TradeAccounts(false) => "Trades: this pane's account".into(),
         Command::TradePeriod(p) => format!("Trades: {}", p.label().to_lowercase()),
@@ -1044,7 +1041,6 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleTrades,
         Command::ToggleTradeLines,
         Command::ToggleTradeLabels,
-        Command::ToggleTradeAccounts,
         Command::TradeAccounts(false),
         Command::TradeAccounts(true),
         Command::TradePeriod(crate::trade_marks::Period::Today),

@@ -6,13 +6,15 @@
 //!   marker per order at its average price. The journal records fills, not orders, so an
 //!   "order" here is a run of consecutive same-side fills in the trade (`orders`): two orders
 //!   that fill back to back on the same side read as one (docs/known-gaps.md).
-//! - **Entry to exit:** a dotted line from the average entry (first entry's time) to the
-//!   average exit (last exit's time), green for a winner, red for a loser, dim for flat, and the
-//!   last exit's label carries the P&L, so color is never the only cue.
+//! - **Entry to exit:** a line of dots from the average entry (first entry's time) to the
+//!   average exit (last exit's time) for a winner, of dashes for a loser (up/down colors), dim
+//!   dots for flat; the pattern and the last exit's signed P&L say it, never color alone.
+//!   An order whose fills differ in price says `avg` (its price needn't be on the grid).
 //! - **Labels** (`B 2 @ 7510.00`, the exit's `· +$1,800`) follow the P&L display setting:
 //!   with it off, side, size and price only.
 //! - **Hover** lists the trade (side, size, prices, times, ticks, money, duration) and the
-//!   hovered order's fills; a **click** opens the trade in the journal.
+//!   hovered order's fills (the hovered marker's own label steps aside for it); a **click**
+//!   opens the trade in the journal.
 //! - **Options** per chart (`TradesConfig`, an optional `ChartState` field): shown (Alt+E),
 //!   entry–exit lines, labels, which accounts (this pane's or all) and the period (today, this
 //!   week, all, by the session's trade date on the chart's clock: the replay's in a replay).
@@ -52,7 +54,7 @@ impl Period {
         match self {
             Period::Today => "Today",
             Period::Week => "This week",
-            Period::All => "All",
+            Period::All => "All dates",
         }
     }
 
@@ -96,6 +98,21 @@ impl TradesConfig {
     pub fn is_default(&self) -> bool {
         *self == TradesConfig::default()
     }
+}
+
+/// A trade-history command applied to a chart's options (main and popped-out windows alike);
+/// anything else leaves them as they are.
+pub fn apply(cmd: crate::commands::Command, mut t: TradesConfig) -> TradesConfig {
+    use crate::commands::Command;
+    match cmd {
+        Command::ToggleTrades => t.hidden = !t.hidden,
+        Command::ToggleTradeLines => t.no_lines = !t.no_lines,
+        Command::ToggleTradeLabels => t.no_labels = !t.no_labels,
+        Command::TradeAccounts(all) => t.all_accounts = all,
+        Command::TradePeriod(p) => t.period = p,
+        _ => {}
+    }
+    t
 }
 
 /// One order: a run of consecutive same-side fills in a trade.
@@ -228,7 +245,8 @@ pub fn build(
             summary.push_str(" · entry approximate");
         }
         let mut result = Vec::new();
-        if mode.ticks() && ticks != "—" {
+        // Ticks alone are the P&L cell already (per contract): not twice.
+        if mode.ticks() && mode.money() && ticks != "—" {
             result.push(format!("{ticks} t"));
         }
         if pnl != "—" {
@@ -248,14 +266,23 @@ pub fn build(
                     crate::journal_view::clock_text(t.exit_time)
                 ),
                 result.join(" · "),
-                "Click: open in the journal".to_owned(),
             ],
         });
         let orders = orders(&t.fills);
         let last_exit = orders.iter().rposition(|o| o.side != t.side);
         for (k, o) in orders.iter().enumerate() {
             let letter = if o.side == Side::Buy { "B" } else { "S" };
-            let mut label = format!("{letter} {} @ {}", qty_text(o.qty), price_text(o.price));
+            let run = &t.fills[o.fills.clone()];
+            let avg = if run.iter().any(|f| f.price != run[0].price) {
+                "avg "
+            } else {
+                ""
+            };
+            let mut label = format!(
+                "{letter} {} @ {avg}{}",
+                qty_text(o.qty),
+                price_text(o.price)
+            );
             if Some(k) == last_exit && pnl != "—" {
                 label.push_str(" · ");
                 label.push_str(pnl);
@@ -302,6 +329,31 @@ const LABEL_PAD_100: f32 = 4.0;
 /// Dots along an entry–exit line: every `DOT_STEP` px, `DOT` px square.
 const DOT_STEP: f32 = 6.0;
 const DOT: f32 = 2.0;
+/// A loser's dashes: `DASH_DOTS` dots in a row every `DASH_STEP` px.
+const DASH_STEP: f32 = 10.0;
+const DASH_DOTS: i32 = 3;
+
+/// The part of the segment `a`->`b` inside the plot (0..w, 0..h), as the parameter range
+/// `t0..=t1` within 0..=1 (Liang-Barsky); `None` when it misses the plot.
+fn clip(a: (f32, f32), b: (f32, f32), w: f32, h: f32) -> Option<(f32, f32)> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-dx, a.0), (dx, w - a.0), (-dy, a.1), (dy, h - a.1)] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                t0 = t0.max(r);
+            } else {
+                t1 = t1.min(r);
+            }
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
+}
 
 /// The layer: marks rebuilt on change, positions per frame.
 #[derive(Default)]
@@ -315,6 +367,8 @@ pub struct TradeMarksLayer {
     /// Each mark's label, shaped once (at the zoom generation in `shaped_at`).
     shaped: Vec<Option<ShapedLine>>,
     shaped_at: u32,
+    /// The marker under the pointer (its hover text repeats its label, which steps aside).
+    hovered: Option<usize>,
     /// The inputs `built` came from.
     key: Option<BuildKey>,
 }
@@ -348,6 +402,16 @@ impl TradeMarksLayer {
         self.lines = Vec::with_capacity(self.built.links.len());
         self.shaped = vec![None; self.built.marks.len()];
         true
+    }
+
+    /// Text is shaped in the theme's color: a new theme shapes it again.
+    pub fn theme_changed(&mut self) {
+        self.shaped.iter_mut().for_each(|l| *l = None);
+    }
+
+    /// The marker whose hover text is open (`hit_index` of the pointer), if any.
+    pub fn set_hovered(&mut self, i: Option<usize>) {
+        self.hovered = i;
     }
 
     /// Build again on the next poll (an option changed).
@@ -435,26 +499,45 @@ impl TradeMarksLayer {
     ) {
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let (pw, ph) = (f32::from(plot.size.width), f32::from(plot.size.height));
-        // Entry–exit lines first (under the markers): dots along the segment, inside the plot.
+        // Entry–exit lines first (under the markers): dots for a winner or flat, dashes for a
+        // loser, stepped only over the part inside the plot (a far-off end costs nothing).
         for &(x0, y0, x1, y1, i) in &self.lines {
-            let color = match self.built.links[i].win {
+            let win = self.built.links[i].win;
+            let color = match win {
                 Some(true) => theme.up,
                 Some(false) => theme.down,
                 None => theme.text_dim,
             };
             let len = (x1 - x0).hypot(y1 - y0);
-            let n = (len / DOT_STEP).floor() as i32;
-            for k in 0..=n {
-                let f = if n == 0 { 0.0 } else { k as f32 / n as f32 };
-                let (x, y) = (x0 + (x1 - x0) * f, y0 + (y1 - y0) * f);
-                if (0.0..=pw).contains(&x) && (0.0..=ph).contains(&y) {
-                    window.paint_quad(gpui::fill(
-                        Bounds::new(
-                            point(px(ox + x - DOT / 2.0), px(oy + y - DOT / 2.0)),
-                            size(px(DOT), px(DOT)),
-                        ),
-                        color,
-                    ));
+            let Some((t0, t1)) = clip((x0, y0), (x1, y1), pw, ph) else {
+                continue;
+            };
+            // A dash is a few dots in a row along the line.
+            let (step, run) = if win == Some(false) {
+                (DASH_STEP, DASH_DOTS)
+            } else {
+                (DOT_STEP, 1)
+            };
+            let (ux, uy) = if len > 0.0 {
+                ((x1 - x0) / len, (y1 - y0) / len)
+            } else {
+                (0.0, 0.0)
+            };
+            let first = (t0 * len / step).ceil() as i64;
+            let last = (t1 * len / step).floor() as i64;
+            for k in first..=last {
+                for d in 0..run {
+                    let along = k as f32 * step + d as f32 * DOT;
+                    let (x, y) = (x0 + ux * along, y0 + uy * along);
+                    if (0.0..=pw).contains(&x) && (0.0..=ph).contains(&y) {
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(
+                                point(px(ox + x - DOT / 2.0), px(oy + y - DOT / 2.0)),
+                                size(px(DOT), px(DOT)),
+                            ),
+                            color,
+                        ));
+                    }
                 }
             }
         }
@@ -496,6 +579,9 @@ impl TradeMarksLayer {
         let pad = crate::zoom::f(LABEL_PAD_100);
         let h = text_px + 2.0 * pad * 0.5 + 2.0;
         for &(x, y, i) in &self.shown {
+            if self.hovered == Some(i) {
+                continue; // its hover text says it, in its place
+            }
             let mark = &self.built.marks[i];
             if self.shaped[i].is_none() {
                 let font = window.text_style().font();
@@ -628,7 +714,10 @@ mod tests {
         assert_eq!(b.trades.len(), 2, "this pane's account, today");
         // One marker per order: the two buys are one order at their average.
         assert_eq!(b.marks.len(), 4);
-        assert_eq!(b.marks[0].label, "B 2 @ 7510.00");
+        assert_eq!(
+            b.marks[0].label, "B 2 @ 7510.00",
+            "same-price fills: no avg"
+        );
         assert!(
             b.marks[1].label.starts_with("S 2 @ 7528.00 · "),
             "{}",
@@ -709,6 +798,76 @@ mod tests {
         assert_eq!(o[0].at, UtcMillis(1));
         assert_eq!((o[1].side, o[1].qty, o[1].price), (Side::Sell, 2, 752800.0));
         assert!(orders(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_line_is_stepped_only_inside_the_plot() {
+        // Wholly inside: all of it.
+        assert_eq!(
+            clip((10.0, 10.0), (90.0, 50.0), 100.0, 100.0),
+            Some((0.0, 1.0))
+        );
+        // From a million px off the left: only the last 50 px, so a few steps.
+        let (t0, t1) = clip((-1.0e6, 50.0), (50.0, 50.0), 100.0, 100.0).unwrap();
+        assert_eq!(t1, 1.0);
+        assert!((1.0 - t0) * (1.0e6 + 50.0) < 51.0, "{t0}");
+        // Missing the plot: nothing.
+        assert_eq!(clip((-50.0, -10.0), (-10.0, -50.0), 100.0, 100.0), None);
+        assert_eq!(clip((10.0, 200.0), (90.0, 300.0), 100.0, 100.0), None);
+    }
+
+    #[test]
+    fn trade_commands_change_only_their_option() {
+        use crate::commands::Command;
+        let d = TradesConfig::default();
+        assert!(apply(Command::ToggleTrades, d).hidden);
+        assert!(!apply(Command::ToggleTrades, apply(Command::ToggleTrades, d)).hidden);
+        assert!(apply(Command::ToggleTradeLines, d).no_lines);
+        assert!(apply(Command::ToggleTradeLabels, d).no_labels);
+        // The account picks set, never flip: picking the checked one again keeps it.
+        let all = apply(Command::TradeAccounts(true), d);
+        assert!(all.all_accounts && apply(Command::TradeAccounts(true), all).all_accounts);
+        assert!(!apply(Command::TradeAccounts(false), all).all_accounts);
+        assert_eq!(
+            apply(Command::TradePeriod(Period::Week), d).period,
+            Period::Week
+        );
+        assert_eq!(apply(Command::ShowKeys, d), d);
+    }
+
+    #[test]
+    fn a_theme_change_drops_shaped_labels() {
+        let mut layer = TradeMarksLayer {
+            shaped: vec![Some(ShapedLine::default()), None],
+            ..Default::default()
+        };
+        layer.theme_changed();
+        assert!(layer.shaped.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn an_order_filled_at_several_prices_says_avg() {
+        let es_product = catalog::get(catalog::ES).unwrap();
+        let today = CivilDate::new(2026, 11, 5).unwrap();
+        let mut t = trade("paper", today, 752800);
+        t.fills[1].price = Price(751025);
+        let b = build(
+            &[t],
+            es(),
+            None,
+            Period::Today,
+            today,
+            &es_product,
+            PnlDisplay::Ticks,
+        );
+        assert!(
+            b.marks[0].label.starts_with("B 2 @ avg 7510.1"),
+            "{}",
+            b.marks[0].label
+        );
+        // Ticks only: said once, not as a trade total and again per contract.
+        let result = &b.trades[0].lines[3];
+        assert_eq!(result.matches(" t").count(), 1, "{result}");
     }
 
     #[test]
