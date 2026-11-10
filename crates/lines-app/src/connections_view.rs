@@ -571,6 +571,9 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
             .as_ref()
             .and_then(|l| l.needs.get(&name).copied())
             .flatten();
+        // A login refused this run stays shown after its panes moved to another source (their
+        // stores, and so its status, are gone).
+        let feeds = conn::with_refusal(feeds, env.as_ref().and_then(|e| e.sources.refusal(&name)));
         let state = conn::state(on, entry.is_some(), needs, &feeds);
         let checking = !row.fields.is_empty() && page.loaded.is_none();
         let dot = match state.tone() {

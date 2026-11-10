@@ -717,6 +717,9 @@ pub struct ChartStore {
     last_chart_us: AtomicU64,
     /// The feed is live (status `Live`).
     live: AtomicBool,
+    /// The feed stopped because the source refused its login (see
+    /// [`ChartStore::logon_refused`]).
+    logon_refused: AtomicBool,
     stale_after_ms: AtomicU64,
     /// Market time (newest trade) at the last update, `i64::MIN` = none yet.
     market_ms: AtomicI64,
@@ -776,6 +779,7 @@ impl ChartStore {
             last_data: AtomicU64::new(0),
             last_chart_us: AtomicU64::new(0),
             live: AtomicBool::new(false),
+            logon_refused: AtomicBool::new(false),
             stale_after_ms: AtomicU64::new(5_000),
             replay: std::sync::OnceLock::new(),
         }
@@ -999,6 +1003,18 @@ impl ChartStore {
 
     pub fn set_status(&self, status: FeedStatus) {
         self.update(|d| d.status = status);
+    }
+
+    /// The live feed stopped because the source refused its login (a `LogonRejected`
+    /// session error: credentials or permissions, which retrying won't fix). The app moves
+    /// panes off such a source (decision 0030). One atomic load: cheap on every poll tick.
+    pub fn logon_refused(&self) -> bool {
+        // Acquire: the failed status (the provider's reason) set before it is seen with it.
+        self.logon_refused.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_logon_refused(&self) {
+        self.logon_refused.store(true, Ordering::Release);
     }
 }
 
