@@ -518,4 +518,3 @@ mod tests {
         assert!(!s.sources["kraken"].on());
     }
 }
-
