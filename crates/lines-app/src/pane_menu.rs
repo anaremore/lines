@@ -353,7 +353,6 @@ pub struct TabMenu {
     pub closed_tabs: bool,
     pub crosshair_sync: bool,
     pub crosshair_sync_price: bool,
-    pub key_hints: bool,
     pub perf_stats: bool,
     pub latency_hud: bool,
 }
@@ -391,7 +390,6 @@ pub fn tab_items(m: &TabMenu) -> Vec<MenuItem> {
                 m.crosshair_sync_price,
             ),
             MenuItem::sep(),
-            toggle("Key hints", Command::ToggleHints, m.key_hints),
             toggle("Performance stats", Command::TogglePerfStats, m.perf_stats),
             toggle("Latency HUD", Command::ToggleLatencyHud, m.latency_hud),
         ],
@@ -993,7 +991,6 @@ mod tests {
             closed_tabs: true,
             crosshair_sync: true,
             crosshair_sync_price: false,
-            key_hints: true,
             perf_stats: false,
             latency_hud: false,
         };

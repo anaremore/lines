@@ -271,6 +271,22 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         end,
         args("--layout trading --size 700x700 --theme dark --panel-menu qty"),
     ));
+    // The footer's zones: safety (PAPER, trading on, REC with Stop), links (Layout: …); in a
+    // narrow window at 150 % the safety words shorten and the links fold into ⋯.
+    v.push(s(
+        "footer-full",
+        true,
+        end,
+        args("--layout trading --size 1600x900 --theme dark --enable-trading --show-recording 724"),
+    ));
+    v.push(s(
+        "footer-narrow-light-150",
+        false,
+        end,
+        args(
+            "--layout trading --size 480x600 --theme light --ui-zoom 150 --enable-trading              --show-recording 724",
+        ),
+    ));
     // In-app updates (decision 0031) on the status line: ready (Restart to update), held by a
     // position, a discarded download, and the rollback offer after two failed starts.
     v.push(s(

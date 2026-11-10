@@ -138,10 +138,11 @@ pub struct WorkspaceDoc {
     /// written only when on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crosshair_sync_price: bool,
-    /// The key-hint bar at the bottom of each window is hidden (shown by default, for new
-    /// users; written only when hidden).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub hide_hints: bool,
+    /// Footer links the trader hid with a right click (`footer::LinkKind::key`; safety items
+    /// can't be). Optional: written only when one is hidden. An older file's `hide_hints` (the
+    /// retired key-hint bar) is read and ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_footer_links: Vec<String>,
     /// Chart headers show performance stats (msgs/s, updates/s, paints/s, paint time). Off
     /// by default; written only when on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -465,26 +466,14 @@ impl StudyVisibility {
         !self.hide_studies && !self.hide_study_labels
     }
 
-    /// Whether a window's footer (key hints + workspace status) is shown: always, unless the
-    /// key hints are hidden *and* the status has nothing to say beyond the workspace name
-    /// (hidden or popped-out panes, crosshair sync and reports always show; docs/design.md
-    /// §3 and §7: state is never hidden by a cosmetic preference).
-    pub fn footer_shown(hide_hints: bool, status_has_state: bool) -> bool {
-        !hide_hints || status_has_state
-    }
-
-    /// The `CleanChart` command: a chart without legends or study tags and the key-hint bar
-    /// hidden. Run on a chart that is already clean, it restores both. Studies stay drawn
-    /// (and hidden studies stay hidden): clean is about text, not data.
-    pub fn clean_chart(self, hints_hidden: bool) -> (StudyVisibility, bool) {
-        let clean = self.hide_study_labels && hints_hidden;
-        (
-            StudyVisibility {
-                hide_study_labels: !clean,
-                ..self
-            },
-            !clean,
-        )
+    /// The `CleanChart` command: a chart without legends or study tags. Run on a chart that is
+    /// already clean, it restores them. Studies stay drawn (and hidden studies stay hidden):
+    /// clean is about text, not data.
+    pub fn clean_chart(self) -> StudyVisibility {
+        StudyVisibility {
+            hide_study_labels: !self.hide_study_labels,
+            ..self
+        }
     }
 }
 
@@ -652,7 +641,7 @@ impl WorkspaceDoc {
             name: name.to_owned(),
             crosshair_sync: false,
             crosshair_sync_price: false,
-            hide_hints: false,
+            hidden_footer_links: Vec::new(),
             show_perf_stats: false,
             show_latency_hud: false,
             windows: vec![WindowDoc {
@@ -1347,17 +1336,24 @@ mod tests {
         };
         let json = serde_json::to_string(&shown).unwrap();
         assert!(!json.contains("hide_"), "{json}");
-        // Workspace preference: hint bar shown unless saved hidden.
+        // Footer links: none hidden unless saved; an older file's `hide_hints` (the retired
+        // key-hint bar) still reads, and isn't written back.
         let mut w = WorkspaceDoc::pair();
-        assert!(!w.hide_hints);
+        assert!(w.hidden_footer_links.is_empty());
         let text = String::from_utf8(encode(&FORMAT, &w).unwrap()).unwrap();
-        assert!(!text.contains("hide_hints"), "{text}");
-        w.hide_hints = true;
+        assert!(!text.contains("hidden_footer_links"), "{text}");
+        let old = text.replacen('{', "{\"hide_hints\":true,", 1);
+        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, old.as_bytes()) else {
+            panic!("an older file with hide_hints reads")
+        };
+        let again = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
+        assert!(!again.contains("hide_hints"), "{again}");
+        w.hidden_footer_links = vec!["layout".into()];
         let bytes = encode(&FORMAT, &w).unwrap();
         let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, &bytes) else {
             panic!("round trip")
         };
-        assert!(value.hide_hints);
+        assert_eq!(value.hidden_footer_links, ["layout"]);
         // Performance stats: off unless saved on, written only when on.
         assert!(!value.show_perf_stats);
         assert!(
@@ -1402,20 +1398,14 @@ mod tests {
             ..v
         };
         assert!(!studies.draws_studies() && !studies.draws_labels());
-        // Clean chart: labels and hint bar off; again: both back.
-        let (c, hints_hidden) = v.clean_chart(false);
-        assert_eq!((c, hints_hidden), (labels, true));
-        assert_eq!(c.clean_chart(hints_hidden), (v, false));
-        // Partly clean (labels hidden, bar shown): cleans fully rather than restoring.
-        assert_eq!(labels.clean_chart(false), (labels, true));
+        // Clean chart: labels off; again: back.
+        let c = v.clean_chart();
+        assert_eq!(c, labels);
+        assert_eq!(c.clean_chart(), v);
         // Hidden studies stay hidden either way.
-        let (c, _) = studies.clean_chart(false);
+        let c = studies.clean_chart();
         assert!(c.hide_studies && c.hide_study_labels);
-        assert!(c.clean_chart(true).0.hide_studies);
-        // The footer goes only when hints are hidden and there is no state to show.
-        assert!(StudyVisibility::footer_shown(false, false));
-        assert!(!StudyVisibility::footer_shown(true, false));
-        assert!(StudyVisibility::footer_shown(true, true));
+        assert!(c.clean_chart().hide_studies);
     }
 
     #[test]

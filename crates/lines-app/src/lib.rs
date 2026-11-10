@@ -29,6 +29,7 @@ mod dropdown;
 mod econ_layer;
 mod econ_ui;
 mod feeds;
+mod footer;
 mod footprint;
 #[cfg(feature = "screenshot")]
 mod gallery;
@@ -688,9 +689,6 @@ struct Cli {
     /// Nothing is recorded: screenshots write no user files.
     #[arg(long, requires = "screenshot", value_name = "SECS")]
     show_recording: Option<u64>,
-    /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
-    #[arg(long, requires = "screenshot")]
-    hide_hints: bool,
     /// External levels (decision 0022): record every level source's responses into this
     /// directory (`<source>-<PRODUCT>.lfr`), so a replay shows the same levels.
     #[arg(long, conflicts_with = "replay_levels")]
@@ -1911,7 +1909,6 @@ where
         if instrument.is_some() {
             doc.retarget_all(instrument.clone());
         }
-        doc.hide_hints |= cli.hide_hints;
         recording::set_fixture(cli.show_recording);
         // The Data folder row's disk facts, before any window (never on the UI thread).
         data_dir::refresh_now();

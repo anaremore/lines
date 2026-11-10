@@ -111,6 +111,11 @@ pub struct DownloadWindow {
 }
 
 impl DownloadWindow {
+    /// A running download's days (done, of total).
+    pub(crate) fn days_progress(&self) -> Option<(usize, usize)> {
+        self.model.days_progress()
+    }
+
     fn new(
         theme: Theme,
         sources: Vec<DaySource>,

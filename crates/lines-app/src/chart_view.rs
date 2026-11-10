@@ -7823,9 +7823,6 @@ fn hud_compact(w: f32) -> bool {
     w > 0.0 && w / crate::zoom::get() < HUD_COMPACT_BELOW_PX
 }
 
-/// Key and mouse hints for a focused chart, in the window's status line.
-pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel or drag an axis: scale  ·  Home latest  ·  Shift+drag measure  ·  type 5, 15, 1h, 500t + Enter: timeframe  ·  Alt+H/T/Z draw  ·  Ctrl+I studies  ·  Alt+V profile";
-
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_level_styles(cx);

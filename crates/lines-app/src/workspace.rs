@@ -31,12 +31,12 @@ use gpui::{
     FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, StyleRefinement, Styled,
     Subscription as GpuiSubscription, TitlebarOptions, Window, WindowBounds, WindowHandle,
-    WindowOptions, div, point, prelude::*, px, relative, size,
+    WindowOptions, div, point, prelude::*, px, size,
 };
 use lines_core::{Price, UtcMillis};
 
 use crate::chain_view::ChainView;
-use crate::chart_view::{self, ChartView, CrosshairTime, Fixture};
+use crate::chart_view::{ChartView, CrosshairTime, Fixture};
 use crate::commands::{self, Command, StrategyCmd};
 use crate::dom_view::{DomOptions, DomView};
 use crate::feeds::{Feeds, PaneFeed};
@@ -67,17 +67,17 @@ const TAB_BAR_H_100: f32 = 28.0;
 fn tab_bar_h() -> f32 {
     crate::zoom::f(TAB_BAR_H_100)
 }
-const HINT_H_100: f32 = 22.0;
-/// [`HINT_H_100`] at the UI zoom (`crate::zoom`).
+const FOOTER_H_100: f32 = 22.0;
+/// [`FOOTER_H_100`] at the UI zoom (`crate::zoom`).
 #[inline]
-fn hint_h() -> f32 {
-    crate::zoom::f(HINT_H_100)
+fn footer_h() -> f32 {
+    crate::zoom::f(FOOTER_H_100)
 }
 /// The shortest window a person can drag to: room for two DOMs stacked. Narrow enough for any
 /// layout that works today (its tab bar's; a popped-out DOM goes down to
 /// `trade_bar::MIN_DOM_WIDTH`).
 const MIN_WINDOW_W: f32 = 240.0;
-const MIN_WINDOW_H: f32 = TAB_BAR_H_100 + HINT_H_100 + 2.0 * crate::trade_bar::MIN_DOM_PANE_H;
+const MIN_WINDOW_H: f32 = TAB_BAR_H_100 + FOOTER_H_100 + 2.0 * crate::trade_bar::MIN_DOM_PANE_H;
 const TAB_W_100: f32 = 168.0;
 /// [`TAB_W_100`] at the UI zoom (`crate::zoom`).
 #[inline]
@@ -143,8 +143,12 @@ pub struct Workspace {
     pub crosshair_sync: bool,
     /// Crosshair sync includes the price between charts of the same product.
     pub crosshair_sync_price: bool,
-    /// The key-hint bar is hidden in every window (workspace preference; shown by default).
-    pub hide_hints: bool,
+    /// Footer links the trader hid (a right click; saved as `hidden_footer_links`).
+    pub hidden_links: Vec<crate::footer::LinkKind>,
+    /// The footer's safety zone and activity line (`crate::footer::gather`), kept fresh by the
+    /// trigger watch: armed DOMs, accounts and feeds change in other windows and tabs.
+    safety: crate::footer::Safety,
+    activity: Option<crate::footer::Activity>,
     pub windows: Vec<WindowHandle<WindowView>>,
     /// Windows holding one detached pane each (the pane stays in its tab's layout).
     pub pane_windows: Vec<WindowHandle<PaneWindow>>,
@@ -184,7 +188,9 @@ impl Workspace {
             name: "default".into(),
             crosshair_sync: false,
             crosshair_sync_price: false,
-            hide_hints: false,
+            hidden_links: Vec::new(),
+            safety: Default::default(),
+            activity: None,
             windows: Vec::new(),
             pane_windows: Vec::new(),
             closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
@@ -1170,8 +1176,8 @@ impl WindowView {
     /// The footer's recording indicator: a red dot, "REC" and the elapsed time (never the dot
     /// alone), and "Stop recording" one click away. While recording the window re-renders once
     /// a second for the time (render, not paint: the bars and books paint as before).
-    fn recording_indicator(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let t = self.theme;
+    /// Recording: its elapsed time ("12:04"), ticking once a second while it shows.
+    fn recording_label(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let (status, now) = match crate::recording::fixture() {
             Some(f) => f,
             None => (
@@ -1194,49 +1200,7 @@ impl WindowView {
             .detach();
         }
         let label = crate::recording::label(status.since_ms, now);
-        Some(
-            div()
-                .id("recording")
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .size(crate::zoom::ui(8.0))
-                        .rounded_full()
-                        .bg(t.recording),
-                )
-                .child(
-                    div()
-                        .text_color(t.text_main)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(label.as_str().to_owned()),
-                )
-                .child(
-                    div()
-                        .id("recording-stop")
-                        // At least the 20 px hit target (docs/design.md), within the footer.
-                        .min_h(crate::zoom::ui(20.0))
-                        .flex()
-                        .items_center()
-                        .px_2()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(t.control_edge)
-                        .text_color(t.text_main)
-                        .hover(|s| s.bg(t.accent.opacity(0.16)))
-                        .child("Stop recording")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                this.run(Command::StopRecording, window, cx);
-                            }),
-                        ),
-                )
-                .into_any_element(),
-        )
+        Some(label.as_str().trim_start_matches("REC").trim().to_owned())
     }
 
     /// Report a refused action inline (docs/design.md: errors where they happened). It expires
@@ -1326,34 +1290,17 @@ impl WindowView {
         tabstate::shows_tab_bar(self.tabs.len())
     }
 
-    /// The footer (key hints and workspace status) is shown unless the key hints are hidden
-    /// and the status has nothing to say beyond the workspace's name: hidden or popped-out
-    /// panes, crosshair sync and reports always bring it back (docs/design.md §3, §7).
-    fn footer_shown(&self, cx: &App) -> bool {
-        let ws = cx.global::<Workspace>();
-        let report = !ws.notices.is_empty() && !ws.windows.is_empty();
-        let panes = self.tabs.get(self.active).is_some_and(|t| {
-            !t.in_state(PaneState::is_hidden).is_empty()
-                || !t.in_state(|s| s == PaneState::Detached).is_empty()
-        });
-        // Recording keeps it too (REC and its Stop live there). The footer is shown by default,
-        // so starting or stopping a recording moves no pane (docs/design.md §7).
-        StudyVisibility::footer_shown(
-            ws.hide_hints,
-            ws.crosshair_sync || report || panes || self.rec_shown,
-        )
-    }
-
     fn content_area(&self, window: &Window, cx: &App) -> Rect {
         let vs = window.viewport_size();
         let (w, h) = (f32::from(vs.width), f32::from(vs.height));
-        let foot = if self.footer_shown(cx) { hint_h() } else { 0.0 };
+        // The footer is always there: its safety zone never hides (docs/design.md §3).
+        let _ = cx;
         let replay = if self.replay_bar.is_some() {
             crate::replay_bar::bar_h()
         } else {
             0.0
         };
-        Rect::new(0.0, 0.0, w, (h - self.bar_h() - foot - replay).max(0.0))
+        Rect::new(0.0, 0.0, w, (h - self.bar_h() - footer_h() - replay).max(0.0))
     }
 
     fn focus_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1592,30 +1539,31 @@ impl WindowView {
                     return; // chart commands; other panes have no studies
                 };
                 let v = chart.read(cx).visibility();
-                let hints = cx.global::<Workspace>().hide_hints;
-                let (v, hints) = match cmd {
-                    Command::ToggleStudyLabels => (
-                        StudyVisibility {
-                            hide_study_labels: !v.hide_study_labels,
-                            ..v
-                        },
-                        hints,
-                    ),
-                    Command::ToggleStudies => (
-                        StudyVisibility {
-                            hide_studies: !v.hide_studies,
-                            ..v
-                        },
-                        hints,
-                    ),
-                    _ => v.clean_chart(hints),
+                let v = match cmd {
+                    Command::ToggleStudyLabels => StudyVisibility {
+                        hide_study_labels: !v.hide_study_labels,
+                        ..v
+                    },
+                    Command::ToggleStudies => StudyVisibility {
+                        hide_studies: !v.hide_studies,
+                        ..v
+                    },
+                    _ => v.clean_chart(),
                 };
                 chart.update(cx, |c, cx| c.set_visibility(v, cx));
-                set_hide_hints(hints, cx);
             }
-            Command::ToggleHints => {
-                let hide = !cx.global::<Workspace>().hide_hints;
-                set_hide_hints(hide, cx);
+            Command::ShowKeys => {
+                crate::settings_view::open_section(crate::settings_schema::Section::Keys, cx);
+            }
+            Command::FooterLink(kind) => {
+                let ws = cx.global_mut::<Workspace>();
+                match ws.hidden_links.iter().position(|k| *k == kind) {
+                    Some(i) => {
+                        ws.hidden_links.remove(i);
+                    }
+                    None => ws.hidden_links.push(kind),
+                }
+                cx.refresh_windows();
             }
             Command::Studies => {
                 if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
@@ -2420,10 +2368,7 @@ impl WindowView {
         let tab = self.tab();
         let leaves = tab.leaves(cx);
         let link = h.link(cx);
-        let (hide_hints, closed_tabs) = {
-            let ws = cx.global::<Workspace>();
-            (ws.hide_hints, !ws.closed_tabs.is_empty())
-        };
+        let closed_tabs = !cx.global::<Workspace>().closed_tabs.is_empty();
         let switches = dom_switches(cx, Some((self.window_id, &self.tabs)));
         let chart = match h {
             PaneHandle::Chart(chart) => {
@@ -2440,7 +2385,7 @@ impl WindowView {
                     studies_shown: !v.hide_studies,
                     study_labels_shown: !v.hide_study_labels,
                     strategy_marks_shown: !c.strategy_marks_hidden(),
-                    clean: v.hide_study_labels && hide_hints,
+                    clean: v.hide_study_labels,
                     order_strip: c.order_strip(),
                     magnet: c.magnet(),
                     drawings_shown: !c.drawings_hidden(),
@@ -2528,7 +2473,6 @@ impl WindowView {
             closed_tabs: !ws.closed_tabs.is_empty(),
             crosshair_sync: ws.crosshair_sync,
             crosshair_sync_price: ws.crosshair_sync_price,
-            key_hints: !ws.hide_hints,
             perf_stats: ws.show_perf_stats,
             latency_hud: ws.show_latency_hud,
         };
@@ -3028,161 +2972,403 @@ impl WindowView {
         bar
     }
 
-    /// The workspace's status for the footer (always there, with or without a tab bar):
-    /// an inline report, what this tab isn't showing (click to bring it back), crosshair
-    /// sync, and the workspace's name (click to open another).
-    fn status(&self, rec: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The window footer (`crate::footer`): safety items on the left, in a fixed order and
+    /// never hidden (shortened when narrow, full words in their tooltips); one activity line in
+    /// the middle; links on the right, folding into ⋯ from the last as the window narrows. A
+    /// right click on a link opens the menu that shows or hides each link.
+    fn footer_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::footer::{self, LinkKind, SafetyKind};
         let t = self.theme;
+        let recording = self.recording_label(cx);
         let ws = cx.global::<Workspace>();
-        let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
-        let trigger_status = ws.trigger_status.clone();
-        let update = ws.update_label.clone();
-        let open = ws.open_positions.and_then(crate::positions::open_label);
-        let is_first = ws.windows.first().map(|w| w.window_id());
-        // What this tab isn't showing, as text that brings it back.
-        let (hidden, detached) = match self.tabs.get(self.active) {
-            Some(tab) => {
-                let kinds = |ids: Vec<PaneId>| -> Vec<&'static str> {
-                    let mut v: Vec<&'static str> = Vec::new();
-                    for id in ids {
-                        if let Some(h) = tab.handle(id) {
-                            let l = match h.kind() {
-                                PaneKind::Chart => "chart",
-                                PaneKind::Dom => "DOM",
-                                PaneKind::Tape => "T&S",
-                                PaneKind::Journal => "journal",
-                                PaneKind::Strategies => "strategy panel",
-                                PaneKind::Chain => "option chain",
-                                PaneKind::Positions => "positions",
-                            };
-                            if !v.contains(&l) {
-                                v.push(l);
-                            }
-                        }
-                    }
-                    v
-                };
-                (
-                    kinds(tab.in_state(PaneState::is_hidden)),
-                    tab.in_state(|s| s == PaneState::Detached).len(),
-                )
+        let mut safety = ws.safety.clone();
+        safety.recording = recording;
+        // Notices that need action: reports, a loud update word, a trigger that can't fire.
+        let mut notices: Vec<String> = Vec::new();
+        let first = ws.windows.first().map(|w| w.window_id());
+        let reports = ws.notices.text().filter(|_| first.is_some());
+        notices.extend(reports.clone());
+        let mut update_cmd = None;
+        let mut available = None;
+        if let Some((text, loud, cmd)) = ws.update_label.clone() {
+            match cmd {
+                Some(Command::RestartToUpdate) => {
+                    safety.restart = Some(text);
+                    update_cmd = cmd;
+                }
+                _ if loud => {
+                    notices.push(text);
+                    update_cmd = cmd;
+                }
+                // Held until positions close, or available: background news.
+                _ => available = Some(text),
             }
-            None => (Vec::new(), 0),
+        }
+        let mut quiet_trigger = None;
+        if let Some((text, loud)) = ws.trigger_status.clone() {
+            if loud {
+                notices.push(text);
+            } else {
+                quiet_trigger = Some(text);
+            }
+        }
+        if !notices.is_empty() {
+            safety.notice = Some(notices.join(" · "));
+        }
+        let items = safety.items();
+        let activity = ws.activity.clone().or_else(|| {
+            available.map(|text| footer::Activity {
+                full: format!("↑ {text}"),
+                short: "↑ Update".to_owned(),
+                tip: text,
+            })
+        });
+        // Links: what this tab isn't showing, and where to go.
+        let mut links: Vec<(LinkKind, String, Option<Command>)> = Vec::new();
+        if let Some(text) = ws.open_positions.and_then(crate::positions::open_label) {
+            links.push((LinkKind::Positions, text, Some(Command::OpenPositions)));
+        }
+        if let Some(tab) = self.tabs.get(self.active) {
+            let mut kinds: Vec<&'static str> = Vec::new();
+            for id in tab.in_state(PaneState::is_hidden) {
+                if let Some(h) = tab.handle(id) {
+                    let l = match h.kind() {
+                        PaneKind::Chart => "Chart",
+                        PaneKind::Dom => "DOM",
+                        PaneKind::Tape => "T&S",
+                        PaneKind::Journal => "Journal",
+                        PaneKind::Strategies => "Strategy panel",
+                        PaneKind::Chain => "Option chain",
+                        PaneKind::Positions => "Positions",
+                    };
+                    if !kinds.contains(&l) {
+                        kinds.push(l);
+                    }
+                }
+            }
+            if !kinds.is_empty() {
+                links.push((
+                    LinkKind::Hidden,
+                    format!("{} hidden: show", kinds.join(", ")),
+                    Some(Command::ShowHidden),
+                ));
+            }
+            let detached = tab.in_state(|s| s == PaneState::Detached).len();
+            if detached > 0 {
+                links.push((
+                    LinkKind::PoppedOut,
+                    format!("{detached} popped out: re-attach"),
+                    Some(Command::Reattach),
+                ));
+            }
+        }
+        if ws.crosshair_sync {
+            links.push((
+                LinkKind::CrosshairSync,
+                "Crosshair sync".to_owned(),
+                Some(Command::ToggleCrosshairSync),
+            ));
+        }
+        if let Some(text) = quiet_trigger {
+            links.push((LinkKind::Triggers, text, None));
+        }
+        links.push((
+            LinkKind::Layout,
+            footer::layout_text(&ws.name),
+            Some(Command::Open),
+        ));
+        let hidden = ws.hidden_links.clone();
+        links.retain(|(k, _, _)| !hidden.contains(k));
+        // Fit to the window, measured as drawn (11 px at the zoom).
+        let size = crate::zoom::ui(11.0);
+        // Measured bold: the badge is bold and the safety words semibold; a regular-weight
+        // link measured bold only folds a little early, never overflows.
+        let mut font = window.text_style().font();
+        font.weight = FontWeight::BOLD;
+        let measure = |s: &str| -> f32 {
+            let run = gpui::TextRun {
+                len: s.len(),
+                font: font.clone(),
+                color: t.text_dim,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                gpui::SharedString::from(s.to_owned()),
+                size,
+                &[run],
+                None,
+            );
+            f32::from(line.width).ceil()
         };
-        let link = |id: &'static str, text: String, cmd: Command| {
-            div()
-                .id(id)
-                .text_color(t.text_dim)
-                .hover(|s| s.text_color(t.text_main))
-                .child(text)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.run(cmd, window, cx);
-                    }),
-                )
+        // Each item's own padding counts as part of its text.
+        let pad = crate::zoom::f(8.0);
+        let padded = |s: &str| measure(s) + pad;
+        let width = f32::from(window.viewport_size().width) - crate::zoom::f(24.0);
+        let texts: Vec<String> = links.iter().map(|(_, s, _)| s.clone()).collect();
+        let fit = footer::fit(
+            width,
+            &items,
+            activity.as_ref(),
+            &texts,
+            crate::zoom::f(footer::GAP),
+            crate::zoom::get(),
+            &padded,
+        );
+        let item_box = |id: &'static str, tip: &str| {
+            crate::tooltip::tip_div(div().id(id), tip, None, &t)
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .whitespace_nowrap()
         };
-        div()
+        let mut left = div()
             .flex_none()
-            .max_w(relative(0.7))
-            .h_full()
             .flex()
             .flex_row()
             .items_center()
-            .justify_end()
-            .gap_3()
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .text_color(t.text_dim)
-            .when_some(report.filter(|_| is_first.is_some()), |d, r| {
-                d.child(
-                    div()
-                        .id("report")
-                        .min_w_0()
-                        .truncate()
-                        .text_color(t.text_main)
-                        .child(format!("{r}  (click to dismiss)"))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, _, _, cx| {
-                                cx.global_mut::<Workspace>().notices.clear();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        ),
-                )
-            })
-            .when_some(open, |d, text| {
-                d.child(link("positions-open", text, Command::OpenPositions))
-            })
-            .when_some(update, |d, (text, loud, cmd)| match cmd {
-                // Restart to update / Roll back: the label is the link.
-                Some(cmd) if !loud => d.child(link("update-status", text, cmd)),
-                _ => d.child(
-                    div()
-                        .id("update-status")
-                        .min_w_0()
-                        .truncate()
-                        .px_1()
-                        .when(loud, |d| d.bg(t.warn).text_color(t.on_warn))
-                        .when(!loud, |d| d.text_color(t.text_main))
-                        .when_some(cmd, |d, cmd| {
-                            d.cursor_pointer().on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    this.run(cmd, window, cx);
-                                }),
-                            )
-                        })
-                        .child(text),
+            .gap(crate::zoom::ui(footer::GAP));
+        for item in &items {
+            let words = if fit.short_safety {
+                item.short.clone()
+            } else {
+                item.full.clone()
+            };
+            let el = match item.kind {
+                SafetyKind::Account => item_box("footer-account", &item.tip).child(
+                    crate::trade_bar::account_badge(safety.account.unwrap_or("PAPER"), &t),
                 ),
-            })
-            .when_some(trigger_status, |d, (text, loud)| {
-                d.child(
-                    div()
-                        .id("trigger-status")
-                        // Gives way in a narrow window before the links after it; the loud part
-                        // is first.
-                        .min_w_0()
-                        .truncate()
-                        .px_1()
-                        .when(loud, |d| d.bg(t.warn).text_color(t.on_warn))
-                        .when(!loud, |d| d.text_color(t.text_main))
-                        .child(text),
+                SafetyKind::Trading | SafetyKind::Feeds => item_box(
+                    if item.kind == SafetyKind::Trading {
+                        "footer-trading"
+                    } else {
+                        "footer-feeds"
+                    },
+                    &item.tip,
                 )
-            })
-            .when(!hidden.is_empty(), |d| {
-                d.child(link(
-                    "show-hidden",
-                    format!("{} hidden · show", hidden.join(", ")),
-                    Command::ShowHidden,
-                ))
-            })
-            .when(detached > 0, |d| {
-                d.child(link(
-                    "reattach",
-                    format!("{detached} popped out · re-attach"),
-                    Command::Reattach,
-                ))
-            })
-            .when(sync, |d| d.child("crosshair sync"))
-            .children(rec)
-            .child(
-                div()
-                    .id("workspace-name")
+                .bg(t.warn)
+                .text_color(t.on_warn)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(words),
+                SafetyKind::Recording => item_box("footer-recording", &item.tip)
+                    .child(
+                        div()
+                            .size(crate::zoom::ui(8.0))
+                            .rounded_full()
+                            .bg(t.recording),
+                    )
+                    .child(
+                        div()
+                            .text_color(t.text_main)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(
+                                words
+                                    .trim_start_matches("● ")
+                                    .trim_end_matches(footer::REC_STOP.0)
+                                    .trim_end_matches(footer::REC_STOP.1)
+                                    .trim_end()
+                                    .to_owned(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("recording-stop")
+                            // At least the 20 px hit target (docs/design.md), within the footer.
+                            .min_h(crate::zoom::hit(20.0).min(crate::zoom::ui(20.0)))
+                            .flex()
+                            .items_center()
+                            .px_2()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(t.control_edge)
+                            .text_color(t.text_main)
+                            .hover(|s| s.bg(t.accent.opacity(0.16)))
+                            .child(if fit.short_safety {
+                                footer::REC_STOP.1
+                            } else {
+                                footer::REC_STOP.0
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.run(Command::StopRecording, window, cx);
+                                }),
+                            ),
+                    ),
+                SafetyKind::Restart => item_box("footer-restart", &item.tip)
                     .text_color(t.text_main)
+                    .cursor_pointer()
                     .hover(|s| s.text_color(t.accent))
-                    .child(name)
+                    .child(words)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.run(Command::Open, window, cx);
+                            this.run(Command::RestartToUpdate, window, cx);
                         }),
                     ),
-            )
+                SafetyKind::Notice => {
+                    let had_reports = reports.is_some();
+                    item_box("footer-notice", &item.tip)
+                        .bg(t.warn)
+                        .text_color(t.on_warn)
+                        .cursor_pointer()
+                        .child(words)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                // A report is dismissed by a click; an update problem's
+                                // action (roll back) runs.
+                                if had_reports {
+                                    cx.global_mut::<Workspace>().notices.clear();
+                                    cx.notify();
+                                } else if let Some(cmd) = update_cmd {
+                                    this.run(cmd, window, cx);
+                                }
+                            }),
+                        )
+                }
+            };
+            left = left.child(el);
+        }
+        let center = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .justify_center()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .when_some(activity.zip(fit.activity), |d, (a, short)| {
+                d.child(
+                    item_box("footer-activity", &a.tip)
+                        .text_color(t.text_dim)
+                        .child(if short { a.short } else { a.full }),
+                )
+            });
+        let mut right = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(crate::zoom::ui(footer::GAP));
+        for (i, (kind, text, cmd)) in links.iter().enumerate().take(fit.links) {
+            let (kind, cmd) = (*kind, *cmd);
+            right = right.child(
+                div()
+                    .id(("footer-link", i))
+                    .flex_none()
+                    .px_1()
+                    .text_color(if kind == LinkKind::Layout {
+                        t.text_main
+                    } else {
+                        t.text_dim
+                    })
+                    .when(cmd.is_some(), |d| {
+                        d.cursor_pointer().hover(|s| s.text_color(t.accent))
+                    })
+                    .child(text.clone())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(cmd) = cmd {
+                                this.run(cmd, window, cx);
+                            }
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, e: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.open_footer_menu(e.position, None, cx);
+                        }),
+                    ),
+            );
+        }
+        if fit.more {
+            let folded: Vec<(String, Option<Command>)> = links[fit.links..]
+                .iter()
+                .map(|(_, s, c)| (s.clone(), *c))
+                .collect();
+            right = right.child(
+                crate::tooltip::tip_div(div().id("footer-more"), "More", None, &t)
+                    .flex_none()
+                    .px_1()
+                    .text_color(t.text_main)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(t.accent))
+                    .child(footer::MORE)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, e: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.open_footer_menu(e.position, Some(folded.clone()), cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, e: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.open_footer_menu(e.position, None, cx);
+                        }),
+                    ),
+            );
+        }
+        div()
+            .id("footer")
+            .h(px(footer_h()))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .px_3()
+            .gap(crate::zoom::ui(footer::GAP))
+            .overflow_hidden()
+            .text_size(crate::zoom::ui(11.0))
+            .text_color(t.text_dim)
+            .bg(t.panel)
+            .border_t_1()
+            .border_color(t.axis_line)
+            .child(left)
+            .child(center)
+            .child(right)
+            .into_any_element()
+    }
+
+    /// The footer's menu: the folded links (when from ⋯), then a switch per link kind (shown or
+    /// hidden; safety items are never listed: they can't be hidden).
+    fn open_footer_menu(
+        &mut self,
+        at: Point<Pixels>,
+        folded: Option<Vec<(String, Option<Command>)>>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::footer::LinkKind;
+        use crate::menu::MenuItem;
+        let mut items = Vec::new();
+        for (text, cmd) in folded.unwrap_or_default() {
+            items.push(match cmd {
+                Some(cmd) => MenuItem::named(&text, cmd, false),
+                None => MenuItem::header(&text),
+            });
+        }
+        if !items.is_empty() {
+            items.push(MenuItem::sep());
+        }
+        items.push(MenuItem::header("Show in footer"));
+        let hidden = cx.global::<Workspace>().hidden_links.clone();
+        for kind in LinkKind::ALL {
+            let mut row = MenuItem::of(Command::FooterLink(kind), !hidden.contains(&kind));
+            row.toggle = true;
+            items.push(row);
+        }
+        self.show_menu(Menu::new(at, items), cx);
     }
 
     /// Screenshots: open a prompt (`--prompt palette[:QUERY]|open|save`).
@@ -3776,22 +3962,6 @@ impl Render for WindowView {
             self.hover_tab = None;
         }
         let area = self.content_area(window, cx);
-        let hints = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
-            Some(PaneHandle::Dom(_)) => {
-                "DOM: wheel scroll, C center, G / Shift+G grouping, Ctrl+K symbol"
-            }
-            Some(PaneHandle::Tape(_)) => "Time & sales: type a symbol or Ctrl+K: switch",
-            Some(PaneHandle::Journal(_)) => {
-                "Journal: click or Up/Down to select, Enter: tags and note, Snapshot column: view, click the stats: today / all dates"
-            }
-            Some(PaneHandle::Positions(_)) => {
-                "Positions: click a row to show it in the linked chart and DOM"
-            }
-            Some(PaneHandle::Chain(_)) => {
-                "Option chain: click an ask to buy or a bid to sell, or Enter on the selected cell; Up/Down strike, Left/Right expiry, Tab calls / puts, Shift+Tab bid / ask, type a symbol or Ctrl+K: switch"
-            }
-            _ => chart_view::HINTS_SHORT,
-        };
         let content = if self.tabs.is_empty() {
             Vec::new()
         } else {
@@ -3801,10 +3971,7 @@ impl Render for WindowView {
         let bar = self
             .shows_bar()
             .then(|| self.tab_bar(cx).into_any_element());
-        let rec = self.recording_indicator(cx);
-        let status = self.status(rec, cx).into_any_element();
-        // F1 / Clean chart hide the key hints; the footer stays while it has state to show.
-        let (footer, hide_hints) = (self.footer_shown(cx), cx.global::<Workspace>().hide_hints);
+        let footer = self.footer_bar(window, cx);
         div()
             .size_full()
             .relative()
@@ -3832,27 +3999,7 @@ impl Render for WindowView {
             .children(self.replay_bar.clone().inspect(|b| {
                 b.update(cx, |b, _| b.theme = t);
             }))
-            .children(footer.then(|| {
-                div()
-                    .h(px(hint_h()))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .px_3()
-                    .gap_4()
-                    .overflow_hidden()
-                    .text_size(crate::zoom::ui(11.0))
-                    .text_color(t.text_dim)
-                    .bg(t.panel)
-                    .border_t_1()
-                    .border_color(t.axis_line)
-                    .child(div().flex_1().min_w_0().truncate().when(!hide_hints, |d| {
-                        d.child(format!("{hints}  ·  {}", commands::workspace_hints()))
-                    }))
-                    .child(status)
-            }))
+            .child(footer)
             .children(menu)
             .children(self.prompt_overlay(cx))
             .children(self.drag_ghost())
@@ -4316,13 +4463,12 @@ pub(crate) fn applied_ui_zoom(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Show or hide the key-hint bar in every window (a workspace preference, saved with it).
-pub(crate) fn set_hide_hints(hide: bool, cx: &mut App) {
-    let ws = cx.global_mut::<Workspace>();
-    if ws.hide_hints != hide {
-        ws.hide_hints = hide;
-        cx.refresh_windows();
-    }
+/// The footer links a document hides (names a newer version wrote are skipped).
+fn hidden_links(doc: &WorkspaceDoc) -> Vec<crate::footer::LinkKind> {
+    doc.hidden_footer_links
+        .iter()
+        .filter_map(|k| crate::footer::LinkKind::from_key(k))
+        .collect()
 }
 
 /// Take a workspace's name and settings (not its windows).
@@ -4330,7 +4476,7 @@ pub fn set_meta(doc: &WorkspaceDoc, cx: &mut App) {
     let ws = cx.global_mut::<Workspace>();
     ws.name = doc.name.clone();
     ws.crosshair_sync = doc.crosshair_sync;
-    ws.hide_hints = doc.hide_hints;
+    ws.hidden_links = hidden_links(doc);
     ws.show_perf_stats = doc.show_perf_stats;
     set_show_latency_hud(doc.show_latency_hud, cx);
 }
@@ -4363,7 +4509,7 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
         ws.name = doc.name.clone();
         ws.crosshair_sync = doc.crosshair_sync;
         ws.crosshair_sync_price = doc.crosshair_sync_price;
-        ws.hide_hints = doc.hide_hints;
+        ws.hidden_links = hidden_links(&doc);
         ws.show_perf_stats = doc.show_perf_stats;
     }
     set_show_latency_hud(doc.show_latency_hud, cx);
@@ -4556,11 +4702,11 @@ fn snapshot_with(
     cx: &mut App,
 ) -> Option<WorkspaceDoc> {
     let ws = cx.global::<Workspace>();
-    let (name, sync, sync_price, hide_hints, show_perf_stats, show_latency_hud, windows) = (
+    let (name, sync, sync_price, hidden_footer_links, show_perf_stats, show_latency_hud, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
         ws.crosshair_sync_price,
-        ws.hide_hints,
+        ws.hidden_links.iter().map(|k| k.key().to_owned()).collect(),
         ws.show_perf_stats,
         ws.show_latency_hud,
         ws.windows.clone(),
@@ -4578,7 +4724,7 @@ fn snapshot_with(
         name,
         crosshair_sync: sync,
         crosshair_sync_price: sync_price,
-        hide_hints,
+        hidden_footer_links,
         show_perf_stats,
         show_latency_hud,
         windows: docs,
@@ -4603,11 +4749,11 @@ pub fn all_panes(cx: &App) -> Vec<(PaneId, PaneHandle)> {
 
 pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
     let ws = cx.global::<Workspace>();
-    let (name, sync, sync_price, hide_hints, show_perf_stats, show_latency_hud, windows) = (
+    let (name, sync, sync_price, hidden_footer_links, show_perf_stats, show_latency_hud, windows) = (
         ws.name.clone(),
         ws.crosshair_sync,
         ws.crosshair_sync_price,
-        ws.hide_hints,
+        ws.hidden_links.iter().map(|k| k.key().to_owned()).collect(),
         ws.show_perf_stats,
         ws.show_latency_hud,
         ws.windows.clone(),
@@ -4620,7 +4766,7 @@ pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
         name,
         crosshair_sync: sync,
         crosshair_sync_price: sync_price,
-        hide_hints,
+        hidden_footer_links,
         show_perf_stats,
         show_latency_hud,
         windows,
@@ -4683,13 +4829,21 @@ pub(crate) fn refresh_trigger_status(cx: &mut App) {
     let mode = crate::picker_view::settings(cx).updates;
     crate::update::set_mode(mode, cx);
     let update = crate::update::status_label(cx);
+    let (safety, activity) = crate::footer::gather(cx);
     let ws = cx.global_mut::<Workspace>();
     // Busy this instant: last time's count stands.
     let open = open.or(ws.open_positions);
-    if ws.trigger_status != status || ws.open_positions != open || ws.update_label != update {
+    if ws.trigger_status != status
+        || ws.open_positions != open
+        || ws.update_label != update
+        || ws.safety != safety
+        || ws.activity != activity
+    {
         ws.trigger_status = status;
         ws.open_positions = open;
         ws.update_label = update;
+        ws.safety = safety;
+        ws.activity = activity;
         for w in ws.windows.clone() {
             let _ = w.update(cx, |_, _, cx| cx.notify());
         }

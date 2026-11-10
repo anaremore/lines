@@ -72,11 +72,12 @@ pub enum Command {
     ToggleStudyLabels,
     /// The focused chart: hide (or show) all its studies, keeping their configuration.
     ToggleStudies,
-    /// The focused chart without legends or study tags, and the key-hint bar hidden; again
-    /// restores both.
+    /// The focused chart without legends or study tags; again restores them.
     CleanChart,
-    /// Show or hide the key-hint bar (a workspace preference; shown by default).
-    ToggleHints,
+    /// Every key and its command: Settings › Keys (F1).
+    ShowKeys,
+    /// Show or hide one of the footer's links (its right-click menu; safety items can't be).
+    FooterLink(crate::footer::LinkKind),
     /// A column action on the focused DOM or time & sales (`crate::pane_columns`).
     Columns(ColumnCmd),
     /// The focused unavailable pane shows the source's own symbol (one click, also Enter).
@@ -458,7 +459,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::ToggleStudyLabels, true, true, false, "l"),
     b(Command::ToggleStudies, true, true, false, "i"),
     b(Command::CleanChart, true, true, false, "m"),
-    b(Command::ToggleHints, false, false, false, "f1"),
+    b(Command::ShowKeys, false, false, false, "f1"),
     b(Command::Studies, true, false, false, "i"),
     // Drawings (roadmap 11). Alt+letter on charts; Alt+V/R/B/G stay the volume profile's.
     b(
@@ -830,7 +831,8 @@ pub fn label(c: Command) -> String {
         Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
         Command::ToggleStudies => "Chart: hide/show studies".into(),
         Command::CleanChart => "Clean chart (no study labels, no key hints)".into(),
-        Command::ToggleHints => "Hide/show key hints bar".into(),
+        Command::ShowKeys => "Keyboard shortcuts…".into(),
+        Command::FooterLink(k) => k.name().into(),
         Command::Columns(ColumnCmd::Toggle(c)) => format!("Show/hide {}", c.label()),
         Command::Columns(ColumnCmd::AutoFit(c)) => format!("Fit {} to content", c.label()),
         Command::Columns(ColumnCmd::AutoFitAll) => "Fit columns to content".into(),
@@ -1000,7 +1002,7 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleStudyLabels,
         Command::ToggleStudies,
         Command::CleanChart,
-        Command::ToggleHints,
+        Command::ShowKeys,
         Command::ToggleLevels,
         Command::ToggleLevelLabels,
         Command::TogglePerfStats,
@@ -1085,15 +1087,6 @@ pub fn filter(query: &str, commands: &[Command]) -> Vec<Command> {
             words.iter().all(|w| l.contains(w.as_str()))
         })
         .collect()
-}
-
-/// The workspace's key hints for the status line.
-pub fn workspace_hints() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "⇧⌘P: all commands  ·  ⌘T: new tab  ·  right-click: pane menu  ·  F1: hide hints"
-    } else {
-        "Ctrl+Shift+P: all commands  ·  Ctrl+T: new tab  ·  right-click: pane menu  ·  F1: hide hints"
-    }
 }
 
 #[cfg(test)]
@@ -1289,7 +1282,7 @@ mod tests {
             &k("alt-left"),
             Command::Focus(Direction::Left)
         ));
-        assert!(runs_while_typing(&k("f1"), Command::ToggleHints));
+        assert!(runs_while_typing(&k("f1"), Command::ShowKeys));
         assert_eq!(cmd("shift-f10"), Some(Command::Menu));
         assert_eq!(c("shift-s"), Some(Command::SaveAs));
         assert_eq!(c("o"), Some(Command::Open));
@@ -1304,7 +1297,7 @@ mod tests {
         assert_eq!(c("shift-l"), Some(Command::ToggleStudyLabels));
         assert_eq!(c("shift-i"), Some(Command::ToggleStudies));
         assert_eq!(c("shift-m"), Some(Command::CleanChart));
-        assert_eq!(cmd("f1"), Some(Command::ToggleHints));
+        assert_eq!(cmd("f1"), Some(Command::ShowKeys));
         let t = |k: &str| Some(Command::Trade(k_trade(k)));
         assert_eq!(c("shift-f"), t("flatten"));
         assert_eq!(c("shift-a"), t("cancel"));
