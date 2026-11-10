@@ -3887,7 +3887,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
     {
         let who = crate::paper_reset::account_words(&info.name, &trading.source);
         let waiting = trading.cache.read().resetting(&info.id);
-        list = list.child(div().my_1().h(px(1.0)).bg(t.axis_line));
+        list = list.child(div().my_1().h(crate::zoom::ui(1.0)).bg(t.axis_line));
         if waiting {
             // In place of the reset rows: one is on its way, and a second can't be started.
             list = list.child(
@@ -3978,7 +3978,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                     div()
                         .px_2()
                         .pb_1()
-                        .text_size(px(11.0))
+                        .text_size(crate::zoom::ui(11.0))
                         .text_color(t.text_main)
                         .child(text),
                 );
