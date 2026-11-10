@@ -423,7 +423,8 @@ pub fn content_height(
             if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
                 h += 4.0 + text_lines(note.chars().count(), 11.0, inner) * line_h(11.0);
             }
-            if let Some(p) = e.custom.as_ref().filter(|p| p.fill != main) {
+            // Under its own row: the color's under Color, a fill's under Fill (never Recent).
+            if let Some(p) = e.custom.as_ref().filter(|p| picker_row(p.fill) == r.label) {
                 h += picker_height(p.opacity.is_some(), e.dropper, controls_w);
             }
             if main && !warnings.is_empty() {
@@ -444,6 +445,11 @@ pub fn content_height(
 
 /// A row of color swatches with a name line: the tab's color ("Color") or a level type's zone
 /// fill ("Fill").
+/// The row the picker opens under: a fill's under Fill, a color's under Color.
+fn picker_row(fill: bool) -> &'static str {
+    if fill { "Fill" } else { "Color" }
+}
+
 fn is_color_row(r: &Row) -> bool {
     r.label == "Color" || r.label == "Fill" || r.label == "Recent"
 }
@@ -695,8 +701,7 @@ fn picker(
                 .border_color(edge(p.zone == Zone::Dropper))
                 .when(e.dropper, |d| d.bg(t.accent).text_color(t.bg))
                 .when(!e.dropper, |d| {
-                    d.text_color(t.text_main)
-                        .hover(|s| s.bg(t.accent.opacity(0.12)))
+                    d.text_color(t.text_main).hover(|s| s.bg(t.element_hover))
                 })
                 // Armed, the button says how out: the editor may cover any part of the plot,
                 // so the hint stays here rather than on a plot banner.
@@ -1212,7 +1217,11 @@ pub fn render(
             if main && !warnings.is_empty() {
                 group = group.child(warning_box(t, warnings));
             }
-            if let Some(p) = e.custom.as_ref().filter(|p| p.fill != main) {
+            if let Some(p) = e
+                .custom
+                .as_ref()
+                .filter(|p| picker_row(p.fill) == row.label)
+            {
                 group = group.child(picker(e, p, t, es, cx));
             }
         }

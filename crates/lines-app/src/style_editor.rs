@@ -509,10 +509,12 @@ impl StyleEditor {
             let c = Color::Custom(Rgb::hex(hex));
             controls.push((chip(c), current == c));
         }
-        // A custom color not among the swatches or the recent colors shows as its own chip.
+        // A custom color not among the swatches shows as its own chip, unless it is the
+        // line color and a recent one (checked and named on the Recent row, which is the line
+        // color's): a fill keeps its chip, so the Fill row always checks what it holds.
         if let Color::Custom(rgb) = current
             && !controls.iter().any(|(_, on)| *on)
-            && !self.recent.contains(&rgb)
+            && (fill || !self.recent.contains(&rgb))
         {
             controls.push((chip(current), true));
         }
@@ -842,6 +844,8 @@ impl StyleEditor {
 
     /// Focus a zone of the picker (a click on it).
     pub fn custom_zone(&mut self, z: crate::color_picker::Zone) -> Outcome {
+        // Any other use of the picker ends the eyedropper.
+        self.dropper = false;
         if let Some(p) = self.custom.as_mut() {
             p.zone = z;
         }

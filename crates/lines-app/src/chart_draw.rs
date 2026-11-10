@@ -455,9 +455,11 @@ impl ChartDrawings {
             return (Outcome::Nothing, None);
         };
         let id = *id;
+        let was_picking = e.custom.is_some();
         let out = f(e);
         let Some(mut d) = self.data.lock().get(id).cloned() else {
             self.editor = None;
+            self.restyled = None;
             return (Outcome::Close, None);
         };
         let (style, picking) = match &self.editor {
@@ -473,7 +475,9 @@ impl ChartDrawings {
         // With the picker closed the editor holds the style to keep, whatever the input was
         // (a click on "Save as default" or another row keeps the previewed color first).
         // Saved only when it differs: one undo step, none for a revert.
-        if !picking || out == Outcome::Changed {
+        // Only a change, or the input that closed the picker (keeping its color), writes: a
+        // plain move never saves the editor's copy over another chart's newer edit.
+        if out == Outcome::Changed || (was_picking && !picking) {
             self.restyled = None;
             if style != d.style {
                 d.style = style;
