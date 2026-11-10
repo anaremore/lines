@@ -40,6 +40,8 @@ use lines_trading::PaperConfig;
 
 /// Everything besides the data that determines the image.
 pub struct Shot {
+    /// The replay bar (`--replay-bar`): its control and calendar.
+    pub replay: Option<crate::replay_bar::Replay>,
     pub out: PathBuf,
     /// Window size in logical px.
     pub size: (f32, f32),
@@ -119,7 +121,8 @@ pub struct SettingsShot {
 /// `--layout-report` for this process (set once by `run`).
 static LAYOUT_REPORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
+pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32> {
+    let replay = shot.replay.take();
     // The first window, wherever it was saved: the screenshot fixes its size.
     let window = WindowDoc {
         placement: None,
@@ -191,6 +194,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     // inside the app with its own exit code: quitting the app is not enough, because on
     // macOS it terminates the process with status 0 before `run` returns.
     let Shot {
+        replay: _,
         out,
         size,
         scale,
@@ -338,6 +342,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         let _keep = &feeds;
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
+        if let Some(r) = replay {
+            cx.set_global(r);
+        }
         if let Some(s) = &strategies {
             cx.set_global(crate::strategy_panel::Strategies(s.clone()));
         }

@@ -20,6 +20,14 @@ use crate::trigger::{
 };
 use crate::types::{AccountId, OrderId, OrderKind};
 
+impl Triggers {
+    /// A replay jumped back: the prints seen on the later clock would refuse every replayed
+    /// one as older.
+    pub(super) fn rewound(&mut self) {
+        self.prints.clear();
+    }
+}
+
 /// The core's trigger state.
 #[derive(Default)]
 pub(super) struct Triggers {

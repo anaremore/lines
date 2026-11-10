@@ -215,9 +215,23 @@ pub struct ReplayTransport {
     /// Read but not yet delivered (keeps `recv` cancel-safe across the timing sleep).
     pending: Option<(Duration, i64, Frame)>,
     clock: Option<UtcMillis>,
+    /// The replay bar's control: it paces frames instead of `speed`.
+    control: Option<std::sync::Arc<crate::replay_control::ReplayControl>>,
 }
 
 impl ReplayTransport {
+    /// Paced by the replay bar's `control` (if any) instead of the fixed speed.
+    pub fn controlled(
+        mut self,
+        control: Option<std::sync::Arc<crate::replay_control::ReplayControl>>,
+    ) -> Self {
+        if let (Some(c), Some((_, wall, _))) = (&control, &self.pending) {
+            c.set_first(UtcMillis(*wall));
+        }
+        self.control = control;
+        self
+    }
+
     pub fn open(path: &Path, speed: f64, stop_at: Option<UtcMillis>) -> Result<Self> {
         let reader =
             Reader::open(path).with_context(|| format!("open recording {}", path.display()))?;
@@ -242,6 +256,7 @@ impl ReplayTransport {
             started: Instant::now(),
             pending,
             clock,
+            control: None,
         })
     }
 
@@ -299,7 +314,12 @@ impl Transport for ReplayTransport {
                 }
             }
         }
-        if self.speed > 0.0 {
+        if let Some(c) = &self.control {
+            let (_, wall, _) = self.pending.as_ref().expect("set above");
+            if c.pace(*wall).await == crate::replay_control::Pace::Rewind {
+                return Ok(None);
+            }
+        } else if self.speed > 0.0 {
             let (at, _, _) = self.pending.as_ref().expect("set above");
             tokio::time::sleep_until(self.started + at.div_f64(self.speed)).await;
         }

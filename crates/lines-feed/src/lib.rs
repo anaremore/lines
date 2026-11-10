@@ -25,6 +25,7 @@ pub mod provider;
 pub mod recorded;
 pub mod recording;
 pub mod registry;
+pub mod replay_control;
 pub mod store;
 pub mod synth;
 pub mod synth_chain;
@@ -115,6 +116,9 @@ pub struct FeedConfig {
     /// Override how long a live feed may be silent before panes show it stale
     /// (default per provider, [`stale_after`]).
     pub stale_after: Option<Duration>,
+    /// A replay the replay bar controls (pause, speed, seek). `None`: it plays at
+    /// `Source::Replay`'s fixed speed (screenshots, headless runs, backtests).
+    pub replay: Option<Arc<replay_control::ReplayControl>>,
 }
 
 impl FeedConfig {
@@ -129,6 +133,7 @@ impl FeedConfig {
             store: None,
             orderflow_sessions: disk::orderflow::DEFAULT_SESSIONS,
             stale_after: None,
+            replay: None,
         }
     }
 }
@@ -293,14 +298,18 @@ impl Drop for FeedHandle {
 /// Create the store for a config (validates provider, product and contract up front).
 pub fn new_store(config: &FeedConfig) -> Result<Arc<ChartStore>> {
     let p = plan(config)?;
-    Ok(Arc::new(ChartStore::new(
+    let store = Arc::new(ChartStore::new(
         p.product,
         p.contract,
         p.provider.capabilities(),
         p.provider.id(),
         config.bar_period_ms,
         config.max_bars,
-    )))
+    ));
+    if let (Source::Replay { .. }, Some(c)) = (&config.source, &config.replay) {
+        store.set_replay(c.clone());
+    }
+    Ok(store)
 }
 
 /// Start the feed on a dedicated thread.
@@ -411,6 +420,10 @@ pub async fn run_feed(
         _ => None,
     };
     let is_replay = matches!(config.source, Source::Replay { .. });
+    let control = config.replay.clone().filter(|_| is_replay);
+    if let (Some(c), Source::Replay { path, .. }) = (&control, &config.source) {
+        scan_last_frame(path.clone(), c.clone());
+    }
     let opts = if let Source::Extension(e) = &config.source {
         let t = e.timing();
         ConnectionOptions {
@@ -526,7 +539,10 @@ pub async fn run_feed(
                 stop_at,
             } if disk::is_stored(path) => {
                 match disk::replay::SegmentReplay::open(path, *speed, *stop_at) {
-                    Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
+                    Ok(t) => {
+                        let t = t.controlled(control.clone());
+                        drive(t, rec, session, &store, &opts, &mut shutdown, sink).await
+                    }
                     Err(e) => Err(ConnectionError::Transport(e)),
                 }
             }
@@ -535,7 +551,10 @@ pub async fn run_feed(
                 speed,
                 stop_at,
             } => match ReplayTransport::open(path, *speed, *stop_at) {
-                Ok(t) => drive(t, rec, session, &store, &opts, &mut shutdown, sink).await,
+                Ok(t) => {
+                    let t = t.controlled(control.clone());
+                    drive(t, rec, session, &store, &opts, &mut shutdown, sink).await
+                }
                 Err(e) => Err(ConnectionError::Transport(e)),
             },
             #[cfg(feature = "vendor-cqg")]
@@ -582,8 +601,26 @@ pub async fn run_feed(
                 continue;
             }
             Ok(ConnectionEnd::Closed) if is_replay => {
-                store.set_status(FeedStatus::ReplayFinished);
-                break;
+                let Some(c) = control.as_ref() else {
+                    store.set_status(FeedStatus::ReplayFinished);
+                    break;
+                };
+                // The replay bar: a finished replay waits for a seek back (or the end of the
+                // run); a seek back restarts the file from its start.
+                if !c.rewind_requested() {
+                    c.set_finished();
+                    store.set_status(FeedStatus::ReplayFinished);
+                    tokio::select! {
+                        _ = c.wait_for_rewind() => {}
+                        _ = shutdown.changed() => break,
+                    }
+                }
+                c.restarted();
+                store.rewind();
+                tap.reset();
+                // Listeners (the trading core) learn where the earlier data ends.
+                listen::restarted(store.feed_id());
+                continue;
             }
             Err(e) if !e.is_retryable() || is_replay => {
                 tracing::error!("feed stopped: {e:#}");
@@ -670,6 +707,47 @@ fn start_recording(
                 .fail(format!("can't record in {}: {e}", dir.display()));
             None
         }
+    }
+}
+
+/// The replay bar's timeline end: the last recorded frame's time, read on a helper thread
+/// (a large recording takes a while; the bar shows no end until then).
+fn scan_last_frame(path: PathBuf, control: Arc<replay_control::ReplayControl>) {
+    let spawned = thread::Builder::new()
+        .name("lines-replay-scan".into())
+        .spawn(move || {
+            let last = if disk::is_stored(&path) {
+                disk::replay::SegmentReplay::open(&path, 0.0, None).and_then(|mut r| {
+                    let mut last = None;
+                    // The latest time, not the last in file order (days can come back in time).
+                    while let Some((t, _)) = r.next_frame()? {
+                        let t = t.div_euclid(1000);
+                        last = Some(last.map_or(t, |l: i64| l.max(t)));
+                    }
+                    Ok(last)
+                })
+            } else {
+                recording::Reader::open(&path)
+                    .and_then(|mut r| {
+                        let mut last = None;
+                        while let Some(rec) = r.next_record()? {
+                            if rec.direction == recording::Direction::FromServer {
+                                let t = rec.wall_ms;
+                                last = Some(last.map_or(t, |l: i64| l.max(t)));
+                            }
+                        }
+                        Ok(last)
+                    })
+                    .map_err(anyhow::Error::from)
+            };
+            match last {
+                Ok(Some(t)) => control.set_last(UtcMillis(t)),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("replay timeline: can't read the recording's end: {e:#}"),
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("replay timeline: no scan thread: {e}");
     }
 }
 

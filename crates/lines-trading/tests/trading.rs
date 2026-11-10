@@ -2629,3 +2629,34 @@ fn the_largest_order_never_holds_back_an_exit() {
         .unwrap_err();
     assert_eq!(e.code, RejectCode::Risk);
 }
+
+/// A replay jumped back (the replay bar): the paper broker cancels its working orders at once,
+/// and a request it had waiting on the old clock takes effect then too, never later, so the
+/// replayed trades can't fill orders placed later in the replay.
+#[test]
+fn a_jump_back_cancels_before_the_replayed_trades() {
+    let mut r = Rig::new(FillModel::Touch);
+    let id = r.place(Side::Buy, 1, OrderKind::Limit { price: px(6000.00) });
+    r.wait(LAT);
+    // A second order still on its way (due 25 ms after the old time) when the jump comes.
+    let late = r.place(Side::Buy, 1, OrderKind::Limit { price: px(5999.00) });
+    // Back an hour.
+    r.t -= 3_600_000;
+    let at = r.now();
+    r.core.replay_rewound(at);
+    r.collect();
+    r.trade(5999.75, 5);
+    r.collect();
+    for id in [id, late] {
+        let states = r.states(id);
+        assert_eq!(
+            states.last().map(String::as_str),
+            Some("canceled"),
+            "{states:?}"
+        );
+        assert!(
+            !states.iter().any(|s| s.contains("filled")),
+            "never filled on the replayed data: {states:?}"
+        );
+    }
+}

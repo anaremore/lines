@@ -773,14 +773,29 @@ pub(crate) async fn replay(
     next_due.store(due(0), Ordering::Release);
     loaded.store(true, Ordering::Release);
     let mut i = 0;
-    while i < batches.len() {
+    loop {
         if let Some(now) = prices.now() {
+            // The replay jumped back (the replay bar): what was applied after `now` goes, and
+            // the batches are applied again from the start up to it.
+            if i > 0 && now < batches[i - 1].0 {
+                i = 0;
+                cell.update(|s| {
+                    s.map = None;
+                    s.received = None;
+                    s.series_received = None;
+                    s.error = None;
+                    s.levels_refused = false;
+                });
+                next_due.store(due(0), Ordering::Release);
+            }
             while i < batches.len() && batches[i].0 <= now {
                 apply(&*source, &ctx, &*prices, &cell, &batches[i].1, batches[i].0);
                 i += 1;
                 next_due.store(due(i), Ordering::Release);
             }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // All applied: a jump back can still come (the replay bar), so keep watching, slower.
+        let idle = if i < batches.len() { 20 } else { 200 };
+        tokio::time::sleep(Duration::from_millis(idle)).await;
     }
 }

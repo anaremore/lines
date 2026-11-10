@@ -33,11 +33,23 @@ pub enum Icon {
     Menu,
     /// ×: close.
     Close,
+    /// A triangle pointing right: play (the replay bar).
+    Play,
+    /// Two bars: pause.
+    Pause,
+    /// A bar and a triangle pointing left: the previous session open.
+    SkipBack,
+    /// A triangle pointing right and a bar: the next session open.
+    SkipForward,
 }
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 7] = [
+    pub const ALL: [Icon; 11] = [
+        Icon::Play,
+        Icon::Pause,
+        Icon::SkipBack,
+        Icon::SkipForward,
         Icon::PopOut,
         Icon::Reattach,
         Icon::Dock,
@@ -120,6 +132,16 @@ impl Icon {
                 ],
             ],
             Icon::Close => &[&[(4.0, 4.0), (12.0, 12.0)], &[(12.0, 4.0), (4.0, 12.0)]],
+            Icon::Play => &[&[(5.0, 3.0), (13.0, 8.0), (5.0, 13.0), (5.0, 3.0)]],
+            Icon::Pause => &[&[(5.0, 3.0), (5.0, 13.0)], &[(11.0, 3.0), (11.0, 13.0)]],
+            Icon::SkipBack => &[
+                &[(4.0, 3.0), (4.0, 13.0)],
+                &[(12.0, 3.0), (6.0, 8.0), (12.0, 13.0), (12.0, 3.0)],
+            ],
+            Icon::SkipForward => &[
+                &[(12.0, 3.0), (12.0, 13.0)],
+                &[(4.0, 3.0), (10.0, 8.0), (4.0, 13.0), (4.0, 3.0)],
+            ],
         }
     }
 }

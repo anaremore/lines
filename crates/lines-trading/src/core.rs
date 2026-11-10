@@ -2110,6 +2110,26 @@ impl TradingCore {
 
     // ---- broker events --------------------------------------------------------------
 
+    /// A replay jumped back to `now` (the replay bar): the broker drops what it held on the
+    /// later clock (its waiting requests take effect, its working orders are canceled, its books
+    /// go: `Broker::rewound`), and so does the core (the marks' and the triggers' times), so the
+    /// replayed data is taken as new. Run before any of it arrives.
+    pub fn replay_rewound(&mut self, now: UtcMillis) {
+        self.seen_now = now;
+        for m in self.marks.values_mut() {
+            m.quoted_at = None;
+            m.last_at = None;
+            m.book_at = None;
+            m.priced_at = None;
+            m.last_sale = None;
+        }
+        // News flattens done on the later clock: the windows after `now` act again.
+        self.news_flattened.retain(|(_, _, at)| *at <= now);
+        self.triggers.rewound();
+        self.broker.rewound();
+        self.tick(now);
+    }
+
     /// Apply whatever the broker has due by `now` (acks after latency, fills, cancels).
     pub fn tick(&mut self, now: UtcMillis) {
         self.seen_now = self.seen_now.max(now);

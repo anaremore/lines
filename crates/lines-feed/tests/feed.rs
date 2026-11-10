@@ -351,3 +351,96 @@ async fn explicit_contract_is_requested_and_recorded() {
     assert!(new_store(&replay(Some(Target::Product(catalog::NQ)))).is_err());
     let _ = std::fs::remove_file(&path);
 }
+
+/// The replay bar's control: a seek ahead stops exactly where a replay cut at that time
+/// stops; a seek back rewinds the store and lands on the same data as a cut there; playing
+/// on reaches the same end as an uncontrolled replay, and a finished replay still rewinds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_controlled_replay_seeks_rewinds_and_finishes() {
+    use lines_feed::replay_control::ReplayControl;
+
+    let path = temp_path("controlled.lfr");
+    let mut live = mock(MockConfig {
+        history_bars: 30,
+        ..Default::default()
+    });
+    live.record = Some(path.clone());
+    run_until(live, "100 frames recorded", |d| {
+        d.stats.frames_in >= 100 && d.stats.trades_in > 0
+    })
+    .await;
+    let replay = |stop_at| {
+        FeedConfig::new(Source::Replay {
+            path: path.clone(),
+            speed: 0.0,
+            stop_at,
+        })
+    };
+    let mut r = lines_feed::recording::Reader::open(&path).unwrap();
+    let mut times = Vec::new();
+    while let Some(rec) = r.next_record().unwrap() {
+        if rec.direction == lines_feed::recording::Direction::FromServer {
+            times.push(rec.wall_ms);
+        }
+    }
+    let late = UtcMillis(times[times.len() * 3 / 4]);
+    let early = UtcMillis(times[times.len() / 4]);
+    let full = run_to_end(replay(None)).await;
+    let at_late = run_to_end(replay(Some(late))).await;
+    let at_early = run_to_end(replay(Some(early))).await;
+
+    let control = Arc::new(ReplayControl::new(0.0));
+    let mut cfg = replay(None);
+    cfg.replay = Some(control.clone());
+    let store = new_store(&cfg).unwrap();
+    let (tx, rx) = watch::channel(false);
+    let task = tokio::spawn(run_feed(cfg, store.clone(), rx));
+    let wait = |what: &str, f: &dyn Fn() -> bool| {
+        let start = Instant::now();
+        while !f() {
+            assert!(start.elapsed() < DEADLINE, "{what}: not reached");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let settled = |t: UtcMillis| {
+        let s = control.snapshot();
+        s.paused && s.seeking.is_none() && s.clock == Some(t)
+    };
+    let same = |a: &ChartStore, b: &ChartStore, what: &str| {
+        let (a, b) = (a.read(), b.read());
+        assert_eq!(a.series.bars(), b.series.bars(), "{what}: bars");
+        assert_eq!(a.last_trade, b.last_trade, "{what}: last trade");
+        assert_eq!(a.tape.len(), b.tape.len(), "{what}: tape");
+    };
+
+    assert!(!control.seek(late), "ahead: no rewind");
+    wait("paused at the late cut", &|| settled(late));
+    // A live recording starts with outbound frames: the timeline starts at the first delivered.
+    assert_eq!(control.snapshot().first, Some(UtcMillis(times[0])));
+    same(&store, &at_late, "seek ahead");
+    assert_eq!(
+        store.market_clock(),
+        Some(late),
+        "the store's clock is the replay's"
+    );
+
+    assert!(control.seek(early), "back: a rewind");
+    wait("paused at the early cut", &|| settled(early));
+    same(&store, &at_early, "seek back");
+    assert_eq!(control.rewinds(), 1);
+
+    control.set_paused(false);
+    wait("finished", &|| {
+        store.read().status == FeedStatus::ReplayFinished
+    });
+    same(&store, &full, "played to the end");
+    assert!(!task.is_finished(), "a finished replay waits for the bar");
+
+    assert!(control.seek(early), "a finished replay rewinds too");
+    wait("paused at the early cut again", &|| settled(early));
+    same(&store, &at_early, "rewound after the end");
+
+    tx.send(true).unwrap();
+    task.await.unwrap();
+    let _ = std::fs::remove_file(&path);
+}

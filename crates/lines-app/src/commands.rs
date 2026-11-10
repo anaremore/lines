@@ -165,6 +165,38 @@ pub enum Command {
     /// One working order on the focused chart, from its tag's menu (`crate::pane_menu`). Not
     /// in the palette or the keymap: it needs the order under the pointer.
     Order(OrderCmd),
+    /// The replay bar (`crate::replay_bar`). Its plain keys act only while a replay plays and
+    /// the focused pane doesn't use the key itself.
+    Replay(ReplayCmd),
+}
+
+/// The replay bar's controls (`crate::replay_bar`). Every jump ends paused at its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayCmd {
+    PlayPause,
+    /// One bar of the focused chart (1 minute when it has no time bars).
+    StepBack,
+    StepForward,
+    /// The previous or next session open.
+    PrevSession,
+    NextSession,
+    Slower,
+    Faster,
+    /// A date and time in the display time zone.
+    GoTo,
+}
+
+impl ReplayCmd {
+    pub const ALL: [ReplayCmd; 8] = [
+        ReplayCmd::PlayPause,
+        ReplayCmd::StepBack,
+        ReplayCmd::StepForward,
+        ReplayCmd::PrevSession,
+        ReplayCmd::NextSession,
+        ReplayCmd::Slower,
+        ReplayCmd::Faster,
+        ReplayCmd::GoTo,
+    ];
 }
 
 /// What an order's tag menu does: the same paths as its tag's controls and the DOM.
@@ -509,6 +541,45 @@ pub const BINDINGS: &[Binding] = &[
         "u",
     ),
     b(Command::CyclePnl, true, false, true, "p"),
+    // The replay bar: plain keys, passed on to the panes when no replay plays (and to a
+    // focused pane that uses them: the chain's Left/Right, typed text).
+    b(
+        Command::Replay(ReplayCmd::PlayPause),
+        false,
+        false,
+        false,
+        "space",
+    ),
+    b(
+        Command::Replay(ReplayCmd::StepBack),
+        false,
+        false,
+        false,
+        "left",
+    ),
+    b(
+        Command::Replay(ReplayCmd::StepForward),
+        false,
+        false,
+        false,
+        "right",
+    ),
+    b(
+        Command::Replay(ReplayCmd::PrevSession),
+        false,
+        true,
+        false,
+        "left",
+    ),
+    b(
+        Command::Replay(ReplayCmd::NextSession),
+        false,
+        true,
+        false,
+        "right",
+    ),
+    b(Command::Replay(ReplayCmd::Slower), false, false, false, "["),
+    b(Command::Replay(ReplayCmd::Faster), false, false, false, "]"),
     // Ctrl+= and Ctrl++ (Shift+= on most layouts, or the keypad's +), Ctrl+−, Ctrl+0.
     b(Command::ZoomIn, true, false, false, "="),
     b(Command::ZoomIn, true, true, false, "="),
@@ -641,7 +712,11 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
 /// Whether holding the key down repeats `cmd`. Never for arming or anything that sends or
 /// cancels orders: a held Ctrl+Alt+B must send one order, not one per key repeat.
 pub fn repeats(cmd: Command) -> bool {
-    !matches!(cmd, Command::Trade(_) | Command::Strategy(_))
+    // Nor play/pause: a held Space would flip it on every repeat.
+    !matches!(
+        cmd,
+        Command::Trade(_) | Command::Strategy(_) | Command::Replay(ReplayCmd::PlayPause)
+    )
 }
 
 /// The hint shown for a command in menus and the palette: its first binding.
@@ -665,6 +740,7 @@ pub fn hint(c: Command) -> String {
     };
     let key = match b.key {
         "right" => "→".to_owned(),
+        "left" => "←".to_owned(),
         "down" => "↓".to_owned(),
         "tab" => "Tab".to_owned(),
         "pagedown" => "PgDn".to_owned(),
@@ -828,6 +904,17 @@ pub fn label(c: Command) -> String {
             StrategyCmd::ToggleMarks => "Chart: show/hide strategy markers",
         }
         .into(),
+        Command::Replay(r) => match r {
+            ReplayCmd::PlayPause => "Replay: play / pause",
+            ReplayCmd::StepBack => "Replay: back one bar",
+            ReplayCmd::StepForward => "Replay: forward one bar",
+            ReplayCmd::PrevSession => "Replay: previous session open",
+            ReplayCmd::NextSession => "Replay: next session open",
+            ReplayCmd::Slower => "Replay: slower",
+            ReplayCmd::Faster => "Replay: faster",
+            ReplayCmd::GoTo => "Replay: go to…",
+        }
+        .into(),
         Command::Order(o) => match o {
             OrderCmd::Breakeven => "Move to breakeven",
             OrderCmd::Resize(_) => "Change size…",
@@ -963,6 +1050,7 @@ pub fn palette() -> Vec<Command> {
     v.extend(TradeCmd::PALETTE_ONLY.map(Command::Trade));
     v.push(Command::CyclePnl);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
+    v.extend(ReplayCmd::ALL.map(Command::Replay));
     v.push(Command::ExportDiagnostics);
     v.push(Command::DownloadDays);
     v.extend([Command::ZoomIn, Command::ZoomOut, Command::ZoomReset]);
@@ -1366,7 +1454,7 @@ mod tests {
         // picker, Ctrl+D and Alt+M work inside it, Alt+V/R/B/G drive the chart's volume
         // profile: none of them is a workspace command.
         for k in [
-            "a", "c", "g", "shift-g", "home", "left", "escape", "enter", "alt-m", "0",
+            "a", "c", "g", "shift-g", "home", "escape", "enter", "alt-m", "0",
             // Chart volume profile: Alt+V/R/B/G.
             "alt-v", "alt-r", "alt-b", "alt-g",
         ] {

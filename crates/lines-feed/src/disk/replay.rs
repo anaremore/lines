@@ -68,9 +68,23 @@ pub struct SegmentReplay {
     first_us: Option<i64>,
     pending: Option<(i64, Frame)>,
     clock: Option<UtcMillis>,
+    /// The replay bar's control: it paces frames instead of `speed`.
+    control: Option<std::sync::Arc<crate::replay_control::ReplayControl>>,
 }
 
 impl SegmentReplay {
+    /// Paced by the replay bar's `control` (if any) instead of the fixed speed.
+    pub fn controlled(
+        mut self,
+        control: Option<std::sync::Arc<crate::replay_control::ReplayControl>>,
+    ) -> Self {
+        if let (Some(c), Some(t)) = (&control, self.clock) {
+            c.set_first(t);
+        }
+        self.control = control;
+        self
+    }
+
     pub fn open(path: &Path, speed: f64, stop_at: Option<UtcMillis>) -> Result<SegmentReplay> {
         let mut r = SegmentReplay {
             files: files(path)?.into(),
@@ -81,6 +95,7 @@ impl SegmentReplay {
             first_us: None,
             pending: None,
             clock: None,
+            control: None,
         };
         // Like a recording: before any frame, the clock reads the first stored time.
         r.pending = r.next_frame()?;
@@ -149,10 +164,15 @@ impl Transport for SegmentReplay {
         let Some((t, _)) = self.pending.as_ref() else {
             return Ok(None);
         };
-        if self.speed > 0.0
+        if let Some(c) = &self.control {
+            let wall = t.div_euclid(1000);
+            if c.pace(wall).await == crate::replay_control::Pace::Rewind {
+                return Ok(None);
+            }
+        } else if self.speed > 0.0
             && let Some(first) = self.first_us
         {
-            let since = Duration::from_micros((t - first).max(0) as u64);
+            let since = Duration::from_micros(t.saturating_sub(first).max(0) as u64);
             tokio::time::sleep_until(self.started + since.div_f64(self.speed)).await;
         }
         Ok(self.pending.take().map(|(t, f)| {
