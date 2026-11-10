@@ -1786,7 +1786,10 @@ where
     });
     writer.flush(Duration::from_secs(3));
     journal.flush(Duration::from_secs(3));
-    // A restart to update (or a rollback) starts the new executable now that this one saved.
+    // A restart to update (or a rollback) applies and starts the new executable now that this
+    // one saved. `run` returning has dropped the app, so the `Trading` global's drop has joined
+    // the trading core and written its last paper save: nothing writes over a rollback's
+    // restored files after this.
     update::relaunch_if_requested();
     Ok(())
 }

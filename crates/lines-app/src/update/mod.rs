@@ -114,6 +114,20 @@ pub enum Pending {
 
 static RELAUNCH: Mutex<Option<Pending>> = Mutex::new(None);
 
+/// The key updates verify against (tests swap in their own).
+fn key() -> Option<&'static str> {
+    #[cfg(test)]
+    if let Some(k) = TEST_KEY.with(|k| *k.borrow()) {
+        return Some(k);
+    }
+    verify::PUBLIC_KEY
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_KEY: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
+}
+
 /// An update, applied: the saved files backed up, the executable swapped, the start count
 /// begun. Errors leave the running version in place.
 pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
@@ -126,6 +140,14 @@ pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
     else {
         return Err("not an update".into());
     };
+    // Verified again here, at the swap: nothing may have replaced it since the press.
+    let v = Version::parse(to).ok_or("bad version")?;
+    let data = std::fs::read(staged).map_err(|e| format!("the update is gone: {e}"))?;
+    let sha = std::fs::read_to_string(staged.with_extension("sha256")).unwrap_or_default();
+    let sig = std::fs::read_to_string(staged.with_extension("minisig")).unwrap_or_default();
+    let expected = manifest::trusted_comment(v, manifest::target());
+    verify::verify(&data, &sha, &sig, key(), &expected)
+        .map_err(|why| format!("v{v} discarded: {why}"))?;
     install::backup(config, from).map_err(|e| format!("couldn't back up settings: {e}"))?;
     install::swap(exe, staged).map_err(|e| format!("couldn't install v{to}: {e}"))?;
     let _ = install::save_state(
@@ -458,7 +480,7 @@ pub fn restart_to_update(cx: &mut App) -> Result<(), String> {
     let sha = std::fs::read_to_string(staged.with_extension("sha256")).unwrap_or_default();
     let sig = std::fs::read_to_string(staged.with_extension("minisig")).unwrap_or_default();
     let expected = manifest::trusted_comment(v, manifest::target());
-    if let Err(why) = verify::verify(&data, &sha, &sig, verify::PUBLIC_KEY, &expected) {
+    if let Err(why) = verify::verify(&data, &sha, &sig, key(), &expected) {
         let _ = std::fs::remove_file(&staged);
         if let Ok(mut st) = u.status.lock() {
             *st = Status::Rejected(v, why.to_string());
@@ -490,6 +512,13 @@ pub fn roll_back(cx: &mut App) -> Result<(), String> {
     Ok(())
 }
 
+/// "Update ready: v0.3.12 · Waits: 1 position open" from `hold::hold_reason`'s
+/// "Update waits: …".
+fn held_label(v: Version, why: &str) -> String {
+    let what = why.strip_prefix("Update waits: ").unwrap_or(why);
+    format!("Update ready: v{v} · Waits: {what}")
+}
+
 /// The status line's word on updates: text, whether it's a warning, and its link's command.
 pub fn status_label(cx: &App) -> Option<(String, bool, Option<crate::commands::Command>)> {
     use crate::commands::Command;
@@ -505,14 +534,7 @@ pub fn status_label(cx: &App) -> Option<(String, bool, Option<crate::commands::C
         Status::Idle => None,
         Status::Available(v) => Some((format!("Update available: v{v}"), false, None)),
         Status::Ready(v, _) => Some(match held(cx) {
-            Some(why) => (
-                format!(
-                    "Update ready: v{v} · {}",
-                    why.trim_start_matches("Update ").replacen('w', "W", 1)
-                ),
-                false,
-                None,
-            ),
+            Some(why) => (held_label(v, &why), false, None),
             None => (
                 format!("Update ready: v{v} · Restart to update"),
                 false,
@@ -543,7 +565,8 @@ mod tests {
         let k = TestKey::new();
         let v = Version(0, 3, 12);
         let exe = b"MZ new lines";
-        let sig = k.sign(exe);
+        // Signed for this release on this system (the tests run on every CI system).
+        let sig = k.sign_as(exe, &manifest::trusted_comment(v, manifest::target()));
         assert_eq!(
             manifest::trusted_comment(v, "x86_64-pc-windows-msvc"),
             verify::tests::RELEASE
@@ -576,6 +599,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&c);
     }
 
+    /// Stage `data` as v0.3.12, signed by a run-time key the swap then checks against.
+    fn staged_for_swap(c: &Path, data: &[u8]) -> PathBuf {
+        let k = TestKey::new();
+        let public: &'static str = Box::leak(k.public.clone().into_boxed_str());
+        TEST_KEY.with(|t| *t.borrow_mut() = Some(public));
+        let p = c.join("download.exe");
+        std::fs::write(&p, data).unwrap();
+        std::fs::write(p.with_extension("sha256"), verify::sha256_hex(data)).unwrap();
+        let comment = manifest::trusted_comment(Version(0, 3, 12), manifest::target());
+        std::fs::write(p.with_extension("minisig"), k.sign_as(data, &comment)).unwrap();
+        p
+    }
+
     /// A rollback applied after the quit: the previous executable back and the saved files the
     /// old version had, whatever the new one wrote last.
     #[test]
@@ -584,7 +620,7 @@ mod tests {
         let exe = c.join("lines.exe");
         std::fs::write(&exe, "v0.3.11").unwrap();
         std::fs::write(c.join("settings.json"), "old settings").unwrap();
-        std::fs::write(c.join("download.exe"), "v0.3.12").unwrap();
+        staged_for_swap(&c, b"v0.3.12");
         let up = Pending::Update {
             config: c.clone(),
             staged: c.join("download.exe"),
@@ -608,6 +644,51 @@ mod tests {
         );
         assert!(install::load_state(&c).is_none());
         let _ = std::fs::remove_dir_all(&c);
+    }
+
+    /// Failures change nothing: a staged file replaced after the press isn't installed, a
+    /// missing one leaves the running version, and no rollback without a kept version.
+    #[test]
+    fn a_failed_update_or_rollback_changes_nothing() {
+        let c = dir("fail");
+        let exe = c.join("lines.exe");
+        std::fs::write(&exe, "v0.3.11").unwrap();
+        let staged = staged_for_swap(&c, b"v0.3.12");
+        std::fs::write(&staged, b"swapped in after the press").unwrap();
+        let up = Pending::Update {
+            config: c.clone(),
+            staged: staged.clone(),
+            from: "0.3.11".into(),
+            to: "0.3.12".into(),
+        };
+        assert!(apply_update(&exe, &up).is_err(), "re-verified at the swap");
+        std::fs::remove_file(&staged).unwrap();
+        assert!(apply_update(&exe, &up).is_err(), "gone");
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v0.3.11");
+        assert!(!install::previous_exe(&exe).exists());
+        assert!(install::load_state(&c).is_none());
+        let back = Pending::Rollback {
+            config: c.clone(),
+            target: "0.3.11".into(),
+        };
+        assert!(apply_rollback(&exe, &back).is_err());
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v0.3.11");
+        let _ = std::fs::remove_dir_all(&c);
+    }
+
+    /// The held label names what waits, once.
+    #[test]
+    fn the_held_label_reads_once() {
+        let why = hold::hold_reason(hold::Activity {
+            positions: 1,
+            orders: 2,
+            ..hold::Activity::default()
+        })
+        .unwrap();
+        assert_eq!(
+            held_label(Version(0, 3, 12), &why),
+            "Update ready: v0.3.12 · Waits: 1 position open, 2 working orders"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ fn backed_up(config: &Path) -> Vec<PathBuf> {
         PathBuf::from("settings.json"),
         PathBuf::from("workspace.json"),
     ];
-    for dir in ["workspaces", "paper"] {
+    for dir in ["workspaces", "paper", "drawings"] {
         if let Ok(rd) = std::fs::read_dir(config.join(dir)) {
             let mut names: Vec<PathBuf> = rd
                 .flatten()
