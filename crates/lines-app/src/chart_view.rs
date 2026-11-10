@@ -6599,8 +6599,9 @@ impl ChartView {
             Some(c) => write!(left, "{c}"),
             None => write!(left, "{} (contract unknown)", i.symbol),
         };
-        // In a run with several sources, the one serving this pane (decision 0030).
-        crate::sources::write_header_tag(&mut left, &self.feed, cx);
+        // In a run with several sources, the one serving this pane (decision 0030): after the
+        // contract, in the secondary color; the first thing a narrow header drops.
+        let tag = crate::sources::header_tag(&self.feed, cx).map(|s| pane::source_tag(&s));
         // Last, bid, ask: a missing value shows as a dimmed dash (docs/design.md §7), never as
         // a bare label that reads like a layout bug.
         let quote = |label: &str, p: Option<Price>| {
@@ -6735,17 +6736,27 @@ impl ChartView {
             );
             f32::from(line.width)
         };
-        let fit = pane::chart_header_fit(
-            room,
-            // A market pane always shows its link marker (unlinked too).
-            true,
-            &left,
-            word,
-            &pane::chip_text(self.timeframe, self.tick_continuous(), to_go),
-            acct.as_ref().map(|(n, p)| (n.as_str(), *p)),
-            self.tf_menu,
-            &measure,
-        );
+        let chip_text = pane::chip_text(self.timeframe, self.tick_continuous(), to_go);
+        let fit_in = |room: f32| {
+            pane::chart_header_fit(
+                room,
+                // A market pane always shows its link marker (unlinked too).
+                true,
+                &left,
+                word,
+                &chip_text,
+                acct.as_ref().map(|(n, p)| (n.as_str(), *p)),
+                self.tf_menu,
+                &measure,
+            )
+        };
+        // The source tag shows only when everything else fits with it.
+        let with_tag = tag
+            .as_deref()
+            .map(|tg| fit_in(room - pane::source_tag_px(tg, &measure)))
+            .filter(|f| room <= 0.0 || (f.account && f.timeframe && f.status && f.link));
+        let tag = tag.filter(|_| with_tag.is_some());
+        let fit = with_tag.unwrap_or_else(|| fit_in(room));
         let desc_w = measure(i.description).ceil() + 1.0;
         let account = crate::trade_bar::chart_chip(self, &t, fit.account, cx);
         let timeframe = fit.timeframe.then(|| {
@@ -6776,6 +6787,14 @@ impl ChartView {
                                 .children(crate::layout_rec::text_marker(&left))
                                 .child(left),
                         )
+                        .children(tag.map(|tg| {
+                            div()
+                                .text_color(t.text_dim)
+                                .flex_shrink_0()
+                                .relative()
+                                .children(crate::layout_rec::text_marker(&tg))
+                                .child(tg)
+                        }))
                         .children(account)
                         // Whole unless nothing else is left to give way: then "…", never cut.
                         .children(word.map(|w| {
@@ -7885,6 +7904,8 @@ impl Render for ChartView {
                 .measure_labels(|t| crate::levels_layer::measure(t, &theme, window));
         }
         let today = pane::today(self.frozen, &self.store);
+        // The list stays off the price axis.
+        self.picker.set_right_inset(axis_w());
         let overlay = self.picker.overlay(
             &t,
             &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),

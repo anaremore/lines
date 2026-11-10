@@ -128,6 +128,8 @@ pub struct PickerUi {
     pub error: Option<String>,
     /// Tabular digits for dates and day counts.
     tnum: FontFeatures,
+    /// What the panel keeps clear at the pane's right (a chart's price axis), px.
+    right_inset: f32,
 }
 
 impl PickerUi {
@@ -139,7 +141,13 @@ impl PickerUi {
             picker,
             error: None,
             tnum: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+            right_inset: 0.0,
         }
+    }
+
+    /// Keep the panel clear of `px` at the pane's right (a chart's price axis).
+    pub fn set_right_inset(&mut self, px: f32) {
+        self.right_inset = px.max(0.0);
     }
 
     pub fn is_open(&self) -> bool {
@@ -256,13 +264,23 @@ impl PickerUi {
     /// only while open. Row clicks call `on_row(view, row, cx)`; the wheel, the × and a press
     /// outside reach the pane's picker through [`PickerHost`].
     pub fn overlay<V: PickerHost + 'static>(
-        &self,
+        &mut self,
         theme: &Theme,
         availability: &crate::sources::Pick,
         today: CivilDate,
         on_row: fn(&mut V, usize, &mut Context<V>),
         cx: &mut Context<V>,
     ) -> Option<AnyElement> {
+        // Symbols an enabled source serves rank above those none does (the run's sources can
+        // change while the picker is open: a source turned on or off, a pane's own moving).
+        if let Some(p) = self.picker.as_mut() {
+            let served = self
+                .entries
+                .iter()
+                .map(|e| availability.check(&Target::Product(e.product.id)).is_ok())
+                .collect();
+            p.set_served(served, &self.entries, settings(cx));
+        }
         let p = self.picker.as_ref()?;
         let t = *theme;
         let settings = settings(cx).clone();
@@ -468,7 +486,8 @@ impl PickerUi {
                 .absolute()
                 .top(crate::zoom::ui(24.0))
                 .left_0()
-                .right_0()
+                // Off a chart's price axis (its width; 0 elsewhere).
+                .right(gpui::px(self.right_inset))
                 .bottom_0()
                 .flex()
                 .justify_center()

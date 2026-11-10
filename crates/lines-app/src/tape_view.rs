@@ -68,6 +68,8 @@ pub fn default_large_print(p: &Product) -> Qty {
 }
 
 pub struct TapeView {
+    /// The pane's width as last painted (0: not yet): which header parts fit.
+    pane_w: f32,
     feed: PaneFeed,
     common: PaneCommon,
     picker: PickerUi,
@@ -165,6 +167,7 @@ impl TapeView {
             store,
             theme,
             seen_revision: u64::MAX,
+            pane_w: 0.0,
             large: opts
                 .large_print
                 .unwrap_or_else(|| default_large_print(&product)),
@@ -332,6 +335,7 @@ impl TapeView {
         let (ox, top) = (f(bounds.origin.x), f(bounds.origin.y));
         let w = f(bounds.size.width);
         let h = f(bounds.size.height);
+        self.pane_w = w;
         window.paint_quad(fill(bounds, t.bg));
         let fmt = self.product.price;
         let qf = self.product.qty;
@@ -474,17 +478,21 @@ impl TapeView {
         self.cols.paint_rules(&t, body, window);
     }
 
-    fn header(&self, cx: &App) -> impl IntoElement {
+    fn header(&self, window: &Window, cx: &App) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(48);
         let mut word = None;
+        // The source's tag sits between the contract and "Time & sales", in the secondary
+        // color.
+        let mut tag = None;
+        let mut contract = String::new();
         if let Some(title) = pane::unavailable_title(&self.feed) {
             let _ = write!(left, "{title}  Time & sales");
         } else if let Some(d) = self.store.try_read() {
             word = pane::status_word(&d.status);
-            left.push_str(&pane::contract_text(&d));
-            crate::sources::write_header_tag(&mut left, &self.feed, cx);
-            left.push_str("  Time & sales");
+            contract = pane::contract_text(&d);
+            left.push_str(&contract);
+            tag = crate::sources::header_tag(&self.feed, cx).map(|s| pane::source_tag(&s));
         }
         let mut right = String::with_capacity(32);
         let mut q = FixedStr::<32>::new();
@@ -493,6 +501,23 @@ impl TapeView {
             let _ = write!(right, "{n}  ·  ");
         }
         let _ = write!(right, "large ≥ {q}");
+        // A narrow header drops the source tag first; the contract and words never.
+        if let Some(tg) = &tag {
+            let tw = pane::text_px(window, crate::zoom::ui(12.0));
+            let room = self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Tape);
+            let rest = pane::side_header_px(
+                self.common.link.is_some(),
+                &contract,
+                "Time & sales",
+                word,
+                &right,
+                &tw,
+            );
+            if !pane::source_tag_fits(room, rest, tg, &tw) {
+                tag = None;
+            }
+        }
+        let has_contract = !contract.is_empty();
         div()
             .flex()
             .flex_row()
@@ -524,6 +549,22 @@ impl TapeView {
                                     .children(crate::layout_rec::text_marker(&left))
                                     .child(left),
                             )
+                            .children(tag.map(|tg| {
+                                div()
+                                    .text_color(t.text_dim)
+                                    .relative()
+                                    .children(crate::layout_rec::text_marker(&tg))
+                                    .child(tg)
+                            }))
+                            .when(has_contract, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(t.text_main)
+                                        .relative()
+                                        .children(crate::layout_rec::text_marker("Time & sales"))
+                                        .child("Time & sales"),
+                                )
+                            })
                             // Every state but live is a word beside the contract that never
                             // gives way, as on the chart: an ended or failed feed must not
                             // read as live (docs/design.md §7).
@@ -558,7 +599,7 @@ impl TapeView {
 }
 
 impl Render for TapeView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let t = self.theme;
         let today = pane::today(self.frozen, &self.store);
@@ -591,7 +632,7 @@ impl Render for TapeView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header(cx))
+            .child(self.header(window, cx))
             .child(
                 div()
                     .relative()

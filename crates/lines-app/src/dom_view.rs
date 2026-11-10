@@ -109,6 +109,10 @@ pub struct DomView {
     has_depth: bool,
     /// Why there is no depth, from the source (shown in the empty ladder).
     depth_note: Option<String>,
+    /// The ladder's bottom-row note while it shows rows ([`book_note`]): the source's reason,
+    /// else "No depth" or "Top of book only" when the source gives none, so empty bid and ask
+    /// columns never read as a thin market.
+    book_note: Option<String>,
     grouping: u32,
     view: LadderView,
     rows: Vec<LadderRow>,
@@ -259,6 +263,7 @@ impl Pane for DomView {
         {
             self.has_depth = d.capabilities.depth;
             self.depth_note.clone_from(&d.depth_note);
+            self.book_note = book_note(&d.capabilities, d.depth_note.as_deref());
             note = true;
         }
         let shown = self.cols.set.is_shown(DomCol::Trail.index());
@@ -277,6 +282,7 @@ impl Pane for DomView {
             self.product = d.product.clone();
             self.has_depth = d.capabilities.depth;
             self.depth_note.clone_from(&d.depth_note);
+            self.book_note = book_note(&d.capabilities, d.depth_note.as_deref());
         }
         let follow = feed.sub.is_some();
         self.orders = OrdersLayer::default();
@@ -310,12 +316,13 @@ impl DomView {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = feed.store().clone();
-        let (product, has_depth, depth_note) = {
+        let (product, has_depth, depth_note, book_note) = {
             let d = store.read();
             (
                 d.product.clone(),
                 d.capabilities.depth,
                 d.depth_note.clone(),
+                book_note(&d.capabilities, d.depth_note.as_deref()),
             )
         };
         pane::watch_store(cx);
@@ -340,6 +347,7 @@ impl DomView {
             product,
             has_depth,
             depth_note,
+            book_note,
             grouping: opts.grouping.max(1),
             view: LadderView::default(),
             rows: Vec::with_capacity(MAX_ROWS),
@@ -956,7 +964,7 @@ impl DomView {
                         units,
                         top,
                         // The note takes the bottom row: the rows above keep their prices.
-                        rows - usize::from(self.depth_note.is_some() && rows > 1),
+                        rows - usize::from(self.book_note.is_some() && rows > 1),
                         &mut self.rows,
                     )
                 }
@@ -1236,9 +1244,10 @@ impl DomView {
             );
         }
         self.cols.paint_rules(&t, body, window);
-        // A thin book must not read as the market's real depth: say so on the bottom row, so
-        // no price the trader aims at moves when the note comes or goes.
-        if let Some(note) = self.depth_note.as_deref()
+        // A thin or missing book must not read as the market's real depth: say so on the
+        // bottom row (one muted line), so no price the trader aims at moves when it comes or
+        // goes.
+        if let Some(note) = self.book_note.as_deref()
             && !self.rows.is_empty()
         {
             let note_y = oy + self.rows.len() as f32 * row_h();
@@ -1258,18 +1267,21 @@ impl DomView {
         }
     }
 
-    fn header(&self, cx: &App) -> impl IntoElement {
+    fn header(&self, window: &Window, cx: &App) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(64);
         let mut right = String::with_capacity(64);
         let mut word = None;
+        // The source's tag sits between the contract and "DOM", in the secondary color.
+        let mut tag = None;
+        let mut contract = String::new();
         if let Some(title) = pane::unavailable_title(&self.feed) {
             let _ = write!(left, "{title}  DOM");
         } else if let Some(d) = self.store.try_read() {
             word = pane::status_word(&d.status);
-            left.push_str(&pane::contract_text(&d));
-            crate::sources::write_header_tag(&mut left, &self.feed, cx);
-            left.push_str("  DOM");
+            contract = pane::contract_text(&d);
+            left.push_str(&contract);
+            tag = crate::sources::header_tag(&self.feed, cx).map(|s| pane::source_tag(&s));
         }
         let ticks = if self.grouping == 1 { "tick" } else { "ticks" };
         if let Some(n) = pane::adopted_note(&self.feed) {
@@ -1282,6 +1294,23 @@ impl DomView {
             Inside::OneSided => Some("one-sided"),
             _ => None,
         };
+        // A narrow header drops the source tag first; the contract and words never.
+        if let Some(tg) = &tag {
+            let tw = pane::text_px(window, crate::zoom::ui(12.0));
+            let room = self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Dom);
+            let rest = pane::side_header_px(
+                self.common.link.is_some(),
+                &contract,
+                "DOM",
+                word,
+                &format!("{} {right}", state.unwrap_or("")),
+                &tw,
+            );
+            if !pane::source_tag_fits(room, rest, tg, &tw) {
+                tag = None;
+            }
+        }
+        let has_contract = !contract.is_empty();
         div()
             .flex()
             .flex_row()
@@ -1312,6 +1341,22 @@ impl DomView {
                                     .children(crate::layout_rec::text_marker(&left))
                                     .child(left),
                             )
+                            .children(tag.map(|tg| {
+                                div()
+                                    .text_color(t.text_dim)
+                                    .relative()
+                                    .children(crate::layout_rec::text_marker(&tg))
+                                    .child(tg)
+                            }))
+                            .when(has_contract, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(t.text_main)
+                                        .relative()
+                                        .children(crate::layout_rec::text_marker("DOM"))
+                                        .child("DOM"),
+                                )
+                            })
                             // Every state but live is a word beside the contract that never
                             // gives way, as on the chart: an ended or failed feed must not
                             // read as live (docs/design.md §7).
@@ -1364,6 +1409,19 @@ fn short_pane_message(flash: Option<&str>, status: bool, ladder: bool) -> Option
 /// room for its header and enough rows for the inside market.
 fn ladder_shows(has_panel: bool, rows_ladder: bool, height: f32) -> bool {
     (!has_panel || rows_ladder) && height >= trade_bar::LADDER_MIN_H
+}
+
+/// The ladder's bottom-row note while it shows rows: the source's own reason (a refused book,
+/// a plan without depth); else, for a source that gives no depth, "Top of book only" when it
+/// gives the best bid and ask, "No depth" when it gives neither (only volume rows); `None`
+/// with depth.
+fn book_note(caps: &lines_core::Capabilities, source: Option<&str>) -> Option<String> {
+    match source {
+        Some(n) => Some(n.to_owned()),
+        None if caps.depth => None,
+        None if caps.bbo => Some("Top of book only".to_owned()),
+        None => Some("No depth".to_owned()),
+    }
 }
 
 /// What an empty ladder says: the source's reason if it gave one.
@@ -1541,7 +1599,7 @@ impl Render for DomView {
                 .absolute()
                 .size_full(),
             )
-            .child(self.header(cx))
+            .child(self.header(window, cx))
             .children(trade)
             .child(
                 div()
@@ -1577,6 +1635,33 @@ impl crate::picker_view::PickerHost for DomView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ladder with rows but no book says so in one muted line: the source's own reason
+    /// first, else "Top of book only" (best bid and ask only) or "No depth" (neither: only
+    /// volume rows); nothing with depth.
+    #[test]
+    fn a_ladder_without_a_book_says_so() {
+        let caps = |depth, bbo| lines_core::Capabilities {
+            history: true,
+            bbo,
+            depth,
+            fractional_qty: false,
+            always_open: false,
+        };
+        assert_eq!(book_note(&caps(true, true), None), None);
+        assert_eq!(
+            book_note(&caps(false, true), None).as_deref(),
+            Some("Top of book only")
+        );
+        assert_eq!(
+            book_note(&caps(false, false), None).as_deref(),
+            Some("No depth")
+        );
+        assert_eq!(
+            book_note(&caps(true, true), Some("not on your plan")).as_deref(),
+            Some("not on your plan")
+        );
+    }
 
     #[test]
     fn a_one_level_book_makes_a_whole_ladder_with_blank_rows() {

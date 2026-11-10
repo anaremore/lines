@@ -596,6 +596,66 @@ pub fn chart_header_fit(
     }
 }
 
+/// The width of a DOM or T&S header's parts, all but its source tag: the row's padding, the
+/// link chip, the contract, the pane's word ("DOM"), the feed's status word, and the right
+/// group's text, each after a gap.
+pub fn side_header_px(
+    linked: bool,
+    contract: &str,
+    pane_word: &str,
+    status: Option<&str>,
+    right: &str,
+    tw: TextPx,
+) -> f32 {
+    header_base_px(linked, contract, tw)
+        + HEADER_GAP
+        + tw(pane_word)
+        + status.map_or(0.0, |s| HEADER_GAP + tw(s))
+        + HEADER_GAP
+        + tw(right)
+        + 12.0 // the row's right padding (px_3)
+}
+
+/// Whether a pane header's source tag ("(Databento)") shows: it is the first thing a narrow
+/// header drops (the contract never is), so only when everything else (`rest` px) fits with
+/// it in `room` (the header's width less the controls' gutter; 0 or less: not laid out yet,
+/// shown).
+pub fn source_tag_fits(room: f32, rest: f32, tag: &str, tw: TextPx) -> bool {
+    room <= 0.0 || rest + HEADER_GAP + tw(tag) <= room
+}
+
+/// The room a source tag takes in a header: a gap and its text.
+pub fn source_tag_px(tag: &str, tw: TextPx) -> f32 {
+    HEADER_GAP + tw(tag)
+}
+
+/// The source tag as a header shows it: in parentheses, in the secondary text color.
+pub fn source_tag(tag: &str) -> String {
+    format!("({tag})")
+}
+
+/// A UI text's width in logical px at `size`, shaped as the header draws it.
+pub fn text_px(window: &gpui::Window, size: gpui::Pixels) -> impl Fn(&str) -> f32 + '_ {
+    let font = window.text_style().font();
+    move |s: &str| -> f32 {
+        let run = gpui::TextRun {
+            len: s.len(),
+            font: font.clone(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window.text_system().shape_line(
+            gpui::SharedString::from(s.to_owned()),
+            size,
+            &[run],
+            None,
+        );
+        f32::from(line.width)
+    }
+}
+
 /// The feed's state as one short word for the chart header, for every state but live. It
 /// never gives way: an ended or failed feed must not read as live at any width.
 pub fn status_word(s: &lines_feed::store::FeedStatus) -> Option<&'static str> {
@@ -620,6 +680,25 @@ mod tests {
 
     fn tw7(s: &str) -> f32 {
         s.chars().count() as f32 * HEADER_CHAR_PX
+    }
+
+    /// A DOM or T&S header drops its source tag first: it shows only when everything else
+    /// fits with it; the contract is never what gives way.
+    #[test]
+    fn the_source_tag_is_the_first_to_go() {
+        let rest = side_header_px(true, "ESZ26", "DOM", Some("ended"), "1 tick/row", &tw7);
+        let tag = source_tag("Databento");
+        let need = rest + HEADER_GAP + tw7(&tag);
+        assert!(source_tag_fits(need, rest, &tag, &tw7));
+        assert!(!source_tag_fits(need - 1.0, rest, &tag, &tw7));
+        assert!(
+            source_tag_fits(0.0, rest, &tag, &tw7),
+            "not laid out yet: shown"
+        );
+        assert!(
+            rest > tw7("ESZ26"),
+            "the contract is in the rest, never dropped"
+        );
     }
 
     fn fit(room: f32, account: Option<(&str, bool)>, menu_open: bool) -> HeaderFit {
