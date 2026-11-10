@@ -1711,6 +1711,11 @@ impl WindowView {
             // An order tag's menu: that order, on the focused chart (where it was opened).
             Command::Order(o) => {
                 if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    // A staged order's Enter and Esc go to the chart: it takes the focus.
+                    if matches!(o, crate::commands::OrderCmd::Stage(..)) {
+                        let f = chart.read(cx).focus_handle().clone();
+                        f.focus(window, cx);
+                    }
                     chart.update(cx, |c, cx| c.order_command(o, cx));
                 }
             }
@@ -2031,6 +2036,12 @@ impl WindowView {
         let Some(h) = tab.handle(id).cloned() else {
             return;
         };
+        // A staged order never moves windows: discarded, said on the chart.
+        if let PaneHandle::Chart(c) = &h {
+            c.update(cx, |v, cx| {
+                v.discard_staged(crate::chart_trade::DISCARDED_MOVED, cx)
+            });
+        }
         let area = self.content_area(window, cx);
         let index = tab.layout.index_of(&id);
         let r = tab
@@ -2074,6 +2085,11 @@ impl WindowView {
             return;
         };
         self.tabs[i].set_state(id, PaneState::Shown);
+        if let Some(PaneHandle::Chart(c)) = self.tabs[i].handle(id).cloned() {
+            c.update(cx, |v, cx| {
+                v.discard_staged(crate::chart_trade::DISCARDED_MOVED, cx)
+            });
+        }
         if i == self.active {
             self.sync_visibility(cx);
             self.focus_pane(id, window, cx);

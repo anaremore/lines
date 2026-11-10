@@ -104,6 +104,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # --order-size N starts every symbol at that order size; --max-order-qty N sets the paper accounts' largest allowed order (a larger size shows "max N"), over Settings › Accounts › Largest order for that run.
 # --replay-bar shows the replay bar paused at --at (an interactive replay always has it); --replay-playing shows it as playing.
 # --order-strip shows the order strip on the first chart; --strip-pick buy|sell shows it with that limit's price pick armed.
+# --stage-order "buy limit 6010.00 stop 6006.00 target 6018.00" stages that order on the first chart as its menu's "… with bracket" does (nothing sent; no legs given: the bracket preset's, or the "+T"/"+S" handles); --chart-flash TEXT shows that refusal flash on it.
 # --show-recording SECS shows the footer as if recording for SECS seconds (REC, the time, Stop recording; nothing is recorded).
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair; --magnet snaps it to OHLC.
 # README images (docs/img/): synthetic data only (decision 0010); workspaces in docs/img/*.json:

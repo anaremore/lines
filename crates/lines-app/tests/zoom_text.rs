@@ -21,9 +21,8 @@ const NOT_YET: &[(&str, &str, usize)] = &[
     ),
     (
         "chart_view.rs",
-        "the order strip (`chart_trade::strip_box`) and a note being typed (drawings don't \
-         zoom)",
-        2,
+        "a note being typed (drawings don't zoom)",
+        1,
     ),
     ("order_group_view.rs", "the group tag's order list", 1),
     (

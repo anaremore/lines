@@ -426,6 +426,24 @@ pub struct ChartTradeState {
     /// A strip limit button pressed: the next click on the plot is its price (the crosshair's
     /// there). Esc, the same button again, or another symbol drops it.
     pub strip_pick: Option<StripOrder>,
+    /// The order the menu's "…with bracket" staged on the chart, unsent (one per chart).
+    pub staged: Option<Staged>,
+    /// The staged part being dragged (a body, or a handle pulling out a leg), its grab offset
+    /// (the part's price − the price under the press), and the order as it was (Esc, or a
+    /// release off the plot, puts it back).
+    pub staged_drag: Option<(StagedPart, i64, Staged)>,
+    /// A press on the staged entry's Place or a tag's ×: acts on release if still there, as a
+    /// working tag's × does.
+    pub staged_press: Option<StagedHit>,
+    /// Place was pressed and the order went to the window: kept until the window answers, so a
+    /// refusal there (no linked DOM enabled) puts it back on the chart.
+    pub placing: Option<Staged>,
+    /// The staged entry's handles as last drawn (plot-local).
+    pub staged_handles: [Option<Handle>; 2],
+    /// The staged entry's Place and × Esc widths as last drawn.
+    pub staged_buttons: (f32, f32),
+    /// A discard notice for a chart that was hidden: shown once it is visible again.
+    pub notice: Option<&'static str>,
 }
 
 /// The resize control left of a tag: −, the size, +, sized by the tag's height (so by the UI
@@ -747,13 +765,16 @@ pub fn order_section(
         .iter()
         .map(|o| {
             let mut label = menu_order_label(o, &qty, fmt);
+            let adds = crate::dom_trade::opens_or_adds(o.side, ctx.position);
+            // Staged on the chart with its legs (only an order that may carry a bracket).
+            let staged = adds.then(|| format!("{label}{WITH_BRACKET}"));
             if let Some(b) = ctx.bracket
                 && !flat
-                && crate::dom_trade::opens_or_adds(o.side, ctx.position)
+                && adds
             {
                 let _ = write!(label, " · bracket {}/{}", b.stop_ticks, b.target_ticks);
             }
-            (label, *o)
+            (label, *o, staged)
         })
         .collect();
     Some(ChartOrders::Rows {
@@ -801,14 +822,448 @@ pub fn menu_command(
     click(col, o.price, o.stop, Arming::new(true), ctx)
 }
 
+// ---- a staged order: a menu order held on the chart until Place --------------------------
+
+/// A staged order discarded because the chart switched symbol or contract.
+pub const DISCARDED_SYMBOL: &str = "Staged order discarded: symbol changed";
+/// A staged order discarded because the chart switched account.
+pub const DISCARDED_ACCOUNT: &str = "Staged order discarded: account changed";
+/// A staged order discarded because its tab or pane was hidden (said when next shown).
+pub const DISCARDED_HIDDEN: &str = "Staged order discarded: chart hidden";
+/// A staged order discarded because its pane moved to or from its own window.
+pub const DISCARDED_MOVED: &str = "Staged order discarded: chart moved";
+/// Place refused: a buy's stop at or above its entry.
+pub const STOP_ABOVE: &str = "The stop is above the entry: drag it below";
+/// Place refused: a sell's stop at or below its entry.
+pub const STOP_BELOW: &str = "The stop is below the entry: drag it above";
+/// Place refused: a buy's target at or below its entry.
+pub const TARGET_BELOW: &str = "The target is below the entry: drag it above";
+/// Place refused: a sell's target at or above its entry.
+pub const TARGET_ABOVE: &str = "The target is above the entry: drag it below";
+/// Place refused: a fill since staging made the entry reduce the position, and a bracket only
+/// goes on an order that opens or adds.
+pub const POSITION_CHANGED: &str = "The position changed: a bracket needs an order that opens or adds";
+
+/// The menu row that stages its order: the plain row's words and " with bracket".
+pub const WITH_BRACKET: &str = " with bracket";
+
+/// Tag ids of a staged order's three tags (the position tag is `u64::MAX`; order ids are far
+/// below these).
+pub const STAGED_ENTRY_ID: u64 = u64::MAX - 1;
+pub const STAGED_STOP_ID: u64 = u64::MAX - 2;
+pub const STAGED_TARGET_ID: u64 = u64::MAX - 3;
+
+/// One of a staged order's lines.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StagedPart {
+    Entry,
+    Stop,
+    Target,
+}
+
+impl StagedPart {
+    /// Its tag's id.
+    pub fn id(self) -> u64 {
+        match self {
+            StagedPart::Entry => STAGED_ENTRY_ID,
+            StagedPart::Stop => STAGED_STOP_ID,
+            StagedPart::Target => STAGED_TARGET_ID,
+        }
+    }
+
+    /// The part a tag id stands for.
+    pub fn of_id(id: u64) -> Option<StagedPart> {
+        match id {
+            STAGED_ENTRY_ID => Some(StagedPart::Entry),
+            STAGED_STOP_ID => Some(StagedPart::Stop),
+            STAGED_TARGET_ID => Some(StagedPart::Target),
+            _ => None,
+        }
+    }
+}
+
+/// An order from the right-click menu's "…with bracket" row, on the chart and not sent: its
+/// entry, the offer it was staged with (Place refuses after the contract, size or account
+/// changed) and its legs. Nothing reaches the broker before Place.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Staged {
+    pub order: MenuOrder,
+    pub offer: Offer,
+    pub stop: Option<Price>,
+    pub target: Option<Price>,
+    /// The order opened or added to the position when staged: it may carry legs. A reducing
+    /// order stages without legs or handles (as the menu's rows attach no bracket to it).
+    pub bracketable: bool,
+}
+
+/// Stage menu order `o`, offered with `offer`, in context `ctx`: refused like the menu row
+/// itself when the chart changed or the market moved since the menu opened. Legs start at the
+/// bracket preset's distances (the DOM's math, `dom_trade::click`); with no preset, none (the
+/// entry's "+T" / "+S" handles add them).
+pub fn stage(
+    o: MenuOrder,
+    offer: Offer,
+    ctx: &crate::dom_trade::EntryCtx,
+) -> Result<Staged, Refusal> {
+    if ctx.contract != offer.contract
+        || ctx.qty != offer.qty
+        || ctx.bracket != offer.bracket
+        || account_key(&ctx.account) != offer.account
+    {
+        return Err(Refusal(CHART_CHANGED));
+    }
+    if crosses(&o, ctx.best_bid, ctx.best_ask, ctx.last) {
+        return Err(Refusal(MARKET_MOVED));
+    }
+    let bracketable = crate::dom_trade::opens_or_adds(o.side, ctx.position);
+    let (stop, target) = match ctx.bracket {
+        Some(b) if bracketable => {
+            let s = o.side.sign();
+            (
+                Some(Price(o.price.0 - s * b.stop_ticks as i64 * ctx.tick)),
+                Some(Price(o.price.0 + s * b.target_ticks as i64 * ctx.tick)),
+            )
+        }
+        _ => (None, None),
+    };
+    Ok(Staged {
+        order: o,
+        offer,
+        stop,
+        target,
+        bracketable,
+    })
+}
+
+impl Staged {
+    /// A part's price, if it is there.
+    pub fn price(&self, part: StagedPart) -> Option<Price> {
+        match part {
+            StagedPart::Entry => Some(self.order.price),
+            StagedPart::Stop => self.stop,
+            StagedPart::Target => self.target,
+        }
+    }
+
+    /// Move a part to `to` (a snapped price). The entry takes its legs with it, so the risk
+    /// and reward it was staged with stay as they were.
+    pub fn move_part(&mut self, part: StagedPart, to: Price) {
+        match part {
+            StagedPart::Entry => {
+                let d = to.0 - self.order.price.0;
+                self.order.price = to;
+                self.stop = self.stop.map(|p| Price(p.0 + d));
+                self.target = self.target.map(|p| Price(p.0 + d));
+            }
+            StagedPart::Stop if self.bracketable => self.stop = Some(to),
+            StagedPart::Target if self.bracketable => self.target = Some(to),
+            _ => {}
+        }
+    }
+
+    /// × on a part: a leg goes (its handle comes back); `true` for the entry, which discards
+    /// the whole order.
+    pub fn remove(&mut self, part: StagedPart) -> bool {
+        match part {
+            StagedPart::Entry => return true,
+            StagedPart::Stop => self.stop = None,
+            StagedPart::Target => self.target = None,
+        }
+        false
+    }
+
+    /// Which "+T" / "+S" handles the entry shows, `[above, below]`: one per missing leg, on its
+    /// side of the entry (a buy's target above, its stop below; a sell's the other way round).
+    pub fn wanted_handles(&self) -> [bool; 2] {
+        if !self.bracketable {
+            return [false, false];
+        }
+        let (t, s) = (self.target.is_none(), self.stop.is_none());
+        if self.order.side == Side::Buy {
+            [t, s]
+        } else {
+            [s, t]
+        }
+    }
+
+    /// The leg a handle adds: the target above a buy and below a sell.
+    pub fn handle_part(&self, above: bool) -> StagedPart {
+        if (self.order.side == Side::Buy) == above {
+            StagedPart::Target
+        } else {
+            StagedPart::Stop
+        }
+    }
+
+    /// The parts it has, entry first.
+    pub fn parts(&self) -> impl Iterator<Item = (StagedPart, Price)> + '_ {
+        [StagedPart::Entry, StagedPart::Stop, StagedPart::Target]
+            .into_iter()
+            .filter_map(|p| self.price(p).map(|x| (p, x)))
+    }
+
+    /// Why the legs can't go out as they are: a stop or target on the wrong side of the entry.
+    pub fn leg_refusal(&self) -> Option<&'static str> {
+        let e = self.order.price.0;
+        let buy = self.order.side == Side::Buy;
+        if let Some(s) = self.stop {
+            if buy && s.0 >= e {
+                return Some(STOP_ABOVE);
+            }
+            if !buy && s.0 <= e {
+                return Some(STOP_BELOW);
+            }
+        }
+        if let Some(t) = self.target {
+            if buy && t.0 <= e {
+                return Some(TARGET_BELOW);
+            }
+            if !buy && t.0 >= e {
+                return Some(TARGET_ABOVE);
+            }
+        }
+        None
+    }
+}
+
+/// The one command Place sends, or why not (shown as a flash, nothing sent):
+/// - the chart's contract, size or account changed since staging: [`CHART_CHANGED`];
+/// - the entry would now fill or trigger at once: [`MARKET_MOVED`];
+/// - a leg on the wrong side of the entry; legs on an order that now reduces the position.
+///
+/// With a leg: `PlaceBracket` with exactly the legs on the chart; with none: `PlaceOrder`. The
+/// entry is the DOM's own click intent (a stop's far-side check included), so the core's and
+/// the window's checks apply as to any chart order.
+pub fn staged_command(
+    s: &Staged,
+    ctx: &crate::dom_trade::EntryCtx,
+) -> Result<TradeCommand, Refusal> {
+    use crate::dom_trade::{Arming, DomColumn, click};
+    if ctx.contract != s.offer.contract
+        || ctx.qty != s.offer.qty
+        || account_key(&ctx.account) != s.offer.account
+    {
+        return Err(Refusal(CHART_CHANGED));
+    }
+    if crosses(&s.order, ctx.best_bid, ctx.best_ask, ctx.last) {
+        return Err(Refusal(MARKET_MOVED));
+    }
+    if let Some(why) = s.leg_refusal() {
+        return Err(Refusal(why));
+    }
+    let legs = s.stop.is_some() || s.target.is_some();
+    if legs && !crate::dom_trade::opens_or_adds(s.order.side, ctx.position) {
+        return Err(Refusal(POSITION_CHANGED));
+    }
+    // The entry alone: the legs are the chart's, never the preset's.
+    let plain = crate::dom_trade::EntryCtx {
+        bracket: None,
+        ..ctx.clone()
+    };
+    let col = if s.order.side == Side::Buy {
+        DomColumn::Bid
+    } else {
+        DomColumn::Ask
+    };
+    let entry = match click(col, s.order.price, s.order.stop, Arming::new(true), &plain)? {
+        TradeCommand::PlaceOrder(spec) => spec,
+        _ => return Err(Refusal(CHART_CHANGED)),
+    };
+    Ok(if legs {
+        TradeCommand::PlaceBracket(lines_trading::BracketSpec {
+            entry,
+            take_profit: s.target,
+            stop_loss: s.stop,
+        })
+    } else {
+        TradeCommand::PlaceOrder(entry)
+    })
+}
+
+/// A leg's ticks per contract and money from the entry (profit positive): what fills there
+/// would make or lose, as the P&L display shows it.
+pub fn leg_pnl(s: &Staged, at: Price, tick: i64, mpu: i128) -> (f64, Money) {
+    let units = (at.0 - s.order.price.0) * s.order.side.sign();
+    let ticks = units as f64 / tick.max(1) as f64;
+    (ticks, Money(units as i128 * s.offer.qty.0 as i128 * mpu))
+}
+
+/// The staged entry's tag: `▲ Buy limit 2 @ 7510.00`, then ` · risk -16.0 t  -$400.00` (the
+/// stop's loss as the P&L display shows it; nothing when off) and ` · 1 : 2.0` (reward over
+/// risk, both legs there). No allocation.
+pub fn write_staged_entry(
+    out: &mut impl Write,
+    s: &Staged,
+    fmt: &PriceFormat,
+    qfmt: lines_core::QtyFormat,
+    mpu: Option<i128>,
+    mode: PnlDisplay,
+) -> fmt::Result {
+    let o = &s.order;
+    write!(
+        out,
+        "{} {} {} ",
+        if o.side == Side::Buy { "▲" } else { "▼" },
+        if o.side == Side::Buy { "Buy" } else { "Sell" },
+        if o.stop { "stop" } else { "limit" },
+    )?;
+    qfmt.write(s.offer.qty, out)?;
+    out.write_str(" @ ")?;
+    fmt.write(o.price, out)?;
+    if let (Some(stop), Some(mpu)) = (s.stop, mpu)
+        && mode.shown()
+    {
+        let (ticks, money) = leg_pnl(s, stop, fmt.tick, mpu);
+        out.write_str(" · risk ")?;
+        crate::pnl::write_pnl(out, mode, Some(ticks), money)?;
+    }
+    if let (Some(stop), Some(target)) = (s.stop, s.target) {
+        let risk = (o.price.0 - stop.0).abs();
+        let reward = (target.0 - o.price.0).abs();
+        if risk > 0 {
+            let tenths = (reward * 10 + risk / 2) / risk;
+            write!(out, " · 1 : {}.{}", tenths / 10, tenths % 10)?;
+        }
+    }
+    Ok(())
+}
+
+/// A staged leg's tag: `Target 2 @ 7518.00` in `text`, and its P&L there (`+32.0 t  +$800.00`)
+/// in `pnl` with its money for the tone (`None`: P&L off or no money per unit). No allocation.
+pub fn write_staged_leg(
+    text: &mut impl Write,
+    pnl: &mut impl Write,
+    s: &Staged,
+    part: StagedPart,
+    fmt: &PriceFormat,
+    qfmt: lines_core::QtyFormat,
+    mpu: Option<i128>,
+    mode: PnlDisplay,
+) -> Result<Option<Money>, fmt::Error> {
+    let Some(at) = s.price(part) else {
+        return Ok(None);
+    };
+    text.write_str(match part {
+        StagedPart::Target => "Target ",
+        StagedPart::Stop => "Stop ",
+        StagedPart::Entry => "Entry ",
+    })?;
+    qfmt.write(s.offer.qty, text)?;
+    text.write_str(" @ ")?;
+    fmt.write(at, text)?;
+    let Some(mpu) = mpu else {
+        return Ok(None);
+    };
+    let (ticks, money) = leg_pnl(s, at, fmt.tick, mpu);
+    Ok(crate::pnl::write_pnl(pnl, mode, Some(ticks), money)?.then_some(money))
+}
+
+/// The staged entry's two buttons: "Place ⏎" and "× Esc".
+pub const PLACE_LABEL: &str = "Place ⏎";
+pub const DISCARD_LABEL: &str = "× Esc";
+
+/// What is under the pointer on a staged order's tags. The entry's tag ends in its Place and
+/// × Esc buttons (`buttons`: their widths); a leg's in the usual × box (`close_left`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StagedHit {
+    Place,
+    Close(StagedPart),
+    Body(StagedPart),
+}
+
+/// The staged tag under plot-local (`x`, `y`) among this frame's tags, if any.
+pub fn staged_hit(tags: &[TagBox], buttons: (f32, f32), x: f32, y: f32) -> Option<StagedHit> {
+    let b = tags
+        .iter()
+        .find(|b| StagedPart::of_id(b.id).is_some() && b.contains(x, y))?;
+    let part = StagedPart::of_id(b.id)?;
+    let right = b.left + b.w;
+    Some(match part {
+        StagedPart::Entry => {
+            let (place, esc) = buttons;
+            if x >= right - esc {
+                StagedHit::Close(part)
+            } else if x >= right - esc - place {
+                StagedHit::Place
+            } else {
+                StagedHit::Body(part)
+            }
+        }
+        _ if x >= b.close_left => StagedHit::Close(part),
+        _ => StagedHit::Body(part),
+    })
+}
+
+/// A staged order's handle under plot-local (`x`, `y`): which leg it adds.
+pub fn staged_handle_hit(
+    handles: &[Option<Handle>; 2],
+    s: &Staged,
+    x: f32,
+    y: f32,
+) -> Option<StagedPart> {
+    handles
+        .iter()
+        .flatten()
+        .find(|h| h.contains(x, y))
+        .map(|h| s.handle_part(h.above))
+}
+
+/// A screenshot's staged order (`--stage-order`): `buy limit 6010.00 stop 6006.00 target
+/// 6018.00` (the side, `limit` or `stop`, the price, then optional legs). Prices in the
+/// product's format.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct StageSpec {
+    pub order: MenuOrder,
+    pub stop: Option<Price>,
+    pub target: Option<Price>,
+}
+
+/// Parse a [`StageSpec`] with `parse_price` (the product's own parser).
+pub fn parse_stage_spec(
+    s: &str,
+    parse_price: impl Fn(&str) -> Option<Price>,
+) -> Result<StageSpec, String> {
+    let w: Vec<&str> = s.split_whitespace().collect();
+    let bad = || format!("--stage-order {s:?}: expected e.g. \"buy limit 6010.00 stop 6006.00 target 6018.00\"");
+    if w.len() < 3 || w.len() % 2 == 0 {
+        return Err(bad());
+    }
+    let side = match w[0] {
+        "buy" => Side::Buy,
+        "sell" => Side::Sell,
+        _ => return Err(bad()),
+    };
+    let stop = match w[1] {
+        "limit" => false,
+        "stop" => true,
+        _ => return Err(bad()),
+    };
+    let price = parse_price(w[2]).ok_or_else(bad)?;
+    let mut spec = StageSpec {
+        order: MenuOrder { side, stop, price },
+        stop: None,
+        target: None,
+    };
+    for pair in w[3..].chunks(2) {
+        let p = parse_price(pair[1]).ok_or_else(bad)?;
+        match pair[0] {
+            "stop" => spec.stop = Some(p),
+            "target" => spec.target = Some(p),
+            _ => return Err(bad()),
+        }
+    }
+    Ok(spec)
+}
+
 /// Whether a press released `dx`, `dy` px from where it started was a click (a pick sends) or a
 /// drag (a pan: the pick stays armed), by the chart's click rule ([`DRAG_PX`]).
 pub fn is_click(dx: f32, dy: f32) -> bool {
     dx.hypot(dy) < DRAG_PX
 }
 
-/// Strip height, margin from the plot's bottom-left corner, and its pieces' widths (fixed, so
-/// the pointer test needs no layout): quantity, two market buttons, two limit buttons.
+/// Strip height, margin from the plot's bottom-left corner, and its pieces' widths at 100 %
+/// (times [`StripBox::s`], the UI zoom never under 100 %, so the pointer test needs no layout):
+/// quantity, two market buttons, two limit buttons.
 pub const STRIP_H: f32 = 26.0;
 pub const STRIP_MARGIN: f32 = 8.0;
 pub const STRIP_PAD: f32 = 3.0;
@@ -828,20 +1283,34 @@ pub struct StripBox {
     pub w: f32,
     /// Narrow plots drop the limit buttons (market only).
     pub limits: bool,
+    /// The factor its sizes are at: the UI zoom, never under 100 % (they are hit targets).
+    pub s: f32,
 }
 
 impl StripBox {
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + STRIP_H
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h()
+    }
+
+    /// Its height.
+    pub fn h(&self) -> f32 {
+        (STRIP_H * self.s).round()
+    }
+
+    /// A 100 % size at its scale, in whole px.
+    pub fn px(&self, v: f32) -> f32 {
+        (v * self.s).round()
     }
 }
 
-/// The strip's box in a `plot_w` x `plot_h` plot: bottom-left, inside the margin; `None` when
-/// the plot is too small for it.
-pub fn strip_box(plot_w: f32, plot_h: f32) -> Option<StripBox> {
-    let market = STRIP_PAD * 2.0 + STRIP_QTY_W + 2.0 * (STRIP_GAP + STRIP_MKT_W);
-    let full = market + 2.0 * (STRIP_GAP + STRIP_LMT_W);
-    let room = plot_w - 2.0 * STRIP_MARGIN;
+/// The strip's box in a `plot_w` x `plot_h` plot at UI zoom `zoom`: bottom-left, inside the
+/// margin; `None` when the plot is too small for it.
+pub fn strip_box(plot_w: f32, plot_h: f32, zoom: f32) -> Option<StripBox> {
+    let s = if zoom.is_finite() { zoom.max(1.0) } else { 1.0 };
+    let px = |v: f32| (v * s).round();
+    let market = px(STRIP_PAD) * 2.0 + px(STRIP_QTY_W) + 2.0 * (px(STRIP_GAP) + px(STRIP_MKT_W));
+    let full = market + 2.0 * (px(STRIP_GAP) + px(STRIP_LMT_W));
+    let room = plot_w - 2.0 * px(STRIP_MARGIN);
     let w = if room >= full {
         full
     } else if room >= market {
@@ -849,12 +1318,13 @@ pub fn strip_box(plot_w: f32, plot_h: f32) -> Option<StripBox> {
     } else {
         return None;
     };
-    let y = plot_h - STRIP_MARGIN - STRIP_H;
-    (y >= STRIP_MARGIN).then_some(StripBox {
-        x: STRIP_MARGIN,
+    let y = plot_h - px(STRIP_MARGIN) - px(STRIP_H);
+    (y >= px(STRIP_MARGIN)).then_some(StripBox {
+        x: px(STRIP_MARGIN),
         y,
         w,
         limits: w == full,
+        s,
     })
 }
 
@@ -891,6 +1361,13 @@ impl Default for ChartTradeState {
             strip_pick: None,
             resize_hover: None,
             resize_grows: false,
+            staged: None,
+            staged_drag: None,
+            staged_press: None,
+            placing: None,
+            staged_handles: [None, None],
+            staged_buttons: (0.0, 0.0),
+            notice: None,
         }
     }
 }
@@ -953,9 +1430,48 @@ impl ChartTradeState {
     /// The chart shows another symbol or contract: a pick armed on the old one is dropped, so
     /// its click never sends at a price read on another product's scale, and a group's list
     /// closes (its orders and money are the old contract's).
-    pub fn feed_changed(&mut self) {
+    /// A staged order goes too (its prices are the old product's): the notice to show, if one
+    /// was staged.
+    pub fn feed_changed(&mut self) -> Option<&'static str> {
         self.strip_pick = None;
         self.group_menu = None;
+        self.discard(DISCARDED_SYMBOL)
+    }
+
+    /// Drop the staged order (and a drag of it), nothing sent: `why` if one was staged.
+    pub fn discard(&mut self, why: &'static str) -> Option<&'static str> {
+        self.staged_drag = None;
+        self.staged_press = None;
+        self.staged_handles = [None, None];
+        self.staged.take().map(|_| why)
+    }
+
+    /// The chart's account, each poll: a staged order from another account is discarded. The
+    /// notice, if one was.
+    pub fn staged_account(&mut self, account: Option<&AccountId>) -> Option<&'static str> {
+        let stale = self
+            .staged
+            .is_some_and(|s| account.is_none_or(|a| account_key(a) != s.offer.account));
+        if stale {
+            self.discard(DISCARDED_ACCOUNT)
+        } else {
+            None
+        }
+    }
+
+    /// Place pressed and the command went to the window: off the chart, held until the window
+    /// answers ([`ChartTradeState::place_refused`]).
+    pub fn placed(&mut self) {
+        self.placing = self.staged.take();
+        self.staged_drag = None;
+        self.staged_handles = [None, None];
+    }
+
+    /// The window refused what Place sent (no linked DOM enabled): it goes back on the chart.
+    pub fn place_refused(&mut self) {
+        if let Some(s) = self.placing.take() {
+            self.staged = Some(s);
+        }
     }
 
     /// The chart's account, each poll: a group's list on another account closes. Whether it did.
@@ -1277,6 +1793,14 @@ mod tests {
             rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
             ["▲ Buy limit 2 @ 6010.00", "▼ Sell stop 2 @ 6010.00"]
         );
+        // Flat, both open a position: both can be staged with a bracket.
+        assert_eq!(
+            rows.iter().map(|r| r.2.as_deref()).collect::<Vec<_>>(),
+            [
+                Some("▲ Buy limit 2 @ 6010.00 with bracket"),
+                Some("▼ Sell stop 2 @ 6010.00 with bracket")
+            ]
+        );
     }
 
     /// Not flat, the bracket rides only on the order that would add: named on that row, not in
@@ -1303,6 +1827,12 @@ mod tests {
                 "▲ Buy limit 2 @ 6010.00 · bracket 2/4",
                 "▼ Sell stop 2 @ 6010.00"
             ]
+        );
+        // The staged row is the order's plain words (the bracket is its legs, on the chart),
+        // and only for the order that adds.
+        assert_eq!(
+            rows.iter().map(|r| r.2.as_deref()).collect::<Vec<_>>(),
+            [Some("▲ Buy limit 2 @ 6010.00 with bracket"), None]
         );
     }
 
@@ -1908,7 +2438,7 @@ mod tests {
 
     #[test]
     fn the_strip_fits_the_plot_or_drops_its_limits_or_hides() {
-        let full = strip_box(1000.0, 600.0).unwrap();
+        let full = strip_box(1000.0, 600.0, 1.0).unwrap();
         assert!(full.limits);
         assert_eq!(
             (full.x, full.y),
@@ -1917,9 +2447,362 @@ mod tests {
         assert!(full.contains(full.x + 1.0, full.y + 1.0));
         assert!(!full.contains(full.x + full.w, full.y + 1.0));
         assert!(!full.contains(full.x + 1.0, full.y - 1.0));
-        let narrow = strip_box(full.w, 600.0).unwrap();
+        let narrow = strip_box(full.w, 600.0, 1.0).unwrap();
         assert!(!narrow.limits && narrow.w < full.w, "market only");
-        assert_eq!(strip_box(narrow.w, 600.0), None, "too narrow: hidden");
-        assert_eq!(strip_box(1000.0, 30.0), None, "too short: hidden");
+        assert_eq!(strip_box(narrow.w, 600.0, 1.0), None, "too narrow: hidden");
+        assert_eq!(strip_box(1000.0, 30.0, 1.0), None, "too short: hidden");
+    }
+
+    /// The strip zooms with the UI (its text and its pointer box alike), never under 100 %.
+    #[test]
+    fn the_strip_zooms_with_the_ui() {
+        let at = |z| strip_box(2000.0, 600.0, z).unwrap();
+        let (one, big) = (at(1.0), at(1.5));
+        assert_eq!(big.h(), (STRIP_H * 1.5).round());
+        assert!(big.w > one.w * 1.45 && big.w < one.w * 1.55);
+        assert!(big.contains(big.x + 1.0, big.y + big.h() - 1.0));
+        assert_eq!(at(0.8), one, "a hit target never shrinks");
+    }
+
+    // ---- staged orders ----------------------------------------------------------------------
+
+    fn buy_at(price: f64) -> MenuOrder {
+        MenuOrder {
+            side: Side::Buy,
+            stop: false,
+            price: p(price),
+        }
+    }
+
+    fn sell_at(price: f64) -> MenuOrder {
+        MenuOrder {
+            side: Side::Sell,
+            stop: false,
+            price: p(price),
+        }
+    }
+
+    /// Bid 6012.00, ask 6012.25; 2 lots; a 2/4 preset when `bracket`.
+    fn staged(
+        position: i64,
+        bracket: bool,
+        o: MenuOrder,
+    ) -> (Staged, crate::dom_trade::EntryCtx) {
+        let c = menu_ctx(position, bracket);
+        (stage(o, Offer::of(&c), &c).unwrap(), c)
+    }
+
+    /// The legs start at the preset's distances (the DOM's math), or none without one.
+    #[test]
+    fn staging_starts_its_legs_at_the_preset() {
+        let (s, _) = staged(0, true, buy_at(6010.00));
+        assert_eq!((s.stop, s.target), (Some(p(6009.50)), Some(p(6011.00))));
+        assert!(s.bracketable);
+        assert_eq!(s.wanted_handles(), [false, false]);
+        let (s, _) = staged(0, true, sell_at(6014.00));
+        assert_eq!((s.stop, s.target), (Some(p(6014.50)), Some(p(6013.00))));
+        // No preset: no legs, and both handles (a buy's target above, stop below).
+        let (s, _) = staged(0, false, buy_at(6010.00));
+        assert_eq!((s.stop, s.target), (None, None));
+        assert_eq!(s.wanted_handles(), [true, true]);
+        assert_eq!(s.handle_part(true), StagedPart::Target);
+        assert_eq!(s.handle_part(false), StagedPart::Stop);
+        let (s, _) = staged(0, false, sell_at(6014.00));
+        assert_eq!(s.handle_part(true), StagedPart::Stop);
+    }
+
+    /// A reducing order stages with no legs and no handles, as the menu attaches no bracket.
+    #[test]
+    fn a_reducing_order_stages_without_legs() {
+        let (mut s, c) = staged(2, true, sell_at(6014.00));
+        assert!(!s.bracketable);
+        assert_eq!((s.stop, s.target), (None, None));
+        assert_eq!(s.wanted_handles(), [false, false]);
+        s.move_part(StagedPart::Stop, p(6016.00));
+        assert_eq!(s.stop, None, "no leg can be dragged out");
+        assert!(matches!(
+            staged_command(&s, &c),
+            Ok(TradeCommand::PlaceOrder(_))
+        ));
+    }
+
+    /// Staging is refused as the menu row is: the chart changed, or the market moved.
+    #[test]
+    fn staging_is_refused_like_the_row() {
+        let c = menu_ctx(0, true);
+        let other = Offer {
+            qty: Qty(3),
+            ..Offer::of(&c)
+        };
+        assert_eq!(
+            stage(buy_at(6010.00), other, &c),
+            Err(Refusal(CHART_CHANGED))
+        );
+        assert_eq!(
+            stage(buy_at(6012.25), Offer::of(&c), &c),
+            Err(Refusal(MARKET_MOVED)),
+            "a buy limit at the ask would fill at once"
+        );
+    }
+
+    /// Dragging snaps to ticks (the chart's `snap_price`); the entry carries its legs.
+    #[test]
+    fn dragging_snaps_and_the_entry_takes_its_legs() {
+        let vp = lines_core::Viewport {
+            price_lo: 600_000.0,
+            price_hi: 602_000.0,
+            height: 400.0,
+            ..lines_core::Viewport::default()
+        };
+        let (mut s, _) = staged(0, true, buy_at(6010.00));
+        // 5 units a px: 6.3 px from the top is off the grid, and lands on a 25-unit tick.
+        let to = lines_core::geometry::snap_price(&vp, 6.3, 25).unwrap();
+        assert_eq!(to.0 % 25, 0);
+        s.move_part(StagedPart::Target, to);
+        assert_eq!(s.target, Some(to));
+        s.move_part(StagedPart::Stop, p(6008.00));
+        s.move_part(StagedPart::Entry, p(6009.00));
+        assert_eq!(s.order.price, p(6009.00));
+        assert_eq!(s.stop, Some(p(6007.00)));
+        assert_eq!(s.target, Some(Price(to.0 - 100)));
+    }
+
+    /// × on a leg drops it and its handle comes back; × on the entry discards the order.
+    #[test]
+    fn x_on_a_leg_drops_it() {
+        let (mut s, c) = staged(0, true, buy_at(6010.00));
+        assert!(!s.remove(StagedPart::Target));
+        assert_eq!(s.target, None);
+        assert_eq!(s.wanted_handles(), [true, false]);
+        let Ok(TradeCommand::PlaceBracket(b)) = staged_command(&s, &c) else {
+            panic!("a stop is still there: a bracket")
+        };
+        assert_eq!((b.stop_loss, b.take_profit), (Some(p(6009.50)), None));
+        assert!(!s.remove(StagedPart::Stop));
+        assert!(matches!(
+            staged_command(&s, &c),
+            Ok(TradeCommand::PlaceOrder(_))
+        ));
+        assert!(s.remove(StagedPart::Entry), "the entry's × discards");
+    }
+
+    /// Place sends one bracket with exactly the chart's legs (never the preset's), or a plain
+    /// order with none; the entry is the DOM's click (a limit here, a stop with its far side).
+    #[test]
+    fn place_builds_one_command() {
+        let (mut s, c) = staged(0, true, buy_at(6010.00));
+        s.move_part(StagedPart::Target, p(6018.00));
+        s.move_part(StagedPart::Stop, p(6006.00));
+        let Ok(TradeCommand::PlaceBracket(b)) = staged_command(&s, &c) else {
+            panic!("bracket")
+        };
+        assert_eq!(b.take_profit, Some(p(6018.00)));
+        assert_eq!(b.stop_loss, Some(p(6006.00)));
+        assert_eq!(
+            (b.entry.side, b.entry.qty, b.entry.kind),
+            (Side::Buy, Qty(2), OrderKind::Limit { price: p(6010.00) })
+        );
+        let stop_entry = MenuOrder {
+            side: Side::Buy,
+            stop: true,
+            price: p(6014.00),
+        };
+        let (s, c) = staged(0, false, stop_entry);
+        let Ok(TradeCommand::PlaceOrder(spec)) = staged_command(&s, &c) else {
+            panic!("plain")
+        };
+        assert_eq!(spec.kind, OrderKind::Stop { trigger: p(6014.00) });
+    }
+
+    /// Each refusal at Place, nothing built: the contract, size or account changed; the market
+    /// moved through the entry; a leg on the wrong side; legs on an order that now reduces.
+    #[test]
+    fn place_refuses_what_changed() {
+        let (s, c) = staged(0, true, buy_at(6010.00));
+        let mut other = c.clone();
+        other.contract = ContractKey::monthly(
+            lines_feed::catalog::ES,
+            2027,
+            lines_core::Month::new(3).unwrap(),
+        );
+        assert_eq!(staged_command(&s, &other), Err(Refusal(CHART_CHANGED)));
+        let mut size = c.clone();
+        size.qty = Qty(1);
+        assert_eq!(staged_command(&s, &size), Err(Refusal(CHART_CHANGED)));
+        let mut acct = c.clone();
+        acct.account = AccountId::new("other");
+        assert_eq!(staged_command(&s, &acct), Err(Refusal(CHART_CHANGED)));
+        // A preset changed since staging doesn't matter: the legs are the chart's.
+        let mut preset = c.clone();
+        preset.bracket = None;
+        assert!(staged_command(&s, &preset).is_ok());
+        let mut moved = c.clone();
+        (moved.best_bid, moved.best_ask) = (Some(p(6009.75)), Some(p(6010.00)));
+        assert_eq!(staged_command(&s, &moved), Err(Refusal(MARKET_MOVED)));
+        let mut wrong = s;
+        wrong.stop = Some(p(6010.25));
+        assert_eq!(staged_command(&wrong, &c), Err(Refusal(STOP_ABOVE)));
+        wrong.stop = Some(p(6010.00));
+        assert_eq!(staged_command(&wrong, &c), Err(Refusal(STOP_ABOVE)), "at it");
+        let mut wrong = s;
+        wrong.target = Some(p(6009.00));
+        assert_eq!(staged_command(&wrong, &c), Err(Refusal(TARGET_BELOW)));
+        let (mut ss, sc) = staged(0, true, sell_at(6014.00));
+        ss.stop = Some(p(6013.00));
+        assert_eq!(staged_command(&ss, &sc), Err(Refusal(STOP_BELOW)));
+        ss.stop = Some(p(6015.00));
+        ss.target = Some(p(6015.00));
+        assert_eq!(staged_command(&ss, &sc), Err(Refusal(TARGET_ABOVE)));
+        // A fill since staging: the buy now reduces a short, so its legs can't go.
+        let mut short = c.clone();
+        short.position = -3;
+        assert_eq!(staged_command(&s, &short), Err(Refusal(POSITION_CHANGED)));
+    }
+
+    /// The tags' words, P&L on (ticks and money, as the display shows them) and off (no money
+    /// and no ticks, the ratio kept).
+    #[test]
+    fn staged_text_follows_the_pnl_display() {
+        let e = es();
+        let mpu = money_per_unit(&e);
+        let (mut s, _) = staged(0, true, buy_at(6010.00));
+        s.stop = Some(p(6006.00));
+        s.target = Some(p(6018.00));
+        let entry = |s: &Staged, mode| {
+            let mut out = String::new();
+            write_staged_entry(&mut out, s, &e.price, e.qty, mpu, mode).unwrap();
+            out
+        };
+        assert_eq!(
+            entry(&s, PnlDisplay::Both),
+            "▲ Buy limit 2 @ 6010.00 · risk -16.0 t  -$400.00 · 1 : 2.0"
+        );
+        assert_eq!(
+            entry(&s, PnlDisplay::Currency),
+            "▲ Buy limit 2 @ 6010.00 · risk -$400.00 · 1 : 2.0"
+        );
+        assert_eq!(
+            entry(&s, PnlDisplay::Off),
+            "▲ Buy limit 2 @ 6010.00 · 1 : 2.0"
+        );
+        let leg = |part, mode| {
+            let (mut text, mut pnl) = (String::new(), String::new());
+            let money =
+                write_staged_leg(&mut text, &mut pnl, &s, part, &e.price, e.qty, mpu, mode)
+                    .unwrap();
+            (text, pnl, money)
+        };
+        assert_eq!(
+            leg(StagedPart::Target, PnlDisplay::Both),
+            (
+                "Target 2 @ 6018.00".to_owned(),
+                "+32.0 t  +$800.00".to_owned(),
+                Some(Money(800 * Money::UNITS_PER_WHOLE))
+            )
+        );
+        assert_eq!(leg(StagedPart::Stop, PnlDisplay::Ticks).1, "-16.0 t");
+        assert_eq!(
+            leg(StagedPart::Stop, PnlDisplay::Off),
+            ("Stop 2 @ 6006.00".to_owned(), String::new(), None)
+        );
+        // One leg: no ratio.
+        let mut one = s;
+        one.target = None;
+        assert_eq!(
+            entry(&one, PnlDisplay::Ticks),
+            "▲ Buy limit 2 @ 6010.00 · risk -16.0 t"
+        );
+    }
+
+    /// The entry's tag ends in Place, then × Esc; a leg's in its ×. Other tags aren't staged.
+    #[test]
+    fn staged_tags_hit_their_buttons() {
+        let tag = |id, top: f32| TagBox {
+            id,
+            price: p(6010.00),
+            line_y: top + 10.0,
+            left: 100.0,
+            top,
+            w: 200.0,
+            h: 20.0,
+            close_left: 278.0,
+        };
+        let tags = [
+            tag(STAGED_ENTRY_ID, 100.0),
+            tag(STAGED_TARGET_ID, 50.0),
+            tag(7, 150.0),
+        ];
+        let b = (60.0, 40.0);
+        assert_eq!(
+            staged_hit(&tags, b, 110.0, 105.0),
+            Some(StagedHit::Body(StagedPart::Entry))
+        );
+        assert_eq!(staged_hit(&tags, b, 210.0, 105.0), Some(StagedHit::Place));
+        assert_eq!(
+            staged_hit(&tags, b, 270.0, 105.0),
+            Some(StagedHit::Close(StagedPart::Entry))
+        );
+        assert_eq!(
+            staged_hit(&tags, b, 290.0, 55.0),
+            Some(StagedHit::Close(StagedPart::Target))
+        );
+        assert_eq!(
+            staged_hit(&tags, b, 110.0, 55.0),
+            Some(StagedHit::Body(StagedPart::Target))
+        );
+        assert_eq!(
+            staged_hit(&tags, b, 110.0, 155.0),
+            None,
+            "a working order's tag"
+        );
+        assert_eq!(staged_hit(&tags, b, 50.0, 105.0), None);
+    }
+
+    /// Nothing reaches the broker before Place: staging, dragging and discarding build no
+    /// command; a symbol or account change discards with its notice; Place takes it off the
+    /// chart, and a refusal from the window puts it back.
+    #[test]
+    fn nothing_is_sent_before_place() {
+        let c = menu_ctx(0, true);
+        let fresh = || stage(buy_at(6010.00), Offer::of(&c), &c).unwrap();
+        let mut st = ChartTradeState::default();
+        st.staged = Some(fresh());
+        if let Some(s) = st.staged.as_mut() {
+            s.move_part(StagedPart::Stop, p(6008.00));
+        }
+        assert_eq!(st.discard(DISCARDED_HIDDEN), Some(DISCARDED_HIDDEN));
+        assert_eq!(st.staged, None);
+        assert_eq!(st.discard(DISCARDED_HIDDEN), None, "nothing staged: no notice");
+        st.staged = Some(fresh());
+        assert_eq!(st.staged_account(Some(&c.account)), None);
+        assert_eq!(
+            st.staged_account(Some(&AccountId::new("other"))),
+            Some(DISCARDED_ACCOUNT)
+        );
+        st.staged = Some(fresh());
+        assert_eq!(st.feed_changed(), Some(DISCARDED_SYMBOL));
+        st.staged = Some(fresh());
+        st.placed();
+        assert!(st.staged.is_none() && st.placing.is_some());
+        st.place_refused();
+        assert!(st.staged.is_some() && st.placing.is_none());
+    }
+
+    #[test]
+    fn a_stage_spec_parses() {
+        let f = es().price;
+        let parse = |s: &str| parse_stage_spec(s, |x| f.scale.parse_decimal(x).ok().map(Price));
+        assert_eq!(
+            parse("buy limit 6010.00 stop 6006.00 target 6018.00"),
+            Ok(StageSpec {
+                order: buy_at(6010.00),
+                stop: Some(p(6006.00)),
+                target: Some(p(6018.00)),
+            })
+        );
+        assert!(parse("sell stop 6000.00").unwrap().order.stop);
+        assert!(parse("buy limit").is_err());
+        assert!(parse("buy limit 6010.00 stop").is_err());
+        assert!(parse("hold limit 6010.00").is_err());
     }
 }

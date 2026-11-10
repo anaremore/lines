@@ -56,6 +56,9 @@ const LAST_TICKS: i64 = 601_950;
 const ORDERS: &str =
     "buy 1 mkt; ack; buy 1 @ 6015.00; buy 1 @ 6016.00 bracket 8/16; ack; buy 1 @ 6014.00";
 
+/// A buy staged under [`ORDERS`]' working orders, with both legs (`--stage-order`).
+const STAGED: &str = "buy limit 6011.00 stop 6009.00 target 6023.00";
+
 /// The scenes. `dir` holds the workspace files some of them use.
 pub fn scenes(dir: &Path) -> Vec<Scene> {
     let ws = |f: &str| dir.join(f).display().to_string();
@@ -323,6 +326,39 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         "--arm --order-controls",
     ));
     v.push(paper("orders-disarmed", false, ORDERS, ""));
+    // Chart trading's one style (docs/design.md "Chart trading"): the position, working, held
+    // and pending orders, the order strip, a staged bracket and a refusal flash on one chart;
+    // dark and light, at 100 % and 150 %. The staged order sits below the working ones, so the
+    // tags stack without overlapping (laid out together, `chart_view::draw_orders`).
+    for (name, quick, extra) in [
+        ("chart-trading-style-dark", true, "--theme dark"),
+        ("chart-trading-style-light", false, "--theme light"),
+        ("chart-trading-style-dark-150", false, "--theme dark --ui-zoom 150"),
+        ("chart-trading-style-light-150", false, "--theme light --ui-zoom 150"),
+    ] {
+        let mut a = args(&format!(
+            "--layout trading --size 1600x900 --arm --order-strip {extra}"
+        ));
+        a.extend([
+            "--paper".into(),
+            ORDERS.into(),
+            "--stage-order".into(),
+            STAGED.into(),
+            "--chart-flash".into(),
+            "The stop is above the entry: drag it below".into(),
+        ]);
+        v.push(s(name, quick, end, a));
+    }
+    // The chart's right-click order section with its "…with bracket" rows (long 1: the buy
+    // adds, so only it can be staged).
+    let mut m = args("--layout trading --size 1600x900 --theme dark --arm");
+    m.extend([
+        "--paper".into(),
+        "buy 1 mkt; ack".into(),
+        "--context-menu".into(),
+        "pane@500,600".into(),
+    ]);
+    v.push(s("chart-order-menu-bracket", true, end, m));
     // A strategy armed on the account: the switch says so (decision 0025).
     v.push(paper(
         "switch-strategy-armed",

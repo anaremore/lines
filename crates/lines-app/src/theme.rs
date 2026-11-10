@@ -798,6 +798,10 @@ mod tests {
             ("up", t.up, "panel", t.panel),
             ("down", t.down, "bg", t.bg),
             ("down", t.down, "panel", t.panel),
+            // A staged order's Place button and the strip's market buttons: `bg` text on the
+            // side's fill.
+            ("bg", t.bg, "up fill", t.up),
+            ("bg", t.bg, "down fill", t.down),
             ("accent", t.accent, "bg", t.bg),
             ("accent", t.accent, "panel", t.panel),
             ("on_last", t.on_last, "last", t.last),

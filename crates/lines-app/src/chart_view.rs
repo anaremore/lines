@@ -321,6 +321,11 @@ pub struct Fixture {
     pub order_strip: bool,
     /// Start with a strip limit's price pick armed (screenshots: `--strip-pick buy|sell`).
     pub strip_pick: Option<crate::chart_trade::StripOrder>,
+    /// Start with an order staged from the menu's "…with bracket" (screenshots: `--stage-order
+    /// "buy limit 6010.00 stop 6006.00 target 6018.00"`, `chart_trade::parse_stage_spec`).
+    pub stage_order: Option<String>,
+    /// Start with this refusal flashed on the chart (screenshots: `--chart-flash TEXT`).
+    pub chart_flash: Option<String>,
     /// Initial timeframe (`--timeframe`). One saved with the pane takes precedence.
     pub timeframe: Timeframe,
     /// Start with the timeframe list open (screenshots: `--timeframe-menu`).
@@ -542,6 +547,9 @@ pub struct ChartView {
     trading_cache: Option<Arc<crate::trading::TradeCache>>,
     /// Screenshot fixture: the position line held dragged to this plot-local y.
     drag_position: Option<f32>,
+    /// Screenshot fixture: an order to stage once the chart can trade, and a flash to show.
+    stage_fixture: Option<String>,
+    flash_fixture: Option<String>,
     /// Screenshot fixture: a Shift+drag, replayed each frame.
     shift_drag: Option<ShiftDrag>,
     /// Screenshot fixture: a drag moving that measure, replayed each frame.
@@ -848,6 +856,8 @@ impl ChartView {
                 .map(|s| s.0.clone()),
             trading_cache: crate::trading::Trading::try_global(cx).map(|t| t.cache.clone()),
             drag_position: fixture.drag_position,
+            stage_fixture: fixture.stage_order.clone(),
+            flash_fixture: fixture.chart_flash.clone(),
             shift_drag: fixture.shift_drag,
             move_measure: fixture.move_measure,
             timeframe: Timeframe::ONE_MINUTE,
@@ -1585,6 +1595,17 @@ impl ChartView {
             }
             return;
         }
+        // A staged order's tags, buttons and handles (never under a working tag: laid out with
+        // them).
+        if region == Region::Plot
+            && !ev.modifiers.control
+            && !self.drawings.active()
+            && self.staged_pressed(x, y)
+        {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // The − / size / + first: quick clicks on them are steps, never a double click.
         if region == Region::Plot
             && !ev.modifiers.control
@@ -1737,6 +1758,15 @@ impl ChartView {
                 EditorKey::Pass => {}
             }
         }
+        // Escape puts a staged part being dragged back where it was.
+        if k.key == "escape"
+            && let Some((_, _, before)) = self.ct.staged_drag.take()
+        {
+            self.ct.staged = Some(before);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // Escape aborts an order drag: a tag, a handle or the position line (nothing sent).
         if (self.ct.drag.is_some() || self.ct.adding.is_some() || self.ct.pos_drag)
             && k.key == "escape"
@@ -1760,6 +1790,22 @@ impl ChartView {
             cx.stop_propagation();
             cx.notify();
             return;
+        }
+        // A staged order: Enter places it, Esc discards it (the pane's own keys, never in
+        // `commands::BINDINGS`: they act on what this chart shows).
+        if self.ct.staged.is_some() && !(m.control || m.alt || m.platform || m.shift) {
+            match k.key.as_str() {
+                "enter" => self.place_staged(cx),
+                "escape" => {
+                    self.ct.discard("");
+                }
+                _ => {}
+            }
+            if matches!(k.key.as_str(), "enter" | "escape") {
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
         }
         // A working order's size being typed (Alt+Enter: one leg of a linked pair).
         if !(m.control || m.platform)
@@ -1892,8 +1938,11 @@ impl ChartView {
         self.seen_revision = u64::MAX;
         self.cross = None;
         self.cross_bar = None;
-        // A limit pick belongs to the symbol it was armed on; so does a size being typed.
-        self.ct.feed_changed();
+        // A limit pick belongs to the symbol it was armed on; so does a size being typed, and
+        // a staged order (said in a flash).
+        if let Some(n) = self.ct.feed_changed() {
+            self.trade.flash(n);
+        }
         self.trade.qty_edit = None;
         self.trade.resize_edit = None;
         self.readout = None;
@@ -2120,6 +2169,7 @@ impl ChartView {
         crate::chart_trade::strip_box(
             f32::from(self.plot.size.width),
             f32::from(self.plot.size.height),
+            crate::zoom::get(),
         )
     }
 
@@ -2129,7 +2179,7 @@ impl ChartView {
     /// can send).
     fn order_strip_view(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::chart_trade::{
-            STRIP_GAP, STRIP_H, STRIP_LMT_W, STRIP_MKT_W, STRIP_PAD, STRIP_QTY_W, StripOrder,
+            STRIP_GAP, STRIP_LMT_W, STRIP_MKT_W, STRIP_PAD, STRIP_QTY_W, StripOrder,
         };
         let b = self.strip_box()?;
         let dim = self.common.link.is_none();
@@ -2141,7 +2191,7 @@ impl ChartView {
         let step = |id: &'static str, text: &'static str, up: bool, cx: &mut Context<Self>| {
             div()
                 .id(id)
-                .w(px(crate::chart_trade::STRIP_STEP_W))
+                .w(px(b.px(crate::chart_trade::STRIP_STEP_W)))
                 .h_full()
                 .flex()
                 .items_center()
@@ -2168,7 +2218,7 @@ impl ChartView {
         };
         let size_control = div()
             .id("strip-size")
-            .w(px(STRIP_QTY_W))
+            .w(px(b.px(STRIP_QTY_W)))
             .h_full()
             .flex()
             .flex_row()
@@ -2180,7 +2230,7 @@ impl ChartView {
             .child(
                 div()
                     .id("strip-size-value")
-                    .w(px(crate::chart_trade::STRIP_VALUE_W))
+                    .w(px(b.px(crate::chart_trade::STRIP_VALUE_W)))
                     .h_full()
                     .flex()
                     .items_center()
@@ -2240,21 +2290,21 @@ impl ChartView {
             .left(px(b.x))
             .top(px(b.y))
             .w(px(b.w))
-            .h(px(STRIP_H))
-            .p(px(STRIP_PAD))
+            .h(px(b.h()))
+            .p(px(b.px(STRIP_PAD)))
             .flex()
             .flex_row()
-            .gap(px(STRIP_GAP))
+            .gap(px(b.px(STRIP_GAP)))
             .bg(t.panel)
             .rounded_sm()
-            // The strip's geometry is the pointer's (`chart_trade::strip_box`) and doesn't zoom;
-            // neither does its text (docs/known-gaps.md).
-            .text_size(px(11.0))
+            // Zoomed with the UI (`chart_trade::strip_box`, the pointer's geometry too); the
+            // order tags' text size and weight.
+            .text_size(crate::zoom::ui(LABEL_PX_100))
             .child(size_control);
         for (o, label, w, fill, line) in buttons {
             let el = div()
                 .id(("strip", o as u64))
-                .w(px(w))
+                .w(px(b.px(w)))
                 .h_full()
                 .flex()
                 .items_center()
@@ -2262,7 +2312,7 @@ impl ChartView {
                 .rounded_sm()
                 .border_1()
                 .border_color(line)
-                .font_weight(FontWeight::BOLD)
+                .font_weight(FontWeight::SEMIBOLD)
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .cursor_pointer()
@@ -2540,6 +2590,25 @@ impl ChartView {
         if ev.pressed_button != Some(MouseButton::Left) && self.drawings.release_lost() {
             cx.notify();
         }
+        if let Some((part, grab, before)) = self.ct.staged_drag {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                // Released where the chart never saw it: keep where it was dragged to.
+                self.ct.staged_drag = None;
+            } else {
+                let (_, y) = self.local(ev.position);
+                let tick = self.instrument.price.tick;
+                if let (Some(to), Some(s)) = (
+                    lines_core::geometry::snap_price(&self.vp, y, tick),
+                    self.ct.staged.as_mut(),
+                ) {
+                    // From the order as pressed, so a leg pulled from a handle is that leg.
+                    *s = before;
+                    s.move_part(part, Price(to.0 + grab));
+                }
+            }
+            cx.notify();
+            return;
+        }
         if self.ct.drag.is_some() || self.ct.adding.is_some() || self.ct.pos_drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.ct.drag = None;
@@ -2633,6 +2702,41 @@ impl ChartView {
             let (x, y) = self.local(ev.position);
             if self.close_hit(x as f32, y as f32) == Some(k) {
                 self.remove_lower(k);
+            }
+            cx.notify();
+            return;
+        }
+        if let Some((_, _, before)) = self.ct.staged_drag.take() {
+            // Released off the plot (another pane, the axes): back where it was.
+            if !self.plot.contains(&ev.position) {
+                self.ct.staged = Some(before);
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(pressed) = self.ct.staged_press.take() {
+            let (x, y) = self.local(ev.position);
+            let n = self.ct.n_tags;
+            let now = crate::chart_trade::staged_hit(
+                &self.ct.tags[..n],
+                self.ct.staged_buttons,
+                x as f32,
+                y as f32,
+            );
+            if now == Some(pressed) {
+                use crate::chart_trade::{StagedHit, StagedPart};
+                match pressed {
+                    StagedHit::Place => self.place_staged(cx),
+                    StagedHit::Close(StagedPart::Entry) => {
+                        self.ct.discard("");
+                    }
+                    StagedHit::Close(part) => {
+                        if let Some(s) = self.ct.staged.as_mut() {
+                            s.remove(part);
+                        }
+                    }
+                    StagedHit::Body(_) => {}
+                }
             }
             cx.notify();
             return;
@@ -2740,6 +2844,48 @@ impl ChartView {
                     .ct
                     .pos_tag
                     .is_some_and(|t| t.contains(x as f32, y as f32)))
+            || self.on_staged_handle(x as f32, y as f32)
+    }
+
+    /// Whether a staged order's "+T" / "+S" handle is at plot-local (`x`, `y`).
+    fn on_staged_handle(&self, x: f32, y: f32) -> bool {
+        self.ct
+            .staged_handles
+            .iter()
+            .flatten()
+            .any(|h| h.contains(x, y))
+    }
+
+    /// A press on the staged order at plot-local (`x`, `y`), last frame's layout: a handle
+    /// pulls out its leg, a body drags (by its grab offset, as a working tag), Place and ×
+    /// act on release. Whether it was on the staged order.
+    fn staged_pressed(&mut self, x: f64, y: f64) -> bool {
+        use crate::chart_trade::{StagedHit, staged_handle_hit, staged_hit};
+        let Some(s) = self.ct.staged else {
+            return false;
+        };
+        let tick = self.instrument.price.tick;
+        let at = lines_core::geometry::snap_price(&self.vp, y, tick);
+        if let Some(part) = staged_handle_hit(&self.ct.staged_handles, &s, x as f32, y as f32) {
+            if at.is_some() {
+                self.ct.staged_drag = Some((part, 0, s));
+            }
+            return true;
+        }
+        let n = self.ct.n_tags;
+        match staged_hit(&self.ct.tags[..n], self.ct.staged_buttons, x as f32, y as f32) {
+            Some(StagedHit::Body(part)) => {
+                if let (Some(at), Some(p)) = (at, s.price(part)) {
+                    self.ct.staged_drag = Some((part, p.0 - at.0, s));
+                }
+                true
+            }
+            Some(h) => {
+                self.ct.staged_press = Some(h);
+                true
+            }
+            None => false,
+        }
     }
 
     /// A press in the plot at plot-local (`x`, `y`) on an order tag, its `×`, a position
@@ -3033,7 +3179,7 @@ impl ChartView {
             &crate::dom_trade::EntryCtx,
         ) -> Result<lines_trading::Command, crate::dom_trade::Refusal>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         use crate::chart_trade::{ENABLE_TO_ORDER, LINK_TO_TRADE};
         let issued = std::time::Instant::now();
         let built = if self.common.link.is_none() {
@@ -3045,22 +3191,52 @@ impl ChartView {
                     .map_err(|crate::dom_trade::Refusal(why)| why)
             })
         };
-        match built {
+        let sent = match built {
             Ok((command, ctx)) => match crate::trade_bar::size_refusal(self, &command, cx) {
-                Some(why) => self.trade.flash(why),
-                None => cx.emit(ChartOrder {
-                    command,
-                    refused: ENABLE_TO_ORDER,
-                    resize: None,
-                    account: ctx.account,
-                    contract: ctx.contract,
-                    link: self.common.link,
-                    issued,
-                }),
+                Some(why) => {
+                    self.trade.flash(why);
+                    false
+                }
+                None => {
+                    cx.emit(ChartOrder {
+                        command,
+                        refused: ENABLE_TO_ORDER,
+                        resize: None,
+                        account: ctx.account,
+                        contract: ctx.contract,
+                        link: self.common.link,
+                        issued,
+                    });
+                    true
+                }
             },
-            Err(why) => self.trade.flash(why),
-        }
+            Err(why) => {
+                self.trade.flash(why);
+                false
+            }
+        };
         cx.notify();
+        sent
+    }
+
+    /// Place the staged order: one command (`chart_trade::staged_command`) through the same
+    /// window path as a menu order, or a flash saying why not (it stays staged). Sent, it
+    /// leaves the chart; a refusal from the window (no linked DOM enabled) puts it back.
+    fn place_staged(&mut self, cx: &mut Context<Self>) {
+        let Some(s) = self.ct.staged else {
+            return;
+        };
+        if self.send_entry(|ctx| crate::chart_trade::staged_command(&s, ctx), cx) {
+            self.ct.placed();
+        }
+    }
+
+    /// Discard the staged order, nothing sent, saying why (a pop-out or a pop-in).
+    pub fn discard_staged(&mut self, why: &'static str, cx: &mut Context<Self>) {
+        if let Some(n) = self.ct.discard(why) {
+            self.trade.flash(n);
+            cx.notify();
+        }
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3569,6 +3745,12 @@ impl ChartView {
                 t.text_dim,
             ));
         }
+        // The 2 px role bar every chart trading tag has: the position's side (its words, LONG
+        // or SHORT, say it too: never color alone).
+        window.paint_quad(fill(
+            Bounds::new(point(px(x), px(top)), size(px(2.0), px(h))),
+            if qty > 0 { t.up } else { t.down },
+        ));
         self.pos_glyphs.paint(
             head.as_str(),
             x + 6.0 * s,
@@ -3623,6 +3805,39 @@ impl ChartView {
         {
             self.ct.adding = lines_core::geometry::order_tags::position_drag_exit(qty, avg, to)
                 .map(|target| crate::chart_trade::AddExit { target, to });
+        }
+        // Screenshot fixtures: an order staged as the menu's "…with bracket" would (once the
+        // chart can trade), its legs as given; and a flash.
+        if let Some(spec) = self.stage_fixture.clone()
+            && let Ok(ctx) = crate::trade_bar::entry_ctx(self, cx)
+        {
+            self.stage_fixture = None;
+            let scale = self.instrument.price.scale;
+            let staged = crate::chart_trade::parse_stage_spec(&spec, |x| {
+                scale.parse_decimal(x).ok().map(Price)
+            })
+            .and_then(|sp| {
+                let mut s = crate::chart_trade::stage(
+                    sp.order,
+                    crate::chart_trade::Offer::of(&ctx),
+                    &ctx,
+                )
+                .map_err(|crate::dom_trade::Refusal(why)| why.to_owned())?;
+                if sp.stop.is_some() || sp.target.is_some() {
+                    (s.stop, s.target) = (sp.stop, sp.target);
+                }
+                Ok(s)
+            });
+            match staged {
+                Ok(s) => self.ct.staged = Some(s),
+                Err(why) => {
+                    tracing::warn!("--stage-order: {why}");
+                    self.trade.flash(why);
+                }
+            }
+        }
+        if let Some(f) = self.flash_fixture.take() {
+            self.trade.flash(f);
         }
         let shown = cx
             .try_global::<crate::picker_view::AppSettings>()
@@ -3750,11 +3965,22 @@ impl ChartView {
                 });
             }
         }
+        // A staged order's tags are laid out with the working ones (so they never overlap):
+        // working orders group into the room left (every order still in a tag).
+        let staged = self.ct.staged;
+        let staged_on_plot = staged.map_or(0, |st| {
+            st.parts()
+                .filter(|(_, p)| {
+                    let y = self.vp.price_to_y(p.0 as f64);
+                    y.is_finite() && (0.0..=ph as f64).contains(&y)
+                })
+                .count()
+        });
         self.ct.n_groups = group_orders(
             &self.vp,
             &mut self.ct.on_plot,
             ph,
-            tags_fit(band, tm),
+            tags_fit(band, tm).saturating_sub(staged_on_plot).max(1),
             tm,
             &mut self.ct.groups,
         );
@@ -3799,6 +4025,65 @@ impl ChartView {
                 price: at,
                 text_w: w,
             });
+        }
+        // The staged order's tags: the entry ends in Place and × Esc, a leg in its ×.
+        let mut st_text = [FixedStr::<128>::new(); 3];
+        let mut st_pnl = [FixedStr::<48>::new(); 3];
+        let mut st_money: [Option<lines_trading::Money>; 3] = [None; 3];
+        if let Some(st) = staged {
+            use crate::chart_trade::{DISCARD_LABEL, PLACE_LABEL, StagedPart};
+            let qfmt = self.instrument.qty;
+            let place_w = self.pos_glyphs.width(PLACE_LABEL, t.bg, true, window) + tm.text_pad;
+            let esc_w = self
+                .pos_glyphs
+                .width(DISCARD_LABEL, t.text_main, true, window)
+                + tm.text_pad;
+            self.ct.staged_buttons = (place_w, esc_w);
+            for (k, (part, at)) in st.parts().enumerate() {
+                let w = if part == StagedPart::Entry {
+                    let _ = crate::chart_trade::write_staged_entry(
+                        &mut st_text[k],
+                        &st,
+                        &fmt,
+                        qfmt,
+                        mpu,
+                        mode,
+                    );
+                    self.pos_glyphs
+                        .width(st_text[k].as_str(), t.text_main, true, window)
+                        + 8.0 * s
+                        + place_w
+                        + (esc_w - tm.close_w)
+                } else {
+                    st_money[k] = crate::chart_trade::write_staged_leg(
+                        &mut st_text[k],
+                        &mut st_pnl[k],
+                        &st,
+                        part,
+                        &fmt,
+                        qfmt,
+                        mpu,
+                        mode,
+                    )
+                    .ok()
+                    .flatten();
+                    let mut w = self
+                        .pos_glyphs
+                        .width(st_text[k].as_str(), t.text_main, true, window);
+                    if st_money[k].is_some() {
+                        w += 8.0 * s
+                            + self
+                                .pos_glyphs
+                                .width(st_pnl[k].as_str(), t.text_main, true, window);
+                    }
+                    w
+                };
+                self.ct.tag_lines.push(LineIn {
+                    id: part.id(),
+                    price: at,
+                    text_w: w,
+                });
+            }
         }
         self.ct.n_tags = layout_tags(
             &self.vp,
@@ -3847,6 +4132,16 @@ impl ChartView {
                     if let Some(m) = self.ct.mark(o.id) {
                         line(window, m, o.price, self.mark_colour(m));
                     }
+                }
+            }
+        }
+        // A staged order: long dashes in its roles' colors, at full strength (held orders' are
+        // short and faded; working orders' solid). Unsent, so never a solid line.
+        if let Some(st) = staged {
+            for (part, at) in st.parts() {
+                let y = self.vp.price_to_y(at.0 as f64) as f32;
+                if (0.0..=ph).contains(&y) {
+                    dashed(window, y, self.staged_colour(&st, part), (6.0 * s).round());
                 }
             }
         }
@@ -3944,6 +4239,22 @@ impl ChartView {
         // Tags.
         for k in 0..self.ct.n_tags {
             let b = self.ct.tags[k];
+            if let (Some(part), Some(st)) = (crate::chart_trade::StagedPart::of_id(b.id), staged)
+            {
+                let i = st.parts().position(|(p, _)| p == part).unwrap_or(0);
+                self.draw_staged_tag(
+                    &b,
+                    &st,
+                    part,
+                    (st_text[i].as_str(), st_pnl[i].as_str(), st_money[i]),
+                    (ox, oy),
+                    hair,
+                    tm,
+                    window,
+                    cx,
+                );
+                continue;
+            }
             let Some(tt) = self.ct.texts.iter().find(|x| x.id == b.id).copied() else {
                 continue;
             };
@@ -3957,7 +4268,7 @@ impl ChartView {
             };
             let pending = !mixed && m.style == MarkStyle::Pending;
             // Always on the label background (readable over candles); pending reads by its dim
-            // text and outline only (no role bar), held by a dashed outline.
+            // text, held by a dashed outline.
             window.paint_quad(fill(rect(b.left, b.top, b.w, order_tag_h), t.label_bg));
             if !mixed && m.style == MarkStyle::Held {
                 self.dashed_outline(rect(b.left, b.top, b.w, order_tag_h), c, hair, window);
@@ -4133,6 +4444,39 @@ impl ChartView {
                 );
             }
         }
+        // A staged entry with a leg missing: its handles, as the position tag's ("+T" / "+S").
+        self.ct.staged_handles = [None, None];
+        if let Some(st) = staged
+            && let Some(b) = self.ct.tags[..self.ct.n_tags]
+                .iter()
+                .find(|b| b.id == crate::chart_trade::STAGED_ENTRY_ID)
+                .copied()
+        {
+            self.ct.staged_handles = handles(&b, st.wanted_handles(), tm);
+            for h in self.ct.staged_handles.iter().flatten() {
+                let part = st.handle_part(h.above);
+                let c = self.staged_colour(&st, part);
+                let r = rect(h.left, h.top, h.w, h.h);
+                window.paint_quad(fill(r, t.label_bg));
+                self.dashed_outline(r, c, hair, window);
+                let label = if part == crate::chart_trade::StagedPart::Target {
+                    "+T"
+                } else {
+                    "+S"
+                };
+                let lw = self.pos_glyphs.width(label, c, true, window);
+                self.pos_glyphs.paint(
+                    label,
+                    ox + h.left + (h.w - lw) * 0.5,
+                    oy + h.top,
+                    h.h,
+                    c,
+                    true,
+                    window,
+                    cx,
+                );
+            }
+        }
         // The newest refusal from this chart (a move, an exit, trading off), at the plot's
         // top left: inline and brief, never a dialog.
         if let Some(why) = self.trade.local_flash() {
@@ -4147,6 +4491,131 @@ impl ChartView {
                 oy + 4.0 * s,
                 order_tag_h,
                 t.on_warn,
+                true,
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// A staged part's color: the entry its side's, the legs their roles' (as working orders).
+    fn staged_colour(
+        &self,
+        st: &crate::chart_trade::Staged,
+        part: crate::chart_trade::StagedPart,
+    ) -> Colour {
+        use crate::chart_trade::StagedPart;
+        let t = &self.theme;
+        match part {
+            StagedPart::Target => t.order_target,
+            StagedPart::Stop => t.order_stop,
+            StagedPart::Entry if st.order.side == lines_trading::Side::Buy => t.up,
+            StagedPart::Entry => t.down,
+        }
+    }
+
+    /// One staged tag, in the order tags' shape (`TAG_H`, `TEXT_PAD`, the 2 px role bar, a
+    /// target's notch on top and a stop's below) but unsent: a dashed outline, and on the entry
+    /// a Place button filled in its side's color (text in `bg`) and × Esc; a leg ends in ×.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_staged_tag(
+        &mut self,
+        b: &lines_core::geometry::order_tags::TagBox,
+        st: &crate::chart_trade::Staged,
+        part: crate::chart_trade::StagedPart,
+        (text, pnl, money): (&str, &str, Option<lines_trading::Money>),
+        (ox, oy): (f32, f32),
+        hair: f32,
+        tm: &lines_core::geometry::order_tags::Metrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use crate::chart_trade::{DISCARD_LABEL, PLACE_LABEL, StagedPart};
+        let t = self.theme;
+        let s = tm.scale;
+        let h = tm.tag_h;
+        let c = self.staged_colour(st, part);
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
+        };
+        window.paint_quad(fill(rect(b.left, b.top, b.w, h), t.label_bg));
+        self.dashed_outline(rect(b.left, b.top, b.w, h), c, hair, window);
+        window.paint_quad(fill(rect(b.left, b.top, 2.0, h), c));
+        let notch = (8.0 * s).round();
+        match part {
+            StagedPart::Target => {
+                window.paint_quad(fill(rect(b.left, b.top - 2.0, notch, 2.0), c))
+            }
+            StagedPart::Stop => window.paint_quad(fill(rect(b.left, b.top + h, notch, 2.0), c)),
+            StagedPart::Entry => {}
+        }
+        let text_x = ox + b.left + 6.0 * s;
+        let head_end = self.pos_glyphs.paint(
+            text,
+            text_x,
+            oy + b.top,
+            h,
+            t.text_main,
+            true,
+            window,
+            cx,
+        );
+        if let Some(m) = money {
+            let tone = match crate::pnl::tone(m) {
+                crate::pnl::Tone::Up => t.up,
+                crate::pnl::Tone::Down => t.down,
+                crate::pnl::Tone::Flat => t.text_main,
+            };
+            self.pos_glyphs.paint(
+                pnl,
+                head_end + 8.0 * s,
+                oy + b.top,
+                h,
+                tone,
+                true,
+                window,
+                cx,
+            );
+        }
+        let right = b.left + b.w;
+        if part == StagedPart::Entry {
+            let (place_w, esc_w) = self.ct.staged_buttons;
+            let esc_left = right - esc_w;
+            let place_left = esc_left - place_w;
+            // Place: filled in the side's color, its text in `bg` (AA: `up`/`down` on `bg`).
+            window.paint_quad(fill(
+                rect(place_left, b.top + hair, place_w, h - 2.0 * hair),
+                c,
+            ));
+            self.pos_glyphs.paint(
+                PLACE_LABEL,
+                ox + place_left + 6.0 * s,
+                oy + b.top,
+                h,
+                t.bg,
+                true,
+                window,
+                cx,
+            );
+            window.paint_quad(fill(rect(esc_left, b.top, hair, h), c));
+            self.pos_glyphs.paint(
+                DISCARD_LABEL,
+                ox + esc_left + 6.0 * s,
+                oy + b.top,
+                h,
+                t.text_main,
+                true,
+                window,
+                cx,
+            );
+        } else {
+            window.paint_quad(fill(rect(b.close_left, b.top, hair, h), c));
+            self.pos_glyphs.paint(
+                "×",
+                ox + b.close_left + tm.close_w * 0.5 - 3.5 * s,
+                oy + b.top,
+                h,
+                t.text_main,
                 true,
                 window,
                 cx,
@@ -5799,6 +6268,7 @@ impl ChartView {
             y,
         )
         .is_some()
+            || self.on_staged_handle(x, y)
     }
 
     /// The single order whose tag (or its ×) is at plot-local (`x`, `y`), last frame's layout:
@@ -5941,7 +6411,31 @@ impl ChartView {
                 {
                     self.trade.flash(crate::chart_trade::CHART_CHANGED);
                 } else {
-                    self.send_entry(|ctx| crate::chart_trade::menu_command(o, offer, ctx), cx)
+                    self.send_entry(|ctx| crate::chart_trade::menu_command(o, offer, ctx), cx);
+                }
+            }
+            // "…with bracket": on the chart, unsent until Place (one per chart: it replaces
+            // one staged before). Refused as its plain row would be.
+            OrderCmd::Stage(o, offer) => {
+                let offered = self.menu_account.take();
+                let staged = if crate::chart_trade::same_account(
+                    offered.as_ref(),
+                    self.trade.account.as_ref(),
+                ) {
+                    crate::trade_bar::entry_ctx(self, cx).and_then(|ctx| {
+                        crate::chart_trade::stage(o, offer, &ctx)
+                            .map_err(|crate::dom_trade::Refusal(why)| why)
+                    })
+                } else {
+                    Err(crate::chart_trade::CHART_CHANGED)
+                };
+                match staged {
+                    Ok(s) => {
+                        self.ct.strip_pick = None;
+                        self.ct.staged_drag = None;
+                        self.ct.staged = Some(s);
+                    }
+                    Err(why) => self.trade.flash(why),
                 }
             }
             OrderCmd::Resize(id) => {
@@ -7137,6 +7631,8 @@ impl ChartView {
     /// The window refused a chart order (no linked DOM with trading enabled): say so on the
     /// chart.
     pub fn exit_refused(&mut self, why: &'static str, cx: &mut Context<Self>) {
+        // A staged order's Place: back on the chart, to place once trading is on.
+        self.ct.place_refused();
         self.trade.flash(why);
         cx.notify();
     }
@@ -7227,6 +7723,10 @@ impl Pane for ChartView {
     }
 
     fn on_hidden_tick(&mut self) {
+        // A staged order never waits unseen: discarded, said once the chart is shown again.
+        if let Some(n) = self.ct.discard(crate::chart_trade::DISCARDED_HIDDEN) {
+            self.ct.notice = Some(n);
+        }
         // A hidden chart paints nothing: its wait to be shown is not receive → paint.
         if self.latency_hud {
             self.paint_latency.hidden(self.store.chart_revision());
@@ -7263,6 +7763,17 @@ impl Pane for ChartView {
         // waits for the next one; a frame's marks can be briefly empty), and closes if the
         // chart's account changed.
         let mut group = self.ct.account_changed(self.trade.account.as_ref());
+        // A staged order: discarded on another account; a discard while hidden said now; and
+        // a Place the window has answered by now (a refusal put it back already).
+        self.ct.placing = None;
+        if let Some(n) = self
+            .ct
+            .staged_account(self.trade.account.as_ref())
+            .or_else(|| self.ct.notice.take())
+        {
+            self.trade.flash(n);
+            group = true;
+        }
         if self.ct.group_menu.is_some() && self.group_plot != self.plot {
             self.group_plot = self.plot;
             group = true;
