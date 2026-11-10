@@ -741,3 +741,158 @@ fn enter_after_a_shift_drag_pins_and_never_deletes_all() {
     assert_eq!(r.d.key("enter", None), Key::Handled);
     assert_eq!(r.items().len(), 2, "pinned; nothing deleted");
 }
+
+impl Rig {
+    fn measure_down(&mut self, x: f32, y: f32) -> bool {
+        self.frame(x, y);
+        let a = self.anchor(x, y);
+        self.d.measure_down(x, y, a)
+    }
+
+    fn measure(&self) -> (Anchor, Anchor) {
+        self.d.measure.expect("a measure")
+    }
+}
+
+/// The grip on a measure's box: inside moves, an edge resizes by its anchor, a corner by both.
+#[test]
+fn a_measure_box_has_move_edge_and_corner_grips() {
+    let (p0, p1) = ((100.0, 300.0), (300.0, 100.0));
+    assert_eq!(grip(p0, p1, 200.0, 200.0, 5.0), Some(Grip::Move));
+    assert_eq!(grip(p0, p1, 400.0, 200.0, 5.0), None, "outside");
+    assert_eq!(
+        grip(p0, p1, 101.0, 200.0, 5.0),
+        Some(Grip::Resize {
+            time: Some(0),
+            price: None
+        }),
+        "a's vertical edge"
+    );
+    assert_eq!(
+        grip(p0, p1, 200.0, 99.0, 5.0),
+        Some(Grip::Resize {
+            time: None,
+            price: Some(1)
+        }),
+        "b's horizontal edge"
+    );
+    assert_eq!(
+        grip(p0, p1, 299.0, 102.0, 5.0),
+        Some(Grip::Resize {
+            time: Some(1),
+            price: Some(1)
+        }),
+        "b's corner"
+    );
+    // Too small to tell edges apart: it moves.
+    assert_eq!(
+        grip((10.0, 10.0), (14.0, 12.0), 12.0, 11.0, 5.0),
+        Some(Grip::Move)
+    );
+    use gpui::CursorStyle as C;
+    assert_eq!(Grip::Move.cursor(p0, p1), C::OpenHand);
+    let corner = Grip::Resize {
+        time: Some(1),
+        price: Some(1),
+    };
+    assert_eq!(corner.cursor(p0, p1), C::ResizeUpRightDownLeft);
+    let edge = Grip::Resize {
+        time: Some(0),
+        price: None,
+    };
+    assert_eq!(edge.cursor(p0, p1), C::ResizeLeftRight);
+}
+
+/// Dragging inside a placed measure moves it by whole bars and ticks, its size in bars and
+/// ticks kept, and the readout follows; a click on it leaves it where it was.
+#[test]
+fn a_placed_measure_moves_keeping_its_size() {
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    let (a, b) = r.measure();
+    let (_, before) = r.d.measure_shown().unwrap();
+    assert!(
+        r.measure_down(300.0, 200.0),
+        "inside: it's the measure's press"
+    );
+    r.frame(360.0, 150.0);
+    let (_, during) = r.d.measure_shown().unwrap();
+    assert_eq!(
+        (during.ticks, during.bars),
+        (before.ticks, before.bars),
+        "live, same size"
+    );
+    assert!(r.up(360.0, 150.0));
+    let (a2, b2) = r.measure();
+    assert_ne!(a2, a, "moved");
+    assert_eq!(b2.price.0 - a2.price.0, b.price.0 - a.price.0, "ticks kept");
+    r.frame(0.0, 0.0);
+    let (_, after) = r.d.measure_shown().unwrap();
+    assert_eq!((after.ticks, after.bars), (before.ticks, before.bars));
+    // A click on it: nothing moves.
+    assert!(r.measure_down(300.0, 200.0));
+    assert!(r.up(301.0, 201.0));
+    assert_eq!(r.measure(), (a2, b2));
+    // A plain click elsewhere still clears it (the chart pans).
+    r.frame(0.0, 0.0);
+    assert!(!r.measure_down(700.0, 380.0));
+    assert!(!r.down(700.0, 380.0));
+    r.frame(0.0, 0.0);
+    assert!(r.d.measure_shown().is_none());
+}
+
+/// An edge or corner resizes: only that anchor's time or price follows the pointer.
+#[test]
+fn a_placed_measure_resizes_by_an_edge_or_corner() {
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    let (a, b) = r.measure();
+    let (p, _) = r.d.measure_shown().unwrap();
+    // b's horizontal edge, dragged up: only b's price changes.
+    let (ex, ey) = ((p.p0.0 + p.p1.0) / 2.0, p.p1.1);
+    assert!(r.measure_down(ex, ey));
+    r.frame(ex, ey - 40.0);
+    r.up(ex, ey - 40.0);
+    let (a2, b2) = r.measure();
+    assert_eq!((a2, b2.time), (a, b.time));
+    assert!(b2.price.0 > b.price.0);
+    // Esc mid-drag puts it back; Esc again clears it.
+    let (p, _) = {
+        r.frame(0.0, 0.0);
+        r.d.measure_shown().unwrap()
+    };
+    assert!(r.measure_down(p.p0.0, p.p0.1));
+    r.frame(p.p0.0 - 60.0, p.p0.1);
+    assert!(r.d.cancel());
+    assert_eq!(r.measure(), (a2, b2));
+    assert!(r.d.cancel());
+    assert!(r.d.measure.is_none());
+}
+
+/// A tool chosen or hidden drawings: a press on the box isn't the measure's.
+#[test]
+fn the_measure_takes_no_press_in_drawing_mode() {
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    r.d.set_tool(Tool::Trend);
+    assert!(!r.measure_down(300.0, 200.0));
+}
+
+#[test]
+fn measure_parts_toggle_and_save_by_name() {
+    let mut s = MeasureShow::default();
+    assert!(MeasurePart::ALL.iter().all(|p| s.get(*p)));
+    s.toggle(MeasurePart::Time);
+    assert!(!s.get(MeasurePart::Time) && !s.is_default());
+    let json = serde_json::to_string(&s).unwrap();
+    let back: MeasureShow = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, s);
+    let partial: MeasureShow = serde_json::from_str(r#"{"bars": false}"#).unwrap();
+    assert!(!partial.bars && partial.ticks, "missing parts stay on");
+}

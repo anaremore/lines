@@ -85,6 +85,10 @@ pub enum MenuObject {
     Order { id: u64, title: String, stop: bool },
     /// A drawing (now the selection): what it is.
     Drawing { title: String },
+    /// The temporary measure: which parts its readout shows.
+    Measure {
+        show: crate::chart_draw::MeasureShow,
+    },
 }
 
 /// A menu a screenshot opens (`--context-menu`, decision 0009): the focused pane's, or the
@@ -170,6 +174,20 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
             v.push(row("Change size…", Command::Order(OrderCmd::Resize(*id))));
             v.push(MenuItem::sep());
             v.push(row("Cancel order", Command::Order(OrderCmd::Cancel(*id))).destructive());
+            v
+        }
+        MenuObject::Measure { show } => {
+            use crate::chart_draw::MeasurePart;
+            let mut v = vec![MenuItem::title("Measure"), MenuItem::sep()];
+            for p in MeasurePart::ALL {
+                v.push(toggle(
+                    p.label(),
+                    Command::Draw(DrawCmd::MeasurePart(p)),
+                    show.get(p),
+                ));
+            }
+            v.push(MenuItem::sep());
+            v.push(row("Remove", Command::Draw(DrawCmd::RemoveMeasure)).destructive());
             v
         }
         MenuObject::Drawing { title } => vec![

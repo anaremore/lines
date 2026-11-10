@@ -214,6 +214,10 @@ pub enum DrawCmd {
     PinMeasure,
     /// Open the style editor on the selected drawing (decision 0026).
     Style,
+    /// Show or hide one part of the measure's readout (its right-click menu; app-wide).
+    MeasurePart(crate::chart_draw::MeasurePart),
+    /// Remove the temporary measure.
+    RemoveMeasure,
 }
 
 impl DrawCmd {
@@ -786,6 +790,8 @@ pub fn label(c: Command) -> String {
             DrawCmd::ToggleDashed => "Drawings: dashed on/off".into(),
             DrawCmd::Style => "Drawings: style of the selected drawing…".into(),
             DrawCmd::PinMeasure => "Drawings: pin measure".into(),
+            DrawCmd::MeasurePart(p) => format!("Measure: show {}", p.label()),
+            DrawCmd::RemoveMeasure => "Measure: remove".into(),
         },
         Command::Strategy(c) => match c {
             StrategyCmd::StopAll => "Strategies: Stop all (flatten their positions)",

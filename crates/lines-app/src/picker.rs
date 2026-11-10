@@ -209,6 +209,13 @@ pub struct Settings {
     /// logical px of its top-left. Optional: a panel without one opens where it always has.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub panel_places: std::collections::BTreeMap<String, (i32, i32)>,
+    /// Which parts the measure's readout shows (its right-click menu). Optional: absent is
+    /// all of them.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::chart_draw::MeasureShow::is_default"
+    )]
+    pub measure: crate::chart_draw::MeasureShow,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]
