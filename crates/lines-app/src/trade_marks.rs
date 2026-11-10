@@ -429,6 +429,18 @@ impl TradeMarksLayer {
         self.hovered = i;
     }
 
+    /// New options: built again on the next poll; hidden, nothing is shown or hoverable from
+    /// now (not only from the next prepare).
+    pub fn set_config(&mut self, config: TradesConfig) {
+        self.config = config;
+        self.key = None;
+        if config.hidden {
+            self.shown.clear();
+            self.lines.clear();
+            self.hovered = None;
+        }
+    }
+
     /// Build again on the next poll (an option changed).
     pub fn invalidate(&mut self) {
         self.key = None;
@@ -583,8 +595,9 @@ impl TradeMarksLayer {
         if self.config.no_labels || !labels {
             return;
         }
-        // Labels in the chart's tag style: on the background, edged in the side's color, beside
-        // the wedge (shaped once per label; a new zoom shapes them again).
+        // Labels as the chart's legends: on `label_bg` with a neutral edge (the wedge says the
+        // side and the line the outcome: a box in either color would mean both), beside the
+        // wedge (shaped once per label; a new zoom or theme shapes them again).
         let zoom_gen = crate::zoom::generation();
         if zoom_gen != self.shaped_at {
             self.shaped.iter_mut().for_each(|l| *l = None);
@@ -624,13 +637,12 @@ impl TradeMarksLayer {
             let left = (ox + x + s * 0.5 + 3.0).min(ox + pw - w).max(ox);
             let top = if buy { oy + y + 2.0 } else { oy + y - 2.0 - h };
             let top = top.clamp(oy, (oy + ph - h).max(oy));
-            let edge = if buy { theme.up } else { theme.down };
             window.paint_quad(gpui::quad(
                 Bounds::new(point(px(left), px(top)), size(px(w), px(h))),
                 px(2.0),
-                theme.bg,
+                theme.label_bg,
                 px(1.0),
-                edge,
+                theme.axis_line,
                 gpui::BorderStyle::Solid,
             ));
             let _ = line.paint(
@@ -848,6 +860,30 @@ mod tests {
             Period::Week
         );
         assert_eq!(apply(Command::ShowKeys, d), d);
+    }
+
+    #[test]
+    fn hidden_trades_can_not_be_hovered() {
+        let mut layer = TradeMarksLayer::default();
+        layer.shown = vec![(10.0, 10.0, 0)];
+        layer.built.marks.push(Mark {
+            side: Side::Buy,
+            at: UtcMillis(0),
+            price: 0.0,
+            label: String::new(),
+            trade: 0,
+            fills: Vec::new(),
+        });
+        layer.built.trades.push(TradeText {
+            id: "t".into(),
+            lines: Vec::new(),
+        });
+        assert!(layer.hit(10.0, 10.0).is_some());
+        layer.set_config(TradesConfig {
+            hidden: true,
+            ..Default::default()
+        });
+        assert!(layer.hit(10.0, 10.0).is_none());
     }
 
     #[test]

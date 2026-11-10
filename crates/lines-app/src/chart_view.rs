@@ -863,7 +863,12 @@ impl ChartView {
             default_account: crate::trading::Trading::try_global(cx)
                 .and_then(|t| t.default_account()),
             trade_press: None,
-            pnl_mode: Default::default(),
+            // As set now: a chart that hasn't rendered yet (another tab) builds its labels
+            // with it, never with money the setting hides.
+            pnl_mode: cx
+                .try_global::<crate::picker_view::AppSettings>()
+                .map(|a| a.settings.pnl_display)
+                .unwrap_or_default(),
             strategies: cx
                 .try_global::<crate::strategy_panel::Strategies>()
                 .map(|s| s.0.clone()),
@@ -2338,8 +2343,7 @@ impl ChartView {
     pub fn restore(&mut self, state: &ChartState) {
         self.drawings.hidden = state.hide_drawings;
         self.marks.set_hidden(state.hide_strategy_marks);
-        self.trade_marks.config = state.trades;
-        self.trade_marks.invalidate();
+        self.trade_marks.set_config(state.trades);
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -6258,7 +6262,12 @@ impl ChartView {
         };
         let mode = self.pnl_mode;
         let product = &self.instrument;
+        // "This pane's account" with no account known yet: nothing, never every account.
+        let none_yet = !config.all_accounts && account.is_none();
         self.trade_marks.update(key, || {
+            if none_yet {
+                return Default::default();
+            }
             crate::trade_marks::build(
                 &snap.trades,
                 contract,
@@ -6274,8 +6283,7 @@ impl ChartView {
     /// Show or hide trade history, or change one of its options (saved with the chart).
     pub fn set_trades(&mut self, config: crate::trade_marks::TradesConfig, cx: &mut Context<Self>) {
         if config != self.trade_marks.config {
-            self.trade_marks.config = config;
-            self.trade_marks.invalidate();
+            self.trade_marks.set_config(config);
             cx.notify();
         }
     }
