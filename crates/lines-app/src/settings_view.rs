@@ -496,6 +496,11 @@ fn commit(
         }
         cx.refresh_windows();
     }
+    if after.app.hide_join_buttons != before.app.hide_join_buttons {
+        // The DOMs' trade panels lay out again (the Join row is one of their rows).
+        crate::pnl::display_changed();
+        cx.refresh_windows();
+    }
     if after.app.pnl_display != before.app.pnl_display {
         crate::pnl::display_changed();
         crate::journal_shots::set_pnl(after.app.pnl_display);

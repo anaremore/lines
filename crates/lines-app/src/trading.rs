@@ -2048,7 +2048,8 @@ pub enum Step {
 /// Parse a script: steps separated by `;`.
 ///
 /// - `buy 2 mkt`, `sell 1 @ 6000.25`, `buy 1 stop 6010.00`, with an optional
-///   `bracket STOP/TARGET` (ticks) after a limit or stop;
+///   `bracket STOP/TARGET` (ticks) after a limit or stop, or `exit` (an exit for the open
+///   position, reduce-only: `PlaceExit`);
 /// - `ack` (acks arrive; orders sent after the last `ack` stay pending);
 /// - `option YYYY-MM-DD STRIKE call|put`: the orders that follow are on that option series;
 /// - `flatten`, `reverse`, `cancelall` (the contract), `account ID`, `tag A,B` (the newest closed trade's
@@ -2302,6 +2303,7 @@ pub fn parse_script(
                 };
                 out.push(Step::Command(match rest {
                     [] => TradeCommand::PlaceOrder(spec),
+                    ["exit"] => TradeCommand::PlaceExit(spec),
                     ["bracket", st] => {
                         let (stop, target) = st
                             .split_once('/')
@@ -3588,6 +3590,12 @@ mod tests {
         };
         assert_eq!(b.take_profit, Some(px(5999.50 + 4.0)));
         assert_eq!(b.stop_loss, Some(px(5999.50 - 2.0)));
+        // `exit`: an exit for the open position (reduce-only).
+        let exit = parse_script("sell 2 stop 5990.00 exit", &es_product, es(), &a).unwrap();
+        assert!(matches!(
+            &exit[0],
+            Step::Command(TradeCommand::PlaceExit(o)) if o.qty.0 == 2 && o.side == Side::Sell
+        ));
         assert!(matches!(
             &steps[5],
             Step::Command(TradeCommand::Flatten { account, .. }) if account.0 == "paper-eval"

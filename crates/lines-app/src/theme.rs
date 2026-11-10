@@ -788,6 +788,9 @@ mod tests {
             ("bg", t.bg, "down", t.down),
             ("bg", t.bg, "order_target", t.order_target),
             ("bg", t.bg, "order_stop", t.order_stop),
+            // The trade panel's position card: the target's price in its color (the stop's is
+            // `down`, above).
+            ("order_target", t.order_target, "panel", t.panel),
             // Menus: a value or shortcut on the selected row; a destructive row, also when
             // selected (`crate::menu`).
             (

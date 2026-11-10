@@ -76,8 +76,9 @@ fn hint_h() -> f32 {
     crate::zoom::f(HINT_H_100)
 }
 /// The shortest window a person can drag to: room for two DOMs stacked. Narrow enough for any
-/// layout that works today.
-const MIN_WINDOW_W: f32 = crate::trade_bar::MIN_DOM_WIDTH;
+/// layout that works today (its tab bar's; a popped-out DOM goes down to
+/// `trade_bar::MIN_DOM_WIDTH`).
+const MIN_WINDOW_W: f32 = 240.0;
 const MIN_WINDOW_H: f32 = TAB_BAR_H_100 + HINT_H_100 + 2.0 * crate::trade_bar::MIN_DOM_PANE_H;
 const TAB_W_100: f32 = 168.0;
 /// [`TAB_W_100`] at the UI zoom (`crate::zoom`).

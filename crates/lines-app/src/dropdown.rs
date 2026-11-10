@@ -19,17 +19,22 @@ pub const GAP: f32 = 2.0;
 /// Space a list keeps from the window's right edge (logical px).
 pub const MARGIN: f32 = 4.0;
 /// Deferred-draw priority of an open list: over the panes.
-pub const PRIORITY: usize = 3;
+pub const PRIORITY: usize = 4;
 /// Deferred-draw priority of every popover's backdrop (`crate::popover`): over the panes,
 /// under Flatten and Cancel all (`LIVE_PRIORITY`) and every list and menu.
 pub const BACKDROP_PRIORITY: usize = 1;
+/// Deferred-draw priority of a trading panel's own lists (Qty, Bracket): over the backdrops and
+/// the panes, under Flatten and Cancel all, which they open beside (docs/design.md §3: those
+/// stay one press and in view with any popover open).
+pub const PANEL_PRIORITY: usize = 2;
 /// Deferred-draw priority of Flatten and Cancel all (`popover::always_live`): over the
-/// backdrops, so they stay one press with a popover open; under the lists.
-pub const LIVE_PRIORITY: usize = 2;
+/// backdrops and the panel's lists, so they stay one press with a popover open; under the
+/// other lists.
+pub const LIVE_PRIORITY: usize = 3;
 /// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
 /// prompts, the switch-all banner): over any open list, so a list never hides or takes the
 /// clicks of a menu opened after it.
-pub const OVERLAY_PRIORITY: usize = 4;
+pub const OVERLAY_PRIORITY: usize = 5;
 
 /// Where a list `popup` (width, height) opens for a trigger at `trigger`, in a window
 /// `window` (width, height) big, all in window logical px: its top-left corner.
@@ -52,6 +57,20 @@ pub fn place(trigger: Rect, popup: (f32, f32), window: (f32, f32)) -> (f32, f32)
     (x.max(0.0), y)
 }
 
+/// Where a trading panel's list opens (`Dropdown::in_panel`): above its field, never below it,
+/// so it never reaches the exits row under the field; at most `trigger.y - GAP` tall (it scrolls
+/// beyond that, [`panel_room`]). Left and right as [`place`].
+pub fn place_above(trigger: Rect, popup: (f32, f32), window: (f32, f32)) -> (f32, f32) {
+    let (x, _) = place(trigger, popup, window);
+    let h = popup.1.min(panel_room(trigger));
+    (x, (trigger.y - GAP - h).max(0.0))
+}
+
+/// The most a panel list may take above its field.
+pub fn panel_room(trigger: Rect) -> f32 {
+    (trigger.y - GAP).max(0.0)
+}
+
 /// `trigger`, with `popup` (when open) placed by [`place`] under it, drawn over everything
 /// else in the window and taking the pointer from what it covers.
 pub fn dropdown(trigger: impl IntoElement, popup: Option<AnyElement>) -> Dropdown {
@@ -59,6 +78,7 @@ pub fn dropdown(trigger: impl IntoElement, popup: Option<AnyElement>) -> Dropdow
         trigger: trigger.into_any_element(),
         popup,
         dismiss: None,
+        priority: PRIORITY,
     }
 }
 
@@ -66,9 +86,18 @@ pub struct Dropdown {
     trigger: AnyElement,
     popup: Option<AnyElement>,
     dismiss: Option<OnDismiss>,
+    priority: usize,
 }
 
 impl Dropdown {
+    /// A trading panel's list: opens above its field ([`place_above`]), scrolling where taller
+    /// than the room there, so it never covers the exits row; and drawn under Flatten and Cancel
+    /// all ([`PANEL_PRIORITY`]) all the same.
+    pub fn in_panel(mut self) -> Self {
+        self.priority = PANEL_PRIORITY;
+        self
+    }
+
     /// Closes the open list on a press anywhere outside it, which goes no further
     /// (`popover::defer_backdrop`, the popover rule).
     pub fn on_dismiss(mut self, dismiss: OnDismiss) -> Self {
@@ -118,7 +147,7 @@ impl Element for Dropdown {
         cx: &mut App,
     ) {
         self.trigger.prepaint(window, cx);
-        let Some(mut popup) = self.popup.take() else {
+        let Some(popup) = self.popup.take() else {
             return;
         };
         // The part of the chip that shows: a header clips its content before the hover
@@ -127,8 +156,28 @@ impl Element for Dropdown {
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
             return;
         }
-        // Its natural size, at most the window's width (a list's own `max_w` wraps its text).
+        // Its natural size, at most the window's width (a list's own `max_w` wraps its text). A
+        // panel's list is at most the room above its field, and scrolls.
         let v = window.viewport_size();
+        let panel = self.priority == PANEL_PRIORITY;
+        let mut popup = if panel {
+            use gpui::StatefulInteractiveElement as _;
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            let room = panel_room(Rect::new(
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            ));
+            gpui::div()
+                .id("panel-list")
+                .max_h(px(room))
+                .overflow_y_scroll()
+                .child(popup)
+                .into_any_element()
+        } else {
+            popup
+        };
         let s = popup.layout_as_root(
             size(
                 AvailableSpace::Definite(v.width),
@@ -143,7 +192,7 @@ impl Element for Dropdown {
             f32::from(bounds.size.width),
             f32::from(bounds.size.height),
         );
-        let (x, y) = place(
+        let (x, y) = (if panel { place_above } else { place })(
             trigger,
             (f32::from(s.width), f32::from(s.height)),
             (f32::from(v.width), f32::from(v.height)),
@@ -156,7 +205,7 @@ impl Element for Dropdown {
         }
         // Deferred: drawn after (over) the rest of the window, and not clipped by the header
         // or the pane.
-        window.defer_draw(popup, point(px(x), px(y)), PRIORITY, None);
+        window.defer_draw(popup, point(px(x), px(y)), self.priority, None);
     }
 
     fn paint(
@@ -185,6 +234,20 @@ mod tests {
         w: 34.0,
         h: 18.0,
     };
+
+    /// A panel's list opens above its field and never reaches below the field's top (the exits
+    /// row is under the field); taller than the room, it is held to it (and scrolls).
+    #[test]
+    fn a_panel_list_opens_above_and_never_below() {
+        let field = Rect::new(20.0, 300.0, 60.0, 28.0);
+        assert_eq!(place_above(field, (150.0, 171.0), WIN), (20.0, 127.0));
+        for h in [50.0, 171.0, 298.0, 400.0, 2000.0] {
+            let (_, y) = place_above(field, (150.0, h), WIN);
+            let shown = h.min(panel_room(field));
+            assert!(y >= 0.0 && y + shown <= field.y - GAP + 0.01, "{h}");
+        }
+        assert_eq!(panel_room(field), 298.0);
+    }
 
     #[test]
     fn opens_under_the_trigger_left_aligned() {
