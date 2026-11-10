@@ -465,6 +465,7 @@ impl ChartDrawings {
         self.hidden = false;
         self.selected = None;
         self.measure = None;
+        self.measure_drag = None;
         // A pending "Delete all" must not take the Enter that pins this measure.
         self.confirm_clear = false;
         self.tool = Some(Tool::Measure);
@@ -1227,20 +1228,35 @@ impl MeasureDrag {
                 (m.a, m.b)
             }
             Grip::Resize { time, price } => {
-                // An edge stops short of the opposite one: the box never collapses to no
-                // width or height (it couldn't be widened back by an edge).
+                // An edge on the opposite one stops a bar or a tick short of it, on the side
+                // it came from: the box never collapses to no width or height (it couldn't be
+                // widened back by an edge). Past it, the box flips, as a ruler drawn back.
                 let mut ends = [a, b];
                 if let Some(i) = time {
                     let i = usize::from(i);
-                    if at.time != ends[1 - i].time {
-                        ends[i].time = at.time;
-                    }
+                    let other = ends[1 - i].time;
+                    ends[i].time = if at.time == other {
+                        let step = if ends[i].time > other { 1.0 } else { -1.0 };
+                        axis.index_of(other)
+                            .and_then(|s| axis.slot_time(s.floor() as i64 + step as i64))
+                            .unwrap_or(ends[i].time)
+                    } else {
+                        at.time
+                    };
                 }
                 if let Some(i) = price {
                     let i = usize::from(i);
-                    if at.price != ends[1 - i].price {
-                        ends[i].price = at.price;
-                    }
+                    let other = ends[1 - i].price;
+                    ends[i].price = if at.price == other {
+                        let step = if ends[i].price > other {
+                            tick.max(1)
+                        } else {
+                            -tick.max(1)
+                        };
+                        lines_core::Price(other.0 + step)
+                    } else {
+                        at.price
+                    };
                 }
                 (ends[0], ends[1])
             }

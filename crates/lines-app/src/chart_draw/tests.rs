@@ -913,8 +913,14 @@ fn a_resize_never_collapses_the_box() {
     r.frame(p.p0.0, ey);
     r.up(p.p0.0, ey);
     let (a2, b2) = r.measure();
-    assert_ne!(a2.time, b2.time, "still has width");
     assert_eq!((a2, b2.price), (a, b.price));
+    let axis = TimeAxis::new(BarsView::fixed(&r.bars, M));
+    let slot = |t| axis.index_of(t).unwrap().floor() as i64;
+    assert_eq!(
+        slot(b2.time),
+        slot(a.time) + 1,
+        "one bar short, not back where it began"
+    );
 }
 
 /// A tool chosen or hidden drawings: a press on the box isn't the measure's.

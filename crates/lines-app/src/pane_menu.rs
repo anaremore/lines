@@ -193,7 +193,7 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
                     _ => false,
                 };
                 let label = if hidden {
-                    format!("{} (hidden by P&L display)", p.label())
+                    format!("{} (P&L display: off)", p.label())
                 } else {
                     p.label().to_owned()
                 };
@@ -720,8 +720,8 @@ mod tests {
             show,
             pnl: PnlDisplay::Off,
         });
-        assert_eq!(labels(&off)[2], "Ticks (hidden by P&L display)");
-        assert_eq!(labels(&off)[4], "P&L / contract (hidden by P&L display)");
+        assert_eq!(labels(&off)[2], "Ticks (P&L display: off)");
+        assert_eq!(labels(&off)[4], "P&L / contract (P&L display: off)");
         assert_eq!(labels(&off)[3], "Points");
     }
 

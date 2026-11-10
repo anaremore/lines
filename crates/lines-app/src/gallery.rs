@@ -946,6 +946,12 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         chart("--theme dark --shift-drag 700,520:1150,180 --context-menu measure@900,350"),
     ));
     v.push(s(
+        "measure-menu-pnl-off-150",
+        false,
+        end,
+        chart("--theme dark --shift-drag 500,520:1000,180 --pnl off --ui-zoom 150 --context-menu measure@700,300"),
+    ));
+    v.push(s(
         "measure-zoom-150",
         false,
         end,
