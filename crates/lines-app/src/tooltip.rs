@@ -55,22 +55,39 @@ pub fn with_tip<E: StatefulInteractiveElement>(
     cmd: Option<Command>,
     t: &Theme,
 ) -> E {
+    // A command's accessible name is the action's alone, as before (its key is the command's).
     let keys = cmd.map(crate::commands::keys).unwrap_or_default();
-    tip_keys(el, name, keys, t)
+    tip_named(el, name, name.to_owned(), keys, t)
 }
 
 /// [`with_tip`] for a key that isn't a command (a list's own keys: "Move up" with `Ctrl` `↑`),
-/// one entry per cap.
+/// one entry per cap. Its accessible name carries the key as text ("Move up, Ctrl+↑"), since
+/// no command names it elsewhere.
 pub fn tip_keys<E: StatefulInteractiveElement>(
     el: E,
     name: &str,
     keys: Vec<String>,
     t: &Theme,
 ) -> E {
+    let label = if keys.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}, {}", keys.join("+"))
+    };
+    tip_named(el, name, label, keys, t)
+}
+
+fn tip_named<E: StatefulInteractiveElement>(
+    el: E,
+    name: &str,
+    label: String,
+    keys: Vec<String>,
+    t: &Theme,
+) -> E {
     let tip: SharedString = name.to_owned().into();
     let theme = *t;
     el.role(gpui::Role::Button)
-        .aria_label(SharedString::from(name.to_owned()))
+        .aria_label(SharedString::from(label))
         .tooltip(move |_, cx: &mut App| -> AnyView {
             cx.new(|_| Tooltip {
                 name: tip.clone(),

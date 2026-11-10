@@ -698,7 +698,7 @@ fn keys_on(c: Command, mac: bool) -> Vec<String> {
     v
 }
 
-/// A command's key as text ("Ctrl+Shift+F", "⇧⌘F"): for sentences, accessible names and
+/// A command's key as text ("Ctrl+Shift+F", "⇧⌘F"): for sentences ("Ctrl+Z undoes") and
 /// search. Menus, tooltips, the palette and Settings › Keys draw [`keys`] as caps instead.
 pub fn hint(c: Command) -> String {
     hint_on(c, cfg!(target_os = "macos"))
