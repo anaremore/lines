@@ -997,6 +997,26 @@ fn table() -> Vec<Setting> {
             ),
             Value::Text(crate::display_zone::describe_saved(None)),
         ),
+        with_default(
+            s(
+                crate::fonts::KEY,
+                Sec::Appearance,
+                "UI font",
+                "Text in menus, headers, labels and dialogs, in every window. Prices, sizes, times and P&L stay in IBM Plex Mono. A font that is no longer installed shows IBM Plex Sans.",
+                Scope::App,
+                Normal,
+                Editor,
+                |p, _, _| Value::Text(crate::fonts::describe_saved(p.app.ui_font.as_deref())),
+                Some(|p, _, v| {
+                    let Value::Text(shown) = v else {
+                        return Err("not a font");
+                    };
+                    p.app.ui_font = crate::fonts::saved_of(&shown)?;
+                    Ok(())
+                }),
+            ),
+            Value::Text(crate::fonts::describe_saved(None)),
+        ),
         // Charts.
         with_default(
             s(
@@ -2541,6 +2561,7 @@ const APPEARANCE: &[Group] = &[group(
         line!("appearance.theme"),
         line!("appearance.palette"),
         line!("appearance.ui_zoom"),
+        line!(crate::fonts::KEY),
     ],
 )];
 const KEYS: &[Group] = &[group("", &[line!("keys.list")])];
@@ -3009,14 +3030,19 @@ mod tests {
         for (k, sec) in want {
             assert_eq!(by_key(k).map(|s| s.section), Some(*sec), "{k}");
         }
-        // The only key the regrouping adds: the prop values line the overrides fold behind
-        // (a button, nothing saved).
+        // Keys added since: the UI font (decision 0036, on Appearance), and the only key the
+        // regrouping adds, the prop values line the overrides fold behind (a button, nothing
+        // saved).
         let new: Vec<&str> = all()
             .iter()
             .map(|s| s.key)
             .filter(|k| !want.iter().any(|(w, _)| w == k))
             .collect();
-        assert_eq!(new, [PROP_OVERRIDES_KEY]);
+        assert_eq!(new, ["appearance.ui_font", PROP_OVERRIDES_KEY]);
+        assert_eq!(
+            by_key("appearance.ui_font").map(|s| s.section),
+            Some(S::Appearance)
+        );
         assert!(by_key(PROP_OVERRIDES_KEY).unwrap().read_only());
     }
 
@@ -3362,7 +3388,13 @@ mod tests {
     fn every_look_setting_undoes_its_own_field() {
         let mut seen = Vec::new();
         for st in all().iter().filter(|s| s.key.starts_with("appearance.")) {
-            if st.key == crate::display_zone::KEY || st.key == "appearance.ui_zoom" {
+            if [
+                crate::display_zone::KEY,
+                crate::fonts::KEY,
+                "appearance.ui_zoom",
+            ]
+            .contains(&st.key)
+            {
                 // Its own settings field (no CLI look flag to keep apart): a plain undo.
                 continue;
             }

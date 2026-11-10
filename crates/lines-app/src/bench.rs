@@ -99,6 +99,9 @@ pub fn run(
         ws.env.sources.primary().base.clone(),
     );
     gpui_platform::application().run(move |cx: &mut App| {
+        // The fonts the app draws with (decision 0034), so paint and shaping are measured in
+        // them.
+        crate::fonts::load(cx);
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
         cx.set_global(AppSettings::ephemeral());

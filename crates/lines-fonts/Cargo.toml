@@ -1,0 +1,12 @@
+[package]
+name = "lines-fonts"
+edition.workspace = true
+version.workspace = true
+# The fonts' licence (decision 0034): IBM's SIL Open Font License 1.1, text in LICENSE.txt.
+# Not `publish = false` on purpose: cargo-about and cargo-deny skip private crates, and this
+# one must be counted, so the OFL text ships in every release's THIRD_PARTY_LICENSES.txt
+# (about.toml and deny.toml accept OFL-1.1 for this crate only).
+license = "OFL-1.1"
+description = "IBM Plex Sans and IBM Plex Mono (regular, medium, semibold), embedded for the Lines UI."
+
+[dependencies]

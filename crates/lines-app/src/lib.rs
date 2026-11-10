@@ -31,6 +31,7 @@ mod dropdown;
 mod econ_layer;
 mod econ_ui;
 mod feeds;
+mod fonts;
 mod footer;
 mod footprint;
 #[cfg(feature = "screenshot")]
@@ -68,6 +69,7 @@ mod redact;
 mod replay_bar;
 #[cfg(feature = "screenshot")]
 mod screenshot;
+mod search_list;
 mod series_pane;
 mod settings_schema;
 mod settings_view;
@@ -452,6 +454,13 @@ struct Cli {
     /// `Europe/London` (default: Settings › General, else exchange). For this run only.
     #[arg(long, value_name = "ZONE")]
     time_zone: Option<String>,
+    /// The UI font: `plex` (the built-in IBM Plex Sans), `system` (the OS's UI font) or an
+    /// installed family's name like `Calibri` (default: Settings › Appearance, else plex;
+    /// screenshots: plex). For this run only; Settings still shows the saved font. A family
+    /// that isn't installed: screenshots fail, the app starts in Plex Sans and says so.
+    /// Numbers are always IBM Plex Mono.
+    #[arg(long, value_name = "FONT")]
+    ui_font: Option<String>,
     /// A one-tab layout for this run only (the saved workspace is left alone). Screenshots
     /// default to `trading`.
     #[arg(long, value_enum)]
@@ -2038,6 +2047,7 @@ where
                 context_menu: cli.context_menu.clone(),
                 update_shot: cli.update_shot.clone(),
                 ui_zoom: cli.ui_zoom,
+                ui_font: cli.ui_font.clone(),
                 prompt: cli.prompt.clone(),
                 panel_at: cli.panel_at,
                 journal_dir: cli.journal_dir.clone(),
@@ -2192,6 +2202,10 @@ where
 
     let drawings = drawings_store::Drawings::new(dir.clone(), Some(writer.clone()));
     let no_update_check = cli.no_update_check;
+    // The UI font: `--ui-font` for this run, else Settings › Appearance (applied once the
+    // text system can list the installed fonts).
+    let ui_font_flag = cli.ui_font.clone();
+    let saved_ui_font = settings.settings.ui_font.clone();
     let download_env = download_view::DownloadEnv {
         root: download_root(&cli),
         // The run's budget: the flag, else Settings › Data folder's, else the default.
@@ -2202,6 +2216,13 @@ where
         },
     };
     gpui_platform::application().run(move |cx: &mut App| {
+        // The built-in fonts, before the first window (decision 0034).
+        fonts::load(cx);
+        let font_problem = match ui_font_flag.as_deref().map(fonts::parse_flag) {
+            Some(Ok(c)) => fonts::apply(&c),
+            Some(Err(e)) => Some(format!("--ui-font: {e}")),
+            None => fonts::apply(&fonts::UiFont::from_saved(saved_ui_font.as_deref())),
+        };
         cx.set_global(download_env);
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
@@ -2219,6 +2240,9 @@ where
             tracing::error!("failed to open the workspace: {e:#}");
             cx.quit();
             return;
+        }
+        if let Some(p) = font_problem {
+            workspace::notice(p, cx);
         }
         workspace::start_autosave(cx);
         workspace::start_trigger_watch(cx);

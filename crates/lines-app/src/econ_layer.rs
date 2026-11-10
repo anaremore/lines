@@ -31,7 +31,7 @@ pub struct EconLayer {
     /// Shaped tags by release (built once each), and the colors they were shaped in: a
     /// theme or palette change shapes them again.
     shaped: HashMap<(usize, bool), ShapedLine>,
-    shaped_in: Option<(gpui::Hsla, gpui::Hsla)>,
+    shaped_in: Option<(gpui::Hsla, gpui::Hsla, u32)>,
 }
 
 impl EconLayer {
@@ -108,9 +108,12 @@ impl ChartLayer for EconLayer {
             return;
         }
         let t = theme;
-        if self.shaped_in != Some((t.on_warn, t.text_main)) {
+        // Shaped in the theme's colors and the UI font (`crate::zoom::generation` moves with
+        // it): either changing shapes the tags again.
+        let shaped_in = (t.on_warn, t.text_main, crate::zoom::generation());
+        if self.shaped_in != Some(shaped_in) {
             self.shaped.clear();
-            self.shaped_in = Some((t.on_warn, t.text_main));
+            self.shaped_in = Some(shaped_in);
         }
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
@@ -137,7 +140,7 @@ impl ChartLayer for EconLayer {
                 let text = self.schedule.releases[release].name.clone();
                 let run = TextRun {
                     len: text.len(),
-                    font: window.text_style().font(),
+                    font: crate::fonts::ui(),
                     color: if high { t.on_warn } else { t.text_main },
                     background_color: None,
                     underline: None,

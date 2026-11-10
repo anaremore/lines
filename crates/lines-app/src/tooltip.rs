@@ -37,6 +37,8 @@ impl Render for Tooltip {
             .border_1()
             .border_color(t.axis_line)
             .text_size(crate::zoom::ui(12.0))
+            // Drawn outside the window's root: its own UI font (`crate::fonts`).
+            .font_family(crate::fonts::ui_family())
             .text_color(t.text_main)
             .flex()
             .flex_row()

@@ -3537,6 +3537,8 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                     .when_some(big, |e, px| e.text_size(crate::zoom::ui(px)))
                     .font_weight(FontWeight::BOLD)
                     .text_color(tone(m))
+                    // A number: the number font (`crate::fonts`), every digit one width.
+                    .font_family(crate::fonts::MONO)
                     .child(s),
             )
     };
@@ -3599,11 +3601,19 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                         .children(avg.map(|a| div().text_color(t.text_dim).child(a))),
                 )
                 .children(big.map(|(s, c)| {
+                    // Open P&L: a number in the number font; with a unit ("ticks") it is words
+                    // (`text::is_words`).
+                    let family = if crate::text::is_words(&s) {
+                        crate::fonts::ui_family()
+                    } else {
+                        crate::fonts::MONO.into()
+                    };
                     div()
                         .flex_shrink_0()
                         .text_size(crate::zoom::ui(px))
                         .font_weight(FontWeight::BOLD)
                         .text_color(c)
+                        .font_family(family)
                         .child(s)
                 }))
         }

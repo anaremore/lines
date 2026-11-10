@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-trading", "crates/lines-strategy", "crates/lines-app", "crates/lines-databento", "crates/lines-sierra", "crates/lines-fuzz"]
+members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-trading", "crates/lines-strategy", "crates/lines-app", "crates/lines-fonts", "crates/lines-databento", "crates/lines-sierra", "crates/lines-fuzz"]
 # The cargo-fuzz targets are their own workspace (libFuzzer stays out of this graph).
 exclude = ["fuzz"]
 # lines-sierra (personal Sierra Chart importer) is a member so `cargo test --workspace` covers it,
 # but not a default member: plain `cargo build`/`cargo run` never build it, and nothing depends on it.
 # lines-fuzz (fuzz harnesses + smoke tests) likewise: tested with the workspace, never built by default.
-default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-trading", "crates/lines-strategy", "crates/lines-app", "crates/lines-databento"]
+default-members = ["crates/lines-core", "crates/cqg-proto", "crates/lines-indicators", "crates/lines-feed", "crates/lines-trading", "crates/lines-strategy", "crates/lines-app", "crates/lines-fonts", "crates/lines-databento"]
 
 [workspace.package]
 edition = "2024"
@@ -22,6 +22,7 @@ lines-indicators = { path = "crates/lines-indicators" }
 lines-trading = { path = "crates/lines-trading" }
 lines-strategy = { path = "crates/lines-strategy" }
 lines-databento = { path = "crates/lines-databento" }
+lines-fonts = { path = "crates/lines-fonts" }
 
 # GPUI is pinned to an exact Zed commit. The crates.io release (0.2.2, Oct 2025) is
 # far behind main. Bump deliberately: change BOTH revs together, rebuild, fix API drift.

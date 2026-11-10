@@ -34,3 +34,8 @@ accepted = ["CDLA-Permissive-2.0"]
 # Mirrors deny.toml: via `dbn` (lines-databento, decision 0033); a public-domain dedication.
 [json-writer]
 accepted = ["Unlicense"]
+
+# Mirrors deny.toml: our lines-fonts crate, IBM Plex Sans and Mono (decision 0034). Counted here
+# (not `publish = false`) so the OFL text and IBM's copyright ship with every release.
+[lines-fonts]
+accepted = ["OFL-1.1"]

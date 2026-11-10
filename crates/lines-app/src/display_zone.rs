@@ -6,6 +6,8 @@
 
 use lines_core::display_tz::{self, DisplayTz, ZoneChoice};
 
+use crate::search_list;
+
 /// The setting's key in the Settings table.
 pub const KEY: &str = "appearance.time_zone";
 
@@ -78,130 +80,26 @@ pub fn option_text(c: &ZoneChoice) -> String {
     c.describe().replace('_', " ")
 }
 
-/// Indices into [`options`] matching `query`: every word in the choice's words (case and
-/// `_`/space ignored). Choices where every word starts a word ("eu" in "Europe/Paris") come
-/// first, each group in list order. Empty: all.
+/// Indices into [`options`] matching `query` (`crate::search_list::matching`): every word in
+/// the choice's words (case and `_`/space ignored), word starts first ("eu" is Europe/Paris
+/// before Africa/Ceuta). Empty: all.
 pub fn matching(query: &str) -> Vec<usize> {
-    let words: Vec<String> = query
-        .split_whitespace()
-        .map(|w| w.to_lowercase().replace('_', " "))
-        .collect();
-    let mut hits: Vec<(bool, usize)> = options()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| {
-            let hay = match c {
+    static HAYS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let hays = HAYS.get_or_init(|| {
+        options()
+            .iter()
+            .map(|c| match c {
                 ZoneChoice::Exchange => "exchange (et) eastern new york".to_owned(),
                 _ => option_text(c).to_lowercase(),
-            };
-            words
-                .iter()
-                .all(|w| hay.contains(w.as_str()))
-                .then(|| (!words.iter().all(|w| starts_a_word(&hay, w)), i))
-        })
-        .collect();
-    hits.sort();
-    hits.into_iter().map(|(_, i)| i).collect()
+            })
+            .collect()
+    });
+    search_list::matching(query, hays.iter().map(String::as_str))
 }
 
-/// `w` begins at the start of `hay` or right after a space, `/` or `(`.
-fn starts_a_word(hay: &str, w: &str) -> bool {
-    hay.match_indices(w)
-        .any(|(at, _)| at == 0 || matches!(hay.as_bytes()[at - 1], b' ' | b'/' | b'('))
-}
-
-/// Rows the list shows at once.
-pub const ROWS: usize = 8;
-
-/// The Settings window's open zone list: a search and a selection.
-#[derive(Clone, Debug)]
-pub struct Pick {
-    pub query: String,
-    /// The selected match (an index into `hits`).
-    pub sel: usize,
-    pub hits: Vec<usize>,
-}
-
-/// What a key did to the list.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PickKey {
-    Typing,
-    Ignored,
-    Cancel,
-    Choose(ZoneChoice),
-}
-
-impl Pick {
-    /// Opened on the zone in force (`current`), selected.
-    pub fn new(current: &ZoneChoice) -> Pick {
-        let hits = matching("");
-        let sel = hits
-            .iter()
-            .position(|&i| options()[i] == *current)
-            .unwrap_or(0);
-        Pick {
-            query: String::new(),
-            sel,
-            hits,
-        }
-    }
-
-    fn refilter(&mut self) {
-        self.hits = matching(&self.query);
-        self.sel = 0;
-    }
-
-    /// The first row shown (the selection stays in view).
-    pub fn top(&self) -> usize {
-        self.sel
-            .saturating_sub(ROWS / 2)
-            .min(self.hits.len().saturating_sub(ROWS))
-    }
-
-    /// The selected choice, if any matches.
-    pub fn selected(&self) -> Option<&'static ZoneChoice> {
-        self.hits.get(self.sel).map(|&i| &options()[i])
-    }
-
-    pub fn key(&mut self, key: &str, ch: Option<&str>) -> PickKey {
-        match key {
-            "escape" => PickKey::Cancel,
-            "enter" => match self.selected() {
-                Some(c) => PickKey::Choose(c.clone()),
-                None => PickKey::Ignored,
-            },
-            "up" => {
-                self.sel = self.sel.saturating_sub(1);
-                PickKey::Typing
-            }
-            "down" => {
-                self.sel = (self.sel + 1).min(self.hits.len().saturating_sub(1));
-                PickKey::Typing
-            }
-            "pageup" => {
-                self.sel = self.sel.saturating_sub(ROWS);
-                PickKey::Typing
-            }
-            "pagedown" => {
-                self.sel = (self.sel + ROWS).min(self.hits.len().saturating_sub(1));
-                PickKey::Typing
-            }
-            "backspace" => {
-                if self.query.pop().is_some() {
-                    self.refilter();
-                }
-                PickKey::Typing
-            }
-            _ => match ch {
-                Some(c) if !c.is_empty() && c.chars().all(|c| !c.is_control()) => {
-                    self.query.push_str(c);
-                    self.refilter();
-                    PickKey::Typing
-                }
-                _ => PickKey::Ignored,
-            },
-        }
-    }
+/// The zone list, opened on the zone in force (`current`), selected.
+pub fn pick(current: &ZoneChoice) -> search_list::Pick {
+    search_list::Pick::new(matching, options().iter().position(|c| c == current))
 }
 
 #[cfg(test)]
@@ -241,37 +139,44 @@ mod tests {
         assert!(europe < at(matching("ceuta")[0]), "{eu:?}");
     }
 
+    /// The chosen index's zone.
+    fn chosen(k: search_list::PickKey) -> Option<ZoneChoice> {
+        match k {
+            search_list::PickKey::Choose(i) => Some(options()[i].clone()),
+            _ => None,
+        }
+    }
+
     #[test]
     fn typing_filters_and_enter_chooses() {
-        let mut p = Pick::new(&ZoneChoice::Exchange);
-        assert_eq!(p.selected(), Some(&ZoneChoice::Exchange));
-        for c in "chicago".chars() {
-            p.key("", Some(&c.to_string()));
-        }
+        let mut p = pick(&ZoneChoice::Exchange);
+        assert_eq!(p.selected(), Some(0));
+        p.type_text("chicago");
         // "System (America/Chicago)" also matches on a machine in Chicago.
-        if p.selected() == Some(&ZoneChoice::System) {
+        if p.selected() == Some(1) {
             p.key("down", None);
         }
         assert_eq!(
-            p.key("enter", None),
-            PickKey::Choose(ZoneChoice::Named("America/Chicago".into()))
+            chosen(p.key("enter", None)),
+            Some(ZoneChoice::Named("America/Chicago".into()))
         );
         p.key("backspace", None);
         assert_eq!(p.query, "chicag");
-        assert_eq!(p.key("escape", None), PickKey::Cancel);
+        assert_eq!(p.key("escape", None), search_list::PickKey::Cancel);
         // Nothing matches: Enter does nothing.
-        let mut p = Pick::new(&ZoneChoice::Exchange);
-        p.key("", Some("zzzz"));
-        assert_eq!(p.key("enter", None), PickKey::Ignored);
+        let mut p = pick(&ZoneChoice::Exchange);
+        p.type_text("zzzz");
+        assert_eq!(p.key("enter", None), search_list::PickKey::Ignored);
     }
 
     #[test]
     fn it_opens_on_the_zone_in_force_and_keeps_it_in_view() {
+        use search_list::ROWS;
         let berlin = ZoneChoice::Named("Europe/Berlin".into());
-        let p = Pick::new(&berlin);
-        assert_eq!(p.selected(), Some(&berlin));
+        let p = pick(&berlin);
+        assert_eq!(p.selected().map(|i| &options()[i]), Some(&berlin));
         assert!(p.top() <= p.sel && p.sel < p.top() + ROWS);
-        let mut p = Pick::new(&ZoneChoice::Exchange);
+        let mut p = pick(&ZoneChoice::Exchange);
         p.key("up", None);
         assert_eq!(p.sel, 0);
         for _ in 0..3 {

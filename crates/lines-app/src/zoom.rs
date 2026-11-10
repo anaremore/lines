@@ -64,6 +64,12 @@ pub fn generation() -> u32 {
     GENERATION.load(Ordering::Relaxed)
 }
 
+/// The UI font changed (`crate::fonts`): text shaped and laid out before is stale, as after
+/// a zoom change, so the same caches drop it.
+pub fn text_changed() {
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Set the zoom (a step; anything else is the nearest step). Whether it changed.
 pub fn set(pct: u16) -> bool {
     let pct = nearest(pct);

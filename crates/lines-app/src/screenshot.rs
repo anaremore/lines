@@ -90,6 +90,8 @@ pub struct Shot {
     pub update_shot: Option<String>,
     /// The UI zoom (`--ui-zoom`).
     pub ui_zoom: Option<u16>,
+    /// `--ui-font`: the UI font (else the built-in IBM Plex Sans, whatever is saved).
+    pub ui_font: Option<String>,
     /// A workspace prompt opens (`--prompt palette[:QUERY]|open|save`).
     pub prompt: Option<String>,
     /// Every pop-up panel as if dragged here (`--panel-at X,Y`).
@@ -220,6 +222,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         context_menu,
         update_shot,
         ui_zoom,
+        ui_font,
         prompt,
         panel_at,
         journal_dir,
@@ -340,6 +343,17 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
     };
     gpui_platform::application().run(move |cx: &mut App| {
         let _keep = &feeds;
+        // The built-in fonts before the first window; screenshots use IBM Plex Sans unless
+        // `--ui-font` names another (decision 0034: the same text widths on every machine).
+        crate::fonts::load(cx);
+        let ui_font = match ui_font.as_deref().map(crate::fonts::parse_flag) {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => fail(&anyhow::anyhow!("--ui-font: {e}")),
+            None => crate::fonts::UiFont::BuiltIn,
+        };
+        if let Some(p) = crate::fonts::apply(&ui_font) {
+            fail(&anyhow::anyhow!("--ui-font: {p}"));
+        }
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
         if let Some(r) = replay {
@@ -356,6 +370,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         let mut settings = AppSettings::ephemeral();
         // `--ui-zoom` as Settings › Appearance would have saved it (its row shows it).
         settings.settings.ui_zoom = ui_zoom.and_then(crate::zoom::saved);
+        // `--ui-font` as Settings › Appearance would have saved it (its row shows it).
+        settings.settings.ui_font = ui_font.to_saved();
         settings.settings.new_panes.default_qty = order_size;
         if let Some((x, y)) = panel_at {
             for p in crate::popover::Panel::ALL {

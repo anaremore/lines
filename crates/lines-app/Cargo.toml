@@ -32,6 +32,8 @@ lines-trading.workspace = true
 lines-strategy.workspace = true
 # Databento (decision 0033): a built-in source on the user's own key (`live`: the gateway).
 lines-databento = { workspace = true, features = ["live"] }
+# IBM Plex Sans and Mono (decision 0034), loaded before the first window.
+lines-fonts.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

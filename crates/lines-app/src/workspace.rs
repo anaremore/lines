@@ -3473,7 +3473,7 @@ impl WindowView {
         let size = crate::zoom::ui(11.0);
         // Measured bold: the badge is bold and the safety words semibold; a regular-weight
         // link measured bold only folds a little early, never overflows.
-        let mut font = window.text_style().font();
+        let mut font = crate::fonts::ui();
         font.weight = FontWeight::BOLD;
         // Measured once per string this frame (`fit` asks for each many times).
         let seen: std::cell::RefCell<Vec<(String, f32)>> = Default::default();
@@ -4448,6 +4448,8 @@ impl Render for WindowView {
             .flex_col()
             .bg(t.bg)
             .track_focus(&self.focus)
+            // The UI font (`crate::fonts`): every text in the window inherits it.
+            .font_family(crate::fonts::ui_family())
             .capture_key_down(cx.listener(Self::on_key_capture))
             .on_action(cx.listener(|this, _: &crate::replay_bar::GoTo, _, cx| {
                 this.run_replay(crate::commands::ReplayCmd::GoTo, cx)

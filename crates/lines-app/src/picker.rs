@@ -208,6 +208,11 @@ pub struct Settings {
     /// the exchange's (ET), "System" the OS zone, else an IANA name. Display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
+    /// The UI font (Settings › Appearance; `crate::fonts`): absent is the built-in IBM Plex
+    /// Sans, "System" the OS's UI font, else an installed family's name (one that is gone
+    /// shows Plex Sans). Numbers are always IBM Plex Mono.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_font: Option<String>,
     /// Defaults for panes created from now on (the Settings window). Optional.
     #[serde(
         default,
@@ -819,6 +824,22 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""time_zone":"Asia/Tokyo""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn the_ui_font_is_an_optional_setting() {
+        // A file from before the setting: the built-in font (absent), no version bump needed.
+        let empty = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!empty.contains("ui_font"), "{empty}");
+        let old: Settings = serde_json::from_str(r#"{"recents":[1]}"#).unwrap();
+        assert_eq!(old.ui_font, None);
+        let s = Settings {
+            ui_font: Some("Calibri".to_owned()),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""ui_font":"Calibri""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
     }
 
