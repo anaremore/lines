@@ -122,8 +122,6 @@ impl State {
     }
 }
 
-/// A source's state from its switch, whether this run has it, the first required setting
-/// with no value, and the state of each of its running feeds.
 /// A source's feed statuses with its refused login (`Sources::refusal`) first, as a failed
 /// feed: the login's reason before any one symbol's.
 pub fn with_refusal(mut feeds: Vec<FeedStatus>, refusal: Option<String>) -> Vec<FeedStatus> {
@@ -133,6 +131,8 @@ pub fn with_refusal(mut feeds: Vec<FeedStatus>, refusal: Option<String>) -> Vec<
     feeds
 }
 
+/// A source's state from its switch, whether this run has it, the first required setting
+/// with no value, and the state of each of its running feeds.
 pub fn state(on: bool, in_run: bool, needs: Option<&'static str>, feeds: &[FeedStatus]) -> State {
     if !on {
         return State::Off { running: in_run };

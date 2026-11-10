@@ -446,6 +446,8 @@ pub fn off_refused(
     // The source the refused store's feed is on (not the saved one: a pane with no market
     // keeps its saved source while it runs on the primary).
     let name = sources.name_of(&feed.config.source)?.to_owned();
+    // A blocking read, once per refused store: its feed has stopped (a `try_read` that missed
+    // would keep the generic reason for the run).
     let why = match &feed.store().read().status {
         lines_feed::store::FeedStatus::Failed(why) => why.clone(),
         _ => "login refused".to_owned(),
