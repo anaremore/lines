@@ -80,6 +80,18 @@ pub enum Command {
     ToggleStudies,
     /// The focused chart without legends or study tags; again restores them.
     CleanChart,
+    /// Trade history on the focused chart (`trade_marks`): shown or hidden (Alt+E).
+    ToggleTrades,
+    /// Its entry–exit lines, on or off.
+    ToggleTradeLines,
+    /// Its labels, on or off.
+    ToggleTradeLabels,
+    /// Every account's trades, or only this pane's.
+    ToggleTradeAccounts,
+    /// Every account's trades (`true`) or only this pane's (the menu's picks).
+    TradeAccounts(bool),
+    /// Which trades, by trade date.
+    TradePeriod(crate::trade_marks::Period),
     /// Every key and its command: Settings › Keys (F1).
     ShowKeys,
     /// Show or hide one of the footer's links (its right-click menu; safety items can't be).
@@ -496,6 +508,8 @@ pub const BINDINGS: &[Binding] = &[
         true,
         "t",
     ),
+    // Alt+E: trade history on the chart ("executions"; Alt+T is the trend line's).
+    b(Command::ToggleTrades, false, false, true, "e"),
     b(
         Command::Draw(DrawCmd::Tool(Tool::Rect)),
         false,
@@ -847,6 +861,13 @@ pub fn label(c: Command) -> String {
         Command::ToggleStudies => "Chart: hide/show studies".into(),
         Command::CleanChart => "Clean chart (no study labels)".into(),
         Command::ShowKeys => "Keyboard shortcuts…".into(),
+        Command::ToggleTrades => "Show trades on the chart".into(),
+        Command::ToggleTradeLines => "Trades: entry–exit lines".into(),
+        Command::ToggleTradeLabels => "Trades: labels".into(),
+        Command::ToggleTradeAccounts => "Trades: all accounts".into(),
+        Command::TradeAccounts(true) => "Trades: all accounts".into(),
+        Command::TradeAccounts(false) => "Trades: this pane's account".into(),
+        Command::TradePeriod(p) => format!("Trades: {}", p.label().to_lowercase()),
         Command::FooterLink(k) => k.name().into(),
         Command::Columns(ColumnCmd::Toggle(c)) => format!("Show/hide {}", c.label()),
         Command::Columns(ColumnCmd::AutoFit(c)) => format!("Fit {} to content", c.label()),
@@ -1020,6 +1041,15 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleStudyLabels,
         Command::ToggleStudies,
         Command::CleanChart,
+        Command::ToggleTrades,
+        Command::ToggleTradeLines,
+        Command::ToggleTradeLabels,
+        Command::ToggleTradeAccounts,
+        Command::TradeAccounts(false),
+        Command::TradeAccounts(true),
+        Command::TradePeriod(crate::trade_marks::Period::Today),
+        Command::TradePeriod(crate::trade_marks::Period::Week),
+        Command::TradePeriod(crate::trade_marks::Period::All),
         Command::ShowKeys,
         Command::ToggleLevels,
         Command::ToggleLevelLabels,

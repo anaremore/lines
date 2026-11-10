@@ -450,6 +450,9 @@ pub struct ChartView {
     legend_band: std::cell::Cell<(f32, f32)>,
     /// The footprint's reasons for candles as last rendered in the legend.
     fp_seen: crate::footprint::Fallbacks,
+    /// The trade marker under the pointer as of the last prepare: its hover text is built in
+    /// render from these positions, so a change re-renders.
+    trade_tip_seen: Option<usize>,
     /// Study legends/tags or all studies hidden (saved with the pane). Hidden studies keep
     /// their configuration and engine nodes, so showing them again is exact and immediate,
     /// but cost no prepare or paint work while hidden.
@@ -538,6 +541,16 @@ pub struct ChartView {
     pub(crate) ct: crate::chart_trade::ChartTradeState,
     /// Strategy markers (decision 0025): entries, exits and skipped signals on this contract.
     marks: crate::strategy_marks::StrategyMarksLayer,
+    /// Trade history on the chart (`crate::trade_marks`).
+    trade_marks: crate::trade_marks::TradeMarksLayer,
+    /// The journal it reads (the app's; none without trading).
+    journal: Option<Arc<lines_trading::JournalShared>>,
+    /// The account a pane without one trades on (the default account).
+    default_account: Option<lines_trading::AccountId>,
+    /// A press on a trade marker: its journal id and where; a click (not a pan) opens it.
+    trade_press: Option<(Point<Pixels>, String)>,
+    /// The P&L display as last rendered (trade labels follow it; the poll has no app).
+    pnl_mode: crate::pnl::PnlDisplay,
     strategies: Option<Arc<dyn crate::strategy_panel::StrategySource>>,
     trading_cache: Option<Arc<crate::trading::TradeCache>>,
     /// Screenshot fixture: the position line held dragged to this plot-local y.
@@ -775,6 +788,7 @@ impl ChartView {
             above_axis: 0.0,
             cross_in_sub: None,
             fp_seen: Default::default(),
+            trade_tip_seen: None,
             legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, readout_bottom())),
             visibility: fixture.visibility,
             picker,
@@ -843,6 +857,12 @@ impl ChartView {
                 ..Default::default()
             },
             marks: crate::strategy_marks::StrategyMarksLayer::default(),
+            trade_marks: crate::trade_marks::TradeMarksLayer::default(),
+            journal: crate::trading::Trading::try_global(cx).map(|t| t.journal.clone()),
+            default_account: crate::trading::Trading::try_global(cx)
+                .and_then(|t| t.default_account()),
+            trade_press: None,
+            pnl_mode: Default::default(),
             strategies: cx
                 .try_global::<crate::strategy_panel::Strategies>()
                 .map(|s| s.0.clone()),
@@ -1657,6 +1677,12 @@ impl ChartView {
         if region == Region::Plot && !ev.modifiers.control && self.order_pressed(x, y, cx) {
             return;
         }
+        // A trade marker: remembered, and the pan starts as usual; a click opens the trade in
+        // the journal on release (`on_mouse_up`).
+        self.trade_press = (region == Region::Plot && self.trade_marks.shown())
+            .then(|| self.trade_marks.hit(x as f32, y as f32))
+            .flatten()
+            .map(|(t, _)| (ev.position, t.id.clone()));
         let drag = match region {
             Region::Plot if ev.modifiers.control => {
                 Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Free, x, y))
@@ -2309,6 +2335,8 @@ impl ChartView {
     pub fn restore(&mut self, state: &ChartState) {
         self.drawings.hidden = state.hide_drawings;
         self.marks.set_hidden(state.hide_strategy_marks);
+        self.trade_marks.config = state.trades;
+        self.trade_marks.invalidate();
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -2607,6 +2635,12 @@ impl ChartView {
         // The release of a press that closed a popover does nothing here (no drawing finished).
         if popover::dismissing() {
             return;
+        }
+        if let Some((from, id)) = self.trade_press.take() {
+            let d = ev.position - from;
+            if crate::chart_trade::is_click(f32::from(d.x), f32::from(d.y)) {
+                cx.emit(OpenTradeInJournal(id));
+            }
         }
         if let Some((from, at)) = self.pick_press.take() {
             // A click while a strip limit's pick was armed. A press that left the chart before a
@@ -3419,6 +3453,19 @@ impl ChartView {
                 f32::from(self.plot.size.width),
                 f32::from(self.plot.size.height),
             );
+            self.trade_marks.prepare(
+                view,
+                &self.vp,
+                f32::from(self.plot.size.width),
+                f32::from(self.plot.size.height),
+            );
+            let tip = self
+                .hover
+                .and_then(|(x, y)| self.trade_marks.hit_index(x, y));
+            if tip != self.trade_tip_seen {
+                self.trade_tip_seen = tip;
+                cx.notify();
+            }
             // The legend says why footprint bars are candles: re-render when that changes.
             let fb = self.footprint.fallbacks();
             if fb != self.fp_seen {
@@ -4345,7 +4392,9 @@ impl ChartView {
                 self.drawings.paint((ox, oy), hair, &t, window);
                 self.paint_drawing_text((ox, oy), window, cx);
             }
-            // Strategy markers: above studies and drawings, under the crosshair.
+            // Trade history, then strategy markers: above studies and drawings, under the
+            // crosshair.
+            self.trade_marks.paint(plot, labels, &t, window, cx);
             self.marks.paint(plot, &t, window, cx);
             if labels {
                 self.profile.paint_label(plot, &t, window, cx);
@@ -6157,6 +6206,130 @@ impl ChartView {
         self.instrument.symbol
     }
 
+    /// Rebuild the trade history marks when the journal, the contract, the account, the period
+    /// or its trade date, or the P&L display moved (the poll, never paint). True when they
+    /// changed.
+    fn poll_trade_marks(&mut self) -> bool {
+        let Some(journal) = self.journal.clone() else {
+            return false;
+        };
+        let Some((contract, market)) = self
+            .store
+            .try_read()
+            .and_then(|d| d.contract.map(|k| (k, d.market_time)))
+        else {
+            return false;
+        };
+        // The chart's clock: the replay's in a replay (its trades are on it), else the wall's.
+        let replay =
+            self.frozen || matches!(self.feed.config.source, lines_feed::Source::Replay { .. });
+        let now = market
+            .filter(|_| replay)
+            .unwrap_or_else(lines_feed::now_utc);
+        let today = lines_feed::disk::partition::trade_date(&self.instrument, now);
+        let config = self.trade_marks.config;
+        use crate::trade_bar::TradePane;
+        let account = if config.all_accounts {
+            None
+        } else {
+            self.trade_ref()
+                .account
+                .clone()
+                .or_else(|| self.default_account.clone())
+        };
+        let key = crate::trade_marks::BuildKey {
+            journal: journal.revision(),
+            contract,
+            account: account.clone(),
+            period: config.period,
+            today,
+            mode: self.pnl_mode,
+            zone_epoch: lines_core::display_tz::epoch(),
+        };
+        let Some(snap) = journal.snapshot() else {
+            return false; // swapped this instant: the next poll
+        };
+        let mode = self.pnl_mode;
+        let product = &self.instrument;
+        self.trade_marks.update(key, || {
+            crate::trade_marks::build(
+                &snap.trades,
+                contract,
+                account.as_ref(),
+                config.period,
+                today,
+                product,
+                mode,
+            )
+        })
+    }
+
+    /// Show or hide trade history, or change one of its options (saved with the chart).
+    pub fn set_trades(&mut self, config: crate::trade_marks::TradesConfig, cx: &mut Context<Self>) {
+        if config != self.trade_marks.config {
+            self.trade_marks.config = config;
+            self.trade_marks.invalidate();
+            cx.notify();
+        }
+    }
+
+    pub fn trades_config(&self) -> crate::trade_marks::TradesConfig {
+        self.trade_marks.config
+    }
+
+    /// The hovered trade marker's text, beside it.
+    fn trade_mark_tip(&self, t: &Theme) -> Option<AnyElement> {
+        if self.drag.is_some()
+            || self.ct.drag.is_some()
+            || self.ct.adding.is_some()
+            || self.ct.pos_drag
+            || self.ct.strip_pick.is_some()
+            || self.anchoring.is_some()
+            || self.drawings.active()
+            || self.takes_text()
+        {
+            return None;
+        }
+        let (x, y) = self.hover?;
+        let (trade, mark) = self.trade_marks.hit(x, y)?;
+        let (left, top, w) = crate::strategy_marks::tip_place(
+            x,
+            y,
+            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.height),
+        );
+        let (first, rest) = trade.lines.split_first()?;
+        let (hint, rest) = rest.split_last()?;
+        let mut tip = div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(w))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(t.panel)
+            .border_1()
+            .border_color(t.axis_line)
+            .text_color(t.text_main)
+            .text_size(crate::zoom::ui(12.0))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(first.clone()),
+            )
+            .children(rest.iter().map(|l| div().child(l.clone())));
+        if mark.fills.len() > 1 {
+            tip = tip
+                .child(div().text_color(t.text_dim).child("This order's fills"))
+                .children(mark.fills.iter().map(|f| div().child(f.clone())));
+        }
+        Some(
+            tip.child(div().text_color(t.text_dim).child(hint.clone()))
+                .into_any_element(),
+        )
+    }
+
     /// Rebuild the strategy markers when the instances, the fills or the contract moved (the
     /// poll, never paint). True when they changed.
     fn poll_marks(&mut self) -> bool {
@@ -7133,6 +7306,11 @@ pub struct ChartOrder {
 
 impl EventEmitter<ChartOrder> for ChartView {}
 
+/// A click on a trade marker: open this trade (its journal id) in the journal.
+pub struct OpenTradeInJournal(pub String);
+
+impl EventEmitter<OpenTradeInJournal> for ChartView {}
+
 impl ChartView {
     /// The window refused a chart order (no linked DOM with trading enabled): say so on the
     /// chart.
@@ -7198,6 +7376,7 @@ impl Pane for ChartView {
             order_strip: self.order_strip,
             hide_drawings: self.drawings.hidden,
             hide_strategy_marks: self.marks.hidden,
+            trades: self.trade_marks.config,
             // Saved on tick charts, and on any chart set to run them continuously.
             tick_continuous: (self.on_ticks() || self.tick_continuous())
                 .then_some(self.tick_continuous()),
@@ -7222,6 +7401,7 @@ impl Pane for ChartView {
             .set_data(crate::drawings_store::for_product(&self.instrument, cx));
         self.note_lines.clear();
         self.marks.clear();
+        self.trade_marks.clear();
         self.trade.feed_changed(&self.store, follow, cx);
         cx.notify();
     }
@@ -7274,6 +7454,7 @@ impl Pane for ChartView {
         }
         // Kept current while hidden, but only asks for a repaint while shown.
         let marks = self.poll_marks() && !self.marks.hidden;
+        let marks = marks | (self.poll_trade_marks() && self.trade_marks.shown());
         // Drawings changed on any chart of this product (shown here).
         let rates = group
             | marks
@@ -7887,6 +8068,14 @@ fn hud_compact(w: f32) -> bool {
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_level_styles(cx);
+        // Trade labels follow the P&L display (the poll that builds them has no app).
+        let mode = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.pnl_display)
+            .unwrap_or_default();
+        if mode != self.pnl_mode {
+            self.pnl_mode = mode;
+        }
         // Text shaped at another UI zoom is the wrong size: shaped again on demand.
         let zoom = crate::zoom::generation();
         if zoom != self.zoom_generation {
@@ -8056,7 +8245,8 @@ impl Render for ChartView {
                     .when_some(overlay, |d, overlay| d.child(overlay))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
                     .when_some(self.drawing_banner(&t), |d, b| d.child(b))
-                    .when_some(self.strategy_mark_tip(&t), |d, b| d.child(b)),
+                    .when_some(self.strategy_mark_tip(&t), |d, b| d.child(b))
+                    .when_some(self.trade_mark_tip(&t), |d, b| d.child(b)),
             )
     }
 }

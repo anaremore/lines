@@ -791,6 +791,17 @@ impl JournalView {
         Ok(())
     }
 
+    /// Show a trade (a click on its chart marker): the trades list, that trade selected and
+    /// scrolled into view once its row is there.
+    pub fn select_trade(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.group = JournalGroup::Trades;
+        self.selected = Some(id.to_owned());
+        if let Some(i) = self.selected_index() {
+            self.scroll = self.scroll.min(i);
+        }
+        cx.notify();
+    }
+
     /// Open the selected trade's trade snapshot in the OS's default app.
     pub fn open_selected_chart(&self, cx: &mut Context<Self>) -> Result<(), &'static str> {
         if !self.group.is_trades() {
