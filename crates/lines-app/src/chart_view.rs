@@ -3430,6 +3430,12 @@ impl ChartView {
         self.above_axis = above_axis;
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
         self.footprint.ensure_capacity(plot_w);
+        // The header's gutter (only ⋯ on a narrow pane) follows this width, as the workspace's
+        // controls do: render again when it crosses over, or the two disagree until then.
+        let narrow = |w: f32| w > 0.0 && w < pane::NARROW_CONTROLS_W;
+        if narrow(f32::from(bounds.size.width)) != narrow(f32::from(self.chart.size.width)) {
+            cx.notify();
+        }
         self.chart = bounds;
         if self.styling() && self.editor_pane != (w, above_axis) {
             // The style editor is placed from the pane's size: place it again.
@@ -5015,9 +5021,7 @@ impl ChartView {
         };
         for i in 0..price_lines {
             let l = self.scene.price_lines[i];
-            // Whole inside the plot, centered on its line: a label near the top would reach up
-            // into the header row, where header text can sit above the axis.
-            if l.y < label_px() * 0.65 || l.y > ph {
+            if !price_label_shows(l.y, ph, label_px()) {
                 continue;
             }
             let span = Span::around(l.y, label_px() * 0.65);
@@ -8621,6 +8625,13 @@ const LEGEND_MAX_W: f32 = 360.0;
 const HUD_COMPACT_BELOW_PX: f32 = 1_200.0;
 
 /// The latency HUD's compact form for a chart `w` px wide (0: not laid out yet).
+/// Whether a price-axis label for the line at `y` (plot px from its top) shows: whole inside
+/// the plot, centered on its line (`size` px text). A label near the top would reach up into
+/// the header row, where header text can sit above the axis.
+fn price_label_shows(y: f32, plot_h: f32, size: f32) -> bool {
+    y >= size * 0.65 && y <= plot_h
+}
+
 fn hud_compact(w: f32) -> bool {
     // In 100 % units (`crate::zoom`): the header's text grows with the zoom.
     w > 0.0 && w / crate::zoom::get() < HUD_COMPACT_BELOW_PX
@@ -8851,6 +8862,18 @@ mod tests {
 
     /// A theme switch reshapes chart labels: a label cached in one theme's color is shaped
     /// again when asked for in another theme's, and kept when the color is the same.
+    /// A price label shows only whole inside the plot: one whose line is within its half
+    /// height of the top would reach into the header row (and under header text there).
+    #[test]
+    fn a_price_label_near_the_top_is_left_out() {
+        let size = 12.0;
+        assert!(!price_label_shows(0.0, 400.0, size));
+        assert!(!price_label_shows(7.0, 400.0, size));
+        assert!(price_label_shows(7.8, 400.0, size));
+        assert!(price_label_shows(200.0, 400.0, size));
+        assert!(!price_label_shows(401.0, 400.0, size));
+    }
+
     #[test]
     fn labels_are_shaped_again_in_a_new_color() {
         let (dark, light) = (

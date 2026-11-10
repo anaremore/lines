@@ -211,10 +211,11 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
 /// PAPER/LIVE badge whole.
 pub const NARROW_CONTROLS_W: f32 = 360.0;
 
-/// [`controls`] for a pane `width` logical px wide: only ⋯ below [`NARROW_CONTROLS_W`].
+/// [`controls`] for a pane `width` logical px wide: only ⋯ below [`NARROW_CONTROLS_W`] (0 or
+/// less: not laid out yet, all of them, as [`controls_gutter_at`]).
 pub fn controls_at(kind: PaneKind, detached: bool, width: f32) -> &'static [Control] {
     let all = controls(kind, detached);
-    if width < NARROW_CONTROLS_W {
+    if width > 0.0 && width < NARROW_CONTROLS_W {
         &all[all.len() - 1..]
     } else {
         all
@@ -316,14 +317,30 @@ const SMALL_HEADER_LINE_100: f32 = 18.0;
 /// `end`: right-aligned (the header's right group); else it follows the item before it with
 /// its own leading gap, so nothing is left behind when it goes.
 pub fn whole_or_none(text: impl Into<gpui::SharedString>, color: gpui::Hsla, end: bool) -> Div {
+    whole_or_none_at(text, color, end, None)
+}
+
+/// [`whole_or_none`] with its measured width (`text_px`, 100 % units) as its basis, plus 2 px of
+/// slack: given that much it never wraps away for sub-pixel rounding, and drops only when the
+/// row squeezes it.
+pub fn whole_or_none_at(
+    text: impl Into<gpui::SharedString>,
+    color: gpui::Hsla,
+    end: bool,
+    measured: Option<f32>,
+) -> Div {
     use gpui::prelude::FluentBuilder as _;
     let text = text.into();
     let line = crate::zoom::ui(SMALL_HEADER_LINE_100);
+    let lead = if end { 0.0 } else { 8.0 };
     div()
         .flex()
         .flex_row()
         .flex_wrap()
         .when(end, |d| d.flex_1().justify_end())
+        .when_some(measured, |d, w| {
+            d.flex_basis(crate::zoom::ui(w + lead + 2.0))
+        })
         .min_w_0()
         .h(line)
         .line_height(line)
@@ -334,7 +351,7 @@ pub fn whole_or_none(text: impl Into<gpui::SharedString>, color: gpui::Hsla, end
         .child(
             div()
                 .flex_shrink_0()
-                .when(!end, |d| d.ml_2())
+                .when(!end, |d| d.pl_2())
                 .text_color(color)
                 .relative()
                 .children(crate::layout_rec::text_marker(&text))
@@ -658,6 +675,29 @@ pub fn chart_header_fit(
     }
 }
 
+/// What a DOM or T&S header's left group never gives up, in 100 % units: the link chip, the
+/// contract (or the unavailable title), the source tag when it shows, the feed's status word and
+/// the STALE badge while stale. Only the pane's word ("DOM") may go from it, so it is the left
+/// group's least width: the contract is never drawn over the status word.
+pub fn side_header_keep_px(
+    linked: bool,
+    contract: &str,
+    tag: Option<&str>,
+    status: Option<&str>,
+    stale: bool,
+    tw: TextPx,
+) -> f32 {
+    // `header_base_px` counts the chart's px_3 row padding: not part of the group.
+    header_base_px(linked, contract, tw) - 12.0
+        + tag.map_or(0.0, |t| HEADER_GAP + tw(t))
+        + status.map_or(0.0, |s| HEADER_GAP + tw(s))
+        + if stale {
+            HEADER_GAP + tw("STALE · no data 99 s") * BOLD + 8.0
+        } else {
+            0.0
+        }
+}
+
 /// The width of a DOM or T&S header's parts, all but its source tag: the row's left padding,
 /// the link chip, the contract, the pane's word ("DOM"), the feed's status word, the STALE
 /// badge while stale, and the right group's text, each after a gap. The right padding is the
@@ -740,7 +780,8 @@ pub fn source_tag(tag: &str) -> String {
 /// A UI text's width at `size`, shaped as the header draws it, in 100 % units (logical px over
 /// the UI zoom), as the header fit models count their gaps and paddings.
 pub fn text_px(window: &gpui::Window, size: gpui::Pixels) -> impl Fn(&str) -> f32 + '_ {
-    let font = window.text_style().font();
+    // The UI font in force (`fonts::ui`), as drawn: in render the window's style is GPUI's default.
+    let font = crate::fonts::ui();
     move |s: &str| -> f32 {
         let run = gpui::TextRun {
             len: s.len(),
@@ -979,8 +1020,9 @@ mod tests {
             }
             assert!(controls_gutter_at(kind, 200.0) < controls_gutter(kind));
             assert!(controls_gutter_at(kind, 200.0) >= crate::icons::HIT + 2.0 * CONTROL_PAD);
-            // Not laid out yet: the full gutter.
+            // Not laid out yet: the full gutter and every control.
             assert_eq!(controls_gutter_at(kind, 0.0), controls_gutter(kind));
+            assert_eq!(controls_at(kind, false, 0.0), controls(kind, false));
         }
     }
 

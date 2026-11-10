@@ -486,9 +486,10 @@ impl Columns {
     }
 
     /// Time & sales in `total` px: the columns narrow to their numbers first, then the time
-    /// gives way; price, size and the side marker stay longest.
+    /// gives way, then the size; price and the side marker stay longest (direction is never
+    /// shown by color alone).
     pub fn layout_tape(&mut self, total: f32) {
-        self.layout_fitting(total, &[], &[TapeCol::Time.index()]);
+        self.layout_fitting(total, &[], &[TapeCol::Time.index(), TapeCol::Size.index()]);
     }
 
     /// This frame only: leave out columns that don't fit entirely in `total` px (header and
@@ -1035,6 +1036,13 @@ mod tests {
         for col in [TapeCol::Price, TapeCol::Size, TapeCol::Side] {
             let cell = c.cells[col.index()];
             assert!(cell.shown && cell.right() <= 120.5, "{col:?} {:?}", c.cells);
+        }
+        // Narrower still: the size goes too; price and the side marker stay.
+        c.layout_tape(92.0);
+        assert!(!c.cells[TapeCol::Size.index()].shown);
+        for col in [TapeCol::Price, TapeCol::Side] {
+            let cell = c.cells[col.index()];
+            assert!(cell.shown && cell.right() <= 92.5, "{col:?} {:?}", c.cells);
         }
         assert_eq!(c.set, saved, "saved columns untouched by narrowing");
         c.layout_tape(700.0);

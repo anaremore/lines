@@ -1303,11 +1303,14 @@ impl DomView {
             _ => None,
         };
         // A narrow header drops the source tag first; the contract and words never.
+        let tw = pane::text_px(window, crate::zoom::ui(12.0));
+        // A narrow pane shows only ⋯, so its header keeps only that gutter free.
+        let gutter = pane::controls_gutter_at(crate::layout::PaneKind::Dom, self.pane_w);
+        // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom); 0 or
+        // less until the pane is laid out.
+        let room = (self.pane_w - gutter) / crate::zoom::get();
         if let Some(tg) = &tag {
-            let tw = pane::text_px(window, crate::zoom::ui(12.0));
             // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom).
-            let room = (self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Dom))
-                / crate::zoom::get();
             let rest = pane::side_header_px(
                 true, // a market pane always shows its link marker
                 &contract,
@@ -1322,6 +1325,19 @@ impl DomView {
             }
         }
         let has_contract = !contract.is_empty();
+        let stale = self.store.stale_for().is_some();
+        // The pane's word only when it fits whole beside everything that never gives way (the
+        // right-hand text goes first); else left out, with its gap.
+        let shows_name = has_contract
+            && (room <= 0.0
+                || pane::side_header_keep_px(true, &left, tag.as_deref(), word, stale, &tw)
+                    + 8.0 // the row's left padding (px_2) is inside the room
+                    + 8.0 // the gap before the right group, there even when its text isn't
+                    + 8.0 + 2.0 // the name's own gap, and its basis' slack (`whole_or_none_at`)
+                    + tw("DOM")
+                    <= room);
+        // The left group's least width: all of it but the pane's word, which gives way first.
+        let keep = pane::side_header_keep_px(true, &left, tag.as_deref(), word, stale, &tw);
         div()
             .flex()
             .flex_row()
@@ -1330,7 +1346,7 @@ impl DomView {
             .whitespace_nowrap()
             .overflow_hidden()
             .px_2()
-            .pr(px(pane::controls_gutter(crate::layout::PaneKind::Dom)))
+            .pr(px(gutter))
             .py_1()
             .bg(t.panel)
             .border_b_1()
@@ -1344,7 +1360,7 @@ impl DomView {
                             .flex_row()
                             .gap_2()
                             .items_center()
-                            .min_w_0()
+                            .min_w(crate::zoom::ui(keep.ceil() + 1.0))
                             .child(pane::market_link_chip(self.common.link, &t))
                             // The contract (and the tag, when it fits) never gives way; the
                             // pane's name after them is the only item that shrinks: it gives way
@@ -1372,8 +1388,13 @@ impl DomView {
                                             .children(crate::layout_rec::text_marker(&tg))
                                             .child(tg)
                                     }))
-                                    .when(has_contract, |d| {
-                                        d.child(pane::whole_or_none("DOM", t.text_main, false))
+                                    .when(shows_name, |d| {
+                                        d.child(pane::whole_or_none_at(
+                                            "DOM",
+                                            t.text_main,
+                                            false,
+                                            Some(tw("DOM")),
+                                        ))
                                     }),
                             )
                             // Every state but live is a word beside the contract that never
