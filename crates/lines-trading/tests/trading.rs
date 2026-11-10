@@ -2490,3 +2490,96 @@ fn a_position_says_when_it_was_marked() {
         "a new trade marks it again"
     );
 }
+
+/// The trader's largest order (Settings › Accounts): every way in is refused above it, as the
+/// `--max-order-qty` limit always was (a single order and a bracket from the DOM, chart, keys,
+/// palette and the API; growing a working order), with the same words; at or under it is
+/// accepted; `None` lifts it; a strategy can't change it, nor set it under 1.
+#[test]
+fn the_largest_order_setting_holds_on_every_way_in() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.trade(6000.00, 1);
+    let set = |r: &mut Rig, max| {
+        r.cmd(Command::SetMaxOrderQty {
+            account: acct(),
+            max,
+        })
+    };
+    set(&mut r, Some(2)).expect("set");
+    for source in [
+        Source::Dom,
+        Source::Chart,
+        Source::Hotkey,
+        Source::Palette,
+        Source::Api,
+    ] {
+        let order = Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(3),
+            kind: limit(5990.00),
+        });
+        let id = r.core.submit(r.now(), source, Instant::now(), order);
+        r.collect();
+        let res = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                Event::Command { id: i, result, .. } if *i == id => Some(result.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let e = res.expect_err("over the largest order");
+        assert_eq!(e.code, RejectCode::Risk, "{source:?}");
+        assert_eq!(
+            e.message, "order quantity 3 is over the maximum 2",
+            "{source:?}"
+        );
+    }
+    let e = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side: Side::Buy,
+                qty: Qty(3),
+                kind: limit(5990.00),
+            },
+            take_profit: Some(px(6002.00)),
+            stop_loss: Some(px(5985.00)),
+        }))
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Risk, "a bracket: {}", e.message);
+    // At the limit: accepted; grown past it: refused.
+    let buy = r.place(Side::Buy, 2, limit(5990.00));
+    r.wait(LAT);
+    let e = grow(&mut r, buy, 3).unwrap_err();
+    assert_eq!(e.code, RejectCode::Risk, "{}", e.message);
+    // The account's view says it (the size controls' "max N").
+    let shown = r.events.iter().rev().find_map(|e| match e {
+        Event::Account(a) => Some(a.limits.max_order_qty),
+        _ => None,
+    });
+    assert_eq!(shown, Some(Some(2)));
+    // Lifted: the same order goes in.
+    set(&mut r, None).expect("lifted");
+    grow(&mut r, buy, 3).expect("no limit now");
+    // Never from a strategy; never under 1.
+    let id = r.core.submit(
+        r.now(),
+        Source::Strategy(lines_trading::StrategyId(1)),
+        Instant::now(),
+        Command::SetMaxOrderQty {
+            account: acct(),
+            max: Some(100),
+        },
+    );
+    r.collect();
+    assert!(r.events.iter().any(|e| matches!(
+        e,
+        Event::Command { id: i, result: Err(_), .. } if *i == id
+    )));
+    assert_eq!(set(&mut r, Some(0)).unwrap_err().code, RejectCode::Invalid);
+}

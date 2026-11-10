@@ -1093,6 +1093,25 @@ impl TradingCore {
             Command::CancelAll { contract, .. } => {
                 Ok(self.cancel_all(env, now, &account, contract))
             }
+            Command::SetMaxOrderQty { max, .. } => {
+                if matches!(env.source, Source::Strategy(_)) {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "a strategy can't change the account's largest order",
+                    ));
+                }
+                if max.is_some_and(|m| m < 1) {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "the largest order is at least 1",
+                    ));
+                }
+                let a = self.accounts.get_mut(&account).expect("checked");
+                a.cfg.limits.max_order_qty = max;
+                // The account's view carries it: the DOM's and chart's size controls say "max N".
+                self.publish_view(&account);
+                Ok(Vec::new())
+            }
             Command::SetGuardrails { guardrails, .. } => {
                 let unrealised = self.unrealised(&account);
                 let day = (now > Self::BEFORE_DATA)

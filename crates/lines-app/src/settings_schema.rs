@@ -504,6 +504,45 @@ pub fn parse_number(s: &str) -> Result<Option<i64>, &'static str> {
     t.parse::<i64>().map(Some).map_err(|_| "whole numbers only")
 }
 
+// ---- largest order (per paper account; applies to the next order) ------------------------
+
+impl Target {
+    /// This account's saved largest order, wherever it is saved (name, else id).
+    pub fn max_order(&self, p: &Prefs) -> Option<i64> {
+        [&self.account_name, &self.account]
+            .into_iter()
+            .flatten()
+            .find_map(|k| p.app.max_order_qty.get(k).copied())
+    }
+}
+
+fn g_max_order(p: &Prefs, t: &Target, _: &Facts) -> Value {
+    Value::Number(t.max_order(p))
+}
+
+fn s_max_order(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
+    let Value::Number(n) = v else {
+        return Err("expected a number");
+    };
+    let key = [&t.account_name, &t.account]
+        .into_iter()
+        .flatten()
+        .find(|k| p.app.max_order_qty.contains_key(*k))
+        .or(t.account_name.as_ref().or(t.account.as_ref()))
+        .cloned()
+        .ok_or("choose an account")?;
+    match n {
+        Some(n) if n < 1 => return Err("at least 1"),
+        Some(n) => {
+            p.app.max_order_qty.insert(key, n);
+        }
+        None => {
+            p.app.max_order_qty.remove(&key);
+        }
+    }
+    Ok(())
+}
+
 // ---- guardrails (per account; tighten now, loosen from the next trade date) --------------
 
 fn guard<'a>(p: &'a Prefs, t: &Target) -> Option<&'a lines_trading::Guardrails> {
@@ -1510,6 +1549,22 @@ fn table() -> Vec<Setting> {
             None,
         ),
         s(
+            MAX_ORDER_KEY,
+            Sec::Accounts,
+            "Largest order",
+            "The most contracts one order (or a resize) may have on this paper account. The core refuses a larger one from every way in: DOM, chart, trade panel, keys, strategies. Empty: no limit.",
+            Scope::Account,
+            Trading,
+            Number {
+                min: 1,
+                max: 100_000,
+                optional: true,
+                unit: "contracts",
+            },
+            g_max_order,
+            Some(s_max_order),
+        ),
+        s(
             RESET_KEY,
             Sec::Accounts,
             "Reset paper account",
@@ -1875,6 +1930,8 @@ pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> 
 
 /// Settings › Accounts › Reset paper account (its buttons are the window's own).
 pub const RESET_KEY: &str = "accounts.reset";
+/// Settings › Accounts › Largest order.
+pub const MAX_ORDER_KEY: &str = "accounts.max_order";
 /// Settings › About › Roll back (a button, decision 0031).
 pub const ROLLBACK_KEY: &str = "about.rollback";
 

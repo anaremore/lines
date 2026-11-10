@@ -529,6 +529,29 @@ fn commit(
             },
         ));
     }
+    if after.app.max_order_qty != before.app.max_order_qty
+        && let (Some(id), Some(t)) = (&target.account, crate::trading::Trading::try_global(cx))
+    {
+        // Paper accounts only (a broker's own limits are the broker's); the next order and
+        // resize are checked against it.
+        let account = lines_trading::AccountId::new(id);
+        if t.account(&account).is_some_and(|a| a.paper) {
+            sent = Some(t.submit(
+                lines_trading::Source::Api,
+                Instant::now(),
+                lines_trading::Command::SetMaxOrderQty {
+                    account,
+                    max: target.max_order(after),
+                },
+            ));
+        } else {
+            crate::workspace::notice(
+                "Largest order is for paper accounts: a broker account keeps the broker's limits"
+                    .to_owned(),
+                cx,
+            );
+        }
+    }
     if after.app.guardrails != before.app.guardrails
         && let (Some(id), Some(t)) = (&target.account, crate::trading::Trading::try_global(cx))
     {

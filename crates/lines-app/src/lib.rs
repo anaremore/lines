@@ -1719,6 +1719,7 @@ where
     let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.
     setup.guardrails = settings.settings.guardrails.clone();
+    setup.max_order_qty = settings.settings.max_order_qty.clone();
     // Prop rules from settings; one that doesn't resolve (an unknown preset) is reported and
     // left out (the account keeps its rules).
     for (account, doc) in &settings.settings.prop_rules {
