@@ -609,6 +609,19 @@ mod tests {
         }
     }
 
+    /// The trail half-life row shows its value ("1.5 s"), never caps, whatever its command's
+    /// binding (keycaps replace a row's text only for a key).
+    #[test]
+    fn the_half_life_row_keeps_its_value() {
+        let rows = items(&pane_of(PaneKind::Dom));
+        let r = rows
+            .iter()
+            .flat_map(|r| std::iter::once(r).chain(r.sub.iter()))
+            .find(|r| r.label == "Next trail half-life")
+            .expect("half-life row");
+        assert_eq!((r.key, r.hint.as_str()), (None, "1.5 s"));
+    }
+
     fn pane_of(kind: PaneKind) -> PaneMenu {
         PaneMenu {
             kind,

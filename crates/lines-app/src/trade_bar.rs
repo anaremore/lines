@@ -2894,11 +2894,12 @@ fn menu_row<V: TradePane>(
         .cursor_pointer()
         .hover(move |s| s.bg(accent.opacity(0.16)).border_color(accent))
         .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
+        // A row with a key may cut its label before the caps (a narrow window); a row without
+        // one (a bracket preset: money-relevant) is named in full.
         .child(
             div()
                 .flex_1()
-                .min_w_0()
-                .truncate()
+                .when(key.is_some(), |d| d.min_w_0().truncate())
                 .text_color(t.text_main)
                 .child(label),
         )

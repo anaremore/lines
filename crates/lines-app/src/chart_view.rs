@@ -7242,9 +7242,6 @@ impl Pane for ChartView {
     }
 }
 
-/// Centre of a drawing's axis tag for its line at plot-local `y`: inside the plot, and moved
-/// one tag off the last-price tag (centre `last`) when that would cover it, to the line's side
-/// if there is room, else the other.
 /// The delete-all confirmation: how many, for which symbol, and the key that undoes it.
 fn clear_drawings_question(n: usize, symbol: &str) -> String {
     let plural = if n == 1 { "" } else { "s" };
@@ -7254,6 +7251,9 @@ fn clear_drawings_question(n: usize, symbol: &str) -> String {
     )
 }
 
+/// Centre of a drawing's axis tag for its line at plot-local `y`: inside the plot, and moved
+/// one tag off the last-price tag (centre `last`) when that would cover it, to the line's side
+/// if there is room, else the other.
 fn drawing_tag_y(y: f32, last: Option<f32>, plot_h: f32) -> f32 {
     let at = cross_tag_y(y, plot_h);
     let Some(last) = last else {
