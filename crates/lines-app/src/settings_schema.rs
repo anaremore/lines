@@ -2694,6 +2694,16 @@ mod tests {
         row.apply(&mut q, &t, Value::Number(Some(4))).unwrap();
         assert_eq!(q.app.max_order_qty.len(), 1);
         assert_eq!(q.app.max_order_qty["paper-1"], 4);
+        // A broker account shows none, whatever is saved (nothing would enforce it).
+        let broker = Facts {
+            accounts: vec![AccountFact {
+                id: "paper-1".into(),
+                paper: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!((row.get)(&q, &t, &broker), Value::Number(None));
         // Emptied: no limit, and nothing saved.
         row.apply(&mut q, &t, Value::Number(None)).unwrap();
         assert!(q.app.max_order_qty.is_empty());

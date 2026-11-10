@@ -932,8 +932,9 @@ impl TradingCore {
                 }
                 // More quantity is more exposure: the increase is checked as a new order of
                 // its own (guardrails, prop state and the contract cap, risk, the submit rate),
-                // and the whole order against the order-size limit. Less quantity, or a price
-                // change alone, needs none of that.
+                // and an entry's whole order against the order-size limit (an exit is bounded
+                // by the position instead). Less quantity, or a price change alone, needs none
+                // of that.
                 if let Some(q) = qty
                     && q.0 > o.qty.0
                 {
@@ -1672,8 +1673,9 @@ impl TradingCore {
                             ),
                         ));
                     }
-                    // A reducing order never adds exposure: the cap can't be crossed.
-                    return self.check_risk(now, spec, &cs, false);
+                    // A reducing order never adds exposure: the cap can't be crossed. It is
+                    // placed reduce-only, an exit, so the largest order doesn't hold it either.
+                    return self.check_risk(now, spec, &cs, true);
                 }
             }
             if let Some(max) = preset.max_micro_contracts {
