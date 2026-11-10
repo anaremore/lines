@@ -2659,11 +2659,10 @@ impl WindowView {
                 recall,
             }) => {
                 let n = shown.len().max(1);
-                // ↑ in an empty palette (or on a recalled query) recalls an older query; ↓
-                // goes back; otherwise they move the selection.
+                // ↑ on the first row of an empty palette (or of a recalled query) recalls an
+                // older query; otherwise ↑↓ move the selection.
                 let recalled = match key {
                     "up" => recall.up(query, *selected, history),
-                    "down" => recall.down(query, *selected, history),
                     _ => None,
                 };
                 match (key, recalled) {

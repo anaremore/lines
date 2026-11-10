@@ -4,8 +4,12 @@
 //! recalls recent queries. GPUI-free.
 //!
 //! - **Saved:** [`PaletteHistory`] on the settings file (`palette`, optional, no migration): a
-//!   use count per command (keyed by the command's name, `{:?}`: a renamed command just starts
-//!   again at 0) and the last [`QUERIES`] queries, newest first.
+//!   use count per command (keyed by [`key`]: the command's name, a setting's by its stable
+//!   settings key and value, so a renamed or reordered command starts again at 0, never takes
+//!   another's count) and the last [`QUERIES`] queries, newest first.
+//! - **Trading commands are never boosted** (`Command::Trade`: Flatten, Buy/Sell market,
+//!   Reverse, arming, …): they keep their fuzzy place, so running one often never puts an order
+//!   at the top of an empty palette, where Enter would send it.
 //! - **Stable:** the order depends only on the query and the history snapshot taken when the
 //!   palette opened (a run is counted after it closes), with every tie broken by the palette's
 //!   own order: the same query always gives the same list, so nothing moves under the pointer.
@@ -22,7 +26,7 @@ pub const QUERIES: usize = 10;
 /// What the palette remembers (the settings file's `palette`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaletteHistory {
-    /// Runs from the palette per command, by its name (`{:?}`).
+    /// Runs from the palette per command, by [`key`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub uses: BTreeMap<String, u32>,
     /// The last queries a command was run from, newest first, at most [`QUERIES`].
@@ -35,7 +39,11 @@ impl PaletteHistory {
         self.uses.is_empty() && self.queries.is_empty()
     }
 
+    /// Its use count for ranking: 0 for a trading command (never boosted).
     fn uses_of(&self, c: Command) -> u32 {
+        if matches!(c, Command::Trade(_)) {
+            return 0;
+        }
         self.uses.get(&key(c)).copied().unwrap_or(0)
     }
 
@@ -53,9 +61,18 @@ impl PaletteHistory {
     }
 }
 
-/// A command's saved name.
+/// A command's saved name: its `{:?}` (variant names and the values they carry, all stable),
+/// except a setting's, whose `{:?}` holds its position in the settings table: by the setting's
+/// key and the value's text instead (`Setting:appearance.theme=Light`).
 fn key(c: Command) -> String {
-    format!("{c:?}")
+    match c {
+        Command::Setting(s) => match (s.setting(), s.value()) {
+            (Some(st), Some(v)) => format!("Setting:{}={}", st.key, st.value_text(&v)),
+            (Some(st), None) => format!("Setting:{}", st.key),
+            (None, _) => "Setting".to_owned(),
+        },
+        c => format!("{c:?}"),
+    }
 }
 
 /// The palette's list for `query`: the matching commands (every one for an empty query), those
@@ -84,7 +101,7 @@ pub fn rank(
     hits.into_iter().map(|(i, _, _)| items[i]).collect()
 }
 
-/// Recalling recent queries with ↑ (and back with ↓) in the palette.
+/// Recalling recent queries with ↑ in the palette (↓ always moves the selection).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Recall {
     /// The recalled query's index in [`PaletteHistory::queries`] (`None`: not recalling).
@@ -93,36 +110,21 @@ pub struct Recall {
 
 impl Recall {
     /// ↑ with `query` typed and row `selected` chosen: the next older query to show, if this ↑
-    /// recalls (an empty palette, or a recalled query unchanged with its first row chosen).
+    /// recalls: only with the first row chosen, in an empty palette or on a recalled query
+    /// unchanged. Anywhere else (the selection moved, a typed query, no older one) `None`: ↑
+    /// moves the selection as usual.
     pub fn up(&mut self, query: &str, selected: usize, history: &PaletteHistory) -> Option<String> {
+        if selected != 0 {
+            return None;
+        }
         let next = match self.at {
             None if query.is_empty() => 0,
-            Some(i) if selected == 0 && history.queries.get(i).is_some_and(|q| q == query) => i + 1,
+            Some(i) if history.queries.get(i).is_some_and(|q| q == query) => i + 1,
             _ => return None,
         };
         let q = history.queries.get(next)?;
         self.at = Some(next);
         Some(q.clone())
-    }
-
-    /// ↓ while a recalled query is shown unchanged with its first row chosen: the next newer
-    /// query, or the empty palette after the newest. `None`: ↓ moves the selection as usual.
-    pub fn down(
-        &mut self,
-        query: &str,
-        selected: usize,
-        history: &PaletteHistory,
-    ) -> Option<String> {
-        let i = self.at?;
-        if selected != 0 || history.queries.get(i).is_none_or(|q| q != query) {
-            return None;
-        }
-        if i == 0 {
-            self.at = None;
-            return Some(String::new());
-        }
-        self.at = Some(i - 1);
-        history.queries.get(i - 1).cloned()
     }
 
     /// The query was edited: no longer recalling.
@@ -134,7 +136,7 @@ impl Recall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::Command as C;
+    use crate::commands::{Command as C, TradeCmd};
 
     fn ranked(query: &str, h: &PaletteHistory) -> Vec<Command> {
         rank(
@@ -143,6 +145,10 @@ mod tests {
             h,
             &mut crate::picker::Searcher::default(),
         )
+    }
+
+    fn labels(cs: &[Command]) -> Vec<String> {
+        cs.iter().take(6).map(|c| commands::label(*c)).collect()
     }
 
     /// Commands run before come first, more uses first; then the rest, fuzzy by score.
@@ -168,18 +174,18 @@ mod tests {
         );
         // Fuzzy: letters in order, not a substring ("nwtb" finds "New tab").
         let q = ranked("nwtb", &PaletteHistory::default());
-        assert!(
-            q.contains(&C::NewTab),
-            "{:?}",
-            q.iter().map(|c| commands::label(*c)).collect::<Vec<_>>()
-        );
+        assert!(q.contains(&C::NewTab), "{:?}", labels(&q));
         // A command that doesn't match never shows, however often it ran.
         let mut h2 = PaletteHistory::default();
         h2.record(C::NewTab, "");
         assert!(!ranked("zzzzqqq", &h2).contains(&C::NewTab));
         // Among matches, the used one first even when another scores higher.
         let base = ranked("tab", &PaletteHistory::default());
-        let last = *base.last().unwrap();
+        let last = *base
+            .iter()
+            .rev()
+            .find(|c| !matches!(c, C::Trade(_)))
+            .unwrap();
         let mut h3 = PaletteHistory::default();
         h3.record(last, "tab");
         assert_eq!(ranked("tab", &h3)[0], last);
@@ -219,8 +225,9 @@ mod tests {
         assert_eq!(h.uses_of(C::NewTab), 14);
     }
 
-    /// ↑ in an empty palette recalls the newest, ↑ again older; ↓ goes back, past the newest
-    /// to empty; typing or a moved selection ends recalling (↑↓ move the selection again).
+    /// ↑ on the first row of an empty palette recalls the newest query, ↑ again older ones;
+    /// anywhere else ↑ moves the selection (a moved selection, a typed or edited query, no
+    /// older query, no history).
     #[test]
     fn up_recalls_recent_queries() {
         let mut h = PaletteHistory::default();
@@ -234,16 +241,14 @@ mod tests {
             None,
             "no older one: the selection moves"
         );
-        assert_eq!(r.down("old", 0, &h).as_deref(), Some("new"));
-        assert_eq!(r.down("new", 0, &h).as_deref(), Some(""));
-        assert_eq!(r.at, None);
-        // A typed query: ↑ moves the selection.
-        assert_eq!(Recall::default().up("ta", 0, &h), None);
-        // A recalled query whose selection moved: ↑↓ move the selection.
+        // The selection moved off the first row (↓, the wheel): ↑ moves it back, never
+        // recalls (a reflexive Enter must run the row the trader went to).
+        assert_eq!(Recall::default().up("", 1, &h), None);
         let mut r = Recall::default();
         r.up("", 0, &h);
         assert_eq!(r.up("new", 2, &h), None);
-        assert_eq!(r.down("new", 2, &h), None);
+        // A typed query: ↑ moves the selection.
+        assert_eq!(Recall::default().up("ta", 0, &h), None);
         // Edited: done.
         r.edited();
         assert_eq!(r.up("newx", 0, &h), None);
@@ -254,7 +259,62 @@ mod tests {
         );
     }
 
-    /// The saved field: absent when empty; old files without it read as empty.
+    /// A trading command run often never moves to the top: an empty palette's Enter never
+    /// sends an order because of the history.
+    #[test]
+    fn trading_commands_are_never_boosted() {
+        let mut h = PaletteHistory::default();
+        for _ in 0..50 {
+            h.record(C::Trade(TradeCmd::Flatten), "");
+        }
+        assert_eq!(ranked("", &h), ranked("", &PaletteHistory::default()));
+        assert_eq!(ranked("", &h)[0], commands::palette()[0]);
+    }
+
+    /// The shipped order keeps the rule the substring filter's tests pinned: "flatten" lists
+    /// Flatten first.
+    #[test]
+    fn flatten_comes_first_for_its_name() {
+        let q = ranked("flatten", &PaletteHistory::default());
+        assert_eq!(q[0], C::Trade(TradeCmd::Flatten), "{:?}", labels(&q));
+    }
+
+    /// A setting command's saved name is its settings key and value, not its table position.
+    #[test]
+    fn setting_keys_name_the_setting() {
+        let s = crate::settings_schema::palette()
+            .into_iter()
+            .find(|s| s.value().is_some())
+            .unwrap();
+        let k = key(C::Setting(s));
+        let st = s.setting().unwrap();
+        assert!(k.starts_with(&format!("Setting:{}=", st.key)), "{k}");
+        assert!(!k.contains("index"), "{k}");
+    }
+
+    /// Characters the fuzzy pattern would treat specially are literal: as a negation, "!tab"
+    /// would list nearly every command; literal, it lists few or none.
+    #[test]
+    fn special_characters_are_literal() {
+        let not = ranked("!tab", &PaletteHistory::default());
+        assert!(not.len() < commands::palette().len() / 2, "{}", not.len());
+    }
+
+    /// On the settings file: absent when empty; a file without it reads as empty; one with it
+    /// round-trips.
+    #[test]
+    fn the_settings_file_keeps_it() {
+        let s: crate::picker::Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.palette.is_empty());
+        let mut s = crate::picker::Settings::default();
+        assert!(!serde_json::to_string(&s).unwrap().contains("palette"));
+        s.palette.record(C::NewTab, "tab");
+        let json = serde_json::to_string(&s).unwrap();
+        let back: crate::picker::Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.palette, s.palette);
+    }
+
+    /// The saved field alone: absent when empty; old files without it read as empty.
     #[test]
     fn the_saved_field_is_optional() {
         let h = PaletteHistory::default();

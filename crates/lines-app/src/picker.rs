@@ -437,14 +437,20 @@ impl Searcher {
 
 impl Searcher {
     /// Each text's fuzzy score for `query`, as the symbol search scores (`None`: no match). An
-    /// empty query matches every text with score 0. Used by the command palette's ranking.
+    /// empty query matches every text with score 0; each word is matched fuzzily, with no
+    /// special characters (`!`, `^`, `$`, `'` are literal). Used by the command palette.
     pub fn score_texts<'a>(
         &mut self,
         query: &str,
         texts: impl IntoIterator<Item = &'a str>,
     ) -> Vec<Option<u32>> {
         let query = query.trim();
-        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            nucleo_matcher::pattern::AtomKind::Fuzzy,
+        );
         texts
             .into_iter()
             .map(|t| {
