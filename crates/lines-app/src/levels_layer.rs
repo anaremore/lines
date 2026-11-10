@@ -35,7 +35,7 @@ use lines_core::levels::{
     LabelMode, LabelSeen, Level, LevelMap, LevelShape, LevelType, MAX_KINDS, MAX_LEVELS, Placed,
     label_text, place, place_labels,
 };
-use lines_core::style::DashPattern;
+use lines_core::style::{DashPattern, LineType};
 use lines_core::{BarsView, PriceFormat, Product, UtcMillis, Viewport};
 use lines_feed::ChartData;
 use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
@@ -51,7 +51,7 @@ use crate::theme::{Theme, drawing_dash, source_colour};
 
 const LABEL_PX: f32 = 11.0;
 /// A label box's width beyond its text: the swatch and padding.
-pub(crate) const LABEL_CHROME: f32 = 22.0;
+pub(crate) const LABEL_CHROME: f32 = 30.0;
 /// The labels' gutter beyond its widest chip: a margin left of the chips and right of them.
 pub(crate) const GUTTER_PAD: f32 = 8.0;
 /// A chip's margin from the plot's right edge.
@@ -239,6 +239,7 @@ impl Slot {
                     color: theme.part_color(c, source_colour(l.style.rgba, a), t.line.opacity),
                     width: w,
                     dash: drawing_dash(t.line.line, w),
+                    line: t.line.line,
                 }
             }
             _ => {
@@ -261,6 +262,11 @@ impl Slot {
                         OWN_DASH
                     } else {
                         DashPattern::SOLID
+                    },
+                    line: if l.style.dashed {
+                        LineType::Dashed
+                    } else {
+                        LineType::Solid
                     },
                 }
             }
@@ -324,6 +330,24 @@ struct Stroke {
     /// Logical px.
     width: f32,
     dash: DashPattern,
+    /// Its line type, for the label's swatch.
+    line: LineType,
+}
+
+/// A level label's swatch width (logical px): one full period of every line type shows.
+pub(crate) const SWATCH_W: f32 = 16.0;
+
+/// A level label's swatch in its line's own type (line type tells levels apart as much as
+/// color): the segments (x, width) of a [`SWATCH_W`] wide sample, and their count. Solid is
+/// one bar, dashed two dashes, dotted four dots, dash-dot a dash and a dot. No allocation.
+pub(crate) fn swatch_segments(line: LineType) -> ([(f32, f32); 4], usize) {
+    const NONE: (f32, f32) = (0.0, 0.0);
+    match line {
+        LineType::Solid => ([(0.0, 16.0), NONE, NONE, NONE], 1),
+        LineType::Dashed => ([(0.0, 6.0), (9.0, 6.0), NONE, NONE], 2),
+        LineType::Dotted => ([(0.0, 2.0), (4.0, 2.0), (9.0, 2.0), (14.0, 2.0)], 4),
+        LineType::DashDot => ([(0.0, 7.0), (10.0, 2.0), NONE, NONE], 2),
+    }
 }
 
 /// A dashed level without a declared type: the 6/4 dash levels always had.
@@ -421,6 +445,12 @@ fn reset_seen(map: Option<&LevelMap>, seen: &mut Vec<LabelSeen>) {
 }
 
 impl LevelsLayer {
+    /// A new theme: labels shaped in the old theme's text color are shaped again (their
+    /// widths, and so the gutter and the cuts, don't change).
+    pub fn theme_changed(&mut self) {
+        self.shaped.clear();
+    }
+
     pub fn new(config: LevelsConfig) -> LevelsLayer {
         LevelsLayer {
             config,
@@ -1095,19 +1125,20 @@ impl LevelsLayer {
                     theme.label_bg,
                 ));
                 let dim = if dim { 0.4 } else { 1.0 };
-                let swatch = self.slots[si]
-                    .stroke(theme, level, dim, false, 1.0 / scale)
-                    .color;
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(px(ox + x + 6.0), px(oy + top + box_h * 0.5 - 1.5)),
-                        size(px(8.0), px(3.0)),
-                    ),
-                    swatch,
-                ));
+                let stroke = self.slots[si].stroke(theme, level, dim, false, 1.0 / scale);
+                let (segs, n) = swatch_segments(stroke.line);
+                for &(sx, sw) in &segs[..n] {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(px(ox + x + 6.0 + sx), px(oy + top + box_h * 0.5 - 1.5)),
+                            size(px(sw), px(3.0)),
+                        ),
+                        stroke.color,
+                    ));
+                }
                 let _ = line.paint(
                     point(
-                        px(ox + x + 18.0),
+                        px(ox + x + 6.0 + SWATCH_W + 4.0),
                         px(oy + top + box_h * 0.5 - LABEL_PX * 0.65),
                     ),
                     px(LABEL_PX * 1.3),
