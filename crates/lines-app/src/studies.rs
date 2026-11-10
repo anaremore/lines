@@ -515,6 +515,18 @@ impl Studies {
         }
     }
 
+    /// Lower pane `k`'s title box height from its top: room the bars keep clear of. Zero when
+    /// no title is drawn (study labels hidden on the chart, or the study's own label off).
+    /// `label_px`: the chart's label text size. The chart uses this one value for the one scale
+    /// its bars, range labels, newest tag and crosshair value all read.
+    pub fn lower_title_h(&self, k: usize, labels: bool, label_px: f32) -> f32 {
+        if labels && self.lower_title(k, None).is_some() {
+            4.0 + label_px * 1.6 + 4.0
+        } else {
+            0.0
+        }
+    }
+
     /// Lower pane `k`'s scale this frame, for `height` px: cumulative delta's visible
     /// extremes; Volume from zero at the bottom edge to its tallest visible bar.
     /// `title_h`: the pane's title box from its top (0 when titles are hidden): Volume's
@@ -691,6 +703,19 @@ impl Studies {
     }
 }
 
+/// An overlay bar's half width for a candle body of half width `body` at `dpi`: the odd number
+/// of device pixels nearest 60 % of the body (centered on the candle's device-pixel centre, as
+/// the body is), and narrower than the body whenever the body is wider than one device pixel.
+pub fn overlay_half_width(body: f32, dpi: f32) -> f32 {
+    let body_dev = (body * 2.0 * dpi).round() as i32;
+    // The odd number of device pixels nearest 60 % of the body, at most the body less one
+    // device pixel each side.
+    let target = body_dev as f32 * 0.6;
+    let odd = ((target - 1.0) * 0.5).round() as i32 * 2 + 1;
+    let dev = odd.clamp(1, (body_dev - 2).max(1));
+    dev as f32 / dpi * 0.5
+}
+
 /// `v` rounded down to two significant digits (an axis label that reads as a round number).
 fn round_down(v: i64) -> i64 {
     let mut step = 1i64;
@@ -760,8 +785,7 @@ fn paint_volume(
     // never reads as a candle body: about 60 % of the body, an odd number of device pixels.
     let body = lines_core::geometry::candle_half_width(vp.bar_px, dpi);
     let half = if edges.is_some() {
-        let dev = ((body * 2.0 * dpi * 0.6).round() as i32 | 1).max(1);
-        dev as f32 / dpi * 0.5
+        overlay_half_width(body, dpi)
     } else {
         body
     };
@@ -1043,6 +1067,81 @@ mod tests {
         vp.bar_px = 8.0;
         vp.right_index = 59.0;
         vp
+    }
+
+    /// Overlay bars: about 60 % of the candle body, an odd number of device pixels (so their
+    /// edges sit on device pixels like the body's), and always narrower than a body wider than
+    /// one device pixel, at DPI 1.0 and 2.0 and every bar width.
+    #[test]
+    fn overlay_bars_are_narrower_than_the_candles_on_device_pixels() {
+        for dpi in [1.0f32, 2.0] {
+            for bar_px in [2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0, 40.0] {
+                let body = lines_core::geometry::candle_half_width(bar_px, dpi);
+                let half = overlay_half_width(body, dpi);
+                let (b, o) = (body * 2.0 * dpi, half * 2.0 * dpi);
+                assert!(
+                    (o - o.round()).abs() < 1e-4,
+                    "{dpi} {bar_px}: {o} device px"
+                );
+                assert_eq!(o.round() as i32 % 2, 1, "{dpi} {bar_px}: odd, {o}");
+                if b.round() > 1.0 {
+                    assert!(o < b, "{dpi} {bar_px}: {o} not under the body's {b}");
+                    // The nearest odd width to 60 %, unless the body leaves no room for it.
+                    let want = (b * 0.6).min(b - 2.0);
+                    assert!((o - want).abs() <= 1.0, "{dpi} {bar_px}: {o} of {b}");
+                } else {
+                    assert_eq!(o, 1.0);
+                }
+            }
+        }
+        // Device pixels: a 9-px body gets a 5-px bar, a 7-px body 5 (4.2 to the nearest odd), a
+        // 3-px body 1 (never as wide as the body), a 13-px body 7.
+        for (body_dev, bar_dev) in [(9.0, 5.0), (7.0, 5.0), (3.0, 1.0), (13.0, 7.0), (1.0, 1.0)] {
+            assert_eq!(
+                overlay_half_width(body_dev / 4.0, 2.0) * 4.0,
+                bar_dev,
+                "{body_dev}"
+            );
+        }
+    }
+
+    /// The pane's one scale: with study labels hidden (or the study's own label off) there is
+    /// no title room, and the bars and the crosshair's value read the same scale either way: a
+    /// value drawn at a height reads back as that value.
+    #[test]
+    fn title_room_follows_the_title_and_bars_and_readout_agree() {
+        let b = bars();
+        let view = BarsView::fixed(&b, 60_000);
+        let fp = Footprint::new(60_000, 10);
+        let vp = viewport();
+        let mut st = Studies::new(vec![volume(false)]);
+        st.prepare(view, &fp, &vp, 200);
+        let label_px = 12.0;
+        assert_eq!(st.lower_title_h(0, false, label_px), 0.0, "labels hidden");
+        let on = st.lower_title_h(0, true, label_px);
+        assert!(on > label_px, "{on}");
+        let mut unlabeled = volume(false);
+        unlabeled.display_mut().label = false;
+        let mut st2 = Studies::new(vec![unlabeled]);
+        st2.prepare(view, &fp, &vp, 200);
+        assert_eq!(
+            st2.lower_title_h(0, true, label_px),
+            0.0,
+            "its own label off"
+        );
+        for labels in [false, true] {
+            let title_h = st.lower_title_h(0, labels, label_px);
+            let sc = st.lower_scale(0, 120.0, title_h).unwrap();
+            let max = st.list[0].vol.max as f64;
+            // The tallest bar's top: clear of the title when there is one, and the crosshair
+            // there reads that bar's volume.
+            let top = sc.y(max);
+            assert!(top >= title_h - 1e-3, "{labels}: {top} under {title_h}");
+            assert!((sc.value(top) - max).abs() < 1e-3, "{labels}");
+            if !labels {
+                assert_eq!(sc, st.lower_scale(0, 120.0, 0.0).unwrap(), "no title room");
+            }
+        }
     }
 
     /// The lower-pane mechanism: every shown study that declares `in_subpane` gets a pane,
