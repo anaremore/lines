@@ -366,9 +366,10 @@ pub fn open(id: PaneId, handle: PaneHandle, place: Option<&Placement>, cx: &mut 
             }),
             icon: crate::window_icon(),
             window_min_size: (handle.kind() == crate::layout::PaneKind::Dom).then(|| {
+                // The trading panel's least size, at the zoom it opens with.
                 gpui::size(
-                    gpui::px(crate::trade_bar::MIN_DOM_WIDTH),
-                    gpui::px(crate::trade_bar::MIN_DOM_PANE_H),
+                    crate::zoom::ui(crate::trade_bar::MIN_DOM_WIDTH),
+                    crate::zoom::ui(crate::trade_bar::MIN_DOM_PANE_H),
                 )
             }),
             ..Default::default()

@@ -978,6 +978,23 @@ fn table() -> Vec<Setting> {
             ),
             Value::Bool(false),
         ),
+        with_default(
+            s(
+                "dom.join_buttons",
+                Sec::Dom,
+                "Join buttons",
+                "Join bid and Join ask in the DOM's trading panel.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(!p.app.hide_join_buttons),
+                Some(|p, _, v| {
+                    p.app.hide_join_buttons = !want_bool(v)?;
+                    Ok(())
+                }),
+            ),
+            Value::Bool(true),
+        ),
         s(
             "dom.columns",
             Sec::Dom,
@@ -2702,6 +2719,22 @@ mod tests {
         assert!(json.contains("\"palette\": \"colorblind\""), "{json}");
         assert!(json.contains("\"dom_grouping\": 5"), "{json}");
         assert!(!json.contains("theme"), "defaults aren't written: {json}");
+        assert!(
+            !json.contains("hide_join_buttons"),
+            "Join buttons shown: absent: {json}"
+        );
+        by_key("dom.join_buttons")
+            .unwrap()
+            .apply(&mut p, &t, Value::Bool(false))
+            .unwrap();
+        let hidden = String::from_utf8(p.app.encode()).unwrap();
+        assert!(hidden.contains("\"hide_join_buttons\": true"), "{hidden}");
+        by_key("dom.join_buttons")
+            .unwrap()
+            .apply(&mut p, &t, Value::Bool(true))
+            .unwrap();
+        let shown = String::from_utf8(p.app.encode()).unwrap();
+        assert!(!shown.contains("hide_join_buttons"), "{shown}");
         // A newer version's key survives a load and a save.
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let mut o = v.as_object().unwrap().clone();

@@ -154,13 +154,13 @@ pub fn write_pnl(
 }
 
 /// An account's day P&L (realised + open, by session trade date) as `mode` shows it: a
-/// currency amount (`today +$125.00`). Day P&L spans contracts, so it has no tick form: shown
+/// currency amount (`Day +$125.00`, the trade panel's word). Day P&L spans contracts, so it has no tick form: shown
 /// in currency and both modes only.
 pub fn write_day(out: &mut impl Write, mode: PnlDisplay, day: Money) -> Result<bool, fmt::Error> {
     if !mode.money() {
         return Ok(false);
     }
-    out.write_str("today ")?;
+    out.write_str("Day ")?;
     write_money(out, day)?;
     Ok(true)
 }
@@ -315,8 +315,8 @@ mod tests {
             write_day(&mut out, mode, -Money::whole(25)).unwrap();
             out
         };
-        assert_eq!(d(PnlDisplay::Both), "today -$25.00");
-        assert_eq!(d(PnlDisplay::Currency), "today -$25.00");
+        assert_eq!(d(PnlDisplay::Both), "Day -$25.00");
+        assert_eq!(d(PnlDisplay::Currency), "Day -$25.00");
         assert_eq!(d(PnlDisplay::Ticks), "");
         assert_eq!(d(PnlDisplay::Off), "");
     }

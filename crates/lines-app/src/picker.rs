@@ -178,6 +178,10 @@ pub struct Settings {
         skip_serializing_if = "crate::dom_trade::ArmPrefs::is_default"
     )]
     pub trading_prefs: crate::dom_trade::ArmPrefs,
+    /// Settings › DOM: the trade panel's Join bid / Join ask buttons are hidden (trade panel mock
+    /// 2). Optional: absent means shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_join_buttons: bool,
     /// Theme, palette and hollow candles (the Settings window; decision 0021). Optional:
     /// absent means the built-in defaults; a CLI flag wins for its run.
     #[serde(
@@ -578,6 +582,25 @@ impl Picker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn join_buttons_show_unless_hidden_and_absent_is_shown() {
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(
+            !json.contains("hide_join_buttons"),
+            "absent when shown: {json}"
+        );
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.hide_join_buttons, "a file from before shows them");
+        let s = Settings {
+            hide_join_buttons: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"hide_join_buttons\":true"), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(back.hide_join_buttons);
+    }
+
     #[test]
     fn ui_zoom_is_written_only_off_100_and_reads_back() {
         let s = Settings::default();

@@ -127,6 +127,9 @@ pub struct DomView {
     orders: OrdersLayer,
     /// Whether the trading header was last rendered with its narrow labels.
     header_narrow: Option<bool>,
+    /// Settings › DOM shows the trade panel's Join buttons (read at each render): a row of the
+    /// panel's layout (`trade_bar::panel_rows`).
+    joins: bool,
     /// The whole pane's height (last frame's layout; 0 with `pane_w` 0: not laid out yet): which of
     /// the trade panel's rows it has room for.
     pane_h: f32,
@@ -345,6 +348,7 @@ impl DomView {
             trade,
             orders: OrdersLayer::default(),
             header_narrow: None,
+            joins: true,
             pane_h: 0.0,
             pane_w: 0.0,
             was_editing: false,
@@ -478,7 +482,7 @@ impl DomView {
         // also an order on the ladder under it. The account list (a popover) takes no focus
         // either; it normally takes the press on its backdrop (`crate::popover`), this is the
         // fallback.
-        if self.trade.account_menu {
+        if self.trade.menu_open() {
             trade_bar::close_account_menu(self, cx);
             cx.stop_propagation();
             return;
@@ -841,7 +845,7 @@ impl DomView {
             cx.notify();
             return;
         }
-        if self.trade.account_menu && crate::popover::closes_on_key(&k.key) {
+        if self.trade.menu_open() && crate::popover::closes_on_key(&k.key) {
             trade_bar::close_account_menu(self, cx);
             cx.stop_propagation();
             return;
@@ -1390,6 +1394,7 @@ impl DomView {
             self.pane_w / z,
             self.pane_h / z,
             trade_bar::panel_editing(&self.trade),
+            self.joins,
         )
     }
 
@@ -1412,7 +1417,10 @@ impl DomView {
         self.pane_w = w;
         self.pane_h = h;
         changed |= self.panel_rows() != before;
-        if trade_bar::panel_editing(&self.trade) && !trade_bar::editor_fits(w, h) {
+        let z = crate::zoom::get();
+        if trade_bar::panel_editing(&self.trade)
+            && !trade_bar::editor_fits(w / z, h / z, self.joins)
+        {
             trade_bar::close_editor_too_short(&mut self.trade);
             changed = true;
         }
@@ -1440,6 +1448,7 @@ impl Render for DomView {
         // The trading panel lays out in 100 % units (`crate::zoom`).
         let width = self.pane_w / crate::zoom::get();
         self.header_narrow = Some(trade_bar::is_narrow(width));
+        self.joins = !crate::picker_view::settings(cx).hide_join_buttons;
         let rows = self.panel_rows();
         let trade = trade_bar::dom_bar(self, &self.product, width, rows, &t, cx);
         self.has_panel = trade.is_some();
@@ -1617,12 +1626,13 @@ mod tests {
         assert!(!ladder_shows(true, true, 0.0));
         assert!(!ladder_shows(true, true, room - 1.0));
         assert!(ladder_shows(true, true, room));
-        // Pane 296 px, width 420: the body has 123 px, and the panel's rows still rule it out.
-        let rows = trade_bar::panel_rows(420.0, 296.0, false);
+        // Pane 296 px, width 420: the body has 85 px, and the panel's rows still rule it out.
+        let rows = trade_bar::panel_rows(420.0, 296.0, false, true);
         assert!(!rows.ladder && !rows.entry);
-        assert!(!ladder_shows(true, rows.ladder, 123.0));
+        assert_eq!(296.0 - 27.0 - rows.height(420.0), 85.0);
+        assert!(!ladder_shows(true, rows.ladder, 85.0));
         assert!(
-            ladder_shows(false, rows.ladder, 123.0),
+            ladder_shows(false, rows.ladder, 85.0),
             "no panel: no quantity to hide"
         );
     }

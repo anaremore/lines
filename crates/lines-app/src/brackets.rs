@@ -97,8 +97,6 @@ pub type BracketSettings = BTreeMap<String, AccountBrackets>;
 /// Presets for a product that has none of its own.
 pub const DEFAULT_PRESETS: [(u32, u32); 3] = [(8, 16), (12, 24), (20, 40)];
 
-/// Most presets the segmented control shows (more go behind "…").
-pub const MAX_SHOWN: usize = 4;
 /// Largest distance accepted, in ticks.
 pub const MAX_TICKS: u32 = 100_000;
 
