@@ -26,7 +26,7 @@ use lines_core::{Aggressor, FixedStr, Print, Product, Qty};
 use lines_feed::catalog::Target;
 use lines_feed::store::ChartStore;
 
-use crate::feeds::{Feeds, PaneFeed};
+use crate::feeds::PaneFeed;
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
     self, ColumnCmd, ColumnMenu, Columns, HeaderHit, Table, TapeCol, header_row_h,
@@ -265,7 +265,7 @@ impl TapeView {
         let m = k.modifiers;
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            let outcome = self.picker.key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
         } else if m.control && !m.alt && k.key == "k" {
             self.picker.open("", cx);
@@ -286,7 +286,7 @@ impl TapeView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &self.feed.availability);
+        let outcome = self.picker.click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -301,7 +301,7 @@ impl TapeView {
     }
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        let feed = crate::sources::retarget(&self.feed, target, cx)?;
         self.set_feed(feed.clone(), cx);
         cx.emit(FeedChanged(feed));
         Ok(())
@@ -546,7 +546,7 @@ impl Render for TapeView {
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
-                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+                .overlay(&t, &crate::sources::pick(&self.feed, cx), today, Self::picker_click, cx);
         let offer = self.common.offer_switch;
         let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),

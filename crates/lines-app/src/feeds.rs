@@ -60,6 +60,9 @@ pub struct PaneFeed {
     pub adopted: Option<Adopted>,
     /// What a one-click switch offers when this pane can't be served.
     pub suggest: Option<Suggestion>,
+    /// The source the pane saves (decision 0030): the one it opened on in a run with several,
+    /// the workspace's own in a run `--source` limits (so a mock run never rewrites it).
+    pub source_doc: Option<String>,
 }
 
 /// A pane showing the replay's contract in place of its own symbol, for this run.
@@ -225,9 +228,23 @@ impl PaneFeed {
                 unavailable: None,
                 adopted,
                 suggest: fallback.suggest.clone(),
+                source_doc: None,
             },
             Err(e) => unavailable(format!("{e:#}"), config),
         }
+    }
+
+    /// A feed with nothing to show, for `reason` (no source for the pane: decision 0030).
+    pub fn unavailable_because(
+        base: &FeedConfig,
+        availability: &Availability,
+        target: Option<&TargetDoc>,
+        reason: String,
+    ) -> PaneFeed {
+        let mut config = base.clone();
+        config.record = None;
+        let symbol = target.map_or_else(|| "default".to_owned(), symbol_of);
+        PaneFeed::unavailable(config, availability.clone(), target.cloned(), symbol, reason)
     }
 
     fn unavailable(
@@ -262,6 +279,7 @@ impl PaneFeed {
             unavailable: Some(Unavailable { symbol, reason }),
             adopted: None,
             suggest: None,
+            source_doc: None,
         }
     }
 
@@ -283,6 +301,33 @@ impl PaneFeed {
             unavailable: None,
             adopted: None,
             suggest: self.suggest.clone(),
+            source_doc: self.source_doc.clone(),
+        })
+    }
+
+    /// Another source's product or contract (a pick the pane's own source can't serve, in a
+    /// run with several): the pane moves to that source and saves it. The caller picks the
+    /// source (`Sources::for_pick`); its own source goes through [`PaneFeed::retarget`].
+    pub fn retarget_on(
+        &self,
+        registry: &FeedRegistry,
+        entry: &crate::sources::SourceEntry,
+        target: Target,
+    ) -> Result<PaneFeed> {
+        let mut config = entry.base.clone();
+        config.target = Some(target.clone());
+        config.record = None;
+        let sub = registry.subscribe(config.clone())?;
+        Ok(PaneFeed {
+            store: sub.store().clone(),
+            sub: Some(sub),
+            config,
+            availability: entry.availability.clone(),
+            target_doc: Some(TargetDoc::from_target(&target)),
+            unavailable: None,
+            adopted: None,
+            suggest: entry.fallback.suggest.clone(),
+            source_doc: Some(entry.name.clone()),
         })
     }
 

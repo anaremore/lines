@@ -14,7 +14,6 @@ use gpui::{
     KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Styled, div, prelude::*,
 };
 use lines_core::{CivilDate, ProductId};
-use lines_feed::availability::Availability;
 use lines_feed::catalog::{self, Target};
 
 use crate::persist::Writer;
@@ -159,7 +158,7 @@ impl PickerUi {
         &mut self,
         ev: &KeyDownEvent,
         today: CivilDate,
-        availability: &Availability,
+        availability: &crate::sources::Pick,
         cx: &mut App,
     ) -> PickerKey {
         let k = &ev.keystroke;
@@ -200,7 +199,7 @@ impl PickerUi {
     }
 
     /// Enter on the selected row. Unavailable rows stay open and say why.
-    pub fn confirm(&mut self, today: CivilDate, availability: &Availability) -> PickerKey {
+    pub fn confirm(&mut self, today: CivilDate, availability: &crate::sources::Pick) -> PickerKey {
         let Some(row) = self
             .picker
             .as_ref()
@@ -220,7 +219,7 @@ impl PickerUi {
         &mut self,
         row: usize,
         today: CivilDate,
-        availability: &Availability,
+        availability: &crate::sources::Pick,
     ) -> PickerKey {
         if let Some(p) = self.picker.as_mut()
             && p.selected != row
@@ -252,7 +251,7 @@ impl PickerUi {
     pub fn overlay<V: PickerHost + 'static>(
         &self,
         theme: &Theme,
-        availability: &Availability,
+        availability: &crate::sources::Pick,
         today: CivilDate,
         on_row: fn(&mut V, usize, &mut Context<V>),
         cx: &mut Context<V>,
@@ -341,6 +340,19 @@ impl PickerUi {
                         } else {
                             roll
                         });
+                    }
+                    // In a run with several sources: which one the pick shows it from.
+                    if let Some(src) = availability.tag(&r.target) {
+                        right = right.child(
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(t.axis_line)
+                                .text_size(crate::zoom::ui(11.0))
+                                .child(src),
+                        );
                     }
                 }
                 (None, None) => {}

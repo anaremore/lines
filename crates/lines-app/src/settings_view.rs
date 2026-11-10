@@ -584,7 +584,7 @@ fn gather_facts(cx: &App) -> Facts {
 fn facts_now(cx: &App, wait: bool) -> Option<Facts> {
     let mut f = Facts::default();
     if let Some(ws) = cx.try_global::<Workspace>()
-        && let Some(st) = &ws.env.base.store
+        && let Some(st) = &ws.env.sources.primary().base.store
     {
         f.store_path = st.root.display().to_string();
         f.store_budget_gb =

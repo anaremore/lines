@@ -189,6 +189,10 @@ pub struct Settings {
         skip_serializing_if = "crate::settings_schema::Appearance::is_default"
     )]
     pub appearance: crate::settings_schema::Appearance,
+    /// The public data sources on or off (decision 0030; `coinbase`, `kraken`, an extension's
+    /// name). Optional: a source absent is on. Read at startup.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sources: std::collections::BTreeMap<String, crate::sources::SourcePrefs>,
     /// The display time zone (Settings › Appearance; `lines_core::display_tz`): absent is
     /// the exchange's (ET), "System" the OS zone, else an IANA name. Display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]

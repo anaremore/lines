@@ -43,7 +43,7 @@ use lines_feed::store::ChartStore;
 use crate::dom_orders::{DragOrder, OrdersLayer};
 use crate::dom_trade::{self, DomColumn, EntryCtx, Ghost, Refusal};
 use crate::dom_trail::DomTrail;
-use crate::feeds::{Feeds, PaneFeed};
+use crate::feeds::PaneFeed;
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
     self, ColumnCmd, ColumnMenu, Columns, DomCol, HeaderHit, Table, header_row_h,
@@ -438,7 +438,7 @@ impl DomView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &self.feed.availability);
+        let outcome = self.picker.click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -454,7 +454,7 @@ impl DomView {
     }
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        let feed = crate::sources::retarget(&self.feed, target, cx)?;
         self.set_feed(feed.clone(), cx);
         cx.emit(FeedChanged(feed));
         Ok(())
@@ -856,7 +856,7 @@ impl DomView {
         }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            let outcome = self.picker.key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
             cx.stop_propagation();
             cx.notify();
@@ -1475,7 +1475,7 @@ impl Render for DomView {
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
-                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+                .overlay(&t, &crate::sources::pick(&self.feed, cx), today, Self::picker_click, cx);
         let offer = self.common.offer_switch;
         let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),

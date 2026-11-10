@@ -182,6 +182,11 @@ pub struct PaneDoc {
     /// `None`: the source's default product (or a recording's contract).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<TargetDoc>,
+    /// The data source the pane shows (decision 0030: `coinbase`, `kraken`, an extension's
+    /// name). Optional: absent, the pane takes the source that serves its target (or the run's,
+    /// with `--source`). Older builds drop it on save; it is inferred again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart: Option<ChartState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +217,7 @@ impl PaneDoc {
             kind,
             link,
             target,
+            source: None,
             chart: None,
             dom: None,
             tape: None,

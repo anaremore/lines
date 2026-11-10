@@ -73,7 +73,7 @@ use lines_feed::ticks::{TickKey, TickLease};
 
 use crate::chart_draw::{self, ChartDrawings};
 use crate::commands::{Command, DrawCmd};
-use crate::feeds::{Feeds, PaneFeed};
+use crate::feeds::PaneFeed;
 use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
@@ -1572,7 +1572,7 @@ impl ChartView {
         }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            let outcome = self.picker.key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
             cx.stop_propagation();
             cx.notify();
@@ -1728,7 +1728,7 @@ impl ChartView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &self.feed.availability);
+        let outcome = self.picker.click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -1746,7 +1746,7 @@ impl ChartView {
     }
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        let feed = crate::sources::retarget(&self.feed, target, cx)?;
         self.apply_feed(feed.clone());
         cx.emit(FeedChanged(feed));
         Ok(())
@@ -7205,7 +7205,7 @@ impl Render for ChartView {
         let today = pane::today(self.frozen, &self.store);
         let overlay =
             self.picker
-                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+                .overlay(&t, &crate::sources::pick(&self.feed, cx), today, Self::picker_click, cx);
         let offer = self.common.offer_switch;
         if let Some(body) = pane::unavailable_body(&self.feed, &t, offer, cx) {
             return div()

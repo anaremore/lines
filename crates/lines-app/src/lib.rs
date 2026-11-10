@@ -26,6 +26,7 @@ mod dropdown;
 mod econ_layer;
 mod econ_ui;
 mod feeds;
+mod sources;
 mod footprint;
 #[cfg(feature = "screenshot")]
 mod gallery;
@@ -195,6 +196,26 @@ impl Extensions {
     }
 }
 
+impl Cli {
+    /// `--source`, or the mock for the runs that take one source (headless, backtests,
+    /// strategies, screenshots, the benchmark).
+    fn source_name(&self) -> &str {
+        self.source.as_deref().unwrap_or("mock")
+    }
+
+    /// No `--source`, and a run with windows that isn't a screenshot or the benchmark: every
+    /// enabled source at once (decision 0030).
+    fn several_sources(&self) -> bool {
+        self.source.is_none()
+            && self.screenshot.is_none()
+            && self.bench.is_none()
+            && self.headless.is_none()
+            && self.backtest.is_none()
+            && self.run_strategy.is_none()
+            && self.replay.is_none()
+    }
+}
+
 /// The `--source` value, resolved.
 #[derive(Clone)]
 enum SourceChoice {
@@ -203,6 +224,14 @@ enum SourceChoice {
 }
 
 impl SourceChoice {
+    /// The source's name as a pane saves it (`coinbase`, an extension's name).
+    fn name(&self) -> String {
+        match self {
+            SourceChoice::Extension(e) => e.name().to_owned(),
+            SourceChoice::Builtin(k) => format!("{k:?}").to_lowercase(),
+        }
+    }
+
     fn parse(name: &str, ext: &Extensions) -> Option<Self> {
         if let Some(e) = ext.sources.iter().find(|e| e.name() == name) {
             return Some(SourceChoice::Extension(ExtensionSource(e.clone())));
@@ -293,9 +322,12 @@ pub enum ThemeKind {
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Cli {
-    /// Where market data comes from.
-    #[arg(long, default_value = "mock")]
-    source: String,
+    /// Where market data comes from, this run only. Without it the run has every enabled
+    /// source at once (Coinbase and Kraken unless turned off in Settings, plus any extension):
+    /// each pane shows the one serving its symbol. Headless, backtest and strategy runs, and
+    /// screenshots, default to the mock.
+    #[arg(long)]
+    source: Option<String>,
     /// Show this product (followed to its front month: ES, NQ, MES, MNQ, ZN, BTC/USD,
     /// ETH/USD, BTC/USD.KR, ETH/USD.KR, BTC-PERP.KR, ETH-PERP.KR) or contract (ESZ26, MNQH2027) in every pane, for this run only (the saved
     /// workspace is left alone).
@@ -981,6 +1013,45 @@ fn feed_config(cli: &Cli, choice: &SourceChoice) -> Result<FeedConfig> {
     Ok(cfg)
 }
 
+/// The run's sources and their feed configs (decision 0030), first preferred. With
+/// `--source` (or a run that takes one source): that one. Without: each registered extension,
+/// then Coinbase, then Kraken, less those turned off in Settings (`settings.json`'s
+/// `sources`, read here before anything else uses it).
+fn run_sources(
+    cli: &Cli,
+    ext: &Extensions,
+    choice: &SourceChoice,
+) -> Result<Vec<(String, FeedConfig)>> {
+    if !cli.several_sources() {
+        return Ok(vec![(choice.name(), feed_config(cli, choice)?)]);
+    }
+    let prefs = persist::config_dir()
+        .map(|d| picker::Settings::load(&d.join("settings.json")).0.sources)
+        .unwrap_or_default();
+    let on = |name: &str| prefs.get(name).is_none_or(sources::SourcePrefs::on);
+    let mut choices: Vec<SourceChoice> = ext
+        .sources
+        .iter()
+        .filter(|e| on(e.name()))
+        .map(|e| SourceChoice::Extension(ExtensionSource(e.clone())))
+        .collect();
+    choices.extend(
+        [SourceKind::Coinbase, SourceKind::Kraken]
+            .into_iter()
+            .map(SourceChoice::Builtin)
+            .filter(|c| on(&c.name())),
+    );
+    if choices.is_empty() {
+        bail!(
+            "every data source is off: turn one on in Settings › Data, or run with --source <name>"
+        );
+    }
+    choices
+        .iter()
+        .map(|c| Ok((c.name(), feed_config(cli, c)?)))
+        .collect()
+}
+
 /// The local store (decision 0019) for live sources: the mock invents a new market every
 /// run and replays and screenshots must not write, so those never store, unless `--store-dir`
 /// names a store for this run.
@@ -1378,9 +1449,12 @@ where
         );
     }
 
-    let choice = SourceChoice::parse(&cli.source, &ext)
-        .ok_or_else(|| anyhow!("unknown source {:?}", cli.source))?;
-    let config = feed_config(&cli, &choice)?;
+    let choice = SourceChoice::parse(cli.source_name(), &ext)
+        .ok_or_else(|| anyhow!("unknown source {:?}", cli.source_name()))?;
+    // The run's sources (decision 0030): every enabled one without `--source`, else that one.
+    // `config` is the first (the run's when limited): what takes one source uses it.
+    let run_sources = run_sources(&cli, &ext, &choice)?;
+    let config = run_sources[0].1.clone();
     // A market replay never runs a level source live (only its recorded batches, if any).
     let market_replay = matches!(config.source, lines_feed::Source::Replay { .. });
     lines_feed::levels::runtime::set_mode(lines_feed::levels::runtime::mode_for(
@@ -1459,13 +1533,25 @@ where
     let mut base = config.clone();
     let instrument = base.target.take().map(|t| TargetDoc::from_target(&t));
     let record = base.record.take();
-    // A replay shows its one contract in panes it can't otherwise serve, for this run only;
-    // not when --instrument says what every pane shows.
-    let fallback = feeds::Fallback::for_source(&base, instrument.is_none());
+    let _ = base;
+    // Each source's table entry. A replay shows its one contract in panes it can't otherwise
+    // serve, for this run only; not when --instrument says what every pane shows.
+    let entries = run_sources
+        .iter()
+        .map(|(name, cfg)| {
+            let mut base = cfg.clone();
+            base.target = None;
+            base.record = None;
+            Ok(sources::SourceEntry {
+                name: name.clone(),
+                fallback: feeds::Fallback::for_source(&base, instrument.is_none()),
+                availability: lines_feed::availability::availability(&base.source)?,
+                base,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let env = PaneEnv {
-        fallback,
-        availability: lines_feed::availability::availability(&base.source)?,
-        base,
+        sources: sources::Sources::new(entries, !cli.several_sources()),
         theme: std::cell::Cell::new(theme),
         look_flags: std::cell::Cell::new(look_flags),
         frozen,
@@ -2013,7 +2099,7 @@ mod tests {
         let ext = Extensions::new().with_source(Arc::new(Ext));
         let cli = parse_cli(["lines", "--source", "example-feed"], &ext).unwrap();
         assert!(matches!(
-            SourceChoice::parse(&cli.source, &ext),
+            SourceChoice::parse(cli.source_name(), &ext),
             Some(SourceChoice::Extension(_))
         ));
         let h = command(&ext).render_long_help().to_string();
@@ -2034,7 +2120,7 @@ mod tests {
         // The default is still the mock.
         let cli = parse(&["lines"]).unwrap();
         assert!(matches!(
-            SourceChoice::parse(&cli.source, &Extensions::new()),
+            SourceChoice::parse(cli.source_name(), &Extensions::new()),
             Some(SourceChoice::Builtin(SourceKind::Mock))
         ));
     }
@@ -2070,7 +2156,7 @@ mod tests {
     fn real_cqg_is_available_with_the_feature() {
         let cli = parse(&["lines", "--source", "cqg"]).unwrap();
         assert!(matches!(
-            SourceChoice::parse(&cli.source, &Extensions::new()),
+            SourceChoice::parse(cli.source_name(), &Extensions::new()),
             Some(SourceChoice::Builtin(SourceKind::Cqg))
         ));
         assert_eq!(cli.cqg_url, lines_feed::cqg::DEMO_URL);

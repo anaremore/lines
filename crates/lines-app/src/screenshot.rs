@@ -129,10 +129,10 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     for pane in window.tabs.iter().flat_map(|t| t.layout.leaves()) {
         let f = PaneFeed::open(
             &registry,
-            &ws.env.base,
-            &ws.env.availability,
+            &ws.env.sources.primary().base,
+            &ws.env.sources.primary().availability,
             pane.target.as_ref(),
-            &ws.env.fallback,
+            &ws.env.sources.primary().fallback,
         );
         if f.sub.is_some() {
             feeds.push(f);
@@ -240,7 +240,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         // Synthetic venue: its positions may be marked from the recording.
         setup.venue_marks_always = true;
     }
-    let mut trading = Trading::start(setup, registry.clone(), ws.env.base.clone());
+    let mut trading = Trading::start(setup, registry.clone(), ws.env.sources.primary().base.clone());
     trading.start_armed = arm;
     trading.start_hotkeys = hotkeys;
     trading.start_order_controls = order_controls;
