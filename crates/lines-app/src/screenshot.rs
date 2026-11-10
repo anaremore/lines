@@ -102,6 +102,9 @@ pub struct Shot {
     pub layout_report: bool,
     /// The Settings window, rendered into `<out stem>-settings.png` (`--settings`).
     pub settings: Option<SettingsShot>,
+    /// The "Download days" window in a state, at a size, rendered into
+    /// `<out stem>-download.png` (`--download-days`, `--download-size`).
+    pub download: Option<(String, (f32, f32))>,
 }
 
 /// `--settings`, `--settings-search`, `--settings-set`.
@@ -219,11 +222,15 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         depth_note: _,
         layout_report,
         settings: settings_shot,
+        download,
     } = shot;
     LAYOUT_REPORT.store(layout_report, std::sync::atomic::Ordering::Relaxed);
     crate::zoom::set(ui_zoom.unwrap_or(crate::zoom::DEFAULT));
     if let Some(s) = &settings_shot {
         crate::settings_view::check_shot(&s.section, &s.set)?;
+    }
+    if let Some((state, _)) = &download {
+        crate::download_view::shot::check(state)?;
     }
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut setup = TradingSetup::manual();
@@ -395,6 +402,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             context_menu,
             prompt,
             settings_shot,
+            download,
             strategies,
         ) {
             fail(&e);
@@ -429,6 +437,7 @@ fn capture(
     context_menu: Option<crate::pane_menu::ShotMenu>,
     prompt: Option<String>,
     settings_shot: Option<SettingsShot>,
+    download: Option<(String, (f32, f32))>,
     strategies: Option<std::sync::Arc<crate::strategy_panel::DemoStrategies>>,
 ) -> Result<()> {
     let handle = workspace::open_doc_window(
@@ -480,8 +489,20 @@ fn capture(
             cx,
         )
     });
+    let download_window =
+        download.map(|(state, size)| (crate::download_view::shot::open(&state, size, cx), size));
     cx.spawn(async move |cx| {
         let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
+        if let Some((hw, size)) = download_window {
+            let stem = out
+                .file_stem()
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            let path = out.with_file_name(format!("{stem}-download.png"));
+            match hw {
+                Some(hw) => wrote.push(shoot(cx, hw, size, &path, scale).await),
+                None => wrote.push(Err(anyhow::anyhow!("the download window did not open"))),
+            }
+        }
         if let Some(Some(hw)) = settings_window {
             let stem = out
                 .file_stem()

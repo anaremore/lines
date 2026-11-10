@@ -21,6 +21,8 @@ mod dom_orders;
 mod dom_trade;
 mod dom_trail;
 mod dom_view;
+mod download_days;
+mod download_view;
 mod drawings_store;
 mod dropdown;
 mod econ_layer;
@@ -599,6 +601,14 @@ struct Cli {
     /// can't be made smaller than 640x420).
     #[arg(long, requires = "settings", value_parser = parse_size)]
     settings_size: Option<(f32, f32)>,
+    /// Screenshot: also render the "Download days" window, on a synthetic source and a scratch
+    /// store, in a state (estimate, progress, error, stored) into `<out stem>-download.png`.
+    #[arg(long, value_name = "STATE", requires = "screenshot")]
+    download_days: Option<String>,
+    /// Screenshot: the "Download days" window's size, WxH logical px (default 620x460; at
+    /// least 400x340).
+    #[arg(long, requires = "download_days", value_parser = parse_size)]
+    download_size: Option<(f32, f32)>,
     /// Screenshot: read this economic calendar (the bundled file's format) instead of the
     /// bundled one, for the app and its trading cores (synthetic releases on synthetic data).
     #[arg(long, requires = "screenshot")]
@@ -1115,6 +1125,18 @@ fn source_prefs(
         .and_then(|mut v| v.get_mut("sources").map(serde_json::Value::take))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
+}
+
+/// Where "Download days…" stores days (decision 0030 §8): `--store-dir`, else the data
+/// directory, whatever this run's source; none with `--no-store`.
+fn download_root(cli: &Cli) -> Result<PathBuf, String> {
+    if cli.no_store {
+        return Err("The local store is off for this run (--no-store).".into());
+    }
+    if let Some(d) = &cli.store_dir {
+        return Ok(d.clone());
+    }
+    lines_feed::disk::default_root().ok_or_else(|| "No data directory: set LINES_DATA_DIR.".into())
 }
 
 /// The local store (decision 0019) for live sources: the mock invents a new market every
@@ -1800,6 +1822,15 @@ where
                             )
                         }),
                     }),
+                download: cli.download_days.clone().map(|state| {
+                    let size = cli.download_size.map_or(download_view::SIZE, |(w, h)| {
+                        (
+                            w.max(download_view::MIN_SIZE.0),
+                            h.max(download_view::MIN_SIZE.1),
+                        )
+                    });
+                    (state, size)
+                }),
             };
             let code = screenshot::run(registry, Workspace::new(env), shot)?;
             std::process::exit(code);
@@ -1920,7 +1951,12 @@ where
 
     let drawings = drawings_store::Drawings::new(dir.clone(), Some(writer.clone()));
     let no_update_check = cli.no_update_check;
+    let download_env = download_view::DownloadEnv {
+        root: download_root(&cli),
+        budget: Some((cli.store_budget_gb.max(0.0) * (1u64 << 30) as f64) as u64),
+    };
     gpui_platform::application().run(move |cx: &mut App| {
+        cx.set_global(download_env);
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
         if let Some(s) = strategies {
