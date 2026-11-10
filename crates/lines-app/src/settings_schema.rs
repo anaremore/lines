@@ -22,7 +22,7 @@ pub enum Section {
     Risk,
     Accounts,
     Data,
-    /// Every data source: its state, plan, settings and secrets (decision 0030 §3–4).
+    /// Every data source: its state, plan, settings and secrets (decisions 0030 §3–4 and 0035).
     Connections,
     Keys,
     Diagnostics,

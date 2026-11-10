@@ -56,7 +56,7 @@ pub enum FieldKind {
     Choice(&'static [&'static str]),
     /// `"on"` or `"off"` (absent: off).
     Switch,
-    /// Kept in the OS keychain, shown masked (decision 0030 §4); never in the settings file,
+    /// Kept in the OS keychain, never displayed, only masked (decisions 0030 §4 and 0035); never in the settings file,
     /// workspaces, logs or diagnostics.
     Secret,
 }

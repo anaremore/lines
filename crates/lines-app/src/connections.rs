@@ -1,4 +1,4 @@
-//! Settings › Connections (decision 0030 §3–4), GPUI-free: the sources the page lists, the
+//! Settings › Connections (decisions 0030 §3–4 and 0035), GPUI-free: the sources the page lists, the
 //! state each is in, the settings a source describes, and where they are kept: plain values
 //! in `settings.json` (`connections`), secrets in the OS keychain (never in the settings
 //! file, workspaces, logs or diagnostics). The page itself is `connections_view`.

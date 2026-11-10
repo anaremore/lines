@@ -1,4 +1,4 @@
-//! A source's settings (decision 0030 §3–4): from the store the app installs, unless the
+//! A source's settings (decisions 0030 §3–4 and 0035): from the store the app installs, unless the
 //! field's environment variable is set. Its own test binary: it sets an environment variable,
 //! which no other test in a process may read at the same time.
 

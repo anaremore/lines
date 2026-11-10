@@ -1,4 +1,4 @@
-//! Settings › Connections' page (decision 0030 §3–4): one card per source with its state, its
+//! Settings › Connections' page (decisions 0030 §3–4 and 0035): one card per source with its state, its
 //! plan, its on/off switch, the settings it describes (text, choice, switch, secret) and Test.
 //!
 //! A saved secret is never shown again in full (only "Configured", where it comes from and
@@ -845,7 +845,7 @@ mod tests {
         }
     }
 
-    /// Decision 0030 §4: a typed secret goes to the keychain (trimmed); an empty one writes
+    /// Decisions 0030 §4 and 0035: a typed secret goes to the keychain (trimmed); an empty one writes
     /// nothing (Remove clears a secret); a plain field writes what was typed, or clears its
     /// value when emptied.
     #[test]
@@ -868,7 +868,7 @@ mod tests {
         assert_eq!(ConnPage::default().finish(), None);
     }
 
-    /// Decision 0030 §4: Remove deletes a saved secret only on a second press; leaving the
+    /// Decisions 0030 §4 and 0035: Remove deletes a saved secret only on a second press; leaving the
     /// page drops a field being typed (its keys can't land in it unseen).
     #[test]
     fn remove_takes_two_presses_and_leaving_drops_an_edit() {
