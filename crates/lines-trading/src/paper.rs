@@ -477,6 +477,13 @@ impl PaperBroker {
 
     /// Take liquidity from the book (opposite side) up to `limit` (`None`: any price).
     fn execute(&mut self, now: UtcMillis, id: OrderId, limit: Option<Price>) {
+        self.take(now, id, limit, None);
+    }
+
+    /// [`Self::execute`] for a stop triggered by a print at `from`: nothing fills better than
+    /// the print (the book may not have caught up with it within its batch), and the modelled
+    /// walk starts at the print when the book's deepest level is better than it.
+    fn take(&mut self, now: UtcMillis, id: OrderId, limit: Option<Price>, from: Option<Price>) {
         let Some(contract) = self.orders.get(&id).map(|p| p.order.contract) else {
             return;
         };
@@ -509,6 +516,14 @@ impl PaperBroker {
                 {
                     break;
                 }
+                if let Some(f) = from
+                    && match side {
+                        Side::Buy => p < f,
+                        Side::Sell => p > f,
+                    }
+                {
+                    continue;
+                }
                 let taken = m.taken.entry((is_bid, p.0)).or_insert(0);
                 let avail = size - *taken;
                 if avail <= 0 {
@@ -534,10 +549,15 @@ impl PaperBroker {
                     Side::Buy => tick,
                     Side::Sell => -tick,
                 };
-                // Modelled ticks taken are remembered like real levels (until the next book
-                // batch forgets prices it doesn't show): orders sent one after another keep
+                // Modelled ticks taken are remembered like real levels (until a book batch no
+                // longer shows their price): orders sent one after another keep
                 // climbing, so splitting an order never slips less than sending it whole.
-                let mut p = deepest.0;
+                // A stop's first modelled tick is no better than its print.
+                let mut p = match (side, from) {
+                    (Side::Sell, Some(f)) => deepest.0.min(f.0 + tick),
+                    (Side::Buy, Some(f)) => deepest.0.max(f.0 - tick),
+                    _ => deepest.0,
+                };
                 for n in 1..=SLIPPAGE_TICKS {
                     if left == 0 {
                         break;
@@ -916,7 +936,7 @@ impl PaperBroker {
                         .markets
                         .get(&contract)
                         .is_none_or(|m| m.book.levels(book_side(side.opposite())).next().is_none());
-                    self.execute(now, id, None);
+                    self.take(now, id, None, Some(price));
                     if no_book {
                         let after = self
                             .orders

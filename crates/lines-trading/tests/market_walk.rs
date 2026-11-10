@@ -706,13 +706,12 @@ fn an_option_remainder_closes_reduce_only_and_can_be_cancelled() {
     assert_eq!(r.pos(call()), 1, "nothing after the cancel");
 }
 
-/// A future's market remainder saved by an earlier version (which let it work on) fills whole on
-/// the next book batch, past a thin ask with the model; never left open.
-#[test]
-fn a_saved_future_remainder_fills_whole_on_the_next_book() {
+/// A paper broker restored with a future's market buy of 5 that has filled 2, as an earlier
+/// version (which let a remainder work on) could have saved it.
+fn saved_remainder(at: &str) -> (PaperBroker, UtcMillis) {
     use lines_trading::paper::PaperOrder;
-    use lines_trading::{Broker, BrokerEvent, Order, Role};
-    let now = UtcMillis::parse_iso(CME_OPEN).unwrap();
+    use lines_trading::{Order, Role};
+    let now = UtcMillis::parse_iso(at).unwrap();
     let mut b = PaperBroker::new(PaperConfig::default());
     b.open_account(acct(), Money::whole(100_000));
     let mut state = b.state();
@@ -739,33 +738,121 @@ fn a_saved_future_remainder_fills_whole_on_the_next_book() {
         queue_ahead: 0,
         held: false,
     });
-    let mut b = PaperBroker::from_state(PaperConfig::default(), state);
-    for i in [
+    (PaperBroker::from_state(PaperConfig::default(), state), now)
+}
+
+fn feed(b: &mut PaperBroker, now: UtcMillis, inputs: &[MarketInput]) {
+    use lines_trading::Broker;
+    for i in inputs {
+        b.market(now, es(), i);
+    }
+}
+
+fn book(bid: (f64, i64), ask: (f64, i64)) -> [MarketInput; 3] {
+    [
         MarketInput::BookClear,
         MarketInput::Book {
             side: BookSide::Bid,
-            price: px(6000.00),
-            qty: Qty(3),
+            price: px(bid.0),
+            qty: Qty(bid.1),
         },
         MarketInput::Book {
             side: BookSide::Ask,
-            price: px(6000.25),
-            qty: Qty(1),
+            price: px(ask.0),
+            qty: Qty(ask.1),
         },
-    ] {
-        b.market(now, es(), &i);
+    ]
+}
+
+fn print(p: f64, q: i64) -> MarketInput {
+    MarketInput::Trade {
+        time: UtcMillis(0),
+        price: px(p),
+        qty: Qty(q),
     }
+}
+
+/// The saved order's fills and whether it was cancelled, from the broker's events so far.
+fn saved_events(b: &mut PaperBroker, now: UtcMillis) -> (Vec<(Price, i64)>, bool) {
+    use lines_trading::{Broker, BrokerEvent};
     let mut out = Vec::new();
     b.poll(now, &mut out);
-    let fills: Vec<(Price, i64)> = out
+    let fills = out
         .iter()
         .filter_map(|e| match e {
             BrokerEvent::Fill { id, price, qty, .. } if *id == OrderId(7) => Some((*price, qty.0)),
             _ => None,
         })
         .collect();
+    let cancelled = out
+        .iter()
+        .any(|e| matches!(e, BrokerEvent::Cancelled { id, .. } if *id == OrderId(7)));
+    (fills, cancelled)
+}
+
+/// A saved remainder fills whole on the next book batch, past a thin ask with the model; never
+/// left open.
+#[test]
+fn a_saved_future_remainder_fills_whole_on_the_next_book() {
+    let (mut b, now) = saved_remainder(CME_OPEN);
+    feed(&mut b, now, &book((6000.00, 3), (6000.25, 1)));
+    let (fills, _) = saved_events(&mut b, now);
     assert_eq!(
         fills,
         [(px(6000.25), 1), (px(6000.50), 1), (px(6000.75), 1)]
     );
+}
+
+/// Before its batch is walked, a print takes the saved remainder first, at the print and up to
+/// what it printed, but only at or beyond the inside on its side: a print at the bid never fills
+/// a buy. With no inside at all, a print fills nothing.
+#[test]
+fn a_print_fills_a_saved_remainder_only_at_or_beyond_the_ask() {
+    let (mut b, now) = saved_remainder(CME_OPEN);
+    feed(&mut b, now, &[print(6000.00, 9)]);
+    feed(&mut b, now, &book((6000.00, 3), (6000.25, 1)));
+    feed(&mut b, now, &[print(6000.00, 9), print(6000.25, 2)]);
+    let (fills, _) = saved_events(&mut b, now);
+    assert_eq!(fills[0], (px(6000.25), 2), "the print at the ask, first");
+    assert_eq!(fills.iter().map(|f| f.1).sum::<i64>(), 3, "never more");
+}
+
+/// The session's close ends a saved remainder: nothing fills at the reopen.
+#[test]
+fn the_session_close_ends_a_saved_remainder() {
+    let (mut b, _) = saved_remainder("2026-11-10T21:59:00Z");
+    let reopen = UtcMillis::parse_iso("2026-11-10T23:00:00Z").unwrap();
+    feed(&mut b, reopen, &book((6010.00, 3), (6010.25, 50)));
+    let (fills, cancelled) = saved_events(&mut b, reopen);
+    assert!(fills.is_empty());
+    assert!(cancelled);
+}
+
+/// A stop fired by a print that comes before its batch's book update: the stale bid above the
+/// print isn't taken, and no fill is better than the print.
+#[test]
+fn a_stop_fired_before_the_book_catches_up_never_beats_the_print() {
+    let mut r = Rig::new(CME_OPEN);
+    let stop = long_with_stop(&mut r, 5);
+    r.top((6000.00, 1), (6000.25, 10));
+    let time = UtcMillis(r.t + 1);
+    r.market(
+        es(),
+        &[
+            MarketInput::Trade {
+                time,
+                price: px(5999.00),
+                qty: Qty(1),
+            },
+            MarketInput::BookClear,
+            MarketInput::Book {
+                side: BookSide::Bid,
+                price: px(5998.75),
+                qty: Qty(1),
+            },
+        ],
+    );
+    let want: Vec<(Price, i64)> = (0..5).map(|n| (ticks(5999.00, -n), 1)).collect();
+    assert_eq!(r.fills(stop), want);
+    assert_eq!(r.pos(es()), 0);
 }
