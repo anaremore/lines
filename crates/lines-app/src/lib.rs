@@ -1166,6 +1166,7 @@ fn store_flags(cli: &Cli) -> data_dir::StoreFlags {
         budget_gb: cli.store_budget_gb,
         depth: cli.store_depth.clone(),
         store_dir: cli.store_dir.is_some(),
+        store_dir_path: cli.store_dir.clone(),
     }
 }
 

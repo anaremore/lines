@@ -2130,7 +2130,15 @@ pub fn flag_text(st: &Setting, f: &Facts) -> Option<String> {
 fn data_status(st: &Setting, p: &Prefs, f: &Facts) -> Option<String> {
     use crate::data_dir::StorePrefs;
     if st.key == DATA_FOLDER_KEY {
-        return f.folder.status();
+        let store = f
+            .store_flags
+            .store_dir_path
+            .as_ref()
+            .map(|d| format!("Its store is at {} for this run (--store-dir)", d.display()));
+        return match (f.folder.status(), store) {
+            (Some(a), Some(b)) => Some(format!("{a} · {b}")),
+            (a, b) => a.or(b),
+        };
     }
     if let Some((flag, _)) = data_flag(st, f) {
         let saved = match (st.get)(p, &Target::default(), f) {

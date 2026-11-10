@@ -31,10 +31,11 @@
 //!
 //! **Journal** (roadmap 8c): the trading thread also feeds `lines_trading::journal` (round
 //! trips from fills, MAE/MFE from the same market batches), saved append-only to
-//! `<config dir>/journal/<source>.jsonl` beside the paper file, under the same rule: replays
+//! `<journal>/<source>.jsonl` (`crate::data_dir::Locations`: the data folder's `journal/`, or the
+//! config folder's on an install from before the data folder), under the same rule: replays
 //! and screenshots keep it in memory. A journal this build can't read (newer, damaged
 //! header) is left as it is and nothing is written to it this run. A saved journal's trades
-//! also get a trade snapshot in `<config dir>/journal/shots/` (`crate::journal_shots`).
+//! also get a trade snapshot in `<journal>/shots/` (`crate::journal_shots`).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};

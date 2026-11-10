@@ -4085,7 +4085,8 @@ fn notify_windows(cx: &mut App) {
     }
 }
 
-/// Write the journal's closed trades as CSV to `<config dir>/journal/export-<time>.csv` (on
+/// Write the journal's closed trades as CSV to `<journal>/export-<time>.csv`
+/// (`crate::data_dir::Locations`; on
 /// the journal's thread; a failure is logged) and say where.
 fn export_journal(cx: &mut App) {
     let Some(t) = crate::trading::Trading::try_global(cx) else {

@@ -63,6 +63,40 @@ pub struct Pointer {
 pub struct PendingMove {
     /// The folder the data is moving from (the one in use when the move was chosen).
     pub from: PathBuf,
+    /// This move's id, also in `<from>/.lines-move-source` ([`MARKER_FILE`]): a folder at
+    /// `from` without it (recreated empty, another disk with the same letter, an unmounted
+    /// mount point) is never moved from.
+    #[serde(default)]
+    pub id: String,
+}
+
+/// In the folder being moved from: the pending move's id.
+pub const MARKER_FILE: &str = ".lines-move-source";
+
+/// A new move's id: unique enough to tell this move's source from any other folder.
+pub fn new_move_id() -> String {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{ns:x}-{:x}", std::process::id())
+}
+
+/// Mark `from` as the source of move `id`.
+pub fn write_marker(from: &Path, id: &str) -> io::Result<()> {
+    let path = from.join(MARKER_FILE);
+    let tmp = from.join(format!("{MARKER_FILE}.tmp"));
+    std::fs::write(&tmp, id.as_bytes())?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Whether `from` holds move `id`'s marker.
+fn has_marker(from: &Path, id: &str) -> bool {
+    std::fs::read_to_string(from.join(MARKER_FILE)).is_ok_and(|m| m.trim() == id)
+}
+
+/// Remove `from`'s marker (best effort).
+fn remove_marker(from: &Path) {
+    let _ = std::fs::remove_file(from.join(MARKER_FILE));
 }
 
 /// A file without `version` has version 1's fields.
@@ -614,16 +648,26 @@ fn source_of(from: &Path, config: Option<&Path>, name: &str) -> Option<PathBuf> 
 /// and check every file, except big-item files the background copy checked (`record.files`)
 /// still the same size and time in both folders. Never overwrites a file the move didn't write
 /// (`record.written`); without a record, a `to` already holding Lines data is refused. An
-/// item whose source and target are one folder (or one inside the other) is refused. Removes
+/// item whose source and target are one folder (or one inside the other) is refused, and so
+/// is a `from` without this move's marker (`id`, [`MARKER_FILE`]). Removes
 /// nothing: see [`remove_old`]. `record` comes back with what this start wrote.
 pub fn finish_move(
     from: &Path,
+    id: &str,
     to: &Path,
     config: Option<&Path>,
     record: &mut Option<Verified>,
 ) -> Result<Moved, String> {
     if !from.is_dir() {
         return Err(format!("{} wasn't found", from.display()));
+    }
+    // Only the folder this move was chosen from: never one recreated empty at its path (a run
+    // while it was missing), another disk given its letter, or a bare mount point.
+    if !has_marker(from, id) {
+        return Err(format!(
+            "{} isn't the folder being moved from (its marker is missing)",
+            from.display()
+        ));
     }
     if same_place(from, to) {
         return Ok(Moved::default());
@@ -769,7 +813,7 @@ pub fn start(
             let mut record = os_default
                 .as_deref()
                 .and_then(|d| read_verified(d, &m.from, &to));
-            let finished = finish_move(&m.from, &to, config, &mut record);
+            let finished = finish_move(&m.from, &m.id, &to, config, &mut record);
             // What this start wrote stays recorded for the next try.
             if finished.is_err()
                 && let (Some(d), Some(r)) = (os_default.as_deref(), &record)
@@ -793,6 +837,7 @@ pub fn start(
                             }
                             saved = Some(p);
                             notices.push(format!("Data moved to {}", to.display()));
+                            remove_marker(&m.from);
                             if let Some(n) = remove_old(&moved) {
                                 notices.push(n);
                             }
@@ -817,9 +862,10 @@ pub fn start(
                         )
                     } else {
                         // The folder being moved from is gone (a drive not plugged in). This run
-                        // still points at it, so the move can finish when it is back; nothing
-                        // in it or in the copy is touched. Said plainly: what this run writes
-                        // there starts empty.
+                        // still points at it, so the move can finish when that folder, with its
+                        // marker, is back; one this run recreates at the path has no marker and
+                        // is never moved from. Nothing in it or in the copy is touched. Said
+                        // plainly: what this run writes there starts empty.
                         let copy = if record.as_ref().is_some_and(|r| !r.files.is_empty()) {
                             format!("the copy checked so far is in {}", to.display())
                         } else {
@@ -1167,6 +1213,12 @@ impl FolderFacts {
         self.next.is_some()
     }
 
+    /// "Use the default folder" (its button, Alt+D) is offered: changeable, nothing waiting,
+    /// and the default isn't the folder in use.
+    pub fn can_use_default(&self) -> bool {
+        self.changeable() && !self.pending() && !self.on_default
+    }
+
     /// The row's value: the folder in use.
     pub fn text(&self) -> String {
         match &self.in_use {
@@ -1299,6 +1351,20 @@ pub fn refresh_now() {
     bump();
 }
 
+/// Keep facts a worker worked out, only if they are for the key still being worked out (a
+/// newer pointer's facts are never replaced by an older one's); that key is then done.
+fn store_derived(d: Derived) -> bool {
+    let mut busy = DERIVING.lock().unwrap_or_else(|e| e.into_inner());
+    if busy.as_ref() != Some(&d.key) {
+        return false;
+    }
+    *busy = None;
+    *DERIVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(d);
+    drop(busy);
+    bump();
+    true
+}
+
 /// The cached disk facts for `key`, or (while a thread works them out) a guess from the paths
 /// alone, never a disk call.
 fn derived_for(run: &Run, key: Option<PathBuf>) -> Derived {
@@ -1317,9 +1383,7 @@ fn derived_for(run: &Run, key: Option<PathBuf>) -> Derived {
         let _ = std::thread::Builder::new()
             .name("lines-data-facts".into())
             .spawn(move || {
-                let d = derive(&run2, key2);
-                *DERIVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(d);
-                bump();
+                store_derived(derive(&run2, key2));
             });
     }
     let in_use = run.locations.root.clone();
@@ -1390,6 +1454,7 @@ pub fn choose(to: PathBuf, with_data: bool) -> Result<(), String> {
         data_dir: to.clone(),
         pending_move: with_data.then(|| PendingMove {
             from: in_use.clone(),
+            id: new_move_id(),
         }),
     };
     let copy = with_data.then(|| {
@@ -1415,6 +1480,11 @@ pub fn choose(to: PathBuf, with_data: bool) -> Result<(), String> {
         .spawn(move || {
             let written = ordered(Some(seq), || {
                 remove_verified(&os_default);
+                // The source's marker first: a pointer naming a move always has one.
+                match &pointer.pending_move {
+                    Some(m) => write_marker(&m.from, &m.id)?,
+                    None => remove_marker(&in_use),
+                }
                 write_pointer(&os_default, &pointer)
             });
             match written {
@@ -1581,6 +1651,7 @@ pub fn cancel() -> Result<(), String> {
         data_dir: in_use.clone(),
         pending_move: None,
     };
+    let marker_dir = in_use.clone();
     let seq = next_seq();
     let before = with_session(|s| {
         let had_copy = s
@@ -1604,6 +1675,7 @@ pub fn cancel() -> Result<(), String> {
         .name("lines-data-move".into())
         .spawn(move || {
             let written = ordered(Some(seq), || {
+                remove_marker(&marker_dir);
                 remove_verified(&os_default);
                 write_pointer(&os_default, &pointer)
             });
@@ -1668,7 +1740,10 @@ pub fn show_for_screenshot(state: &str) -> Result<(), String> {
     with_session(|s| {
         s.pointer = Some(Some(Pointer {
             data_dir: to.clone(),
-            pending_move: moving.then(|| PendingMove { from: from.clone() }),
+            pending_move: moving.then(|| PendingMove {
+                from: from.clone(),
+                id: "screenshot".into(),
+            }),
         }));
         s.copy = copy;
         s.problem = (kind == "failed").then(|| {
@@ -1725,6 +1800,8 @@ pub struct StoreFlags {
     pub depth: Option<Vec<String>>,
     /// `--store-dir`: a store for this run wherever the source is.
     pub store_dir: bool,
+    /// Where `--store-dir` put it.
+    pub store_dir_path: Option<PathBuf>,
 }
 
 /// The store this run keeps.

@@ -19,13 +19,22 @@ fn read(p: &Path) -> Vec<u8> {
     std::fs::read(p).unwrap()
 }
 
+/// The tests' move id.
+const MOVE: &str = "test-move";
+
+/// The pointer, for a move from `from` (marked as its source when it is there, as choosing
+/// the move does).
 fn pointer(os: &Path, to: &Path, from: Option<&Path>) {
+    if let Some(f) = from.filter(|f| f.is_dir()) {
+        write_marker(f, MOVE).unwrap();
+    }
     write_pointer(
         os,
         &Pointer {
             data_dir: to.to_path_buf(),
             pending_move: from.map(|f| PendingMove {
                 from: f.to_path_buf(),
+                id: MOVE.into(),
             }),
         },
     )
@@ -189,6 +198,10 @@ fn a_move_copies_checks_switches_then_removes_only_what_it_moved() {
     assert_eq!(read(&from.join("other/keep.bin")), b"not Lines'");
     assert_eq!(read(&config.join("settings.json")), b"{\"version\":1}");
     assert!(from.is_dir(), "never the folder itself");
+    assert!(
+        !from.join(MARKER_FILE).exists(),
+        "the marker goes with the move"
+    );
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -266,8 +279,8 @@ fn nested_folders_are_refused() {
     );
     assert!(probe_writable(&d.join("missing")).is_err());
     // A move between nested folders is refused at the start too.
-    assert!(finish_move(&cur, &cur.join("inner"), None, &mut None).is_err());
-    assert!(finish_move(&cur.join("inner"), &cur, None, &mut None).is_err());
+    assert!(finish_move(&cur, MOVE, &cur.join("inner"), None, &mut None).is_err());
+    assert!(finish_move(&cur.join("inner"), MOVE, &cur, None, &mut None).is_err());
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -487,10 +500,11 @@ fn a_store_another_lines_is_writing_is_not_moved() {
         .open(from.join("store-v1/coinbase/BTC-USD/writer.lock"))
         .unwrap();
     lock.lock().unwrap();
-    let e = finish_move(&from, &to, None, &mut None).unwrap_err();
+    write_marker(&from, MOVE).unwrap();
+    let e = finish_move(&from, MOVE, &to, None, &mut None).unwrap_err();
     assert!(e.contains("another Lines"), "{e}");
     drop(lock);
-    assert!(finish_move(&from, &to, None, &mut None).is_ok());
+    assert!(finish_move(&from, MOVE, &to, None, &mut None).is_ok());
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -559,6 +573,7 @@ fn flags_win_over_saved_store_settings_for_their_run() {
         budget_gb: Some(2.5),
         depth: Some(vec!["ES".into()]),
         store_dir: true,
+        store_dir_path: Some(PathBuf::from("D:/of-store")),
     };
     assert_eq!(
         store_run(&flags, &saved),
@@ -680,7 +695,7 @@ fn an_item_moved_onto_itself_is_refused_and_nothing_is_removed() {
         ..Verified::default()
     });
     let other = PathBuf::from(config.display().to_string().replace('\\', "/"));
-    assert!(finish_move(&from, &other, Some(&config), &mut rec).is_err());
+    assert!(finish_move(&from, MOVE, &other, Some(&config), &mut rec).is_err());
     assert!(config.join("paper/coinbase.json").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -963,4 +978,118 @@ fn no_period_hard_against_a_path() {
         assert!(!p.contains(&format!("{}.", path.display())), "{p}");
     }
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A source missing at a start, recreated empty by that run (or a different disk on its
+/// letter, or a bare mount point), is never moved from: no marker, no switch, nothing moved.
+/// The real source coming back with its marker finishes the move.
+#[test]
+fn only_the_marked_source_is_ever_moved_from() {
+    let d = dir("marker");
+    let (os, from, to) = (d.join("os"), d.join("old"), d.join("new"));
+    populate(&from);
+    std::fs::create_dir_all(&to).unwrap();
+    pointer(&os, &to, Some(&from));
+    // The drive is unplugged at the start: this run uses an empty folder at its path ...
+    let away = d.join("old-away");
+    std::fs::rename(&from, &away).unwrap();
+    let (run, _) = start(None, Some(os.clone()), None, true);
+    assert_eq!(run.locations.root, Some(from.clone()));
+    // ... and recreates it (its logs, a paper save).
+    write(&from.join("paper/coinbase.json"), b"fresh paper");
+    let (run, _) = start(None, Some(os.clone()), None, true);
+    assert_eq!(run.locations.root, Some(from.clone()), "no switch");
+    let problem = run.problem.unwrap();
+    assert!(
+        problem.contains("isn't the folder being moved from (its marker is missing)"),
+        "{problem}"
+    );
+    let (p, _) = read_pointer(&pointer_path(&os));
+    assert!(p.unwrap().pending_move.is_some(), "still pending");
+    assert_eq!(read(&from.join("paper/coinbase.json")), b"fresh paper");
+    assert!(!to.join("paper").exists(), "nothing moved");
+    // An empty mount-point-style folder from the start: no switch either.
+    let mount = d.join("mount");
+    std::fs::create_dir_all(&mount).unwrap();
+    write_pointer(
+        &os,
+        &Pointer {
+            data_dir: to.clone(),
+            pending_move: Some(PendingMove {
+                from: mount.clone(),
+                id: MOVE.into(),
+            }),
+        },
+    )
+    .unwrap();
+    let (run, _) = start(None, Some(os.clone()), None, true);
+    assert_eq!(run.locations.root, Some(mount.clone()));
+    assert!(run.problem.unwrap().contains("marker is missing"));
+    // The real source comes back with its marker: the move finishes.
+    let _ = std::fs::remove_dir_all(&from);
+    std::fs::rename(&away, &from).unwrap();
+    pointer(&os, &to, Some(&from));
+    let (run, notices) = start(None, Some(os.clone()), None, true);
+    assert_eq!(run.locations.root, Some(to.clone()), "{notices:?}");
+    assert!(to.join("journal/coinbase.jsonl").exists());
+    assert!(!from.join(MARKER_FILE).exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The folder facts cache keeps only the facts for the key being worked out: a worker that
+/// finishes for an older pointer never replaces a newer one's, and the key is then done.
+#[test]
+fn stale_folder_facts_are_dropped() {
+    let key = |s: &str| Some(PathBuf::from(s));
+    let facts = |k: Option<PathBuf>| Derived {
+        key: k,
+        ..Derived::default()
+    };
+    *DERIVING.lock().unwrap() = Some(key("new"));
+    assert!(!store_derived(facts(key("old"))), "stale: dropped");
+    assert_eq!(*DERIVING.lock().unwrap(), Some(key("new")));
+    assert!(store_derived(facts(key("new"))));
+    assert_eq!(*DERIVING.lock().unwrap(), None, "done");
+    assert_eq!(
+        DERIVED.lock().unwrap().as_ref().map(|d| d.key.clone()),
+        Some(key("new"))
+    );
+}
+
+/// Alt+D (and its button): only when the folder can change, nothing waits, and the default
+/// isn't in use.
+#[test]
+fn use_the_default_folder_is_offered_only_when_it_can_apply() {
+    let f = FolderFacts {
+        in_use: Some(PathBuf::from("D:/LinesData")),
+        os_default: Some(PathBuf::from("C:/Lines")),
+        ..FolderFacts::default()
+    };
+    assert!(f.can_use_default());
+    let on_default = FolderFacts {
+        on_default: true,
+        ..f.clone()
+    };
+    assert!(!on_default.can_use_default());
+    let waiting = FolderFacts {
+        next: Some(PathBuf::from("E:/x")),
+        ..f.clone()
+    };
+    assert!(!waiting.can_use_default());
+    let env = FolderFacts { by: By::Env, ..f };
+    assert!(!env.can_use_default());
+}
+
+/// With --store-dir, the Data folder row says where this run's store is.
+#[test]
+fn the_folder_row_names_a_store_dir() {
+    use crate::settings_schema::{Facts, Prefs, Target, by_key, status};
+    let mut f = Facts::default();
+    let st = by_key(crate::settings_schema::DATA_FOLDER_KEY).unwrap();
+    assert_eq!(status(st, &Prefs::default(), &Target::default(), &f), None);
+    f.store_flags.store_dir_path = Some(PathBuf::from("D:/of-store"));
+    assert_eq!(
+        status(st, &Prefs::default(), &Target::default(), &f).as_deref(),
+        Some("Its store is at D:/of-store for this run (--store-dir)")
+    );
 }

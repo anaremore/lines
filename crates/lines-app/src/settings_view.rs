@@ -1283,9 +1283,7 @@ impl SettingsWindow {
             ("d", false, false, true) => {
                 let f = &self.facts.folder;
                 if let Some(i) = sel.filter(|&i| schema::all()[i].key == schema::DATA_FOLDER_KEY)
-                    && f.changeable()
-                    && !f.pending()
-                    && !f.on_default
+                    && f.can_use_default()
                 {
                     self.data_pick(i, true, cx);
                 }
@@ -1581,7 +1579,7 @@ impl SettingsWindow {
                 v.data_pick(i, false, cx);
             }),
         ));
-        if !f.on_default {
+        if f.can_use_default() {
             row = row.child(
                 button(2, "Use the default folder · Alt+D", true).on_mouse_down(
                     MouseButton::Left,
