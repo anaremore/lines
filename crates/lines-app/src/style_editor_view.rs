@@ -553,7 +553,7 @@ fn choice(t: &Theme, on: bool, label: String) -> gpui::Div {
         .text_size(crate::zoom::ui(12.0))
         .text_color(t.text_main)
         .when(on, |d| {
-            d.bg(t.accent.opacity(0.28))
+            d.bg(t.element_selected)
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("✓")
         })
@@ -804,7 +804,7 @@ pub fn render(
                         .border_color(t.control_edge)
                         .text_size(crate::zoom::ui(12.0))
                         .text_color(if *saved { t.text_dim } else { t.text_main })
-                        .hover(|s| s.bg(t.accent.opacity(0.12)))
+                        .hover(|s| s.bg(t.element_hover))
                         .child(label)
                         .on_mouse_down(MouseButton::Left, click(0)),
                 ),

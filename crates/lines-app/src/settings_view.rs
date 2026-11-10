@@ -36,12 +36,6 @@ use crate::workspace::Workspace;
 pub struct SettingsWindowGlobal(pub Option<WindowHandle<SettingsWindow>>);
 impl gpui::Global for SettingsWindowGlobal {}
 
-/// The fill of a value in force under a flag: the accent faded, under main text (AA, tested
-/// as `theme::locked_fill`).
-fn locked_fill(t: &Theme) -> gpui::Hsla {
-    crate::theme::locked_fill(t)
-}
-
 /// An error from the data folder's choices, worded as a failure.
 fn failed(e: String) -> String {
     if crate::data_dir::is_problem(&e) {
@@ -1585,7 +1579,17 @@ impl SettingsWindow {
                 .border_1()
                 .border_color(t.control_edge)
                 .when(on, |d| d.cursor_pointer())
-                .when(!on, |d| d.text_color(t.text_dim).opacity(0.6))
+                // Dimmed, not faded (design.md §6): a 2 px dashed muted edge and dim text, the
+                // extra pixel taken from the padding and the margin so it keeps its size and
+                // center beside an enabled button.
+                .when(!on, |d| {
+                    d.border_2()
+                        .border_dashed()
+                        .border_color(t.border_disabled)
+                        .px(crate::zoom::ui(8.0) - px(1.0))
+                        .my(px(-1.0))
+                        .text_color(t.text_dim)
+                })
                 .child(label)
         };
         if !f.changeable() {
@@ -1680,7 +1684,17 @@ impl SettingsWindow {
                 .rounded_sm()
                 .when(strong && on, |d| d.font_weight(FontWeight::BOLD))
                 .when(on, |d| d.cursor_pointer())
-                .when(!on, |d| d.text_color(t.text_dim).opacity(0.6))
+                // Dimmed, not faded (design.md §6): a 2 px dashed muted edge and dim text, the
+                // extra pixel taken from the padding and the margin so it keeps its size and
+                // center beside an enabled button.
+                .when(!on, |d| {
+                    d.border_2()
+                        .border_dashed()
+                        .border_color(t.border_disabled)
+                        .px(crate::zoom::ui(8.0) - px(1.0))
+                        .my(px(-1.0))
+                        .text_color(t.text_dim)
+                })
                 .child(label)
         };
         let paths = self.data_paths();
@@ -1782,7 +1796,7 @@ impl SettingsWindow {
             } else {
                 format!("{sym} (unavailable)")
             };
-            let fill = if locked { locked_fill(&t) } else { t.accent };
+            let fill = if locked { t.element_selected } else { t.accent };
             let text = if on && known && !locked {
                 t.bg
             } else if known || on {
@@ -1945,7 +1959,7 @@ impl SettingsWindow {
                             .when(!locked, |d| d.cursor_pointer())
                             .when(on && !locked, |d| d.bg(t.accent).text_color(t.bg))
                             .when(on && locked, |d| {
-                                d.bg(locked_fill(&t)).text_color(t.text_main)
+                                d.bg(t.element_selected).text_color(t.text_main)
                             })
                             .child(name)
                             .on_mouse_down(

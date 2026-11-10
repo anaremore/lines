@@ -95,7 +95,7 @@ pub fn render(
                         } else {
                             gpui::transparent_black()
                         })
-                        .when(selected, |d| d.bg(t.accent.opacity(0.16)))
+                        .when(selected, |d| d.bg(t.ghost_selected))
                         .child(
                             div()
                                 .w(crate::zoom::ui(12.0))
@@ -163,10 +163,17 @@ pub fn render(
                         .py(px(1.0))
                         .rounded_sm()
                         .border_1()
-                        .border_color(if sel { t.accent } else { t.axis_line })
+                        .border_color(if sel {
+                            // The keys' chip: a main-text edge, seen on a chip that is on too.
+                            t.text_main
+                        } else if *on {
+                            t.accent
+                        } else {
+                            t.axis_line
+                        })
                         .text_size(crate::zoom::ui(12.0))
                         .text_color(t.text_main)
-                        .when(*on, |d| d.bg(t.accent.opacity(0.22)))
+                        .when(*on, |d| d.bg(t.element_selected))
                         .on_mouse_down(MouseButton::Left, click(i, MenuPart::Primary));
                     let chip = match swatch {
                         Swatch::Study(c) => chip.child(
@@ -204,7 +211,7 @@ pub fn render(
                         } else {
                             gpui::transparent_black()
                         })
-                        .when(selected, |d| d.bg(t.accent.opacity(0.16)))
+                        .when(selected, |d| d.bg(t.ghost_selected))
                         .child(
                             div()
                                 .id(("action-label", i))

@@ -2864,7 +2864,7 @@ fn menu_row<V: TradePane>(
     cx: &mut Context<V>,
     act: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let accent = t.accent;
+    let (accent, lit) = (t.accent, t.ghost_selected);
     let mark = match mark {
         Mark::Box(on) => div()
             .size(crate::zoom::ui(11.0))
@@ -2892,7 +2892,7 @@ fn menu_row<V: TradePane>(
         .border_l_2()
         .border_color(gpui::transparent_black())
         .cursor_pointer()
-        .hover(move |s| s.bg(accent.opacity(0.16)).border_color(accent))
+        .hover(move |s| s.bg(lit).border_color(accent))
         .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
         // A row with a key may cut its label before the caps (a narrow window); a row without
         // one (a bracket preset: money-relevant) is named in full.
@@ -4385,6 +4385,8 @@ fn join_buttons<V: TradePane>(
         let price = p.map(|p| product.price.format::<32>(p));
         let (words, price) = join_text(is_bid, price.as_ref().map(|p| p.as_str()), width);
         let line = if is_bid { t.up } else { t.down };
+        // Raised to the panel, not a state token: the price is in the side's color, AA on
+        // `panel` but not on the light themes' tinted states.
         let panel = t.panel;
         div()
             .id(id)
@@ -4924,7 +4926,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
     }
     let trading = Trading::try_global(cx)?;
     let current = v.trade_ref().account.clone();
-    let accent = t.accent;
+    let lit = t.ghost_selected;
     // The trigger's label, only while recording (and only with a current account).
     let trigger = crate::layout_rec::on()
         .then(|| current.as_ref().and_then(|a| trading.account(a)))
@@ -4972,7 +4974,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                 .flex()
                 .flex_col()
                 .cursor_pointer()
-                .hover(move |s| s.bg(accent.opacity(0.18)))
+                .hover(move |s| s.bg(lit))
                 .child(
                     div()
                         .flex()
@@ -5069,7 +5071,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                     .px_2()
                     .py_1()
                     .cursor_pointer()
-                    .hover(move |s| s.bg(accent.opacity(0.18)))
+                    .hover(move |s| s.bg(lit))
                     // Destructive rows go last, in their token (design.md §6); the words say it.
                     .text_color(t.destructive)
                     .whitespace_nowrap()

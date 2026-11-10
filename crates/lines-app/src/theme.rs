@@ -82,6 +82,29 @@ pub struct Theme {
     /// Brand accent (signal violet): focus, selection, active state such as manual price
     /// scale. Never used for up/down.
     pub accent: Hsla,
+    /// Interaction states (design.md §5, "State tokens"): opaque fills, chosen per theme
+    /// rather than derived as a faded accent, which reads differently on paper than on ink.
+    /// Each keeps the text drawn on it at AA and `control_edge` and `accent` edges on it at
+    /// 3:1, and each stronger state stands further from `panel` than the weaker one (tested).
+    /// The edge of a selected or focused control is `accent`; a dimmed control (nothing it
+    /// would do now) is dashed, with `text_dim`, never faded: its edge `border_disabled`, or
+    /// its side's color.
+    ///
+    /// A frameless row under the pointer, in a list that also has a highlighted row (the
+    /// picker, the workspace list).
+    pub ghost_hover: Hsla,
+    /// The highlighted row of a menu or list, beside an `accent` left edge: the row Enter acts
+    /// on, or the row under the pointer where that is the highlight (menus, the trade panel's
+    /// lists, the timeframe list).
+    pub ghost_selected: Hsla,
+    /// A framed button or field under the pointer.
+    pub element_hover: Hsla,
+    /// A control that is on (a chip in force, the style editor's chosen option) or a value in
+    /// force under a flag (Settings' locked chips), with `text_main` on it.
+    pub element_selected: Hsla,
+    /// A dimmed control's dashed edge (Settings' disabled buttons): 3:1 on `panel` and `bg`
+    /// (WCAG 1.4.11), and quieter than `control_edge`, so it never reads as enabled (tested).
+    pub border_disabled: Hsla,
     /// Shape cue for direction (in addition to colour).
     pub hollow: HollowBodies,
     /// DOM: depth bars behind bid / ask sizes (subtle; text sits on them).
@@ -563,7 +586,7 @@ impl Theme {
             grid: c(0x20242f),
             session_divider: c(0x3a4256),
             axis_line: c(0x2a3040),
-            control_edge: c(0x6e7489),
+            control_edge: c(0x737a8f),
             text_dim: c(0x9a9fb2),
             text_main: c(brand::PAPER),
             up: c(up),
@@ -574,6 +597,12 @@ impl Theme {
             cross_tag: c(0x2b3142),
             on_cross_tag: c(brand::PAPER),
             accent: c(brand::VIOLET),
+            // Violet-tinted steps up from the panel.
+            ghost_hover: c(0x222438),
+            ghost_selected: c(0x2b2b49),
+            element_hover: c(0x272843),
+            element_selected: c(0x2e2e50),
+            border_disabled: c(0x64697e),
             hollow: HollowBodies::Up,
             bid_bar: c(up).opacity(0.16),
             ask_bar: c(down).opacity(0.16),
@@ -625,7 +654,7 @@ impl Theme {
             grid: c(0xe4e2ec),
             session_divider: c(0xb4b0c6),
             axis_line: c(0xcdcad9),
-            control_edge: c(0x7d7a8c),
+            control_edge: c(0x726f82),
             text_dim: c(0x565b6e),
             text_main: c(brand::INK),
             up: c(up),
@@ -636,6 +665,13 @@ impl Theme {
             cross_tag: c(0x2e3344),
             on_cross_tag: c(brand::PAPER),
             accent: c(violet),
+            // Violet-tinted steps down from paper, as far as dim text (AA) and control edges
+            // (3:1) on them allow.
+            ghost_hover: c(0xdfdbf2),
+            ghost_selected: c(0xd6cff2),
+            element_hover: c(0xd9d5f1),
+            element_selected: c(0xcfc9f0),
+            border_disabled: c(0x858296),
             hollow: HollowBodies::Up,
             bid_bar: c(up).opacity(0.12),
             ask_bar: c(down).opacity(0.12),
@@ -707,12 +743,6 @@ pub fn source_colour(rgba: u32, alpha: f32) -> Hsla {
         a: (rgba & 0xff) as f32 / 255.0 * alpha.clamp(0.0, 1.0),
     }
     .into()
-}
-
-/// Settings: the fill of a value in force under a flag (a dimmed "On", a chosen depth chip):
-/// the accent faded, always under `text_main` (AA on `bg` and `panel`, tested).
-pub fn locked_fill(t: &Theme) -> Hsla {
-    t.accent.opacity(0.22)
 }
 
 /// `top` (possibly translucent) composited over opaque `bottom`, as drawn.
@@ -839,40 +869,13 @@ mod tests {
             // The trade panel's position card: the target's price in its color (the stop's is
             // `down`, above).
             ("order_target", t.order_target, "panel", t.panel),
-            // Menus: a value or shortcut on the selected row; a destructive row, also when
-            // selected (`crate::menu`).
-            (
-                "text_dim",
-                t.text_dim,
-                "selected row",
-                over(t.accent.opacity(0.16), t.panel),
-            ),
+            // Menus: a destructive row (on the highlighted row: `state_tokens_carry_their_text`).
             ("destructive", t.destructive, "panel", t.panel),
             // Settings › Data: a failure or refusal line (with "Failed:" / "Refused:") on a row
             // and on the selected row (`panel`); pending, progress and flag lines in `warn`.
             ("destructive", t.destructive, "bg", t.bg),
             ("warn", t.warn, "bg", t.bg),
             ("warn", t.warn, "panel", t.panel),
-            // A Settings value in force under a flag: main text on the faded fill, on a row
-            // and on the selected row.
-            (
-                "text_main",
-                t.text_main,
-                "locked fill on bg",
-                over(locked_fill(t), t.bg),
-            ),
-            (
-                "text_main",
-                t.text_main,
-                "locked fill on panel",
-                over(locked_fill(t), t.panel),
-            ),
-            (
-                "destructive",
-                t.destructive,
-                "selected row",
-                over(t.accent.opacity(0.16), t.panel),
-            ),
         ]
     }
 
@@ -1018,6 +1021,102 @@ mod tests {
             // The check isn't a blanket fallback: the theme's own series keep their colors.
             assert!(colored > 0, "{}", t.name);
         }
+    }
+
+    /// A state token's check: its name, its fill, the text on it, the edges and marks on it.
+    type Family<'a> = (&'a str, Hsla, Vec<(&'a str, Hsla)>, Vec<(&'a str, Hsla)>);
+
+    /// The interaction-state tokens (design.md §5, "State tokens"), one family at a time, in
+    /// every theme and palette: what is drawn on each state meets AA (text) or 3:1 (an edge or
+    /// mark meant to be seen, WCAG 1.4.11), and each stronger state stands further from the
+    /// panel than the weaker one, so selected never reads as merely hovered.
+    #[test]
+    fn state_tokens_carry_their_text() {
+        let mut failures = Vec::new();
+        for t in Theme::all() {
+            // (state, fill, text on it, edges and marks on it)
+            let families: [Family; 4] = [
+                // Ghost rows: the picker's and workspace list's hovered row, a header icon (an
+                // icon that is on is drawn in the accent).
+                (
+                    "ghost_hover",
+                    t.ghost_hover,
+                    vec![("text_main", t.text_main), ("text_dim", t.text_dim)],
+                    vec![("control_edge", t.control_edge), ("accent", t.accent)],
+                ),
+                // A menu's highlighted row: its label, hint and shortcut, a destructive row,
+                // a switch's box, the accent edge beside it (no row's text is the accent).
+                (
+                    "ghost_selected",
+                    t.ghost_selected,
+                    vec![
+                        ("text_main", t.text_main),
+                        ("text_dim", t.text_dim),
+                        ("destructive", t.destructive),
+                    ],
+                    vec![("control_edge", t.control_edge), ("accent", t.accent)],
+                ),
+                // A framed button under the pointer: its label (dim once saved, in the style
+                // editor) and its edge (`control_edge` or the accent).
+                (
+                    "element_hover",
+                    t.element_hover,
+                    vec![("text_main", t.text_main), ("text_dim", t.text_dim)],
+                    vec![("control_edge", t.control_edge), ("accent", t.accent)],
+                ),
+                // A chip that is on, a locked value: main text, its edge (the accent, or a
+                // locked depth chip's dashed `control_edge`).
+                (
+                    "element_selected",
+                    t.element_selected,
+                    vec![("text_main", t.text_main)],
+                    vec![("control_edge", t.control_edge), ("accent", t.accent)],
+                ),
+            ];
+            for (state, fill, text, edges) in &families {
+                assert_eq!(fill.a, 1.0, "{}: {state} is opaque", t.name);
+                for (name, c) in text {
+                    let r = contrast(*c, *fill);
+                    if r < 4.5 {
+                        failures.push(format!("{}: {name} on {state} = {r:.2}", t.name));
+                    }
+                }
+                for (name, c) in edges {
+                    let r = contrast(*c, *fill);
+                    if r < 3.0 {
+                        failures.push(format!("{}: {name} edge on {state} = {r:.2}", t.name));
+                    }
+                }
+            }
+            for (weak, strong) in [
+                (
+                    ("ghost_hover", t.ghost_hover),
+                    ("ghost_selected", t.ghost_selected),
+                ),
+                (
+                    ("element_hover", t.element_hover),
+                    ("element_selected", t.element_selected),
+                ),
+            ] {
+                let (w, s) = (contrast(weak.1, t.panel), contrast(strong.1, t.panel));
+                // At least as visible as the faded accents they replaced (8 % hover, 16 %
+                // selected on the panel: about 1.11:1 and 1.25:1).
+                if s <= w || w < 1.11 || s < 1.25 {
+                    failures.push(format!(
+                        "{}: {} ({s:.2}) must stand further from panel than {} ({w:.2})",
+                        t.name, strong.0, weak.0
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{}",
+            failures.join(
+                "
+"
+            )
+        );
     }
 
     /// A dimmed Buy or Sell (entries locked) is drawn unfilled on the panel: its words and
@@ -1339,6 +1438,9 @@ mod tests {
             for bg in [t.panel, t.bg] {
                 let r = contrast(t.control_edge, bg);
                 assert!(r >= 3.0, "{}: control edge {r:.2}:1", t.name);
+                // A dimmed control's edge: seen, and quieter than an enabled one's.
+                let d = contrast(t.border_disabled, bg);
+                assert!(d >= 3.0 && d < r, "{}: disabled edge {d:.2}:1", t.name);
             }
         }
     }

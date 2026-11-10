@@ -29,6 +29,7 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 
 ## 5. Consistent system
 - All colours come from `crates/lines-app/src/theme.rs` tokens; no literal colours in views. Dark is the primary theme; light must be equally complete.
+- **State tokens.** Hover, selection and "on" use the theme's named states, never a token faded by hand (`tests/state_tokens.rs`): `ghost_hover` and `ghost_selected` for frameless rows (a menu's or list's highlighted row also gets an `accent` left edge), `element_hover` and `element_selected` for framed buttons and chips. Each is opaque and chosen per theme, so a light-mode fix is one token edit, tested for AA text and 3:1 edges on it. Focus and selected edges are `accent` (a chip that is on is outlined in it); dimmed is a dashed `border_disabled` edge (or the side's color) and dim text (§6), never faded; text over the plot sits on `label_bg`.
 - User-chosen colors for drawings and studies are user data, not code (decision 0026): the style editor warns when one is close to a color with a meaning or too low in contrast, but never blocks.
 - **Spacing scale:** 2, 4, 8, 12, 16, 24 px. **Type scale:** 11, 12, 13, 15 px, one UI family and one monospace family for numbers.
 - Edges snap to device pixels (as the crosshair work established), so lines are crisp at every DPI.
@@ -55,7 +56,7 @@ Context menus follow these rules (`crates/lines-app/src/menu.rs`, `pane_menu.rs`
 ### Controls
 - A **field** names what it holds and shows its value ("Qty 10 ▾", "Bracket 8/16 t ▾"): a quiet box on `panel` with an `axis_line` edge (the accent while its list is open). Its list opens under it in the menus' look: a check on the one in force, a box for a mode, shortcuts on the right, an editor ("Edit presets…") last.
 - **Primary** actions are solid in their meaning's color with text in `bg` (Buy in `up`, Sell in `down`); **secondary** ones are outlined in it on `bg` (Join bid, Join ask). The words always say the side.
-- **Dimmed** (nothing it would do now: Buy and Sell while entries are locked, BE while flat, Reverse while flat or entries are locked) is a 2 px dashed edge with dim text and no fill, never faded: the words stay readable (a locked Buy or Sell says "Locked" under its size wherever that fits, in place of its price), and only a live primary action is solid.
+- **Dimmed** (nothing it would do now: Buy and Sell while entries are locked, BE while flat, Reverse while flat or entries are locked) is a 2 px dashed edge with dim text and no fill, never faded (the chart's order strip keeps a 1 px dash: its buttons are a fixed 96 px and a five-digit size needs the room): the words stay readable (a locked Buy or Sell says "Locked" under its size wherever that fits, in place of its price), and only a live primary action is solid.
 - **Exits** sit at the bottom under a divider, outlined in `axis_line`; **Flatten** is outlined in `warn` (2 px) and bold. Cancel all and Flatten never dim; BE and Reverse dim while there is nothing to act on.
 - Narrower, a control drops its least needed part first and is never cut: a price line before a size, a field's name before its value. A row goes whole.
 
