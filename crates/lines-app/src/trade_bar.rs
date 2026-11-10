@@ -1835,9 +1835,9 @@ pub fn keys_in_header(width: f32) -> bool {
 /// below): every row fits whole from here.
 pub const MIN_DOM_WIDTH: f32 = 165.0;
 
-/// From this width the exits row holds BE and Reverse beside Cancel all and Flatten, and the Join
-/// buttons show (unless Settings › DOM hides them). Narrower, the joins are hidden first, before
-/// anything else gives way, and BE and Reverse take a row of their own above the divider.
+/// From this width the exits row holds BE and Reverse beside Cancel all and Flatten. Narrower, BE
+/// and Reverse take a row of their own above the divider. (The Join buttons have already gone,
+/// below [`NARROW_BELOW`].)
 pub const EXITS_ONE_ROW: f32 = 240.0;
 
 /// Whether a panel `width` is narrow (0: not laid out yet, full layout).
@@ -1852,9 +1852,20 @@ pub fn is_tight(width: f32) -> bool {
 
 /// The top row: PAPER, the account, the trading switch.
 const HDR_H: f32 = 28.0;
-/// The position card (two lines) and the space under it.
+/// The position card (two lines; three in tight panels) and the space under it.
 const CARD_H: f32 = 58.0;
 const CARD_BOX_H: f32 = 50.0;
+/// One more card line: tight panels keep the average and the working count on it.
+const CARD_LINE_H: f32 = 16.0;
+
+/// The position card's row height at `width`: one line taller in tight panels.
+pub fn card_h(width: f32) -> f32 {
+    CARD_H + if is_tight(width) { CARD_LINE_H } else { 0.0 }
+}
+
+fn card_box_h(width: f32) -> f32 {
+    CARD_BOX_H + if is_tight(width) { CARD_LINE_H } else { 0.0 }
+}
 const STATUS_H: f32 = 24.0;
 const METERS_H: f32 = 38.0;
 const METERS_NARROW_H: f32 = 20.0;
@@ -1962,9 +1973,10 @@ impl PanelRows {
     };
 
     /// Whether the Join buttons' row shows at `width`: with the buttons, the setting on, and a
-    /// panel from [`EXITS_ONE_ROW`] wide.
+    /// panel from [`NARROW_BELOW`] wide. Narrower they hide first, before anything else gives way
+    /// (owner's ruling): their prices have already gone where they didn't fit ([`join_text`]).
     pub fn joins_show(&self, width: f32) -> bool {
-        self.buttons && self.joins && !is_tight(width)
+        self.buttons && self.joins && !is_narrow(width)
     }
 
     /// Whether BE and Reverse take a row of their own at `width`.
@@ -1977,7 +1989,7 @@ impl PanelRows {
     fn editor_h(&self, width: f32) -> f32 {
         CTRL_H
             + TRADE_H
-            + if self.joins && !is_tight(width) {
+            + if self.joins && !is_narrow(width) {
                 JOIN_H
             } else {
                 0.0
@@ -1996,7 +2008,7 @@ impl PanelRows {
         };
         let row = |shown: bool, h: f32| if shown { h } else { 0.0 };
         HDR_H
-            + row(self.card, CARD_H)
+            + row(self.card, card_h(width))
             + row(self.status, STATUS_H)
             + row(self.meters, meters)
             + row(self.entry, CTRL_H)
@@ -2309,6 +2321,24 @@ pub fn util_labels(width: f32) -> [&'static str; 4] {
     }
 }
 
+/// Whether a read-only account's "Cancel all off" and "Flatten off" fit the exits row at `width`
+/// (beside BE and Reverse where they share it). Where they don't, one cell says "Exits off": the
+/// word that nothing will be sent is never cut.
+pub fn off_exits_fit(width: f32) -> bool {
+    if width == 0.0 {
+        return true;
+    }
+    let size = util_text(width);
+    // A cell: its words, `px_1` each side and its border.
+    let cell = |s: &str| (text_w(s, size) + 2.0 * 4.0 + 2.0).max(MIN_HIT);
+    let mut room = width - 2.0 * SIDE;
+    if !is_tight(width) {
+        let l = util_labels(width);
+        room -= cell(l[0]) + cell(l[1]) + 2.0 * 4.0;
+    }
+    cell("Cancel all off") + 4.0 + cell("Flatten off") <= room
+}
+
 /// The exits row's text size: 12 px, 11 in a tight panel (Cancel all and Flatten keep their words).
 fn util_text(width: f32) -> f32 {
     if is_tight(width) { 11.0 } else { 12.0 }
@@ -2372,7 +2402,7 @@ pub fn market_text(buy: bool, size: i64, price: Option<&str>, width: f32) -> Mar
 }
 
 /// What a Join button says, by the room it has: the words and the price, then the words alone,
-/// then just "Bid" / "Ask" (the joins show only from [`EXITS_ONE_ROW`]).
+/// then just "Bid" / "Ask" (the joins show only from [`NARROW_BELOW`]).
 pub fn join_text(bid: bool, price: Option<&str>, width: f32) -> (&'static str, Option<String>) {
     let (long, short) = if bid {
         ("Join bid", "Bid")
@@ -3016,7 +3046,7 @@ pub fn dom_bar<V: TradePane>(
     if rows.card {
         panel = panel.child(
             div()
-                .h(crate::zoom::ui(CARD_H))
+                .h(crate::zoom::ui(card_h(width)))
                 .flex_shrink_0()
                 .child(position_card(data.as_ref(), product, width, t)),
         );
@@ -3286,8 +3316,16 @@ pub fn dom_bar<V: TradePane>(
             );
         }
     }
+    // A read-only account where "Cancel all off" and "Flatten off" don't fit: one "Exits off".
+    let merged_off = locked.is_some() && !off_exits_fit(width);
     for (cmd, name, label, entry) in util {
         if !util_shows(entry, rows, width) {
+            continue;
+        }
+        if merged_off && !entry {
+            if cmd == TradeCmd::Flatten {
+                row = row.child(button(cmd, name, "Exits", entry, true, cx));
+            }
             continue;
         }
         // BE and Reverse size to their words; Cancel all and Flatten share the rest.
@@ -3359,7 +3397,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         .flex_col()
         .justify_center()
         .gap(crate::zoom::ui(2.0))
-        .h(crate::zoom::ui(CARD_BOX_H))
+        .h(crate::zoom::ui(card_box_h(width)))
         .px_2()
         .rounded_md()
         .bg(t.panel);
@@ -3386,6 +3424,8 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
     };
     let position = d.and_then(|d| d.position).filter(|p| p.0 != 0);
     let mut day_below = position.is_some();
+    // The average where it doesn't fit beside the side and the P&L: first on the lines below.
+    let mut avg_below: Option<String> = None;
     let first = match position {
         Some((q, avg, ticks, money)) => {
             let long = q > 0;
@@ -3415,7 +3455,13 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
             let pnl_text = big.as_ref().map(|(s, _)| s.as_str());
             let px = card_big_px(width, &side, pnl_text);
             let avg = avg.map(|a| format!("@ {}", avg_text(product, a)));
-            let avg = avg.filter(|a| card_avg_fits(width, &side, a, pnl_text, px));
+            let avg = match avg {
+                Some(a) if card_avg_fits(width, &side, &a, pnl_text, px) => Some(a),
+                a => {
+                    avg_below = a;
+                    None
+                }
+            };
             line(22.0)
                 .child(
                     div()
@@ -3462,14 +3508,16 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                 .children(here.map(|m| day_el(m, Some(13.0))))
         }
     };
-    // Second line, as whole items in order (what doesn't fit is left out whole, never cut): an
-    // unresolved order, a market order's remainder, the stop, the target, ticks (P&L both ways),
-    // working orders.
+    // The lines below, as whole items in order (what doesn't fit is left out whole, never cut,
+    // lowest priority first; [`card_place`]): the average when it isn't above, a market order's
+    // remainder, the stop, the target, working orders (never left out), ticks (P&L both ways).
     let pos_qty = position.map_or(0, |p| p.0);
-    let mut items: Vec<(String, gpui::Hsla, bool)> = Vec::new();
-    let unresolved = d.map_or(0, |d| d.unresolved);
+    let mut items: Vec<(String, gpui::Hsla, bool, u8)> = Vec::new();
+    if let Some(a) = avg_below {
+        items.push((a, t.text_dim, false, 3));
+    }
     if let Some(m) = d.and_then(|d| d.market_left) {
-        items.push((market_words(m), t.text_main, false));
+        items.push((market_words(m), t.text_main, false, 4));
     }
     if position.is_some() {
         if let Some((p, q)) = d.and_then(|d| d.stop) {
@@ -3477,6 +3525,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                 card_exit("SL", q, pos_qty, fmt.format::<32>(p).as_str()),
                 t.down,
                 true,
+                2,
             ));
         }
         if let Some((p, q)) = d.and_then(|d| d.target) {
@@ -3484,15 +3533,8 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                 card_exit("TP", q, pos_qty, fmt.format::<32>(p).as_str()),
                 t.order_target,
                 true,
+                2,
             ));
-        }
-        if let Some(tk) = position
-            .and_then(|p| p.2)
-            .filter(|_| mode.money() && mode.ticks())
-        {
-            let mut s = String::new();
-            let _ = crate::pnl::write_ticks(&mut s, tk);
-            items.push((s, t.text_dim, false));
         }
     }
     let working = d.map_or(0, |d| d.working);
@@ -3503,19 +3545,46 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         },
         t.text_dim,
         false,
+        CARD_KEEP,
     ));
-    let mut left = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .flex_1()
-        .min_w_0()
-        .h(crate::zoom::ui(16.0))
-        .overflow_hidden()
-        .items_center()
-        .gap_x_2()
-        .text_size(crate::zoom::ui(11.0))
-        .when(unresolved > 0, |e| {
+    if let Some(tk) = position
+        .and_then(|p| p.2)
+        .filter(|_| mode.money() && mode.ticks())
+    {
+        let mut s = String::new();
+        let _ = crate::pnl::write_ticks(&mut s, tk);
+        items.push((s, t.text_dim, false, 0));
+    }
+    let unresolved = d.map_or(0, |d| d.unresolved);
+    let chip = (unresolved > 0).then(|| unresolved_label(unresolved, width));
+    let day_on_line = day.filter(|_| day_below);
+    let day_w = day_on_line.map_or(0.0, |m| {
+        let mut s = String::new();
+        let _ = crate::pnl::write_money(&mut s, m);
+        text_w("Day ", 11.0) + text_w(&s, 11.0) + 4.0 + 8.0
+    });
+    let chip_w = chip.as_ref().map_or(0.0, |c| text_w(c, 11.0) + 8.0 + 8.0);
+    let inner = card_inner(width);
+    let lines = if is_tight(width) { 2 } else { 1 };
+    let rooms = [(inner - day_w - chip_w).max(0.0), inner];
+    let widths: Vec<(f32, u8)> = items
+        .iter()
+        .map(|(s, _, priced, k)| (text_w(s, 11.0) + if *priced { 4.0 } else { 0.0 }, *k))
+        .collect();
+    let place = card_place(&rooms[..lines], &widths);
+    let lower = || {
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .items_center()
+            .gap_x_2()
+            .text_size(crate::zoom::ui(11.0))
+    };
+    let mut rows = [
+        lower().when_some(chip, |e, c| {
             e.child(
                 div()
                     .flex_shrink_0()
@@ -3523,10 +3592,13 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                     .bg(t.warn)
                     .text_color(t.on_warn)
                     .font_weight(FontWeight::BOLD)
-                    .child(unresolved_label(unresolved, width)),
+                    .child(c),
             )
-        });
-    for (text, color, priced) in items {
+        }),
+        lower(),
+    ];
+    for ((text, color, priced, _), at) in items.into_iter().zip(place) {
+        let Some(at) = at else { continue };
         // "SL 7562.00": the role quiet, the price in its color.
         let item = if priced {
             let (role, rest) = text.split_once(' ').unwrap_or(("", text.as_str()));
@@ -3545,13 +3617,66 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         } else {
             div().flex_shrink_0().text_color(color).child(text)
         };
-        left = left.child(item);
+        let r = std::mem::replace(&mut rows[at], div());
+        rows[at] = r.child(item);
     }
+    let [row2, row3] = rows;
     let second = line(16.0)
         .text_size(crate::zoom::ui(11.0))
-        .child(left)
-        .children(day.filter(|_| day_below).map(|m| day_el(m, None)));
-    card.child(first).child(second)
+        .child(row2)
+        .children(day_on_line.map(|m| day_el(m, None)));
+    card.child(first)
+        .child(second)
+        .when(lines > 1, |c| c.child(line(16.0).child(row3)))
+}
+
+/// The working count's priority on the card: never left out.
+pub const CARD_KEEP: u8 = u8::MAX;
+
+/// Where the card's lower items go: each item `(width, priority)`, in order, to a line (an index
+/// into `rooms`, the room on each line) or nowhere. Items fill the lines in order; while they
+/// don't fit, the lowest priority (the last of equals) is left out whole. [`CARD_KEEP`] is never
+/// left out: where only those remain and still don't fit, they go on the first line.
+pub fn card_place(rooms: &[f32], items: &[(f32, u8)]) -> Vec<Option<usize>> {
+    let mut shown: Vec<bool> = vec![true; items.len()];
+    loop {
+        let mut out = vec![None; items.len()];
+        let mut line = 0;
+        let mut used = 0.0;
+        let mut fits = true;
+        for (i, (w, _)) in items.iter().enumerate() {
+            if !shown[i] {
+                continue;
+            }
+            let need = if used > 0.0 { w + 8.0 } else { *w };
+            if line < rooms.len() && used + need <= rooms[line] {
+                used += need;
+                out[i] = Some(line);
+            } else if line + 1 < rooms.len() && *w <= rooms[line + 1] {
+                line += 1;
+                used = *w;
+                out[i] = Some(line);
+            } else {
+                fits = false;
+                break;
+            }
+        }
+        if fits {
+            return out;
+        }
+        let drop = items
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, k))| shown[*i] && *k != CARD_KEEP)
+            .min_by_key(|(i, (_, k))| (*k, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        match drop {
+            Some(i) => shown[i] = false,
+            None => {
+                return shown.iter().map(|s| s.then_some(0)).collect();
+            }
+        }
+    }
 }
 
 /// The rule meters: a thin bar per limit with `used / limit`. Narrow: one line behind ▸.
@@ -3971,10 +4096,13 @@ fn controls<V: TradePane>(
             cx.listener(|v: &mut V, _: &gpui::MouseDownEvent, _, cx| close_account_menu(v, cx)),
         )
     };
+    // Under Flatten and Cancel all, which these lists can reach (`dropdown::PANEL_PRIORITY`).
     let qty = crate::dropdown::dropdown(div().flex().flex_shrink_0().child(qty), qty_menu)
+        .in_panel()
         .on_dismiss(dismiss(cx));
     let bracket =
         crate::dropdown::dropdown(div().flex().flex_1().min_w_0().child(bracket), bracket_menu)
+            .in_panel()
             .on_dismiss(dismiss(cx));
     div()
         .flex()
@@ -5966,7 +6094,8 @@ mod tests {
         assert!(narrow < wide);
         let tight = panel_height(MIN_DOM_WIDTH);
         assert_eq!(tight, panel_height(EXITS_ONE_ROW - 1.0));
-        assert_eq!(tight, narrow - JOIN_H + ACT_H);
+        // Tight: BE and Reverse's row, and the card's third line (the average and working count).
+        assert_eq!(tight, narrow + ACT_H + CARD_LINE_H);
         // Settings › DOM without the joins: their row shorter, where they'd show.
         let off = PanelRows {
             joins: false,
@@ -6082,25 +6211,26 @@ mod tests {
         for (width, joins, full, ladder, meters, status, card, actions) in [
             (420.0, true, 397.0, 319.0, 211.0, 173.0, 149.0, 91.0),
             (420.0, false, 363.0, 319.0, 211.0, 173.0, 149.0, 91.0),
-            (EXITS_ONE_ROW, true, 379.0, 301.0, 193.0, 173.0, 149.0, 91.0),
+            // Narrow: no joins (they hide first, below NARROW_BELOW).
+            (EXITS_ONE_ROW, true, 345.0, 301.0, 193.0, 173.0, 149.0, 91.0),
             (
                 MIN_DOM_WIDTH,
                 true,
-                375.0,
-                331.0,
-                223.0,
-                203.0,
-                179.0,
+                391.0,
+                347.0,
+                239.0,
+                219.0,
+                195.0,
                 121.0,
             ),
             (
                 MIN_DOM_WIDTH,
                 false,
-                375.0,
-                331.0,
-                223.0,
-                203.0,
-                179.0,
+                391.0,
+                347.0,
+                239.0,
+                219.0,
+                195.0,
                 121.0,
             ),
         ] {
@@ -6352,15 +6482,19 @@ mod tests {
             join_text(false, price, 320.0),
             ("Join ask", Some("7571.75".into()))
         );
-        // Prices go first: still shown, without them.
-        assert_eq!(join_text(true, price, EXITS_ONE_ROW), ("Join bid", None));
-        assert!(PanelRows::ALL.joins_show(EXITS_ONE_ROW));
-        // Then the row: hidden in a tight panel, before the exits change (BE and Reverse take the
-        // freed row, and the exits keep their words).
-        for width in WIDTHS {
+        // Prices go first: still shown, without them (a long price at the narrowest width that
+        // shows the joins).
+        let long = Some("21450.25");
+        assert_eq!(join_text(true, long, NARROW_BELOW), ("Join bid", None));
+        assert!(PanelRows::ALL.joins_show(NARROW_BELOW));
+        // Then the row: hidden below NARROW_BELOW, before anything else gives way (Reverse's
+        // short word, the meters behind ▸ and the short switch words all start there).
+        assert_eq!(util_labels(NARROW_BELOW)[1], "Reverse");
+        assert!(!is_narrow(NARROW_BELOW));
+        for width in WIDTHS.into_iter().chain([260.0, NARROW_BELOW - 1.0]) {
             assert_eq!(
                 PanelRows::ALL.joins_show(width),
-                !is_tight(width),
+                !is_narrow(width),
                 "{width}"
             );
             assert_eq!(
@@ -6381,7 +6515,7 @@ mod tests {
                 assert!(need <= inner, "{width}: {words} {p:?}");
             }
         }
-        assert!(!PanelRows::ALL.joins_show(EXITS_ONE_ROW - 1.0));
+        assert!(!PanelRows::ALL.joins_show(NARROW_BELOW - 1.0));
         // Short words only where "Join bid" itself has no room (never at a width that shows them).
         assert_eq!(join_text(true, price, 100.0), ("Bid", None));
     }
@@ -6414,6 +6548,85 @@ mod tests {
         assert_eq!(card_exit("SL", 2, 2, "7562.00"), "SL 7562.00");
         assert_eq!(card_exit("TP", 2, -2, "7577.00"), "TP 7577.00");
         assert_eq!(card_exit("SL", 1, 2, "7562.00"), "SL 1 @ 7562.00");
+    }
+
+    /// A read-only account's exits say "off" whole: both where they fit, else one "Exits off".
+    #[test]
+    fn read_only_exits_are_never_cut() {
+        assert!(off_exits_fit(0.0));
+        assert!(off_exits_fit(480.0));
+        for width in WIDTHS.into_iter().chain([260.0, NARROW_BELOW]) {
+            let size = util_text(width);
+            let room = width - 2.0 * SIDE;
+            if !off_exits_fit(width) {
+                let need = text_w("Exits off", size) + 2.0 * 4.0 + 2.0;
+                let others = if is_tight(width) {
+                    0.0
+                } else {
+                    let l = util_labels(width);
+                    text_w(l[0], size).max(MIN_HIT - 10.0)
+                        + text_w(l[1], size)
+                        + 2.0 * (2.0 * 4.0 + 2.0)
+                        + 2.0 * 4.0
+                };
+                assert!(need + others <= room, "{width}: Exits off fits");
+            }
+        }
+        assert!(!off_exits_fit(MIN_DOM_WIDTH), "165 px merges them");
+    }
+
+    /// The card's lower items: the working count is never left out; ticks go first, then the
+    /// target, then the stop, then the average. Tight panels have one more line for them.
+    #[test]
+    fn the_card_never_drops_the_working_count() {
+        assert_eq!(card_h(165.0), card_h(200.0));
+        assert!(
+            card_h(165.0) > card_h(240.0),
+            "tight panels have a third card line"
+        );
+        let w = |s: &str| text_w(s, 11.0);
+        let avg = (w("@ 6010.25"), 3);
+        let sl = (w("SL 6006.00") + 4.0, 2);
+        let tp = (w("TP 6014.00") + 4.0, 2);
+        let working = (w("2 working"), CARD_KEEP);
+        let ticks = (w("+0.0 t"), 0);
+        let items = [avg, sl, tp, working, ticks];
+        for width in WIDTHS {
+            let inner = card_inner(width);
+            let day = w("Day ") + w("-$13408.75") + 12.0;
+            let lines = if is_tight(width) { 2 } else { 1 };
+            let rooms = [inner - day, inner];
+            let place = card_place(&rooms[..lines], &items);
+            assert!(place[3].is_some(), "{width}: the working count shows");
+            // What shows fits its line.
+            for (l, room) in rooms[..lines].iter().enumerate() {
+                let on: Vec<f32> = items
+                    .iter()
+                    .zip(&place)
+                    .filter(|(_, p)| **p == Some(l))
+                    .map(|(i, _)| i.0)
+                    .collect();
+                let used = on.iter().sum::<f32>() + 8.0 * on.len().saturating_sub(1) as f32;
+                assert!(used <= *room, "{width}: line {l} holds {used} in {room}");
+            }
+            // Left out in order: ticks, then TP, then SL, then the average.
+            let order = [4, 2, 1, 0];
+            let dropped: Vec<usize> = order.into_iter().filter(|i| place[*i].is_none()).collect();
+            assert_eq!(
+                dropped,
+                order[..dropped.len()],
+                "{width}: left out in order"
+            );
+        }
+        // At the narrowest the average and the working count both show.
+        let inner = card_inner(165.0);
+        let place = card_place(&[inner - w("Day $0.00") - 12.0, inner], &items);
+        assert!(place[0].is_some() && place[3].is_some(), "{place:?}");
+        // Nothing fits: the working count still shows, on the first line.
+        assert_eq!(
+            card_place(&[0.0], &items),
+            vec![None, None, None, Some(0), None]
+        );
     }
 
     /// The card's side and P&L are never cut: the average goes first, then the large text steps

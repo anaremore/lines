@@ -19,17 +19,22 @@ pub const GAP: f32 = 2.0;
 /// Space a list keeps from the window's right edge (logical px).
 pub const MARGIN: f32 = 4.0;
 /// Deferred-draw priority of an open list: over the panes.
-pub const PRIORITY: usize = 3;
+pub const PRIORITY: usize = 4;
 /// Deferred-draw priority of every popover's backdrop (`crate::popover`): over the panes,
 /// under Flatten and Cancel all (`LIVE_PRIORITY`) and every list and menu.
 pub const BACKDROP_PRIORITY: usize = 1;
+/// Deferred-draw priority of a trading panel's own lists (Qty, Bracket): over the backdrops and
+/// the panes, under Flatten and Cancel all, which they open beside (docs/design.md §3: those
+/// stay one press and in view with any popover open).
+pub const PANEL_PRIORITY: usize = 2;
 /// Deferred-draw priority of Flatten and Cancel all (`popover::always_live`): over the
-/// backdrops, so they stay one press with a popover open; under the lists.
-pub const LIVE_PRIORITY: usize = 2;
+/// backdrops and the panel's lists, so they stay one press with a popover open; under the
+/// other lists.
+pub const LIVE_PRIORITY: usize = 3;
 /// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
 /// prompts, the switch-all banner): over any open list, so a list never hides or takes the
 /// clicks of a menu opened after it.
-pub const OVERLAY_PRIORITY: usize = 4;
+pub const OVERLAY_PRIORITY: usize = 5;
 
 /// Where a list `popup` (width, height) opens for a trigger at `trigger`, in a window
 /// `window` (width, height) big, all in window logical px: its top-left corner.
@@ -59,6 +64,7 @@ pub fn dropdown(trigger: impl IntoElement, popup: Option<AnyElement>) -> Dropdow
         trigger: trigger.into_any_element(),
         popup,
         dismiss: None,
+        priority: PRIORITY,
     }
 }
 
@@ -66,9 +72,16 @@ pub struct Dropdown {
     trigger: AnyElement,
     popup: Option<AnyElement>,
     dismiss: Option<OnDismiss>,
+    priority: usize,
 }
 
 impl Dropdown {
+    /// A trading panel's list ([`PANEL_PRIORITY`]): drawn under Flatten and Cancel all.
+    pub fn in_panel(mut self) -> Self {
+        self.priority = PANEL_PRIORITY;
+        self
+    }
+
     /// Closes the open list on a press anywhere outside it, which goes no further
     /// (`popover::defer_backdrop`, the popover rule).
     pub fn on_dismiss(mut self, dismiss: OnDismiss) -> Self {
@@ -156,7 +169,7 @@ impl Element for Dropdown {
         }
         // Deferred: drawn after (over) the rest of the window, and not clipped by the header
         // or the pane.
-        window.defer_draw(popup, point(px(x), px(y)), PRIORITY, None);
+        window.defer_draw(popup, point(px(x), px(y)), self.priority, None);
     }
 
     fn paint(
