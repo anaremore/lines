@@ -5788,6 +5788,12 @@ impl Render for ChainView {
     }
 }
 
+impl crate::picker_view::PickerHost for ChainView {
+    fn picker_ui(&mut self) -> &mut crate::picker_view::PickerUi {
+        &mut self.picker
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

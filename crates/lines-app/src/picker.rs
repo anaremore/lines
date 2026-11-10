@@ -205,6 +205,10 @@ pub struct Settings {
     /// Risk section). Optional: an account without an entry keeps its rules.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub prop_rules: std::collections::BTreeMap<String, crate::settings_schema::PropRulesDoc>,
+    /// Where each pop-up panel was last dragged (`crate::popover::Panel::key`), window
+    /// logical px of its top-left. Optional: a panel without one opens where it always has.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub panel_places: std::collections::BTreeMap<String, (i32, i32)>,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]
@@ -736,6 +740,30 @@ mod tests {
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pnl_display, PnlDisplay::Off);
         assert_eq!(SETTINGS_FORMAT.current, 1, "no version bump");
+    }
+
+    /// Panel places: optional (a file without them reads, none are written), kept through a
+    /// save, and read beside keys a newer build wrote.
+    #[test]
+    fn panel_places_are_optional_and_round_trip() {
+        let none: Settings = serde_json::from_str("{}").unwrap();
+        assert!(none.panel_places.is_empty());
+        assert!(
+            !serde_json::to_string(&none)
+                .unwrap()
+                .contains("panel_places")
+        );
+        let mut s = Settings::default();
+        s.panel_places.insert("palette".into(), (420, 96));
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.panel_places.get("palette"), Some(&(420, 96)));
+        let newer: Settings = serde_json::from_str(
+            r#"{"panel_places": {"picker": [10, 20], "someday": [1, 2]}, "future": true}"#,
+        )
+        .unwrap();
+        assert_eq!(newer.panel_places.get("picker"), Some(&(10, 20)));
+        assert!(newer.unknown.contains_key("future"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Rendering of the style editor (`crate::style_editor` is the model): a popover over the
-//! chart (`crate::popover::layer`: a press outside closes it and does nothing else), render
+//! chart (`crate::popover::floating`: a press outside closes it and does nothing else), render
 //! time only. Every control is clickable and maps to the same model calls as the keys.
 //!
 //! State never relies on color alone (WCAG 1.4.1, 1.4.11): a selected choice has a check mark,
@@ -179,14 +179,16 @@ fn tabs_height(e: &StyleEditor) -> f32 {
 /// What doesn't scroll: header, tabs and footer (title, "Save as default", the key hint, full
 /// or short) and the borders.
 fn chrome_height(e: &StyleEditor) -> f32 {
-    let title = 16.0 + line_h(13.0) + 1.0;
+    // The title is the panel's title bar (`popover::floating`), above the box.
+    let title = crate::popover::title_h();
     let save = if e.default_label.is_some() {
         4.0 + 28.0
     } else {
         0.0
     };
-    let hint = 8.0 + line_h(11.0);
-    2.0 + title + tabs_height(e) + 1.0 + save + hint
+    // The footer holds only "Save as default" (no key hints: the title bar carries the panel).
+    let pad = if save > 0.0 { 4.0 } else { 0.0 };
+    2.0 + title + tabs_height(e) + 1.0 + save + pad
 }
 
 /// Whether `row` is drawn in the footer ("Save as default"), outside the scroll body.
@@ -622,8 +624,6 @@ pub fn render(
     cx: &mut Context<ChartView>,
 ) -> AnyElement {
     let scroll = &es.handle;
-    // Short of room: the key hint shortens (the keys still work) and the body scrolls.
-    let full_hint = content_h <= at.h;
     let rows = e.rows();
     let focus = (e.row, e.col);
     let names = names(e, t);
@@ -848,36 +848,20 @@ pub fn render(
         body_len(&rows),
         "one body child per row (`body_child`)"
     );
-    let hint = match (full_hint, e.parts.len() > 1) {
-        (true, true) => "↑↓←→ move · Enter pick · Tab next part · Esc close",
-        (true, false) => "↑↓←→ move · Enter pick · Esc close",
-        (false, true) => "Tab next part · Esc close",
-        (false, false) => "Esc close",
-    };
-    let footer = div()
-        .flex_none()
-        .border_t_1()
-        .border_color(t.axis_line)
-        .when_some(footer_save, |d, s| {
-            d.child(
+    let footer = footer_save.map(|s| {
+        div()
+            .flex_none()
+            .border_t_1()
+            .border_color(t.axis_line)
+            .child(
                 div()
                     .px(crate::zoom::ui(12.0))
-                    .pt(crate::zoom::ui(4.0))
+                    .py(crate::zoom::ui(4.0))
                     .flex()
                     .flex_row()
                     .child(s),
             )
-        })
-        .child(
-            div()
-                .px(crate::zoom::ui(12.0))
-                .py(crate::zoom::ui(4.0))
-                .text_size(crate::zoom::ui(11.0))
-                .text_color(t.text_dim)
-                .whitespace_nowrap()
-                .truncate()
-                .child(hint),
-        );
+    });
     // The scrollbar: from the body's last layout, else (first frame) from the estimate.
     let view_h = f32::from(scroll.bounds().size.height);
     let (view_h, body_h) = if view_h > 0.0 {
@@ -925,29 +909,18 @@ pub fn render(
                 .id("style-editor")
                 .occlude()
                 .w(px(at.w))
-                .max_h(px(at.h))
+                .max_h(px((at.h - crate::popover::title_h()).max(0.0)))
                 .overflow_hidden()
                 .flex()
                 .flex_col()
                 .bg(t.panel)
                 .border_1()
                 .border_color(t.axis_line)
-                .rounded_md()
+                .rounded_b_md()
                 .text_size(crate::zoom::ui(13.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .px(crate::zoom::ui(12.0))
-                        .py(crate::zoom::ui(8.0))
-                        .border_b_1()
-                        .border_color(t.axis_line)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(t.text_main)
-                        .child(e.title.clone()),
-                )
                 .children(tabs_strip)
                 .child(body)
-                .child(footer),
+                .children(footer),
         )
         .into_any_element()
 }

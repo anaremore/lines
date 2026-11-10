@@ -14,7 +14,7 @@
 //! every list and menu), so the press reaches the backdrop and nothing under it. [`opened`] keeps one
 //! popover open: it closes the previous one (in any pane or window). A new popover is one
 //! [`Kind`], an [`opened`] call where it opens, and its list drawn through
-//! `dropdown::dropdown(..).on_dismiss(..)` or [`layer`].
+//! `dropdown::dropdown(..).on_dismiss(..)` or, for a pop-up panel, [`floating`].
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Context, Element, EntityId, Global, GlobalElementId,
@@ -452,21 +452,270 @@ impl Element for Live {
     }
 }
 
-/// `content` where its own style puts it (e.g. absolute in a pane), drawn over the window at
-/// `dropdown::PRIORITY` with [`defer_backdrop`] under it: the studies menu.
-pub fn layer(content: impl IntoElement, dismiss: OnDismiss) -> Layer {
-    Layer {
-        content: Some(content.into_any_element()),
-        dismiss: Some(dismiss),
+// ---- floating panels ----------------------------------------------------------------------
+
+/// A pop-up panel, drawn by [`floating`] with a title bar (grip, title, ×) that drags it.
+/// Each kind remembers where it was dragged to (`Settings::panel_places`, window logical px),
+/// shared by every pane and window, and is kept inside the window every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Panel {
+    Palette,
+    Picker,
+    OpenWorkspace,
+    SaveAs,
+    Studies,
+    StyleEditor,
+    OrderGroup,
+}
+
+impl Panel {
+    /// Every kind (screenshots' `--panel-at`, tests).
+    #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
+    pub const ALL: [Panel; 7] = [
+        Panel::Palette,
+        Panel::Picker,
+        Panel::OpenWorkspace,
+        Panel::SaveAs,
+        Panel::Studies,
+        Panel::StyleEditor,
+        Panel::OrderGroup,
+    ];
+
+    /// Its key in `Settings::panel_places`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Panel::Palette => "palette",
+            Panel::Picker => "picker",
+            Panel::OpenWorkspace => "open_workspace",
+            Panel::SaveAs => "save_as",
+            Panel::Studies => "studies",
+            Panel::StyleEditor => "style_editor",
+            Panel::OrderGroup => "order_group",
+        }
     }
 }
 
-pub struct Layer {
-    content: Option<AnyElement>,
-    dismiss: Option<OnDismiss>,
+/// Whole rows a wheel moves a panel's list by: `dy` (px, positive = up) added to what earlier
+/// small deltas left over (`carry`), a row per `line` px. Positive rows move down the list.
+pub fn wheel_steps(carry: &mut f32, dy: f32, line: f32) -> isize {
+    if line <= 0.0 {
+        return 0;
+    }
+    *carry += dy;
+    let n = (*carry / line).trunc();
+    *carry -= n * line;
+    -(n as isize)
 }
 
-impl IntoElement for Layer {
+/// What earlier small wheel deltas left over, kept apart per kind of delta: a pixel leftover
+/// is never read as lines (a touchpad, which reports pixels, then a smooth wheel, lines).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WheelCarry {
+    px: f32,
+    lines: f32,
+}
+
+impl WheelCarry {
+    /// A line-based event (`lines` > 0: up; a mouse wheel, smooth or not) as rows: a whole
+    /// notch (a line or more) is one row, whatever the system's lines per notch; smaller
+    /// deltas add up, a row per line.
+    pub fn lines(&mut self, lines: f32) -> isize {
+        self.px = 0.0;
+        if lines.abs() >= 1.0 {
+            self.lines = 0.0;
+            return if lines > 0.0 { -1 } else { 1 };
+        }
+        wheel_steps(&mut self.lines, lines, 1.0)
+    }
+
+    /// A pixel-based event (`dy` px, > 0: up; a precision touchpad) as rows, a row per `line`
+    /// px.
+    pub fn pixels(&mut self, dy: f32, line: f32) -> isize {
+        self.lines = 0.0;
+        wheel_steps(&mut self.px, dy, line)
+    }
+}
+
+thread_local! {
+    static WHEEL_CARRY: std::cell::Cell<WheelCarry> =
+        const { std::cell::Cell::new(WheelCarry { px: 0.0, lines: 0.0 }) };
+}
+
+/// A wheel event over a panel's list as rows ([`WheelCarry`]).
+pub fn wheel_rows(ev: &gpui::ScrollEvent, window: &Window) -> isize {
+    WHEEL_CARRY.with(|c| {
+        let mut carry = c.get();
+        let n = match ev.delta {
+            gpui::ScrollDelta::Lines(l) => carry.lines(l.y),
+            gpui::ScrollDelta::Pixels(p) => {
+                carry.pixels(f32::from(p.y), f32::from(window.line_height()))
+            }
+        };
+        c.set(carry);
+        n
+    })
+}
+
+/// The title bar's height at 100 % (logical px): the × keeps its 20 px hit box.
+pub const TITLE_H: f32 = 24.0;
+
+/// The title bar's height at the UI zoom (never under [`TITLE_H`]).
+pub fn title_h() -> f32 {
+    crate::zoom::f(TITLE_H).max(TITLE_H)
+}
+
+/// `origin` moved so a panel of `size` lies inside `window` (all logical px). A panel bigger
+/// than the window keeps its top-left (the title bar) on screen.
+pub fn clamp_place(origin: (f32, f32), size: (f32, f32), window: (f32, f32)) -> (f32, f32) {
+    let fit = |at: f32, len: f32, room: f32| at.min(room - len).max(0.0);
+    (
+        fit(origin.0, size.0, window.0),
+        fit(origin.1, size.1, window.1),
+    )
+}
+
+/// Where a panel goes: where it was dragged to (`saved`), else where it opens (`natural`),
+/// kept inside the window.
+pub fn panel_place(
+    saved: Option<(f32, f32)>,
+    natural: (f32, f32),
+    size: (f32, f32),
+    window: (f32, f32),
+) -> (f32, f32) {
+    clamp_place(saved.unwrap_or(natural), size, window)
+}
+
+/// A drag in progress: the panel, the pointer's offset from its top-left, and where it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PanelDrag {
+    panel: Panel,
+    grab: (f32, f32),
+    at: (f32, f32),
+    /// Where the press was, and whether the pointer has since gone further than a click's slop.
+    press: (f32, f32),
+    moved: bool,
+    /// The panel's size and the window's, as last drawn: a release keeps the place clamped.
+    room: Option<((f32, f32), (f32, f32))>,
+}
+
+/// How far a press may wander and stay a click (logical px): a click on the title bar keeps
+/// no place.
+const DRAG_SLOP: f32 = 3.0;
+
+impl PanelDrag {
+    fn start(panel: Panel, pointer: (f32, f32), at: (f32, f32)) -> PanelDrag {
+        PanelDrag {
+            panel,
+            grab: (pointer.0 - at.0, pointer.1 - at.1),
+            at,
+            press: pointer,
+            moved: false,
+            room: None,
+        }
+    }
+
+    /// The pointer moved with the left button held: the panel follows it, once it has gone
+    /// past a click's slop.
+    fn follow(self, pointer: (f32, f32)) -> PanelDrag {
+        let far = (pointer.0 - self.press.0)
+            .abs()
+            .max((pointer.1 - self.press.1).abs())
+            > DRAG_SLOP;
+        if !(self.moved || far) {
+            return self;
+        }
+        PanelDrag {
+            at: (pointer.0 - self.grab.0, pointer.1 - self.grab.1),
+            moved: true,
+            ..self
+        }
+    }
+
+    /// The drag ended (a release, or a move with no button held: a release the window
+    /// missed): the place to keep, only if it moved, kept inside the window as last drawn.
+    fn end(self) -> Option<(i32, i32)> {
+        if !self.moved {
+            return None;
+        }
+        let at = match self.room {
+            Some((size, window)) => clamp_place(self.at, size, window),
+            None => self.at,
+        };
+        Some((at.0.round() as i32, at.1.round() as i32))
+    }
+}
+
+/// Forget any drag in progress (Reset pop-up panel positions: a drag whose release was missed
+/// must not bring a place back).
+pub fn forget_drag() {
+    PANEL_DRAG.with(|d| d.set(None));
+}
+
+/// End `panel`'s drag, keeping its place if it moved.
+fn end_drag(panel: Panel, cx: &mut App) {
+    let Some(d) = dragged(panel) else {
+        return;
+    };
+    PANEL_DRAG.with(|c| c.set(None));
+    if let Some(at) = d.end() {
+        crate::picker_view::update_settings(cx, |s| {
+            s.panel_places.insert(panel.key().to_owned(), at);
+        });
+    }
+}
+
+thread_local! {
+    static PANEL_DRAG: std::cell::Cell<Option<PanelDrag>> = const { std::cell::Cell::new(None) };
+}
+
+fn dragged(panel: Panel) -> Option<PanelDrag> {
+    PANEL_DRAG.with(|d| d.get()).filter(|d| d.panel == panel)
+}
+
+fn saved_place(panel: Panel, cx: &App) -> Option<(f32, f32)> {
+    if let Some(d) = dragged(panel) {
+        return Some(d.at);
+    }
+    crate::picker_view::settings(cx)
+        .panel_places
+        .get(panel.key())
+        .map(|&(x, y)| (x as f32, y as f32))
+}
+
+type Dismisser = std::rc::Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
+
+/// `content` in a panel frame: a title bar above it (a grip and `title`, draggable; a × that
+/// closes it with `dismiss`), drawn over the window at `dropdown::PRIORITY` with
+/// [`defer_backdrop`] under it, so a press outside closes it too and does nothing else. A drag
+/// never closes it. Where `content`'s own style puts it (e.g. absolute in a pane) is where it
+/// opens until it is dragged ([`panel_place`]).
+pub fn floating(
+    panel: Panel,
+    title: impl Into<gpui::SharedString>,
+    theme: &crate::theme::Theme,
+    content: impl IntoElement,
+    dismiss: OnDismiss,
+) -> Floating {
+    Floating {
+        panel,
+        title: title.into(),
+        theme: *theme,
+        content: Some(content.into_any_element()),
+        dismiss: Some(std::rc::Rc::from(dismiss)),
+        priority: crate::dropdown::PRIORITY,
+    }
+}
+
+pub struct Floating {
+    priority: usize,
+    panel: Panel,
+    title: gpui::SharedString,
+    theme: crate::theme::Theme,
+    content: Option<AnyElement>,
+    dismiss: Option<Dismisser>,
+}
+
+impl IntoElement for Floating {
     type Element = Self;
 
     fn into_element(self) -> Self {
@@ -474,7 +723,76 @@ impl IntoElement for Layer {
     }
 }
 
-impl Element for Layer {
+impl Floating {
+    /// Drawn at this deferred priority instead of `dropdown::PRIORITY` (the workspace's
+    /// prompts sit above header dropdowns).
+    pub fn priority(mut self, priority: usize) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    fn title_bar(&self, width: Pixels, at: (f32, f32), dismiss: Dismisser) -> AnyElement {
+        use gpui::{MouseButton, ParentElement};
+        let t = self.theme;
+        let panel = self.panel;
+        div()
+            .id(("panel-title", panel as u64))
+            .occlude()
+            .w(width)
+            .h(px(title_h()))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .pl_2()
+            .pr(px(2.0))
+            .bg(t.panel)
+            .border_1()
+            .border_b_0()
+            .border_color(t.axis_line)
+            .rounded_t_md()
+            .text_size(crate::zoom::ui(12.0))
+            .cursor_grab()
+            .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, _| {
+                let p = (f32::from(ev.position.x), f32::from(ev.position.y));
+                PANEL_DRAG.with(|d| d.set(Some(PanelDrag::start(panel, p, at))));
+                window.refresh();
+            })
+            // A click released before the frame that listens for the drag: nothing to keep.
+            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                end_drag(panel, cx);
+                window.refresh();
+            })
+            .child(div().flex_none().text_color(t.text_dim).child("⠿"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_main)
+                    .child(self.title.clone()),
+            )
+            .child(
+                crate::icons::button(
+                    ("panel-close", panel as u64),
+                    crate::icons::Icon::Close,
+                    &format!("Close {}", self.title),
+                    None,
+                    false,
+                    &t,
+                )
+                .on_mouse_down(MouseButton::Left, move |ev, window, cx| {
+                    cx.stop_propagation();
+                    mark_dismissing();
+                    PANEL_DRAG.with(|d| d.set(None));
+                    dismiss(ev, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+}
+
+impl Element for Floating {
     type RequestLayoutState = ();
     type PrepaintState = ();
 
@@ -509,22 +827,54 @@ impl Element for Layer {
         let (Some(content), Some(dismiss)) = (self.content.take(), self.dismiss.take()) else {
             return;
         };
-        let rect = Rect::new(
-            f32::from(bounds.origin.x),
-            f32::from(bounds.origin.y),
-            f32::from(bounds.size.width),
-            f32::from(bounds.size.height),
+        let v = window.viewport_size();
+        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let natural = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let at = panel_place(
+            saved_place(self.panel, cx),
+            natural,
+            (w, h + title_h()),
+            (f32::from(v.width), f32::from(v.height)),
         );
-        let priority = crate::dropdown::PRIORITY;
+        // A drag keeps the place as drawn (inside the window), which is what a release saves.
+        if let Some(mut d) = dragged(self.panel) {
+            d.at = at;
+            d.room = Some((
+                (w, h + title_h()),
+                (f32::from(v.width), f32::from(v.height)),
+            ));
+            PANEL_DRAG.with(|c| c.set(Some(d)));
+        }
+        let rect = Rect::new(at.0, at.1, w, h + title_h());
+        let close = dismiss.clone();
+        let panel = self.panel;
+        let close: OnDismiss = Box::new(move |ev, window, cx| {
+            if dragged(panel).is_some() {
+                PANEL_DRAG.with(|d| d.set(None));
+            }
+            close(ev, window, cx)
+        });
         defer_backdrop(
             window,
             cx,
             crate::dropdown::BACKDROP_PRIORITY,
             &[rect],
-            dismiss,
+            close,
         );
-        // As `gpui::deferred`: at the parent's offset, keeping the content's own layout.
-        let offset = window.element_offset();
+        let priority = self.priority;
+        let mut bar = self.title_bar(bounds.size.width, at, dismiss);
+        bar.layout_as_root(
+            size(
+                AvailableSpace::Definite(bounds.size.width),
+                AvailableSpace::Definite(px(title_h())),
+            ),
+            window,
+            cx,
+        );
+        window.defer_draw(bar, point(px(at.0), px(at.1)), priority, None);
+        // As `gpui::deferred`, moved from where its own layout put it to under the title bar.
+        let offset =
+            window.element_offset() + point(px(at.0 - natural.0), px(at.1 + title_h() - natural.1));
         window.defer_draw(content, offset, priority, None);
     }
 
@@ -535,9 +885,157 @@ impl Element for Layer {
         _bounds: Bounds<Pixels>,
         _request_layout: &mut (),
         _prepaint: &mut (),
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
+        // While this panel is dragged it follows the pointer anywhere in the window; a release
+        // keeps the place (the drag never reaches the backdrop: a move or release isn't a press).
+        let panel = self.panel;
+        if dragged(panel).is_none() {
+            return;
+        }
+        window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, window, cx| {
+            if phase != gpui::DispatchPhase::Capture {
+                return;
+            }
+            let Some(g) = dragged(panel) else {
+                return;
+            };
+            if ev.pressed_button != Some(gpui::MouseButton::Left) {
+                // The release never reached the window (it closed mid-drag, focus left).
+                end_drag(panel, cx);
+            } else {
+                let p = (f32::from(ev.position.x), f32::from(ev.position.y));
+                PANEL_DRAG.with(|d| d.set(Some(g.follow(p))));
+            }
+            window.refresh();
+        });
+        window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, window, cx| {
+            if phase != gpui::DispatchPhase::Capture || dragged(panel).is_none() {
+                return;
+            }
+            end_drag(panel, cx);
+            window.refresh();
+        });
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    /// A panel stays inside the window: pulled back from every edge, and one bigger than the
+    /// window keeps its title bar on screen.
+    #[test]
+    fn a_panel_is_kept_inside_the_window() {
+        let win = (1000.0, 600.0);
+        assert_eq!(
+            clamp_place((100.0, 50.0), (300.0, 200.0), win),
+            (100.0, 50.0)
+        );
+        assert_eq!(
+            clamp_place((900.0, 500.0), (300.0, 200.0), win),
+            (700.0, 400.0)
+        );
+        assert_eq!(clamp_place((-40.0, -10.0), (300.0, 200.0), win), (0.0, 0.0));
+        assert_eq!(clamp_place((50.0, 50.0), (1200.0, 900.0), win), (0.0, 0.0));
+        // After the window shrinks (or moves to a smaller monitor) the same place is pulled in.
+        assert_eq!(
+            clamp_place((700.0, 400.0), (300.0, 200.0), (800.0, 500.0)),
+            (500.0, 300.0)
+        );
+    }
+
+    /// Where it was dragged wins over where it opens; with none, where it opens.
+    #[test]
+    fn a_dragged_place_is_remembered() {
+        let win = (1000.0, 600.0);
+        let size = (300.0, 200.0);
+        assert_eq!(panel_place(None, (20.0, 30.0), size, win), (20.0, 30.0));
+        assert_eq!(
+            panel_place(Some((400.0, 100.0)), (20.0, 30.0), size, win),
+            (400.0, 100.0)
+        );
+        assert_eq!(
+            panel_place(Some((990.0, 590.0)), (20.0, 30.0), size, win),
+            (700.0, 400.0)
+        );
+    }
+
+    /// A wheel notch is a row; a trackpad's small deltas add up to one.
+    #[test]
+    fn the_wheel_moves_whole_rows() {
+        let mut carry = 0.0;
+        assert_eq!(wheel_steps(&mut carry, -20.0, 20.0), 1, "down a row");
+        assert_eq!(wheel_steps(&mut carry, 40.0, 20.0), -2, "up two");
+        assert_eq!(wheel_steps(&mut carry, -7.0, 20.0), 0);
+        assert_eq!(wheel_steps(&mut carry, -7.0, 20.0), 0);
+        assert_eq!(
+            wheel_steps(&mut carry, -7.0, 20.0),
+            1,
+            "small deltas add up"
+        );
+        assert_eq!(wheel_steps(&mut carry, -7.0, 0.0), 0);
+    }
+
+    /// A notch is one row whatever the system's lines per notch.
+    #[test]
+    fn a_notch_is_one_row() {
+        let mut c = WheelCarry::default();
+        assert_eq!(c.lines(3.0), -1);
+        assert_eq!(c.lines(-3.0), 1);
+        assert_eq!(c.lines(0.0), 0);
+        // A smooth wheel's quarter lines: a row per four.
+        let steps: isize = (0..8).map(|_| c.lines(-0.25)).sum();
+        assert_eq!(steps, 2);
+        // A whole notch after a partial one: one row, the partial dropped.
+        c.lines(-0.5);
+        assert_eq!(c.lines(-1.0), 1);
+        assert_eq!(c, WheelCarry::default());
+    }
+
+    /// A touchpad's pixel leftover is never read as lines: a wheel step after it moves by its
+    /// own measure (not 14 rows the other way).
+    #[test]
+    fn pixel_and_line_leftovers_stay_apart() {
+        let mut c = WheelCarry::default();
+        assert_eq!(c.pixels(15.0, 20.0), 0, "under a row");
+        assert_eq!(c.lines(-0.125), 0);
+        assert_eq!(
+            c.pixels(-15.0, 20.0),
+            0,
+            "the line leftover isn't read as pixels"
+        );
+        assert_eq!(c.pixels(-25.0, 20.0), 2);
+    }
+
+    /// A drag follows the pointer by where it was grabbed; only one that moved keeps a place
+    /// (a click on the title bar keeps none).
+    #[test]
+    fn a_drag_keeps_a_place_only_when_it_moved() {
+        let d = PanelDrag::start(Panel::Palette, (110.0, 60.0), (100.0, 50.0));
+        assert_eq!(d.end(), None, "a click");
+        let d = d.follow((112.0, 61.0));
+        assert_eq!(d.end(), None, "within the slop");
+        assert_eq!(d.at, (100.0, 50.0), "and it doesn't move");
+        let d = d.follow((310.0, 260.0));
+        assert_eq!(d.at, (300.0, 250.0), "the grab offset is kept");
+        assert_eq!(d.end(), Some((300, 250)));
+        // Back where it started: still a move.
+        assert_eq!(d.follow((110.0, 60.0)).end(), Some((100, 50)));
+        // Released past the window's edge before a frame clamped it: kept inside.
+        let d = PanelDrag {
+            room: Some(((400.0, 300.0), (1000.0, 600.0))),
+            ..d.follow((1210.0, 60.0))
+        };
+        assert_eq!(d.end(), Some((600, 50)));
+    }
+
+    #[test]
+    fn every_panel_has_its_own_key() {
+        let all = Panel::ALL;
+        let keys: std::collections::BTreeSet<_> = all.iter().map(|p| p.key()).collect();
+        assert_eq!(keys.len(), all.len());
     }
 }
 

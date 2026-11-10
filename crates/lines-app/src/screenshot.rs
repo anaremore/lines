@@ -82,6 +82,10 @@ pub struct Shot {
     pub context_menu: Option<crate::pane_menu::ShotMenu>,
     /// The UI zoom (`--ui-zoom`).
     pub ui_zoom: Option<u16>,
+    /// A workspace prompt opens (`--prompt palette[:QUERY]|open|save`).
+    pub prompt: Option<String>,
+    /// Every pop-up panel as if dragged here (`--panel-at X,Y`).
+    pub panel_at: Option<(f32, f32)>,
     /// Keep the journal in this folder, so a script's trades get trade snapshots (`--journal-dir`).
     pub journal_dir: Option<PathBuf>,
     /// Show the replay's book as a source without depth would: only the inside, with this note
@@ -192,6 +196,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         hover_header,
         context_menu,
         ui_zoom,
+        prompt,
+        panel_at,
         journal_dir,
         depth_note: _,
         layout_report,
@@ -319,6 +325,14 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         // `--ui-zoom` as Settings › Appearance would have saved it (its row shows it).
         settings.settings.ui_zoom = ui_zoom.and_then(crate::zoom::saved);
         settings.settings.new_panes.default_qty = order_size;
+        if let Some((x, y)) = panel_at {
+            for p in crate::popover::Panel::ALL {
+                settings
+                    .settings
+                    .panel_places
+                    .insert(p.key().to_owned(), (x.round() as i32, y.round() as i32));
+            }
+        }
         if let Some(m) = pnl {
             settings.settings.pnl_display = m;
         }
@@ -358,6 +372,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
             script,
             hover_header,
             context_menu,
+            prompt,
             settings_shot,
             strategies,
         ) {
@@ -391,6 +406,7 @@ fn capture(
     script: Option<(Vec<crate::trading::Step>, lines_core::UtcMillis)>,
     hover_header: bool,
     context_menu: Option<crate::pane_menu::ShotMenu>,
+    prompt: Option<String>,
     settings_shot: Option<SettingsShot>,
     strategies: Option<std::sync::Arc<crate::strategy_panel::DemoStrategies>>,
 ) -> Result<()> {
@@ -404,6 +420,9 @@ fn capture(
     }
     if let Some(m) = context_menu {
         handle.update(cx, |v, _, cx| v.screenshot_menu(m, cx))?;
+    }
+    if let Some(p) = prompt {
+        handle.update(cx, |v, window, cx| v.screenshot_prompt(&p, window, cx))??;
     }
     // The panes now follow their feeds (the core has the book): run the script and wait for
     // its events to reach the panes.

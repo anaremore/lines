@@ -132,6 +132,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # DOM/T&S evidence from synthetic data: record the mock (it has depth), then shoot the replay:
 #   lines --source mock --headless 6 --record recordings/dom-mock.lfr
 #   lines --replay recordings/dom-mock.lfr --screenshot out.png --size 1600x900 --dom-grouping 2 --large-print 6
+# --prompt palette[:QUERY]|open|save opens a workspace prompt; --panel-at X,Y draws every pop-up panel as if dragged there (kept inside the window).
 # --picker "nq" renders the symbol picker open on that query (screenshots never read or write user settings).
 # Backtest a strategy (decision 0025), headless: --backtest NAME --replay FILE|DIR [--replay-levels DIR]
 #   --backtest-config settings.json [--report out.json]. The public build has only the example `level-touch`.
