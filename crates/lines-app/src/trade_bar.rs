@@ -2339,6 +2339,41 @@ pub fn off_exits_fit(width: f32) -> bool {
     cell("Cancel all off") + 4.0 + cell("Flatten off") <= room
 }
 
+/// How the bracket editor's preset rows are laid out at `width`: the row marker, the Stop and
+/// Target cells' width (`None`: they share the room), the name cell, and the text size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EditorCells {
+    pub marker: bool,
+    pub value: Option<f32>,
+    pub name: bool,
+    pub text: f32,
+}
+
+/// The longest distance a cell holds while typed, at the wide glyph estimate: six digits
+/// ([`crate::brackets::MAX_TICKS`]) or a point distance like "100.00", and the cursor.
+#[cfg(test)]
+const EDITOR_VALUE_SAMPLE: &str = "100000▏";
+
+/// A tight panel drops the marker (the active cell has its accent border) and the name (it still
+/// saves; wider panels edit it), and Stop and Target share the row: a distance is never cut.
+pub fn editor_cells(width: f32) -> EditorCells {
+    if is_tight(width) {
+        EditorCells {
+            marker: false,
+            value: None,
+            name: false,
+            text: 11.0,
+        }
+    } else {
+        EditorCells {
+            marker: true,
+            value: Some(64.0),
+            name: true,
+            text: 12.0,
+        }
+    }
+}
+
 /// The exits row's text size: 12 px, 11 in a tight panel (Cancel all and Flatten keep their words).
 fn util_text(width: f32) -> f32 {
     if is_tight(width) { 11.0 } else { 12.0 }
@@ -3173,7 +3208,15 @@ pub fn dom_bar<V: TradePane>(
             if let Some(c) = &pt.bracket_confirm {
                 panel = panel.child(bracket_confirm_view(c, v, product, narrow, h, t, cx));
             } else if let Some(ed) = &pt.editor {
-                panel = panel.child(editor_view(ed, pt.editor_msg.as_deref(), v, h, t, cx));
+                panel = panel.child(editor_view(
+                    ed,
+                    pt.editor_msg.as_deref(),
+                    v,
+                    h,
+                    width,
+                    t,
+                    cx,
+                ));
             }
         }
     } else {
@@ -3556,12 +3599,24 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         items.push((s, t.text_dim, false, 0));
     }
     let unresolved = d.map_or(0, |d| d.unresolved);
-    let chip = (unresolved > 0).then(|| unresolved_label(unresolved, width));
     let day_on_line = day.filter(|_| day_below);
     let day_w = day_on_line.map_or(0.0, |m| {
         let mut s = String::new();
         let _ = crate::pnl::write_money(&mut s, m);
         text_w("Day ", 11.0) + text_w(&s, 11.0) + 4.0 + 8.0
+    });
+    // The unresolved chip keeps its advice only where the working count still fits beside it.
+    let working_w = items
+        .iter()
+        .find(|i| i.3 == CARD_KEEP)
+        .map_or(0.0, |i| text_w(&i.0, 11.0));
+    let chip = (unresolved > 0).then(|| {
+        let long = unresolved_label(unresolved, width);
+        if text_w(&long, 11.0) + 16.0 + 8.0 + working_w + day_w <= card_inner(width) {
+            long
+        } else {
+            format!("{unresolved} unresolved")
+        }
     });
     let chip_w = chip.as_ref().map_or(0.0, |c| text_w(c, 11.0) + 8.0 + 8.0);
     let inner = card_inner(width);
@@ -4279,6 +4334,7 @@ fn editor_view<V: TradePane>(
     msg: Option<&str>,
     v: &V,
     h: f32,
+    width: f32,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> gpui::Div {
@@ -4314,7 +4370,8 @@ fn editor_view<V: TradePane>(
                 .text_color(t.text_dim)
                 .child("Enter save · Esc cancel"),
         );
-    let cell_el = |r: usize, f: Field, text: &str, w: f32| {
+    let fit = editor_cells(width);
+    let cell_el = |r: usize, f: Field, text: &str, w: Option<f32>| {
         let active = r == ed.row && f == ed.field;
         let bad = ed.cell_problem(r, f).is_some();
         let shown = if active {
@@ -4324,7 +4381,10 @@ fn editor_view<V: TradePane>(
         };
         div()
             .id(("bracket-cell", (r * 3 + f as usize) as u64))
-            .w(crate::zoom::ui(w))
+            .map(|d| match w {
+                Some(w) => d.w(crate::zoom::ui(w)).flex_shrink_0(),
+                None => d.flex_1().min_w_0(),
+            })
             .h(crate::zoom::ui(18.0))
             .px_1()
             .flex()
@@ -4362,17 +4422,23 @@ fn editor_view<V: TradePane>(
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(
-                    div()
-                        .w(crate::zoom::ui(14.0))
-                        .text_color(if r == ed.row { t.accent } else { t.text_dim })
-                        .child(if r == ed.row { "›" } else { " " }),
-                )
-                .child(div().text_color(t.text_dim).child("S"))
-                .child(cell_el(r, Field::Stop, &row.stop, 48.0))
-                .child(div().text_color(t.text_dim).child("T"))
-                .child(cell_el(r, Field::Target, &row.target, 48.0))
-                .child(cell_el(r, Field::Name, &row.name, 64.0)),
+                .text_size(crate::zoom::ui(fit.text))
+                .when(fit.marker, |d| {
+                    d.child(
+                        div()
+                            .w(crate::zoom::ui(14.0))
+                            .flex_shrink_0()
+                            .text_color(if r == ed.row { t.accent } else { t.text_dim })
+                            .child(if r == ed.row { "›" } else { " " }),
+                    )
+                })
+                .child(div().flex_shrink_0().text_color(t.text_dim).child("S"))
+                .child(cell_el(r, Field::Stop, &row.stop, fit.value))
+                .child(div().flex_shrink_0().text_color(t.text_dim).child("T"))
+                .child(cell_el(r, Field::Target, &row.target, fit.value))
+                .when(fit.name, |d| {
+                    d.child(cell_el(r, Field::Name, &row.name, None))
+                }),
         );
     }
     if ed.rows.is_empty() {
@@ -6548,6 +6614,35 @@ mod tests {
         assert_eq!(card_exit("SL", 2, 2, "7562.00"), "SL 7562.00");
         assert_eq!(card_exit("TP", 2, -2, "7577.00"), "TP 7577.00");
         assert_eq!(card_exit("SL", 1, 2, "7562.00"), "SL 1 @ 7562.00");
+    }
+
+    /// The bracket editor's preset row fits every width without cutting a distance being typed.
+    #[test]
+    fn the_editor_never_cuts_a_distance() {
+        for width in WIDTHS {
+            let fit = editor_cells(width);
+            let room = width - 2.0 * SIDE;
+            let label = text_w("S", fit.text) + text_w("T", fit.text);
+            let cell_pad = 2.0 * 4.0 + 2.0;
+            let need = text_w(EDITOR_VALUE_SAMPLE, fit.text) + cell_pad;
+            match fit.value {
+                Some(w) => {
+                    assert!(need <= w, "{width}: a distance fits its {w} px cell");
+                    let fixed = if fit.marker { 14.0 } else { 0.0 } + label + 2.0 * w;
+                    let gaps = 4.0 * if fit.name { 5.0 } else { 4.0 };
+                    assert!(fixed + gaps <= room, "{width}: the row fits");
+                }
+                None => {
+                    let gaps = 4.0 * 3.0;
+                    let each = (room - label - gaps) / 2.0;
+                    assert!(need <= each, "{width}: {need} in {each}");
+                }
+            }
+        }
+        assert!(
+            !editor_cells(MIN_DOM_WIDTH).name,
+            "a tight panel leaves the name out"
+        );
     }
 
     /// A read-only account's exits say "off" whole: both where they fit, else one "Exits off".
