@@ -714,6 +714,8 @@ impl Render for DownloadWindow {
         div()
             .id("download")
             .size_full()
+            // The UI font (`crate::fonts`): every text in the window inherits it.
+            .font_family(crate::fonts::ui_family())
             .flex()
             .flex_col()
             .bg(t.bg)

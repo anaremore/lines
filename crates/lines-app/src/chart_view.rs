@@ -48,8 +48,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, Font, FontWeight,
-    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    AnyElement, App, Bounds, ContentMask, Context, EventEmitter, FocusHandle, FontWeight, Hsla,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, ShapedLine, SharedString,
     Styled, TextAlign, TextRun, Window, canvas, div, fill, point, prelude::*, px, size,
 };
@@ -200,6 +200,28 @@ enum LabelKind {
     /// The display zone ("ET", "JST") in the corner under the price axis (keyed by its
     /// offset: an abbreviation changes with it).
     Zone,
+}
+
+impl LabelKind {
+    /// Prices, times and values on the axes and tags: the number font (IBM Plex Mono,
+    /// `crate::fonts`). Titles, names and notes are in the UI font.
+    fn numeric(self) -> bool {
+        matches!(
+            self,
+            LabelKind::Price
+                | LabelKind::Time
+                | LabelKind::TimeSeconds
+                | LabelKind::Date
+                | LabelKind::DateTime
+                | LabelKind::LastPrice
+                | LabelKind::CrossPrice
+                | LabelKind::SubValue
+                | LabelKind::SubLast
+                | LabelKind::SubCross
+                | LabelKind::CrossTime
+                | LabelKind::DrawingTag(_)
+        )
+    }
 }
 
 /// A lower pane's × (logical px square): its hit target.
@@ -492,7 +514,6 @@ pub struct ChartView {
     /// epoch (`lines_core::display_tz`): a change clears the cached labels.
     zone: DisplayTz,
     zone_epoch: u64,
-    font: Option<Font>,
     rates: Rates,
     paint_time_ewma_us: f64,
     /// Show `rates` in the header (workspace preference, read at render).
@@ -796,7 +817,6 @@ impl ChartView {
             corner_zone_w: None,
             zone: display_tz::current(),
             zone_epoch: display_tz::epoch(),
-            font: None,
             rates: Rates {
                 at: Instant::now(),
                 updates: 0,
@@ -3195,9 +3215,6 @@ impl ChartView {
         if self.tick_marks.capacity() < marks {
             self.tick_marks.reserve_exact(marks - self.tick_marks.len());
         }
-        if self.font.is_none() {
-            self.font = Some(window.text_style().font());
-        }
         if !self.space_measured {
             self.measure_grid_space(window);
         }
@@ -5432,16 +5449,11 @@ impl ChartView {
     /// Measure the axis labels' spacing (`GridSpace`) with this window's font, once.
     fn measure_grid_space(&mut self, window: &mut Window) {
         let dim = self.theme.text_dim;
-        let mut w = |key: i64, text: &'static str| {
-            f32::from(
-                self.label(LabelKind::Indicator, key, dim, window, |s| {
-                    let _ = s.write_str(text);
-                })
-                .width,
-            ) as f64
-        };
+        // In the time labels' font, the number font (`LabelKind::numeric`), which a UI font
+        // change leaves alone. Measured once, not kept.
+        let mut w = |text: &str| f32::from(self.shape(text, dim, window).width) as f64;
         // Widest digits; a gap of two digits' width between labels.
-        let (time, date_time) = (w(1, "88:88"), w(2, "88-88 88:88"));
+        let (time, date_time) = (w("88:88"), w("88-88 88:88"));
         let gap = time * 0.4 + 8.0;
         self.scene.space = GridSpace {
             price_px: f64::from(label_px()) * 2.5,
@@ -5494,7 +5506,7 @@ impl ChartView {
                 .is_none_or(|(s, k, _)| s != text || *k != ts)
             {
                 let text = text.to_owned();
-                let line = self.shape_sized(&text, color, ts.size.px(), window);
+                let line = self.shape_sized(&text, color, ts.size.px(), false, window);
                 self.note_lines.insert(d.id, (text, ts, line));
             }
             let Some((_, _, line)) = self.note_lines.get(&d.id) else {
@@ -5530,7 +5542,7 @@ impl ChartView {
             {
                 let shown = format!("{text}▏");
                 // A note is a drawing: typed at the size it is drawn at, which doesn't zoom.
-                let line = self.shape_sized(&shown, t.text_main, LABEL_PX_100, window);
+                let line = self.shape_sized(&shown, t.text_main, LABEL_PX_100, false, window);
                 self.note_entry_line = Some((shown, line));
             }
             let Some((_, line)) = &self.note_entry_line else {
@@ -6466,23 +6478,27 @@ impl ChartView {
         );
     }
 
+    /// Numbers at the label size (the bar and measure readouts), in the number font.
     fn shape(&self, text: &str, color: Hsla, window: &mut Window) -> ShapedLine {
-        self.shape_sized(text, color, label_px(), window)
+        self.shape_sized(text, color, label_px(), true, window)
     }
 
+    /// `mono`: in the number font, IBM Plex Mono; else the UI font (`crate::fonts`).
     fn shape_sized(
         &self,
         text: &str,
         color: Hsla,
         size_px: f32,
+        mono: bool,
         window: &mut Window,
     ) -> ShapedLine {
         let run = TextRun {
             len: text.len(),
-            font: self
-                .font
-                .clone()
-                .unwrap_or_else(|| window.text_style().font()),
+            font: if mono {
+                crate::fonts::mono()
+            } else {
+                crate::fonts::ui()
+            },
             color,
             background_color: None,
             underline: None,
@@ -6518,7 +6534,7 @@ impl ChartView {
             } else {
                 label_px()
             };
-            let line = self.shape_sized(s.as_str(), color, size, window);
+            let line = self.shape_sized(s.as_str(), color, size, kind.numeric(), window);
             self.labels.insert((kind, key), (color, line));
         }
         &self.labels[&(kind, key)].1
@@ -6605,11 +6621,22 @@ impl ChartView {
         pane::keep_refused(&mut left, &mut tag, self.feed.store().logon_refused());
         // Last, bid, ask: a missing value shows as a dimmed dash (docs/design.md §7), never as
         // a bare label that reads like a layout bug.
+        // The label in the UI font, the price in the number font (`crate::fonts`), as on the
+        // axis and in the DOM.
         let quote = |label: &str, p: Option<Price>| {
             let (text, missing) = quote_text(label, p, &f);
+            let (word, value) = text.split_once(' ').unwrap_or((text.as_str(), ""));
             div()
+                .flex()
+                .flex_row()
+                .gap_1()
                 .text_color(if missing { t.text_dim } else { t.text_main })
-                .child(text)
+                .child(word.to_owned())
+                .child(
+                    div()
+                        .font_family(crate::fonts::MONO)
+                        .child(value.to_owned()),
+                )
         };
         // Each item is dropped whole when it doesn't fit (it wraps onto a hidden second line,
         // never cut); bid and ask are one item, so the quote never shows one side alone.
@@ -6672,13 +6699,16 @@ impl ChartView {
         if self.frozen {
             // Frozen clock: only data-derived time is shown, so screenshots are reproducible.
             // On the display zone's clock, like every other time, and short ("16:58:59 ET": the
-            // axis has the date) so a narrow header keeps its zone.
+            // axis has the date) so a narrow header keeps its zone. First in the status text,
+            // so a narrow header (it cuts from the end) gives up the provider's name before it.
             if let Some(mt) = d.market_time {
                 let zone = display_tz::current();
-                let _ = right.write_str("  ·  ");
-                let _ = zone.write_clock(mt, &mut right);
-                let _ = right.write_char(' ');
-                let _ = zone.write_label(mt, &mut right);
+                let mut clock = String::with_capacity(32);
+                let _ = zone.write_clock(mt, &mut clock);
+                let _ = clock.write_char(' ');
+                let _ = zone.write_label(mt, &mut clock);
+                clock.push_str("  ·  ");
+                right.insert_str(0, &clock);
             }
         } else if self.perf_stats {
             // Debug detail, not data (docs/design.md §1): only behind "Performance stats".
@@ -6717,8 +6747,8 @@ impl ChartView {
         let room = f32::from(self.chart.size.width)
             - pane::controls_gutter(crate::layout::PaneKind::Chart);
         let acct = crate::trade_bar::chart_account(self, cx);
-        // Header text widths as the UI font shapes them (text_sm).
-        let font = window.text_style().font();
+        // Header text widths as the UI font shapes them (text_sm; `fonts::ui`, as drawn).
+        let font = crate::fonts::ui();
         let size = gpui::rems(0.875).to_pixels(window.rem_size());
         let measure = |s: &str| -> f32 {
             let run = TextRun {
@@ -7866,6 +7896,9 @@ impl Render for ChartView {
             self.note_lines.clear();
             self.note_entry_line = None;
             self.measure_lines.clear();
+            // Or in another UI font (`crate::fonts`): the studies' labels too.
+            self.profile.theme_changed();
+            self.levels.text_changed();
         }
         // A group's list closes when none of its orders is left.
         if self

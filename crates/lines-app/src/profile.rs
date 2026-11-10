@@ -271,7 +271,7 @@ impl VolumeProfileLayer {
             let text = self.label.as_str();
             let run = TextRun {
                 len: text.len(),
-                font: window.text_style().font(),
+                font: crate::fonts::ui(),
                 color: t.text_dim,
                 background_color: None,
                 underline: None,

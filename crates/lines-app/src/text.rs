@@ -1,4 +1,11 @@
-//! Allocation-free number text for panes that repaint many changing values (DOM, T&S).
+//! Allocation-free text for panes that repaint many changing values (DOM, T&S, footprint,
+//! journal, chain, the chart's order tags).
+//!
+//! Fonts (decision 0034, `crate::fonts`): a string with no letter (a price, size, time, P&L,
+//! "—", "▲") is a number and is in IBM Plex Mono, whatever the UI font; a string with a
+//! letter (a header, a message, a contract, "Long", "3 ticks") is words and is in the UI font,
+//! so the UI font setting reaches it. [`is_words`] decides, once per string, for measuring and
+//! painting alike. Both are shaped with tabular digits (`tnum`).
 //!
 //! Shaping a string allocates, and a DOM's sizes or a tape's times change every frame, so a
 //! per-value label cache would miss constantly. Instead each *character* is shaped once per
@@ -20,6 +27,14 @@ struct Key {
     ch: char,
     color: [u32; 4],
     bold: bool,
+    /// In the UI font (part of words), else the number font.
+    words: bool,
+}
+
+/// Whether `s` is words (in the UI font) rather than a number (in IBM Plex Mono): it has an
+/// ASCII letter. No allocation.
+pub fn is_words(s: &str) -> bool {
+    s.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 pub struct Glyphs {
@@ -30,7 +45,8 @@ pub struct Glyphs {
     generation: u32,
     /// Follows the UI zoom (else always `base`).
     zooms: bool,
-    font: Option<Font>,
+    /// The number font and the UI font (`[mono, ui]`), each made on first use.
+    fonts: [Option<Font>; 2],
     cache: HashMap<Key, ShapedLine>,
 }
 
@@ -46,7 +62,7 @@ impl Glyphs {
             size: crate::zoom::f(size),
             generation: crate::zoom::generation(),
             zooms: true,
-            font: None,
+            fonts: [None, None],
             cache: HashMap::with_capacity(256),
         }
     }
@@ -61,30 +77,48 @@ impl Glyphs {
         }
     }
 
-    /// The text size now: the base at the zoom now. A zoom change drops what was shaped at
-    /// the old size (once; nothing is allocated until glyphs are shaped again).
+    /// The text size now: the base at the zoom now. A zoom change, or a UI font change (which
+    /// bumps the same generation, even for fixed-size glyphs), drops what was shaped before
+    /// (once; nothing is allocated until glyphs are shaped again).
     pub fn size(&mut self) -> f32 {
         let g = crate::zoom::generation();
-        if self.zooms && g != self.generation {
+        if g != self.generation {
             self.generation = g;
-            self.size = crate::zoom::f(self.base);
+            if self.zooms {
+                self.size = crate::zoom::f(self.base);
+            }
             self.cache.clear();
+            self.fonts[1] = None;
         }
         self.size
     }
 
-    fn glyph(&mut self, ch: char, color: Hsla, bold: bool, window: &mut Window) -> &ShapedLine {
+    fn glyph(
+        &mut self,
+        ch: char,
+        color: Hsla,
+        bold: bool,
+        words: bool,
+        window: &mut Window,
+    ) -> &ShapedLine {
         self.size();
         let key = Key {
             ch,
             color: color_key(color),
             bold,
+            words,
         };
         if !self.cache.contains_key(&key) {
-            let mut font = self
-                .font
+            let mut font = self.fonts[usize::from(words)]
                 .get_or_insert_with(|| {
-                    let mut f = window.text_style().font();
+                    // Numbers are IBM Plex Mono whatever the UI font: every digit the same
+                    // width, so columns line up. `tnum` keeps digits even in the UI font and
+                    // in a glyph that falls back to another font.
+                    let mut f = if words {
+                        crate::fonts::ui()
+                    } else {
+                        crate::fonts::mono()
+                    };
                     f.features = FontFeatures(Arc::new(vec![("tnum".into(), 1)]));
                     f
                 })
@@ -113,10 +147,11 @@ impl Glyphs {
         &self.cache[&key]
     }
 
-    /// Width of `s` in logical px.
+    /// Width of `s` in logical px (in its font: [`is_words`]).
     pub fn width(&mut self, s: &str, color: Hsla, bold: bool, window: &mut Window) -> f32 {
+        let words = is_words(s);
         s.chars()
-            .map(|c| f32::from(self.glyph(c, color, bold, window).width))
+            .map(|c| f32::from(self.glyph(c, color, bold, words, window).width))
             .sum()
     }
 
@@ -138,8 +173,9 @@ impl Glyphs {
         let line_h = px(size * 1.3);
         let top = y + (row_h - size * 1.3) * 0.5;
         let mut at = x;
+        let words = is_words(s);
         for c in s.chars() {
-            let g = self.glyph(c, color, bold, window);
+            let g = self.glyph(c, color, bold, words, window);
             let w = f32::from(g.width);
             let _ = g.paint(
                 point(px(at), px(top)),
@@ -184,4 +220,38 @@ impl Glyphs {
 /// `Pixels` → `f32` shorthand.
 pub fn f(p: Pixels) -> f32 {
     f32::from(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_words;
+
+    /// Numbers (and their marks) in Plex Mono; anything with a letter in the UI font.
+    #[test]
+    fn a_letter_makes_words() {
+        for n in [
+            "6000.75",
+            "10:29:59.873",
+            "-$1,250.00",
+            "12",
+            "—",
+            "▲",
+            "+3",
+            "≈ 2.41",
+            "",
+        ] {
+            assert!(!is_words(n), "{n:?} is a number");
+        }
+        for w in [
+            "Price",
+            "no trades yet",
+            "ESZ26",
+            "Long",
+            "3 ticks",
+            "Time ET",
+            "1.2K",
+        ] {
+            assert!(is_words(w), "{w:?} is words");
+        }
+    }
 }

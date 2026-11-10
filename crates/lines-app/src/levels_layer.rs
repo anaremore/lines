@@ -451,6 +451,17 @@ impl LevelsLayer {
         self.shaped.clear();
     }
 
+    /// A new UI font (`crate::fonts`): labels are measured, cut and shaped again.
+    pub fn text_changed(&mut self) {
+        self.shaped.clear();
+        self.widths.clear();
+        self.shortest.clear();
+        self.cuts.clear();
+        for s in &mut self.slots {
+            s.measured_texts.clear();
+        }
+    }
+
     pub fn new(config: LevelsConfig) -> LevelsLayer {
         LevelsLayer {
             config,
@@ -1359,7 +1370,7 @@ fn estimate(t: &str) -> f32 {
 pub(crate) fn measure(text: &str, theme: &Theme, window: &mut Window) -> f32 {
     let run = TextRun {
         len: text.len(),
-        font: window.text_style().font(),
+        font: crate::fonts::ui(),
         color: theme.text_main,
         background_color: None,
         underline: None,
@@ -1392,7 +1403,7 @@ fn shaped_width(
         }
         let run = TextRun {
             len: text.len(),
-            font: window.text_style().font(),
+            font: crate::fonts::ui(),
             color: theme.text_main,
             background_color: None,
             underline: None,

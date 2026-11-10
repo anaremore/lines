@@ -45,6 +45,14 @@ allow = ["CDLA-Permissive-2.0"]
 crate = "json-writer"
 allow = ["Unlicense"]
 
+[[licenses.exceptions]]
+# Our lines-fonts crate: IBM Plex Sans and Mono, embedded unmodified (decision 0034). The SIL
+# Open Font License allows bundling with software; its condition (ship the licence and
+# copyright text) is met by THIRD_PARTY_LICENSES.txt, which lists this crate because it is not
+# `publish = false`.
+crate = "lines-fonts"
+allow = ["OFL-1.1"]
+
 [licenses.private]
 # Our own crates are `publish = false` and FSL-licensed.
 ignore = true

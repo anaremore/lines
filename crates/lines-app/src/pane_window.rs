@@ -369,6 +369,8 @@ impl Render for PaneWindow {
             .relative()
             .bg(t.bg)
             .track_focus(&self.focus)
+            // The UI font (`crate::fonts`): every text in the window inherits it.
+            .font_family(crate::fonts::ui_family())
             .capture_key_down(cx.listener(Self::on_key_capture))
             .child(
                 div()

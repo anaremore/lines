@@ -38,5 +38,6 @@ Format: Status · Context · Decision · Consequences.
 | 0030 | Several data sources at once, set up in Settings › Connections (Accepted; §4 Show superseded by 0035) |
 | 0031 | In-app updates, signed, never during a trade (Accepted) |
 | 0033 | Databento is a public data source (Accepted) |
-| 0034 | Bundled fonts: IBM Plex Sans for the UI, IBM Plex Mono for numbers (Accepted) |
+| 0036 | A UI font setting (Accepted; supersedes 0034's deferred font setting and §2's fallback-only clause) |
+| 0034 | Bundled fonts: IBM Plex Sans for the UI, IBM Plex Mono for numbers (Accepted; font setting superseded by 0036) |
 | 0035 | A saved key is never shown again (Accepted; supersedes the Show clause of 0030 §4) |

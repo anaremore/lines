@@ -26,7 +26,9 @@ use gpui::{
 
 use crate::brackets::{self, EditorKey};
 use crate::display_zone;
+use crate::fonts;
 use crate::picker_view::{settings, update_settings};
+use crate::search_list;
 use crate::settings_schema::{
     self as schema, AccountFact, Facts, Kind, Prefs, Scope, Section, Target, Value, WorkspacePrefs,
 };
@@ -180,8 +182,8 @@ pub struct SettingsWindow {
     undo: Vec<UndoEntry>,
     editor: Option<brackets::Editor>,
     editor_msg: Option<String>,
-    /// The time zone's searchable list, while open (`crate::display_zone`).
-    zone_pick: Option<display_zone::Pick>,
+    /// The time zone's or the UI font's searchable list, while open (`crate::search_list`).
+    list_pick: Option<(List, search_list::Pick)>,
     /// Data folder: the folder picked, waiting for "Move existing data" or "Start empty".
     data_choice: Option<std::path::PathBuf>,
     /// Why the picked folder can't take a move (it already holds Lines data).
@@ -284,18 +286,20 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
         );
     }
     // `account=NAME` picks the window's account (by name or id), `appearance.time_zone=list:Q`
-    // opens the time zone's list with Q typed; the rest are settings.
+    // (or `appearance.ui_font=list:Q`) opens that setting's list with Q typed; the rest are
+    // settings.
     for s in set.iter().filter(|s| {
-        !s.starts_with("account=") && !s.starts_with(ZONE_LIST) && !s.starts_with(DATA_PICK)
+        !s.starts_with("account=") && List::typed(s).is_none() && !s.starts_with(DATA_PICK)
     }) {
         parse_set(s).map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }
 
-/// `--settings-set` prefix: the time zone's list, open, with the rest typed in it.
+/// `--settings-set` infix after a list setting's key (`appearance.time_zone=list:Q`): its
+/// list, open, with the rest typed in it.
 #[cfg(feature = "screenshot")]
-const ZONE_LIST: &str = "appearance.time_zone=list:";
+const LIST_OPEN: &str = "=list:";
 
 /// `--settings-set` prefix: the data folder picked (`data.folder=pick:PATH`, the Move existing
 /// data / Start empty question), picked and refused for an open trade
@@ -333,14 +337,12 @@ pub fn open_for_screenshot(
                 }
                 continue;
             }
-            if let Some(q) = s.strip_prefix(ZONE_LIST) {
-                if let Some(i) = schema::index_of(display_zone::KEY) {
+            if let Some((list, q)) = List::typed(s) {
+                if let Some(i) = schema::index_of(list.key()) {
                     v.select(i);
-                    v.open_zone_pick(cx);
-                    if let Some(p) = v.zone_pick.as_mut() {
-                        for ch in q.chars() {
-                            p.key("", Some(ch.encode_utf8(&mut [0; 4])));
-                        }
+                    v.open_list(list, cx);
+                    if let Some((_, p)) = v.list_pick.as_mut() {
+                        p.type_text(q);
                     }
                 }
                 continue;
@@ -492,12 +494,13 @@ pub fn run(c: schema::SettingCmd, cx: &mut App) -> Result<Option<String>, &'stat
         None => {
             let i = c.index as usize;
             open(Some(i), cx);
-            if st.key == crate::display_zone::KEY
+            if let Some(list) = List::of(st.key)
                 && let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0)
             {
-                // The time zone's palette command opens its list, ready to type in.
+                // The time zone's and the UI font's palette commands open the list, ready to
+                // type in.
                 let _ = h.update(cx, |w, _, cx| {
-                    w.open_zone_pick(cx);
+                    w.open_list(list, cx);
                     cx.notify();
                 });
             }
@@ -580,6 +583,13 @@ fn commit(
             after.app.time_zone.as_deref(),
         ));
         if let Some(p) = problem {
+            crate::workspace::notice(p, cx);
+        }
+        cx.refresh_windows();
+    }
+    if after.app.ui_font != before.app.ui_font {
+        // Live in every window: text shaped in the old family is shaped again (`fonts`).
+        if let Some(p) = fonts::apply(&fonts::UiFont::from_saved(after.app.ui_font.as_deref())) {
             crate::workspace::notice(p, cx);
         }
         cx.refresh_windows();
@@ -770,7 +780,7 @@ impl SettingsWindow {
             undo: Vec::new(),
             editor: None,
             editor_msg: None,
-            zone_pick: None,
+            list_pick: None,
             data_choice: None,
             data_holds: None,
             data_forced: None,
@@ -883,7 +893,7 @@ impl SettingsWindow {
         self.cancel_pending();
         self.editor = None;
         self.editor_msg = None;
-        self.zone_pick = None;
+        self.list_pick = None;
         self.data_choice = None;
         self.data_holds = None;
     }
@@ -1194,39 +1204,45 @@ impl SettingsWindow {
         self.drop_unfinished();
     }
 
-    /// Open the time zone's list, on the zone in force.
-    fn open_zone_pick(&mut self, cx: &App) {
-        let saved = settings(cx).time_zone.clone();
-        self.zone_pick = Some(display_zone::Pick::new(
-            &lines_core::display_tz::ZoneChoice::from_saved(saved.as_deref()),
-        ));
+    /// Open a setting's list, on the choice in force.
+    fn open_list(&mut self, list: List, cx: &App) {
+        let s = settings(cx);
+        let pick = match list {
+            List::Zone => display_zone::pick(&lines_core::display_tz::ZoneChoice::from_saved(
+                s.time_zone.as_deref(),
+            )),
+            List::Font => fonts::pick(&fonts::UiFont::from_saved(s.ui_font.as_deref())),
+        };
+        self.list_pick = Some((list, pick));
     }
 
-    /// A key while the time zone's list is open: it filters, moves, chooses or closes.
-    fn zone_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// A key while a list is open: it filters, moves, chooses or closes.
+    fn list_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
-        let Some(p) = self.zone_pick.as_mut() else {
+        let Some((list, p)) = self.list_pick.as_mut() else {
             return;
         };
+        let list = *list;
         match p.key(k.key.as_str(), k.key_char.as_deref()) {
-            display_zone::PickKey::Typing | display_zone::PickKey::Ignored => {}
-            display_zone::PickKey::Cancel => self.zone_pick = None,
-            display_zone::PickKey::Choose(c) => self.choose_zone(&c, cx),
+            search_list::PickKey::Typing | search_list::PickKey::Ignored => {}
+            search_list::PickKey::Cancel => self.list_pick = None,
+            search_list::PickKey::Choose(k) => self.choose(list, k, cx),
         }
         cx.notify();
     }
 
-    fn choose_zone(&mut self, c: &lines_core::display_tz::ZoneChoice, cx: &mut Context<Self>) {
-        self.zone_pick = None;
-        if let Some(i) = schema::index_of(display_zone::KEY) {
-            self.set(i, Value::Text(c.describe()), false, cx);
+    /// Set the list's setting to its choice `k`, and close the list.
+    fn choose(&mut self, list: List, k: usize, cx: &mut Context<Self>) {
+        self.list_pick = None;
+        if let Some(i) = schema::index_of(list.key()) {
+            self.set(i, Value::Text(list.value(k)), false, cx);
         }
     }
 
     /// The editor a setting of kind `Editor` opens.
     fn open_editor_for(&mut self, i: usize, cx: &App) {
-        if schema::all()[i].key == display_zone::KEY {
-            self.open_zone_pick(cx);
+        if let Some(list) = List::of(schema::all()[i].key) {
+            self.open_list(list, cx);
         } else {
             self.open_editor(cx);
         }
@@ -1317,8 +1333,8 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
-        if self.zone_pick.is_some() {
-            self.zone_key(ev, cx);
+        if self.list_pick.is_some() {
+            self.list_key(ev, cx);
             return;
         }
         // The UI zoom is app-wide: its keys work here too (not while a number is typed).
@@ -2208,7 +2224,7 @@ impl SettingsWindow {
                 }
             }
             (Kind::Editor, _) => {
-                let label = if st.key == display_zone::KEY {
+                let label = if List::of(st.key).is_some() {
                     "Change…"
                 } else if st.key == schema::PROP_OVERRIDES_KEY {
                     if self.overrides_open {
@@ -3066,10 +3082,15 @@ impl SettingsWindow {
         Some(v.into_any_element())
     }
 
-    /// The time zone's list: what's typed, then the matching zones around the selection.
-    fn zone_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// A setting's open list (under the row of `key`): what's typed, then the matches around
+    /// the selection.
+    fn list_view(&self, key: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.theme;
-        let p = self.zone_pick.as_ref()?;
+        let (list, p) = self.list_pick.as_ref()?;
+        let list = *list;
+        if list.key() != key {
+            return None;
+        }
         let mut v = div()
             .flex()
             .flex_col()
@@ -3086,14 +3107,13 @@ impl SettingsWindow {
                     .rounded_sm()
                     .border_1()
                     .border_color(t.axis_line)
-                    .child(format!("Search zones: {}▏", p.query)),
+                    .child(format!("Search {}: {}▏", list.plural(), p.query)),
             );
         let top = p.top();
-        for (r, &k) in p.hits.iter().enumerate().skip(top).take(display_zone::ROWS) {
+        for (r, &k) in p.hits.iter().enumerate().skip(top).take(search_list::ROWS) {
             let on = r == p.sel;
-            let choice = &display_zone::options()[k];
             let mut row = div()
-                .id(("zone", k))
+                .id((list.plural(), k))
                 .px_1()
                 .rounded_sm()
                 .border_1()
@@ -3103,33 +3123,145 @@ impl SettingsWindow {
                     gpui::transparent_black()
                 })
                 .cursor_pointer()
-                .child(display_zone::option_text(choice));
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(list.text(k));
+            // A font's row ends with a sample in that font: its name stays in the UI font, so a
+            // symbol font's row is still readable (GPUI falls back to the OS fonts for a family
+            // it can't load).
+            if let Some(family) = list.family(k) {
+                row = row.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .justify_end()
+                        .text_color(t.text_dim)
+                        .font_weight(FontWeight::NORMAL)
+                        .font_family(family)
+                        .child(fonts::SAMPLE),
+                );
+            }
             if on {
                 row = row.font_weight(FontWeight::BOLD);
             }
             v = v.child(row.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, _, _, cx| {
-                    v.choose_zone(&display_zone::options()[k], cx);
+                    v.choose(list, k, cx);
                     cx.notify();
                 }),
             ));
         }
-        let shown = p.hits.len().min(display_zone::ROWS);
-        v = v.child(
-            div()
-                .text_size(crate::zoom::ui(11.5))
-                .text_color(t.text_dim)
-                .child(if p.hits.is_empty() {
-                    "No zone matches · Backspace edits · Esc closes".to_owned()
-                } else {
-                    format!(
-                        "{shown} of {} · ↑↓ choose · Enter sets · Esc closes",
-                        p.hits.len()
-                    )
-                }),
-        );
+        let shown = p.hits.len().min(search_list::ROWS);
+        // What's shown, then each key as caps beside its action (`docs/design.md` §6).
+        let keys: &[(&[&str], &str)] = if p.hits.is_empty() {
+            &[(&["Backspace"], "edits"), (&["Esc"], "closes")]
+        } else {
+            &[
+                (&["↑", "↓"], "choose"),
+                (&["Enter"], "sets"),
+                (&["Esc"], "closes"),
+            ]
+        };
+        let mut foot = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .text_size(crate::zoom::ui(11.5))
+            .text_color(t.text_dim)
+            .child(if p.hits.is_empty() {
+                format!("No {} matches", list.singular())
+            } else {
+                format!("{shown} of {}", p.hits.len())
+            });
+        for (caps, action) in keys {
+            let caps: Vec<String> = caps.iter().map(|c| (*c).to_owned()).collect();
+            foot = foot.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .children(crate::keycap::caps_of(&caps, &t))
+                    .child(*action),
+            );
+        }
+        v = v.child(foot);
         Some(v.into_any_element())
+    }
+}
+
+/// A setting chosen from a searchable list (`crate::search_list`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum List {
+    /// Appearance › Time zone (`crate::display_zone`).
+    Zone,
+    /// Appearance › UI font (`crate::fonts`).
+    Font,
+}
+
+impl List {
+    const ALL: [List; 2] = [List::Zone, List::Font];
+
+    /// The list a setting chooses from, if it has one.
+    fn of(key: &str) -> Option<List> {
+        List::ALL.into_iter().find(|l| l.key() == key)
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            List::Zone => display_zone::KEY,
+            List::Font => fonts::KEY,
+        }
+    }
+
+    /// `--settings-set KEY=list:Q`: the list and Q.
+    #[cfg(feature = "screenshot")]
+    fn typed(s: &str) -> Option<(List, &str)> {
+        let (key, q) = s.split_once(LIST_OPEN)?;
+        Some((List::of(key)?, q))
+    }
+
+    fn singular(self) -> &'static str {
+        match self {
+            List::Zone => "zone",
+            List::Font => "font",
+        }
+    }
+
+    fn plural(self) -> &'static str {
+        match self {
+            List::Zone => "zones",
+            List::Font => "fonts",
+        }
+    }
+
+    /// Choice `k`'s words in the list.
+    fn text(self, k: usize) -> String {
+        match self {
+            List::Zone => display_zone::option_text(&display_zone::options()[k]),
+            List::Font => fonts::options()[k].describe().to_owned(),
+        }
+    }
+
+    /// The font family choice `k`'s sample is drawn in (the font list previews each font).
+    fn family(self, k: usize) -> Option<gpui::SharedString> {
+        match self {
+            List::Zone => None,
+            List::Font => Some(fonts::options()[k].family().into()),
+        }
+    }
+
+    /// Choice `k` as the setting's value.
+    fn value(self, k: usize) -> String {
+        match self {
+            List::Zone => display_zone::options()[k].describe(),
+            List::Font => fonts::options()[k].describe().to_owned(),
+        }
     }
 }
 
@@ -3236,13 +3368,14 @@ impl Render for SettingsWindow {
             child += 1;
         }
         let mut selected_child = None;
-        // Blocks shown after a line: the preset editor, the time zone's list, the keys.
+        // Blocks shown after a line: the preset editor, the time zone's and the UI font's
+        // lists, the keys.
         let extras = |v: &Self, keys: &[usize], cx: &mut Context<Self>| -> Vec<AnyElement> {
             let mut out = Vec::new();
             for &i in keys {
                 match schema::all()[i].key {
                     "trading.brackets" => out.extend(v.editor_view()),
-                    k if k == display_zone::KEY => out.extend(v.zone_view(cx)),
+                    k if List::of(k).is_some() => out.extend(v.list_view(k, cx)),
                     "keys.list" => out.push(v.keys_list()),
                     // Settings › Connections: a card per source (decision 0030).
                     k if k == schema::CONNECTIONS_LIST => {
@@ -3363,6 +3496,8 @@ impl Render for SettingsWindow {
         div()
             .id("settings")
             .size_full()
+            // The UI font (`crate::fonts`): every text in the window inherits it.
+            .font_family(crate::fonts::ui_family())
             .flex()
             .flex_col()
             .bg(t.bg)

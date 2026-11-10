@@ -1,6 +1,6 @@
 # 0034: Bundled fonts: IBM Plex Sans for the UI, IBM Plex Mono for numbers
 
-**Status:** Accepted (owner accepted 2026-11-10)
+**Status:** Accepted (owner accepted 2026-11-10). Superseded in part by 0036 (owner, 2026-11-10): the user font setting, deferred here, and §2's "only as a fallback" for the OS fonts.
 
 **Context:** Lines draws with whatever fonts the OS provides. `docs/design.md` §5 calls for "one UI family and one monospace family for numbers", but which families those are depends on the machine. As a result:
 - text width, and so layout, differs between Windows, macOS and Linux;

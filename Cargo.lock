@@ -3031,6 +3031,7 @@ dependencies = [
  "lines-core",
  "lines-databento",
  "lines-feed",
+ "lines-fonts",
  "lines-indicators",
  "lines-strategy",
  "lines-trading",
@@ -3093,6 +3094,10 @@ dependencies = [
  "tracing",
  "ureq",
 ]
+
+[[package]]
+name = "lines-fonts"
+version = "0.3.17"
 
 [[package]]
 name = "lines-fuzz"
