@@ -242,18 +242,19 @@ pub struct DatabentoSession {
     stats: SessionStats,
 }
 
-/// Whether an error refuses the replay's start ("Invalid start time …"), in any case.
+/// Whether an error refuses the replay's start ("Invalid start time …", the words in any case).
 fn refuses_start(text: &str) -> bool {
-    text.to_ascii_lowercase().contains("invalid start")
+    text.to_ascii_lowercase().contains("invalid start time")
 }
 
 /// The earliest start a refused replay names: Databento's "Invalid start time. Must be
-/// 2026-11-09T17:10:00Z or later, or 0" (ns), in any case and with trailing punctuation, a
-/// `+00:00` offset or fractional seconds; rounded up to the next millisecond (it is a lower
-/// bound: a start before it is refused again). `None` when no time is named.
+/// 2026-11-09T17:10:00Z or later, or 0" (ns). The words may be in any case; the time is
+/// Databento's form (`T` and `Z`, or a `+00:00` offset, fractional seconds allowed), trailing
+/// `.,;:` trimmed. Rounded up to the next millisecond (a lower bound: a start before it is
+/// refused again). `None` when no such time follows "must be" (the caller then uses now).
 fn invalid_start_floor(text: &str) -> Option<u64> {
     let lower = text.to_ascii_lowercase();
-    let at = lower.find("invalid start")?;
+    let at = lower.find("invalid start time")?;
     let must = lower[at..].find("must be")? + at + "must be".len();
     let token = text[must..].split_whitespace().next()?;
     let token = token.trim_end_matches(['.', ',', ';', ':']);
@@ -264,7 +265,7 @@ fn invalid_start_floor(text: &str) -> Option<u64> {
     // Digits beyond the millisecond that aren't all zero: round up.
     let sub_ms = iso
         .split_once('.')
-        .map(|(_, f)| f.trim_end_matches(['Z', 'z']))
+        .map(|(_, f)| f.trim_end_matches('Z'))
         .is_some_and(|f| f.len() > 3 && f[3..].bytes().any(|b| b != b'0'));
     let ms = if sub_ms { t.0.checked_add(1)? } else { t.0 };
     u64::try_from(ms).ok()?.checked_mul(1_000_000)
@@ -902,7 +903,8 @@ impl DatabentoSession {
             }
             Ok(ErrorCode::ReplayDataAgedOut) => {
                 // Without a named start, the floor is now: asking again for the same start
-                // would only fail again (this contract replays nothing more until restart).
+                // would only fail again. A reconnect in the same bar is live only; a later one
+                // replays from the next bar boundary after the floor.
                 let now_ns = (self.now.0.max(0) as u64) * 1_000_000;
                 let floor_ns = ns_in(&text).unwrap_or(now_ns);
                 Err(self.replay_floor(floor_ns, &text, events))

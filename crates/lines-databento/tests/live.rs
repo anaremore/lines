@@ -1032,6 +1032,58 @@ fn a_refused_start_reconnects_from_the_earliest_named() {
     assert!(err.is_some_and(|e| !e.is_retryable()));
 }
 
+/// A refused start naming no time: the floor is the error's time. A reconnect in the same bar
+/// subscribes live only, its gap reaching now (nothing silently missing); one in a later bar
+/// replays from the next bar boundary.
+#[test]
+fn a_refused_start_naming_no_time_floors_at_now() {
+    let floors = Floors::default();
+    let at = |s: i64| UtcMillis(now().0 + s * 1000);
+    let refused = connection(dbn(|e| {
+        e.encode_record(&ErrorMsg::new(
+            T0,
+            Some(ErrorCode::InvalidSubscription),
+            "Invalid start time",
+            true,
+        ))
+        .unwrap();
+    }));
+    let frames: Vec<(&[u8], UtcMillis)> = refused.iter().map(|f| (f.as_slice(), at(30))).collect();
+    let c = |t: UtcMillis| StartContext {
+        now: t,
+        ..ctx(None)
+    };
+    let (_, _, err) = run_at(
+        &mut session(&floors, ReplayLimit::default()),
+        c(at(30)),
+        &frames,
+    );
+    assert!(err.is_some_and(|e| e.is_retryable()));
+    assert_eq!(floors.lock().unwrap()[&z6()], at(30).0 as u64 * 1_000_000);
+    // The same bar: live only, and the gap runs to now.
+    let (events, out, _) = run_at(
+        &mut session(&floors, ReplayLimit::default()),
+        c(at(40)),
+        &[(GREETING, at(40)), (SUCCESS, at(40))],
+    );
+    assert_eq!(
+        out[2],
+        "schema=trades|stype_in=raw_symbol|symbols=ESZ6|snapshot=0|is_last=1
+"
+    );
+    assert!(events.contains(&MarketEvent::HistoryGap {
+        from: UtcMillis(at(40).0 - 3 * 86_400_000),
+        to: at(40),
+    }));
+    // A later bar: from the next bar boundary after the floor.
+    let (_, out, _) = run_at(
+        &mut session(&floors, ReplayLimit::default()),
+        c(at(90)),
+        &[(GREETING, at(90)), (SUCCESS, at(90))],
+    );
+    assert_eq!(out[2], trades_line(now().0 + MIN));
+}
+
 /// A recording spanning a reconnect: each connection starts with the transport's marker, so
 /// one replay session decodes both.
 #[test]
