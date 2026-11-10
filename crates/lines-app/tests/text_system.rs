@@ -63,6 +63,15 @@ fn main() {
     ts.add_fonts(lines_fonts::all().map(std::borrow::Cow::Borrowed).collect())
         .expect("the embedded fonts load");
     let names = ts.all_font_names();
+    // Linux: Lines doesn't enable `gpui_platform`'s `wayland`/`x11` features, and without them
+    // GPUI's Linux platform has GPUI's no-op text system (no fonts, no text; headless only),
+    // where `add_fonts` keeps nothing (`docs/known-gaps.md`). Pin that: once a real text system
+    // is there, the checks below run on Linux too.
+    #[cfg(target_os = "linux")]
+    if names.is_empty() {
+        println!("text system: GPUI's no-op (Linux without wayland/x11); Plex checks not run");
+        return;
+    }
     for family in [lines_fonts::SANS, lines_fonts::MONO] {
         assert!(
             names.iter().any(|n| n == family),
