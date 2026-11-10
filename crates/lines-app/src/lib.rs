@@ -13,6 +13,7 @@ mod chart_draw;
 mod chart_trade;
 mod chart_view;
 mod commands;
+mod data_dir;
 #[cfg(feature = "screenshot")]
 mod demo_broker;
 mod diagnostics;
@@ -376,17 +377,20 @@ struct Cli {
     #[cfg(feature = "vendor-cqg")]
     #[arg(long, default_value = "WebAPITest")]
     client_app_id: String,
-    /// Don't use the local market-data store. By default live feeds (Coinbase, CQG) keep
-    /// trades and best bid/ask per contract in the OS data directory (`LINES_DATA_DIR`
-    /// overrides), show the cached bars at startup and fill the rest from the feed.
+    /// Don't use the local market-data store this run. By default live feeds (Coinbase, CQG)
+    /// keep trades and best bid/ask per contract in the data folder (Settings › Data;
+    /// `LINES_DATA_DIR` overrides), show the cached bars at startup and fill the rest from the
+    /// feed. Wins over Settings › Data › Local store for this run.
     #[arg(long)]
     no_store: bool,
-    /// Also store order-book depth for these products (e.g. ES,NQ). Off by default: large.
+    /// Also store order-book depth for these products this run (e.g. ES,NQ), instead of
+    /// Settings › Data › Depth recorded for (default none: large).
     #[arg(long, value_delimiter = ',')]
-    store_depth: Vec<String>,
-    /// Local store size budget in GiB; the oldest trade dates are removed beyond it.
-    #[arg(long, default_value_t = 4.0)]
-    store_budget_gb: f64,
+    store_depth: Option<Vec<String>>,
+    /// Local store size budget in GiB this run, instead of Settings › Data › Store budget
+    /// (default 4); the oldest trade dates are removed beyond it.
+    #[arg(long)]
+    store_budget_gb: Option<f64>,
     /// Use the local store under DIR (its `store-v1/`) for any source, the mock, replays and
     /// screenshots included (evidence and tests with a synthetic stored session). Without it
     /// those never store. The run writes into DIR as a live feed would: give a screenshot a
@@ -610,6 +614,11 @@ struct Cli {
     /// least 400x340).
     #[arg(long, requires = "download_days", value_parser = parse_size)]
     download_size: Option<(f32, f32)>,
+    /// Screenshot: Settings › Data › Data folder in a state, nothing written: `pending:PATH`
+    /// (a new folder that starts empty after restart), `moving:PATH:DONE_GB:TOTAL_GB` (a move's
+    /// copy in progress), `copied:PATH:TOTAL_GB`, `failed:PATH` (last start's move failed).
+    #[arg(long, value_name = "STATE", requires = "settings")]
+    data_folder_shot: Option<String>,
     /// Screenshot: read this economic calendar (the bundled file's format) instead of the
     /// bundled one, for the app and its trading cores (synthetic releases on synthetic data).
     #[arg(long, requires = "screenshot")]
@@ -957,7 +966,11 @@ fn parse_point(s: &str) -> Result<(f32, f32), String> {
     Ok((x, y))
 }
 
-fn feed_config(cli: &Cli, choice: &SourceChoice) -> Result<FeedConfig> {
+fn feed_config(
+    cli: &Cli,
+    choice: &SourceChoice,
+    prefs: &data_dir::StorePrefs,
+) -> Result<FeedConfig> {
     let kind = match choice {
         SourceChoice::Builtin(k) => Some(*k),
         SourceChoice::Extension(_) => None,
@@ -1032,7 +1045,7 @@ fn feed_config(cli: &Cli, choice: &SourceChoice) -> Result<FeedConfig> {
         })?);
     }
     cfg.record = cli.record.clone();
-    cfg.store = store_config(cli, choice);
+    cfg.store = store_config(cli, choice, prefs);
     cfg.orderflow_sessions = cli.orderflow_sessions;
     Ok(cfg)
 }
@@ -1046,9 +1059,10 @@ fn run_sources(
     cli: &Cli,
     ext: &Extensions,
     choice: &SourceChoice,
+    store: &data_dir::StorePrefs,
 ) -> Result<(Vec<(String, FeedConfig)>, bool)> {
     if !cli.several_sources() {
-        let first = feed_config(cli, choice)?;
+        let first = feed_config(cli, choice, store)?;
         // `--also-replay` (screenshots): more recordings, each its own source, beside the
         // first. A replay (a screenshot's `--replay` without `--source`, too) is named so.
         let name = match first.source {
@@ -1084,11 +1098,11 @@ fn run_sources(
         // would), so Settings › Data can turn one back on.
         tracing::warn!("every data source is off in Settings › Data: starting on the mock");
         let mock = SourceChoice::Builtin(SourceKind::Mock);
-        return Ok((vec![(mock.name(), feed_config(cli, &mock)?)], true));
+        return Ok((vec![(mock.name(), feed_config(cli, &mock, store)?)], true));
     }
     let out = choices
         .iter()
-        .map(|c| Ok((c.name(), feed_config(cli, c)?)))
+        .map(|c| Ok((c.name(), feed_config(cli, c, store)?)))
         .collect::<Result<Vec<_>>>()?;
     Ok((out, false))
 }
@@ -1129,22 +1143,44 @@ fn source_prefs(
 }
 
 /// Where "Download days…" stores days (decision 0030 §8): `--store-dir`, else the data
-/// directory, whatever this run's source; none with `--no-store`.
+/// folder (`data_dir::root`, Settings › Data), whatever this run's source; none with the store
+/// off (`--no-store`, or Settings › Data › Local store off).
 fn download_root(cli: &Cli) -> Result<PathBuf, String> {
     if cli.no_store {
         return Err("The local store is off for this run (--no-store).".into());
     }
+    let (prefs, flags) = data_dir::store_at_start();
+    if !data_dir::store_run(&flags, &prefs).on {
+        return Err("The local store is off (Settings › Data › Local store).".into());
+    }
     if let Some(d) = &cli.store_dir {
         return Ok(d.clone());
     }
-    lines_feed::disk::default_root().ok_or_else(|| "No data directory: set LINES_DATA_DIR.".into())
+    data_dir::root().ok_or_else(|| "No data folder: set one in Settings › Data.".into())
+}
+
+/// This run's store flags.
+fn store_flags(cli: &Cli) -> data_dir::StoreFlags {
+    data_dir::StoreFlags {
+        no_store: cli.no_store,
+        budget_gb: cli.store_budget_gb,
+        depth: cli.store_depth.clone(),
+        store_dir: cli.store_dir.is_some(),
+        store_dir_path: cli.store_dir.clone(),
+    }
 }
 
 /// The local store (decision 0019) for live sources: the mock invents a new market every
 /// run and replays and screenshots must not write, so those never store, unless `--store-dir`
-/// names a store for this run.
-fn store_config(cli: &Cli, choice: &SourceChoice) -> Option<lines_feed::disk::StoreConfig> {
-    if cli.no_store {
+/// names a store for this run. On/off, budget and depth: Settings › Data (`prefs`), the flags
+/// winning for their run.
+fn store_config(
+    cli: &Cli,
+    choice: &SourceChoice,
+    prefs: &data_dir::StorePrefs,
+) -> Option<lines_feed::disk::StoreConfig> {
+    let run = data_dir::store_run(&store_flags(cli), prefs);
+    if !run.on {
         return None;
     }
     let forced = cli.store_dir.is_some();
@@ -1164,23 +1200,23 @@ fn store_config(cli: &Cli, choice: &SourceChoice) -> Option<lines_feed::disk::St
     };
     let root = match &cli.store_dir {
         Some(dir) => dir.clone(),
-        None => match lines_feed::disk::default_root() {
+        None => match data_dir::root() {
             Some(r) => r,
             None => {
                 tracing::warn!(
-                    "no data directory (set LINES_DATA_DIR); running without the local store"
+                    "no data folder (set LINES_DATA_DIR); running without the local store"
                 );
                 return None;
             }
         },
     };
     let mut cfg = lines_feed::disk::StoreConfig::new(root, source);
-    cfg.depth_products = cli.store_depth.clone();
-    cfg.budget_bytes = (cli.store_budget_gb.max(0.0) * (1u64 << 30) as f64) as u64;
+    cfg.depth_products = run.depth;
+    cfg.budget_bytes = (run.budget_gb.max(0.0) * (1u64 << 30) as f64) as u64;
     tracing::info!(
         "local store: {} (budget {:.1} GiB{})",
         cfg.root.display(),
-        cli.store_budget_gb,
+        run.budget_gb,
         if cfg.depth_products.is_empty() {
             String::new()
         } else {
@@ -1515,7 +1551,26 @@ where
         && cli.screenshot.is_none()
         && cli.bench.is_none()
         && cli.backtest.is_none();
+    // The data folder (Settings › Data), before anything opens a file in it: the interactive
+    // app finishes a move chosen last run here. Screenshots, the bench and backtests read no
+    // user files (`data_dir::run` falls back to LINES_DATA_DIR, else the OS default).
+    let reads_user_files =
+        cli.screenshot.is_none() && cli.bench.is_none() && cli.backtest.is_none();
+    let mut data_notices = Vec::new();
+    let store_prefs = if reads_user_files {
+        let config = persist::config_dir();
+        data_notices = data_dir::init_from_env(config.as_deref(), interactive);
+        config
+            .map(|d| data_dir::StorePrefs::peek(&d.join("settings.json")))
+            .unwrap_or_default()
+    } else {
+        data_dir::StorePrefs::default()
+    };
+    data_dir::set_store_run(store_prefs.clone(), store_flags(&cli));
     logs::init(interactive.then(logs::LogConfig::from_env).flatten());
+    for n in &data_notices {
+        tracing::warn!("{n}");
+    }
     for e in &ext.sources {
         lines_feed::extension::register(e.clone())?;
     }
@@ -1541,7 +1596,7 @@ where
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source_name()))?;
     // The run's sources (decision 0030): every enabled one without `--source`, else that one.
     // `config` is the first (the run's when limited): what takes one source uses it.
-    let (run_sources, limited) = run_sources(&cli, &ext, &choice)?;
+    let (run_sources, limited) = run_sources(&cli, &ext, &choice, &store_prefs)?;
     let config = run_sources[0].1.clone();
     // A market replay never runs a level source live (only its recorded batches, if any).
     let market_replay = matches!(config.source, lines_feed::Source::Replay { .. });
@@ -1745,6 +1800,12 @@ where
         }
         doc.hide_hints |= cli.hide_hints;
         recording::set_fixture(cli.show_recording);
+        // The Data folder row's disk facts, before any window (never on the UI thread).
+        data_dir::refresh_now();
+        #[cfg(feature = "screenshot")]
+        if let Some(state) = &cli.data_folder_shot {
+            data_dir::show_for_screenshot(state).map_err(|e| anyhow!("--data-folder-shot: {e}"))?;
+        }
         doc.normalise().map_err(|e| anyhow!("--workspace: {e}"))?;
         let size = cli.size.unwrap_or((1280.0, 800.0));
         if let Some(secs) = cli.bench {
@@ -1856,6 +1917,8 @@ where
         Some(writer.clone()),
     );
     let mut reports: Vec<String> = settings_report.into_iter().collect();
+    // Data folder moves and problems (they were logged at startup).
+    reports.extend(data_notices);
     if zone_flag.is_none() {
         reports.extend(display_zone::apply(
             &lines_core::display_tz::ZoneChoice::from_saved(settings.settings.time_zone.as_deref()),
@@ -1907,7 +1970,7 @@ where
     journal_shots::set_theme(ws.env.theme.get());
     journal_shots::set_pnl(settings.settings.pnl_display);
     // The paper trading core (roadmap 7): its own thread, state per data source.
-    let mut setup = trading::TradingSetup::for_live(dir.as_deref(), &config.source);
+    let mut setup = trading::TradingSetup::for_live(Some(&data_dir::locations()), &config.source);
     // The trader's guardrails (roadmap 8b) from settings.json.
     setup.guardrails = settings.settings.guardrails.clone();
     setup.max_order_qty = settings.settings.max_order_qty.clone();
@@ -1958,7 +2021,12 @@ where
     let no_update_check = cli.no_update_check;
     let download_env = download_view::DownloadEnv {
         root: download_root(&cli),
-        budget: Some((cli.store_budget_gb.max(0.0) * (1u64 << 30) as f64) as u64),
+        // The run's budget: the flag, else Settings › Data's, else the default.
+        budget: {
+            let (prefs, flags) = data_dir::store_at_start();
+            let gb = data_dir::store_run(&flags, &prefs).budget_gb;
+            Some((gb.max(0.0) * (1u64 << 30) as f64) as u64)
+        },
     };
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(download_env);

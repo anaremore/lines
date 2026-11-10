@@ -1104,7 +1104,7 @@ impl WindowView {
     /// "Start recording": every live feed into the data folder's `recordings/`
     /// (`crate::recording`). Never waits on a feed: each starts at its next connect.
     fn start_recording(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = lines_feed::disk::default_root() else {
+        let Some(root) = crate::data_dir::root() else {
             return self.refuse("No data folder for recordings (set LINES_DATA_DIR)", cx);
         };
         let stores = Feeds::registry(cx).stores();
@@ -4085,7 +4085,8 @@ fn notify_windows(cx: &mut App) {
     }
 }
 
-/// Write the journal's closed trades as CSV to `<config dir>/journal/export-<time>.csv` (on
+/// Write the journal's closed trades as CSV to `<journal>/export-<time>.csv`
+/// (`crate::data_dir::Locations`; on
 /// the journal's thread; a failure is logged) and say where.
 fn export_journal(cx: &mut App) {
     let Some(t) = crate::trading::Trading::try_global(cx) else {
@@ -4093,9 +4094,11 @@ fn export_journal(cx: &mut App) {
         return;
     };
     let journal = t.journal.clone();
-    let Some(dir) = cx.global::<Workspace>().config_dir.clone() else {
+    // Beside the journal (`crate::data_dir`: the data folder's `journal/`, or the config
+    // folder's on an install from before the data folder).
+    let Some(dir) = crate::data_dir::locations().journal else {
         notice(
-            "no config directory: the journal can't be exported here".into(),
+            "no data folder: the journal can't be exported here".into(),
             cx,
         );
         return;
@@ -4103,7 +4106,7 @@ fn export_journal(cx: &mut App) {
     let now = lines_feed::now_utc();
     let d = lines_core::CivilDate::from_utc(now);
     let s = now.0.rem_euclid(86_400_000) / 1000;
-    let path = dir.join("journal").join(format!(
+    let path = dir.join(format!(
         "export-{}{:02}{:02}-{:02}{:02}{:02}-{:03}.csv",
         d.year,
         d.month,

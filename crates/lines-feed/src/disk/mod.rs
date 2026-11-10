@@ -81,13 +81,20 @@ impl StoreConfig {
     }
 }
 
-/// `LINES_DATA_DIR`, else the OS's local (never roaming) data directory: `%LOCALAPPDATA%\Lines`
-/// on Windows, `~/Library/Application Support/Lines` on macOS, `$XDG_DATA_HOME/lines` (or
-/// `~/.local/share/lines`) elsewhere.
+/// `LINES_DATA_DIR`, else the OS's local data directory ([`os_default_root`]). The app
+/// resolves its data folder itself (`LINES_DATA_DIR`, then the folder Settings › Data chose,
+/// then this); examples and tests use this.
 pub fn default_root() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("LINES_DATA_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(d));
     }
+    os_default_root()
+}
+
+/// The OS's local (never roaming) data directory, whatever `LINES_DATA_DIR` says:
+/// `%LOCALAPPDATA%\Lines` on Windows, `~/Library/Application Support/Lines` on macOS,
+/// `$XDG_DATA_HOME/lines` (or `~/.local/share/lines`) elsewhere.
+pub fn os_default_root() -> Option<PathBuf> {
     let env = |k: &str| {
         std::env::var_os(k)
             .filter(|v| !v.is_empty())

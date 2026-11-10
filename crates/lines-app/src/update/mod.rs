@@ -101,13 +101,13 @@ impl Updater {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pending {
     Update {
-        config: PathBuf,
+        dirs: install::Dirs,
         staged: PathBuf,
         from: String,
         to: String,
     },
     Rollback {
-        config: PathBuf,
+        dirs: install::Dirs,
         target: String,
     },
 }
@@ -132,7 +132,7 @@ thread_local! {
 /// begun. Errors leave the running version in place.
 pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
     let Pending::Update {
-        config,
+        dirs,
         staged,
         from,
         to,
@@ -151,7 +151,8 @@ pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
         let _ = std::fs::remove_file(staged);
         return Err(format!("v{v} discarded: {why}"));
     }
-    install::backup(config, from).map_err(|e| format!("couldn't back up settings: {e}"))?;
+    let config = &dirs.config;
+    install::backup(dirs, from).map_err(|e| format!("couldn't back up settings: {e}"))?;
     // The bytes just verified, not the file again (nothing can swap it in between).
     install::swap_bytes(exe, &data).map_err(|e| format!("couldn't install v{to}: {e}"))?;
     let _ = install::save_state(
@@ -168,13 +169,13 @@ pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
 
 /// A rollback, applied: the previous executable back, and the saved files it had.
 pub fn apply_rollback(exe: &Path, p: &Pending) -> Result<(), String> {
-    let Pending::Rollback { config, target } = p else {
+    let Pending::Rollback { dirs, target } = p else {
         return Err("not a rollback".into());
     };
     install::roll_back_exe(exe).map_err(|e| format!("couldn't roll back: {e}"))?;
-    install::restore(config, target)
+    install::restore(dirs, target)
         .map_err(|e| format!("rolled back to v{target}, but its saved files: {e}"))?;
-    let _ = std::fs::remove_file(install::state_path(config));
+    let _ = std::fs::remove_file(install::state_path(&dirs.config));
     Ok(())
 }
 
@@ -413,7 +414,7 @@ pub fn stage(
 /// What a restart would interrupt, read now from the trading cache and the strategy source
 /// (every listed account: positions, working orders, armed triggers; running strategies).
 /// `Err` when the trading cache is busy this instant.
-fn activity_now(cx: &App) -> Result<hold::Activity, String> {
+pub(crate) fn activity_now(cx: &App) -> Result<hold::Activity, String> {
     let mut a = hold::Activity::default();
     if let Some(t) = crate::trading::Trading::try_global(cx) {
         let accounts = t.accounts();
@@ -493,7 +494,7 @@ pub fn restart_to_update(cx: &mut App) -> Result<(), String> {
     }
     if let Ok(mut r) = RELAUNCH.lock() {
         *r = Some(Pending::Update {
-            config,
+            dirs: install::Dirs::for_run(config),
             staged,
             from: Version::current().to_string(),
             to: v.to_string(),
@@ -510,7 +511,10 @@ pub fn roll_back(cx: &mut App) -> Result<(), String> {
     let config = crate::persist::config_dir().ok_or("no settings folder")?;
     let target = rollback_target(&config).ok_or("no earlier version is kept")?;
     if let Ok(mut r) = RELAUNCH.lock() {
-        *r = Some(Pending::Rollback { config, target });
+        *r = Some(Pending::Rollback {
+            dirs: install::Dirs::for_run(config),
+            target,
+        });
     }
     cx.quit();
     Ok(())
@@ -626,7 +630,7 @@ mod tests {
         std::fs::write(c.join("settings.json"), "old settings").unwrap();
         staged_for_swap(&c, b"v0.3.12");
         let up = Pending::Update {
-            config: c.clone(),
+            dirs: install::Dirs::in_config(c.clone()),
             staged: c.join("download.exe"),
             from: "0.3.11".into(),
             to: "0.3.12".into(),
@@ -637,7 +641,7 @@ mod tests {
         // The new version saves its own format, then rolls back.
         std::fs::write(c.join("settings.json"), "new settings").unwrap();
         let back = Pending::Rollback {
-            config: c.clone(),
+            dirs: install::Dirs::in_config(c.clone()),
             target: "0.3.11".into(),
         };
         apply_rollback(&exe, &back).unwrap();
@@ -660,7 +664,7 @@ mod tests {
         let staged = staged_for_swap(&c, b"v0.3.12");
         std::fs::write(&staged, b"swapped in after the press").unwrap();
         let up = Pending::Update {
-            config: c.clone(),
+            dirs: install::Dirs::in_config(c.clone()),
             staged: staged.clone(),
             from: "0.3.11".into(),
             to: "0.3.12".into(),
@@ -672,7 +676,7 @@ mod tests {
         assert!(!install::previous_exe(&exe).exists());
         assert!(install::load_state(&c).is_none());
         let back = Pending::Rollback {
-            config: c.clone(),
+            dirs: install::Dirs::in_config(c.clone()),
             target: "0.3.11".into(),
         };
         assert!(apply_rollback(&exe, &back).is_err());

@@ -14,16 +14,59 @@ use serde::{Deserialize, Serialize};
 
 use crate::versioned::{self, Format};
 
-/// The saved files backed up before an update, relative to the config folder: settings,
-/// workspaces and the trading files (paper accounts, guardrails). Not the store, recordings,
-/// journal or logs (their formats are versioned per file and only grow; decision 0031 §5).
-fn backed_up(config: &Path) -> Vec<PathBuf> {
+/// Where the saved files and their backups are: settings and workspaces in the config folder,
+/// paper accounts and backups where `crate::data_dir` puts them (the data folder, or the config
+/// folder on an install from before it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dirs {
+    pub config: PathBuf,
+    pub paper: PathBuf,
+    pub backups: PathBuf,
+}
+
+impl Dirs {
+    /// Everything in the config folder (installs from before the data folder; tests).
+    pub fn in_config(config: PathBuf) -> Dirs {
+        Dirs {
+            paper: config.join("paper"),
+            backups: config.join("backups"),
+            config,
+        }
+    }
+
+    /// This run's places (`crate::data_dir::locations`).
+    pub fn for_run(config: PathBuf) -> Dirs {
+        let l = crate::data_dir::locations();
+        let mut d = Dirs::in_config(config);
+        if let Some(p) = l.paper {
+            d.paper = p;
+        }
+        if let Some(b) = l.backups {
+            d.backups = b;
+        }
+        d
+    }
+
+    /// A backed-up file's place: `paper/…` in the paper folder, the rest in the config folder.
+    fn file(&self, rel: &Path) -> PathBuf {
+        match rel.strip_prefix("paper") {
+            Ok(rest) => self.paper.join(rest),
+            Err(_) => self.config.join(rel),
+        }
+    }
+}
+
+/// The saved files backed up before an update, as kept in a backup: settings, workspaces and
+/// drawings (config folder) and the trading files (paper accounts, guardrails) as `paper/…`.
+/// Not the store, recordings, journal or logs (their formats are versioned per file and only
+/// grow; decision 0031 §5).
+fn backed_up(dirs: &Dirs) -> Vec<PathBuf> {
     let mut v = vec![
         PathBuf::from("settings.json"),
         PathBuf::from("workspace.json"),
     ];
     for dir in ["workspaces", "paper", "drawings"] {
-        if let Ok(rd) = std::fs::read_dir(config.join(dir)) {
+        if let Ok(rd) = std::fs::read_dir(dirs.file(Path::new(dir))) {
             let mut names: Vec<PathBuf> = rd
                 .flatten()
                 .map(|e| e.path())
@@ -34,36 +77,36 @@ fn backed_up(config: &Path) -> Vec<PathBuf> {
             v.extend(names);
         }
     }
-    v.retain(|p| config.join(p).is_file());
+    v.retain(|p| dirs.file(p).is_file());
     v
 }
 
-/// `<config>/backups/<version>`.
-pub fn backup_dir(config: &Path, version: &str) -> PathBuf {
-    config.join("backups").join(version)
+/// `<backups>/<version>`.
+pub fn backup_dir(dirs: &Dirs, version: &str) -> PathBuf {
+    dirs.backups.join(version)
 }
 
 /// Copy the saved files to `backups/<version>/` (replacing an earlier backup of that
 /// version). Returns how many were copied.
-pub fn backup(config: &Path, version: &str) -> std::io::Result<usize> {
-    let to = backup_dir(config, version);
+pub fn backup(dirs: &Dirs, version: &str) -> std::io::Result<usize> {
+    let to = backup_dir(dirs, version);
     if to.exists() {
         std::fs::remove_dir_all(&to)?;
     }
-    let files = backed_up(config);
+    let files = backed_up(dirs);
     for rel in &files {
         let dst = to.join(rel);
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
         }
-        std::fs::copy(config.join(rel), &dst)?;
+        std::fs::copy(dirs.file(rel), &dst)?;
     }
     Ok(files.len())
 }
 
 /// Copy `backups/<version>/` back over the saved files. Returns how many were restored.
-pub fn restore(config: &Path, version: &str) -> std::io::Result<usize> {
-    let from = backup_dir(config, version);
+pub fn restore(dirs: &Dirs, version: &str) -> std::io::Result<usize> {
+    let from = backup_dir(dirs, version);
     let mut n = 0;
     let mut stack = vec![from.clone()];
     while let Some(dir) = stack.pop() {
@@ -72,7 +115,7 @@ pub fn restore(config: &Path, version: &str) -> std::io::Result<usize> {
             if p.is_dir() {
                 stack.push(p);
             } else if let Ok(rel) = p.strip_prefix(&from) {
-                let dst = config.join(rel);
+                let dst = dirs.file(rel);
                 if let Some(d) = dst.parent() {
                     std::fs::create_dir_all(d)?;
                 }
@@ -251,19 +294,43 @@ mod tests {
         write(&c.join("workspaces/day.json"), "old day");
         write(&c.join("paper/replay.json"), "old paper");
         write(&c.join("journal/replay.jsonl"), "journal stays");
-        assert_eq!(backup(&c, "0.3.11").unwrap(), 4);
+        let d = Dirs::in_config(c.clone());
+        assert_eq!(backup(&d, "0.3.11").unwrap(), 4);
         // The new version migrates them forward.
         write(&c.join("settings.json"), "new settings");
         write(&c.join("paper/replay.json"), "new paper");
-        assert_eq!(restore(&c, "0.3.11").unwrap(), 4);
+        assert_eq!(restore(&d, "0.3.11").unwrap(), 4);
         assert_eq!(read(&c.join("settings.json")), "old settings");
         assert_eq!(read(&c.join("paper/replay.json")), "old paper");
         assert_eq!(read(&c.join("workspaces/day.json")), "old day");
         assert!(
-            !backup_dir(&c, "0.3.11").join("journal").exists(),
+            !backup_dir(&d, "0.3.11").join("journal").exists(),
             "not the journal"
         );
         let _ = std::fs::remove_dir_all(&c);
+    }
+
+    /// With paper accounts and backups in the data folder, a backup holds the paper files and
+    /// a rollback puts them back there, not in the config folder.
+    #[test]
+    fn paper_in_the_data_folder_is_backed_up_and_restored_there() {
+        let root = dir("backup-data");
+        let (c, data) = (root.join("config"), root.join("data"));
+        write(&c.join("settings.json"), "old settings");
+        write(&data.join("paper/coinbase.json"), "old paper");
+        let d = Dirs {
+            config: c.clone(),
+            paper: data.join("paper"),
+            backups: data.join("backups"),
+        };
+        assert_eq!(backup(&d, "0.3.11").unwrap(), 2);
+        assert!(data.join("backups/0.3.11/paper/coinbase.json").is_file());
+        assert!(!c.join("backups").exists(), "backups go to the data folder");
+        write(&data.join("paper/coinbase.json"), "new paper");
+        assert_eq!(restore(&d, "0.3.11").unwrap(), 2);
+        assert_eq!(read(&data.join("paper/coinbase.json")), "old paper");
+        assert!(!c.join("paper").exists(), "never into the config folder");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
