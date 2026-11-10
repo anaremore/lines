@@ -96,11 +96,15 @@ fn kind_bits(k: FrameKind) -> u8 {
 enum Msg {
     Record(u8, u64, Bytes),
     Flush,
+    /// Finish the file now (a recording stopped while its connection goes on).
+    Stop,
 }
 
 /// Non-blocking recorder: frames are handed to a dedicated writer thread, so disk I/O never
 /// stalls the network task. Dropping the recorder flushes and closes the file.
 pub struct Recorder {
+    /// Set by [`Recorder::stop`]: frames after it are not recorded.
+    stopped: std::sync::atomic::AtomicBool,
     tx: Option<mpsc::Sender<Msg>>,
     start: Instant,
     worker: Option<thread::JoinHandle<io::Result<()>>>,
@@ -213,6 +217,7 @@ impl Recorder {
                             w.write_raw(tag, nanos, &payload)?
                         }
                         Ok(Msg::Flush) => w.flush()?,
+                        Ok(Msg::Stop) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
@@ -225,6 +230,7 @@ impl Recorder {
             },
         )?;
         Ok(Recorder {
+            stopped: std::sync::atomic::AtomicBool::new(false),
             tx: Some(tx),
             start: Instant::now(),
             worker: Some(worker),
@@ -232,12 +238,30 @@ impl Recorder {
     }
 
     pub fn record(&self, direction: Direction, frame: &Frame) {
+        if self.is_stopped() {
+            return;
+        }
         let nanos = self.start.elapsed().as_nanos() as u64;
         let tag = direction as u8 | (kind_bits(frame.kind) << 1);
         if let Some(tx) = &self.tx {
             // Bytes clone is a refcount bump, not a copy.
             let _ = tx.send(Msg::Record(tag, nanos, frame.data.clone()));
         }
+    }
+
+    /// Finish the file now: its writer thread writes what it holds and closes it; frames
+    /// after this are dropped. Never blocks (the file is closed on the writer thread).
+    pub fn stop(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.stopped.swap(true, Ordering::AcqRel)
+            && let Some(tx) = &self.tx
+        {
+            let _ = tx.send(Msg::Stop);
+        }
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn flush(&self) {

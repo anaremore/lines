@@ -690,6 +690,8 @@ pub struct ChartStore {
     calendar: Option<&'static lines_core::sessions::SessionCalendar>,
     /// This store's feed in the indicator engine (unique per process).
     feed_id: u64,
+    /// Start / stop recording this feed (`live_record`).
+    pub recording: crate::live_record::RecordCtl,
 }
 
 static NEXT_FEED_ID: AtomicU64 = AtomicU64::new(1);
@@ -719,6 +721,7 @@ impl ChartStore {
         ChartStore {
             calendar,
             feed_id: NEXT_FEED_ID.fetch_add(1, Ordering::Relaxed),
+            recording: Default::default(),
             market_ms: AtomicI64::new(i64::MIN),
             frame_ms: AtomicI64::new(i64::MIN),
             data: Mutex::new(ChartData::new(

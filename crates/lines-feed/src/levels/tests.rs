@@ -327,6 +327,57 @@ fn acquire_in_a_replay_without_recordings() {
     );
 }
 
+/// The app's "Start recording" mid-session: a live source already running starts its file
+/// with its newest batch, at the time that batch came (a one-shot source sends no other), and
+/// stopping ends it; batches before the start and after the stop are not in it.
+#[test]
+fn a_recording_started_mid_session_begins_with_the_newest_batch() {
+    let dir = std::env::temp_dir().join(format!("lines-levels-mid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let ctx = es_ctx();
+    let prices: Arc<dyn ChartPrices> = Arc::new(Fixed {
+        bars: vec![bar_at("2026-11-05T14:30:00", 600_100)],
+        now: None,
+    });
+    let src: Arc<dyn LevelSource> = Arc::new(DemoLevels);
+    let cell = Arc::new(LevelCell::for_test(&*src, false));
+    let rec = runtime::recorder_slot(&*src, &ctx, None);
+    let last: runtime::Shared<(UtcMillis, Vec<LevelFrame>)> = Default::default();
+    {
+        let (src, ctx, prices, cell, rec, last) = (
+            src.clone(),
+            ctx.clone(),
+            prices.clone(),
+            cell.clone(),
+            rec.clone(),
+            last.clone(),
+        );
+        rt.block_on(async move {
+            let task = tokio::spawn(runtime::live(src, ctx, prices, cell.clone(), rec, last));
+            while cell.read().map.is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            task.abort();
+        });
+    }
+    let path = recording_path(&dir, "demo", "ES");
+    assert!(!path.exists(), "nothing recorded before the start");
+    let received = cell.read().received;
+    let header = runtime::header_for(&*src, &ctx);
+    runtime::begin(&rec, &last, Some(&dir), "demo", &header);
+    runtime::begin(&rec, &last, None, "demo", &header);
+    let batches = read_recording(&path, "demo", "ES").unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].1, frames());
+    assert_eq!(Some(batches[0].0), received, "at the time it came");
+    assert!(rec.lock().is_none(), "stopped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn recorded_levels_replay_to_the_same_map() {
     let dir = std::env::temp_dir().join(format!("lines-levels-{}", std::process::id()));
@@ -352,7 +403,15 @@ fn recorded_levels_replay_to_the_same_map() {
             dir.clone(),
         );
         rt.block_on(async move {
-            let task = tokio::spawn(runtime::live(src, ctx, prices, cell.clone(), Some(dir)));
+            let rec = runtime::recorder_slot(&*src, &ctx, Some(dir));
+            let task = tokio::spawn(runtime::live(
+                src,
+                ctx,
+                prices,
+                cell.clone(),
+                rec,
+                Default::default(),
+            ));
             while cell.read().map.is_none() {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }

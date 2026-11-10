@@ -214,6 +214,84 @@ struct Entry {
     loaded: Arc<AtomicBool>,
     /// The chart's clock (replays deliver batches by it).
     prices: Arc<dyn ChartPrices>,
+    /// Live: where its batches are recorded now (set and cleared by [`record_into`]).
+    rec: Shared<Recorder>,
+    /// Live: its newest batch and when it came (a recording started later begins with it).
+    last: Shared<(UtcMillis, Vec<LevelFrame>)>,
+    source_id: String,
+    header: Header,
+}
+
+pub(crate) type Shared<T> = Arc<parking_lot::Mutex<Option<T>>>;
+
+/// A live source's recorder slot, recording into `dir` from its next batch (`None`: empty).
+pub(crate) fn recorder_slot(
+    source: &dyn LevelSource,
+    ctx: &LevelContext,
+    dir: Option<PathBuf>,
+) -> Shared<Recorder> {
+    Arc::new(parking_lot::Mutex::new(dir.map(|d| Recorder {
+        path: recording_path(&d, source.id(), ctx.product.symbol),
+        header: header(source, ctx),
+        writer: None,
+    })))
+}
+
+/// Start recording a running live source into `dir` (`None`: stop): its newest batch first,
+/// at the time it came, then every later batch (`live` writes into `rec`).
+pub(crate) fn begin(
+    rec: &Shared<Recorder>,
+    last: &Shared<(UtcMillis, Vec<LevelFrame>)>,
+    dir: Option<&std::path::Path>,
+    source_id: &str,
+    header: &Header,
+) {
+    let mut slot = rec.lock();
+    *slot = dir.map(|d| {
+        let mut r = Recorder {
+            path: recording_path(d, source_id, &header.product),
+            header: header.clone(),
+            writer: None,
+        };
+        if let Some((t, frames)) = last.lock().as_ref() {
+            r.write(*t, frames);
+        }
+        r
+    });
+}
+
+/// The directory live levels are recorded into now ("Start recording" in the app; `None`:
+/// not recording). Charts that acquire a source while it is set record too.
+fn record_dir() -> &'static RwLock<Option<PathBuf>> {
+    static D: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+    D.get_or_init(Default::default)
+}
+
+/// Start (`Some(dir)`) or stop (`None`) recording every live level source into `dir`, one
+/// file per source and product as `--record-levels` writes ([`recording_path`]). Each starts
+/// with the source's newest batch (so a replay has the map from its first moment, even a
+/// one-shot source's), then every later batch. Never blocks: the files are written on the
+/// levels runtime. Replayed sources are never recorded.
+pub fn record_into(dir: Option<PathBuf>) {
+    *record_dir().write() = dir.clone();
+    let held: Vec<Arc<Entry>> = entries()
+        .lock()
+        .values()
+        .filter_map(Weak::upgrade)
+        .collect();
+    rt().spawn(async move {
+        for e in held {
+            if e.cell.read().replay {
+                continue;
+            }
+            begin(&e.rec, &e.last, dir.as_deref(), &e.source_id, &e.header);
+        }
+    });
+}
+
+/// Whether live levels are being recorded ([`record_into`]).
+pub fn recording() -> bool {
+    record_dir().read().is_some()
 }
 
 impl Drop for Entry {
@@ -304,15 +382,27 @@ pub fn acquire(
     };
     let replaying = matches!(m, LevelMode::Replay(_) | LevelMode::NotRecorded);
     let cell = Arc::new(LevelCell::new(&*source, replaying));
+    // Recording live levels: `--record-levels` from the start, or the app's recording now.
+    let hdr = header(&*source, &ctx);
+    let dir = match &m {
+        LevelMode::Record(d) => Some(d.clone()),
+        LevelMode::Live => record_dir().read().clone(),
+        _ => None,
+    };
+    let rec = recorder_slot(&*source, &ctx, dir);
+    let last: Shared<(UtcMillis, Vec<LevelFrame>)> = Default::default();
+    let source_id = source.id().to_owned();
     let next_due = Arc::new(AtomicI64::new(i64::MAX));
     let loaded = Arc::new(AtomicBool::new(!replaying));
     let clock = prices.clone();
     let task = {
         let (cell, next_due, loaded) = (cell.clone(), next_due.clone(), loaded.clone());
+        let (rec, last) = (rec.clone(), last.clone());
         rt().spawn(async move {
             match m {
-                LevelMode::Live => live(source, ctx, prices, cell, None).await,
-                LevelMode::Record(dir) => live(source, ctx, prices, cell, Some(dir)).await,
+                LevelMode::Live | LevelMode::Record(_) => {
+                    live(source, ctx, prices, cell, rec, last).await
+                }
                 LevelMode::Replay(dir) => {
                     replay(source, ctx, prices, cell, Some(dir), next_due, loaded).await
                 }
@@ -329,6 +419,10 @@ pub fn acquire(
         next_due,
         loaded,
         prices: clock,
+        rec,
+        last,
+        source_id,
+        header: hdr,
     });
     map.insert(key, Arc::downgrade(&entry));
     LevelHandle { entry }
@@ -400,7 +494,7 @@ fn apply(
     });
 }
 
-struct Recorder {
+pub(crate) struct Recorder {
     path: PathBuf,
     header: Header,
     writer: Option<Writer<std::io::BufWriter<std::fs::File>>>,
@@ -432,6 +526,11 @@ impl Recorder {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn header_for(source: &dyn LevelSource, ctx: &LevelContext) -> Header {
+    header(source, ctx)
+}
+
 fn header(source: &dyn LevelSource, ctx: &LevelContext) -> Header {
     Header {
         start_wall_ms: 0,
@@ -448,18 +547,15 @@ pub(crate) async fn live(
     ctx: LevelContext,
     prices: Arc<dyn ChartPrices>,
     cell: Arc<LevelCell>,
-    record: Option<PathBuf>,
+    rec: Shared<Recorder>,
+    last: Shared<(UtcMillis, Vec<LevelFrame>)>,
 ) {
-    let mut rec = record.map(|dir| Recorder {
-        path: recording_path(&dir, source.id(), ctx.product.symbol),
-        header: header(&*source, &ctx),
-        writer: None,
-    });
-    let batch = |frames: &[LevelFrame], rec: &mut Option<Recorder>| {
+    let batch = |frames: &[LevelFrame]| {
         let now = crate::now_utc();
-        if let Some(r) = rec.as_mut() {
+        if let Some(r) = rec.lock().as_mut() {
             r.write(now, frames);
         }
+        *last.lock() = Some((now, frames.to_vec()));
         apply(&*source, &ctx, &*prices, &cell, frames, now);
     };
     let mut backoff = Duration::from_secs(1);
@@ -480,7 +576,7 @@ pub(crate) async fn live(
         match source.refresh() {
             RefreshMode::OneShot => match t.fetch().await {
                 Ok(f) => {
-                    batch(&f, &mut rec);
+                    batch(&f);
                     // Static: keep it. A one-shot map is never refreshed, so it never ages
                     // past the source's threshold unless the source says it should.
                     std::future::pending::<()>().await;
@@ -491,7 +587,7 @@ pub(crate) async fn live(
                 match t.fetch().await {
                     Ok(f) => {
                         backoff = Duration::from_secs(1);
-                        batch(&f, &mut rec);
+                        batch(&f);
                     }
                     Err(e) => {
                         fail(&cell, e);
@@ -504,7 +600,7 @@ pub(crate) async fn live(
                 match t.next_event().await {
                     Ok(Some(f)) => {
                         backoff = Duration::from_secs(1);
-                        batch(std::slice::from_ref(&f), &mut rec);
+                        batch(std::slice::from_ref(&f));
                     }
                     Ok(None) => break,
                     Err(e) => {

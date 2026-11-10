@@ -55,6 +55,7 @@ mod popover;
 mod positions;
 mod positions_view;
 mod profile;
+mod recording;
 mod redact;
 #[cfg(feature = "screenshot")]
 mod screenshot;
@@ -597,6 +598,10 @@ struct Cli {
     /// first). STUDY: `vwap:N`, `delta:N`, `volume:N`, `profile`, `footprint`, `levels:ID`.
     #[arg(long, requires = "screenshot")]
     studies_menu: Option<String>,
+    /// Screenshot: the window header as if recording for SECS seconds (REC, the time, Stop).
+    /// Nothing is recorded: screenshots write no user files.
+    #[arg(long, requires = "screenshot", value_name = "SECS")]
+    show_recording: Option<u64>,
     /// Screenshot: no key-hint bar (F1 in the app; Ctrl+Shift+C = this + no study labels).
     #[arg(long, requires = "screenshot")]
     hide_hints: bool,
@@ -1562,6 +1567,7 @@ where
             doc.retarget_all(instrument.clone());
         }
         doc.hide_hints |= cli.hide_hints;
+        recording::set_fixture(cli.show_recording);
         doc.normalise().map_err(|e| anyhow!("--workspace: {e}"))?;
         let size = cli.size.unwrap_or((1280.0, 800.0));
         if let Some(secs) = cli.bench {

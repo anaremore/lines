@@ -75,6 +75,9 @@ pub struct PaneMenu {
     pub hidden_panes: bool,
     pub detached_panes: bool,
     pub closed_tabs: bool,
+    /// Recording live feeds (`crate::recording`): on or off; `None` when there is nothing live
+    /// to record (no row).
+    pub recording: Option<bool>,
 }
 
 /// The thing under the pointer at a right click.
@@ -460,6 +463,17 @@ fn pane(m: &PaneMenu) -> MenuItem {
         sub.push(MenuItem::of(Command::Reattach, false));
     }
     sub.push(MenuItem::sep());
+    // Recording is app-wide (every live feed), reached from any pane: a switch, its command
+    // the way out when on.
+    if let Some(on) = m.recording {
+        let cmd = if on {
+            Command::StopRecording
+        } else {
+            Command::StartRecording
+        };
+        sub.push(toggle("Recording", cmd, on));
+        sub.push(MenuItem::sep());
+    }
     sub.push(MenuItem::of(Command::NewTab, false));
     if m.closed_tabs {
         sub.push(MenuItem::of(Command::ReopenTab, false));
@@ -544,7 +558,27 @@ mod tests {
             hidden_panes: true,
             detached_panes: true,
             closed_tabs: true,
+            recording: Some(false),
         }
+    }
+
+    /// Pane › Recording: a switch (checked while recording) whose command starts or stops it;
+    /// no row when nothing live can be recorded.
+    #[test]
+    fn the_pane_menu_starts_and_stops_recording() {
+        let sub = |m: &PaneMenu| pane(m).sub;
+        let find = |items: Vec<MenuItem>| items.into_iter().find(|i| i.label == "Recording");
+        let off = find(sub(&pane_of(PaneKind::Chart))).expect("a Recording row");
+        assert_eq!(
+            (off.cmd, off.checked),
+            (Some(Command::StartRecording), false)
+        );
+        let mut m = pane_of(PaneKind::Dom);
+        m.recording = Some(true);
+        let on = find(sub(&m)).expect("a Recording row");
+        assert_eq!((on.cmd, on.checked), (Some(Command::StopRecording), true));
+        m.recording = None;
+        assert!(find(sub(&m)).is_none(), "nothing live: no row");
     }
 
     const KINDS: [PaneKind; 7] = [

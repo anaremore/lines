@@ -17,6 +17,7 @@ pub mod indicators;
 pub mod kraken;
 pub mod levels;
 pub mod listen;
+pub mod live_record;
 pub mod native;
 pub mod occ;
 pub mod provider;
@@ -353,6 +354,10 @@ pub async fn run_feed(
         ) {
             Ok(r) => {
                 tracing::info!("recording raw frames to {}", path.display());
+                let r = Arc::new(r);
+                store
+                    .recording
+                    .set_active(path.clone(), now_utc().0, r.clone());
                 Some(r)
             }
             Err(e) => {
@@ -365,6 +370,10 @@ pub async fn run_feed(
         },
         None => None,
     };
+    // A live feed can be recorded from the app ("Start recording"); a replay never again.
+    store
+        .recording
+        .set_recordable(!matches!(config.source, Source::Replay { .. }));
     // The local store: cached bars first (panes show them at once), then the feed fills from
     // where they end. One writer per contract; a roll switches it.
     let mut writer = open_writer(&config, &plan.product, plan.contract, &store);
@@ -446,11 +455,9 @@ pub async fn run_feed(
                     warm_start(&config, w, &store, &mut tap);
                 }
                 // Recordings hold exactly one contract: stop rather than mix two.
-                if let Some(r) = recorder.take() {
+                if recorder.take().is_some() {
                     tracing::warn!("recording stopped at the roll (recordings hold one contract)");
-                    if let Err(e) = r.finish() {
-                        tracing::error!("recording incomplete: {e}");
-                    }
+                    store.recording.end();
                 }
             }
             next
@@ -465,7 +472,15 @@ pub async fn run_feed(
             }
         };
         let session = session.as_mut();
-        let rec = recorder.as_ref();
+        // A recording stopped from the app is finished: drop it. One asked for starts here,
+        // at a connect, so its file begins with a whole session.
+        if recorder.as_ref().is_some_and(|r| r.is_stopped()) {
+            recorder = None;
+        }
+        if let Some(dir) = store.recording.take_pending() {
+            recorder = start_recording(&dir, &plan, contract, &store);
+        }
+        let rec = recorder.as_deref();
         let mut no_sink = NoSink;
         let store_sink: &mut dyn EventSink = match writer.as_mut() {
             Some(w) => w,
@@ -542,6 +557,11 @@ pub async fn run_feed(
 
         match result {
             Ok(ConnectionEnd::Shutdown) => break,
+            // A recording asked to start: reconnect at once with it.
+            Ok(ConnectionEnd::Restart) => {
+                attempt = 0;
+                continue;
+            }
             Ok(ConnectionEnd::Closed) if is_replay => {
                 store.set_status(FeedStatus::ReplayFinished);
                 break;
@@ -574,7 +594,8 @@ pub async fn run_feed(
             }
         }
     }
-    if let Some(r) = recorder
+    store.recording.end();
+    if let Some(r) = recorder.and_then(|r| Arc::try_unwrap(r).ok())
         && let Err(e) = r.finish()
     {
         tracing::error!("recording incomplete: {e}");
@@ -584,6 +605,47 @@ pub async fn run_feed(
         FeedStatus::Failed(_) | FeedStatus::ReplayFinished
     ) {
         store.set_status(FeedStatus::Stopped);
+    }
+}
+
+/// Create a recording asked for from the app in `dir`: `<source>-<symbol>-<UTC time>.lfr`, the
+/// provider (the source) in its header. A failure is shown in the app, never stops the feed.
+fn start_recording(
+    dir: &std::path::Path,
+    plan: &Plan,
+    contract: Option<ContractKey>,
+    store: &ChartStore,
+) -> Option<Arc<Recorder>> {
+    let now = now_utc().0;
+    let symbol = contract.map_or_else(
+        || plan.product.symbol.to_owned(),
+        |k| k.label(&plan.product).to_string(),
+    );
+    let name = live_record::file_name(plan.provider.id(), &symbol, now);
+    let made = live_record::fresh_path(dir, &name).and_then(|path| {
+        Recorder::create(
+            &path,
+            plan.provider.id(),
+            &plan.provider.protocol(),
+            plan.product.symbol,
+            contract,
+        )
+        .map(|r| (path, r))
+    });
+    match made {
+        Ok((path, r)) => {
+            tracing::info!("recording raw frames to {}", path.display());
+            let r = Arc::new(r);
+            store.recording.set_active(path, now, r.clone());
+            Some(r)
+        }
+        Err(e) => {
+            tracing::warn!("can't start a recording in {}: {e}", dir.display());
+            store
+                .recording
+                .fail(format!("can't record in {}: {e}", dir.display()));
+            None
+        }
     }
 }
 
