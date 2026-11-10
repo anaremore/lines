@@ -157,8 +157,8 @@ pub struct GroupMenu {
     pub account: Option<AccountId>,
     /// `Target: 200 in 20 orders, 5822.75–5823.00`.
     pub title: String,
-    /// Plot-local top of the tag pressed (the list opens under it).
-    pub top: f32,
+    /// Plot-local bottom of the tag pressed (the list opens under it).
+    pub tag_bottom: f32,
     /// Cancel all pressed once, with this many orders open.
     pub confirm: Option<usize>,
 }
@@ -428,26 +428,30 @@ pub struct ChartTradeState {
     pub strip_pick: Option<StripOrder>,
 }
 
-/// The resize control left of a tag: −, the size, + (each at least 20 px, a tag's height).
-pub const RESIZE_BTN_W: f32 = 20.0;
-pub const RESIZE_VALUE_W: f32 = 40.0;
-pub const RESIZE_W: f32 = 2.0 * RESIZE_BTN_W + RESIZE_VALUE_W;
+/// The resize control left of a tag: −, the size, +, sized by the tag's height (so by the UI
+/// zoom): the buttons square, the size twice as wide (20, 40 and 20 px at 100 %).
+/// `(button, value)` widths.
+pub fn resize_parts(b: &TagBox) -> (f32, f32) {
+    (b.h, 2.0 * b.h)
+}
+
+/// The whole resize control's width for tag `b`.
+pub fn resize_w(b: &TagBox) -> f32 {
+    let (btn, value) = resize_parts(b);
+    2.0 * btn + value
+}
 
 /// The piece of the resize control of tag `b` at plot-local (`x`, `y`); `None` off it, or when
 /// the tag sits too near the plot's left edge to have one.
 pub fn resize_hit(b: &TagBox, x: f32, y: f32) -> Option<ResizeHit> {
-    let left = b.left - RESIZE_W;
-    if left < 0.0
-        || y < b.top
-        || y >= b.top + lines_core::geometry::order_tags::TAG_H
-        || x < left
-        || x >= b.left
-    {
+    let (btn, value) = resize_parts(b);
+    let left = b.left - resize_w(b);
+    if left < 0.0 || y < b.top || y >= b.top + b.h || x < left || x >= b.left {
         return None;
     }
-    Some(if x < left + RESIZE_BTN_W {
+    Some(if x < left + btn {
         ResizeHit::Down
-    } else if x < left + RESIZE_BTN_W + RESIZE_VALUE_W {
+    } else if x < left + btn + value {
         ResizeHit::Value
     } else {
         ResizeHit::Up
@@ -1855,6 +1859,7 @@ mod tests {
             left: 200.0,
             top: 100.0,
             w: 150.0,
+            h: lines_core::geometry::order_tags::TAG_H,
             close_left: 330.0,
         };
         assert_eq!(resize_hit(&b, 121.0, 105.0), Some(ResizeHit::Down));
@@ -1865,6 +1870,14 @@ mod tests {
         assert_eq!(resize_hit(&b, 160.0, 99.0), None, "above it");
         let edge = TagBox { left: 60.0, ..b };
         assert_eq!(resize_hit(&edge, 30.0, 105.0), None, "no room: none");
+        // At 150 % UI zoom (a 30 px tag): 30, 60 and 30 px, hit the full height.
+        let z = TagBox { h: 30.0, ..b };
+        assert_eq!(resize_w(&z), 120.0);
+        assert_eq!(resize_hit(&z, 81.0, 128.0), Some(ResizeHit::Down));
+        assert_eq!(resize_hit(&z, 111.0, 105.0), Some(ResizeHit::Value));
+        assert_eq!(resize_hit(&z, 171.0, 105.0), Some(ResizeHit::Up));
+        assert_eq!(resize_hit(&z, 79.0, 105.0), None, "left of it");
+        assert_eq!(resize_hit(&z, 160.0, 130.0), None, "below it");
     }
 
     #[test]

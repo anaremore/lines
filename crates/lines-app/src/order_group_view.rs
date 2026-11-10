@@ -70,11 +70,11 @@ pub fn list_x(plot_x: f32, plot_w: f32, viewport_w: f32) -> (f32, f32) {
 
 /// The list's height for `rows` rows with `avail` px from the plot's top to the window's bottom:
 /// at most [`ROWS_SHOWN`] rows, fewer if the window is short, always one; and its top, under the
-/// tag if there is room, moved up to keep Cancel all in the window.
-pub fn list_place(rows: usize, tag_top: f32, avail: f32) -> (f32, f32) {
+/// tag (whose bottom is `tag_bottom`) if there is room, moved up to keep Cancel all in the window.
+pub fn list_place(rows: usize, tag_bottom: f32, avail: f32) -> (f32, f32) {
     let wanted = ROW_H * rows.min(ROWS_SHOWN) as f32;
     let list_h = wanted.min(avail - CHROME_H - MARGIN).max(ROW_H);
-    let under = tag_top + lines_core::geometry::order_tags::TAG_H + 6.0;
+    let under = tag_bottom + 6.0;
     let top = under.min(avail - list_h - CHROME_H).max(MARGIN);
     (list_h, top)
 }
@@ -184,7 +184,7 @@ pub fn layer(
     let avail = f32::from(window.viewport_size().height)
         - f32::from(plot.origin.y)
         - crate::popover::title_h();
-    let (list_h, top) = list_place(menu.rows.len(), menu.top, avail);
+    let (list_h, top) = list_place(menu.rows.len(), menu.tag_bottom, avail);
     let shown = (list_h / ROW_H).floor() as usize;
     let scroll = (menu.rows.len() > shown).then(|| {
         div().flex_shrink_0().text_color(t.text_dim).child(format!(
@@ -329,7 +329,7 @@ mod tests {
         // Plenty of room: under the tag, twelve rows.
         let (h, top) = list_place(70, 100.0, 800.0);
         assert_eq!(h, ROW_H * ROWS_SHOWN as f32);
-        assert_eq!(top, 100.0 + lines_core::geometry::order_tags::TAG_H + 6.0);
+        assert_eq!(top, 100.0 + 6.0);
         // A tag near the window's bottom: moved up, all of it inside.
         let (h, top) = list_place(70, 700.0, 800.0);
         assert!(top + h + CHROME_H <= 800.0, "{top} {h}");

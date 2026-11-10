@@ -18,6 +18,8 @@
 //! - **Snapping** is the crosshair's ([`super::snap_price`]): the tick nearest the pointer.
 //! - **Groups** ([`group_orders`]): orders of one kind whose tags can't sit at their own levels
 //!   share one tag; zooming in splits them back. No order is ever left without a tag.
+//! - **Sizes** come from [`Metrics`] (the UI zoom's; [`Metrics::BASE`] is 100 %). Every laid-out
+//!   box carries its own size, so a hit test always matches the frame that drew it.
 
 use super::snap;
 use crate::{Price, Viewport};
@@ -35,6 +37,70 @@ pub const HANDLE_W: f32 = 26.0;
 pub const HANDLE_H: f32 = 20.0;
 /// Space between a handle and the position tag.
 pub const HANDLE_GAP: f32 = 3.0;
+/// A tag's or edge marker's horizontal text padding, both sides together.
+pub const TEXT_PAD: f32 = 12.0;
+
+/// The tags' sizes at one scale (the UI zoom): the constants above times `scale`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Metrics {
+    /// The factor the sizes are at (1.0: the constants).
+    pub scale: f32,
+    pub tag_h: f32,
+    pub close_w: f32,
+    pub tag_gap: f32,
+    pub handle_w: f32,
+    pub handle_h: f32,
+    pub handle_gap: f32,
+    pub text_pad: f32,
+}
+
+impl Metrics {
+    /// 100 %: the constants.
+    pub const BASE: Metrics = Metrics {
+        scale: 1.0,
+        tag_h: TAG_H,
+        close_w: CLOSE_W,
+        tag_gap: TAG_GAP,
+        handle_w: HANDLE_W,
+        handle_h: HANDLE_H,
+        handle_gap: HANDLE_GAP,
+        text_pad: TEXT_PAD,
+    };
+
+    /// The sizes at `scale` (a non-finite or non-positive one is 100 %), each in whole logical
+    /// px and the tag's height even, so a tag centered on its (snapped) line and everything
+    /// placed from it keeps its edges on device pixels (`docs/design.md`: crisp at every DPI).
+    pub fn at(scale: f32) -> Metrics {
+        if !(scale.is_finite() && scale > 0.0) {
+            return Metrics::BASE;
+        }
+        let px = |v: f32| (v * scale).round();
+        Metrics {
+            scale,
+            tag_h: (TAG_H * scale * 0.5).round() * 2.0,
+            close_w: px(CLOSE_W),
+            tag_gap: px(TAG_GAP),
+            handle_w: px(HANDLE_W),
+            handle_h: px(HANDLE_H),
+            handle_gap: px(HANDLE_GAP),
+            text_pad: px(TEXT_PAD),
+        }
+    }
+}
+
+impl Metrics {
+    /// The sizes at the UI zoom `zoom`: hit targets never under their 100 % size (`zoom::hit`'s
+    /// rule), so below 100 % only the text shrinks.
+    pub fn for_ui_zoom(zoom: f32) -> Metrics {
+        Metrics::at(zoom.max(1.0))
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Metrics {
+        Metrics::BASE
+    }
+}
 
 /// One line to tag: an id the caller chooses (order id; the position uses its own), its
 /// price, and the tag's text width (measured by the caller, logical px).
@@ -56,13 +122,15 @@ pub struct TagBox {
     pub left: f32,
     pub top: f32,
     pub w: f32,
+    /// Its height ([`Metrics::tag_h`] when laid out).
+    pub h: f32,
     /// Where the `×` box starts (it runs to `left + w`).
     pub close_left: f32,
 }
 
 impl TagBox {
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.left && x < self.left + self.w && y >= self.top && y < self.top + TAG_H
+        x >= self.left && x < self.left + self.w && y >= self.top && y < self.top + self.h
     }
 }
 
@@ -77,11 +145,12 @@ pub struct EdgeMarker {
     pub left: f32,
     pub top: f32,
     pub w: f32,
+    pub h: f32,
 }
 
 impl EdgeMarker {
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.left && x < self.left + self.w && y >= self.top && y < self.top + TAG_H
+        x >= self.left && x < self.left + self.w && y >= self.top && y < self.top + self.h
     }
 }
 
@@ -92,11 +161,13 @@ pub struct Handle {
     pub above: bool,
     pub left: f32,
     pub top: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 impl Handle {
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.left && x < self.left + HANDLE_W && y >= self.top && y < self.top + HANDLE_H
+        x >= self.left && x < self.left + self.w && y >= self.top && y < self.top + self.h
     }
 }
 
@@ -115,13 +186,14 @@ pub enum TagHit {
 
 /// Edge markers for `lines` whose price is off the plot `[0, plot_h]`: `[top, bottom]`, the
 /// nearest off-plot order at each edge, right-aligned at `plot_w` with the width the caller
-/// measured for each marker's text (`text_w`). Allocation-free.
+/// measured for each marker's text (`text_w`), sized by `m`. Allocation-free.
 pub fn edge_markers(
     vp: &Viewport,
     lines: &[LineIn],
     plot_w: f32,
     plot_h: f32,
     text_w: [f32; 2],
+    m: &Metrics,
 ) -> [Option<EdgeMarker>; 2] {
     let mut out: [Option<EdgeMarker>; 2] = [None, None];
     for l in lines {
@@ -162,14 +234,15 @@ pub fn edge_markers(
             }
         }
     }
-    for (k, m) in out.iter_mut().enumerate() {
-        if let Some(m) = m {
-            m.w = (text_w[k] + 12.0).min(plot_w);
-            m.left = plot_w - TAG_GAP - m.w;
-            m.top = if k == 0 {
-                TAG_GAP
+    for (k, e) in out.iter_mut().enumerate() {
+        if let Some(e) = e {
+            e.w = (text_w[k] + m.text_pad).min(plot_w);
+            e.h = m.tag_h;
+            e.left = plot_w - m.tag_gap - e.w;
+            e.top = if k == 0 {
+                m.tag_gap
             } else {
-                plot_h - TAG_GAP - TAG_H
+                plot_h - m.tag_gap - m.tag_h
             };
         }
     }
@@ -177,14 +250,14 @@ pub fn edge_markers(
 }
 
 /// The band tags may use, leaving room for the edge markers: `(top, bottom)`.
-pub fn tag_band(markers: &[Option<EdgeMarker>; 2], plot_h: f32) -> (f32, f32) {
+pub fn tag_band(markers: &[Option<EdgeMarker>; 2], plot_h: f32, m: &Metrics) -> (f32, f32) {
     let top = if markers[0].is_some() {
-        TAG_GAP + TAG_H + TAG_GAP
+        m.tag_gap + m.tag_h + m.tag_gap
     } else {
         0.0
     };
     let bottom = if markers[1].is_some() {
-        plot_h - TAG_GAP - TAG_H - TAG_GAP
+        plot_h - m.tag_gap - m.tag_h - m.tag_gap
     } else {
         plot_h
     };
@@ -196,7 +269,8 @@ pub fn tag_band(markers: &[Option<EdgeMarker>; 2], plot_h: f32) -> (f32, f32) {
 /// `out.len()`, [`MAX_TAGS`] and what the band holds). Every order on the plot gets a tag,
 /// clamped into the band (off the plot: the edge markers stand for them). Overlapping tags are
 /// pushed down in price order (highest price first), then the stack is pulled back up if it
-/// ran off the bottom; it never leaves the band. Allocation-free.
+/// ran off the bottom; it never leaves the band. Sized by `m`. Allocation-free.
+#[allow(clippy::too_many_arguments)]
 pub fn layout_tags(
     vp: &Viewport,
     lines: &[LineIn],
@@ -204,10 +278,12 @@ pub fn layout_tags(
     plot_h: f32,
     band: (f32, f32),
     scale_factor: f32,
+    m: &Metrics,
     out: &mut [TagBox],
 ) -> usize {
     let (lo, hi) = band;
-    let cap = out.len().min(tags_fit(band));
+    let (tag_h, gap) = (m.tag_h, m.tag_gap);
+    let cap = out.len().min(tags_fit(band, m));
     let mut n = 0;
     for l in lines {
         if n == cap {
@@ -218,15 +294,16 @@ pub fn layout_tags(
             continue;
         }
         let line_y = snap(y, scale_factor);
-        let w = (l.text_w + 12.0 + CLOSE_W).min(plot_w);
+        let w = (l.text_w + m.text_pad + m.close_w).min(plot_w);
         out[n] = TagBox {
             id: l.id,
             price: l.price,
             line_y,
-            left: plot_w - TAG_GAP - w,
-            top: line_y - TAG_H * 0.5,
+            left: plot_w - gap - w,
+            top: line_y - tag_h * 0.5,
             w,
-            close_left: plot_w - TAG_GAP - CLOSE_W,
+            h: tag_h,
+            close_left: plot_w - gap - m.close_w,
         };
         n += 1;
     }
@@ -247,7 +324,7 @@ pub fn layout_tags(
         let floor = if i == 0 {
             lo
         } else {
-            tags[i - 1].top + TAG_H + TAG_GAP
+            tags[i - 1].top + tag_h + gap
         };
         tags[i].top = tags[i].top.max(floor);
     }
@@ -255,27 +332,32 @@ pub fn layout_tags(
     // the one tag a band too short for it still gets.)
     let mut ceiling = hi;
     for t in tags.iter_mut().rev() {
-        if t.top + TAG_H > ceiling {
-            t.top = (ceiling - TAG_H).max(0.0);
+        if t.top + tag_h > ceiling {
+            t.top = (ceiling - tag_h).max(0.0);
         }
-        ceiling = t.top - TAG_GAP;
+        ceiling = t.top - gap;
     }
     n
 }
 
-/// The position tag's handles: `want[0]` above it, `want[1]` below, at the tag's left end.
-pub fn handles(tag: &TagBox, want: [bool; 2]) -> [Option<Handle>; 2] {
-    let left = tag.left;
+/// The position tag's handles: `want[0]` above it, `want[1]` below, at the tag's left end,
+/// sized by `m`.
+pub fn handles(tag: &TagBox, want: [bool; 2], m: &Metrics) -> [Option<Handle>; 2] {
+    let (left, w, h) = (tag.left, m.handle_w, m.handle_h);
     [
         want[0].then_some(Handle {
             above: true,
             left,
-            top: tag.top - HANDLE_GAP - HANDLE_H,
+            top: tag.top - m.handle_gap - h,
+            w,
+            h,
         }),
         want[1].then_some(Handle {
             above: false,
             left,
-            top: tag.top + TAG_H + HANDLE_GAP,
+            top: tag.top + tag.h + m.handle_gap,
+            w,
+            h,
         }),
     ]
 }
@@ -403,8 +485,8 @@ pub fn round_average(notional: i128, qty: i64) -> Option<Price> {
 
 /// How many tags the band holds (what [`layout_tags`] lays out): at least one, however short
 /// the plot, so orders on it always have a way in; at most `MAX_TAGS`.
-pub fn tags_fit(band: (f32, f32)) -> usize {
-    let fits = (((band.1 - band.0) + TAG_GAP) / (TAG_H + TAG_GAP))
+pub fn tags_fit(band: (f32, f32), m: &Metrics) -> usize {
+    let fits = (((band.1 - band.0) + m.tag_gap) / (m.tag_h + m.tag_gap))
         .floor()
         .max(0.0) as usize;
     fits.clamp(1, MAX_TAGS)
@@ -412,7 +494,7 @@ pub fn tags_fit(band: (f32, f32)) -> usize {
 
 /// The tags for the orders on the plot, at most `cap` (from [`tags_fit`]) and `out.len()`: every
 /// order is in exactly one, so none is hidden. Orders of one kind whose tags can't both sit at
-/// their own levels (`TAG_H + TAG_GAP` apart) share a tag; zooming in splits them back. When that
+/// their own levels (`m.tag_h + m.tag_gap` apart) share a tag; zooming in splits them back. When that
 /// leaves too many tags for the band, the distance grows until it fits; if one tag per kind
 /// still doesn't, the last tag takes everything left ([`MIXED_KEY`]). Sorts `orders` by kind,
 /// then highest price first. Allocation-free.
@@ -421,6 +503,7 @@ pub fn group_orders(
     orders: &mut [GroupIn],
     plot_h: f32,
     cap: usize,
+    m: &Metrics,
     out: &mut [TagGroup],
 ) -> usize {
     let cap = cap.min(out.len());
@@ -438,7 +521,7 @@ pub fn group_orders(
             .filter(|w| !joins(&w[0], &w[1], apart))
             .count()
     };
-    let mut apart = (TAG_H + TAG_GAP) as f64;
+    let mut apart = (m.tag_h + m.tag_gap) as f64;
     while count(apart) > cap && apart <= plot_h as f64 {
         apart *= 2.0;
     }
@@ -478,6 +561,8 @@ mod tests {
     use super::super::snap_price;
     use super::*;
 
+    const M: Metrics = Metrics::BASE;
+
     fn vp() -> Viewport {
         // 0..100 px tall from price 610_000 (top) to 600_000 (bottom): 100 units a pixel.
         Viewport {
@@ -503,7 +588,16 @@ mod tests {
     fn tags_sit_on_their_line_at_the_right_edge() {
         let v = vp();
         let mut out = [TagBox::default(); 4];
-        let n = layout_tags(&v, &[line(7, 605_000)], 400.0, 100.0, FULL, 1.0, &mut out);
+        let n = layout_tags(
+            &v,
+            &[line(7, 605_000)],
+            400.0,
+            100.0,
+            FULL,
+            1.0,
+            &M,
+            &mut out,
+        );
         assert_eq!(n, 1);
         let t = out[0];
         assert_eq!(t.line_y, snap(v.price_to_y(605_000.0), 1.0));
@@ -512,7 +606,16 @@ mod tests {
         assert_eq!(t.close_left, 400.0 - TAG_GAP - CLOSE_W);
         // Off the plot: no tag.
         assert_eq!(
-            layout_tags(&v, &[line(1, 620_000)], 400.0, 100.0, FULL, 1.0, &mut out),
+            layout_tags(
+                &v,
+                &[line(1, 620_000)],
+                400.0,
+                100.0,
+                FULL,
+                1.0,
+                &M,
+                &mut out
+            ),
             0
         );
     }
@@ -529,7 +632,7 @@ mod tests {
             line(4, 600_000),
         ];
         let band = (16.0, 84.0);
-        let n = layout_tags(&v, &lines, 400.0, 100.0, band, 1.0, &mut out);
+        let n = layout_tags(&v, &lines, 400.0, 100.0, band, 1.0, &M, &mut out);
         // The order at the very bottom (y 100) is outside the band: an edge marker's job.
         assert_eq!(n, 3);
         let tags = &out[..n];
@@ -564,13 +667,14 @@ mod tests {
             100.0,
             (16.0, 84.0),
             1.0,
+            &M,
             &mut out,
         );
         assert_eq!(n, 1, "not lost under the marker");
         assert!(out[0].top >= 16.0);
         // Twelve orders in a band that holds three: three tags, all inside.
         let many: Vec<LineIn> = (0..12).map(|i| line(i, 605_000 + i as i64 * 25)).collect();
-        let n = layout_tags(&v, &many, 400.0, 100.0, (16.0, 84.0), 1.0, &mut out);
+        let n = layout_tags(&v, &many, 400.0, 100.0, (16.0, 84.0), 1.0, &M, &mut out);
         assert_eq!(n, 3);
         for t in &out[..n] {
             assert!(t.top >= 16.0 && t.top + TAG_H <= 84.0, "{t:?}");
@@ -588,7 +692,7 @@ mod tests {
             line(3, 605_000), // on the plot
             line(4, 595_000), // below
         ];
-        let m = edge_markers(&v, &lines, 400.0, 100.0, [90.0, 90.0]);
+        let m = edge_markers(&v, &lines, 400.0, 100.0, [90.0, 90.0], &M);
         let top = m[0].unwrap();
         assert_eq!(
             (top.id, top.price, top.n, top.above),
@@ -600,10 +704,10 @@ mod tests {
         assert_eq!((bottom.id, bottom.n, bottom.above), (4, 1, false));
         assert_eq!(bottom.top + TAG_H, 100.0 - TAG_GAP);
         // Tags keep clear of the markers.
-        let (lo, hi) = tag_band(&m, 100.0);
+        let (lo, hi) = tag_band(&m, 100.0, &M);
         assert!(lo >= top.top + TAG_H && hi <= bottom.top);
         assert_eq!(
-            edge_markers(&v, &lines[2..3], 400.0, 100.0, [90.0; 2]),
+            edge_markers(&v, &lines[2..3], 400.0, 100.0, [90.0; 2], &M),
             [None, None]
         );
         // Clicking a marker centres its price, keeping the span.
@@ -615,7 +719,16 @@ mod tests {
     fn hits_tell_handles_markers_close_and_body_apart() {
         let v = vp();
         let mut out = [TagBox::default(); 2];
-        let n = layout_tags(&v, &[line(9, 605_000)], 400.0, 100.0, FULL, 1.0, &mut out);
+        let n = layout_tags(
+            &v,
+            &[line(9, 605_000)],
+            400.0,
+            100.0,
+            FULL,
+            1.0,
+            &M,
+            &mut out,
+        );
         let t = out[0];
         let y = t.top + TAG_H * 0.5;
         let none: [Option<EdgeMarker>; 2] = [None, None];
@@ -634,7 +747,7 @@ mod tests {
             None,
             "lines aren't targets"
         );
-        let h = handles(&t, [true, true]);
+        let h = handles(&t, [true, true], &M);
         let up = h[0].unwrap();
         assert_eq!(
             hit(&out[..n], &none, &h, up.left + 1.0, up.top + 1.0),
@@ -645,7 +758,7 @@ mod tests {
             hit(&out[..n], &none, &h, down.left + 1.0, down.top + 1.0),
             Some(TagHit::Handle(false))
         );
-        let m = edge_markers(&v, &[line(5, 612_000)], 400.0, 100.0, [60.0, 60.0]);
+        let m = edge_markers(&v, &[line(5, 612_000)], 400.0, 100.0, [60.0, 60.0], &M);
         let mk = m[0].unwrap();
         assert_eq!(
             hit(&out[..n], &m, &no_h, mk.left + 1.0, mk.top + 1.0),
@@ -729,7 +842,7 @@ mod tests {
         let mut out = [TagGroup::default(); MAX_TAGS];
         let mut a = orders;
         // 25 units apart at 0.1 px per unit: 2.5 px, they can't both fit.
-        let n = group_orders(&zoom(0.1), &mut a, 400.0, MAX_TAGS, &mut out);
+        let n = group_orders(&zoom(0.1), &mut a, 400.0, MAX_TAGS, &M, &mut out);
         assert_eq!(n, 2, "{out:?}");
         assert_eq!((out[0].key, out[0].n, out[0].qty), (1, 3, 25));
         assert_eq!((out[0].lo, out[0].hi), (Price(582_275), Price(582_300)));
@@ -740,7 +853,7 @@ mod tests {
         );
         // 25 units apart at 2 px per unit: 50 px: their own levels, but the equal prices stay.
         let mut b = orders;
-        let n = group_orders(&zoom(2.0), &mut b, 400.0, MAX_TAGS, &mut out);
+        let n = group_orders(&zoom(2.0), &mut b, 400.0, MAX_TAGS, &M, &mut out);
         assert_eq!(n, 3, "{out:?}");
         assert_eq!((out[0].hi, out[0].n), (Price(582_300), 1));
         assert_eq!((out[1].hi, out[1].n, out[1].qty), (Price(582_275), 2, 15));
@@ -753,7 +866,7 @@ mod tests {
     fn the_average_is_exact_and_rounded_only_for_the_label() {
         let mut orders = [grp(1, 582_275, 1, 1), grp(2, 582_300, 2, 1)];
         let mut out = [TagGroup::default(); 4];
-        let n = group_orders(&zoom(0.01), &mut orders, 400.0, 4, &mut out);
+        let n = group_orders(&zoom(0.01), &mut orders, 400.0, 4, &M, &mut out);
         assert_eq!(n, 1);
         assert_eq!(out[0].notional, 582_275 + 2 * 582_300);
         assert_eq!(out[0].average(), Price(582_292), "582291.67 rounds up");
@@ -784,7 +897,7 @@ mod tests {
             .map(|i| grp(i as u64 + 1, 580_000 + i * 60, 2, 1))
             .collect();
         let vp = zoom(0.09);
-        let n = group_orders(&vp, &mut many, 400.0, 3, &mut out);
+        let n = group_orders(&vp, &mut many, 400.0, 3, &M, &mut out);
         assert!((1..=3).contains(&n), "{n}");
         assert_eq!(out[..n].iter().map(|g| g.n).sum::<usize>(), 70);
         assert_eq!(out[..n].iter().map(|g| g.qty).sum::<i64>(), 140);
@@ -795,22 +908,129 @@ mod tests {
             grp(3, 582_000, 1, 3),
             grp(4, 582_000, 1, 4),
         ];
-        let n = group_orders(&zoom(1.0), &mut kinds, 400.0, 2, &mut out);
+        let n = group_orders(&zoom(1.0), &mut kinds, 400.0, 2, &M, &mut out);
         assert_eq!(n, 2);
         assert_eq!((out[0].key, out[0].n), (1, 1));
         assert_eq!((out[1].key, out[1].n), (MIXED_KEY, 3));
         // The tag's orders are a contiguous run of the sorted slice.
         assert_eq!(kinds[out[1].first].key, 2);
         // No room, no orders: nothing, no panic.
-        assert_eq!(group_orders(&zoom(1.0), &mut kinds, 400.0, 0, &mut out), 0);
-        assert_eq!(group_orders(&zoom(1.0), &mut [], 400.0, 3, &mut out), 0);
+        assert_eq!(
+            group_orders(&zoom(1.0), &mut kinds, 400.0, 0, &M, &mut out),
+            0
+        );
+        assert_eq!(group_orders(&zoom(1.0), &mut [], 400.0, 3, &M, &mut out), 0);
     }
 
     #[test]
     fn tags_fit_counts_the_band_and_the_limit() {
-        assert_eq!(tags_fit((0.0, TAG_H)), 1);
-        assert_eq!(tags_fit((0.0, 2.0 * TAG_H + TAG_GAP)), 2);
-        assert_eq!(tags_fit((0.0, 10.0)), 1, "always a way in");
-        assert_eq!(tags_fit((0.0, 100_000.0)), MAX_TAGS);
+        assert_eq!(tags_fit((0.0, TAG_H), &M), 1);
+        assert_eq!(tags_fit((0.0, 2.0 * TAG_H + TAG_GAP), &M), 2);
+        assert_eq!(tags_fit((0.0, 10.0), &M), 1, "always a way in");
+        assert_eq!(tags_fit((0.0, 100_000.0), &M), MAX_TAGS);
+    }
+
+    /// UI zoom: at 150 % tags, `×` boxes, markers and handles are 1.5×, a band holds fewer
+    /// tags, and every hit test matches the scaled boxes (owner bug: they stayed at 100 %).
+    #[test]
+    fn tags_scale_with_the_ui_zoom_and_hits_follow() {
+        let z = Metrics::at(1.5);
+        assert_eq!(Metrics::at(1.0), Metrics::BASE);
+        assert_eq!(Metrics::at(f32::NAN), Metrics::BASE);
+        assert_eq!(
+            Metrics::for_ui_zoom(0.8),
+            Metrics::BASE,
+            "never under 100 %"
+        );
+        assert_eq!(Metrics::for_ui_zoom(1.5), z);
+        assert_eq!((z.tag_h, z.close_w, z.tag_gap), (30.0, 33.0, 3.0));
+        assert_eq!((z.handle_w, z.handle_h, z.handle_gap), (39.0, 30.0, 5.0));
+        // Every size is whole and the tag's height even at any zoom (crisp edges).
+        for pct in 80..=150 {
+            let m = Metrics::at(pct as f32 / 100.0);
+            for v in [
+                m.tag_h * 0.5,
+                m.close_w,
+                m.tag_gap,
+                m.handle_w,
+                m.handle_h,
+                m.handle_gap,
+            ] {
+                assert_eq!(v, v.round(), "{pct} %: {m:?}");
+            }
+        }
+        let v = vp();
+        let mut out = [TagBox::default(); 4];
+        let n = layout_tags(
+            &v,
+            &[line(9, 605_000)],
+            400.0,
+            100.0,
+            FULL,
+            1.0,
+            &z,
+            &mut out,
+        );
+        assert_eq!(n, 1);
+        let t = out[0];
+        assert_eq!(t.h, 30.0);
+        assert!((t.top + 15.0 - t.line_y).abs() < 0.01, "centred");
+        assert_eq!(t.w, 80.0 + 18.0 + 33.0, "text, padding and × all scaled");
+        assert_eq!(t.left + t.w, 400.0 - 3.0);
+        assert_eq!(t.close_left, 400.0 - 3.0 - 33.0);
+        let none: [Option<EdgeMarker>; 2] = [None, None];
+        let no_h: [Option<Handle>; 2] = [None, None];
+        let tags = &out[..n];
+        // The scaled tag's lower half is hit (a 100 % box would end at top + 20).
+        assert_eq!(
+            hit(tags, &none, &no_h, t.left + 1.0, t.top + 25.0),
+            Some(TagHit::Body(9))
+        );
+        assert_eq!(hit(tags, &none, &no_h, t.left + 1.0, t.top + 30.0), None);
+        // The × is 33 px: 30 px left of the tag's right end is still the ×.
+        assert_eq!(
+            hit(tags, &none, &no_h, t.left + t.w - 30.0, t.top + 1.0),
+            Some(TagHit::Close(9))
+        );
+        assert_eq!(
+            hit(tags, &none, &no_h, t.close_left - 0.5, t.top + 1.0),
+            Some(TagHit::Body(9))
+        );
+        // Handles: 39 × 30, 5 px off the tag.
+        let h = handles(&t, [true, true], &z);
+        let (up, down) = (h[0].unwrap(), h[1].unwrap());
+        assert_eq!((up.w, up.h, up.top), (39.0, 30.0, t.top - 5.0 - 30.0));
+        assert_eq!(down.top, t.top + 30.0 + 5.0);
+        assert_eq!(
+            hit(tags, &none, &h, up.left + 38.0, up.top + 29.0),
+            Some(TagHit::Handle(true))
+        );
+        assert_eq!(
+            hit(tags, &none, &h, down.left + 38.0, down.top + 29.0),
+            Some(TagHit::Handle(false))
+        );
+        // Edge markers: 30 px tall, padding scaled, the band leaves room for them.
+        let m = edge_markers(&v, &[line(5, 612_000)], 400.0, 100.0, [60.0, 60.0], &z);
+        let mk = m[0].unwrap();
+        assert_eq!((mk.top, mk.h, mk.w), (3.0, 30.0, 60.0 + 18.0));
+        assert_eq!(
+            hit(tags, &m, &no_h, mk.left + 1.0, mk.top + 29.0),
+            Some(TagHit::Edge(Price(612_000)))
+        );
+        assert_eq!(tag_band(&m, 100.0, &z).0, 3.0 + 30.0 + 3.0);
+        // Fewer tags per band; orders group sooner.
+        assert_eq!(tags_fit((0.0, 100.0), &M), 4);
+        assert_eq!(tags_fit((0.0, 100.0), &z), 3);
+        let mut orders = [grp(1, 582_000, 1, 1), grp(2, 582_025, 1, 1)];
+        let mut g = [TagGroup::default(); 4];
+        // 25 units at 1 px a unit: room at 100 % (22 px apart), not at 150 % (33).
+        assert_eq!(
+            group_orders(&zoom(1.0), &mut orders, 400.0, 4, &M, &mut g),
+            2
+        );
+        assert_eq!(
+            group_orders(&zoom(1.0), &mut orders, 400.0, 4, &z, &mut g),
+            1
+        );
     }
 }
