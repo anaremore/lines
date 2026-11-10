@@ -8,36 +8,59 @@
 
 [![CI](https://github.com/anaremore/lines/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/anaremore/lines/actions/workflows/ci.yml)
 
-![Dark theme: a footprint chart with a long paper position, its stop and target lines and a working buy limit, beside the DOM and time & sales](docs/img/chart-orders-footprint.png)
+![Dark theme: a footprint chart with a long paper position, its stop and target lines and a working buy limit, beside the DOM with its trade panel and time & sales](docs/img/chart-orders-footprint.png)
 
 <sub>All screenshots use synthetic data, rendered with Lines' screenshot mode.</sub>
 
-## Status: pre-alpha
-
-Lines trades on paper only: no live broker connections and no live order entry. Data comes from a mock futures feed, the Coinbase and Kraken public crypto feeds, and replays of recorded sessions. Live futures connectors (Rithmic, CQG) are planned and not in public builds.
+> [!IMPORTANT]
+> **Pre-alpha. Paper trading only.** Lines has no live order routing: every order goes to a simulated paper account. Public builds read the mock futures feed, Coinbase and Kraken public data, and replays. Official builds add vendor connectors.
 
 ## What works today
 
-- **Data:** a simulated ES futures feed, Coinbase and Kraken public feeds, record and deterministic replay, and a local market-data store for live feeds, so charts and order flow open instantly on restart.
-- **Charts:** minute to weekly candles, plus bars built from counted trades: tick (`500t`), volume (`500v`), range (`10r`) and seconds (`30s`; volume, range and seconds bars are on `main`, after v0.3.0). Footprint, cumulative delta, VWAP with bands, and a volume profile.
-- **Drawings:** lines, rays, trend lines, zones, notes and a measure tool, with color, line style, width and opacity per drawing.
-- **DOM:** a tick-indexed ladder with depth, volume at price and a price trail; click, drag and hotkey paper orders; brackets; Flatten and Cancel all always visible.
-- **Chart trading:** working orders as lines you can drag or cancel, and stop/target handles on the position line.
-- **Risk:** your own guardrails (daily loss, losing-streak cooldown, max trades, max position, no entries before the close) and prop-firm rule presets (trailing drawdown, daily loss, contract cap) that apply to paper accounts.
-- **Journal:** every round trip with exact P&L and fees, MAE/MFE, tags and notes, stats, CSV export.
-- **Workspaces:** grids, tabs, pop-out windows and link groups, saved and restored. Command palette, Settings window, symbol picker.
-- **Look:** dark and light themes, a colorblind-safe palette, and direction never shown by color alone.
+**Trading (paper)**
+- **DOM:** a tick-indexed ladder with depth, volume at price and a price trail; click, drag and hotkey orders; brackets.
+- **Trade panel:** the position card (size, average, open P&L, stop and target, day P&L), quantity and bracket lists, large Buy and Sell, Join bid / Join ask, and BE, Reverse, Cancel all and Flatten always in reach.
+- **One-step Reverse** (Ctrl+Alt+R): cancels, closes reduce-only, then opens the other side as its own order.
+- **Chart trading:** working orders as lines you drag or cancel; stop and target handles on the position line.
+- **Positions pane** (Ctrl+Shift+J): every open position on every account, with Flatten per row and Flatten all.
+- **Reset paper account** from the palette, the account menu or Settings: it flattens first and asks for a second press.
+- **Options on SPY:** an option chain, and an option chart where Entry, Stop and Target are lines on the underlying's price, held as triggers by the trading core ([decision 0029](docs/decisions/0029-option-chart-and-underlying-triggers.md)).
+- **Risk:** your own guardrails (daily loss, losing-streak cooldown, max trades, max position, no entries before the close, economic-calendar blackouts) and prop-firm rule presets (trailing drawdown, daily loss, contract cap).
+- **Journal:** every round trip with exact P&L and fees, MAE/MFE, tags, notes, stats and CSV export.
+
+**Charts**
+- Minute to weekly candles, plus tick (`500t`), volume (`500v`), range (`10r`) and seconds (`30s`) bars.
+- Studies: footprint, volume profile, VWAP with bands, cumulative delta, and Volume in a lower pane or as an overlay.
+- External levels: a plug-in source of price levels drawn on the chart, recorded and replayed with the data.
+- Drawings: lines, rays, trend lines, zones and notes, each with its own style.
+- **Ruler:** Shift+drag measures ticks, points, P&L, bars and time with no tool to pick; move or resize it, and choose which parts show.
+
+**Interface**
+- Right-click menus on panes, tabs, orders and drawings.
+- UI zoom from 80 to 150 % (Ctrl+= / Ctrl+− / Ctrl+0).
+- Floating pop-up panels: palette, symbol picker, studies, style editor and order list.
+- Display time zone: exchange (ET) by default, your system's, or any zone.
+- Dark and light themes, a colorblind-safe palette, and direction never shown by color alone.
+- Workspaces: grids, tabs, pop-out windows and link groups, saved and restored.
+
+**Data**
+- Coinbase and Kraken public feeds (spot and perpetuals), a simulated ES futures feed, and deterministic replay.
+- **Record / Stop recording** from the app: live feeds and levels go to the data folder, with REC in the footer.
+- A local market-data store for live feeds, so charts and order flow open at once on restart.
+
+**Updates**
+- In-app updates on Windows: Lines downloads a new release, checks its SHA-256 and signature, and asks before it restarts. A restart waits while a position, working order or armed trigger is open, and the previous version is kept for rollback. v0.3.12 is the last version you install by hand.
 
 Prices and money are exact integers, never floating point.
 
 | | |
 |---|---|
-| ![A 500-trade tick chart with session VWAP and 1σ/2σ bands](docs/img/tick-chart.png) | ![Light theme: a 5-minute chart with a long paper position, its stop and target, beside the DOM and time & sales](docs/img/light.png) |
-| Tick chart (500 trades per bar) with VWAP bands | Light theme |
+| ![Light theme: a 5-minute chart with a split Volume pane and a paper position, beside the DOM and the Positions pane](docs/img/light.png) | ![Dark theme: a 500-trade tick chart with VWAP bands, external levels and a ruler measurement](docs/img/tick-chart.png) |
+| Light theme, Volume study and Positions pane | Tick chart with VWAP bands, levels and the ruler |
 
 ## Install
 
-Download your platform's archive from the [latest release](https://github.com/anaremore/lines/releases): a zip for Windows x64 and macOS (Apple silicon), a tar.gz for Linux x64. Extract it and run `lines.exe` (Windows), `Lines.app` (macOS) or `lines` (Linux). SHA-256 checksums are attached. Builds are not code-signed yet, so Windows and macOS may warn on first launch.
+Download your platform's archive from the [latest release](https://github.com/anaremore/lines/releases): a zip for Windows x64 and macOS (Apple silicon), a tar.gz for Linux x64. Extract it and run `lines.exe` (Windows), `Lines.app` (macOS) or `lines` (Linux). SHA-256 checksums are attached. Builds aren't code-signed, so Windows and macOS may warn on first launch. Windows updates itself from then on; on macOS and Linux, download each new release.
 
 ## Quick start
 
@@ -45,29 +68,33 @@ Download your platform's archive from the [latest release](https://github.com/an
 lines --source mock                           # simulated ES futures, any hour; paper trading works
 lines --source coinbase --instrument BTC/USD  # live public crypto data, 24/7
 lines --source kraken --instrument BTC/USD.KR
+lines --source replay --replay session.lfr --speed 10
 lines --help                                  # every option
 ```
 
-To trade on paper, enable trading in the DOM's header (or Ctrl+Shift+Space), then click the bid column to buy and the ask column to sell. Shift+click places a stop.
+To trade on paper, turn on the Trading switch in the DOM's trade panel (or Ctrl+Shift+Space), then click the bid column to buy and the ask column to sell. Shift+click places a stop.
 
 ## Keyboard basics
 
-"Ctrl" is Cmd on macOS.
+"Ctrl" is Cmd on macOS. The palette lists every command with its key.
 
 | Key | Action |
 |---|---|
-| Ctrl+Shift+P | Command palette: every command, with its key |
+| Ctrl+Shift+P | Command palette |
 | Ctrl+, | Settings |
 | Ctrl+K, or type a letter on a chart | Symbol picker |
-| `5` / `1h` / `500t` + Enter (`500v` / `10r` / `30s` after v0.3.0) | Change the chart's timeframe |
-| Ctrl+I | Studies (VWAP, volume profile, footprint, cumulative delta) |
-| Alt+H / Alt+T / Alt+Z / Alt+N / Alt+U | Horizontal line, trend line, zone, note, measure |
-| Ctrl+Shift+Space | Enable or disable DOM trading |
+| `5` / `1h` / `500t` / `500v` / `10r` / `30s` + Enter | Change the chart's timeframe |
+| Ctrl+I | Studies |
+| Shift+drag on a chart | Ruler |
+| Alt+H / Alt+T / Alt+Z / Alt+N | Horizontal line, trend line, zone, note |
+| Ctrl+Shift+Space | Trading on or off (DOM) |
 | Ctrl+Alt+B / Ctrl+Alt+S | Buy / sell market |
+| Ctrl+Alt+R | Reverse |
 | Ctrl+Shift+F / Ctrl+Shift+A | Flatten / cancel all orders |
+| Ctrl+Shift+J | Positions |
+| Ctrl+= / Ctrl+− / Ctrl+0 | UI zoom |
 | Ctrl+Shift+D / Ctrl+Shift+E | Hide or show the DOM / time & sales |
 | Ctrl+T, Ctrl+PageDown | New tab, next tab |
-| F1 | Hide or show the key-hint bar |
 
 ## Build from source
 
@@ -86,7 +113,7 @@ Architecture and every CLI flag: [`docs/architecture.md`](docs/architecture.md).
 
 ## Roadmap and known gaps
 
-- [ROADMAP.md](ROADMAP.md): what is done and what comes next (chart trading phase 2, strategies, live connectors).
+- [ROADMAP.md](ROADMAP.md): what's done and what comes next.
 - [docs/known-gaps.md](docs/known-gaps.md): the honest list of current limits.
 
 Troubleshooting: run "Export diagnostics" from the command palette and attach the zip. It stays on your computer until you share it, with credentials and account IDs removed.
