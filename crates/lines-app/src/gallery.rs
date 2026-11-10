@@ -808,8 +808,9 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             "--layout chart --size 1400x800 --theme {theme} --volume {opts}{extra}"
         ));
         if name == "volume-with-delta-dark" {
+            // A study set replaces the command line's studies: both are in it.
             a.push("--study-set".into());
-            a.push(ws("delta-only.json"));
+            a.push(ws("volume-and-delta.json"));
         }
         s(name, quick, end, a)
     };
@@ -1131,8 +1132,8 @@ fn write_workspaces(dir: &Path) -> Result<()> {
                            "poc": { "color": "#f719cb", "width": 2, "line": "dashed" },
                            "va": { "color": "p3", "opacity": 75 } } } }"##;
     std::fs::write(dir.join("studies-styled.json"), studies).context("studies-styled.json")?;
-    let delta = r##"{ "indicators": [ { "kind": "cum_delta", "reset": "eth" } ] }"##;
-    std::fs::write(dir.join("delta-only.json"), delta).context("delta-only.json")?;
+    let both = r##"{ "indicators": [ { "kind": "volume" }, { "kind": "cum_delta", "reset": "eth" } ] }"##;
+    std::fs::write(dir.join("volume-and-delta.json"), both).context("volume-and-delta.json")?;
     let bands = r##"{ "indicators": [ { "kind": "vwap", "reset": "eth", "bands": 7 } ] }"##;
     std::fs::write(dir.join("vwap-bands-unstyled.json"), bands)
         .context("vwap-bands-unstyled.json")?;
