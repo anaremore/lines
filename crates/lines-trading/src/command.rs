@@ -206,6 +206,51 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         replace: bool,
     },
+    /// A new account group (`crate::group`): a name unique ignoring case, and its members (known
+    /// accounts, each once; may be empty). Groups carry no rules: prop rules, risk limits and
+    /// guardrails stay per account. Never from a strategy.
+    CreateGroup {
+        name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        members: Vec<AccountId>,
+    },
+    /// Rename a group (to a name no other group has, ignoring case). Never from a strategy.
+    RenameGroup {
+        group: String,
+        name: String,
+    },
+    /// Forget a group. Its accounts, orders and positions are untouched. Never from a strategy.
+    DeleteGroup {
+        group: String,
+    },
+    /// Replace a group's members (known accounts, each once; may be empty). Never from a
+    /// strategy.
+    SetGroupMembers {
+        group: String,
+        members: Vec<AccountId>,
+    },
+    /// [`Command::CancelAll`] on every member of a group, as one member command each (its own
+    /// id from the internal range, its own result): never gated by risk, prop rules or
+    /// guardrails, as on one account. A person's (or the API's), never a strategy's.
+    GroupCancelAll {
+        group: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "opt_contract"
+        )]
+        contract: Option<ContractKey>,
+    },
+    /// [`Command::Flatten`] on every member of a group, as [`Command::GroupCancelAll`].
+    GroupFlatten {
+        group: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "opt_contract"
+        )]
+        contract: Option<ContractKey>,
+    },
 }
 
 /// Exits for manual trades on an account and contract.
@@ -223,7 +268,8 @@ pub enum BracketMode {
 }
 
 impl Command {
-    /// The account the command acts on (`None`: strategy controls that name an instance).
+    /// The account the command acts on (`None`: strategy controls that name an instance, and
+    /// group commands, see [`Command::group`]).
     pub fn account(&self) -> Option<&AccountId> {
         match self {
             Command::PlaceOrder(o) | Command::PlaceExit(o) => Some(&o.account),
@@ -247,6 +293,25 @@ impl Command {
             | Command::ArmStrategy { .. }
             | Command::PauseStrategy { .. }
             | Command::StopStrategies { .. } => None,
+            Command::CreateGroup { .. }
+            | Command::RenameGroup { .. }
+            | Command::DeleteGroup { .. }
+            | Command::SetGroupMembers { .. }
+            | Command::GroupCancelAll { .. }
+            | Command::GroupFlatten { .. } => None,
+        }
+    }
+
+    /// The account group a group command acts on (a new group's name for `CreateGroup`).
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            Command::CreateGroup { name, .. } => Some(name),
+            Command::RenameGroup { group, .. }
+            | Command::DeleteGroup { group }
+            | Command::SetGroupMembers { group, .. }
+            | Command::GroupCancelAll { group, .. }
+            | Command::GroupFlatten { group, .. } => Some(group),
+            _ => None,
         }
     }
 
@@ -256,6 +321,8 @@ impl Command {
             self,
             Command::CancelAll { .. }
                 | Command::Flatten { .. }
+                | Command::GroupCancelAll { .. }
+                | Command::GroupFlatten { .. }
                 | Command::ResetPaper { .. }
                 | Command::CancelOrder { .. }
                 | Command::CancelTrigger { .. }
@@ -357,6 +424,8 @@ pub enum RejectCode {
     UnknownAccount,
     UnknownOrder,
     UnknownContract,
+    /// No account group by that name.
+    UnknownGroup,
     /// Not on the tick grid, non-positive quantity, nonsensical bracket, …
     Invalid,
     /// A pre-trade risk limit (decision 0006).

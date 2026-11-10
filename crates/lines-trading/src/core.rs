@@ -44,6 +44,7 @@ use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind
 pub const EXTERNAL_ORDER: OrderId = OrderId(0);
 mod cancels;
 mod flatten;
+mod groups;
 mod position_bracket;
 mod reset;
 mod reverse;
@@ -61,9 +62,6 @@ pub struct AccountConfig {
     pub limits: RiskLimits,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<RulePreset>,
-    /// The account group (for the future copier, roadmap 14).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
     /// Whose trading day the account's day (daily loss, end-of-day drawdown) follows.
     #[serde(default = "default_day_product")]
     pub day_product: u32,
@@ -81,7 +79,6 @@ impl AccountConfig {
             starting_balance,
             limits: RiskLimits::default(),
             rules: None,
-            group: None,
             day_product: default_day_product(),
         }
     }
@@ -207,6 +204,8 @@ impl Latency {
 pub struct TradingCore {
     broker: Box<dyn Broker>,
     accounts: BTreeMap<AccountId, AccountCache>,
+    /// Account groups, in the order they were created (`core/groups.rs`).
+    groups: Vec<crate::group::AccountGroup>,
     orders: BTreeMap<OrderId, Order>,
     marks: HashMap<ContractKey, Mark>,
     specs: HashMap<ContractKey, ContractSpec>,
@@ -300,6 +299,7 @@ impl TradingCore {
         TradingCore {
             broker,
             accounts: BTreeMap::new(),
+            groups: Vec::new(),
             orders: BTreeMap::new(),
             marks: HashMap::new(),
             specs: HashMap::new(),
@@ -534,15 +534,9 @@ impl TradingCore {
         self.accounts.values().map(|a| (&a.cfg, &a.tracker))
     }
 
-    /// Account groups (name → members) from the accounts' configs.
-    pub fn groups(&self) -> BTreeMap<String, Vec<AccountId>> {
-        let mut g: BTreeMap<String, Vec<AccountId>> = BTreeMap::new();
-        for a in self.accounts.values() {
-            if let Some(name) = &a.cfg.group {
-                g.entry(name.clone()).or_default().push(a.cfg.id.clone());
-            }
-        }
-        g
+    /// Account groups, in the order they were created.
+    pub fn groups(&self) -> &[crate::group::AccountGroup] {
+        &self.groups
     }
 
     pub fn broker(&self) -> &dyn Broker {
@@ -713,7 +707,26 @@ impl TradingCore {
     /// Handle a command whose id was assigned elsewhere (the threaded runtime assigns ids at
     /// the caller so it can return them without waiting).
     pub fn handle(&mut self, now: UtcMillis, env: Envelope) {
+        // The result is also in the command's `Event::Command`.
+        let _ = self.handle_result(now, env);
+    }
+
+    /// [`TradingCore::handle`], returning the command's result (also in its `Event::Command`).
+    fn handle_result(&mut self, now: UtcMillis, env: Envelope) -> Result<Vec<OrderId>, Reject> {
         self.seen_now = self.seen_now.max(now);
+        // Group commands (`core/groups.rs`): managing groups, or one member command each.
+        if let Some(result) = self.group_command(now, &env) {
+            if env.id.0 < INTERNAL_COMMAND_IDS {
+                self.next_command = self.next_command.max(env.id.0 + 1);
+            }
+            self.events.push(Event::Command {
+                id: env.id,
+                source: env.source,
+                at: now,
+                result: result.clone(),
+            });
+            return result;
+        }
         if env.id.0 < INTERNAL_COMMAND_IDS {
             self.next_command = self.next_command.max(env.id.0 + 1);
         }
@@ -761,7 +774,7 @@ impl TradingCore {
             id: env.id,
             source: env.source,
             at: now,
-            result,
+            result: result.clone(),
         });
         // Requests may complete at once (zero latency): apply what the broker has.
         self.poll(now);
@@ -771,6 +784,7 @@ impl TradingCore {
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
+        result
     }
 
     fn run(&mut self, now: UtcMillis, env: &Envelope) -> Result<Vec<OrderId>, Reject> {
@@ -1217,6 +1231,12 @@ impl TradingCore {
             | Command::ArmStrategy { .. }
             | Command::PauseStrategy { .. }
             | Command::StopStrategies { .. } => unreachable!("handled by strategy_control"),
+            Command::CreateGroup { .. }
+            | Command::RenameGroup { .. }
+            | Command::DeleteGroup { .. }
+            | Command::SetGroupMembers { .. }
+            | Command::GroupCancelAll { .. }
+            | Command::GroupFlatten { .. } => unreachable!("handled by group_command"),
             Command::Reverse {
                 contract,
                 take_profit,

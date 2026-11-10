@@ -92,6 +92,20 @@ pub enum Event {
         #[serde(with = "time_serde")]
         at: UtcMillis,
     },
+    /// The account groups after any change (created, renamed, deleted, members set, restored),
+    /// all of them, in the order they were created.
+    Groups {
+        groups: Vec<crate::group::AccountGroup>,
+    },
+    /// A group Cancel All or Flatten: one result per member, in the group's order, each its own
+    /// member command's (which also had its own [`Event::Command`] just before). The group
+    /// command's own `Event::Command` follows this, carrying every order id the members' results
+    /// name.
+    GroupCommand {
+        id: CommandId,
+        group: String,
+        results: Vec<crate::group::MemberResult>,
+    },
     /// The cache was rebuilt from the broker (after a (re)connect or restart).
     Rebuilt {
         accounts: usize,

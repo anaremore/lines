@@ -304,6 +304,7 @@ pub fn trading_file(core: &TradingCore, paper: &PaperConfig) -> Option<TradingFi
         next_order_id: core.next_order_id(),
         in_flight: core.in_flight().cloned().collect(),
         triggers: core.saved_triggers(),
+        groups: core.groups().to_vec(),
     })
 }
 

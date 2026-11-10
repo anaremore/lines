@@ -786,26 +786,6 @@ fn trading_file_round_trips_and_migrates_v0() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn account_groups_exist_in_the_model() {
-    let mut b = PaperBroker::new(paper(FillModel::TradeThrough));
-    let mut core = {
-        b.open_account(AccountId::new("a"), Money::whole(50_000));
-        b.open_account(AccountId::new("b"), Money::whole(50_000));
-        TradingCore::new(Box::new(b))
-    };
-    for id in ["a", "b"] {
-        let mut c = AccountConfig::paper(id, 50_000);
-        c.group = Some("evals".into());
-        core.add_account(c, None);
-    }
-    assert_eq!(
-        core.groups()["evals"],
-        vec![AccountId::new("a"), AccountId::new("b")]
-    );
-    let _ = core.broker().capabilities();
-}
-
 // ---- OMS checklist (docs/inspiration.md, "Trading core, OMS, risk") ---------------------
 //
 // One test per item that applies to lines-trading; behaviour only. Items that need exact

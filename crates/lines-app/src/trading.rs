@@ -342,6 +342,9 @@ impl TradeState {
                 self.rebuilds += 1;
                 None
             }
+            // Account groups have no UI yet (headless commands, roadmap 6); a group command's
+            // member commands answer as their own commands.
+            Event::Groups { .. } | Event::GroupCommand { .. } => None,
             Event::ResetWaiting { account } => {
                 self.resets_waiting.insert(account.clone());
                 Some(account)
@@ -1235,6 +1238,8 @@ impl Trading {
                 core.restore_in_flight(f.in_flight);
                 // A position's Stop and Target come back armed, and say so (decision 0029).
                 core.restore_triggers(f.triggers);
+                // Account groups (name and members) as they were saved.
+                core.restore_groups(f.groups);
                 (core, f.paper)
             }
             None => {
@@ -1882,6 +1887,13 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         | TradeCommand::ArmStrategy { .. }
         | TradeCommand::PauseStrategy { .. }
         | TradeCommand::StopStrategies { .. } => return None,
+        // Group commands name no one account (no UI yet).
+        TradeCommand::CreateGroup { .. }
+        | TradeCommand::RenameGroup { .. }
+        | TradeCommand::DeleteGroup { .. }
+        | TradeCommand::SetGroupMembers { .. }
+        | TradeCommand::GroupCancelAll { .. }
+        | TradeCommand::GroupFlatten { .. } => return None,
     };
     Some(Note {
         account,
