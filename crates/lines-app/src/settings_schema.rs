@@ -187,7 +187,6 @@ pub struct Prefs {
 /// The settings a workspace saves with itself.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspacePrefs {
-    pub hide_hints: bool,
     pub latency_hud: bool,
 }
 
@@ -931,23 +930,6 @@ fn table() -> Vec<Setting> {
                 }),
             ),
             Value::Text(crate::display_zone::describe_saved(None)),
-        ),
-        with_default(
-            s(
-                "appearance.hints",
-                Sec::Appearance,
-                "Hint bar",
-                "Key hints along the bottom of the window (F1).",
-                Scope::Workspace,
-                Normal,
-                Toggle,
-                |p, _, _| Value::Bool(!p.ws.hide_hints),
-                Some(|p, _, v| {
-                    p.ws.hide_hints = !want_bool(v)?;
-                    Ok(())
-                }),
-            ),
-            Value::Bool(true),
         ),
         // Charts.
         with_default(
@@ -2272,7 +2254,7 @@ pub struct SettingCmd {
 pub const OPEN: u8 = u8::MAX;
 
 /// Settings the palette already sets through commands of their own.
-const HAS_COMMAND: [&str; 3] = ["trading.pnl", "appearance.hints", "diagnostics.latency_hud"];
+const HAS_COMMAND: [&str; 2] = ["trading.pnl", "diagnostics.latency_hud"];
 
 impl SettingCmd {
     pub fn setting(self) -> Option<&'static Setting> {

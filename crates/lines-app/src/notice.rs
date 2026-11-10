@@ -62,6 +62,7 @@ impl Notices {
         self.0.clear();
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

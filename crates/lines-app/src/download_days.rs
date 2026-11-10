@@ -667,6 +667,14 @@ impl Model {
             })
     }
 
+    /// A running download's days: (done, of total), for the window footer's activity line.
+    pub fn days_progress(&self) -> Option<(usize, usize)> {
+        (self.phase == Phase::Downloading).then(|| {
+            let (_, _, done, _) = self.progress();
+            (done, self.fetching.len())
+        })
+    }
+
     /// The download's days: (estimated total, spent so far, done, the day in flight 1-based).
     fn progress(&self) -> (u64, u64, usize, Option<usize>) {
         let mut est = 0;

@@ -17,6 +17,7 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 ## 3. Trust: state is always unambiguous
 - Order states look distinct and never borrow each other's look: **pending** (outlined), **working** (filled), **partially filled**, **rejected** (with the reason inline).
 - Connection, data delay, and paper vs live are always visible, never only in a menu. Paper vs live differ by more than colour (decision 0006).
+- The window footer's left zone is for safety: account kind, trading on (with the armed DOM count), feeds that aren't live, recording, a pending restart and notices that need action, in a fixed order, never hidden or folded (narrow, they shorten their words). The middle is one line of background work; the right holds links, which fold into ⋯ (`footer.rs`). No key-hint text: keys are keycaps where the action is.
 - Errors appear inline where they happened, never as modal dialogs that steal focus during trading. Modals only for destructive confirmations the user opted into.
 - Flatten and Cancel All are always reachable with one action.
 

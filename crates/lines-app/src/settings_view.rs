@@ -491,7 +491,6 @@ fn current_prefs(cx: &App) -> Prefs {
     Prefs {
         app,
         ws: WorkspacePrefs {
-            hide_hints: ws.is_some_and(|w| w.hide_hints),
             latency_hud: ws.is_some_and(|w| w.show_latency_hud),
         },
     }
@@ -568,9 +567,6 @@ fn commit(
         crate::pnl::display_changed();
         crate::journal_shots::set_pnl(after.app.pnl_display);
         cx.refresh_windows();
-    }
-    if after.ws.hide_hints != before.ws.hide_hints {
-        crate::workspace::set_hide_hints(after.ws.hide_hints, cx);
     }
     if after.ws.latency_hud != before.ws.latency_hud {
         crate::workspace::set_show_latency_hud(after.ws.latency_hud, cx);
