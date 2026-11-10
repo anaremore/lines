@@ -442,7 +442,7 @@ pub fn volume_label(v: &VolumeSpec) -> String {
         s.push_str(" · buy/sell");
     }
     if v.average {
-        s.push_str(&format!(" · average {}", v.len()));
+        s.push_str(&format!(" · average {}", v.window()));
     }
     if v.overlay {
         s.push_str(" · overlay");

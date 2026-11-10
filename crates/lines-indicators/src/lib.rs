@@ -104,7 +104,7 @@ impl VolumeSpec {
     }
 
     /// The average's length, in range.
-    pub fn len(&self) -> usize {
+    pub fn window(&self) -> usize {
         usize::from(self.average_len.clamp(1, Self::MAX_LEN))
     }
 }
@@ -353,7 +353,7 @@ mod tests {
         let IndicatorConfig::Volume { spec, .. } = zero else {
             unreachable!()
         };
-        assert_eq!(spec.len(), 1);
+        assert_eq!(spec.window(), 1);
     }
 
     /// Styles are an optional nested field: a config without them writes none and loads as

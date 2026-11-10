@@ -254,7 +254,7 @@ impl Studies {
                 }
                 let opts = VolumeOptions {
                     split: spec.split,
-                    average: spec.average.then(|| spec.len()),
+                    average: spec.average.then(|| spec.window()),
                 };
                 s.vol.build(fp, bars, vp.visible_range(bars.len()), opts);
                 continue;
@@ -511,7 +511,7 @@ impl Studies {
             IndicatorConfig::Volume { spec, .. } => Some(LowerTitle::Volume {
                 bar: hovered.and_then(|i| s.vol.at(i).copied()).or(s.vol.newest),
                 split: spec.split,
-                average: spec.average.then_some(spec.len() as u16),
+                average: spec.average.then_some(spec.window() as u16),
             }),
             IndicatorConfig::Vwap { .. } => None,
         }
@@ -615,7 +615,7 @@ impl Studies {
                     theme.part_color(s.looks[study_style::VOLUME_BARS].color(), theme.volume, 100);
                 let mut name = "Volume".to_owned();
                 if spec.average {
-                    name.push_str(&format!(" · average {}", spec.len()));
+                    name.push_str(&format!(" · average {}", spec.window()));
                 }
                 col = col.child(
                     div()
