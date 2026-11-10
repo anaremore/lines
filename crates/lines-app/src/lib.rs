@@ -619,8 +619,9 @@ struct Cli {
     /// with this note in the DOM.
     #[arg(long, value_name = "TEXT", requires = "screenshot")]
     depth_note: Option<String>,
-    /// Screenshot: also render the Settings window at this section (appearance, charts, dom,
-    /// trading, accounts, data, keys, diagnostics) into `<out stem>-settings.png`.
+    /// Screenshot: also render the Settings window at this section (general, appearance,
+    /// charts, dom, trading, risk, accounts, data, connections, keys, diagnostics, about)
+    /// into `<out stem>-settings.png`.
     #[arg(long, requires = "screenshot")]
     settings: Option<String>,
     /// Screenshot: the Settings window's search text.

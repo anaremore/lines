@@ -50,9 +50,11 @@ pub enum State {
     Off {
         running: bool,
     },
-    /// A required setting has no value.
+    /// A required setting has no value (`started`: it is in this run, from before or from
+    /// its environment variable, and won't connect without it).
     NotSetUp {
         needs: &'static str,
+        started: bool,
     },
     /// On, but not part of this run (turned on, or set up, after it started).
     NextStart,
@@ -85,7 +87,14 @@ impl State {
         match self {
             State::Off { running: false } => "Off".to_owned(),
             State::Off { running: true } => "Off when Lines restarts".to_owned(),
-            State::NotSetUp { needs } => format!("Not set up: needs {needs}, so not started"),
+            State::NotSetUp {
+                needs,
+                started: false,
+            } => format!("Not set up: needs {needs}, so not started"),
+            State::NotSetUp {
+                needs,
+                started: true,
+            } => format!("Not set up: needs {needs} to connect"),
             State::NextStart => "On when Lines restarts".to_owned(),
             State::Idle => "Idle: connects when a pane shows its symbols".to_owned(),
             State::Connecting => "Connecting…".to_owned(),
@@ -117,7 +126,10 @@ pub fn state(on: bool, in_run: bool, needs: Option<&'static str>, feeds: &[FeedS
     // `--source` given without one).
     if !(in_run && !feeds.is_empty()) {
         if let Some(needs) = needs {
-            return State::NotSetUp { needs };
+            return State::NotSetUp {
+                needs,
+                started: in_run,
+            };
         }
         if !in_run {
             return State::NextStart;
@@ -410,7 +422,14 @@ mod tests {
         );
         assert_eq!(
             state(true, true, Some("API key"), &[]),
-            State::NotSetUp { needs: "API key" }
+            State::NotSetUp {
+                needs: "API key",
+                started: true
+            }
+        );
+        assert_eq!(
+            state(true, false, Some("API key"), &[]).text(),
+            "Not set up: needs API key, so not started"
         );
         // A source that is running says what it is doing, set up or not.
         assert_eq!(

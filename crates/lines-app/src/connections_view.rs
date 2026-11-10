@@ -6,7 +6,7 @@
 //! only the masked form reaches the window. Replace types a new one; Remove takes two presses.
 //! Every control is reachable from the keyboard: ↑/↓ move between them, Enter or Space press.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -78,8 +78,12 @@ pub(crate) struct ConnPage {
     test: Option<Test>,
     /// Source → the last Test's words and whether it failed.
     results: HashMap<String, (String, bool)>,
-    /// The keyboard's control, an index into `controls`.
-    focus: usize,
+    /// The keyboard's control, an index into `controls` (kept inside it as controls come
+    /// and go).
+    focus: Cell<usize>,
+    /// Each running store's last status seen (by its address): a store busy with a batch
+    /// keeps it, since drawing never waits on a feed.
+    statuses: RefCell<HashMap<usize, FeedStatus>>,
     /// The page's controls in drawing order, as last drawn (what ↑/↓ and Enter act on).
     controls: RefCell<Vec<Action>>,
 }
@@ -176,6 +180,7 @@ impl ConnPage {
     pub(crate) fn leave(&mut self) {
         self.edit = None;
         self.remove_armed = None;
+        self.focus.set(0);
     }
 
     /// Remove pressed: `true` on the second press within `REMOVE_CONFIRM` (remove now); the
@@ -208,14 +213,20 @@ impl ConnPage {
         }
         match key {
             "up" => {
-                self.focus = self.focus.saturating_sub(1);
+                self.focus
+                    .set(self.focus.get().min(n - 1).saturating_sub(1));
                 Some(None)
             }
             "down" => {
-                self.focus = (self.focus + 1).min(n - 1);
+                self.focus.set((self.focus.get() + 1).min(n - 1));
                 Some(None)
             }
-            "enter" | "space" => Some(self.controls.borrow().get(self.focus.min(n - 1)).cloned()),
+            "enter" | "space" => Some(
+                self.controls
+                    .borrow()
+                    .get(self.focus.get().min(n - 1))
+                    .cloned(),
+            ),
             _ => None,
         }
     }
@@ -374,7 +385,7 @@ struct Ctl<'a> {
 impl Ctl<'_> {
     fn take(&mut self, a: &Action) -> bool {
         self.page.controls.borrow_mut().push(a.clone());
-        let focused = self.next == self.page.focus;
+        let focused = self.next == self.page.focus.get();
         self.next += 1;
         focused
     }
@@ -535,9 +546,23 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                 registry
                     .stores_of(&lines_feed::registry::source_key(&e.base.source))
                     .iter()
-                    // A store's lock is held only briefly (a batch): wait for it rather than
-                    // drop the feed from this frame's state.
-                    .map(|s| s.read().status.clone())
+                    // Never wait on a feed while drawing: a store busy with a batch keeps the
+                    // status last seen (none yet: connecting).
+                    .map(|s| {
+                        let id = std::sync::Arc::as_ptr(s) as usize;
+                        match s.try_read() {
+                            Some(d) => {
+                                page.statuses.borrow_mut().insert(id, d.status.clone());
+                                d.status.clone()
+                            }
+                            None => page
+                                .statuses
+                                .borrow()
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or(FeedStatus::Connecting),
+                        }
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -789,6 +814,11 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
         }
         card = card.child(line("", test_row.into_any_element(), t));
         out = out.child(card);
+    }
+    // Controls come and go (a Remove drops two): keep the keyboard on one that exists.
+    let n = page.controls.borrow().len();
+    if n > 0 && page.focus.get() >= n {
+        page.focus.set(n - 1);
     }
     out.into_any_element()
 }
