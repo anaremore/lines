@@ -660,6 +660,16 @@ pub fn chart_fit_with_tag(
     (fit_in(room), false)
 }
 
+/// A pane whose own login was refused says so in its header at every width: its tag
+/// ("(Rithmic: login refused)") joins the contract text, in the main color, and is never
+/// dropped.
+pub fn keep_refused(contract: &mut String, tag: &mut Option<String>, refused: bool) {
+    if refused && let Some(t) = tag.take() {
+        contract.push(' ');
+        contract.push_str(&t);
+    }
+}
+
 /// The source tag as a header shows it: in parentheses, in the secondary text color.
 pub fn source_tag(tag: &str) -> String {
     format!("({tag})")
@@ -748,6 +758,20 @@ mod tests {
             rest > tw7("ESZ26"),
             "the contract is in the rest, never dropped"
         );
+    }
+
+    /// A refused login's tag joins the contract (never dropped); any other stays a tag.
+    #[test]
+    fn a_refused_login_is_never_dropped() {
+        let mut c = "ESZ26".to_owned();
+        let mut tag = Some(source_tag("Rithmic: login refused"));
+        keep_refused(&mut c, &mut tag, true);
+        assert_eq!(c, "ESZ26 (Rithmic: login refused)");
+        assert_eq!(tag, None);
+        let mut c = "ESZ26".to_owned();
+        let mut tag = Some(source_tag("Databento"));
+        keep_refused(&mut c, &mut tag, false);
+        assert_eq!((c.as_str(), tag.as_deref()), ("ESZ26", Some("(Databento)")));
     }
 
     /// A chart drops its source tag before anything else gives way, and never keeps it on

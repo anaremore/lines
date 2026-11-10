@@ -491,8 +491,9 @@ impl TapeView {
         } else if let Some(d) = self.store.try_read() {
             word = pane::status_word(&d.status);
             contract = pane::contract_text(&d);
-            left.push_str(&contract);
             tag = crate::sources::header_tag(&self.feed, cx).map(|s| pane::source_tag(&s));
+            pane::keep_refused(&mut contract, &mut tag, self.feed.store().logon_refused());
+            left.push_str(&contract);
         }
         let mut right = String::with_capacity(32);
         let mut q = FixedStr::<32>::new();

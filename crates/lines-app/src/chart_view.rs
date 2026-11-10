@@ -6601,7 +6601,8 @@ impl ChartView {
         };
         // In a run with several sources, the one serving this pane (decision 0030): after the
         // contract, in the secondary color; the first thing a narrow header drops.
-        let tag = crate::sources::header_tag(&self.feed, cx).map(|s| pane::source_tag(&s));
+        let mut tag = crate::sources::header_tag(&self.feed, cx).map(|s| pane::source_tag(&s));
+        pane::keep_refused(&mut left, &mut tag, self.feed.store().logon_refused());
         // Last, bid, ask: a missing value shows as a dimmed dash (docs/design.md §7), never as
         // a bare label that reads like a layout bug.
         let quote = |label: &str, p: Option<Price>| {

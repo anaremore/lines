@@ -1287,8 +1287,9 @@ impl DomView {
         } else if let Some(d) = self.store.try_read() {
             word = pane::status_word(&d.status);
             contract = pane::contract_text(&d);
-            left.push_str(&contract);
             tag = crate::sources::header_tag(&self.feed, cx).map(|s| pane::source_tag(&s));
+            pane::keep_refused(&mut contract, &mut tag, self.feed.store().logon_refused());
+            left.push_str(&contract);
         }
         let ticks = if self.grouping == 1 { "tick" } else { "ticks" };
         if let Some(n) = pane::adopted_note(&self.feed) {
