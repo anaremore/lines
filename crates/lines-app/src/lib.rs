@@ -61,6 +61,7 @@ mod redact;
 mod screenshot;
 mod settings_schema;
 mod settings_view;
+mod sources;
 mod strategy_host;
 mod strategy_marks;
 mod strategy_panel;
@@ -195,6 +196,27 @@ impl Extensions {
     }
 }
 
+impl Cli {
+    /// `--source`, or the mock for the runs that take one source (headless, backtests,
+    /// strategies, screenshots, the benchmark).
+    fn source_name(&self) -> &str {
+        self.source.as_deref().unwrap_or("mock")
+    }
+
+    /// No `--source`, and a run with windows that isn't a screenshot or the benchmark: every
+    /// enabled source at once (decision 0030).
+    fn several_sources(&self) -> bool {
+        self.source.is_none()
+            && self.screenshot.is_none()
+            && self.bench.is_none()
+            && self.headless.is_none()
+            && self.backtest.is_none()
+            && self.run_strategy.is_none()
+            && self.strategy.is_none()
+            && self.replay.is_none()
+    }
+}
+
 /// The `--source` value, resolved.
 #[derive(Clone)]
 enum SourceChoice {
@@ -203,6 +225,17 @@ enum SourceChoice {
 }
 
 impl SourceChoice {
+    /// The source's name as a pane saves it (`coinbase`, an extension's name).
+    fn name(&self) -> String {
+        match self {
+            SourceChoice::Extension(e) => e.name().to_owned(),
+            // Its command-line name (stable: saved workspaces and settings hold it).
+            SourceChoice::Builtin(k) => k
+                .to_possible_value()
+                .map_or_else(String::new, |v| v.get_name().to_owned()),
+        }
+    }
+
     fn parse(name: &str, ext: &Extensions) -> Option<Self> {
         if let Some(e) = ext.sources.iter().find(|e| e.name() == name) {
             return Some(SourceChoice::Extension(ExtensionSource(e.clone())));
@@ -293,9 +326,17 @@ pub enum ThemeKind {
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Cli {
-    /// Where market data comes from.
-    #[arg(long, default_value = "mock")]
-    source: String,
+    /// Where market data comes from, this run only. Without it the run has every enabled
+    /// source at once (Coinbase and Kraken unless turned off in Settings, plus any extension):
+    /// each pane shows the one serving its symbol. Headless, backtest and strategy runs, and
+    /// screenshots, default to the mock.
+    #[arg(long)]
+    source: Option<String>,
+    /// Another recording as its own source beside `--replay` (repeatable; screenshots and
+    /// checks of several sources at once, decision 0030): each pane shows the recording that
+    /// serves its symbol.
+    #[arg(long, value_name = "FILE", requires = "screenshot")]
+    also_replay: Vec<PathBuf>,
     /// Show this product (followed to its front month: ES, NQ, MES, MNQ, ZN, BTC/USD,
     /// ETH/USD, BTC/USD.KR, ETH/USD.KR, BTC-PERP.KR, ETH-PERP.KR) or contract (ESZ26, MNQH2027) in every pane, for this run only (the saved
     /// workspace is left alone).
@@ -981,6 +1022,97 @@ fn feed_config(cli: &Cli, choice: &SourceChoice) -> Result<FeedConfig> {
     Ok(cfg)
 }
 
+/// The run's sources and their feed configs (decision 0030), first preferred. With
+/// `--source` (or a run that takes one source): that one. Without: each registered extension,
+/// then Coinbase, then Kraken, less those turned off in Settings (`settings.json`'s
+/// `sources`, read here before anything else uses it).
+/// `bool`: the run is limited to its first source (every pane on it, no source saved).
+fn run_sources(
+    cli: &Cli,
+    ext: &Extensions,
+    choice: &SourceChoice,
+) -> Result<(Vec<(String, FeedConfig)>, bool)> {
+    if !cli.several_sources() {
+        let first = feed_config(cli, choice)?;
+        // `--also-replay` (screenshots): more recordings, each its own source, beside the
+        // first. A replay (a screenshot's `--replay` without `--source`, too) is named so.
+        let name = match first.source {
+            Source::Replay { .. } => "replay".to_owned(),
+            _ => choice.name(),
+        };
+        let mut out = vec![(name, first.clone())];
+        for (i, path) in cli.also_replay.iter().enumerate() {
+            let mut cfg = first.clone();
+            cfg.target = None;
+            cfg.record = None;
+            cfg.store = None;
+            cfg.source = Source::Replay {
+                path: path.clone(),
+                speed: match &first.source {
+                    Source::Replay { speed, .. } => *speed,
+                    _ => cli.speed,
+                },
+                // To its end: its own day may lie after `--at` (which cuts the first).
+                stop_at: None,
+            };
+            out.push((format!("replay-{}", i + 2), cfg));
+        }
+        let limited = out.len() == 1;
+        return Ok((out, limited));
+    }
+    let prefs = persist::config_dir()
+        .map(|d| source_prefs(&d.join("settings.json")))
+        .unwrap_or_default();
+    let choices = enabled_sources(ext, &prefs);
+    if choices.is_empty() {
+        // Every source off: the app still opens (on the mock, offline, as `--source mock`
+        // would), so Settings › Data can turn one back on.
+        tracing::warn!("every data source is off in Settings › Data: starting on the mock");
+        let mock = SourceChoice::Builtin(SourceKind::Mock);
+        return Ok((vec![(mock.name(), feed_config(cli, &mock)?)], true));
+    }
+    let out = choices
+        .iter()
+        .map(|c| Ok((c.name(), feed_config(cli, c)?)))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((out, false))
+}
+
+/// The sources a run without `--source` has, in preference order (decision 0030): each
+/// registered extension, then Coinbase, then Kraken, less those switched off.
+fn enabled_sources(
+    ext: &Extensions,
+    prefs: &std::collections::BTreeMap<String, sources::SourcePrefs>,
+) -> Vec<SourceChoice> {
+    let on = |name: &str| prefs.get(name).is_none_or(sources::SourcePrefs::on);
+    let mut choices: Vec<SourceChoice> = ext
+        .sources
+        .iter()
+        .filter(|e| on(e.name()))
+        .map(|e| SourceChoice::Extension(ExtensionSource(e.clone())))
+        .collect();
+    choices.extend(
+        [SourceKind::Coinbase, SourceKind::Kraken]
+            .into_iter()
+            .map(SourceChoice::Builtin)
+            .filter(|c| on(&c.name())),
+    );
+    choices
+}
+
+/// `settings.json`'s `sources` switches, read on their own before the settings load (which
+/// sets an unreadable file aside, once): anything unreadable reads as every source on.
+fn source_prefs(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<String, sources::SourcePrefs> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|mut v| v.get_mut("sources").map(serde_json::Value::take))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
 /// The local store (decision 0019) for live sources: the mock invents a new market every
 /// run and replays and screenshots must not write, so those never store, unless `--store-dir`
 /// names a store for this run.
@@ -1378,9 +1510,12 @@ where
         );
     }
 
-    let choice = SourceChoice::parse(&cli.source, &ext)
-        .ok_or_else(|| anyhow!("unknown source {:?}", cli.source))?;
-    let config = feed_config(&cli, &choice)?;
+    let choice = SourceChoice::parse(cli.source_name(), &ext)
+        .ok_or_else(|| anyhow!("unknown source {:?}", cli.source_name()))?;
+    // The run's sources (decision 0030): every enabled one without `--source`, else that one.
+    // `config` is the first (the run's when limited): what takes one source uses it.
+    let (run_sources, limited) = run_sources(&cli, &ext, &choice)?;
+    let config = run_sources[0].1.clone();
     // A market replay never runs a level source live (only its recorded batches, if any).
     let market_replay = matches!(config.source, lines_feed::Source::Replay { .. });
     lines_feed::levels::runtime::set_mode(lines_feed::levels::runtime::mode_for(
@@ -1459,13 +1594,25 @@ where
     let mut base = config.clone();
     let instrument = base.target.take().map(|t| TargetDoc::from_target(&t));
     let record = base.record.take();
-    // A replay shows its one contract in panes it can't otherwise serve, for this run only;
-    // not when --instrument says what every pane shows.
-    let fallback = feeds::Fallback::for_source(&base, instrument.is_none());
+    let _ = base;
+    // Each source's table entry. A replay shows its one contract in panes it can't otherwise
+    // serve, for this run only; not when --instrument says what every pane shows.
+    let entries = run_sources
+        .iter()
+        .map(|(name, cfg)| {
+            let mut base = cfg.clone();
+            base.target = None;
+            base.record = None;
+            Ok(sources::SourceEntry {
+                name: name.clone(),
+                fallback: feeds::Fallback::for_source(&base, instrument.is_none()),
+                availability: lines_feed::availability::availability(&base.source)?,
+                base,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let env = PaneEnv {
-        fallback,
-        availability: lines_feed::availability::availability(&base.source)?,
-        base,
+        sources: sources::Sources::new(entries, limited),
         theme: std::cell::Cell::new(theme),
         look_flags: std::cell::Cell::new(look_flags),
         frozen,
@@ -2013,7 +2160,7 @@ mod tests {
         let ext = Extensions::new().with_source(Arc::new(Ext));
         let cli = parse_cli(["lines", "--source", "example-feed"], &ext).unwrap();
         assert!(matches!(
-            SourceChoice::parse(&cli.source, &ext),
+            SourceChoice::parse(cli.source_name(), &ext),
             Some(SourceChoice::Extension(_))
         ));
         let h = command(&ext).render_long_help().to_string();
@@ -2031,10 +2178,57 @@ mod tests {
         let err = parse(&["lines", "--source", "example-feed"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
         assert!(!help().contains("example-feed"));
-        // The default is still the mock.
+        // Runs that take one source (screenshots, headless, strategies) default to the mock;
+        // a plain run has several (decision 0030).
+        let cli = parse(&["lines"]).unwrap();
+        assert!(cli.several_sources());
+        let cli = parse(&[
+            "lines",
+            "--strategy",
+            "level-touch",
+            "--backtest-config",
+            "x.json",
+        ])
+        .unwrap();
+        assert!(!cli.several_sources(), "a strategy run keeps the mock");
+        // `--also-replay` is for screenshots only (a run that autosaves mustn't save its
+        // run-only source names).
+        assert!(parse(&["lines", "--also-replay", "x.lfr"]).is_err());
+        // A plain run's sources: extensions, Coinbase, Kraken, less those switched off;
+        // every one off leaves none (the run then opens on the mock, limited).
+        let names = |prefs: &[(&str, bool)]| -> Vec<String> {
+            let prefs = prefs
+                .iter()
+                .map(|(n, on)| ((*n).to_owned(), sources::SourcePrefs { enabled: Some(*on) }))
+                .collect();
+            enabled_sources(&Extensions::new(), &prefs)
+                .iter()
+                .map(SourceChoice::name)
+                .collect()
+        };
+        assert_eq!(names(&[]), ["coinbase", "kraken"]);
+        assert_eq!(names(&[("kraken", false)]), ["coinbase"]);
+        assert_eq!(
+            names(&[("coinbase", true), ("kraken", true)]),
+            ["coinbase", "kraken"]
+        );
+        assert!(names(&[("coinbase", false), ("kraken", false)]).is_empty());
+        // The switches are read without the settings load; unreadable reads as all on.
+        let dir = std::env::temp_dir().join(format!("lines-src-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        std::fs::write(
+            &p,
+            r#"{"version":1,"sources":{"kraken":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(source_prefs(&p).get("kraken").map(|s| s.on()), Some(false));
+        std::fs::write(&p, "not json").unwrap();
+        assert!(source_prefs(&p).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
         let cli = parse(&["lines"]).unwrap();
         assert!(matches!(
-            SourceChoice::parse(&cli.source, &Extensions::new()),
+            SourceChoice::parse(cli.source_name(), &Extensions::new()),
             Some(SourceChoice::Builtin(SourceKind::Mock))
         ));
     }
@@ -2070,7 +2264,7 @@ mod tests {
     fn real_cqg_is_available_with_the_feature() {
         let cli = parse(&["lines", "--source", "cqg"]).unwrap();
         assert!(matches!(
-            SourceChoice::parse(&cli.source, &Extensions::new()),
+            SourceChoice::parse(cli.source_name(), &Extensions::new()),
             Some(SourceChoice::Builtin(SourceKind::Cqg))
         ));
         assert_eq!(cli.cqg_url, lines_feed::cqg::DEMO_URL);

@@ -87,7 +87,7 @@ pub trait Pane: EventEmitter<FeedChanged> + Sized + 'static {
     /// The one-click action on an unavailable pane: show the source's own symbol here (a
     /// deliberate switch, saved and followed by the link group like the picker's).
     fn show_suggested(&mut self, cx: &mut Context<Self>) {
-        match self.feed().to_suggested(&crate::feeds::Feeds::registry(cx)) {
+        match crate::sources::to_suggested(self.feed(), cx) {
             Ok(feed) => {
                 self.set_feed(feed.clone(), cx);
                 cx.emit(FeedChanged(feed));

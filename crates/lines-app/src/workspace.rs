@@ -34,8 +34,6 @@ use gpui::{
     WindowOptions, div, point, prelude::*, px, relative, size,
 };
 use lines_core::{Price, UtcMillis};
-use lines_feed::FeedConfig;
-use lines_feed::availability::Availability;
 
 use crate::chain_view::ChainView;
 use crate::chart_view::{self, ChartView, CrosshairTime, Fixture};
@@ -107,9 +105,8 @@ const DOCK_SHARE: f32 = 0.72;
 
 /// What every pane is created from: the run's source and look.
 pub struct PaneEnv {
-    /// The run's source; panes set the target.
-    pub base: FeedConfig,
-    pub availability: Availability,
+    /// The run's data sources (decision 0030): each pane opens on one of them.
+    pub sources: crate::sources::Sources,
     /// The look every pane is created with; the Settings window changes it live
     /// ([`set_theme`]).
     pub theme: std::cell::Cell<Theme>,
@@ -131,8 +128,6 @@ pub struct PaneEnv {
     /// Window size for windows without a saved placement (`--size`), else a share of the
     /// primary display.
     pub default_size: Option<(f32, f32)>,
-    /// What the source shows when a pane's own symbol can't be served (adopt / suggest).
-    pub fallback: crate::feeds::Fallback,
 }
 
 struct Autosave {
@@ -231,6 +226,11 @@ impl Workspace {
         tracing::warn!("{r}");
         self.notices.push(r, true, Instant::now());
     }
+}
+
+/// The pane environment, if the workspace exists (the picker's sources, decision 0030).
+pub(crate) fn try_env(cx: &App) -> Option<Rc<PaneEnv>> {
+    cx.try_global::<Workspace>().map(|w| w.env.clone())
 }
 
 fn env(cx: &App) -> Rc<PaneEnv> {
@@ -430,6 +430,7 @@ impl PaneHandle {
     fn doc(&self, cx: &mut App) -> PaneDoc {
         each!(self, e => e.update(cx, |p, _| {
             let mut d = PaneDoc::new(self.kind(), p.common().link, p.feed().target_doc.clone());
+            d.source = p.feed().source_doc.clone();
             p.save_state(&mut d);
             d
         }))
@@ -582,15 +583,44 @@ impl Tab {
 fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
     let env = env(cx);
     let registry = Feeds::registry(cx);
-    let mut base = env.base.clone();
-    base.record = env.record.borrow().clone();
-    let feed = PaneFeed::open(
-        &registry,
-        &base,
-        &env.availability,
-        doc.target.as_ref(),
-        &env.fallback,
-    );
+    let feed = match env
+        .sources
+        .for_pane(doc.source.as_deref(), doc.target.as_ref())
+    {
+        Ok(entry) => {
+            let mut base = entry.base.clone();
+            base.record = env.record.borrow().clone();
+            let mut feed = PaneFeed::open(
+                &registry,
+                &base,
+                &entry.availability,
+                doc.target.as_ref(),
+                &entry.fallback,
+            );
+            // A run with several sources saves the one the pane shows; a run `--source` limits
+            // keeps the workspace's (a mock run never rewrites it).
+            feed.source_doc = if env.sources.limited() || doc.target.is_none() {
+                doc.source.clone()
+            } else {
+                Some(entry.name.clone())
+            };
+            feed
+        }
+        // No source for it (a saved source that is off, or none serving its target): this pane
+        // says why; the others load. The saved source stays.
+        Err(crate::sources::NoSource(reason)) => {
+            let entry = env.sources.primary();
+            let mut feed = PaneFeed::unavailable_because(
+                &entry.base,
+                &entry.availability,
+                doc.target.as_ref(),
+                reason,
+            );
+            feed.suggest = entry.fallback.suggest.clone();
+            feed.source_doc = doc.source.clone();
+            feed
+        }
+    };
     if feed.sub.is_some() {
         // The recording belongs to the first pane that started a feed (one contract per file).
         env.record.borrow_mut().take();
@@ -1813,19 +1843,24 @@ impl WindowView {
         }
         // An option chain opens on the focused pane's market, in its link group (the
         // journal and the strategy panel aren't per market).
-        let (target, link) = match (
+        let (target, link, source) = match (
             kind,
             self.tabs.get(self.active).and_then(|t| t.focused_handle()),
         ) {
-            (PaneKind::Chain, Some(h)) => (h.feed(cx).target_doc, h.link(cx)),
+            (PaneKind::Chain, Some(h)) => {
+                let f = h.feed(cx);
+                (f.target_doc, h.link(cx), f.source_doc)
+            }
             // Positions in the focused pane's link group: a row's click shows it there.
-            (PaneKind::Positions, Some(h)) => (None, h.link(cx)),
-            _ => (None, None),
+            (PaneKind::Positions, Some(h)) => (None, h.link(cx), None),
+            _ => (None, None, None),
         };
+        let mut pane = PaneDoc::new(kind, link, target);
+        pane.source = source;
         let tab = Self::build_tab(
             &TabDoc {
                 focused: 0,
-                layout: Layout::Pane(PaneDoc::new(kind, link, target)),
+                layout: Layout::Pane(pane),
             },
             cx,
         );
@@ -1836,11 +1871,19 @@ impl WindowView {
 
     /// A fresh trading tab on the focused pane's market, in its link group.
     fn fresh_tab(&self, cx: &mut App) -> Tab {
-        let (target, link) = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
-            Some(h) => (h.feed(cx).target_doc, h.link(cx)),
-            None => (None, Some(0)),
-        };
-        let layout = trading_group(link, &mut |k, l| PaneDoc::new(k, l, target.clone()));
+        let (target, link, source) =
+            match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
+                Some(h) => {
+                    let f = h.feed(cx);
+                    (f.target_doc, h.link(cx), f.source_doc)
+                }
+                None => (None, Some(0), None),
+            };
+        let layout = trading_group(link, &mut |k, l| {
+            let mut d = PaneDoc::new(k, l, target.clone());
+            d.source = source.clone();
+            d
+        });
         Self::build_tab(&TabDoc { focused: 0, layout }, cx)
     }
 
@@ -2064,7 +2107,8 @@ impl WindowView {
             return;
         }
         let old = h.doc(cx);
-        let doc = PaneDoc::new(kind, old.link, old.target);
+        let mut doc = PaneDoc::new(kind, old.link, old.target);
+        doc.source = old.source;
         let id = self.tab().focused;
         let handle = make_pane(&doc, cx);
         let subs = self.subscribe(id, &handle, cx);

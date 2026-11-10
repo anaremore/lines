@@ -73,7 +73,7 @@ use lines_feed::ticks::{TickKey, TickLease};
 
 use crate::chart_draw::{self, ChartDrawings};
 use crate::commands::{Command, DrawCmd};
-use crate::feeds::{Feeds, PaneFeed};
+use crate::feeds::PaneFeed;
 use crate::levels_layer::{LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
@@ -1572,7 +1572,9 @@ impl ChartView {
         }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            let outcome = self
+                .picker
+                .key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
             cx.stop_propagation();
             cx.notify();
@@ -1728,7 +1730,9 @@ impl ChartView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &self.feed.availability);
+        let outcome = self
+            .picker
+            .click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -1746,7 +1750,7 @@ impl ChartView {
     }
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        let feed = crate::sources::retarget(&self.feed, target, cx)?;
         self.apply_feed(feed.clone());
         cx.emit(FeedChanged(feed));
         Ok(())
@@ -5946,6 +5950,8 @@ impl ChartView {
             Some(c) => write!(left, "{c}"),
             None => write!(left, "{} (contract unknown)", i.symbol),
         };
+        // In a run with several sources, the one serving this pane (decision 0030).
+        crate::sources::write_header_tag(&mut left, &self.feed, cx);
         // Last, bid, ask: a missing value shows as a dimmed dash (docs/design.md §7), never as
         // a bare label that reads like a layout bug.
         let quote = |label: &str, p: Option<Price>| {
@@ -6083,7 +6089,7 @@ impl ChartView {
         let fit = pane::chart_header_fit(
             room,
             self.common.link.is_some(),
-            &pane::contract_text(&d),
+            &left,
             word,
             &pane::chip_text(self.timeframe, self.tick_continuous(), to_go),
             acct.as_ref().map(|(n, p)| (n.as_str(), *p)),
@@ -7203,9 +7209,13 @@ impl Render for ChartView {
         let market_time = self.store.try_read().and_then(|d| d.market_time);
         self.levels.snapshot(market_time);
         let today = pane::today(self.frozen, &self.store);
-        let overlay =
-            self.picker
-                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+        let overlay = self.picker.overlay(
+            &t,
+            &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),
+            today,
+            Self::picker_click,
+            cx,
+        );
         let offer = self.common.offer_switch;
         if let Some(body) = pane::unavailable_body(&self.feed, &t, offer, cx) {
             return div()

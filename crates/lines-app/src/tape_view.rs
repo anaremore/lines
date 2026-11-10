@@ -26,7 +26,7 @@ use lines_core::{Aggressor, FixedStr, Print, Product, Qty};
 use lines_feed::catalog::Target;
 use lines_feed::store::ChartStore;
 
-use crate::feeds::{Feeds, PaneFeed};
+use crate::feeds::PaneFeed;
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
     self, ColumnCmd, ColumnMenu, Columns, HeaderHit, Table, TapeCol, header_row_h,
@@ -265,7 +265,9 @@ impl TapeView {
         let m = k.modifiers;
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            let outcome = self
+                .picker
+                .key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
         } else if m.control && !m.alt && k.key == "k" {
             self.picker.open("", cx);
@@ -286,7 +288,9 @@ impl TapeView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &self.feed.availability);
+        let outcome = self
+            .picker
+            .click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -301,7 +305,7 @@ impl TapeView {
     }
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        let feed = crate::sources::retarget(&self.feed, target, cx)?;
         self.set_feed(feed.clone(), cx);
         cx.emit(FeedChanged(feed));
         Ok(())
@@ -470,13 +474,15 @@ impl TapeView {
         self.cols.paint_rules(&t, body, window);
     }
 
-    fn header(&self) -> impl IntoElement {
+    fn header(&self, cx: &App) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(48);
         if let Some(title) = pane::unavailable_title(&self.feed) {
             let _ = write!(left, "{title}  Time & sales");
         } else if let Some(d) = self.store.try_read() {
-            let _ = write!(left, "{}  Time & sales", pane::contract_text(&d));
+            left.push_str(&pane::contract_text(&d));
+            crate::sources::write_header_tag(&mut left, &self.feed, cx);
+            left.push_str("  Time & sales");
         }
         let mut right = String::with_capacity(32);
         let mut q = FixedStr::<32>::new();
@@ -544,9 +550,13 @@ impl Render for TapeView {
         let entity = cx.entity();
         let t = self.theme;
         let today = pane::today(self.frozen, &self.store);
-        let overlay =
-            self.picker
-                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+        let overlay = self.picker.overlay(
+            &t,
+            &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),
+            today,
+            Self::picker_click,
+            cx,
+        );
         let offer = self.common.offer_switch;
         let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),
@@ -569,7 +579,7 @@ impl Render for TapeView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header())
+            .child(self.header(cx))
             .child(
                 div()
                     .relative()

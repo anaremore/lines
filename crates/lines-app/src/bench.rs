@@ -56,7 +56,7 @@ pub fn run(
     hide_doms: bool,
     expect_idle: bool,
 ) -> Result<i32> {
-    let mock = matches!(ws.env.base.source, Source::CqgMock(_));
+    let mock = matches!(ws.env.sources.primary().base.source, Source::CqgMock(_));
     if mock && doc.name == "6c2d" {
         spread_over_two_contracts(&mut doc);
     }
@@ -96,7 +96,7 @@ pub fn run(
     let trading = crate::trading::Trading::start(
         crate::trading::TradingSetup::manual(),
         registry.clone(),
-        ws.env.base.clone(),
+        ws.env.sources.primary().base.clone(),
     );
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(Feeds(registry));

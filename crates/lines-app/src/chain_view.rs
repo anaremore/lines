@@ -67,7 +67,7 @@ use lines_trading::trigger::{TriggerKind, TriggerView};
 use lines_trading::{AccountId, CommandId, OrderId, Side};
 
 use crate::chain_ticket::{self as ticket, Cell, ShotTicket, Ticket};
-use crate::feeds::{Feeds, PaneFeed};
+use crate::feeds::PaneFeed;
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
@@ -2663,7 +2663,9 @@ impl ChainView {
         }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &self.feed.availability, cx);
+            let outcome = self
+                .picker
+                .key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
             cx.stop_propagation();
             cx.notify();
@@ -2747,7 +2749,9 @@ impl ChainView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &self.feed.availability);
+        let outcome = self
+            .picker
+            .click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -2762,7 +2766,7 @@ impl ChainView {
     }
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let feed = self.feed.retarget(&Feeds::registry(cx), target)?;
+        let feed = crate::sources::retarget(&self.feed, target, cx)?;
         self.set_feed(feed.clone(), cx);
         cx.emit(FeedChanged(feed));
         Ok(())
@@ -4172,6 +4176,9 @@ impl ChainView {
             left.push_str(&title);
         } else if let Some(d) = self.store.try_read() {
             left.push_str(self.product.symbol);
+            if !narrow {
+                crate::sources::write_header_tag(&mut left, &self.feed, cx);
+            }
             if let Some(l) = d.last_trade.filter(|_| !narrow) {
                 left.push(' ');
                 let mut s = FixedStr::<24>::new();
@@ -5526,9 +5533,13 @@ impl Render for ChainView {
             self.exit_buttons(cx)
         };
         let today = pane::today(self.frozen, &self.store);
-        let overlay =
-            self.picker
-                .overlay(&t, &self.feed.availability, today, Self::picker_click, cx);
+        let overlay = self.picker.overlay(
+            &t,
+            &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),
+            today,
+            Self::picker_click,
+            cx,
+        );
         let offer = self.common.offer_switch;
         let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),
