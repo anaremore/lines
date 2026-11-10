@@ -104,13 +104,20 @@ impl Sources {
             .iter()
             .find(|e| e.availability.check(&t).is_ok());
         found.ok_or_else(|| {
+            // Says what's missing and the way out (decision 0030): the source, or the symbol.
             NoSource(format!(
-                "no enabled source serves {}",
+                "No source has {}: pick another symbol",
                 lines_feed::catalog::get(match &t {
                     Target::Product(p) => *p,
                     Target::Contract(k) => k.product,
                 })
-                .map_or("it", |p| p.symbol)
+                .map_or_else(
+                    || "it".to_owned(),
+                    |p| match &t {
+                        Target::Contract(k) => k.label(&p).as_str().to_owned(),
+                        Target::Product(_) => p.symbol.to_owned(),
+                    }
+                )
             ))
         })
     }
@@ -442,11 +449,7 @@ mod tests {
         assert_eq!(s.for_pane(Some("kraken"), None).unwrap().name, "mock");
         // Nothing serves NQ here (the mock is ES only).
         let err = s.for_pane(None, Some(&doc(catalog::NQ))).unwrap_err();
-        assert!(
-            err.0.starts_with("no enabled source serves NQ"),
-            "{}",
-            err.0
-        );
+        assert_eq!(err.0, "No source has NQ: pick another symbol");
     }
 
     #[test]

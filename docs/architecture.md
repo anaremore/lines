@@ -61,7 +61,9 @@ cargo run -p lines-app                                          # every enabled 
 cargo run -p lines-app -- --source mock                          # this source only: CQG-protocol mock (ES only), 5k updates/s
 lines --replay es.lfr --also-replay spy.lfr --at <ISO time> --screenshot out.png  # 2nd recording as its own source
 # The app restores the autosaved workspace (<config dir>/workspace.json); first run: `pair`
-# (NQ | ES, each chart + DOM + T&S; on the mock NQ shows greyed "mock serves ES only").
+# (NQ | ES, each chart + DOM + T&S; on the mock NQ shows greyed "mock serves ES only") when a
+# source in the run serves futures, else BTC/USD (Coinbase) chart + DOM + T&S (a public build).
+# Screenshots: `--workspace first-run` is that choice for the run's sources.
 cargo run -p lines-app -- --workspace 2x2                        # built-ins: pair trading chart 1x2 2x2 1+2 6c2d, or a saved name
 cargo run -p lines-app -- --source mock --disconnect-every 10    # reconnect + back-fill
 cargo run -p lines-app -- --source coinbase --instrument BTC/USD # live; --instrument/--layout: this run only, not autosaved

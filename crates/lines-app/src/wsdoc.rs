@@ -680,6 +680,22 @@ impl WorkspaceDoc {
         w
     }
 
+    /// The workspace a first run opens (and a saved one that can't be read falls back to):
+    /// `pair` when a source in the run serves futures (ES); else BTC/USD (Coinbase) as chart,
+    /// DOM and time & sales in link group A, since a public build has no futures source and
+    /// a first run must never open on panes no source can show (decision 0030).
+    pub fn first_run(futures: bool) -> WorkspaceDoc {
+        if futures {
+            return WorkspaceDoc::pair();
+        }
+        WorkspaceDoc::single(
+            "default",
+            trading_group(Some(0), &mut |k, l| {
+                PaneDoc::new(k, l, Some(TargetDoc::product(catalog::BTC_USD)))
+            }),
+        )
+    }
+
     /// The tracked benchmark (`docs/positioning.md`): 6 charts + 2 DOMs in one tab, on the
     /// source's default product. Two rows of three charts over a strip of two DOMs would be
     /// cramped, so: three columns of two charts, then a column of two DOMs.
@@ -2177,5 +2193,20 @@ mod tests {
                 y: 300.0
             }
         );
+    }
+
+    /// Decision 0030: a first run opens on what the run's sources can show: `pair` with a
+    /// futures source, else BTC/USD (Coinbase) as chart, DOM and time & sales.
+    #[test]
+    fn a_first_run_opens_on_what_its_sources_serve() {
+        assert_eq!(WorkspaceDoc::first_run(true), WorkspaceDoc::pair());
+        let w = WorkspaceDoc::first_run(false);
+        let panes = w.windows[0].tabs[0].layout.leaves();
+        let kinds: Vec<PaneKind> = panes.iter().map(|p| p.kind).collect();
+        assert!(kinds.contains(&PaneKind::Chart) && kinds.contains(&PaneKind::Dom));
+        assert!(kinds.contains(&PaneKind::Tape));
+        assert!(panes.iter().all(|p| {
+            p.target.as_ref().map(|t| t.product) == Some(catalog::BTC_USD.0) && p.link == Some(0)
+        }));
     }
 }

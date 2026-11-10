@@ -1615,6 +1615,17 @@ where
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Whether a source in this run serves futures (ES): the first-run workspace is `pair`
+    // then, else BTC/USD (a public build's plain run, decision 0030).
+    let futures = run_sources
+        .iter()
+        .filter_map(|(_, cfg)| lines_feed::availability::availability(&cfg.source).ok())
+        .any(|a| {
+            a.check(&lines_feed::catalog::Target::Product(
+                lines_feed::catalog::ES,
+            ))
+            .is_ok()
+        });
     let env = PaneEnv {
         sources: sources::Sources::new(entries, limited),
         theme: std::cell::Cell::new(theme),
@@ -1709,7 +1720,7 @@ where
     if frozen || bench {
         // Built-ins or explicit files only: these modes never read user settings.
         let mut doc = match (&cli.workspace, cli.layout) {
-            (Some(w), _) => fixed_workspace(w)?,
+            (Some(w), _) => fixed_workspace(w, futures)?,
             (None, Some(l)) => preset_doc(l),
             (None, None) if bench => WorkspaceDoc::bench(),
             (None, None) => preset_doc(LayoutKind::Trading),
@@ -1849,14 +1860,15 @@ where
                 if !l.writable {
                     autosave = false;
                 }
-                l.value.unwrap_or_else(WorkspaceDoc::pair)
+                l.value
+                    .unwrap_or_else(|| WorkspaceDoc::first_run(futures))
             }
-            None => WorkspaceDoc::pair(),
+            None => WorkspaceDoc::first_run(futures),
         },
     };
     if let Err(e) = doc.normalise() {
         reports.push(format!("saved workspace: {e}; loaded the default"));
-        doc = WorkspaceDoc::pair();
+        doc = WorkspaceDoc::first_run(futures);
     }
     if instrument.is_some() {
         doc.retarget_all(instrument);
@@ -1965,8 +1977,12 @@ fn preset_doc(l: LayoutKind) -> WorkspaceDoc {
     wsdoc::builtin(p.name()).expect("presets are built in")
 }
 
-/// Screenshot/benchmark workspaces: a built-in, or a workspace file given by path.
-fn fixed_workspace(w: &str) -> Result<WorkspaceDoc> {
+/// Screenshot/benchmark workspaces: a built-in, `first-run` (what a first run opens with
+/// this run's sources), or a workspace file given by path.
+fn fixed_workspace(w: &str, futures: bool) -> Result<WorkspaceDoc> {
+    if w.eq_ignore_ascii_case("first-run") {
+        return Ok(WorkspaceDoc::first_run(futures));
+    }
     if let Some(doc) = wsdoc::builtin(w) {
         return Ok(doc);
     }
