@@ -1,0 +1,42 @@
+[package]
+name = "lines-databento"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Databento (GLBX.MDP3) for Lines (decision 0033): historical DBN import into lines-events-1 replays, a cost check, and live market data (feature `live`) with the user's own API key."
+
+[[bin]]
+name = "lines-databento"
+path = "src/main.rs"
+
+[dependencies]
+lines-core.workspace = true
+lines-feed.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+# DBN decoding/encoding (Apache-2.0) with zstd for `.dbn.zst`. Not the `databento` client
+# crate: see README ("Dependencies").
+dbn = { version = "0.73", default-features = false, features = ["zstd"] }
+# Same version and default features as the rest of the workspace: rustls with `ring`
+# (no aws-lc, no OpenSSL).
+ureq.workspace = true
+clap.workspace = true
+tracing-subscriber.workspace = true
+
+# Live market data (feature `live`): TCP to the gateway, SHA-256 for its challenge (`ring`,
+# already in the tree through rustls).
+tokio = { workspace = true, optional = true }
+ring = { version = "0.17", optional = true }
+
+[features]
+# Live market data (`--source databento`; the `lines` binary turns it on).
+live = ["dep:tokio", "dep:ring"]
+
+[dev-dependencies]
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The key from the Windows Credential Manager (`key.rs`; macOS and Linux use their own tools).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }

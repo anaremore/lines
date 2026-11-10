@@ -6,6 +6,10 @@
 # Sierra Chart data is licensed for personal use only (decision 0010).
 *.scid
 *.depth
+# Databento downloads are licensed data (decisions 0010, 0033).
+/data/databento/
+*.dbn
+*.dbn.zst
 # The local market-data store may hold licensed data (decision 0019): never commit it.
 *.lseg
 # Fuzz corpora and crash inputs are generated, never committed.

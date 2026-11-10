@@ -30,6 +30,8 @@ lines-feed.workspace = true
 lines-indicators.workspace = true
 lines-trading.workspace = true
 lines-strategy.workspace = true
+# Databento (decision 0033): a built-in source on the user's own key (`live`: the gateway).
+lines-databento = { workspace = true, features = ["live"] }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

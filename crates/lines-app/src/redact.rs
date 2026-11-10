@@ -109,8 +109,12 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-/// A token-looking word: long, mixing letters and digits (API keys, session ids, JWT parts).
+/// A token-looking word: long, mixing letters and digits (API keys, session ids, JWT parts),
+/// or a Databento key's shape (`db-` and 29 more, which may hold no digit).
 fn looks_like_token(w: &str) -> bool {
+    if w.len() == 32 && w.starts_with("db-") && w[3..].chars().all(|c| c.is_ascii_alphanumeric()) {
+        return true;
+    }
     w.len() >= 24
         && w.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-' | '.'))
@@ -271,6 +275,15 @@ fn home_paths(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Databento key's shape is a token even with no digit; near misses are not.
+    #[test]
+    fn a_databento_key_is_a_token() {
+        assert!(looks_like_token("db-FAKEFAKEFAKEFAKEFAKEFAKEFAKEF"));
+        assert!(!looks_like_token("db-FAKEFAKEFAKEFAKEFAKEFAKEFAKE"), "31");
+        assert!(!looks_like_token("db-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFA"), "33");
+        assert!(!looks_like_token("xx-FAKEFAKEFAKEFAKEFAKEFAKEFAKEF"));
+    }
 
     #[test]
     fn sensitive_keys() {

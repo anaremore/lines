@@ -39,6 +39,12 @@ confidence-threshold = 0.93
 crate = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]
 
+[[licenses.exceptions]]
+# Via `dbn` (lines-databento, decision 0033). The Unlicense is a public-domain dedication with
+# no conditions.
+crate = "json-writer"
+allow = ["Unlicense"]
+
 [licenses.private]
 # Our own crates are `publish = false` and FSL-licensed.
 ignore = true

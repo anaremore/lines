@@ -9,9 +9,9 @@ Lines ships continuous **pre-alpha** builds. Releases are produced by the planni
 
 ## A release requires
 1. `main` builds, `cargo test --workspace` passes, clippy `-D warnings` and `cargo fmt --check` clean (CI once roadmap 1b lands, locally until then).
-2. Release notes: what changed, known gaps, and the published benchmarks once they exist (`docs/positioning.md`).
-3. No vendor connector, proto, kit, credential, account ID, or licensed data in the tree or the artifact (decisions 0010, 0014).
-4. **Live trading cannot be enabled in any public build.** Only mock, replay, Coinbase public data and paper trading ship.
+2. Release notes: what changed, known gaps, and the published benchmarks once they exist (`docs/positioning.md`). They list Databento as a source that needs the user's own Databento account (decision 0033).
+3. No vendor connector, proto, kit, credential, account ID, or licensed data in the tree or the artifact (decisions 0010, 0014), except a data-only connector on the user's own credentials with public protocols and libraries (decision 0033: Databento).
+4. **Live trading cannot be enabled in any public build.** Only mock, replay, Coinbase and Kraken public data, Databento market data (the user's own key), and paper trading ship.
 
 ## Always stops for the owner (never done autonomously)
 - Anything involving money, contracts, vendor agreements, or legal terms (including license changes).
