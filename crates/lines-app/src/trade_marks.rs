@@ -34,9 +34,10 @@ use serde::{Deserialize, Serialize};
 use crate::pnl::PnlDisplay;
 use crate::theme::Theme;
 
-/// Which trades a chart shows, by trade date.
+/// Which trades a chart shows, by trade date. Saved leniently: a value this build doesn't know
+/// (a newer build's, a hand edit) reads as today, never a corrupt workspace.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(from = "serde_json::Value", into = "String")]
 pub enum Period {
     /// The chart's current trade date.
     #[default]
@@ -86,6 +87,27 @@ pub struct TradesConfig {
     pub all_accounts: bool,
     #[serde(default, skip_serializing_if = "Period::is_today")]
     pub period: Period,
+}
+
+impl From<serde_json::Value> for Period {
+    fn from(v: serde_json::Value) -> Period {
+        match v.as_str() {
+            Some("week") => Period::Week,
+            Some("all") => Period::All,
+            _ => Period::Today,
+        }
+    }
+}
+
+impl From<Period> for String {
+    fn from(p: Period) -> String {
+        match p {
+            Period::Today => "today",
+            Period::Week => "week",
+            Period::All => "all",
+        }
+        .to_owned()
+    }
 }
 
 impl Period {
@@ -323,11 +345,16 @@ pub fn build(
             });
         }
         if let (Some(entry), Some(exit)) = (t.avg_entry(), t.avg_exit()) {
-            let net = t.net();
+            // The outcome as the P&L display shows it (the journal row's sign: net money, else
+            // the ticks as rounded; off: flat), so the line never tells what the setting hides.
             out.links.push(Link {
                 from: (t.entry_time, entry),
                 to: (t.exit_time, exit),
-                win: (net.0 != 0).then_some(net.0 > 0),
+                win: match row.sign {
+                    1 => Some(true),
+                    -1 => Some(false),
+                    _ => None,
+                },
             });
         }
     }
@@ -439,11 +466,6 @@ impl TradeMarksLayer {
             self.lines.clear();
             self.hovered = None;
         }
-    }
-
-    /// Build again on the next poll (an option changed).
-    pub fn invalidate(&mut self) {
-        self.key = None;
     }
 
     /// Forget the marks (another market: the next poll builds its own).
@@ -780,6 +802,8 @@ mod tests {
                 .flat_map(|t| &t.lines)
                 .all(|l| !l.contains('$'))
         );
+        // ...and no outcome either: every line is drawn flat.
+        assert!(off.links.iter().all(|l| l.win.is_none()));
         // All accounts, this week.
         let all = build(
             &trades,
@@ -864,8 +888,10 @@ mod tests {
 
     #[test]
     fn hidden_trades_can_not_be_hovered() {
-        let mut layer = TradeMarksLayer::default();
-        layer.shown = vec![(10.0, 10.0, 0)];
+        let mut layer = TradeMarksLayer {
+            shown: vec![(10.0, 10.0, 0)],
+            ..Default::default()
+        };
         layer.built.marks.push(Mark {
             side: Side::Buy,
             at: UtcMillis(0),
@@ -960,5 +986,20 @@ mod tests {
             serde_json::from_str::<TradesConfig>("{}").unwrap(),
             TradesConfig::default()
         );
+        // Every period round-trips; a value from a newer build or a hand edit reads as today.
+        for p in Period::ALL {
+            let c = TradesConfig {
+                period: p,
+                ..Default::default()
+            };
+            let text = serde_json::to_string(&c).unwrap();
+            assert_eq!(serde_json::from_str::<TradesConfig>(&text).unwrap(), c);
+        }
+        for odd in [r#""month""#, "null", "7", "{}"] {
+            let c: TradesConfig =
+                serde_json::from_str(&format!(r#"{{"period": {odd}, "no_lines": true}}"#)).unwrap();
+            assert_eq!(c.period, Period::Today, "{odd}");
+            assert!(c.no_lines);
+        }
     }
 }
