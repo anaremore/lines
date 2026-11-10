@@ -37,3 +37,4 @@ Format: Status · Context · Decision · Consequences.
 | 0029 | Trading options from the underlying's chart, with triggers on the underlying's price (Accepted) |
 | 0030 | Several data sources at once, set up in Settings › Connections (Accepted) |
 | 0031 | In-app updates, signed, never during a trade (Accepted) |
+| 0033 | Databento is a public data source (Proposed) |
