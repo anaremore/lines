@@ -45,6 +45,23 @@ pub struct ChartMenu {
     pub drawing_selected: bool,
     pub symbol: String,
     pub chart_only: bool,
+    /// The order section a right click on the plot opens with (`None`: no section: not on
+    /// the plot, or an option chart, which keeps its trigger flow).
+    pub orders: Option<ChartOrders>,
+}
+
+/// The chart menu's order section (owner-approved mock, 2026-11-09).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChartOrders {
+    /// The header ("At 6012.25 · 2 contracts · bracket 8/16") and the two orders.
+    Rows {
+        header: String,
+        rows: Vec<(String, crate::chart_trade::MenuOrder)>,
+        /// The contract and size they are offered with (checked again when one is chosen).
+        offer: crate::chart_trade::Offer,
+    },
+    /// One dim row saying why there are none (trading off, no live price).
+    Note(String),
 }
 
 #[derive(Clone, Debug)]
@@ -220,10 +237,41 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
     }
 }
 
+/// The chart menu's order section, its separator below (main and popped-out windows).
+pub fn order_items(o: &ChartOrders) -> Vec<MenuItem> {
+    let mut v = Vec::with_capacity(4);
+    match o {
+        ChartOrders::Rows {
+            header,
+            rows,
+            offer,
+        } => {
+            v.push(MenuItem::title(header));
+            for (label, o) in rows {
+                v.push(row(label, Command::Order(OrderCmd::Place(*o, *offer))));
+            }
+        }
+        ChartOrders::Note(n) => v.push(MenuItem::title(n)),
+    }
+    v.push(MenuItem::sep());
+    v
+}
+
+/// Whether a menu has a row that places an order: it opens with nothing highlighted, so a
+/// stray Enter never sends one (design.md §6 rule 5).
+pub fn places_orders(items: &[MenuItem]) -> bool {
+    items
+        .iter()
+        .any(|i| matches!(i.cmd, Some(Command::Order(OrderCmd::Place(..)))))
+}
+
 /// A pane's menu.
 pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
     let mut v = Vec::new();
     if let Some(c) = &m.chart {
+        if let Some(o) = &c.orders {
+            v.extend(order_items(o));
+        }
         v.push(row("Studies…", Command::Studies));
         v.push(timeframe(c));
         v.push(chart_show(c));
@@ -535,6 +583,7 @@ mod tests {
             drawings_shown: true,
             drawing_selected: true,
             symbol: "ES".into(),
+            orders: None,
             chart_only: false,
         }
     }
@@ -596,6 +645,64 @@ mod tests {
             .iter()
             .map(|i| if i.is_sep() { "---" } else { i.label.as_str() })
             .collect()
+    }
+
+    /// The order section comes first, above a separator, then the approved chart menu as it
+    /// was; a dim note stands alone (no order rows when trading is off or there's no price).
+    #[test]
+    fn the_order_section_tops_the_chart_menu() {
+        use crate::chart_trade::{MenuOrder, NO_PRICE_ROW, TRADING_OFF_ROW};
+        use lines_core::Price;
+        use lines_trading::Side;
+        let buy = MenuOrder {
+            side: Side::Buy,
+            stop: false,
+            price: Price(601_000),
+        };
+        let sell = MenuOrder {
+            side: Side::Sell,
+            stop: true,
+            price: Price(601_000),
+        };
+        let k = crate::chart_trade::Offer {
+            contract: lines_core::ContractKey::monthly(
+                lines_feed::catalog::ES,
+                2026,
+                lines_core::Month::new(12).unwrap(),
+            ),
+            qty: lines_core::Qty(2),
+            bracket: None,
+        };
+        let mut m = pane_of(PaneKind::Chart);
+        let base = items(&m);
+        let plain = labels(&base);
+        m.chart.as_mut().unwrap().orders = Some(ChartOrders::Rows {
+            header: "At 6010.00 · 2 contracts".into(),
+            rows: vec![
+                ("▲ Buy limit 2 @ 6010.00".into(), buy),
+                ("▼ Sell stop 2 @ 6010.00".into(), sell),
+            ],
+            offer: k,
+        });
+        let v = items(&m);
+        assert!(places_orders(&v), "it opens with nothing highlighted");
+        assert!(!places_orders(&items(&pane_of(PaneKind::Chart))));
+        assert!(v[0].title && v[0].cmd.is_none());
+        assert_eq!(v[1].cmd, Some(Command::Order(OrderCmd::Place(buy, k))));
+        assert_eq!(v[2].cmd, Some(Command::Order(OrderCmd::Place(sell, k))));
+        assert!(v[3].is_sep());
+        assert_eq!(labels(&v[4..]), plain, "the rest unchanged");
+        for note in [TRADING_OFF_ROW, NO_PRICE_ROW] {
+            m.chart.as_mut().unwrap().orders = Some(ChartOrders::Note(note.into()));
+            let v = items(&m);
+            assert!(v[0].title && !v[0].selectable(), "{note}: a state label");
+            assert!(v[1].is_sep());
+            assert!(
+                v.iter()
+                    .all(|i| !matches!(i.cmd, Some(Command::Order(OrderCmd::Place(..))))),
+                "{note}: no order rows"
+            );
+        }
     }
 
     #[test]

@@ -170,6 +170,9 @@ pub enum OrderCmd {
     Resize(u64),
     /// Cancel this order (the tag's ×).
     Cancel(u64),
+    /// Place a limit or stop at the price right-clicked (the chart menu's order section).
+    /// The contract is the one the row was offered on: a chart that switched since refuses it.
+    Place(crate::chart_trade::MenuOrder, crate::chart_trade::Offer),
 }
 
 /// Strategy controls. Stop all acts on every instance from anywhere and is never gated;
@@ -818,6 +821,7 @@ pub fn label(c: Command) -> String {
             OrderCmd::Breakeven => "Move to breakeven",
             OrderCmd::Resize(_) => "Change size…",
             OrderCmd::Cancel(_) => "Cancel order",
+            OrderCmd::Place(..) => "Place order",
         }
         .into(),
         Command::Trade(t) => match t {

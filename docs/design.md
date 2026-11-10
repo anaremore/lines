@@ -48,7 +48,7 @@ Context menus follow these rules (`crates/lines-app/src/menu.rs`, `pane_menu.rs`
 4. Show/hide pairs are switches (under Show ›), drawn as a box that is checked when on, never "Hide X / Show X" labels that flip. One of a set (a timeframe, a link group) has a plain check on the one in force. Section names inside a menu are small capitals.
 5. Right-clicking an object (an order's tag, a drawing) gives that object's menu, its name and value as a non-clickable header above a divider: "Stop 2 @ 7562.00", then what can be done to it. It opens with nothing highlighted, so a stray Enter never acts on an order.
 6. Delete, cancel and close go last, in `Theme::destructive`, and say what they do. Bulk deletes confirm first.
-7. Shortcuts show right-aligned, from `commands::BINDINGS`. "All commands…" is the last row of a pane menu, and every row's action is also in the palette (tested), except an object's own rows, which act on the thing under the pointer and have direct controls too.
+7. Shortcuts show right-aligned, from `commands::BINDINGS`. "All commands…" is the last row of a pane menu, and every row's action is also in the palette (tested), except an object's own rows, which act on the thing under the pointer and have direct controls too, and a chart's order rows, which place an order at the price right-clicked (no price without the pointer). A menu that can place an order opens with nothing highlighted, like an object's.
 
 ### Controls
 - A **field** names what it holds and shows its value ("Qty 10 ▾", "Bracket 8/16 t ▾"): a quiet box on `panel` with an `axis_line` edge (the accent while its list is open). Its list opens under it in the menus' look: a check on the one in force, a box for a mode, shortcuts on the right, an editor ("Edit presets…") last.

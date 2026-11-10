@@ -293,6 +293,11 @@ impl Pane for DomView {
 }
 
 impl DomView {
+    /// This DOM's link group (read-only: `PaneHandle::link` needs `&mut App`).
+    pub fn link_group(&self) -> crate::layout::LinkGroup {
+        self.common.link
+    }
+
     /// A new look (the Settings window's appearance).
     pub(crate) fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;

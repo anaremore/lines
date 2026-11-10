@@ -920,50 +920,7 @@ impl WindowView {
         ev: &crate::chart_view::ChartOrder,
         cx: &mut Context<Self>,
     ) {
-        use crate::trade_bar::TradePane;
-        // Link groups span every window (decision 0016): look at the DOMs in all of them.
-        let windows = cx.global::<Workspace>().windows.clone();
-        let mut doms: Vec<gpui::Entity<crate::dom_view::DomView>> = Vec::new();
-        for w in &windows {
-            // This view is being updated: reading its window through the handle would panic
-            // (GPUI), so its own DOMs come from `self.tabs` below.
-            if w.window_id() == self.window_id {
-                continue;
-            }
-            if let Ok(wv) = w.read(cx) {
-                doms.extend(
-                    wv.tabs
-                        .iter()
-                        .flat_map(|t| t.handles())
-                        .filter_map(|h| match h {
-                            PaneHandle::Dom(d) => Some(d.clone()),
-                            _ => None,
-                        }),
-                );
-            }
-        }
-        // This window is being updated (it is not readable through its handle): its own DOMs.
-        doms.extend(
-            self.tabs
-                .iter()
-                .flat_map(|t| t.handles())
-                .filter_map(|h| match h {
-                    PaneHandle::Dom(d) => Some(d.clone()),
-                    _ => None,
-                }),
-        );
-        let mut seen = Vec::with_capacity(doms.len());
-        for d in doms {
-            let l = PaneHandle::Dom(d.clone()).link(cx);
-            let v = d.read(cx);
-            let p = v.trade_ref();
-            seen.push((
-                l,
-                p.account.clone(),
-                crate::trade_bar::contract_of(v.trade_store()),
-                p.arming.is_armed(),
-            ));
-        }
+        let seen = dom_switches(cx, Some((self.window_id, &self.tabs)));
         let ok = crate::chart_trade::linked_dom_enabled(
             ev.link,
             &ev.account,
@@ -2375,12 +2332,31 @@ impl WindowView {
             );
             return;
         }
-        let m = self.pane_menu(&h, cx);
-        self.show_menu(Menu::new(at, crate::pane_menu::items(&m)), cx);
+        // The right click's price is taken by this menu: no later one offers orders at it.
+        let price = match &h {
+            PaneHandle::Chart(chart) => chart.update(cx, |c, _| c.take_menu_price()),
+            _ => None,
+        };
+        let m = self.pane_menu(&h, price, cx);
+        let items = crate::pane_menu::items(&m);
+        // A menu that can place an order opens with nothing highlighted (design.md §6 rule 5):
+        // a stray Enter never sends one.
+        let menu = Menu::new(at, items);
+        let menu = if crate::pane_menu::places_orders(&menu.items) {
+            menu.unselected()
+        } else {
+            menu
+        };
+        self.show_menu(menu, cx);
     }
 
     /// The focused pane's state, as its menu shows it.
-    fn pane_menu(&self, h: &PaneHandle, cx: &mut Context<Self>) -> crate::pane_menu::PaneMenu {
+    fn pane_menu(
+        &self,
+        h: &PaneHandle,
+        price: Option<lines_core::Price>,
+        cx: &mut Context<Self>,
+    ) -> crate::pane_menu::PaneMenu {
         use crate::pane_menu::{ChartMenu, DomMenu, JournalMenu, PaneMenu};
         let kind = h.kind();
         let tab = self.tab();
@@ -2390,9 +2366,11 @@ impl WindowView {
             let ws = cx.global::<Workspace>();
             (ws.hide_hints, !ws.closed_tabs.is_empty())
         };
+        let switches = dom_switches(cx, Some((self.window_id, &self.tabs)));
         let chart = match h {
             PaneHandle::Chart(chart) => {
                 let c = chart.read(cx);
+                let orders = c.order_menu(price, chart_trades(c, &switches), cx);
                 let v = c.visibility();
                 let lc = c.levels_config();
                 Some(ChartMenu {
@@ -2411,6 +2389,7 @@ impl WindowView {
                     drawing_selected: c.drawing_selected(),
                     symbol: c.product_symbol().to_string(),
                     chart_only: tabstate::is_chart_only(&leaves, tab.focused),
+                    orders,
                 })
             }
             _ => None,
@@ -3157,7 +3136,12 @@ impl WindowView {
     }
 
     /// The screenshot's menu, if its pane can show it now: whether it's done.
-    fn open_shot_menu(&mut self, m: &crate::pane_menu::ShotMenu, cx: &mut Context<Self>) -> bool {
+    fn open_shot_menu(
+        &mut self,
+        m: &crate::pane_menu::ShotMenu,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let at = point(px(m.at.0), px(m.at.1));
         if m.order {
             let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
@@ -3190,6 +3174,12 @@ impl WindowView {
         } else if m.tab {
             self.open_tab_menu(at, cx);
         } else {
+            // A chart's order section, as a right click there gives it.
+            if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned()
+                && !chart.update(cx, |c, _| c.set_menu_point(at, window))
+            {
+                return false;
+            }
             self.open_menu(at, cx);
         }
         if let (Some(sub), Some(menu)) = (&m.sub, self.menu.as_mut()) {
@@ -3658,7 +3648,7 @@ impl Render for WindowView {
             notice(format!("Recording didn't start: {e}"), cx);
         }
         if let Some(m) = self.shot_menu.clone()
-            && self.open_shot_menu(&m, cx)
+            && self.open_shot_menu(&m, window, cx)
         {
             self.shot_menu = None;
         }
@@ -3743,6 +3733,74 @@ impl Render for WindowView {
             .children(self.prompt_overlay(cx))
             .children(self.drag_ghost())
     }
+}
+
+/// A DOM's trading switch: its link group, account, contract, and whether it is enabled.
+pub(crate) type DomSwitch = (
+    crate::layout::LinkGroup,
+    Option<lines_trading::AccountId>,
+    Option<lines_core::ContractKey>,
+    bool,
+);
+
+/// Every DOM's trading switch, in every window (link groups span windows, decision 0016): a
+/// chart trades only through a linked DOM's. `own`: the window being updated, which can't be
+/// read through its handle (GPUI), with its tabs.
+pub(crate) fn dom_switches(cx: &App, own: Option<(gpui::WindowId, &[Tab])>) -> Vec<DomSwitch> {
+    use crate::trade_bar::TradePane;
+    let doms_of = |tabs: &[Tab]| -> Vec<Entity<crate::dom_view::DomView>> {
+        tabs.iter()
+            .flat_map(|t| t.handles())
+            .filter_map(|h| match h {
+                PaneHandle::Dom(d) => Some(d.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut doms = Vec::new();
+    for w in &cx.global::<Workspace>().windows {
+        if own.is_some_and(|(id, _)| id == w.window_id()) {
+            continue;
+        }
+        if let Ok(wv) = w.read(cx) {
+            doms.extend(doms_of(&wv.tabs));
+        }
+    }
+    if let Some((_, tabs)) = own {
+        doms.extend(doms_of(tabs));
+    }
+    doms.into_iter()
+        .map(|d| {
+            let v = d.read(cx);
+            let p = v.trade_ref();
+            (
+                v.link_group(),
+                p.account.clone(),
+                crate::trade_bar::contract_of(v.trade_store()),
+                p.arming.is_armed(),
+            )
+        })
+        .collect()
+}
+
+/// Whether chart `c` can send orders: a DOM linked to it, on its account and contract, has
+/// trading enabled.
+pub(crate) fn chart_trades(c: &crate::chart_view::ChartView, switches: &[DomSwitch]) -> bool {
+    use crate::trade_bar::TradePane;
+    let (Some(account), Some(contract)) = (
+        c.trade_ref().account.as_ref(),
+        crate::trade_bar::contract_of(c.trade_store()),
+    ) else {
+        return false;
+    };
+    crate::chart_trade::linked_dom_enabled(
+        c.link_group(),
+        account,
+        contract,
+        switches
+            .iter()
+            .map(|(l, a, k, on)| (*l, a.as_ref(), *k, *on)),
+    )
 }
 
 /// Icon controls over the right end of a pane's header (`pane::controls`). Callers build
