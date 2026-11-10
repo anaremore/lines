@@ -6,6 +6,12 @@
 //! contracts (the registry, refcounted) and stops when none does, so a source no pane shows
 //! costs nothing, and a source failing or going stale reaches only its own panes.
 //!
+//! A source whose login is refused (a `LogonRejected` feed: credentials or permissions)
+//! loses the choice for this run: panes on it move to the next source serving their symbol,
+//! new panes and picks skip it, and the picker's tag says why ("Rithmic: login refused").
+//! Not set up is the source's own `check` (an extension) or its absence (Databento without a
+//! key). A restart tries the login again.
+//!
 //! `--source X` limits the run to X (tests, screenshots, headless checks: as before this
 //! table). Without it the run has every enabled source: Coinbase and Kraken (on unless turned
 //! off in settings) and every registered extension (decision 0020). The mock and replays stay
@@ -43,6 +49,8 @@ pub struct Sources {
     entries: Vec<SourceEntry>,
     /// `--source` limited the run to one source: every pane uses it (as before).
     limited: bool,
+    /// Sources whose login was refused this run (shared by the clones panes hold).
+    refused: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Why a pane can't open on any source (its target and the reason, for the pane).
@@ -53,7 +61,46 @@ impl Sources {
     /// The run's sources. `entries` is never empty (startup checks).
     pub fn new(entries: Vec<SourceEntry>, limited: bool) -> Sources {
         assert!(!entries.is_empty(), "a run has at least one source");
-        Sources { entries, limited }
+        Sources {
+            entries,
+            limited,
+            refused: Default::default(),
+        }
+    }
+
+    /// The source refused its login: it loses every choice this run. `true` the first time.
+    pub fn refuse(&self, name: &str) -> bool {
+        let mut r = self.refused_list();
+        if r.iter().any(|n| n == name) {
+            return false;
+        }
+        r.push(name.to_owned());
+        true
+    }
+
+    fn refused_list(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
+        self.refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether the source refused its login this run.
+    pub fn refused(&self, name: &str) -> bool {
+        self.refused_list().iter().any(|n| n == name)
+    }
+
+    /// The source serving `target`: the first whose login wasn't refused, else (only refused
+    /// ones serve it) the first; `None`: none serves it.
+    fn serving(&self, target: &Target) -> Option<&SourceEntry> {
+        let mut serving = self
+            .entries
+            .iter()
+            .filter(|e| e.availability.check(target).is_ok());
+        let first = serving.next()?;
+        if !self.refused(&first.name) {
+            return Some(first);
+        }
+        serving.find(|e| !self.refused(&e.name)).or(Some(first))
     }
 
     /// The first source: the run's when limited, else the preferred one. Single-source uses
@@ -75,8 +122,9 @@ impl Sources {
         self.limited
     }
 
-    /// The source a pane opens on: the one it saved (if the run has it); else, limited, the
-    /// run's; else the first that serves its target; a pane with no target takes the primary.
+    /// The source a pane opens on: the one it saved (if the run has it), unless its login was
+    /// refused and another serves the target; else, limited, the run's; else the first that
+    /// serves its target (a refused one last); a pane with no target takes the primary.
     /// `Err`: a saved source the run doesn't have, or no source serving the target, with why.
     pub fn for_pane(
         &self,
@@ -87,17 +135,31 @@ impl Sources {
         if self.limited || target.is_none() {
             return Ok(self.primary());
         }
-        if let Some(name) = saved {
-            return self.get(name).ok_or_else(|| NoSource(missing_reason(name)));
-        }
+        let saved = match saved {
+            Some(name) => {
+                let e = self
+                    .get(name)
+                    .ok_or_else(|| NoSource(missing_reason(name)))?;
+                if !self.refused(name) {
+                    return Ok(e);
+                }
+                Some(e)
+            }
+            None => None,
+        };
         let Some(t) = target.map(TargetDoc::to_target) else {
             return Ok(self.primary());
         };
         let t = t.map_err(NoSource)?;
-        let found = self
-            .entries
-            .iter()
-            .find(|e| e.availability.check(&t).is_ok());
+        // A saved source whose login was refused: the next serving it, else still the saved.
+        let found = match saved {
+            Some(e) => Some(
+                self.serving(&t)
+                    .filter(|f| !self.refused(&f.name))
+                    .unwrap_or(e),
+            ),
+            None => self.serving(&t),
+        };
         found.ok_or_else(|| {
             // What's missing; the pane under it and the tab's banner give the way out
             // (Ctrl+K, a one-click switch to a symbol a source has).
@@ -154,16 +216,17 @@ impl Sources {
         .or(Some(catalog::BTC_USD))
     }
 
-    /// The source a pick goes to: the pane's own if it serves the target, else the first that
-    /// does (`None`: none).
+    /// The source a pick goes to: the pane's own if it serves the target and its login wasn't
+    /// refused, else the first that does and wasn't, else (only refused ones serve it) the
+    /// pane's own if it serves it, else the first (`None`: none serves it).
     pub fn for_pick(&self, current: &str, target: &Target) -> Option<&SourceEntry> {
-        self.get(current)
-            .filter(|e| e.availability.check(target).is_ok())
-            .or_else(|| {
-                self.entries
-                    .iter()
-                    .find(|e| e.availability.check(target).is_ok())
-            })
+        let own = self
+            .get(current)
+            .filter(|e| e.availability.check(target).is_ok());
+        own.filter(|e| !self.refused(&e.name))
+            .or_else(|| self.serving(target).filter(|e| !self.refused(&e.name)))
+            .or(own)
+            .or_else(|| self.serving(target))
     }
 
     /// The pane's own source in this run: its saved one if the run has it, else the primary.
@@ -223,6 +286,8 @@ pub struct Pick {
     others: Vec<(String, Availability)>,
     /// The pane's own source's name (for the tag), when the run has several.
     own_name: Option<String>,
+    /// Sources whose login was refused this run (they lose the tag to another serving).
+    refused: Vec<String>,
 }
 
 impl Pick {
@@ -232,6 +297,7 @@ impl Pick {
             own: own.clone(),
             others: Vec::new(),
             own_name: None,
+            refused: Vec::new(),
         }
     }
 
@@ -252,17 +318,23 @@ impl Pick {
         }
     }
 
-    /// The source a row's tag names, in a run with several: the pane's own when it serves the
-    /// target, else the first that does (`None`: one source, or none serves it).
+    /// The source a row's tag names, in a run with several, as [`Sources::for_pick`] picks:
+    /// the pane's own when it serves the target, else the first that does, a source whose
+    /// login was refused last and saying so ("Rithmic: login refused"). `None`: one source, or
+    /// none serves it.
     pub fn tag(&self, target: &Target) -> Option<String> {
         let own = self.own_name.as_ref()?;
-        if self.own.check(target).is_ok() {
-            return Some(source_label(own));
+        let serving = std::iter::once((own, &self.own))
+            .chain(self.others.iter().map(|(n, a)| (n, a)))
+            .filter(|(_, a)| a.check(target).is_ok());
+        let mut first_refused = None;
+        for (n, _) in serving {
+            if !self.refused.contains(n) {
+                return Some(source_label(n));
+            }
+            first_refused.get_or_insert(n);
         }
-        self.others
-            .iter()
-            .find(|(_, a)| a.check(target).is_ok())
-            .map(|(n, _)| source_label(n))
+        first_refused.map(|n| refused_label(n))
     }
 }
 
@@ -285,6 +357,11 @@ fn missing_reason_with(name: &str, databento: Option<bool>) -> String {
             .to_owned();
     }
     format!("{} is off or not in this build", source_label(name))
+}
+
+/// A source whose login was refused, as the picker's tag and a pane's header name it.
+pub fn refused_label(name: &str) -> String {
+    format!("{}: login refused", source_label(name))
 }
 
 /// How a source is named on screen: "Coinbase", "Kraken", an extension's name capitalised.
@@ -320,7 +397,39 @@ pub fn pick(feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Pick {
             .map(|e| (e.name.clone(), e.availability.clone()))
             .collect(),
         own_name: Some(own),
+        refused: sources.refused_list().clone(),
     }
+}
+
+/// The pane's feed stopped because its source refused the login: the run stops choosing that
+/// source, and the pane moves to the next source serving its symbol (saving that one, as a
+/// pick would). `None`: it stays (a limited run, no symbol, or no other source has it; its
+/// header then says the login was refused).
+pub fn off_refused(
+    feed: &crate::feeds::PaneFeed,
+    cx: &gpui::App,
+) -> Option<crate::feeds::PaneFeed> {
+    let env = crate::workspace::try_env(cx)?;
+    let sources = &env.sources;
+    if sources.limited() {
+        return None;
+    }
+    let name = current(sources, feed).to_owned();
+    if sources.refuse(&name) {
+        tracing::warn!(
+            "{}: login refused; panes move to the next source that has their symbol",
+            source_label(&name)
+        );
+    }
+    let target = feed.target_doc.as_ref()?.to_target().ok()?;
+    let entry = sources.for_pick(&name, &target)?;
+    if entry.name == name {
+        return None;
+    }
+    let registry = crate::feeds::Feeds::registry(cx);
+    feed.retarget_on(&registry, entry, target)
+        .inspect_err(|e| tracing::warn!("moving a pane off {name}: {e:#}"))
+        .ok()
 }
 
 /// Switch a pane to `target`: on its own source if that serves it, else on the first source
@@ -377,7 +486,12 @@ pub fn header_tag(feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Option<Strin
     if sources.limited() || sources.all().len() < 2 {
         return None;
     }
-    Some(source_label(current(sources, feed)))
+    let name = current(sources, feed);
+    Some(if sources.refused(name) {
+        refused_label(name)
+    } else {
+        source_label(name)
+    })
 }
 
 /// Append the header tag to a header's contract text.
@@ -578,6 +692,105 @@ mod tests {
         assert_eq!(s.for_pane(None, Some(&btc)).unwrap().name, "mock");
     }
 
+    /// Two sources serving ES (an extension first, as Rithmic in the official build, then
+    /// Databento) and Coinbase.
+    fn three() -> Sources {
+        let mock = |name: &str| {
+            entry(
+                name,
+                lines_feed::Source::CqgMock(lines_feed::cqg::mock::MockConfig::default()),
+            )
+        };
+        Sources::new(
+            vec![
+                mock("rithmic"),
+                mock("databento"),
+                entry(
+                    "coinbase",
+                    lines_feed::Source::Coinbase {
+                        url: lines_feed::coinbase::WS_URL.into(),
+                    },
+                ),
+            ],
+            false,
+        )
+    }
+
+    /// The owner's run (2026-11-10): Rithmic first, its test login refused ("logon rejected
+    /// (code 13) permission denied"), so ES panes showed nothing though Databento has ES. A
+    /// refused source loses every choice to the next serving the symbol, saved or not.
+    #[test]
+    fn a_source_whose_login_was_refused_loses_every_choice() {
+        let s = three();
+        let es = doc(catalog::ES);
+        let es_t = Target::Product(catalog::ES);
+        assert_eq!(s.for_pane(None, Some(&es)).unwrap().name, "rithmic");
+        assert!(s.refuse("rithmic"));
+        assert!(!s.refuse("rithmic"), "once");
+        assert!(
+            s.clone().refused("rithmic"),
+            "every clone (the panes') knows"
+        );
+        // New panes, saved panes, picks and switches go to Databento.
+        assert_eq!(s.for_pane(None, Some(&es)).unwrap().name, "databento");
+        assert_eq!(
+            s.for_pane(Some("rithmic"), Some(&es)).unwrap().name,
+            "databento"
+        );
+        assert_eq!(s.for_pick("rithmic", &es_t).unwrap().name, "databento");
+        assert_eq!(
+            on(s.plan_move(Some("rithmic"), &es_t)).as_deref(),
+            Some("databento")
+        );
+        // Others are untouched: BTC stays on Coinbase, a pane with no market on the primary.
+        assert_eq!(
+            s.for_pane(None, Some(&doc(catalog::BTC_USD))).unwrap().name,
+            "coinbase"
+        );
+        assert_eq!(s.for_pane(Some("rithmic"), None).unwrap().name, "rithmic");
+        // The picker's tag names where a pick goes, and why a refused source would be it.
+        let avail = |n: &str| s.get(n).unwrap().availability.clone();
+        let pick = |own: &str, refused: &[&str]| Pick {
+            own: avail(own),
+            others: ["rithmic", "databento", "coinbase"]
+                .into_iter()
+                .filter(|n| *n != own)
+                .map(|n| (n.to_owned(), avail(n)))
+                .collect(),
+            own_name: Some(own.to_owned()),
+            refused: refused.iter().map(|n| (*n).to_owned()).collect(),
+        };
+        assert_eq!(
+            pick("rithmic", &["rithmic"]).tag(&es_t).as_deref(),
+            Some("Databento")
+        );
+        assert_eq!(
+            pick("coinbase", &["rithmic"]).tag(&es_t).as_deref(),
+            Some("Databento")
+        );
+        assert_eq!(pick("coinbase", &[]).tag(&es_t).as_deref(), Some("Rithmic"));
+        // Only refused sources serve it: still the first, saying why.
+        assert!(s.refuse("databento"));
+        assert_eq!(s.for_pane(None, Some(&es)).unwrap().name, "rithmic");
+        assert_eq!(
+            s.for_pane(Some("databento"), Some(&es)).unwrap().name,
+            "databento",
+            "a refused saved source stays when no other serves it"
+        );
+        assert_eq!(s.for_pick("databento", &es_t).unwrap().name, "databento");
+        assert_eq!(
+            pick("coinbase", &["rithmic", "databento"])
+                .tag(&es_t)
+                .as_deref(),
+            Some("Rithmic: login refused")
+        );
+        assert!(
+            pick("coinbase", &["rithmic", "databento"])
+                .check(&es_t)
+                .is_ok()
+        );
+    }
+
     #[test]
     fn the_picker_offers_every_sources_symbols_and_tags_them() {
         let s = two(false);
@@ -589,6 +802,7 @@ mod tests {
                 s.get("coinbase").unwrap().availability.clone(),
             )],
             own_name: Some("mock".into()),
+            refused: Vec::new(),
         };
         let btc = Target::Product(catalog::BTC_USD);
         let es = Target::Product(catalog::ES);

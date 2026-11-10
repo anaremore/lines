@@ -103,11 +103,23 @@ pub fn watch_store<V: Pane>(cx: &mut Context<V>) {
     cx.spawn(async move |this, cx| {
         // Whole seconds the feed has been stale (redraw when it changes: the marker counts).
         let mut stale_secs: Option<u64> = None;
+        // The store whose refused login this pane already acted on (shown or hidden).
+        let mut refusal_seen: usize = 0;
         loop {
             cx.background_executor()
                 .timer(Duration::from_millis(8))
                 .await;
             let alive = this.update(cx, |pane, cx| {
+                // Its source refused the login: move to the next one serving the symbol
+                // (decision 0030; once per store, one atomic load otherwise).
+                let store = Arc::as_ptr(pane.store()) as usize;
+                if store != refusal_seen && pane.store().logon_refused() {
+                    refusal_seen = store;
+                    if let Some(feed) = crate::sources::off_refused(pane.feed(), cx) {
+                        pane.set_feed(feed, cx);
+                    }
+                    cx.notify();
+                }
                 if !pane.common().visible {
                     pane.on_hidden_tick();
                     return;
