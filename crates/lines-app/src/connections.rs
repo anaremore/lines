@@ -47,16 +47,22 @@ pub fn rows() -> Vec<Row> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     /// Switched off (`running`: still serving panes until Lines restarts).
-    Off { running: bool },
+    Off {
+        running: bool,
+    },
     /// A required setting has no value.
-    NotSetUp { needs: &'static str },
+    NotSetUp {
+        needs: &'static str,
+    },
     /// On, but not part of this run (turned on, or set up, after it started).
     NextStart,
     /// In this run, and no pane shows its symbols: nothing is connected.
     Idle,
     Connecting,
     /// Serving `feeds` symbols.
-    Connected { feeds: usize },
+    Connected {
+        feeds: usize,
+    },
     /// The provider refused, with its reason.
     Refused(String),
 }
@@ -156,6 +162,14 @@ pub fn use_memory_keychain(seed: &[(&str, &str, &str)]) {
         .map(|(s, k, v)| (account(s, k), (*v).to_owned()))
         .collect();
     *backend().write().unwrap_or_else(|e| e.into_inner()) = Backend::Memory(Mutex::new(map));
+}
+
+/// Whether secrets are in memory for this process (screenshots, tests): reads never block.
+pub fn memory_keychain() -> bool {
+    matches!(
+        &*backend().read().unwrap_or_else(|e| e.into_inner()),
+        Backend::Memory(_)
+    )
 }
 
 fn account(source: &str, key: &str) -> String {
@@ -277,6 +291,56 @@ pub fn needs(source: &str, fields: &[Field]) -> Option<&'static str> {
         .map(|f| f.label)
 }
 
+/// An example source for screenshots of the page (`--example-connection`): an API key and a
+/// choice, never connected. Public code names no real connector (decision 0020).
+pub struct Example;
+
+impl extension::SourceExtension for Example {
+    fn api_version(&self) -> u32 {
+        extension::API_VERSION
+    }
+    fn name(&self) -> &'static str {
+        "example"
+    }
+    fn help(&self) -> &'static str {
+        "An example source (screenshots of Settings › Connections)."
+    }
+    fn provider(&self) -> Arc<dyn lines_feed::provider::Provider> {
+        Arc::new(lines_feed::coinbase::CoinbaseProvider)
+    }
+    fn default_product(&self) -> lines_core::ProductId {
+        lines_feed::catalog::BTC_USD
+    }
+    fn connect(
+        &self,
+        _: &lines_core::Product,
+        _: Option<lines_core::ContractKey>,
+    ) -> extension::BoxFuture<'static, anyhow::Result<Box<dyn extension::DynTransport>>> {
+        Box::pin(async { anyhow::bail!("the example source never connects") })
+    }
+    fn fields(&self) -> Vec<Field> {
+        vec![
+            Field {
+                key: "api-key",
+                label: "API key",
+                kind: FieldKind::Secret,
+                required: true,
+                env: Some("LINES_EXAMPLE_KEY"),
+            },
+            Field {
+                key: "dataset",
+                label: "Dataset",
+                kind: FieldKind::Choice(&["Futures", "Equities"]),
+                required: false,
+                env: None,
+            },
+        ]
+    }
+    fn plan(&self) -> Option<String> {
+        Some("Example only: live futures with depth".to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,8 +350,14 @@ mod tests {
         let live = FeedStatus::Live;
         let busy = FeedStatus::Connecting;
         let refused = FeedStatus::Failed("key not entitled to GLBX".into());
-        assert_eq!(state(false, false, None, &[]), State::Off { running: false });
-        assert_eq!(state(false, true, None, &[live.clone()]), State::Off { running: true });
+        assert_eq!(
+            state(false, false, None, &[]),
+            State::Off { running: false }
+        );
+        assert_eq!(
+            state(false, true, None, &[live.clone()]),
+            State::Off { running: true }
+        );
         assert_eq!(
             state(true, true, Some("API key"), &[]),
             State::NotSetUp { needs: "API key" }
@@ -296,7 +366,12 @@ mod tests {
         assert_eq!(state(true, true, None, &[]), State::Idle);
         assert_eq!(state(true, true, None, &[busy.clone()]), State::Connecting);
         assert_eq!(
-            state(true, true, None, &[busy.clone(), live.clone(), live.clone()]),
+            state(
+                true,
+                true,
+                None,
+                &[busy.clone(), live.clone(), live.clone()]
+            ),
             State::Connected { feeds: 2 }
         );
         // A refusal is never hidden behind another feed's connection.

@@ -22,6 +22,8 @@ pub enum Section {
     Risk,
     Accounts,
     Data,
+    /// Every data source: its state, plan, settings and secrets (decision 0030 §3–4).
+    Connections,
     Keys,
     Diagnostics,
     /// The version, and rolling back an update (decision 0031).
@@ -29,7 +31,7 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 11] = [
+    pub const ALL: [Section; 12] = [
         Section::General,
         Section::Appearance,
         Section::Charts,
@@ -38,6 +40,7 @@ impl Section {
         Section::Risk,
         Section::Accounts,
         Section::Data,
+        Section::Connections,
         Section::Keys,
         Section::Diagnostics,
         Section::About,
@@ -53,6 +56,7 @@ impl Section {
             Section::Risk => "Risk",
             Section::Accounts => "Accounts",
             Section::Data => "Data",
+            Section::Connections => "Connections",
             Section::Keys => "Keys",
             Section::Diagnostics => "Diagnostics",
             Section::About => "About",
@@ -89,6 +93,11 @@ impl Scope {
         }
     }
 }
+
+/// The Connections section's list of sources (`connections_view` draws it).
+pub const CONNECTIONS_LIST: &str = "connections.list";
+/// The public sources' switches: rows for search and the palette, drawn on their cards.
+pub const SOURCE_SWITCHES: [&str; 2] = ["data.coinbase", "data.kraken"];
 
 /// Trading-affecting settings are marked in the window and loosening them asks first
 /// (decision 0021).
@@ -1582,11 +1591,23 @@ fn table() -> Vec<Setting> {
             },
             None,
         ),
-        // Data.
+        // Connections: the sources (drawn as cards by `connections_view`, each with its switch;
+        // the two switches below stay rows for search and the palette).
+        s(
+            CONNECTIONS_LIST,
+            Sec::Connections,
+            "Data sources",
+            "Each source connects only when a pane shows one of its symbols. Switches apply when Lines next starts. Secrets are kept in the system's keychain.",
+            Scope::App,
+            Normal,
+            Info,
+            |_, _, _| Value::Text(String::new()),
+            None,
+        ),
         with_default(
             s(
                 "data.coinbase",
-                Sec::Data,
+                Sec::Connections,
                 "Coinbase",
                 "Public crypto prices (BTC/USD, ETH/USD). Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
                 Scope::App,
@@ -1600,7 +1621,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "data.kraken",
-                Sec::Data,
+                Sec::Connections,
                 "Kraken",
                 "Public crypto prices, spot and perpetuals. Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
                 Scope::App,

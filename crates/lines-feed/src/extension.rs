@@ -364,12 +364,18 @@ mod tests {
     fn a_sources_setting_comes_from_the_store_unless_its_variable_is_set() {
         register(Arc::new(Keyed)).unwrap();
         set_settings_store(Arc::new(Held));
-        assert_eq!(setting("keyed-test", "api-key").as_deref(), Some("stored-1234"));
+        assert_eq!(
+            setting("keyed-test", "api-key").as_deref(),
+            Some("stored-1234")
+        );
         assert_eq!(setting("keyed-test", "no-such-field"), None);
         assert_eq!(setting("no-such-source", "api-key"), None);
         // SAFETY: this test alone uses the variable.
         unsafe { std::env::set_var("LINES_KEYED_TEST_KEY", "from-env-9999") };
-        assert_eq!(setting("keyed-test", "api-key").as_deref(), Some("from-env-9999"));
+        assert_eq!(
+            setting("keyed-test", "api-key").as_deref(),
+            Some("from-env-9999")
+        );
         unsafe { std::env::remove_var("LINES_KEYED_TEST_KEY") };
     }
 }

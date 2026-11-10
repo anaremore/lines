@@ -14,6 +14,8 @@ mod chart_trade;
 mod chart_view;
 mod commands;
 mod data_dir;
+mod connections;
+mod connections_view;
 #[cfg(feature = "screenshot")]
 mod demo_broker;
 mod diagnostics;
@@ -70,8 +72,6 @@ mod series_pane;
 mod settings_schema;
 mod settings_view;
 mod sources;
-mod connections;
-mod connections_view;
 mod strategy_host;
 mod strategy_marks;
 mod strategy_panel;
@@ -631,6 +631,11 @@ struct Cli {
     /// confirmation. Repeatable.
     #[arg(long, requires = "settings")]
     settings_set: Vec<String>,
+    /// Screenshot: register an example source that describes an API key and a choice
+    /// (Settings › Connections evidence); KEY is its saved key in this run's in-memory
+    /// keychain, `none` for none. Never the user's keychain.
+    #[arg(long, value_name = "KEY", requires = "settings")]
+    example_connection: Option<String>,
     /// Screenshot: the Settings window's size, WxH logical px (default 860x620; the window
     /// can't be made smaller than 640x420).
     #[arg(long, requires = "settings", value_parser = parse_size)]
@@ -1169,14 +1174,30 @@ fn run_sources(
     let prefs = persist::config_dir()
         .map(|d| source_prefs(&d.join("settings.json")))
         .unwrap_or_default();
-    let choices = enabled_sources(ext, &prefs, |name| name != DATABENTO || databento_set_up());
+    // A source missing a required setting (Settings › Connections shows "not set up") isn't
+    // started: its panes say so. Reads the keychain once, before any window opens.
+    let choices: Vec<SourceChoice> =
+        enabled_sources(ext, &prefs, |name| name != DATABENTO || databento_set_up())
+            .into_iter()
+            .filter(|c| match c {
+                SourceChoice::Extension(e) => match connections::needs(e.name(), &e.fields()) {
+                    None => true,
+                    Some(field) => {
+                        tracing::warn!("{} is not set up (needs {field}): not started", e.name());
+                        connections::mark_not_set_up(e.name(), field);
+                        false
+                    }
+                },
+                SourceChoice::Builtin(_) => true,
+            })
+            .collect();
     // A caller's own `databento` (not key-gated) too: its key looked up now, never from the UI.
     if choices.iter().any(|c| c.name() == DATABENTO) {
         let _ = databento_set_up();
     }
     if choices.is_empty() {
         // Every source off: the app still opens (on the mock, offline, as `--source mock`
-        // would), so Settings › Data can turn one back on.
+        // would), so Settings › Connections can turn one back on.
         tracing::warn!("every data source is off in Settings › Data: starting on the mock");
         let mock = SourceChoice::Builtin(SourceKind::Mock);
         return Ok((vec![(mock.name(), feed_config(cli, &mock, store)?)], true));
@@ -1241,7 +1262,9 @@ fn enabled_sources(
 
 /// `settings.json`'s `sources` switches, read on their own before the settings load (which
 /// sets an unreadable file aside, once): anything unreadable reads as every source on.
-fn source_prefs(path: &std::path::Path) -> std::collections::BTreeMap<String, sources::SourcePrefs> {
+fn source_prefs(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<String, sources::SourcePrefs> {
     settings_key(path, "sources")
 }
 
@@ -1715,7 +1738,15 @@ where
     // `settings.json`, secrets from the OS keychain, read by each connector when it connects.
     // Screenshots and the benchmark never read the user's keychain or settings.
     if cli.screenshot.is_some() || cli.bench.is_some() {
-        connections::use_memory_keychain(&[]);
+        match cli.example_connection.as_deref() {
+            Some(key) if key != "none" => {
+                connections::use_memory_keychain(&[("example", "api-key", key)])
+            }
+            _ => connections::use_memory_keychain(&[]),
+        }
+        if cli.example_connection.is_some() {
+            lines_feed::extension::register(Arc::new(connections::Example))?;
+        }
         connections::install(&connections::Plain::new());
     } else {
         connections::install(
