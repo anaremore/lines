@@ -101,7 +101,7 @@ Run on the exact HEAD you push. Report the SHA and each result.
 ## Conventions
 - `Price(i64)`, `Qty(i64)`, `Money(i128)` are exact. No floats for order prices or money.
   Unrepresentable values are counted, never rounded.
-- Vendor symbols live only in `lines-feed` (crate-private) and `lines-sierra`.
+- Vendor symbols live only in `lines-feed` (crate-private), `lines-databento` and `lines-sierra`.
 - `ProviderSession`s do no I/O. No heap allocation in paint paths (`lines-core/tests/no_alloc.rs`).
   The UI never blocks on a feed or the trading core.
 - Colors only from `crates/lines-app/src/theme.rs`. Text meets WCAG AA in all theme/palette
