@@ -1852,19 +1852,26 @@ pub fn is_tight(width: f32) -> bool {
 
 /// The top row: PAPER, the account, the trading switch.
 const HDR_H: f32 = 28.0;
-/// The position card (two lines; three in tight panels) and the space under it.
+/// The position card's first line, its lower lines and the space under it.
 const CARD_H: f32 = 58.0;
 const CARD_BOX_H: f32 = 50.0;
-/// One more card line: tight panels keep the average and the working count on it.
+/// One card line under the first.
 const CARD_LINE_H: f32 = 16.0;
 
-/// The position card's row height at `width`: one line taller in tight panels.
+/// The position card's lines under the first at `width`: two (the stop and target with the day's
+/// P&L, then the rest), four in a tight panel (the stop, the target, the average and working
+/// orders, then ticks with the day's P&L), so the prices and the working count all show.
+pub fn card_lines(width: f32) -> usize {
+    if is_tight(width) { 4 } else { 2 }
+}
+
+/// The position card's row height at `width`.
 pub fn card_h(width: f32) -> f32 {
-    CARD_H + if is_tight(width) { CARD_LINE_H } else { 0.0 }
+    CARD_H + (card_lines(width) - 1) as f32 * CARD_LINE_H
 }
 
 fn card_box_h(width: f32) -> f32 {
-    CARD_BOX_H + if is_tight(width) { CARD_LINE_H } else { 0.0 }
+    CARD_BOX_H + (card_lines(width) - 1) as f32 * CARD_LINE_H
 }
 const STATUS_H: f32 = 24.0;
 const METERS_H: f32 = 38.0;
@@ -3552,13 +3559,10 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         }
     };
     // The lines below, as whole items in order (what doesn't fit is left out whole, never cut,
-    // lowest priority first; [`card_place`]): the average when it isn't above, a market order's
-    // remainder, the stop, the target, working orders (never left out), ticks (P&L both ways).
+    // lowest priority first; [`card_place`]): a market order's remainder, the stop, the target,
+    // the average when it isn't above, working orders (never left out), ticks (P&L both ways).
     let pos_qty = position.map_or(0, |p| p.0);
     let mut items: Vec<(String, gpui::Hsla, bool, u8)> = Vec::new();
-    if let Some(a) = avg_below {
-        items.push((a, t.text_dim, false, 3));
-    }
     if let Some(m) = d.and_then(|d| d.market_left) {
         items.push((market_words(m), t.text_main, false, 4));
     }
@@ -3568,7 +3572,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                 card_exit("SL", q, pos_qty, fmt.format::<32>(p).as_str()),
                 t.down,
                 true,
-                2,
+                4,
             ));
         }
         if let Some((p, q)) = d.and_then(|d| d.target) {
@@ -3576,9 +3580,12 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
                 card_exit("TP", q, pos_qty, fmt.format::<32>(p).as_str()),
                 t.order_target,
                 true,
-                2,
+                4,
             ));
         }
+    }
+    if let Some(a) = avg_below {
+        items.push((a, t.text_dim, false, 3));
     }
     let working = d.map_or(0, |d| d.working);
     items.push((
@@ -3620,8 +3627,13 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
     });
     let chip_w = chip.as_ref().map_or(0.0, |c| text_w(c, 11.0) + 8.0 + 8.0);
     let inner = card_inner(width);
-    let lines = if is_tight(width) { 2 } else { 1 };
-    let rooms = [(inner - day_w - chip_w).max(0.0), inner];
+    let lines = card_lines(width);
+    // The day's P&L sits on the first lower line, or in a tight panel on the last.
+    let day_line = if is_tight(width) { lines - 1 } else { 0 };
+    let mut rooms = [inner; 4];
+    rooms[0] -= chip_w;
+    rooms[day_line] -= day_w;
+    let rooms = rooms.map(|r| r.max(0.0));
     let widths: Vec<(f32, u8)> = items
         .iter()
         .map(|(s, _, priced, k)| (text_w(s, 11.0) + if *priced { 4.0 } else { 0.0 }, *k))
@@ -3651,6 +3663,8 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
             )
         }),
         lower(),
+        lower(),
+        lower(),
     ];
     for ((text, color, priced, _), at) in items.into_iter().zip(place) {
         let Some(at) = at else { continue };
@@ -3675,45 +3689,52 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         let r = std::mem::replace(&mut rows[at], div());
         rows[at] = r.child(item);
     }
-    let [row2, row3] = rows;
-    let second = line(16.0)
-        .text_size(crate::zoom::ui(11.0))
-        .child(row2)
-        .children(day_on_line.map(|m| day_el(m, None)));
-    card.child(first)
-        .child(second)
-        .when(lines > 1, |c| c.child(line(16.0).child(row3)))
+    let mut card = card.child(first);
+    for (i, row) in rows.into_iter().enumerate().take(lines) {
+        card = card.child(
+            line(16.0)
+                .text_size(crate::zoom::ui(11.0))
+                .child(row)
+                .children(
+                    day_on_line
+                        .filter(|_| i == day_line)
+                        .map(|m| day_el(m, None)),
+                ),
+        );
+    }
+    card
 }
 
 /// The working count's priority on the card: never left out.
 pub const CARD_KEEP: u8 = u8::MAX;
 
-/// Where the card's lower items go: each item `(width, priority)`, in order, to a line (an index
-/// into `rooms`, the room on each line) or nowhere. Items fill the lines in order; while they
-/// don't fit, the lowest priority (the last of equals) is left out whole. [`CARD_KEEP`] is never
+/// Where the card's lower items go: each item `(width, priority)`, in order, to the first line
+/// with room for it (an index into `rooms`, the room on each line) or nowhere. While they don't
+/// all fit, the lowest priority (the last of equals) is left out whole. [`CARD_KEEP`] is never
 /// left out: where only those remain and still don't fit, they go on the first line.
 pub fn card_place(rooms: &[f32], items: &[(f32, u8)]) -> Vec<Option<usize>> {
     let mut shown: Vec<bool> = vec![true; items.len()];
     loop {
         let mut out = vec![None; items.len()];
-        let mut line = 0;
-        let mut used = 0.0;
+        let mut used = vec![0.0f32; rooms.len()];
         let mut fits = true;
         for (i, (w, _)) in items.iter().enumerate() {
             if !shown[i] {
                 continue;
             }
-            let need = if used > 0.0 { w + 8.0 } else { *w };
-            if line < rooms.len() && used + need <= rooms[line] {
-                used += need;
-                out[i] = Some(line);
-            } else if line + 1 < rooms.len() && *w <= rooms[line + 1] {
-                line += 1;
-                used = *w;
-                out[i] = Some(line);
-            } else {
-                fits = false;
-                break;
+            let at = (0..rooms.len()).find(|&l| {
+                let need = if used[l] > 0.0 { w + 8.0 } else { *w };
+                used[l] + need <= rooms[l]
+            });
+            match at {
+                Some(l) => {
+                    used[l] += if used[l] > 0.0 { w + 8.0 } else { *w };
+                    out[i] = Some(l);
+                }
+                None => {
+                    fits = false;
+                    break;
+                }
             }
         }
         if fits {
@@ -4341,6 +4362,8 @@ fn editor_view<V: TradePane>(
     use crate::brackets::Field;
     let rows_shown = editor_list_rows(h);
     let first = ed.row.saturating_sub(rows_shown - 1);
+    let tight = is_tight(width);
+    let unit = ed.units.word();
     let head = div()
         .flex()
         .flex_row()
@@ -4349,27 +4372,48 @@ fn editor_view<V: TradePane>(
         .h(crate::zoom::ui(EDITOR_HEAD_H))
         .whitespace_nowrap()
         .overflow_hidden()
-        .child(
-            div()
-                .flex_shrink_0()
-                .font_weight(FontWeight::BOLD)
-                .text_color(t.text_main)
-                .child(format!("Bracket presets · {}", ed.product.symbol)),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_color(t.text_dim)
-                .child(format!("in {}", ed.units.word())),
-        )
+        .when(tight, |d| d.gap_1())
+        .when(!tight, |d| {
+            d.child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(t.text_main)
+                    .child(format!("Bracket presets · {}", ed.product.symbol)),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(t.text_dim)
+                    .child(format!("in {unit}")),
+            )
+        })
+        // Tight: the unit names the distances ("Ticks"), and the actions sit beside it so the
+        // footer keeps its room for the prices.
+        .when(tight, |d| {
+            let mut w = unit.chars();
+            let title: String = w
+                .next()
+                .map(|c| c.to_uppercase().chain(w).collect())
+                .unwrap_or_default();
+            d.child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(t.text_main)
+                    .child(title),
+            )
+        })
         .child(div().flex_1())
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_color(t.text_dim)
-                .child("Enter save · Esc cancel"),
-        );
+        .when(!tight, |d| {
+            d.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(t.text_dim)
+                    .child("Enter save · Esc cancel"),
+            )
+        });
     let fit = editor_cells(width);
     let cell_el = |r: usize, f: Field, text: &str, w: Option<f32>| {
         let active = r == ed.row && f == ed.field;
@@ -4474,6 +4518,8 @@ fn editor_view<V: TradePane>(
         .items_center()
         .gap_1()
         .h(crate::zoom::ui(EDITOR_FOOT_H))
+        // Tight: 11 px, so both prices fit whole ("S 21450.25  T 21460.25" in 149 px).
+        .when(tight, |d| d.text_size(crate::zoom::ui(11.0)))
         .child(match problem {
             Some(p) => div()
                 .min_w_0()
@@ -4482,13 +4528,20 @@ fn editor_view<V: TradePane>(
                 .bg(t.warn)
                 .text_color(t.on_warn)
                 .child(p),
-            None => div()
-                .min_w_0()
-                .truncate()
-                .text_color(t.text_main)
-                .child(preview.unwrap_or_default()),
-        })
-        .child(div().flex_1())
+            // The preview's prices are never cut: whole items, what doesn't fit left out whole
+            // (a tight panel gives the footer to them alone).
+            None => whole_items(
+                &preview.unwrap_or_default().replace(" · ", "  "),
+                t.text_main,
+                false,
+            ),
+        });
+    let actions = div()
+        .flex()
+        .flex_row()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
         .child(action(
             "bracket-add",
             "+",
@@ -4510,6 +4563,11 @@ fn editor_view<V: TradePane>(
             "Move down (Ctrl+Down)",
             |e| e.reorder(1),
         ));
+    let (head, foot) = if tight {
+        (head.child(div().flex_1()).child(actions), foot)
+    } else {
+        (head, foot.child(div().flex_1()).child(actions))
+    };
     div()
         .flex()
         .flex_col()
@@ -5310,7 +5368,15 @@ fn bracket_confirm_view<V: TradePane>(
         ),
         lines_trading::BracketMode::PerEntry => String::new(),
     };
-    let (title, what, keep, replace_text) = if narrow {
+    let compact = confirm_compact(h);
+    let (title, what, keep, replace_text) = if compact {
+        (
+            String::new(),
+            confirm_compact_text(n, &preset),
+            "Keep",
+            format!("Replace {n}"),
+        )
+    } else if narrow {
         (
             "One bracket for the position?".to_owned(),
             format!("Cancels {n} exit{s}; one stop and target ({preset})."),
@@ -5381,13 +5447,16 @@ fn bracket_confirm_view<V: TradePane>(
         .gap_1()
         .h(crate::zoom::ui(h))
         .overflow_hidden()
-        .child(
-            div()
-                .flex_shrink_0()
-                .font_weight(FontWeight::BOLD)
-                .text_color(t.text_main)
-                .child(title),
-        )
+        .when(compact, |d| d.text_size(crate::zoom::ui(11.0)))
+        .when(!compact, |d| {
+            d.child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(t.text_main)
+                    .child(title),
+            )
+        })
         // The text gives way (clipped) before the buttons ever do: they sit at the bottom.
         .child(
             div()
@@ -5403,11 +5472,27 @@ fn bracket_confirm_view<V: TradePane>(
                 .flex_row()
                 .flex_shrink_0()
                 .gap_2()
-                .mt_3()
+                .when(compact, |d| d.mt_1())
+                .when(!compact, |d| d.mt_3())
                 .justify_end()
                 .child(cancel)
                 .child(replace),
         )
+}
+
+/// The height the confirmation's full wording needs (its title, two to four lines, the buttons).
+pub const CONFIRM_FULL_H: f32 = 130.0;
+
+/// Whether the confirmation to replace working exits uses its compact wording: where it has
+/// less than [`CONFIRM_FULL_H`] (narrow panels, and the joins hidden), one question at 11 px.
+pub fn confirm_compact(h: f32) -> bool {
+    h < CONFIRM_FULL_H
+}
+
+/// The compact confirmation's question: what is cancelled and what replaces it, in full.
+pub fn confirm_compact_text(n: usize, preset: &str) -> String {
+    let s = if n == 1 { "" } else { "s" };
+    format!("Replace {n} exit{s} with one bracket ({preset})?")
 }
 
 #[cfg(test)]
@@ -6148,7 +6233,7 @@ mod tests {
     #[test]
     fn panel_height_depends_on_width_only() {
         let wide = panel_height(420.0);
-        assert_eq!(wide, 298.0);
+        assert_eq!(wide, 314.0);
         assert_eq!(wide, panel_height(800.0));
         assert_eq!(
             wide,
@@ -6160,8 +6245,8 @@ mod tests {
         assert!(narrow < wide);
         let tight = panel_height(MIN_DOM_WIDTH);
         assert_eq!(tight, panel_height(EXITS_ONE_ROW - 1.0));
-        // Tight: BE and Reverse's row, and the card's third line (the average and working count).
-        assert_eq!(tight, narrow + ACT_H + CARD_LINE_H);
+        // Tight: BE and Reverse's row, and the card's two more lines.
+        assert_eq!(tight, narrow + ACT_H + 2.0 * CARD_LINE_H);
         // Settings › DOM without the joins: their row shorter, where they'd show.
         let off = PanelRows {
             joins: false,
@@ -6275,28 +6360,28 @@ mod tests {
     #[test]
     fn rows_give_way_in_order() {
         for (width, joins, full, ladder, meters, status, card, actions) in [
-            (420.0, true, 397.0, 319.0, 211.0, 173.0, 149.0, 91.0),
-            (420.0, false, 363.0, 319.0, 211.0, 173.0, 149.0, 91.0),
+            (420.0, true, 413.0, 335.0, 227.0, 189.0, 165.0, 91.0),
+            (420.0, false, 379.0, 335.0, 227.0, 189.0, 165.0, 91.0),
             // Narrow: no joins (they hide first, below NARROW_BELOW).
-            (EXITS_ONE_ROW, true, 345.0, 301.0, 193.0, 173.0, 149.0, 91.0),
+            (EXITS_ONE_ROW, true, 361.0, 317.0, 209.0, 189.0, 165.0, 91.0),
             (
                 MIN_DOM_WIDTH,
                 true,
-                391.0,
-                347.0,
-                239.0,
-                219.0,
-                195.0,
+                423.0,
+                379.0,
+                271.0,
+                251.0,
+                227.0,
                 121.0,
             ),
             (
                 MIN_DOM_WIDTH,
                 false,
-                391.0,
-                347.0,
-                239.0,
-                219.0,
-                195.0,
+                423.0,
+                379.0,
+                271.0,
+                251.0,
+                227.0,
                 121.0,
             ),
         ] {
@@ -6643,6 +6728,11 @@ mod tests {
             !editor_cells(MIN_DOM_WIDTH).name,
             "a tight panel leaves the name out"
         );
+        // Tight: the footer holds both preview prices whole at 11 px (an NQ-sized price), and
+        // the header the unit word and the four actions.
+        let room = MIN_DOM_WIDTH - 2.0 * SIDE;
+        assert!(2.0 * text_w("S 21450.25", 11.0) + 4.0 <= room);
+        assert!(text_w("Points", 12.0) + 4.0 + 4.0 + 4.0 * MIN_HIT + 3.0 * 4.0 <= room);
     }
 
     /// A read-only account's exits say "off" whole: both where they fit, else one "Exits off".
@@ -6677,46 +6767,56 @@ mod tests {
         assert_eq!(card_h(165.0), card_h(200.0));
         assert!(
             card_h(165.0) > card_h(240.0),
-            "tight panels have a third card line"
+            "tight panels have more card lines"
         );
+        assert_eq!(card_h(240.0), card_h(420.0));
         let w = |s: &str| text_w(s, 11.0);
+        // In the card's order: the stop, the target, the average (when not above), working, ticks.
+        let sl = (w("SL 6006.00") + 4.0, 4);
+        let tp = (w("TP 6014.00") + 4.0, 4);
         let avg = (w("@ 6010.25"), 3);
-        let sl = (w("SL 6006.00") + 4.0, 2);
-        let tp = (w("TP 6014.00") + 4.0, 2);
         let working = (w("2 working"), CARD_KEEP);
         let ticks = (w("+0.0 t"), 0);
-        let items = [avg, sl, tp, working, ticks];
-        for width in WIDTHS {
+        let items = [sl, tp, avg, working, ticks];
+        let rooms_at = |width: f32, day: &str| {
             let inner = card_inner(width);
-            let day = w("Day ") + w("-$13408.75") + 12.0;
-            let lines = if is_tight(width) { 2 } else { 1 };
-            let rooms = [inner - day, inner];
-            let place = card_place(&rooms[..lines], &items);
-            assert!(place[3].is_some(), "{width}: the working count shows");
-            // What shows fits its line.
-            for (l, room) in rooms[..lines].iter().enumerate() {
-                let on: Vec<f32> = items
-                    .iter()
-                    .zip(&place)
-                    .filter(|(_, p)| **p == Some(l))
-                    .map(|(i, _)| i.0)
-                    .collect();
-                let used = on.iter().sum::<f32>() + 8.0 * on.len().saturating_sub(1) as f32;
-                assert!(used <= *room, "{width}: line {l} holds {used} in {room}");
+            let lines = card_lines(width);
+            let day_line = if is_tight(width) { lines - 1 } else { 0 };
+            let mut r = vec![inner; lines];
+            r[day_line] -= w("Day ") + w(day) + 12.0;
+            r
+        };
+        for width in WIDTHS {
+            for day in ["$0.00", "+$125.00", "-$13408.75"] {
+                let rooms = rooms_at(width, day);
+                let place = card_place(&rooms, &items);
+                assert!(place[3].is_some(), "{width} {day}: the working count shows");
+                // The stop and the target show at every width the owner lays out.
+                assert!(
+                    place[0].is_some() && place[1].is_some(),
+                    "{width} {day}: {place:?}"
+                );
+                // What shows fits its line.
+                for (l, room) in rooms.iter().enumerate() {
+                    let on: Vec<f32> = items
+                        .iter()
+                        .zip(&place)
+                        .filter(|(_, p)| **p == Some(l))
+                        .map(|(i, _)| i.0)
+                        .collect();
+                    let used = on.iter().sum::<f32>() + 8.0 * on.len().saturating_sub(1) as f32;
+                    assert!(used <= *room, "{width}: line {l} holds {used} in {room}");
+                }
+                // Left out in order: ticks, then the average, then the target, then the stop.
+                let order = [4, 2, 1, 0];
+                let dropped: Vec<usize> =
+                    order.into_iter().filter(|i| place[*i].is_none()).collect();
+                assert_eq!(dropped, order[..dropped.len()], "{width} {day}: in order");
             }
-            // Left out in order: ticks, then TP, then SL, then the average.
-            let order = [4, 2, 1, 0];
-            let dropped: Vec<usize> = order.into_iter().filter(|i| place[*i].is_none()).collect();
-            assert_eq!(
-                dropped,
-                order[..dropped.len()],
-                "{width}: left out in order"
-            );
         }
-        // At the narrowest the average and the working count both show.
-        let inner = card_inner(165.0);
-        let place = card_place(&[inner - w("Day $0.00") - 12.0, inner], &items);
-        assert!(place[0].is_some() && place[3].is_some(), "{place:?}");
+        // At the narrowest everything shows with a modest day.
+        let place = card_place(&rooms_at(MIN_DOM_WIDTH, "$0.00"), &items);
+        assert!(place.iter().all(Option::is_some), "{place:?}");
         // Nothing fits: the working count still shows, on the first line.
         assert_eq!(
             card_place(&[0.0], &items),

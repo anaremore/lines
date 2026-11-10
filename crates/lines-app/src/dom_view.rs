@@ -1626,10 +1626,10 @@ mod tests {
         assert!(!ladder_shows(true, true, 0.0));
         assert!(!ladder_shows(true, true, room - 1.0));
         assert!(ladder_shows(true, true, room));
-        // Pane 296 px, width 420: the body has 85 px, and the panel's rows still rule it out.
-        let rows = trade_bar::panel_rows(420.0, 296.0, false, true);
+        // Pane 312 px, width 420: the body has 85 px, and the panel's rows still rule it out.
+        let rows = trade_bar::panel_rows(420.0, 312.0, false, true);
         assert!(!rows.ladder && !rows.entry);
-        assert_eq!(296.0 - 27.0 - rows.height(420.0), 85.0);
+        assert_eq!(312.0 - 27.0 - rows.height(420.0), 85.0);
         assert!(!ladder_shows(true, rows.ladder, 85.0));
         assert!(
             ladder_shows(false, rows.ladder, 85.0),
