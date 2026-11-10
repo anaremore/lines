@@ -207,6 +207,28 @@ pub fn drag_stack(
     out
 }
 
+/// The panes' ratios from a chart's saved fields: `subpane` (the first, which older builds
+/// write and read), then `subpanes` (all, when one below the first was moved) over it; each
+/// clamped, the rest defaults.
+pub fn restore(subpane: Option<f32>, subpanes: &[f32]) -> [f32; MAX_PANES] {
+    let mut r: [f32; MAX_PANES] = std::array::from_fn(default_ratio);
+    if let Some(x) = subpane {
+        r[0] = clamp_ratio(x);
+    }
+    for (k, x) in subpanes.iter().take(MAX_PANES).enumerate() {
+        r[k] = clamp_ratio(*x);
+    }
+    r
+}
+
+/// What a chart saves (the inverse of [`restore`]): `subpane` only when the first pane moved,
+/// `subpanes` only when one below it did.
+pub fn saved(r: &[f32; MAX_PANES]) -> (Option<f32>, Vec<f32>) {
+    let first = (r[0] != DEFAULT_RATIO).then_some(r[0]);
+    let more = (1..MAX_PANES).any(|k| r[k] != default_ratio(k));
+    (first, if more { r.to_vec() } else { Vec::new() })
+}
+
 pub fn clamp_ratio(r: f32) -> f32 {
     if r.is_finite() {
         r.clamp(MIN_RATIO, MAX_RATIO)
@@ -452,6 +474,30 @@ mod tests {
         assert_eq!(s.y(0.0), 100.0);
         assert!(s.y(1_000.0) > 0.0, "padded at the top");
         assert!(Scale::from_zero(0, 100.0).hi > 0.0);
+    }
+
+    /// Saved ratios round-trip; untouched panes save nothing; a file from an older build (only
+    /// `subpane`) restores the first pane; a damaged value falls back.
+    #[test]
+    fn ratios_save_and_restore() {
+        let defaults: [f32; MAX_PANES] = std::array::from_fn(default_ratio);
+        assert_eq!(saved(&defaults), (None, Vec::new()));
+        assert_eq!(restore(None, &[]), defaults);
+        let mut top = defaults;
+        top[0] = 0.4;
+        assert_eq!(
+            saved(&top),
+            (Some(0.4), Vec::new()),
+            "the top divider: subpane only"
+        );
+        assert_eq!(restore(Some(0.4), &[]), top, "an older build's file");
+        let mut lower = defaults;
+        lower[1] = 0.3;
+        let (a, b) = saved(&lower);
+        assert_eq!(a, None);
+        assert_eq!(restore(a, &b), lower);
+        assert_eq!(restore(Some(f32::NAN), &[])[0], DEFAULT_RATIO);
+        assert_eq!(restore(None, &[0.3, 99.0])[1], MAX_RATIO);
     }
 
     #[test]

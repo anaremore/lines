@@ -247,11 +247,12 @@ impl Studies {
     ) {
         for s in &mut self.list {
             if let IndicatorConfig::Volume { spec, display, .. } = &s.config {
-                // Only when the plot grows wider than ever before (as the candle scene).
-                s.vol.reserve(max_columns);
+                // A hidden Volume does no work (its buffer included).
                 if display.hidden {
                     continue;
                 }
+                // Only when the plot grows wider than ever before (as the candle scene).
+                s.vol.reserve(max_columns);
                 let opts = VolumeOptions {
                     split: spec.split,
                     average: spec.average.then(|| spec.window()),
@@ -346,6 +347,9 @@ impl Studies {
             let band = (ph * OVERLAY_SHARE).round();
             let scale = Scale::from_zero(s.vol.max, band);
             let at = (origin.0, origin.1 + ph - band);
+            // All of it under the candles: faint fills, with each bar's top edge and hollow
+            // outlines in the opaque colors (3:1 on the chart), so the bars read as data
+            // without competing with price; the average line under the candles too.
             if back {
                 let cols = volume_colors(s, theme);
                 paint_volume(
@@ -355,10 +359,10 @@ impl Studies {
                     &scale,
                     vp,
                     s.overlay_colors(theme, cols),
+                    Some(cols),
                     theme.hollow,
                     window,
                 );
-            } else {
                 paint_average(s, spec, at, &scale, vp, theme, window);
             }
         }
@@ -591,6 +595,7 @@ impl Studies {
                     scale,
                     vp,
                     volume_colors(s, theme),
+                    None,
                     theme.hollow,
                     window,
                 );
@@ -731,9 +736,23 @@ fn paint_volume(
     scale: &Scale,
     vp: &Viewport,
     [bars_c, up_c, down_c]: [Hsla; 3],
+    edges: Option<[Hsla; 3]>,
     hollow: crate::theme::HollowBodies,
     window: &mut Window,
 ) {
+    // The overlay's edges: outlines and top edges in these (opaque) colors.
+    let edge = |c: Hsla| match edges {
+        Some([b, u, d]) => {
+            if c == up_c {
+                u
+            } else if c == down_c {
+                d
+            } else {
+                b
+            }
+        }
+        None => c,
+    };
     let (up_h, down_h) = (hollow.is_hollow(true), hollow.is_hollow(false));
     let dpi = window.scale_factor();
     let hair = 1.0 / dpi;
@@ -761,6 +780,7 @@ fn paint_volume(
     };
     let draw = |window: &mut Window, x: f32, (top, bot): (f32, f32), col: Hsla, hollow: bool| {
         let (bx, bw, bh) = (x - half, half * 2.0, bot - top);
+        let e = edge(col);
         if hollow && bw >= 3.0 * hair && bh >= 3.0 * hair {
             for q in [
                 rect(bx, top, bw, hair),
@@ -768,10 +788,13 @@ fn paint_volume(
                 rect(bx, top, hair, bh),
                 rect(bx + bw - hair, top, hair, bh),
             ] {
-                window.paint_quad(gpui::fill(q, col));
+                window.paint_quad(gpui::fill(q, e));
             }
         } else {
             window.paint_quad(gpui::fill(rect(bx, top, bw, bh), col));
+            if e != col {
+                window.paint_quad(gpui::fill(rect(bx, top, bw, hair), e));
+            }
         }
     };
     for v in &s.vol.bars {
@@ -1086,6 +1109,11 @@ mod tests {
         let mut st = Studies::new(vec![hidden]);
         st.prepare(view, &fp, &vp, 200);
         assert!(st.list[0].vol.bars.is_empty() && st.list[0].vol.newest.is_none());
+        assert_eq!(
+            st.list[0].vol.bars.capacity(),
+            0,
+            "no buffer reserved either"
+        );
     }
 
     /// N5: a style-only change keeps each study (its engine handle and built columns stay)

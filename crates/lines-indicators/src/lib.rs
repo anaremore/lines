@@ -77,7 +77,7 @@ pub enum IndicatorConfig {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VolumeSpec {
-    /// Bars in candle colors: rising filled, falling hollow.
+    /// Bars in candle colors, hollow or filled as the chart's rising and falling candles are.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub color_by_candle: bool,
     /// An average line over `average_len` bars.

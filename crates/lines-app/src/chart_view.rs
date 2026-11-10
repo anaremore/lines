@@ -2161,17 +2161,7 @@ impl ChartView {
         if !state.styles.is_empty() {
             self.set_study_styles(&state.styles);
         }
-        if let Some(r) = state.subpane {
-            self.subpane_ratios[0] = crate::subpane::clamp_ratio(r);
-        }
-        for (k, r) in state
-            .subpanes
-            .iter()
-            .take(crate::subpane::MAX_PANES)
-            .enumerate()
-        {
-            self.subpane_ratios[k] = crate::subpane::clamp_ratio(*r);
-        }
+        self.subpane_ratios = crate::subpane::restore(state.subpane, &state.subpanes);
         // Saved indicators, then any given on the command line (`--vwap`) not among them.
         let configs = merge_indicators(state.indicators.clone(), self.studies.configs());
         self.set_indicator_configs(configs);
@@ -2421,7 +2411,9 @@ impl ChartView {
             }) => {
                 let dy = f32::from(ev.position.y) - *y0;
                 let r = crate::subpane::drag_stack(self.above_axis, *n, *ratios, *k, dy);
-                self.subpane_ratios[..*n].copy_from_slice(&r[..*n]);
+                // Only the panes the divider moves (the top one: pane 0; another: its two).
+                let moved = if *k == 0 { 0..1 } else { *k - 1..*k + 1 };
+                self.subpane_ratios[moved.clone()].copy_from_slice(&r[moved]);
             }
             None => return,
         }
@@ -4453,7 +4445,7 @@ impl ChartView {
         window.paint_quad(fill(rect(0.0, s.divider_mid(), pw, hair), t.axis_line));
         let sub = rect(0.0, s.sub_top, pw, s.sub_h);
         // The title box (`draw_volume_title`, the delta's) from the pane's top.
-        let title_h = if self.visibility.draws_labels() {
+        let title_h = if self.studies.lower_title(k, None).is_some() {
             4.0 + label_px() * 1.6 + 4.0
         } else {
             0.0
@@ -4645,7 +4637,8 @@ impl ChartView {
     ) {
         let t = self.theme;
         let qty = self.instrument.qty;
-        // The average's own color is the theme's text (`study_style::VOLUME`).
+        // Dimmer than the total, AA on the legend box in every theme (the line itself is the
+        // Average part's color).
         let avg_color = t.text_dim;
         // (part, value, color): the name and total first.
         let mut parts = [(VOL_NAME, 0i64, t.text_main); 6];
@@ -6396,15 +6389,8 @@ impl Pane for ChartView {
             timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
             footprint: self.footprint.config(),
             styles: self.study_styles(),
-            subpane: (self.subpane_ratios[0] != crate::subpane::DEFAULT_RATIO)
-                .then_some(self.subpane_ratios[0]),
-            subpanes: if (1..crate::subpane::MAX_PANES)
-                .any(|k| self.subpane_ratios[k] != crate::subpane::default_ratio(k))
-            {
-                self.subpane_ratios.to_vec()
-            } else {
-                Vec::new()
-            },
+            subpane: crate::subpane::saved(&self.subpane_ratios).0,
+            subpanes: crate::subpane::saved(&self.subpane_ratios).1,
         });
         doc.trade = self.trade.doc();
     }
@@ -7231,6 +7217,19 @@ mod tests {
         assert_eq!(out, vec![recolored], "color and width are styles");
         let out = merge_indicators(vec![styled.clone()], vec![vwap(Reset::Rth)]);
         assert_eq!(out, vec![styled, vwap(Reset::Rth)]);
+        // One Volume per chart: a saved one wins over the command line's, whatever its options.
+        let volume = |color_by_candle| IndicatorConfig::Volume {
+            spec: lines_indicators::VolumeSpec {
+                color_by_candle,
+                ..Default::default()
+            },
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let out = merge_indicators(vec![volume(false)], vec![volume(true), vwap(Reset::Eth)]);
+        assert_eq!(out, vec![volume(false), vwap(Reset::Eth)]);
+        let out = merge_indicators(vec![], vec![volume(true)]);
+        assert_eq!(out, vec![volume(true)]);
     }
     use lines_core::{Aggressor, Capabilities, Month, Qty};
     use lines_feed::catalog;
