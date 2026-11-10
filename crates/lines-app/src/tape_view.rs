@@ -506,7 +506,7 @@ impl TapeView {
             let tw = pane::text_px(window, crate::zoom::ui(12.0));
             let room = self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Tape);
             let rest = pane::side_header_px(
-                self.common.link.is_some(),
+                true, // a market pane always shows its link marker
                 &contract,
                 "Time & sales",
                 word,
