@@ -180,14 +180,15 @@ fn tabs_height(e: &StyleEditor) -> f32 {
 /// or short) and the borders.
 fn chrome_height(e: &StyleEditor) -> f32 {
     // The title is the panel's title bar (`popover::floating`), above the box.
-    let title = crate::popover::TITLE_H;
+    let title = crate::popover::title_h();
     let save = if e.default_label.is_some() {
         4.0 + 28.0
     } else {
         0.0
     };
-    let hint = 8.0 + line_h(11.0);
-    2.0 + title + tabs_height(e) + 1.0 + save + hint
+    // The footer holds only "Save as default" (no key hints: the title bar carries the panel).
+    let pad = if save > 0.0 { 4.0 } else { 0.0 };
+    2.0 + title + tabs_height(e) + 1.0 + save + pad
 }
 
 /// Whether `row` is drawn in the footer ("Save as default"), outside the scroll body.
@@ -623,8 +624,6 @@ pub fn render(
     cx: &mut Context<ChartView>,
 ) -> AnyElement {
     let scroll = &es.handle;
-    // Short of room: the key hint shortens (the keys still work) and the body scrolls.
-    let full_hint = content_h <= at.h;
     let rows = e.rows();
     let focus = (e.row, e.col);
     let names = names(e, t);
@@ -849,36 +848,20 @@ pub fn render(
         body_len(&rows),
         "one body child per row (`body_child`)"
     );
-    let hint = match (full_hint, e.parts.len() > 1) {
-        (true, true) => "↑↓←→ move · Enter pick · Tab next part · Esc close",
-        (true, false) => "↑↓←→ move · Enter pick · Esc close",
-        (false, true) => "Tab next part · Esc close",
-        (false, false) => "Esc close",
-    };
-    let footer = div()
-        .flex_none()
-        .border_t_1()
-        .border_color(t.axis_line)
-        .when_some(footer_save, |d, s| {
-            d.child(
+    let footer = footer_save.map(|s| {
+        div()
+            .flex_none()
+            .border_t_1()
+            .border_color(t.axis_line)
+            .child(
                 div()
                     .px(crate::zoom::ui(12.0))
-                    .pt(crate::zoom::ui(4.0))
+                    .py(crate::zoom::ui(4.0))
                     .flex()
                     .flex_row()
                     .child(s),
             )
-        })
-        .child(
-            div()
-                .px(crate::zoom::ui(12.0))
-                .py(crate::zoom::ui(4.0))
-                .text_size(crate::zoom::ui(11.0))
-                .text_color(t.text_dim)
-                .whitespace_nowrap()
-                .truncate()
-                .child(hint),
-        );
+    });
     // The scrollbar: from the body's last layout, else (first frame) from the estimate.
     let view_h = f32::from(scroll.bounds().size.height);
     let (view_h, body_h) = if view_h > 0.0 {
@@ -926,7 +909,7 @@ pub fn render(
                 .id("style-editor")
                 .occlude()
                 .w(px(at.w))
-                .max_h(px((at.h - crate::popover::TITLE_H).max(0.0)))
+                .max_h(px((at.h - crate::popover::title_h()).max(0.0)))
                 .overflow_hidden()
                 .flex()
                 .flex_col()
@@ -937,7 +920,7 @@ pub fn render(
                 .text_size(crate::zoom::ui(13.0))
                 .children(tabs_strip)
                 .child(body)
-                .child(footer),
+                .children(footer),
         )
         .into_any_element()
 }

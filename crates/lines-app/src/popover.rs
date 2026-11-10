@@ -521,8 +521,13 @@ pub fn wheel_rows(ev: &gpui::ScrollEvent, window: &Window) -> isize {
     })
 }
 
-/// The title bar's height (logical px): the × keeps its 20 px hit box.
+/// The title bar's height at 100 % (logical px): the × keeps its 20 px hit box.
 pub const TITLE_H: f32 = 24.0;
+
+/// The title bar's height at the UI zoom (never under [`TITLE_H`]).
+pub fn title_h() -> f32 {
+    crate::zoom::f(TITLE_H).max(TITLE_H)
+}
 
 /// `origin` moved so a panel of `size` lies inside `window` (all logical px). A panel bigger
 /// than the window keeps its top-left (the title bar) on screen.
@@ -628,7 +633,7 @@ impl Floating {
             .id(("panel-title", panel as u64))
             .occlude()
             .w(width)
-            .h(px(TITLE_H))
+            .h(px(title_h()))
             .flex()
             .flex_row()
             .items_center()
@@ -640,7 +645,7 @@ impl Floating {
             .border_b_0()
             .border_color(t.axis_line)
             .rounded_t_md()
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .cursor_grab()
             .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, _| {
                 let p = (f32::from(ev.position.x), f32::from(ev.position.y));
@@ -722,7 +727,7 @@ impl Element for Floating {
         let at = panel_place(
             saved_place(self.panel, cx),
             natural,
-            (w, h + TITLE_H),
+            (w, h + title_h()),
             (f32::from(v.width), f32::from(v.height)),
         );
         // A drag keeps the place as drawn (inside the window), which is what a release saves.
@@ -730,7 +735,7 @@ impl Element for Floating {
             d.at = at;
             PANEL_DRAG.with(|c| c.set(Some(d)));
         }
-        let rect = Rect::new(at.0, at.1, w, h + TITLE_H);
+        let rect = Rect::new(at.0, at.1, w, h + title_h());
         let close = dismiss.clone();
         defer_backdrop(
             window,
@@ -744,7 +749,7 @@ impl Element for Floating {
         bar.layout_as_root(
             size(
                 AvailableSpace::Definite(bounds.size.width),
-                AvailableSpace::Definite(px(TITLE_H)),
+                AvailableSpace::Definite(px(title_h())),
             ),
             window,
             cx,
@@ -752,7 +757,7 @@ impl Element for Floating {
         window.defer_draw(bar, point(px(at.0), px(at.1)), priority, None);
         // As `gpui::deferred`, moved from where its own layout put it to under the title bar.
         let offset =
-            window.element_offset() + point(px(at.0 - natural.0), px(at.1 + TITLE_H - natural.1));
+            window.element_offset() + point(px(at.0 - natural.0), px(at.1 + title_h() - natural.1));
         window.defer_draw(content, offset, priority, None);
     }
 

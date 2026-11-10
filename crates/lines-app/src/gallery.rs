@@ -177,6 +177,40 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             end,
             args("--layout chart --size 1400x800 --theme dark --picker nq"),
         ),
+        // Floating panels: the palette where it opens (quick), Open workspace with the mouse,
+        // both dragged (kept inside the window), and a narrow window.
+        s(
+            "panel-palette",
+            true,
+            end,
+            args("--layout chart --size 1400x800 --theme dark --prompt palette:hide"),
+        ),
+        s(
+            "panel-open-light",
+            false,
+            end,
+            args("--layout chart --size 1400x800 --theme light --prompt open"),
+        ),
+        s(
+            "panel-palette-moved",
+            false,
+            end,
+            args(
+                "--layout chart --size 1400x800 --theme dark --prompt palette --panel-at 1300,700",
+            ),
+        ),
+        s(
+            "panel-picker-moved-light",
+            false,
+            end,
+            args("--layout chart --size 1400x800 --theme light --picker nq --panel-at 40,500"),
+        ),
+        s(
+            "panel-palette-narrow",
+            false,
+            end,
+            args("--layout chart --size 520x600 --theme dark --prompt palette"),
+        ),
         // Pop-out window, journal, footprint.
         s(
             "popout",
@@ -211,6 +245,11 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         s(name, quick, end, a)
     };
     v.push(paper("orders-armed", true, ORDERS, "--arm"));
+    // The grouped-order list in its floating panel.
+    let mut g = args("--layout chart --size 1400x800 --theme dark --order-group-menu");
+    g.push("--paper".into());
+    g.push("buy 1 @ 6015.00; ack; buy 1 @ 6015.25; ack; buy 1 @ 6015.50; ack".into());
+    v.push(s("panel-order-group", false, end, g));
     v.push(paper(
         "order-controls",
         true,

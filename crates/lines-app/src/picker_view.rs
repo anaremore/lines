@@ -369,7 +369,12 @@ impl PickerUi {
                     .when(selected, |d| d.bg(t.accent.opacity(0.16)))
                     .when(!selected, |d| d.hover(|s| s.bg(t.accent.opacity(0.08))))
                     .cursor_pointer()
-                    .child(div().w(crate::zoom::ui(12.0)).text_color(t.text_dim).child(star))
+                    .child(
+                        div()
+                            .w(crate::zoom::ui(12.0))
+                            .text_color(t.text_dim)
+                            .child(star),
+                    )
                     .child(
                         div()
                             .flex_none()
