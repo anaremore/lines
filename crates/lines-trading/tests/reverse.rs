@@ -402,9 +402,9 @@ fn without_reduce_only_a_lost_cancel_closes_but_doesnt_open() {
     );
 }
 
-/// On a thin book (one small level, as a top-of-book feed gives) both orders work on, and the
-/// opening stays an entry: when liquidity comes the close fills first and the opening still opens
-/// the new side, never shrunk away as a second close.
+/// On a thin book (one small level, as a top-of-book feed gives, already taken) the close and the
+/// opening both fill whole past it with modelled slippage (issue #94): the opening stays an entry
+/// and opens the new side, never shrunk away as a second close.
 #[test]
 fn on_a_thin_book_the_opening_still_opens() {
     let mut r = Rig::new(true);
@@ -434,9 +434,6 @@ fn on_a_thin_book_the_opening_still_opens() {
     r.reverse().unwrap();
     r.wait(LAT + 1);
     r.wait(LAT + 1);
-    assert_eq!(r.pos(), 3, "nothing to take yet: both work on");
-    thin(&mut r, 20);
-    r.wait(1);
     assert_eq!(r.pos(), -3, "closed, then opened");
     assert!(r.open_orders().is_empty());
 }
