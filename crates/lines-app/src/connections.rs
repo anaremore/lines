@@ -113,11 +113,15 @@ pub fn state(on: bool, in_run: bool, needs: Option<&'static str>, feeds: &[FeedS
     if !on {
         return State::Off { running: in_run };
     }
-    if let Some(needs) = needs {
-        return State::NotSetUp { needs };
-    }
-    if !in_run {
-        return State::NextStart;
+    // Running feeds say what they are doing, set up or not (a key removed while connected,
+    // `--source` given without one).
+    if !(in_run && !feeds.is_empty()) {
+        if let Some(needs) = needs {
+            return State::NotSetUp { needs };
+        }
+        if !in_run {
+            return State::NextStart;
+        }
     }
     // A problem on any of its feeds shows first: never hidden behind another's connection.
     if let Some(why) = feeds.iter().find_map(|s| match s {
@@ -305,6 +309,29 @@ pub fn install(saved: &Plain) {
     extension::set_settings_store(Arc::new(AppStore));
 }
 
+fn not_started() -> &'static RwLock<HashMap<String, &'static str>> {
+    static N: OnceLock<RwLock<HashMap<String, &'static str>>> = OnceLock::new();
+    N.get_or_init(Default::default)
+}
+
+/// A source on but not started because a required setting had no value, with that
+/// setting's label (decided once at startup).
+pub fn mark_not_set_up(source: &str, needs: &'static str) {
+    not_started()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(source.to_owned(), needs);
+}
+
+/// Why a source on in Settings isn't in this run: the required setting it lacked.
+pub fn not_set_up(source: &str) -> Option<&'static str> {
+    not_started()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(source)
+        .copied()
+}
+
 /// The first required setting of a registered source with no value (its environment
 /// variable counts). Reads the keychain: call it off the UI thread.
 pub fn needs(source: &str, fields: &[Field]) -> Option<&'static str> {
@@ -384,6 +411,11 @@ mod tests {
         assert_eq!(
             state(true, true, Some("API key"), &[]),
             State::NotSetUp { needs: "API key" }
+        );
+        // A source that is running says what it is doing, set up or not.
+        assert_eq!(
+            state(true, true, Some("API key"), std::slice::from_ref(&live)),
+            State::Connected { feeds: 1 }
         );
         assert_eq!(state(true, false, None, &[]), State::NextStart);
         assert_eq!(state(true, true, None, &[]), State::Idle);

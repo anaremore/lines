@@ -273,6 +273,13 @@ fn missing_reason(name: &str) -> String {
 }
 
 fn missing_reason_with(name: &str, databento: Option<bool>) -> String {
+    // On, but missing a setting it describes (decision 0030 §6): say so and where.
+    if let Some(needs) = crate::connections::not_set_up(name) {
+        return format!(
+            "{} isn't set up: needs {needs}. Set it up in Settings › Connections",
+            source_label(name)
+        );
+    }
     if name == crate::DATABENTO && databento == Some(false) {
         return "Databento is not set up: no API key (see Settings › Data)".to_owned();
     }
@@ -532,6 +539,15 @@ mod tests {
         assert_eq!(
             missing_reason_with("databento", Some(true)),
             "Databento is off or not in this build"
+        );
+        // On but not set up: the pane says so, and where (decision 0030 §6).
+        crate::connections::mark_not_set_up("acme-not-set-up", "API key");
+        let err = s
+            .for_pane(Some("acme-not-set-up"), Some(&doc(catalog::BTC_USD)))
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            "Acme-not-set-up isn't set up: needs API key. Set it up in Settings › Connections"
         );
         // A pane that shows no market (a journal) is never unavailable for its source.
         assert_eq!(s.for_pane(Some("kraken"), None).unwrap().name, "mock");

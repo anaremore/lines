@@ -1591,47 +1591,6 @@ fn table() -> Vec<Setting> {
             },
             None,
         ),
-        // Connections: the sources (drawn as cards by `connections_view`, each with its switch;
-        // the two switches below stay rows for search and the palette).
-        s(
-            CONNECTIONS_LIST,
-            Sec::Connections,
-            "Data sources",
-            "Each source connects only when a pane shows one of its symbols. A source's switch applies when Lines restarts; its settings, the next time it connects. Secrets are kept in the system's keychain.",
-            Scope::App,
-            Normal,
-            Info,
-            |_, _, _| Value::Text(String::new()),
-            None,
-        ),
-        with_default(
-            s(
-                "data.coinbase",
-                Sec::Connections,
-                "Coinbase",
-                "Public crypto prices (BTC/USD, ETH/USD). Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
-                Scope::App,
-                Normal,
-                Toggle,
-                |p, _, _| Value::Bool(source_on(p, "coinbase")),
-                Some(|p, _, v| set_source(p, "coinbase", want_bool(v)?)),
-            ),
-            Value::Bool(true),
-        ),
-        with_default(
-            s(
-                "data.kraken",
-                Sec::Connections,
-                "Kraken",
-                "Public crypto prices, spot and perpetuals. Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
-                Scope::App,
-                Normal,
-                Toggle,
-                |p, _, _| Value::Bool(source_on(p, "kraken")),
-                Some(|p, _, v| set_source(p, "kraken", want_bool(v)?)),
-            ),
-            Value::Bool(true),
-        ),
         with_default(
             s(
                 "data.databento",
@@ -1747,6 +1706,47 @@ fn table() -> Vec<Setting> {
                 }),
             ),
             Value::List(Vec::new()),
+        ),
+        // Connections: the sources (drawn as cards by `connections_view`, each with its switch;
+        // the two switches below stay rows for search and the palette).
+        s(
+            CONNECTIONS_LIST,
+            Sec::Connections,
+            "Data sources",
+            "Each source connects only when a pane shows one of its symbols. A source's switch applies when Lines restarts; its settings, the next time it connects. Secrets are kept in the system's keychain.",
+            Scope::App,
+            Normal,
+            Info,
+            |_, _, _| Value::Text(String::new()),
+            None,
+        ),
+        with_default(
+            s(
+                "data.coinbase",
+                Sec::Connections,
+                "Coinbase",
+                "Public crypto prices (BTC/USD, ETH/USD). Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, "coinbase")),
+                Some(|p, _, v| set_source(p, "coinbase", want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
+        with_default(
+            s(
+                "data.kraken",
+                Sec::Connections,
+                "Kraken",
+                "Public crypto prices, spot and perpetuals. Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, "kraken")),
+                Some(|p, _, v| set_source(p, "kraken", want_bool(v)?)),
+            ),
+            Value::Bool(true),
         ),
         // Keys.
         s(

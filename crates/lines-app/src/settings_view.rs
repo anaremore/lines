@@ -1219,6 +1219,21 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
+        // On Connections, ↑/↓ move between the cards' controls and Enter or Space press one
+        // (design.md §6: every action reachable from the keyboard).
+        if self.section == Section::Connections
+            && self.query.trim().is_empty()
+            && self.pending.is_none()
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.alt
+            && let Some(pressed) = self.conn.nav_key(ev.keystroke.key.as_str())
+        {
+            if let Some(a) = pressed {
+                self.conn_action(a, cx);
+            }
+            cx.notify();
+            return;
+        }
         if self.zone_pick.is_some() {
             self.zone_key(ev, cx);
             return;
@@ -2526,7 +2541,6 @@ impl SettingsWindow {
                     );
                 }
             }),
-            Action::Show(name, key) => self.conn.toggle_shown(&name, key),
             Action::Edit(name, field) => {
                 let buf = match field.kind {
                     // A secret is typed afresh (Replace); never put back in a field.
@@ -2578,6 +2592,18 @@ impl SettingsWindow {
                 });
                 crate::connections::sync_plain(&settings(cx).connections);
                 // Setup may have changed ("not set up").
+                self.conn.reload(None);
+            }
+            Commit::Clear(name, key) => {
+                update_settings(cx, |s| {
+                    if let Some(m) = s.connections.get_mut(&name) {
+                        m.remove(key);
+                        if m.is_empty() {
+                            s.connections.remove(&name);
+                        }
+                    }
+                });
+                crate::connections::sync_plain(&settings(cx).connections);
                 self.conn.reload(None);
             }
         }

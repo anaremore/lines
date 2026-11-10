@@ -1,9 +1,13 @@
 //! Settings › Connections' page (decision 0030 §3–4): one card per source with its state, its
 //! plan, its on/off switch, the settings it describes (text, choice, switch, secret) and Test.
-//! Secrets are read and written on a worker thread (a keychain may block), shown masked to
-//! their last 4 characters, with Show, Replace and Remove.
+//!
+//! A saved secret is never shown again in full (only "Configured", where it comes from and
+//! its last 4 characters): the keychain is read on a worker thread (a keychain may block) and
+//! only the masked form reaches the window. Replace types a new one; Remove takes two presses.
+//! Every control is reachable from the keyboard: ↑/↓ move between them, Enter or Space press.
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -21,11 +25,14 @@ use crate::theme::Theme;
 
 /// How long Test waits for the source to go live.
 const TEST_FOR: Duration = Duration::from_secs(15);
+/// How long a first press on Remove waits for the second.
+const REMOVE_CONFIRM: Duration = Duration::from_secs(4);
 
 /// Secrets and setup, as the worker read them.
 #[derive(Default)]
 pub(crate) struct Loaded {
-    /// `(source, field)` → the saved secret (`None`: none saved).
+    /// `(source, field)` → the saved secret masked to its last 4 characters (`None`: none
+    /// saved). The full value never leaves the worker.
     secrets: HashMap<(String, &'static str), Option<String>>,
     /// Source → the first required setting with no value.
     needs: HashMap<String, Option<&'static str>>,
@@ -45,6 +52,9 @@ struct Test {
     sub: Subscription,
     started: Instant,
     last_reason: Option<String>,
+    /// A pane's running connection was joined (its answer is that connection's, not a new
+    /// one's).
+    reused: bool,
 }
 
 /// One keychain job: an optional write, then a fresh read of everything.
@@ -55,12 +65,7 @@ type Job = Box<dyn FnOnce() -> Loaded + Send>;
 struct Worker {
     jobs: mpsc::Sender<Job>,
     done: mpsc::Receiver<Loaded>,
-    /// Jobs sent and not yet answered.
-    out: usize,
 }
-
-/// How long a first press on Remove waits for the second.
-const REMOVE_CONFIRM: Duration = Duration::from_secs(4);
 
 /// What the page holds between frames.
 #[derive(Default)]
@@ -69,20 +74,21 @@ pub(crate) struct ConnPage {
     worker: Option<Worker>,
     /// A secret's Remove pressed once: a second press within `REMOVE_CONFIRM` removes it.
     remove_armed: Option<(String, &'static str, Instant)>,
-    /// Secrets shown in full (Show pressed), until the window closes.
-    shown: HashSet<(String, &'static str)>,
     pub(crate) edit: Option<Edit>,
     test: Option<Test>,
     /// Source → the last Test's words and whether it failed.
     results: HashMap<String, (String, bool)>,
+    /// The keyboard's control, an index into `controls`.
+    focus: usize,
+    /// The page's controls in drawing order, as last drawn (what ↑/↓ and Enter act on).
+    controls: RefCell<Vec<Action>>,
 }
 
 /// What a press on the page asks for (`SettingsWindow::conn_action` does it).
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Action {
     /// A source on or off (applies at the next start).
     Switch(String, bool),
-    Show(String, &'static str),
     /// Start typing a text or secret field.
     Edit(String, Field),
     Remove(String, &'static str),
@@ -94,14 +100,17 @@ pub(crate) enum Action {
 }
 
 /// What a finished edit writes.
+#[derive(Debug, PartialEq)]
 pub(crate) enum Commit {
     Secret(String, &'static str, String),
     Plain(String, &'static str, String),
+    /// An emptied plain field: no value (a choice's first, else unset).
+    Clear(String, &'static str),
 }
 
 impl ConnPage {
-    /// Read every source's secrets and setup off the UI thread, after `first` (a save or a
-    /// remove) if given.
+    /// Read every source's secrets (masked) and setup off the UI thread, after `first` (a
+    /// save or a remove) if given.
     pub(crate) fn reload(&mut self, first: Option<Box<dyn FnOnce() -> Result<(), String> + Send>>) {
         let rows = conn::rows();
         let read = move || {
@@ -117,7 +126,8 @@ impl ConnPage {
                         l.error.get_or_insert(e);
                         None
                     });
-                    l.secrets.insert((r.name.clone(), f.key), v);
+                    l.secrets
+                        .insert((r.name.clone(), f.key), v.as_deref().map(conn::masked));
                 }
                 l.needs
                     .insert(r.name.clone(), conn::needs(&r.name, &r.fields));
@@ -141,15 +151,18 @@ impl ConnPage {
                         }
                     }
                 });
-            if spawned.is_err() {
+            if let Err(e) = spawned {
+                // Say so once; the page doesn't try again every frame.
+                self.loaded = Some(Loaded {
+                    error: Some(format!("couldn't start the keychain reader: {e}")),
+                    ..Loaded::default()
+                });
                 return;
             }
-            self.worker = Some(Worker { jobs, done, out: 0 });
+            self.worker = Some(Worker { jobs, done });
         }
-        if let Some(w) = &mut self.worker
-            && w.jobs.send(Box::new(read)).is_ok()
-        {
-            w.out += 1;
+        if let Some(w) = &self.worker {
+            let _ = w.jobs.send(Box::new(read));
         }
     }
 
@@ -186,14 +199,34 @@ impl ConnPage {
             .is_some_and(|(s, k, at)| s == source && *k == key && at.elapsed() < REMOVE_CONFIRM)
     }
 
+    /// ↑/↓ move the keyboard between the page's controls; Enter or Space press the one it is
+    /// on (`Some`). Other keys: `None`, not handled.
+    pub(crate) fn nav_key(&mut self, key: &str) -> Option<Option<Action>> {
+        let n = self.controls.borrow().len();
+        if n == 0 {
+            return None;
+        }
+        match key {
+            "up" => {
+                self.focus = self.focus.saturating_sub(1);
+                Some(None)
+            }
+            "down" => {
+                self.focus = (self.focus + 1).min(n - 1);
+                Some(None)
+            }
+            "enter" | "space" => Some(self.controls.borrow().get(self.focus.min(n - 1)).cloned()),
+            _ => None,
+        }
+    }
+
     /// The window's poll: the worker's answer, the running Test. `true`: redraw.
     pub(crate) fn tick(&mut self) -> bool {
         let mut changed = false;
-        if let Some(w) = &mut self.worker {
+        if let Some(w) = &self.worker {
             loop {
                 match w.done.try_recv() {
                     Ok(l) => {
-                        w.out = w.out.saturating_sub(1);
                         self.loaded = Some(l);
                         changed = true;
                     }
@@ -225,6 +258,10 @@ impl ConnPage {
                 t.last_reason = Some(reason.clone());
             }
             let done = match status {
+                Some(FeedStatus::Live) if t.reused => Some((
+                    "Connected (the connection a pane already uses)".to_owned(),
+                    false,
+                )),
                 Some(FeedStatus::Live) => Some((
                     format!("Connected in {:.1} s", t.started.elapsed().as_secs_f32()),
                     false,
@@ -264,7 +301,11 @@ impl ConnPage {
             );
             return;
         };
-        match crate::feeds::Feeds::registry(cx).subscribe(entry.base.clone()) {
+        let registry = crate::feeds::Feeds::registry(cx);
+        let reused = !registry
+            .stores_of(&lines_feed::registry::source_key(&entry.base.source))
+            .is_empty();
+        match registry.subscribe(entry.base.clone()) {
             Ok(sub) => {
                 self.results.remove(source);
                 self.test = Some(Test {
@@ -272,19 +313,13 @@ impl ConnPage {
                     sub,
                     started: Instant::now(),
                     last_reason: None,
+                    reused,
                 });
             }
             Err(e) => {
                 self.results
                     .insert(source.to_owned(), (format!("Refused: {e:#}"), true));
             }
-        }
-    }
-
-    pub(crate) fn toggle_shown(&mut self, source: &str, key: &'static str) {
-        let k = (source.to_owned(), key);
-        if !self.shown.remove(&k) {
-            self.shown.insert(k);
         }
     }
 
@@ -315,15 +350,33 @@ impl ConnPage {
         None
     }
 
-    /// Enter or Save: what the edit writes (an empty secret is ignored: Remove clears one).
+    /// Enter or Save: what the edit writes. An empty secret writes nothing (Remove clears
+    /// one); an emptied plain field clears its value.
     pub(crate) fn finish(&mut self) -> Option<Commit> {
         let e = self.edit.take()?;
         let value = e.buf.trim().to_owned();
         match e.field.kind {
             FieldKind::Secret if value.is_empty() => None,
             FieldKind::Secret => Some(Commit::Secret(e.source, e.field.key, value)),
+            _ if value.is_empty() => Some(Commit::Clear(e.source, e.field.key)),
             _ => Some(Commit::Plain(e.source, e.field.key, value)),
         }
+    }
+}
+
+/// Registers the page's controls in drawing order (for the keyboard) and says which one has
+/// the keyboard.
+struct Ctl<'a> {
+    page: &'a ConnPage,
+    next: usize,
+}
+
+impl Ctl<'_> {
+    fn take(&mut self, a: &Action) -> bool {
+        self.page.controls.borrow_mut().push(a.clone());
+        let focused = self.next == self.page.focus;
+        self.next += 1;
+        focused
     }
 }
 
@@ -331,6 +384,7 @@ impl ConnPage {
 fn segments(
     id: &str,
     options: &[(&str, bool, Action)],
+    ctl: &mut Ctl<'_>,
     t: &Theme,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
@@ -343,6 +397,7 @@ fn segments(
         .border_color(t.axis_line)
         .rounded_sm();
     for (j, (name, on, action)) in options.iter().enumerate() {
+        let focused = ctl.take(action);
         let a = action.clone();
         seg = seg.child(
             div()
@@ -350,6 +405,12 @@ fn segments(
                 .px_2()
                 .whitespace_nowrap()
                 .cursor_pointer()
+                .border_1()
+                .border_color(if focused {
+                    t.accent
+                } else {
+                    gpui::transparent_black()
+                })
                 .when(*on, |d| d.bg(t.accent).text_color(t.bg))
                 .child((*name).to_owned())
                 .on_mouse_down(
@@ -365,9 +426,11 @@ fn button(
     id: String,
     label: &str,
     action: Action,
+    ctl: &mut Ctl<'_>,
     t: &Theme,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
+    let focused = ctl.take(&action);
     div()
         .id(SharedString::from(id))
         .flex_none()
@@ -375,7 +438,7 @@ fn button(
         .px_2()
         .rounded_sm()
         .border_1()
-        .border_color(t.axis_line)
+        .border_color(if focused { t.accent } else { t.axis_line })
         .cursor_pointer()
         .child(label.to_owned())
         .on_mouse_down(
@@ -413,6 +476,19 @@ fn line(label: &str, content: AnyElement, t: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+fn field_box(text: String, editing: bool, t: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .min_w(crate::zoom::ui(160.0))
+        .px_2()
+        .rounded_sm()
+        .border_1()
+        .border_color(if editing { t.accent } else { t.axis_line })
+        .text_color(t.text_main)
+        .child(text)
+        .into_any_element()
+}
+
 /// An empty field: "Not set", dimmed so it never reads as a saved value.
 fn empty_box(t: &Theme) -> AnyElement {
     div()
@@ -427,21 +503,16 @@ fn empty_box(t: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn field_box(text: String, editing: bool, t: &Theme) -> AnyElement {
-    div()
-        .flex_none()
-        .min_w(crate::zoom::ui(160.0))
-        .px_2()
-        .rounded_sm()
-        .border_1()
-        .border_color(if editing { t.accent } else { t.axis_line })
-        .text_color(t.text_main)
-        .child(text)
-        .into_any_element()
+/// The environment variable that overrides this field, when it is set.
+fn env_override(f: &Field) -> Option<&'static str> {
+    f.env
+        .filter(|v| std::env::var(v).is_ok_and(|x| !x.is_empty()))
 }
 
 /// The page: one card per source (`connections::rows`).
 pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>) -> AnyElement {
+    page.controls.borrow_mut().clear();
+    let mut ctl = Ctl { page, next: 0 };
     let settings = crate::picker_view::settings(cx);
     let prefs = settings.sources.clone();
     let plain = settings.connections.clone();
@@ -460,12 +531,13 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
         let on = prefs.get(&name).is_none_or(crate::sources::SourcePrefs::on);
         let entry = env.as_ref().and_then(|e| e.sources.get(&name));
         let feeds: Vec<FeedStatus> = entry
-            .as_ref()
             .map(|e| {
                 registry
                     .stores_of(&lines_feed::registry::source_key(&e.base.source))
                     .iter()
-                    .filter_map(|s| s.try_read().map(|d| d.status.clone()))
+                    // A store's lock is held only briefly (a batch): wait for it rather than
+                    // drop the feed from this frame's state.
+                    .map(|s| s.read().status.clone())
                     .collect()
             })
             .unwrap_or_default();
@@ -500,6 +572,7 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                 ("Off", !on, Action::Switch(name.clone(), false)),
                 ("On", on, Action::Switch(name.clone(), true)),
             ],
+            &mut ctl,
             t,
             cx,
         );
@@ -560,11 +633,19 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                         .flex_row()
                         .gap_1()
                         .child(field_box(format!("{shown}▏"), true, t))
-                        .child(button(format!("{id}-save"), "Save", Action::Save, t, cx))
+                        .child(button(
+                            format!("{id}-save"),
+                            "Save",
+                            Action::Save,
+                            &mut ctl,
+                            t,
+                            cx,
+                        ))
                         .child(button(
                             format!("{id}-cancel"),
                             "Cancel",
                             Action::Cancel,
+                            &mut ctl,
                             t,
                             cx,
                         ))
@@ -575,33 +656,42 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                         .loaded
                         .as_ref()
                         .map(|l| l.secrets.get(&(name.clone(), f.key)).cloned().flatten());
-                    let mut d = div().flex().flex_row().gap_1();
+                    let mut d = div().flex().flex_row().items_center().gap_1();
+                    if let Some(var) = env_override(f) {
+                        // Where the value comes from, never the value.
+                        d = d.child(div().text_color(t.text_main).child(format!(
+                            "Configured · environment variable {var} (overrides)"
+                        )));
+                    }
                     match saved {
                         None => d = d.child(field_box("…".to_owned(), false, t)),
                         Some(None) => {
-                            d = d.child(empty_box(t)).child(button(
+                            if env_override(f).is_none() {
+                                d = d.child(empty_box(t));
+                            }
+                            d = d.child(button(
                                 format!("{id}-enter"),
                                 "Enter",
                                 Action::Edit(name.clone(), f.clone()),
+                                &mut ctl,
                                 t,
                                 cx,
-                            ))
+                            ));
                         }
-                        Some(Some(v)) => {
-                            let open = page.shown.contains(&(name.clone(), f.key));
+                        Some(Some(masked)) => {
                             d = d
-                                .child(field_box(if open { v } else { conn::masked(&v) }, false, t))
-                                .child(button(
-                                    format!("{id}-show"),
-                                    if open { "Hide" } else { "Show" },
-                                    Action::Show(name.clone(), f.key),
-                                    t,
-                                    cx,
-                                ))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(t.text_main)
+                                        .child("Configured · keychain"),
+                                )
+                                .child(field_box(masked, false, t))
                                 .child(button(
                                     format!("{id}-replace"),
                                     "Replace",
                                     Action::Edit(name.clone(), f.clone()),
+                                    &mut ctl,
                                     t,
                                     cx,
                                 ))
@@ -613,6 +703,7 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                                         "Remove"
                                     },
                                     Action::Remove(name.clone(), f.key),
+                                    &mut ctl,
                                     t,
                                     cx,
                                 )));
@@ -620,22 +711,30 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                     }
                     d.into_any_element()
                 }
-                (FieldKind::Text, None) => div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .child(match conn::plain_value(&plain, &name, f) {
-                        Some(v) => field_box(v, false, t),
-                        None => empty_box(t),
-                    })
-                    .child(button(
+                (FieldKind::Text, None) => {
+                    let mut d = div().flex().flex_row().gap_1().child(
+                        match conn::plain_value(&plain, &name, f).filter(|v| !v.is_empty()) {
+                            Some(v) => field_box(v, false, t),
+                            None => empty_box(t),
+                        },
+                    );
+                    d = d.child(button(
                         format!("{id}-edit"),
                         "Edit",
                         Action::Edit(name.clone(), f.clone()),
+                        &mut ctl,
                         t,
                         cx,
-                    ))
-                    .into_any_element(),
+                    ));
+                    if let Some(var) = env_override(f) {
+                        d = d.child(
+                            div()
+                                .text_color(t.text_dim)
+                                .child(format!("{var} is set and overrides this")),
+                        );
+                    }
+                    d.into_any_element()
+                }
                 (FieldKind::Choice(values), _) => {
                     let now = conn::plain_value(&plain, &name, f);
                     let opts: Vec<(&str, bool, Action)> = values
@@ -648,7 +747,7 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                             )
                         })
                         .collect();
-                    segments(&id, &opts, t, cx)
+                    segments(&id, &opts, &mut ctl, t, cx)
                 }
                 (FieldKind::Switch, _) => {
                     let now = conn::plain_value(&plain, &name, f).as_deref() == Some("on");
@@ -658,26 +757,13 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                             ("Off", !now, Action::Set(name.clone(), f.key, "off".into())),
                             ("On", now, Action::Set(name.clone(), f.key, "on".into())),
                         ],
+                        &mut ctl,
                         t,
                         cx,
                     )
                 }
             };
             card = card.child(line(f.label, content, t));
-            // An environment variable wins over what is saved here (tests, headless runs).
-            if let Some(var) = f
-                .env
-                .filter(|v| std::env::var(v).is_ok_and(|x| !x.is_empty()))
-            {
-                card = card.child(line(
-                    "",
-                    div()
-                        .text_color(t.text_dim)
-                        .child(format!("{var} is set and overrides this"))
-                        .into_any_element(),
-                    t,
-                ));
-            }
         }
         let testing = page.test.as_ref().is_some_and(|x| x.source == name);
         let mut test_row = div().flex().flex_row().items_center().gap_2();
@@ -688,6 +774,7 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                 format!("conn-{name}-test"),
                 "Test",
                 Action::Test(name.clone()),
+                &mut ctl,
                 t,
                 cx,
             ))
@@ -728,21 +815,26 @@ mod tests {
     }
 
     /// Decision 0030 §4: a typed secret goes to the keychain (trimmed); an empty one writes
-    /// nothing (Remove clears a secret); a plain field writes what was typed.
+    /// nothing (Remove clears a secret); a plain field writes what was typed, or clears its
+    /// value when emptied.
     #[test]
     fn a_finished_field_writes_where_its_kind_belongs() {
         let mut p = edit(FieldKind::Secret, "  db-key-1234  ");
-        assert!(matches!(
+        assert_eq!(
             p.finish(),
-            Some(Commit::Secret(s, "k", v)) if s == "acme" && v == "db-key-1234"
-        ));
+            Some(Commit::Secret("acme".into(), "k", "db-key-1234".into()))
+        );
         assert!(p.edit.is_none());
-        assert!(edit(FieldKind::Secret, "   ").finish().is_none());
-        assert!(matches!(
+        assert_eq!(edit(FieldKind::Secret, "   ").finish(), None);
+        assert_eq!(
             edit(FieldKind::Text, "GLBX").finish(),
-            Some(Commit::Plain(_, "k", v)) if v == "GLBX"
-        ));
-        assert!(ConnPage::default().finish().is_none());
+            Some(Commit::Plain("acme".into(), "k", "GLBX".into()))
+        );
+        assert_eq!(
+            edit(FieldKind::Text, "  ").finish(),
+            Some(Commit::Clear("acme".into(), "k"))
+        );
+        assert_eq!(ConnPage::default().finish(), None);
     }
 
     /// Decision 0030 §4: Remove deletes a saved secret only on a second press; leaving the
@@ -759,13 +851,30 @@ mod tests {
         assert!(p.edit.is_none());
     }
 
-    /// Show toggles a secret in full and back.
+    /// design.md §6: every control on the page is reachable from the keyboard: ↑/↓ move
+    /// through them in drawing order, Enter or Space press the one with the keyboard.
     #[test]
-    fn show_toggles_one_secret() {
+    fn the_keyboard_reaches_every_control() {
         let mut p = ConnPage::default();
-        p.toggle_shown("acme", "k");
-        assert!(p.shown.contains(&("acme".to_owned(), "k")));
-        p.toggle_shown("acme", "k");
-        assert!(p.shown.is_empty());
+        assert_eq!(p.nav_key("down"), None, "no controls drawn: not handled");
+        *p.controls.borrow_mut() = vec![
+            Action::Switch("acme".into(), false),
+            Action::Switch("acme".into(), true),
+            Action::Test("acme".into()),
+        ];
+        assert_eq!(
+            p.nav_key("enter"),
+            Some(Some(Action::Switch("acme".into(), false)))
+        );
+        assert_eq!(p.nav_key("down"), Some(None));
+        assert_eq!(p.nav_key("down"), Some(None));
+        assert_eq!(p.nav_key("down"), Some(None), "stays on the last");
+        assert_eq!(p.nav_key("space"), Some(Some(Action::Test("acme".into()))));
+        assert_eq!(p.nav_key("up"), Some(None));
+        assert_eq!(
+            p.nav_key("enter"),
+            Some(Some(Action::Switch("acme".into(), true)))
+        );
+        assert_eq!(p.nav_key("x"), None);
     }
 }
