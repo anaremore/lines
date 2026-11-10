@@ -2571,6 +2571,25 @@ mod tests {
     use lines_trading::{Money, OrderSpec, OrderState, RejectCode, RiskLimits, Side};
 
     use super::*;
+
+    /// `--max-order-qty` wins over the setting for its run; else the setting, by name or id.
+    #[test]
+    fn the_flag_overrides_the_largest_order_setting() {
+        let mut saved = BTreeMap::new();
+        saved.insert("Paper".to_owned(), 5);
+        saved.insert("paper-2".to_owned(), 7);
+        assert_eq!(wanted_max_order(None, &saved, "Paper", "paper-1"), Some(5));
+        assert_eq!(wanted_max_order(None, &saved, "Other", "paper-2"), Some(7));
+        assert_eq!(wanted_max_order(None, &saved, "Other", "paper-3"), None);
+        assert_eq!(
+            wanted_max_order(Some(2), &saved, "Paper", "paper-1"),
+            Some(2)
+        );
+        assert_eq!(
+            wanted_max_order(Some(2), &BTreeMap::new(), "X", "x"),
+            Some(2)
+        );
+    }
     use crate::dom_trade::{self, ArmEvent, ArmPrefs, Arming, DomColumn, EntryCtx};
 
     fn es() -> ContractKey {

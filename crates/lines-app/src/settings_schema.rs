@@ -2664,6 +2664,38 @@ mod tests {
         assert!(!loosening(loss, &one, &fifty, &g, &tight));
     }
 
+    /// Largest order: saved per account under its name, read back, edited in place, removed
+    /// when emptied, never under 1, and round-tripped through `settings.json`.
+    #[test]
+    fn the_largest_order_setting_round_trips() {
+        let mut p = Prefs::default();
+        let t = Target {
+            account: Some("paper-1".into()),
+            account_name: Some("Paper".into()),
+            product: None,
+        };
+        let row = by_key(MAX_ORDER_KEY).unwrap();
+        assert_eq!((row.get)(&p, &t, &Facts::default()), Value::Number(None));
+        row.apply(&mut p, &t, Value::Number(Some(5))).unwrap();
+        assert_eq!(p.app.max_order_qty.get("Paper"), Some(&5));
+        assert_eq!(t.max_order(&p), Some(5));
+        assert!(row.apply(&mut p, &t, Value::Number(Some(0))).is_err());
+        let json = String::from_utf8(p.app.encode()).unwrap();
+        let back: crate::picker::Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_order_qty.get("Paper"), Some(&5));
+        // Saved under the id (as startup also accepts): edited there, no second entry.
+        let mut q = Prefs::default();
+        q.app.max_order_qty.insert("paper-1".into(), 3);
+        row.apply(&mut q, &t, Value::Number(Some(4))).unwrap();
+        assert_eq!(q.app.max_order_qty.len(), 1);
+        assert_eq!(q.app.max_order_qty["paper-1"], 4);
+        // Emptied: no limit, and nothing saved.
+        row.apply(&mut q, &t, Value::Number(None)).unwrap();
+        assert!(q.app.max_order_qty.is_empty());
+        let none = String::from_utf8(q.app.encode()).unwrap();
+        assert!(!none.contains("max_order_qty"), "optional: {none}");
+    }
+
     /// Guardrails saved under the account's id (as startup accepts) are read and edited there.
     #[test]
     fn guardrails_saved_by_id_are_found() {
