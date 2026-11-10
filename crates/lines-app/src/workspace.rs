@@ -162,6 +162,9 @@ pub struct Workspace {
     /// Open positions on every listed account, for the footer's `N open` (kept fresh by the
     /// trigger watch, as a position changes with no window redrawing).
     open_positions: Option<usize>,
+    /// The status line's word on updates (`crate::update::status_label`), refreshed with the
+    /// trigger status.
+    update_label: Option<(String, bool, Option<Command>)>,
     /// Problems and refusals shown inline in the footer (`crate::notice`: repeats counted,
     /// refusals expire, problems that need action stay until dismissed).
     pub notices: Notices,
@@ -192,6 +195,7 @@ impl Workspace {
             last_chart: None,
             trigger_status: None,
             open_positions: None,
+            update_label: None,
             notices: Notices::default(),
             show_perf_stats: false,
             show_latency_hud: false,
@@ -1565,6 +1569,16 @@ impl WindowView {
                     error: None,
                 });
             }
+            Command::RestartToUpdate => {
+                if let Err(why) = crate::update::restart_to_update(cx) {
+                    notice(why, cx);
+                }
+            }
+            Command::RollBackUpdate => {
+                if let Err(why) = crate::update::roll_back(cx) {
+                    notice(why, cx);
+                }
+            }
             Command::ResetPanels => {
                 crate::popover::forget_drag();
                 crate::picker_view::update_settings(cx, |s| s.panel_places.clear());
@@ -2761,6 +2775,7 @@ impl WindowView {
         let ws = cx.global::<Workspace>();
         let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
         let trigger_status = ws.trigger_status.clone();
+        let update = ws.update_label.clone();
         let open = ws.open_positions.and_then(crate::positions::open_label);
         let is_first = ws.windows.first().map(|w| w.window_id());
         // What this tab isn't showing, as text that brings it back.
@@ -2839,6 +2854,29 @@ impl WindowView {
             })
             .when_some(open, |d, text| {
                 d.child(link("positions-open", text, Command::OpenPositions))
+            })
+            .when_some(update, |d, (text, loud, cmd)| match cmd {
+                // Restart to update / Roll back: the label is the link.
+                Some(cmd) if !loud => d.child(link("update-status", text, cmd)),
+                _ => d.child(
+                    div()
+                        .id("update-status")
+                        .min_w_0()
+                        .truncate()
+                        .px_1()
+                        .when(loud, |d| d.bg(t.warn).text_color(t.on_warn))
+                        .when(!loud, |d| d.text_color(t.text_main))
+                        .when_some(cmd, |d, cmd| {
+                            d.cursor_pointer().on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.run(cmd, window, cx);
+                                }),
+                            )
+                        })
+                        .child(text),
+                ),
             })
             .when_some(trigger_status, |d, (text, loud)| {
                 d.child(
@@ -4253,12 +4291,18 @@ pub(crate) fn refresh_trigger_status(cx: &mut App) {
     );
     drop(st);
     let open = crate::positions_view::open_count(cx);
+    // Updates: what a restart would interrupt, the chosen mode, and what to say.
+    crate::update::refresh_activity(cx);
+    let mode = crate::picker_view::settings(cx).updates;
+    crate::update::set_mode(mode, cx);
+    let update = crate::update::status_label(cx);
     let ws = cx.global_mut::<Workspace>();
     // Busy this instant: last time's count stands.
     let open = open.or(ws.open_positions);
-    if ws.trigger_status != status || ws.open_positions != open {
+    if ws.trigger_status != status || ws.open_positions != open || ws.update_label != update {
         ws.trigger_status = status;
         ws.open_positions = open;
+        ws.update_label = update;
         for w in ws.windows.clone() {
             let _ = w.update(cx, |_, _, cx| cx.notify());
         }

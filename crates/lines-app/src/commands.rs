@@ -62,6 +62,10 @@ pub enum Command {
     Palette,
     SaveAs,
     Open,
+    /// Restart into the downloaded, verified update (held while anything is trading).
+    RestartToUpdate,
+    /// Go back to the version the last update replaced, with its saved files.
+    RollBackUpdate,
     /// Every pop-up panel opens where it did before it was dragged.
     ResetPanels,
     /// The focused chart: hide (or show) its study legends and tags; studies stay drawn.
@@ -725,6 +729,8 @@ pub fn label(c: Command) -> String {
         Command::Palette => "Command palette".into(),
         Command::SaveAs => "Save workspace as…".into(),
         Command::Open => "Open workspace…".into(),
+        Command::RestartToUpdate => "Restart to update".into(),
+        Command::RollBackUpdate => "Roll back the last update".into(),
         Command::ResetPanels => "Reset pop-up panel positions".into(),
         Command::ExportDiagnostics => "Export diagnostics…".into(),
         Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
@@ -912,6 +918,8 @@ pub fn palette() -> Vec<Command> {
         Command::SaveAs,
         Command::Open,
         Command::ResetPanels,
+        Command::RestartToUpdate,
+        Command::RollBackUpdate,
         Command::Menu,
     ]);
     // Columns of the focused DOM or time & sales.
