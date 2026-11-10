@@ -2821,9 +2821,10 @@ enum Mark {
 
 /// A panel list: under its field, in the menus' look (`crate::menu`).
 fn menu_list(id: &'static str, t: &Theme) -> gpui::Stateful<gpui::Div> {
+    // The wheel goes on to the dropdown's scroll (a list held to the room scrolls).
     div()
         .id(id)
-        .occlude()
+        .block_mouse_except_scroll()
         .min_w(crate::zoom::ui(150.0))
         .flex()
         .flex_col()
@@ -4230,11 +4231,14 @@ fn controls<V: TradePane>(
             cx.listener(|v: &mut V, _: &gpui::MouseDownEvent, _, cx| close_account_menu(v, cx)),
         )
     };
-    // Each list opens under its field, as every dropdown does (`dropdown::fit`).
+    // Each list opens under its field (`dropdown::fit`), under Flatten and Cancel all, which it
+    // can reach and which stay one press over it (`dropdown::PANEL_PRIORITY`).
     let qty = crate::dropdown::dropdown(div().flex().flex_shrink_0().child(qty), qty_menu)
+        .in_panel()
         .on_dismiss(dismiss(cx));
     let bracket =
         crate::dropdown::dropdown(div().flex().flex_1().min_w_0().child(bracket), bracket_menu)
+            .in_panel()
             .on_dismiss(dismiss(cx));
     div()
         .flex()
@@ -4890,7 +4894,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
         .map(|a| format!("{} ▾", a.name));
     let mut list = div()
         .id("account-list")
-        .occlude()
+        .block_mouse_except_scroll()
         .relative()
         .children(trigger.and_then(|trigger| {
             crate::layout_rec::bordered(

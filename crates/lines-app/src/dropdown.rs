@@ -9,7 +9,8 @@
 //! edge, and up above the trigger when there is no room below. [`fit`] is that rule; [`dropdown`]
 //! applies it with the trigger's real bounds, in window coordinates, so a list escapes its
 //! pane's header and the pane itself. Every dropdown is placed so, the trading panel's Qty and
-//! Bracket lists included (docs/design.md: a field's list opens under it, in the menus' look).
+//! Bracket lists included (docs/design.md: a field's list opens under it, in the menus' look);
+//! those draw under Flatten and Cancel all ([`PANEL_PRIORITY`]), which stay one press (§3).
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, GlobalElementId, InspectorElementId,
@@ -28,9 +29,13 @@ pub const PRIORITY: usize = 4;
 /// Deferred-draw priority of every popover's backdrop (`crate::popover`): over the panes,
 /// under Flatten and Cancel all (`LIVE_PRIORITY`) and every list and menu.
 pub const BACKDROP_PRIORITY: usize = 1;
+/// Deferred-draw priority of a trading panel's own lists (Qty, Bracket): over the backdrops and
+/// the panes, under Flatten and Cancel all, which a list opening under its field can reach
+/// (docs/design.md §3: those stay one press and in view with any popover open).
+pub const PANEL_PRIORITY: usize = 2;
 /// Deferred-draw priority of Flatten and Cancel all (`popover::always_live`): over the
-/// backdrops, so they stay one press with a popover open (where an open list doesn't cover
-/// them); under the lists.
+/// backdrops and the panel's lists, so they stay one press with a popover open; under the
+/// other lists.
 pub const LIVE_PRIORITY: usize = 3;
 /// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
 /// prompts, the switch-all banner): over any open list, so a list never hides or takes the
@@ -98,6 +103,13 @@ pub struct Dropdown {
 }
 
 impl Dropdown {
+    /// A trading panel's list (Qty, Bracket): placed as every list is ([`fit`]), drawn under
+    /// Flatten and Cancel all ([`PANEL_PRIORITY`]), which stay one press over it.
+    pub fn in_panel(mut self) -> Self {
+        self.priority = PANEL_PRIORITY;
+        self
+    }
+
     /// Closes the open list on a press anywhere outside it, which goes no further
     /// (`popover::defer_backdrop`, the popover rule).
     pub fn on_dismiss(mut self, dismiss: OnDismiss) -> Self {
@@ -171,8 +183,13 @@ impl Element for Dropdown {
         let mut popup = {
             use gpui::StatefulInteractiveElement as _;
             use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            // Its own id (from where its trigger is): two lists never share a scroll offset. It
+            // takes the wheel; the list inside blocks every other press but lets the wheel
+            // through (`block_mouse_except_scroll`), so a held-down list scrolls.
+            let key = ((trigger.x.max(0.0) as u64) << 32) | trigger.y.max(0.0) as u64;
             gpui::div()
-                .id("dropdown-list")
+                .id(("dropdown-list", key))
+                .occlude()
                 .flex()
                 .flex_col()
                 .min_w(bounds.size.width)

@@ -1185,8 +1185,11 @@ mod tests {
     /// open), those under the lists and menus, the window's overlays on top.
     #[test]
     fn always_live_controls_draw_between_backdrops_and_popovers() {
-        use crate::dropdown::{BACKDROP_PRIORITY, LIVE_PRIORITY, OVERLAY_PRIORITY, PRIORITY};
-        const { assert!(BACKDROP_PRIORITY < LIVE_PRIORITY) };
+        use crate::dropdown::{
+            BACKDROP_PRIORITY, LIVE_PRIORITY, OVERLAY_PRIORITY, PANEL_PRIORITY, PRIORITY,
+        };
+        const { assert!(BACKDROP_PRIORITY < PANEL_PRIORITY) };
+        const { assert!(PANEL_PRIORITY < LIVE_PRIORITY) };
         const { assert!(LIVE_PRIORITY < PRIORITY) };
         const { assert!(PRIORITY < OVERLAY_PRIORITY) };
     }
