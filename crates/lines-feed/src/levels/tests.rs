@@ -254,9 +254,26 @@ fn refused_levels_leave_the_series_current() {
     assert!(matches!(s.status(later), LevelStatus::Stale { .. }));
     assert_eq!(s.error.as_deref(), Some("capture is stale"));
     assert_eq!(s.series_status(later), LevelStatus::Current);
+    // A push after a failed refresh: the lines move, but the series stay stale (a push never
+    // hides a failing refresh).
+    s.take(Err("timeout".into()), later);
+    let mut pushed = (**s.map.as_ref().unwrap()).clone();
+    pushed.series_update = true;
+    s.take(Ok(Some(pushed)), later);
+    assert!(matches!(s.series_status(later), LevelStatus::Stale { .. }));
+    assert_eq!(s.error.as_deref(), Some("timeout"));
     // A failed refresh with the same words is still a failure: the series go stale too.
     s.take(Err("capture is stale".into()), now);
     assert!(matches!(s.series_status(now), LevelStatus::Stale { .. }));
+    // Unchanged with no map yet: the reason shown stays.
+    let mut waiting = runtime::LevelState {
+        map: None,
+        series_received: None,
+        error: Some("capture is stale".into()),
+        ..s.clone()
+    };
+    waiting.take(Ok(None), now);
+    assert_eq!(waiting.error.as_deref(), Some("capture is stale"));
     // An empty state: missing for both.
     let fresh = runtime::LevelState {
         map: None,

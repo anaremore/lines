@@ -548,6 +548,8 @@ pub fn run(bt: &Backtest) -> Result<Report> {
                         .decode(&ctx, &prices, l.state.map.as_deref(), frames);
                     let refused = match &r {
                         Err(e) => Some(e.as_str()),
+                        // A series-only update repeats the map's refusal: said once, by its refresh.
+                        Ok(Some(m)) if m.series_update => None,
                         Ok(Some(m)) => m.levels_refused.as_deref(),
                         Ok(None) => None,
                     };

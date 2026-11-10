@@ -199,10 +199,9 @@ impl LevelState {
                         }
                     }
                 }
-                None => {
-                    self.error = None;
-                    self.levels_refused = false;
-                }
+                // Nothing known yet, nothing new: a reason already shown stays (a source's
+                // keepalive or live push before its first map says nothing about it).
+                None => {}
             },
             Err(e) => {
                 self.error = Some(e);
@@ -587,7 +586,8 @@ impl Recorder {
         let mut buf = Vec::new();
         encode_batch(frames, &mut buf);
         let since = Duration::from_millis((time.0 - self.header.start_wall_ms).max(0) as u64);
-        // Batches are rare (seconds apart): flush each, so an aborted task loses nothing.
+        // Batches come about a second apart at most (a source's live push): flush each, so an
+        // aborted task loses nothing.
         if let Some(w) = self.writer.as_mut()
             && let Err(e) = w
                 .write(Direction::FromServer, since, &Frame::binary(buf))
