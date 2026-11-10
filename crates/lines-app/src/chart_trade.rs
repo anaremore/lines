@@ -567,6 +567,28 @@ pub struct Offer {
     pub contract: ContractKey,
     pub qty: Qty,
     pub bracket: Option<crate::dom_trade::BracketPreset>,
+    /// The account's fingerprint ([`account_key`]): commands are `Copy`, an account id isn't.
+    pub account: u64,
+}
+
+impl Offer {
+    /// What a row built from `ctx` shows: its contract, size, bracket and account.
+    pub fn of(ctx: &crate::dom_trade::EntryCtx) -> Offer {
+        Offer {
+            contract: ctx.contract,
+            qty: ctx.qty,
+            bracket: ctx.bracket,
+            account: account_key(&ctx.account),
+        }
+    }
+}
+
+/// An account's fingerprint for an [`Offer`]: the same id always gives the same key in a run.
+pub fn account_key(a: &AccountId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    a.hash(&mut h);
+    h.finish()
 }
 
 /// Whether a menu row's account is still the chart's (the chart remembers the one it was
@@ -731,11 +753,7 @@ pub fn order_section(
         })
         .collect();
     Some(ChartOrders::Rows {
-        offer: Offer {
-            contract: ctx.contract,
-            qty: ctx.qty,
-            bracket: ctx.bracket,
-        },
+        offer: Offer::of(&ctx),
         header: menu_header(
             at,
             &qty,
@@ -759,7 +777,10 @@ pub fn menu_command(
     use crate::dom_trade::{Arming, DomColumn, click};
     // Its price belongs to the contract it was offered on (a linked pane can switch the chart
     // while the menu is open): never sent on another.
-    if ctx.contract != offered.contract || ctx.qty != offered.qty || ctx.bracket != offered.bracket
+    if ctx.contract != offered.contract
+        || ctx.qty != offered.qty
+        || ctx.bracket != offered.bracket
+        || account_key(&ctx.account) != offered.account
     {
         return Err(Refusal(CHART_CHANGED));
     }
@@ -1282,11 +1303,7 @@ mod tests {
     }
 
     fn offer(c: &crate::dom_trade::EntryCtx) -> Offer {
-        Offer {
-            contract: c.contract,
-            qty: c.qty,
-            bracket: c.bracket,
-        }
+        Offer::of(c)
     }
 
     /// The size it was offered with, too: a size changed while the menu was open refuses it;
@@ -1300,9 +1317,8 @@ mod tests {
             price: p(6010.00),
         };
         let shown = Offer {
-            contract: c.contract,
             qty: Qty(3),
-            bracket: None,
+            ..offer(&c)
         };
         assert_eq!(menu_command(o, shown, &c), Err(Refusal(CHART_CHANGED)));
         // A bracket set since the menu opened (or one it named, gone): refused too.
@@ -1322,6 +1338,26 @@ mod tests {
         assert!(!same_account(Some(&a), Some(&b)));
         assert!(!same_account(None, Some(&a)), "no offer open");
         assert!(!same_account(None, None));
+    }
+
+    /// A row is sent only on the account it was offered on: the chart switched to another
+    /// account while the menu was open refuses it.
+    #[test]
+    fn a_menu_order_never_carries_to_another_account() {
+        let on_a = menu_ctx(0, false);
+        let o = MenuOrder {
+            side: Side::Buy,
+            stop: false,
+            price: p(6010.00),
+        };
+        let shown = Offer::of(&on_a);
+        assert!(menu_command(o, shown, &on_a).is_ok());
+        let on_b = crate::dom_trade::EntryCtx {
+            account: AccountId::new("other"),
+            ..menu_ctx(0, false)
+        };
+        assert_eq!(menu_command(o, shown, &on_b), Err(Refusal(CHART_CHANGED)));
+        assert_ne!(account_key(&on_a.account), account_key(&on_b.account));
     }
 
     /// A row is sent only on the contract it was offered on: a chart switched to another while
@@ -1345,8 +1381,7 @@ mod tests {
                 o,
                 Offer {
                     contract: nq,
-                    qty: c.qty,
-                    bracket: None,
+                    ..offer(&c)
                 },
                 &c
             ),

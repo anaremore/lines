@@ -672,6 +672,7 @@ mod tests {
             ),
             qty: lines_core::Qty(2),
             bracket: None,
+            account: 0,
         };
         let mut m = pane_of(PaneKind::Chart);
         let base = items(&m);
