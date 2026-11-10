@@ -62,6 +62,19 @@ impl Strip {
         scroll.clamp(0.0, self.n as f32 * self.tab_w)
     }
 
+    /// The x a tab drop reads (window coordinates): inside this window's tab bar, held to the
+    /// strip, so the ▾, + or left padding never pick a tab scrolled out of view; anywhere else
+    /// (beside or above the window, over the panes) as it is, so a drop on another window or a
+    /// tear-off still goes where the pointer is.
+    pub fn drop_x(&self, x: f32, y: f32, window_w: f32, bar_h: f32) -> f32 {
+        let in_bar = (0.0..window_w).contains(&x) && (0.0..bar_h).contains(&y);
+        if in_bar {
+            x.clamp(self.x0, (self.x0 + self.room - 1.0).max(self.x0))
+        } else {
+            x
+        }
+    }
+
     /// A wheel turn of `delta` px (positive scrolls toward the last tab).
     pub fn wheel(&self, scroll: f32, delta: f32) -> f32 {
         self.clamp(scroll + delta)
@@ -161,6 +174,36 @@ mod tests {
         for i in 0..9 {
             assert_eq!(after.left_of(i, held), before.left_of(i, s));
         }
+    }
+
+    /// A drop inside this window's tab bar is held to the strip; beside or above the window
+    /// (another window's tab bar at the same height, a tear-off) the pointer is read as it is.
+    #[test]
+    fn a_drop_is_held_to_the_strip_only_inside_this_windows_bar() {
+        let s = strip(10, 500.0);
+        let end = s.x0 + s.room - 1.0;
+        assert_eq!(s.drop_x(495.0, 10.0, 500.0, 30.0), end, "over the ▾ or +");
+        assert_eq!(s.drop_x(2.0, 10.0, 500.0, 30.0), s.x0, "the left padding");
+        assert_eq!(s.drop_x(100.0, 10.0, 500.0, 30.0), 100.0, "on a tab");
+        assert_eq!(
+            s.drop_x(800.0, 10.0, 500.0, 30.0),
+            800.0,
+            "beside: another window"
+        );
+        assert_eq!(
+            s.drop_x(-50.0, 10.0, 500.0, 30.0),
+            -50.0,
+            "beside, to the left"
+        );
+        assert_eq!(
+            s.drop_x(495.0, -20.0, 500.0, 30.0),
+            495.0,
+            "above the window"
+        );
+        assert_eq!(s.drop_x(495.0, 200.0, 500.0, 30.0), 495.0, "over the panes");
+        // A strip with no room never panics.
+        let z = Strip::new(10.0, 8.0, 100.0, 24.0, 24.0, 3);
+        assert_eq!(z.drop_x(5.0, 10.0, 10.0, 30.0), z.x0);
     }
 
     #[test]

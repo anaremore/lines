@@ -753,10 +753,12 @@ enum Prompt {
         text: String,
         error: Option<String>,
     },
-    /// Rename the active tab (empty: named after its symbols again).
+    /// Rename the tab it was opened for (empty: named after its symbols again).
     RenameTab {
         text: String,
         error: Option<String>,
+        /// The tab's index when the prompt opened.
+        tab: usize,
     },
     Open {
         items: Vec<String>,
@@ -929,7 +931,7 @@ impl WindowView {
             state,
             focused: PaneId(0),
             pending_windows,
-            name: doc.name.clone(),
+            name: doc.name.as_deref().and_then(tabstate::tab_name),
             pinned: doc.pinned,
         };
         let order = tab.order();
@@ -1801,7 +1803,11 @@ impl WindowView {
             Command::Replay(rc) => self.run_replay(rc, cx),
             Command::RenameTab => {
                 let text = self.tab().name.clone().unwrap_or_default();
-                self.prompt = Some(Prompt::RenameTab { text, error: None });
+                self.prompt = Some(Prompt::RenameTab {
+                    text,
+                    error: None,
+                    tab: self.active,
+                });
             }
             Command::TogglePinTab => {
                 let tab = self.tab_mut();
@@ -2420,15 +2426,9 @@ impl WindowView {
             .filter(|w| w.window_id() != me)
             .filter_map(|w| w.read(cx).ok().map(|wv| (*w, wv.screen)))
             .collect();
-        // Over the bar, a drop lands only where the strip shows tabs (where the marker is drawn):
-        // the pointer is held inside the strip, so the ▾, + or the left padding never pick a
-        // tab scrolled out of view.
-        let x = f32::from(pos.x).clamp(strip.x0, (strip.x0 + strip.room - 1.0).max(strip.x0));
-        let x = if f32::from(pos.y) < tab_bar_h() {
-            x
-        } else {
-            f32::from(pos.x)
-        };
+        // Inside this window's tab bar a drop is held to the strip (`Strip::drop_x`); beside or
+        // above the window the pointer is read as it is (another window, a tear-off).
+        let x = strip.drop_x(f32::from(pos.x), f32::from(pos.y), own.w, tab_bar_h());
         let pointer = (own.x + x, own.y + f32::from(pos.y));
         match wsdoc::tab_drop(pointer, own, bar, &rights, &others) {
             TabDrop::Reorder(j) => {
@@ -2649,9 +2649,11 @@ impl WindowView {
                 }
                 Err(e) => *error = Some(e),
             },
-            Some(Prompt::RenameTab { text, .. }) => {
-                let name = tabstate::tab_name(text);
-                self.tab_mut().name = name;
+            Some(Prompt::RenameTab { text, tab, .. }) => {
+                let (name, i) = (tabstate::tab_name(text), *tab);
+                if let Some(t) = self.tabs.get_mut(i) {
+                    t.name = name;
+                }
                 self.prompt = None;
             }
             Some(Prompt::Open {
@@ -2745,21 +2747,23 @@ impl WindowView {
             return;
         }
         match self.prompt.as_mut() {
-            Some(Prompt::SaveAs { text, error } | Prompt::RenameTab { text, error }) => match key {
-                "backspace" => {
-                    text.pop();
-                    *error = None;
-                }
-                _ => {
-                    if let Some(c) = k.key_char.as_deref().filter(|_| {
-                        !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform
-                    }) && text.chars().count() < 40
-                    {
-                        text.push_str(c);
+            Some(Prompt::SaveAs { text, error } | Prompt::RenameTab { text, error, .. }) => {
+                match key {
+                    "backspace" => {
+                        text.pop();
                         *error = None;
                     }
+                    _ => {
+                        if let Some(c) = k.key_char.as_deref().filter(|_| {
+                            !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform
+                        }) && text.chars().count() < 40
+                        {
+                            text.push_str(c);
+                            *error = None;
+                        }
+                    }
                 }
-            },
+            }
             Some(Prompt::Open {
                 items, selected, ..
             }) => match key {
@@ -3042,16 +3046,32 @@ impl WindowView {
         let mut on = false;
         let mut feed = None;
         for h in tab.handles() {
+            // An unavailable pane's store is a stand-in: it says nothing (the pane says why).
             let store = match h {
                 PaneHandle::Dom(d) => {
                     let v = d.read(cx);
                     on |= v.trade_ref().arming.is_armed();
-                    v.trade_store().clone()
+                    v.feed()
+                        .unavailable
+                        .is_none()
+                        .then(|| v.trade_store().clone())
                 }
-                PaneHandle::Chart(c) => c.read(cx).store().clone(),
-                PaneHandle::Tape(t) => t.read(cx).store().clone(),
-                PaneHandle::Chain(c) => c.read(cx).store().clone(),
+                PaneHandle::Chart(c) => {
+                    let v = c.read(cx);
+                    v.feed().unavailable.is_none().then(|| v.store().clone())
+                }
+                PaneHandle::Tape(t) => {
+                    let v = t.read(cx);
+                    v.feed().unavailable.is_none().then(|| v.store().clone())
+                }
+                PaneHandle::Chain(c) => {
+                    let v = c.read(cx);
+                    v.feed().unavailable.is_none().then(|| v.store().clone())
+                }
                 _ => continue,
+            };
+            let Some(store) = store else {
+                continue;
             };
             if feed.is_some() {
                 continue;
@@ -4121,7 +4141,7 @@ impl WindowView {
                 )
         };
         let (panel, title, body, error) = match p {
-            Prompt::RenameTab { text, error } => (
+            Prompt::RenameTab { text, error, .. } => (
                 crate::popover::Panel::RenameTab,
                 "Rename tab",
                 div()
