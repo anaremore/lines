@@ -855,7 +855,9 @@ pub fn card_stop<'a>(
     last: Option<Price>,
 ) -> Option<(Price, i64)> {
     orders
-        .filter(|o| protects(o, position))
+        // A bracket's stop-loss leg stays the stop once a stop-limit has triggered (it rests as
+        // a limit): BE won't move it, but it still protects.
+        .filter(|o| protects(o, position) || (live(o) && o.role == lines_trading::Role::StopLoss))
         .filter_map(dom_trade::order_mark)
         .map(|m| (m.price, m.qty.0 - m.filled.0))
         .min_by_key(|(pr, _)| (pr.0 - last.map_or(pr.0, |l| l.0)).abs())
@@ -1876,9 +1878,9 @@ const CARD_BOX_H: f32 = 50.0;
 /// One card line under the first.
 const CARD_LINE_H: f32 = 16.0;
 
-/// The position card's lines under the first at `width`: two (the stop and target with the day's
-/// P&L, then the rest), four in a tight panel (the stop, the target, the average and working
-/// orders, then ticks with the day's P&L), so the prices and the working count all show.
+/// The position card's lines under the first at `width`: two, four in a tight panel. The orders
+/// fill them by priority ([`card_place`]); the ticks sit on the first line's right, under the
+/// open P&L, and the day's P&L on the last line's right.
 pub fn card_lines(width: f32) -> usize {
     if is_tight(width) { 4 } else { 2 }
 }
@@ -2594,7 +2596,7 @@ pub fn card_avg_fits(width: f32, side: &str, avg: &str, pnl: Option<&str>, big: 
 }
 
 /// Where a flat card shows the day's P&L: on its first line beside "Flat" where it fits (the mock),
-/// else on the second line's right, as in a position.
+/// else on the last line's right, as in a position.
 pub fn flat_day_on_first_line(width: f32, day: &str) -> bool {
     text_w("Flat", 13.0) + 8.0 + text_w("Day ", 12.0) + text_w(day, 13.0) <= card_inner(width)
 }
@@ -3440,8 +3442,9 @@ pub fn card_exit(role: &str, qty: i64, position: i64, price: &str) -> String {
 }
 
 /// The position card (mock 2): the side by shape and size with the average, open P&L large on the
-/// right; under them the stop (SL, the down color) and target (TP, the target color), ticks,
-/// working orders and anything unresolved as whole items, and the day's P&L on the right. Flat:
+/// right; under them the stop (SL, the down color, or "No stop") and target (TP, the target
+/// color), working orders and anything unresolved as whole items, the ticks under the open P&L
+/// and the day's P&L on the last line's right. Flat:
 /// "Flat", and the day's P&L beside it where it fits. P&L off: no amounts at all.
 fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) -> gpui::Div {
     let mode = d.map(|d| d.mode).unwrap_or_default();
@@ -3580,7 +3583,7 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
     };
     // The lines below, as whole items in order (what doesn't fit is left out whole, never cut,
     // lowest priority first; [`card_place`]): a market order's remainder, the stop, the target,
-    // the average when it isn't above, working orders (never left out), ticks (P&L both ways).
+    // the average when it isn't above, working orders (never left out).
     let pos_qty = position.map_or(0, |p| p.0);
     let mut items: Vec<(String, gpui::Hsla, bool, u8)> = Vec::new();
     if let Some(m) = d.and_then(|d| d.market_left) {
@@ -3641,9 +3644,11 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         .iter()
         .find(|i| i.3 == CARD_KEEP)
         .map_or(0.0, |i| text_w(&i.0, 11.0));
+    let ticks_w = ticks.as_ref().map_or(0.0, |s| text_w(s, 11.0) + 8.0);
     let chip = (unresolved > 0).then(|| {
         let long = unresolved_label(unresolved, width);
-        if text_w(&long, 11.0) + 16.0 + 8.0 + working_w + day_w <= card_inner(width) {
+        // It shares the first line with the ticks; the working count must still fit beside it.
+        if text_w(&long, 11.0) + 16.0 + 8.0 + working_w + ticks_w <= card_inner(width) {
             long
         } else {
             format!("{unresolved} unresolved")
@@ -3652,10 +3657,8 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
     let chip_w = chip.as_ref().map_or(0.0, |c| text_w(c, 11.0) + 8.0 + 8.0);
     let inner = card_inner(width);
     let lines = card_lines(width);
-    // The day's P&L sits on the first lower line, or in a tight panel on the last.
     // The day's P&L on the last line; the ticks under the open P&L, on the first.
     let day_line = lines - 1;
-    let ticks_w = ticks.as_ref().map_or(0.0, |s| text_w(s, 11.0) + 8.0);
     let mut rooms = [inner; 4];
     rooms[0] -= chip_w + ticks_w;
     rooms[day_line] -= day_w;
@@ -6999,7 +7002,7 @@ mod tests {
             let confirm = w("Keep") + w("Replace 99") + 8.0;
             assert!(confirm <= room, "confirmation buttons {confirm}");
         }
-        // The tight switch says the state in a word, and the count with its noun.
+        // The tight switch is its track alone, "!" when orders would be denied, or the count.
         assert_eq!(switch_words(false, None, 0, MIN_DOM_WIDTH), "");
         assert_eq!(switch_words(true, None, 0, MIN_DOM_WIDTH), "");
         assert_eq!(
@@ -7156,6 +7159,18 @@ mod tests {
             stop(6, Side::Sell, 600_800, 1, true),
         ];
         assert_eq!(card_stop(two.iter(), 2, last), Some((Price(600_800), 1)));
+        // A bracket's stop-loss leg stays the stop once its stop-limit has triggered.
+        let mut leg = stop(7, Side::Sell, 600_600, 2, false);
+        leg.role = Role::StopLoss;
+        leg.kind = OrderKind::StopLimit {
+            trigger: Price(600_600),
+            limit: Price(600_575),
+        };
+        leg.triggered = true;
+        assert!(card_stop([leg].iter(), 2, last).is_some());
+        // A short's buy stop protects it.
+        let short = [stop(8, Side::Buy, 601_400, 1, false)];
+        assert_eq!(card_stop(short.iter(), -2, last), Some((Price(601_400), 1)));
     }
 
     /// A market order still working (a thin book's remainder) says so, with what is left.
