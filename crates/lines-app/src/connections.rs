@@ -227,20 +227,27 @@ fn account(source: &str, key: &str) -> String {
 }
 
 /// Where a secret lives in the OS keychain: (target, service, user). A connector's own entry
-/// is the one it reads with the platform's tools: on Windows a generic credential whose
-/// target is the entry's name; on macOS and Linux an item in the default keychain or
-/// collection whose service is that name (keyring takes a target there as a keychain or
-/// collection name, so none is given). Lines' own: service `lines`, account `<source>.<key>`.
-fn entry_spec(own: Option<&'static str>, account: String) -> (Option<String>, String, String) {
+/// is the one it reads with the platform's tools, under the account its documentation gives
+/// (the source's name: `cmdkey /user:databento`, `security -a databento`, `secret-tool …
+/// username databento`), so saving replaces that item rather than adding a second one: on
+/// Windows a generic credential whose target is the entry's name; on macOS and Linux an
+/// item in the default keychain or collection whose service is that name (keyring takes a
+/// target there as a keychain or collection name, so none is given). Lines' own: service
+/// `lines`, account `<source>.<key>`.
+fn entry_spec(
+    own: Option<&'static str>,
+    source: &str,
+    account: String,
+) -> (Option<String>, String, String) {
     match own {
-        Some(entry) if cfg!(windows) => (Some(entry.to_owned()), entry.to_owned(), SERVICE.into()),
-        Some(entry) => (None, entry.to_owned(), SERVICE.into()),
+        Some(entry) if cfg!(windows) => (Some(entry.to_owned()), entry.to_owned(), source.into()),
+        Some(entry) => (None, entry.to_owned(), source.into()),
         None => (None, SERVICE.into(), account),
     }
 }
 
 fn os_entry(source: &str, key: &str) -> Result<keyring::Entry, String> {
-    let (target, service, user) = entry_spec(own_entry(source, key), account(source, key));
+    let (target, service, user) = entry_spec(own_entry(source, key), source, account(source, key));
     match target {
         Some(t) => keyring::Entry::new_with_target(&t, &service, &user),
         None => keyring::Entry::new(&service, &user),
@@ -515,11 +522,16 @@ mod tests {
     /// Windows, the service (default keychain or collection, no target) elsewhere.
     #[test]
     fn a_connectors_own_entry_is_where_its_reader_looks() {
-        let (target, service, user) = entry_spec(Some("lines-databento"), "x".into());
-        assert_eq!(service, "lines-databento");
-        assert_eq!(user, "lines");
+        // Databento's entry and account, as its README has users store the key.
+        let entry = lines_databento::key::CREDENTIAL;
+        let (target, service, user) = entry_spec(Some(entry), "databento", "x".into());
+        assert_eq!(service, entry);
+        assert_eq!(
+            user, "databento",
+            "the account the README gives: one item, replaced"
+        );
         if cfg!(windows) {
-            assert_eq!(target.as_deref(), Some("lines-databento"));
+            assert_eq!(target.as_deref(), Some(entry));
         } else {
             assert_eq!(
                 target, None,
@@ -527,7 +539,7 @@ mod tests {
             );
         }
         assert_eq!(
-            entry_spec(None, "acme.api-key".into()),
+            entry_spec(None, "acme", "acme.api-key".into()),
             (None, "lines".to_owned(), "acme.api-key".to_owned())
         );
     }
