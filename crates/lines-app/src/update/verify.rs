@@ -51,7 +51,12 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// `data` is the file the manifest describes (`sha256`, `signature`), signed by `key`.
-pub fn verify(data: &[u8], sha256: &str, signature: &str, key: Option<&str>) -> Result<(), Rejected> {
+pub fn verify(
+    data: &[u8],
+    sha256: &str,
+    signature: &str,
+    key: Option<&str>,
+) -> Result<(), Rejected> {
     let key = key.ok_or(Rejected::NoKey)?;
     if !sha256_hex(data).eq_ignore_ascii_case(sha256.trim()) {
         return Err(Rejected::Checksum);
@@ -101,7 +106,10 @@ mod tests {
         let k = TestKey::new();
         let data = b"lines 0.3.12";
         let sig = k.sign(data);
-        assert_eq!(verify(data, &sha256_hex(data), &sig, Some(&k.public)), Ok(()));
+        assert_eq!(
+            verify(data, &sha256_hex(data), &sig, Some(&k.public)),
+            Ok(())
+        );
     }
 
     /// A file changed after signing fails its checksum; one whose checksum was changed to
@@ -133,7 +141,12 @@ mod tests {
             Err(Rejected::Signature(_))
         ));
         assert!(matches!(
-            verify(data, &sha256_hex(data), "not a signature", Some(&ours.public)),
+            verify(
+                data,
+                &sha256_hex(data),
+                "not a signature",
+                Some(&ours.public)
+            ),
             Err(Rejected::Signature(_))
         ));
     }
@@ -142,7 +155,10 @@ mod tests {
     #[test]
     fn no_key_no_update() {
         let data = b"x";
-        assert_eq!(verify(data, &sha256_hex(data), "", None), Err(Rejected::NoKey));
+        assert_eq!(
+            verify(data, &sha256_hex(data), "", None),
+            Err(Rejected::NoKey)
+        );
         assert!(
             COMMITTED_KEY.is_none(),
             "the owner commits the real key; tests never put one here"

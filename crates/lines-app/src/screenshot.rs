@@ -82,6 +82,8 @@ pub struct Shot {
     pub hover_header: bool,
     /// A context menu opens (`--context-menu`).
     pub context_menu: Option<crate::pane_menu::ShotMenu>,
+    /// The updater's state on the status line (`--update-shot`).
+    pub update_shot: Option<String>,
     /// The UI zoom (`--ui-zoom`).
     pub ui_zoom: Option<u16>,
     /// A workspace prompt opens (`--prompt palette[:QUERY]|open|save`).
@@ -198,6 +200,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         bracket_position,
         hover_header,
         context_menu,
+        update_shot,
         ui_zoom,
         prompt,
         panel_at,
@@ -323,6 +326,11 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         cx.set_global(trading);
         if let Some(s) = &strategies {
             cx.set_global(crate::strategy_panel::Strategies(s.clone()));
+        }
+        if let Some(k) = &update_shot
+            && let Err(e) = crate::update::screenshot(k, cx)
+        {
+            fail(&anyhow::anyhow!("--update-shot: {e}"));
         }
         let mut settings = AppSettings::ephemeral();
         // `--ui-zoom` as Settings › Appearance would have saved it (its row shows it).

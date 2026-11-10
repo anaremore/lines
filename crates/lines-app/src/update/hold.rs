@@ -12,12 +12,6 @@ pub struct Activity {
     pub strategies: usize,
 }
 
-impl Activity {
-    pub fn quiet(&self) -> bool {
-        *self == Activity::default()
-    }
-}
-
 fn count(n: usize, one: &str, many: &str, tail: &str) -> Option<String> {
     match n {
         0 => None,
@@ -51,7 +45,10 @@ mod tests {
             positions: 1,
             ..Activity::default()
         };
-        assert_eq!(hold_reason(pos).as_deref(), Some("Update waits: 1 position open"));
+        assert_eq!(
+            hold_reason(pos).as_deref(),
+            Some("Update waits: 1 position open")
+        );
         let all = Activity {
             positions: 2,
             orders: 1,

@@ -357,6 +357,10 @@ struct Cli {
     /// and headless runs never check anyway.
     #[arg(long)]
     no_update_check: bool,
+    /// Screenshot: the status line's word on updates as if the updater were in this state
+    /// (`ready`, `available`, `rejected`, `rollback`); no request is made.
+    #[arg(long, requires = "screenshot")]
+    update_shot: Option<String>,
     /// Run the feed without a window for N seconds and print stats (useful for recording).
     #[arg(long)]
     headless: Option<u64>,
@@ -1614,6 +1618,7 @@ where
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
                 context_menu: cli.context_menu.clone(),
+                update_shot: cli.update_shot.clone(),
                 ui_zoom: cli.ui_zoom,
                 prompt: cli.prompt.clone(),
                 panel_at: cli.panel_at,

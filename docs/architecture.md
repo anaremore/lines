@@ -85,6 +85,7 @@ cargo run --release -p lines-sierra --example scid_markers -- <file.scid> <YYYY-
 cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
   --screenshot out.png --at 2026-11-06T14:05:00Z --size 1280x800 --theme dark --scale 1
 # --move-measure X0,Y0:X1,Y1 then moves that measure as a drag inside it would; --measure-parts ticks,bars shows only those readout parts; --context-menu measure@X,Y opens its menu.
+# --no-update-check: no update request this run (tests, screenshots, bench, backtests and headless runs never check). --update-shot ready|available|rejected|rollback (screenshots): the status line's word on updates, no request.
 # --shift-drag X0,Y0:X1,Y1 replays a Shift+drag on the first chart (plot-local px, as --cursor), released: the measure it leaves.
 # --drag-position Y previews the position line dragged to plot-local Y (the stop or target it would set, with its P&L; nothing is placed).
 # --order-controls shows the first single-order mark's and tag's − / size / +, as if hovered.

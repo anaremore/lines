@@ -18,7 +18,10 @@ use crate::versioned::{self, Format};
 /// workspaces and the trading files (paper accounts, guardrails). Not the store, recordings,
 /// journal or logs (their formats are versioned per file and only grow; decision 0031 §5).
 fn backed_up(config: &Path) -> Vec<PathBuf> {
-    let mut v = vec![PathBuf::from("settings.json"), PathBuf::from("workspace.json")];
+    let mut v = vec![
+        PathBuf::from("settings.json"),
+        PathBuf::from("workspace.json"),
+    ];
     for dir in ["workspaces", "paper"] {
         if let Ok(rd) = std::fs::read_dir(config.join(dir)) {
             let mut names: Vec<PathBuf> = rd
@@ -82,7 +85,9 @@ pub fn restore(config: &Path, version: &str) -> std::io::Result<usize> {
 }
 
 fn sibling(exe: &Path, tag: &str) -> PathBuf {
-    let stem = exe.file_stem().map_or_else(Default::default, |s| s.to_os_string());
+    let stem = exe
+        .file_stem()
+        .map_or_else(Default::default, |s| s.to_os_string());
     let mut name = stem;
     name.push(format!(".{tag}"));
     if let Some(ext) = exe.extension() {
@@ -230,7 +235,10 @@ mod tests {
         assert_eq!(read(&c.join("settings.json")), "old settings");
         assert_eq!(read(&c.join("paper/replay.json")), "old paper");
         assert_eq!(read(&c.join("workspaces/day.json")), "old day");
-        assert!(!backup_dir(&c, "0.3.11").join("journal").exists(), "not the journal");
+        assert!(
+            !backup_dir(&c, "0.3.11").join("journal").exists(),
+            "not the journal"
+        );
         let _ = std::fs::remove_dir_all(&c);
     }
 
@@ -244,7 +252,10 @@ mod tests {
         swap(&exe, &new).unwrap();
         assert_eq!(read(&exe), "v0.3.12");
         assert_eq!(read(&previous_exe(&exe)), "v0.3.11");
-        assert_eq!(previous_exe(&exe).file_name().unwrap(), "lines.previous.exe");
+        assert_eq!(
+            previous_exe(&exe).file_name().unwrap(),
+            "lines.previous.exe"
+        );
         roll_back_exe(&exe).unwrap();
         assert_eq!(read(&exe), "v0.3.11");
         assert_eq!(read(&d.join("lines.failed.exe")), "v0.3.12");
@@ -283,7 +294,10 @@ mod tests {
         let mut ok = s.clone().unwrap();
         ok.confirmed = true;
         assert!(!on_start(Some(ok), "0.3.12").1);
-        assert!(!on_start(s, "0.3.11").1, "the old version (rolled back) isn't counted");
+        assert!(
+            !on_start(s, "0.3.11").1,
+            "the old version (rolled back) isn't counted"
+        );
         assert_eq!(on_start(None, "0.3.12"), (None, false));
     }
 

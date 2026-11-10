@@ -226,8 +226,16 @@ mod tests {
         let (v, url) = newest(&f, cur).unwrap();
         assert_eq!(v, Version(0, 3, 12));
         assert!(url.ends_with("v0.3.12/update.json"));
-        assert_eq!(newest(&feed(&[("v0.3.11", false, true)]), cur), None, "same");
-        assert_eq!(newest(&feed(&[("v0.3.9", false, true)]), cur), None, "older");
+        assert_eq!(
+            newest(&feed(&[("v0.3.11", false, true)]), cur),
+            None,
+            "same"
+        );
+        assert_eq!(
+            newest(&feed(&[("v0.3.9", false, true)]), cur),
+            None,
+            "older"
+        );
     }
 
     #[test]
@@ -236,7 +244,10 @@ mod tests {
         let want = Version(0, 3, 12);
         let (v, f) = pick(&manifest("0.3.12"), want, cur, T).unwrap();
         assert_eq!((v, f.target.as_str()), (want, T));
-        assert_eq!(pick(&manifest("0.3.11"), want, cur, T).unwrap_err(), Refused::NotNewer);
+        assert_eq!(
+            pick(&manifest("0.3.11"), want, cur, T).unwrap_err(),
+            Refused::NotNewer
+        );
         assert_eq!(
             pick(&manifest("0.3.13"), want, cur, T).unwrap_err(),
             Refused::NotNewer,

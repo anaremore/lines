@@ -38,7 +38,11 @@ pub enum UpdateMode {
 
 impl UpdateMode {
     pub const LABELS: [&'static str; 3] = ["Automatic", "Notify only", "Off"];
-    pub const ALL: [UpdateMode; 3] = [UpdateMode::Automatic, UpdateMode::NotifyOnly, UpdateMode::Off];
+    pub const ALL: [UpdateMode; 3] = [
+        UpdateMode::Automatic,
+        UpdateMode::NotifyOnly,
+        UpdateMode::Off,
+    ];
 
     pub fn is_default(&self) -> bool {
         *self == UpdateMode::Automatic
@@ -121,7 +125,9 @@ pub fn start(config: PathBuf, mode: UpdateMode, cx: &mut App) {
     if let Some(s) = &state {
         let _ = install::save_state(&config, s);
     }
-    let offer_rollback = offer.then(|| state.as_ref().map(|s| s.from.clone())).flatten();
+    let offer_rollback = offer
+        .then(|| state.as_ref().map(|s| s.from.clone()))
+        .flatten();
     let status = Arc::new(Mutex::new(Status::Idle));
     let mode = Arc::new(Mutex::new(mode));
     cx.set_global(Updater {
@@ -142,9 +148,9 @@ pub fn start(config: PathBuf, mode: UpdateMode, cx: &mut App) {
                 s.confirmed = true;
                 let _ = install::save_state(&c, &s);
             }
-            let _ = cx.update(|cx| {
-                if let Some(u) = cx.try_global_mut::<Updater>() {
-                    u.offer_rollback = None;
+            cx.update(|cx| {
+                if cx.has_global::<Updater>() {
+                    cx.global_mut::<Updater>().offer_rollback = None;
                 }
             });
         })
@@ -176,6 +182,35 @@ pub fn start(config: PathBuf, mode: UpdateMode, cx: &mut App) {
             }
         })
         .ok();
+}
+
+/// Screenshots (`--update-shot ready|available|rejected|rollback`): the updater in that state,
+/// with no request and nothing on disk. A `--paper` position shows the trade hold.
+#[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+pub fn screenshot(kind: &str, cx: &mut App) -> Result<(), String> {
+    let v = Version(0, 3, 99);
+    let (status, offer_rollback) = match kind {
+        "ready" => (Status::Ready(v, PathBuf::from("lines.exe")), None),
+        "available" => (Status::Available(v), None),
+        "rejected" => (
+            Status::Rejected(v, "its signature didn't verify".into()),
+            None,
+        ),
+        "rollback" => (Status::Idle, Some("0.3.10".to_owned())),
+        other => {
+            return Err(format!(
+                "{other}: expected ready, available, rejected or rollback"
+            ));
+        }
+    };
+    cx.set_global(Updater {
+        config: PathBuf::new(),
+        status: Arc::new(Mutex::new(status)),
+        mode: Arc::new(Mutex::new(UpdateMode::Automatic)),
+        activity: hold::Activity::default(),
+        offer_rollback,
+    });
+    Ok(())
 }
 
 /// The mode changed in Settings: the updater's thread reads it before its next check.
@@ -225,7 +260,14 @@ fn check(config: &Path, mode: UpdateMode) -> Result<Status, String> {
     let (v, file) =
         manifest::pick(&m, v, current, manifest::target()).map_err(|e| e.to_string())?;
     let data = http_get(&file.url, Duration::from_secs(30 * 60))?;
-    Ok(stage(config, v, &data, &file.sha256, &file.signature, verify::PUBLIC_KEY))
+    Ok(stage(
+        config,
+        v,
+        &data,
+        &file.sha256,
+        &file.signature,
+        verify::PUBLIC_KEY,
+    ))
 }
 
 /// Where a verified download waits for the restart.
@@ -292,17 +334,16 @@ pub fn refresh_activity(cx: &mut App) {
             .count();
     }
     if let Some(s) = cx.try_global::<crate::strategy_panel::Strategies>() {
-        a.strategies = s
-            .0
-            .snapshot()
-            .iter()
-            .filter(|i| {
-                i.state == lines_trading::strategy::StrategyState::Armed && i.fault.is_none()
-            })
-            .count();
+        a.strategies =
+            s.0.snapshot()
+                .iter()
+                .filter(|i| {
+                    i.state == lines_trading::strategy::StrategyState::Armed && i.fault.is_none()
+                })
+                .count();
     }
-    if let Some(u) = cx.try_global_mut::<Updater>() {
-        u.activity = a;
+    if cx.has_global::<Updater>() {
+        cx.global_mut::<Updater>().activity = a;
     }
 }
 
@@ -313,7 +354,9 @@ pub fn restart_to_update(cx: &mut App) -> Result<(), String> {
     if let Some(why) = held(cx) {
         return Err(why);
     }
-    let u = cx.try_global::<Updater>().ok_or("updates are off in this run")?;
+    let u = cx
+        .try_global::<Updater>()
+        .ok_or("updates are off in this run")?;
     let Status::Ready(v, staged) = u.status() else {
         return Err("no update is ready".into());
     };
@@ -433,14 +476,20 @@ mod tests {
             stage(&c, v, exe, &sha, &other.sign(exe), Some(&k.public)),
             Status::Rejected(_, _)
         ));
-        assert!(matches!(stage(&c, v, exe, &sha, &sig, None), Status::Rejected(_, _)));
+        assert!(matches!(
+            stage(&c, v, exe, &sha, &sig, None),
+            Status::Rejected(_, _)
+        ));
         assert!(!staged_path(&c, v).exists(), "nothing staged");
         let _ = std::fs::remove_dir_all(&c);
     }
 
     #[test]
     fn the_mode_saves_by_name() {
-        assert_eq!(serde_json::to_string(&UpdateMode::NotifyOnly).unwrap(), "\"notify_only\"");
+        assert_eq!(
+            serde_json::to_string(&UpdateMode::NotifyOnly).unwrap(),
+            "\"notify_only\""
+        );
         assert!(UpdateMode::default().is_default());
         assert_eq!(UpdateMode::Off.index(), 2);
     }
