@@ -369,7 +369,9 @@ impl TapeView {
         }
         let mw = self.glyphs.width("▲", t.text_main, false, window);
         self.cols.need(TapeCol::Side.index(), mw, pad() * 0.5);
-        self.cols.layout(w);
+        // Narrow: every column narrows to what its numbers need, then the time gives way;
+        // price, size and the side marker (direction is never color alone) stay whole.
+        self.cols.layout_tape(w);
         self.cols.paint_header(
             &mut self.glyphs,
             &t,
@@ -505,7 +507,9 @@ impl TapeView {
         // A narrow header drops the source tag first; the contract and words never.
         if let Some(tg) = &tag {
             let tw = pane::text_px(window, crate::zoom::ui(12.0));
-            let room = self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Tape);
+            // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom).
+            let room = (self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Tape))
+                / crate::zoom::get();
             let rest = pane::side_header_px(
                 true, // a market pane always shows its link marker
                 &contract,
@@ -543,35 +547,48 @@ impl TapeView {
                             .flex_row()
                             .gap_2()
                             .items_center()
+                            .min_w_0()
                             .child(pane::market_link_chip(self.common.link, &t))
+                            // The contract (and the tag, when it fits) never gives way; the
+                            // pane's name after them is the only item that shrinks: it gives way
+                            // first, whole, its gap with it.
                             .child(
                                 div()
-                                    .text_color(t.text_main)
-                                    .relative()
-                                    .children(crate::layout_rec::text_marker(&left))
-                                    .child(left),
+                                    .flex()
+                                    .flex_row()
+                                    .min_w_0()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_color(t.text_main)
+                                            .relative()
+                                            .children(crate::layout_rec::text_marker(&left))
+                                            .child(left),
+                                    )
+                                    .children(tag.map(|tg| {
+                                        div()
+                                            .flex_shrink_0()
+                                            .ml_2()
+                                            .text_color(t.text_dim)
+                                            .relative()
+                                            .children(crate::layout_rec::text_marker(&tg))
+                                            .child(tg)
+                                    }))
+                                    .when(has_contract, |d| {
+                                        d.child(pane::whole_or_none(
+                                            "Time & sales",
+                                            t.text_main,
+                                            false,
+                                        ))
+                                    }),
                             )
-                            .children(tag.map(|tg| {
-                                div()
-                                    .text_color(t.text_dim)
-                                    .relative()
-                                    .children(crate::layout_rec::text_marker(&tg))
-                                    .child(tg)
-                            }))
-                            .when(has_contract, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(t.text_main)
-                                        .relative()
-                                        .children(crate::layout_rec::text_marker("Time & sales"))
-                                        .child("Time & sales"),
-                                )
-                            })
                             // Every state but live is a word beside the contract that never
                             // gives way, as on the chart: an ended or failed feed must not
                             // read as live (docs/design.md §7).
                             .children(word.map(|w| {
                                 div()
+                                    .flex_shrink_0()
                                     .text_color(t.text_main)
                                     .relative()
                                     .children(crate::layout_rec::text_marker(w))
@@ -579,15 +596,8 @@ impl TapeView {
                             }))
                             .children(pane::stale_badge(&self.store, &t)),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(t.text_dim)
-                            .relative()
-                            .children(crate::layout_rec::text_marker(&right))
-                            .child(right),
-                    ),
+                    // Whole or not at all, never cut to a bare "l…".
+                    .child(pane::whole_or_none(right, t.text_dim, true)),
             )
     }
 }

@@ -206,6 +206,35 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
     }
 }
 
+/// Below this pane width (logical px) a header's hover controls are only the pane menu ⋯ (its
+/// other commands are all in that menu), so a narrow chart header keeps its contract and its
+/// PAPER/LIVE badge whole.
+pub const NARROW_CONTROLS_W: f32 = 360.0;
+
+/// [`controls`] for a pane `width` logical px wide: only ⋯ below [`NARROW_CONTROLS_W`].
+pub fn controls_at(kind: PaneKind, detached: bool, width: f32) -> &'static [Control] {
+    let all = controls(kind, detached);
+    if width < NARROW_CONTROLS_W {
+        &all[all.len() - 1..]
+    } else {
+        all
+    }
+}
+
+/// [`controls_gutter`] for a pane `width` logical px wide (0 or less: not laid out yet, the
+/// full gutter).
+pub fn controls_gutter_at(kind: PaneKind, width: f32) -> f32 {
+    if width > 0.0 && width < NARROW_CONTROLS_W {
+        gutter_for(1.0)
+    } else {
+        controls_gutter(kind)
+    }
+}
+
+fn gutter_for(n: f32) -> f32 {
+    n * crate::icons::HIT + (n - 1.0) * CONTROL_GAP + 2.0 * CONTROL_PAD
+}
+
 /// A pane header's height (logical px): its padding, one line of its text and its bottom
 /// border (charts use the larger `text_sm`). The hover controls are centered on it.
 pub fn header_height(kind: PaneKind) -> f32 {
@@ -227,8 +256,7 @@ pub const CONTROL_PAD: f32 = 4.0;
 /// header content never reaches it (`header_content` clips there), so the controls never
 /// cover anything (the account chip, status text). Sized for the most icons any header shows.
 pub fn controls_gutter(kind: PaneKind) -> f32 {
-    let n = controls(kind, false).len().max(controls(kind, true).len()) as f32;
-    n * crate::icons::HIT + (n - 1.0) * CONTROL_GAP + 2.0 * CONTROL_PAD
+    gutter_for(controls(kind, false).len().max(controls(kind, true).len()) as f32)
 }
 
 /// The chip's timeframe: "233t", with "∞" when tick bars run continuously ("1000t ∞").
@@ -278,6 +306,40 @@ pub fn header_content() -> Div {
         .justify_between()
         .items_center()
         .gap_2()
+}
+
+/// Line height of a DOM or time & sales header's text at 100 % (its 12 px text).
+const SMALL_HEADER_LINE_100: f32 = 18.0;
+
+/// A DOM or time & sales header item that shows whole or not at all: it wraps onto a hidden
+/// second line when the row is too narrow, never cut mid-word or shown as a bare "…".
+/// `end`: right-aligned (the header's right group); else it follows the item before it with
+/// its own leading gap, so nothing is left behind when it goes.
+pub fn whole_or_none(text: impl Into<gpui::SharedString>, color: gpui::Hsla, end: bool) -> Div {
+    use gpui::prelude::FluentBuilder as _;
+    let text = text.into();
+    let line = crate::zoom::ui(SMALL_HEADER_LINE_100);
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .when(end, |d| d.flex_1().justify_end())
+        .min_w_0()
+        .h(line)
+        .line_height(line)
+        .items_center()
+        .overflow_hidden()
+        // A zero-width first item: the text can wrap away too (a line's first item never wraps).
+        .child(div().w(gpui::px(0.0)).h(line))
+        .child(
+            div()
+                .flex_shrink_0()
+                .when(!end, |d| d.ml_2())
+                .text_color(color)
+                .relative()
+                .children(crate::layout_rec::text_marker(&text))
+                .child(text),
+        )
 }
 
 /// The pane header's contract text: the active contract is always shown (decision 0013);
@@ -675,7 +737,8 @@ pub fn source_tag(tag: &str) -> String {
     format!("({tag})")
 }
 
-/// A UI text's width in logical px at `size`, shaped as the header draws it.
+/// A UI text's width at `size`, shaped as the header draws it, in 100 % units (logical px over
+/// the UI zoom), as the header fit models count their gaps and paddings.
 pub fn text_px(window: &gpui::Window, size: gpui::Pixels) -> impl Fn(&str) -> f32 + '_ {
     let font = window.text_style().font();
     move |s: &str| -> f32 {
@@ -693,7 +756,8 @@ pub fn text_px(window: &gpui::Window, size: gpui::Pixels) -> impl Fn(&str) -> f3
             &[run],
             None,
         );
-        f32::from(line.width)
+        // In 100 % units, as the fit's gaps and paddings are (they scale with the zoom).
+        f32::from(line.width) / crate::zoom::get()
     }
 }
 
@@ -896,6 +960,27 @@ mod tests {
             (S::Stopped, "stopped"),
         ] {
             assert_eq!(status_word(&s), Some(w));
+        }
+    }
+
+    /// A narrow pane's header shows only ⋯ (every other control is in the pane menu), and keeps
+    /// only its gutter free: the 480 px window at 150 % has room for the contract and PAPER.
+    #[test]
+    fn a_narrow_pane_shows_only_the_menu_control() {
+        for kind in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
+            for detached in [false, true] {
+                let narrow = controls_at(kind, detached, NARROW_CONTROLS_W - 1.0);
+                assert_eq!(narrow.len(), 1, "{kind:?}");
+                assert_eq!(narrow[0].cmd, crate::commands::Command::Menu);
+                assert_eq!(
+                    controls_at(kind, detached, NARROW_CONTROLS_W),
+                    controls(kind, detached)
+                );
+            }
+            assert!(controls_gutter_at(kind, 200.0) < controls_gutter(kind));
+            assert!(controls_gutter_at(kind, 200.0) >= crate::icons::HIT + 2.0 * CONTROL_PAD);
+            // Not laid out yet: the full gutter.
+            assert_eq!(controls_gutter_at(kind, 0.0), controls_gutter(kind));
         }
     }
 

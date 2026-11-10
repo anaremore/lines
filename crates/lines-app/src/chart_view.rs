@@ -5015,7 +5015,9 @@ impl ChartView {
         };
         for i in 0..price_lines {
             let l = self.scene.price_lines[i];
-            if l.y < 0.0 || l.y > ph {
+            // Whole inside the plot, centered on its line: a label near the top would reach up
+            // into the header row, where header text can sit above the axis.
+            if l.y < label_px() * 0.65 || l.y > ph {
                 continue;
             }
             let span = Span::around(l.y, label_px() * 0.65);
@@ -7282,7 +7284,10 @@ impl ChartView {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .px_3()
-                .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chart)))
+                .pr(px(pane::controls_gutter_at(
+                    crate::layout::PaneKind::Chart,
+                    f32::from(self.chart.size.width),
+                )))
                 .py_1()
                 .bg(t.panel)
                 .border_b_1()
@@ -7449,8 +7454,12 @@ impl ChartView {
         // What fits whole beside the hover controls' gutter (from last frame's width); the
         // rest is dropped whole, never cut: typing a timeframe and the palette still change
         // the timeframe, and the palette the account.
-        let room = f32::from(self.chart.size.width)
-            - pane::controls_gutter(crate::layout::PaneKind::Chart);
+        // The fit model's gaps and paddings are 100 % sizes (they scale with the UI zoom, as
+        // the text does); the controls' gutter doesn't. So the fit runs in 100 % units: room
+        // and text widths over the zoom.
+        let z = crate::zoom::get();
+        let width = f32::from(self.chart.size.width);
+        let room = (width - pane::controls_gutter_at(crate::layout::PaneKind::Chart, width)) / z;
         let acct = crate::trade_bar::chart_account(self, cx);
         // Header text widths as the UI font shapes them (text_sm; `fonts::ui`, as drawn).
         let font = crate::fonts::ui();
@@ -7470,7 +7479,7 @@ impl ChartView {
                 &[run],
                 None,
             );
-            f32::from(line.width)
+            f32::from(line.width) / z
         };
         let chip_text = pane::chip_text(self.timeframe, self.tick_continuous(), to_go);
         let fit_in = |room: f32| {
@@ -7493,7 +7502,7 @@ impl ChartView {
             fit_in,
         );
         let tag = tag.filter(|_| shows_tag);
-        let desc_w = measure(i.description).ceil() + 1.0;
+        let desc_w = (measure(i.description) * z).ceil() + 1.0;
         let account = crate::trade_bar::chart_chip(self, &t, fit.account, cx);
         let timeframe = fit.timeframe.then(|| {
             let dismiss: popover::OnDismiss = Box::new(

@@ -428,6 +428,7 @@ impl Columns {
     }
 
     /// Lay the columns out in a table `total` px wide (plain arithmetic, no allocation).
+    #[cfg(test)]
     pub fn layout(&mut self, total: f32) {
         let specs = self.specs();
         self.set.layout(specs, &self.needed, total, &mut self.cells);
@@ -482,6 +483,12 @@ impl Columns {
             ],
             &[JournalCol::Contract.index(), JournalCol::Account.index()],
         );
+    }
+
+    /// Time & sales in `total` px: the columns narrow to their numbers first, then the time
+    /// gives way; price, size and the side marker stay longest.
+    pub fn layout_tape(&mut self, total: f32) {
+        self.layout_fitting(total, &[], &[TapeCol::Time.index()]);
     }
 
     /// This frame only: leave out columns that don't fit entirely in `total` px (header and
@@ -1000,6 +1007,38 @@ mod tests {
             assert!(cell.shown && cell.right() <= 240.5, "{col:?} {:?}", c.cells);
         }
         assert!(!c.cells[DomCol::Orders.index()].shown);
+    }
+
+    /// A narrow time & sales keeps price, size and the side marker inside the pane: the
+    /// columns narrow first, then the time gives way (the gallery's 480 px window at 150 %).
+    #[test]
+    fn a_narrow_tape_keeps_price_size_and_side() {
+        let mut c = Columns::new(Table::Tape);
+        for (col, w) in [
+            (TapeCol::Time, 90.0),
+            (TapeCol::Price, 60.0),
+            (TapeCol::Size, 24.0),
+            (TapeCol::Side, 12.0),
+        ] {
+            c.need(col.index(), w, 0.0);
+        }
+        let saved = c.set;
+        // Room for everything once the columns narrow to their numbers: time stays.
+        c.layout_tape(200.0);
+        for col in TapeCol::ALL {
+            let cell = c.cells[col.index()];
+            assert!(cell.shown && cell.right() <= 200.5, "{col:?} {:?}", c.cells);
+        }
+        // Too narrow for the time too: it gives way, the rest stay whole.
+        c.layout_tape(120.0);
+        assert!(!c.cells[TapeCol::Time.index()].shown);
+        for col in [TapeCol::Price, TapeCol::Size, TapeCol::Side] {
+            let cell = c.cells[col.index()];
+            assert!(cell.shown && cell.right() <= 120.5, "{col:?} {:?}", c.cells);
+        }
+        assert_eq!(c.set, saved, "saved columns untouched by narrowing");
+        c.layout_tape(700.0);
+        assert!(c.cells[TapeCol::Time.index()].shown, "wide: all shown");
     }
 
     #[test]

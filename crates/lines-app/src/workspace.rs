@@ -3993,6 +3993,7 @@ impl WindowView {
                     kind,
                     false,
                     chart_only,
+                    r.w,
                     |this: &mut Self, cmd, id, at, window, cx| {
                         this.focus_pane(id, window, cx);
                         match (cmd, at) {
@@ -4620,6 +4621,7 @@ pub(crate) fn header_controls<V: 'static>(
     kind: PaneKind,
     detached: bool,
     chart_only: bool,
+    width: f32,
     run: ControlRun<V>,
     id: PaneId,
     cx: &mut Context<V>,
@@ -4632,7 +4634,7 @@ pub(crate) fn header_controls<V: 'static>(
         .right_0()
         // The header's own height, so the icons sit on its text's center line.
         .h(crate::zoom::ui(crate::pane::header_height(kind) - 1.0))
-        .w(px(crate::pane::controls_gutter(kind)))
+        .w(px(crate::pane::controls_gutter_at(kind, width)))
         .overflow_hidden()
         .justify_end()
         .px(px(crate::pane::CONTROL_PAD))
@@ -4641,7 +4643,10 @@ pub(crate) fn header_controls<V: 'static>(
         .items_center()
         .gap(px(crate::pane::CONTROL_GAP))
         .bg(t.panel);
-    for (i, c) in crate::pane::controls(kind, detached).iter().enumerate() {
+    for (i, c) in crate::pane::controls_at(kind, detached, width)
+        .iter()
+        .enumerate()
+    {
         let cmd = c.cmd;
         let on = chart_only && cmd == Command::ChartOnly;
         row = row.child(
