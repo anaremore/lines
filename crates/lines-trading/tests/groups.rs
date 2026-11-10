@@ -395,7 +395,7 @@ fn a_group_flatten_closes_every_member_and_nothing_else() {
     assert_eq!(sent, named);
     assert!(!sent.is_empty());
     // In order: each member's own result, then the group's results, then the group's answer.
-    let at = |f: &dyn Fn(&Event) -> bool| r.events.iter().position(|e| f(e)).unwrap();
+    let at = |f: &dyn Fn(&Event) -> bool| r.events.iter().position(f).unwrap();
     let members: Vec<usize> = results
         .iter()
         .map(|m| at(&|e| matches!(e, Event::Command { id, .. } if *id == m.command)))
