@@ -137,8 +137,10 @@ pub struct LevelState {
     /// When the map was last received or confirmed: the wall clock live, the recorded time
     /// in a replay.
     pub received: Option<UtcMillis>,
-    /// The last refresh's error, if it failed.
+    /// The last refresh's error, if it failed (also a map's `levels_refused`).
     pub error: Option<String>,
+    /// When a map was last accepted, also one whose levels were refused: its series' freshness.
+    pub series_received: Option<UtcMillis>,
     pub stale_after: Duration,
     pub replay: bool,
 }
@@ -151,6 +153,52 @@ impl LevelState {
         };
         let age_ms = (now.0 - received.0).max(0);
         if self.error.is_some() || age_ms > self.stale_after.as_millis() as i64 {
+            LevelStatus::Stale { age_ms }
+        } else {
+            LevelStatus::Current
+        }
+    }
+
+    /// Take a decode's result, received at `time` (the runtime and a backtest alike).
+    pub fn take(&mut self, result: Result<Option<LevelMap>, String>, time: UtcMillis) {
+        match result {
+            // Levels refused, series new: the levels stay stale (their time isn't renewed),
+            // the series are current.
+            Ok(Some(map)) if map.levels_refused.is_some() => {
+                self.error = map.levels_refused.clone();
+                self.map = Some(Arc::new(map));
+                self.series_received = Some(time);
+            }
+            Ok(Some(map)) => {
+                self.map = Some(Arc::new(map));
+                self.received = Some(time);
+                self.series_received = Some(time);
+                self.error = None;
+            }
+            Ok(None) => {
+                if self.map.is_some() {
+                    self.received = Some(time);
+                    self.series_received = Some(time);
+                }
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// The map's series' freshness at `now`: as [`Self::status`], except that refused levels
+    /// (`LevelMap::levels_refused`) don't make the series stale; they follow the last map
+    /// accepted.
+    pub fn series_status(&self, now: UtcMillis) -> LevelStatus {
+        let Some(received) = self.series_received.filter(|_| self.map.is_some()) else {
+            return LevelStatus::Missing;
+        };
+        let levels_only = matches!(
+            (&self.error, &self.map),
+            (Some(e), Some(m)) if m.levels_refused.as_ref() == Some(e)
+        );
+        let age_ms = (now.0 - received.0).max(0);
+        if (self.error.is_some() && !levels_only) || age_ms > self.stale_after.as_millis() as i64 {
             LevelStatus::Stale { age_ms }
         } else {
             LevelStatus::Current
@@ -177,6 +225,7 @@ impl LevelCell {
                 map: None,
                 received: None,
                 error: None,
+                series_received: None,
                 stale_after: source.stale_after(),
                 replay,
             }),
@@ -488,18 +537,7 @@ fn apply(
                 map.source, map.product
             ));
         }
-        Ok(Some(map)) => {
-            s.map = Some(Arc::new(map));
-            s.received = Some(time);
-            s.error = None;
-        }
-        Ok(None) => {
-            if s.map.is_some() {
-                s.received = Some(time);
-            }
-            s.error = None;
-        }
-        Err(e) => s.error = Some(e),
+        r => s.take(r, time),
     });
 }
 

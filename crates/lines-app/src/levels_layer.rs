@@ -119,6 +119,8 @@ struct Slot {
     now: UtcMillis,
     map: Option<Arc<LevelMap>>,
     status: LevelStatus,
+    /// Its series' freshness (`LevelState::series_status`: refused levels don't stale them).
+    series_status: LevelStatus,
     error: Option<String>,
     /// Kind visibility bit per kind index (maps have at most 64 kinds).
     kinds: u64,
@@ -286,6 +288,7 @@ impl LevelsLayer {
                     now: UtcMillis(i64::MIN),
                     map: None,
                     status: LevelStatus::Missing,
+                    series_status: LevelStatus::Missing,
                     error: None,
                     kinds: u64::MAX,
                     placed: Vec::with_capacity(MAX_LEVELS),
@@ -294,14 +297,15 @@ impl LevelsLayer {
             .collect();
     }
 
-    /// Source `id`'s map, freshness and clock as of this frame's [`Self::snapshot`] (`None`:
+    /// Source `id`'s map, its series' freshness and its clock as of this frame's
+    /// [`Self::snapshot`] (`None`:
     /// the source doesn't serve this chart). Lower-pane series studies read their lines here.
     pub fn source_view(
         &self,
         id: &str,
     ) -> Option<(Option<&Arc<LevelMap>>, LevelStatus, UtcMillis)> {
         let s = self.slots.iter().find(|s| s.handle.source() == id)?;
-        Some((s.map.as_ref(), s.status, s.now))
+        Some((s.map.as_ref(), s.series_status, s.now))
     }
 
     /// The style overrides by source id, as saved.
@@ -377,6 +381,7 @@ impl LevelsLayer {
                     lines_feed::now_utc()
                 };
                 s.status = st.status(now);
+                s.series_status = st.series_status(now);
                 // External series judge freshness on the market's clock whenever this run
                 // isn't live (a replay or a screenshot: a synthetic source runs "live" over
                 // it, but its series follow the replay's day), else the wall clock.

@@ -232,6 +232,10 @@ pub struct LevelMap {
     /// Line series for lower panes: see [`Series`]. Shared, so a source rebuilding its map
     /// each refresh keeps unchanged series without copying them.
     pub series: Vec<std::sync::Arc<Series>>,
+    /// The source couldn't take this refresh's levels (the reason; e.g. its upstream says they
+    /// are stale): the map carries its previous levels unchanged, shown stale with this reason,
+    /// while its series are new and judged on their own freshness.
+    pub levels_refused: Option<String>,
 }
 
 impl LevelMap {
@@ -247,6 +251,7 @@ impl LevelMap {
                 meta: LevelMeta::default(),
                 values: Vec::new(),
                 series: Vec::new(),
+                levels_refused: None,
             },
             error: None,
         }
@@ -436,6 +441,12 @@ impl LevelMapBuilder {
     /// Add a line series for lower panes: see [`Series`].
     pub fn series(mut self, s: std::sync::Arc<Series>) -> Self {
         self.map.series.push(s);
+        self
+    }
+
+    /// See [`LevelMap::levels_refused`].
+    pub fn levels_refused(mut self, reason: impl Into<String>) -> Self {
+        self.map.levels_refused = Some(reason.into());
         self
     }
 
