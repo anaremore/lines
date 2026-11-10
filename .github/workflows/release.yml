@@ -90,6 +90,8 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       PKG: lines-${{ github.ref_name }}-${{ matrix.name }}
+      # Whether the owner's update-signing key is set (secrets can't be tested in `if:`).
+      HAS_UPDATE_KEY: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,6 +175,24 @@ jobs:
             Set-Content -NoNewline dist/$env:PKG/README.txt
           # Flat zip: lines.exe, LICENSE.md, README.txt at the top level.
           Compress-Archive -Path dist/$env:PKG/* -DestinationPath "out/$env:PKG.zip"
+
+      # In-app updates (decision 0031): the bare executable, its minisign signature (trusted
+      # comment `lines <version> public pre-release <target>`) and `update.json`, for the app's
+      # updater. Only when the owner's signing key is a repository secret; without it the
+      # release is as before and no build updates itself.
+      - name: Sign the update (Windows)
+        if: runner.os == 'Windows' && env.HAS_UPDATE_KEY == 'true'
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PASSWORD: ${{ secrets.UPDATE_SIGNING_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = 'x86_64-pc-windows-msvc'
+          $name = "lines-$target.exe"
+          Copy-Item target/release/lines.exe "out/$name"
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$name"
+          cargo run --locked --release -p lines-app --example sign_update -- "out/$name" $env:VERSION $target $url out
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
