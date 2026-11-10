@@ -355,6 +355,7 @@ impl Studies {
                     &scale,
                     vp,
                     s.overlay_colors(theme, cols),
+                    theme.hollow,
                     window,
                 );
             } else {
@@ -519,11 +520,13 @@ impl Studies {
 
     /// Lower pane `k`'s scale this frame, for `height` px: cumulative delta's visible
     /// extremes; Volume from zero at the bottom edge to its tallest visible bar.
-    pub fn lower_scale(&self, k: usize, height: f32) -> Option<Scale> {
+    /// `title_h`: the pane's title box from its top (0 when titles are hidden): Volume's
+    /// tallest bar stays below it, so the readout never covers a bar's top.
+    pub fn lower_scale(&self, k: usize, height: f32, title_h: f32) -> Option<Scale> {
         let s = self.lower().nth(k)?;
         match &s.config {
             IndicatorConfig::Volume { .. } => {
-                (!s.vol.bars.is_empty()).then(|| Scale::from_zero(s.vol.max, height))
+                (!s.vol.bars.is_empty()).then(|| Scale::from_zero_below(s.vol.max, height, title_h))
             }
             _ => {
                 let (lo, hi) = s.extent?;
@@ -537,7 +540,7 @@ impl Studies {
     pub fn lower_marks(&self, k: usize, sc: &Scale) -> [Option<i64>; 2] {
         match self.lower().nth(k) {
             Some(s) if matches!(s.config, IndicatorConfig::Volume { .. }) => {
-                [Some(s.vol.max), None]
+                [Some(round_down(s.vol.max)).filter(|v| *v > 0), None]
             }
             Some(_) => [
                 Some((sc.hi - (sc.hi - sc.lo) * 0.08).round() as i64),
@@ -581,7 +584,16 @@ impl Studies {
         };
         match &s.config {
             IndicatorConfig::Volume { spec, .. } => {
-                paint_volume(s, spec, origin, scale, vp, volume_colors(s, theme), window);
+                paint_volume(
+                    s,
+                    spec,
+                    origin,
+                    scale,
+                    vp,
+                    volume_colors(s, theme),
+                    theme.hollow,
+                    window,
+                );
                 paint_average(s, spec, origin, scale, vp, theme, window);
             }
             _ => paint_delta(s, origin, scale, vp, theme, window),
@@ -681,6 +693,15 @@ impl Studies {
     }
 }
 
+/// `v` rounded down to two significant digits (an axis label that reads as a round number).
+fn round_down(v: i64) -> i64 {
+    let mut step = 1i64;
+    while v / step >= 100 {
+        step *= 10;
+    }
+    v / step * step
+}
+
 /// Volume's colors (plain bars, up/buy, down/sell) as styled, opaque as the pane draws them.
 fn volume_colors(s: &Study, theme: &Theme) -> [Hsla; 3] {
     let l = &s.looks;
@@ -697,10 +718,12 @@ fn volume_colors(s: &Study, theme: &Theme) -> [Hsla; 3] {
 }
 
 /// Volume's bars from `scale`'s zero (its bottom edge, `origin` its top-left): plain in the
-/// bars color; colored by candle (rising filled, falling hollow); or split (sell volume hollow
-/// at the base, buy volume filled on it, volume without a side in the bars color on top).
-/// Direction is never by color alone: down and sell are hollow wherever a bar is 3 device
-/// pixels each way (as the candles). Quads only: no allocation.
+/// bars color; colored by candle; or split (sell volume at the base, buy volume on it, volume
+/// without a side in the bars color on top). Direction is never by color alone, and its shape
+/// is the candles' own: a rising bar and buy volume are hollow exactly when rising candles are
+/// (`hollow`, the chart's setting), falling bars and sell volume when falling candles are
+/// (bars under 3 device pixels each way stay filled, as the candles). Quads only.
+#[allow(clippy::too_many_arguments)]
 fn paint_volume(
     s: &Study,
     spec: &lines_indicators::VolumeSpec,
@@ -708,8 +731,10 @@ fn paint_volume(
     scale: &Scale,
     vp: &Viewport,
     [bars_c, up_c, down_c]: [Hsla; 3],
+    hollow: crate::theme::HollowBodies,
     window: &mut Window,
 ) {
+    let (up_h, down_h) = (hollow.is_hollow(true), hollow.is_hollow(false));
     let dpi = window.scale_factor();
     let hair = 1.0 / dpi;
     let rect = |x: f32, y: f32, w: f32, h: f32| {
@@ -725,8 +750,13 @@ fn paint_volume(
         if hi <= lo {
             return None;
         }
-        let bot = snap(scale.y(lo as f64));
+        let mut bot = snap(scale.y(lo as f64));
         let top = snap(scale.y(hi as f64)).min(bot - hair);
+        // A stacked segment leaves a device pixel's gap above the one under it, so where one
+        // side ends shows by shape too, whatever the colors.
+        if lo > 0 && bot - top >= 2.0 * hair {
+            bot -= hair;
+        }
         Some((top, bot))
     };
     let draw = |window: &mut Window, x: f32, (top, bot): (f32, f32), col: Hsla, hollow: bool| {
@@ -752,18 +782,18 @@ fn paint_volume(
             let sell = v.sell.0.min(total);
             let buy = v.buy.0.min(total - sell);
             if let Some(r) = seg(0, sell) {
-                draw(window, x, r, down_c, true);
+                draw(window, x, r, down_c, down_h);
             }
             if let Some(r) = seg(sell, sell + buy) {
-                draw(window, x, r, up_c, false);
+                draw(window, x, r, up_c, up_h);
             }
             if let Some(r) = seg(sell + buy, total) {
                 draw(window, x, r, bars_c, false);
             }
         } else if let Some(r) = seg(0, total) {
             match (spec.color_by_candle, v.up) {
-                (true, true) => draw(window, x, r, up_c, false),
-                (true, false) => draw(window, x, r, down_c, true),
+                (true, true) => draw(window, x, r, up_c, up_h),
+                (true, false) => draw(window, x, r, down_c, down_h),
                 (false, _) => draw(window, x, r, bars_c, false),
             }
         }
@@ -786,7 +816,8 @@ fn paint_average(
     }
     let dpi = window.scale_factor();
     let line = s.looks[study_style::VOLUME_AVERAGE].line();
-    let color = theme.part_color(line.color, theme.study[0], line.opacity);
+    // Its own color is the theme's main text: neutral, clear of up and down in every palette.
+    let color = theme.part_color(line.color, theme.text_main, line.opacity);
     let w = study_style::vwap_px(line.width);
     let d = dash(line.line, w);
     let mut b = stroke(px(w), &d);
@@ -1041,9 +1072,15 @@ mod tests {
         };
         assert_eq!(hovered.total, lines_core::Qty(50));
         assert_eq!(st.lower_last(0), Some(69));
-        let sc = st.lower_scale(0, 100.0).unwrap();
+        let sc = st.lower_scale(0, 100.0, 0.0).unwrap();
         assert_eq!(sc.y(0.0), 100.0, "zero on the bottom edge");
         assert_eq!(st.lower_marks(0, &sc), [Some(69), None]);
+        // Below the title box: the tallest bar's top clears it.
+        let sc = st.lower_scale(0, 100.0, 30.0).unwrap();
+        assert!(sc.y(69.0) >= 30.0, "{}", sc.y(69.0));
+        assert_eq!(round_down(2_373), 2_300);
+        assert_eq!(round_down(69), 69);
+        assert_eq!(round_down(0), 0);
         let mut hidden = volume(false);
         hidden.display_mut().hidden = true;
         let mut st = Studies::new(vec![hidden]);

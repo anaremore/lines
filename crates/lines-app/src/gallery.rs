@@ -1132,7 +1132,8 @@ fn write_workspaces(dir: &Path) -> Result<()> {
                            "poc": { "color": "#f719cb", "width": 2, "line": "dashed" },
                            "va": { "color": "p3", "opacity": 75 } } } }"##;
     std::fs::write(dir.join("studies-styled.json"), studies).context("studies-styled.json")?;
-    let both = r##"{ "indicators": [ { "kind": "volume" }, { "kind": "cum_delta", "reset": "eth" } ] }"##;
+    let both =
+        r##"{ "indicators": [ { "kind": "volume" }, { "kind": "cum_delta", "reset": "eth" } ] }"##;
     std::fs::write(dir.join("volume-and-delta.json"), both).context("volume-and-delta.json")?;
     let bands = r##"{ "indicators": [ { "kind": "vwap", "reset": "eth", "bands": 7 } ] }"##;
     std::fs::write(dir.join("vwap-bands-unstyled.json"), bands)

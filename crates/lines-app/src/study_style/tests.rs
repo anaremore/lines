@@ -66,7 +66,7 @@ fn defaults_are_todays_look_and_write_nothing() {
         assert!(map.is_empty(), "{defs:?}: {map:?}");
         for d in defs {
             assert!(
-                d.own.is_some() || d.key == "line" && defs.len() == 3 || d.key == "average",
+                d.own.is_some() || d.key == "line" && defs.len() == 3,
                 "{}",
                 d.key
             );

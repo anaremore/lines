@@ -195,10 +195,12 @@ pub fn drag_stack(
         }
     } else {
         // The pair keeps its sum: the divider moves between the two panes.
+        // Neither of the two past its minimum or the ratio cap.
         let pair = start[k - 1] + start[k];
+        let lo_k = lo.max(pair - MAX_RATIO);
         let hi = (pair - lo).min(MAX_RATIO);
-        if lo <= hi {
-            out[k] = (start[k] - dy / avail).clamp(lo, hi);
+        if lo_k <= hi {
+            out[k] = (start[k] - dy / avail).clamp(lo_k, hi);
             out[k - 1] = pair - out[k];
         }
     }
@@ -299,6 +301,21 @@ impl Scale {
             lo: 0.0,
             hi: hi * 1.08,
             height,
+        }
+    }
+
+    /// [`Scale::from_zero`] with `hi` kept at least `top` px below the pane's top (a title
+    /// there), when the pane is tall enough to leave the bars room.
+    pub fn from_zero_below(hi: i64, height: f32, top: f32) -> Scale {
+        let s = Scale::from_zero(hi, height);
+        let room = height - top;
+        if top <= 0.0 || room < height * 0.4 {
+            return s;
+        }
+        let hi = hi.max(1) as f64;
+        Scale {
+            hi: s.hi.max(hi * f64::from(height) / f64::from(room)),
+            ..s
         }
     }
 
@@ -414,6 +431,9 @@ mod tests {
         assert_eq!(after.panes()[0].sub_h, 180.0);
         assert_eq!(after.panes()[1].sub_h, 90.0);
         assert_eq!(after.price_h, st.price_h);
+        // The pane above never past the cap (the divider keeps following the pointer).
+        let big = drag_stack(total, 2, [0.6, 0.2, 0.0, 0.0], 1, 1_000.0);
+        assert!(big[0] <= MAX_RATIO + 1e-6 && (big[0] + big[1] - 0.8).abs() < 1e-6);
         // Far: minimums hold.
         let far = drag_stack(total, 2, r, 1, 1_000.0);
         let after = stack_at_scale(total, &far[..2], 1.0).unwrap();

@@ -386,7 +386,8 @@ fn volume_bars_do_not_allocate() {
     let mut bars = 0;
     let n = allocs_during(|| {
         for f in 0..200usize {
-            vp.right_index = 249.0 - (f % 40) as f64;
+            // Every fourth frame scrolled back: the newest bar is off screen (built apart).
+            vp.right_index = if f % 4 == 2 { 120.0 } else { 249.0 } - (f % 40) as f64;
             let view = if f % 2 == 0 { view1 } else { derived.view() };
             let opts = VolumeOptions {
                 split: f % 3 != 0,

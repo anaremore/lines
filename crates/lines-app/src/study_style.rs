@@ -142,7 +142,8 @@ pub const VOLUME_DOWN: usize = 2;
 pub const VOLUME_AVERAGE: usize = 3;
 /// The Volume study: its plain bars (one neutral theme color), the up and down colors (rising
 /// and falling bars when colored by candle; buy and sell volume when split) and the average
-/// line. Direction never rests on these colors: falling bars and sell volume are hollow.
+/// line (the theme's text color: neutral in every palette). Direction never rests on these
+/// colors: bars take the candles' own hollow or filled shape.
 pub const VOLUME: [PartDef; 4] = [
     part(
         "bars",
@@ -152,11 +153,11 @@ pub const VOLUME: [PartDef; 4] = [
         own("Theme", OwnToken::Volume),
     ),
     PartDef {
-        note: Some("Rising bars and buy volume. Both are filled bars."),
+        note: Some("Rising bars and buy volume, hollow or filled as the rising candles are."),
         ..part("up", "Up", fill(100), false, own("Theme up", OwnToken::Up))
     },
     PartDef {
-        note: Some("Falling bars and sell volume. Both are hollow bars, whatever their color."),
+        note: Some("Falling bars and sell volume, hollow or filled as the falling candles are."),
         ..part(
             "down",
             "Down",
@@ -168,9 +169,9 @@ pub const VOLUME: [PartDef; 4] = [
     part(
         "average",
         "Average",
-        line(Color::Palette(0), 2, 100),
+        line(Color::Own, 2, 80),
         true,
-        None,
+        own("Theme", OwnToken::Text),
     ),
 ];
 

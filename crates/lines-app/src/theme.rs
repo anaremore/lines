@@ -1030,10 +1030,6 @@ mod tests {
         }
     }
 
-    /// Drawing colors read against the chart (3:1, graphical objects) and never borrow a
-    /// meaning: clearly apart from up, down and the accent (sRGB distance, so near-misses such
-    /// as a sky blue beside the colorblind palette's blue up fail too), in every theme and
-    /// palette.
     /// The Volume study's neutral bars read as data on the chart (3:1, WCAG 1.4.11) and are
     /// never mistaken for a direction or the accent.
     #[test]
@@ -1055,6 +1051,10 @@ mod tests {
         }
     }
 
+    /// Drawing colors read against the chart (3:1, graphical objects) and never borrow a
+    /// meaning: clearly apart from up, down and the accent (sRGB distance, so near-misses such
+    /// as a sky blue beside the colorblind palette's blue up fail too), in every theme and
+    /// palette.
     #[test]
     fn drawing_colors_contrast_and_stay_distinct() {
         for t in Theme::all() {

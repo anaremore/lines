@@ -4452,7 +4452,13 @@ impl ChartView {
         ));
         window.paint_quad(fill(rect(0.0, s.divider_mid(), pw, hair), t.axis_line));
         let sub = rect(0.0, s.sub_top, pw, s.sub_h);
-        let scale = self.studies.lower_scale(k, s.sub_h);
+        // The title box (`draw_volume_title`, the delta's) from the pane's top.
+        let title_h = if self.visibility.draws_labels() {
+            4.0 + label_px() * 1.6 + 4.0
+        } else {
+            0.0
+        };
+        let scale = self.studies.lower_scale(k, s.sub_h, title_h);
         let cross_in = self.cross_in_sub.filter(|(j, _)| *j == k).map(|(_, y)| y);
         window.with_content_mask(Some(ContentMask { bounds: sub }), |window| {
             for l in &self.scene.time_lines {
@@ -4639,7 +4645,8 @@ impl ChartView {
     ) {
         let t = self.theme;
         let qty = self.instrument.qty;
-        let avg_color = t.legend_text(t.study[0]);
+        // The average's own color is the theme's text (`study_style::VOLUME`).
+        let avg_color = t.text_dim;
         // (part, value, color): the name and total first.
         let mut parts = [(VOL_NAME, 0i64, t.text_main); 6];
         let mut n = 1;
@@ -6580,9 +6587,15 @@ fn merge_indicators(
     saved: Vec<lines_indicators::IndicatorConfig>,
     initial: Vec<lines_indicators::IndicatorConfig>,
 ) -> Vec<lines_indicators::IndicatorConfig> {
+    use lines_indicators::IndicatorConfig as C;
     let mut out = saved;
     for c in initial {
-        if !out.iter().any(|s| s.same_but_style(&c)) {
+        // One Volume per chart: a saved one wins over the command line's.
+        let volume = |x: &C| matches!(x, C::Volume { .. });
+        if !out
+            .iter()
+            .any(|s| s.same_but_style(&c) || volume(s) && volume(&c))
+        {
             out.push(c);
         }
     }
