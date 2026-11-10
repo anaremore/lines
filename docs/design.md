@@ -50,6 +50,15 @@ Context menus follow these rules (`crates/lines-app/src/menu.rs`, `pane_menu.rs`
 6. Delete, cancel and close go last, in `Theme::destructive`, and say what they do. Bulk deletes confirm first.
 7. Shortcuts show right-aligned, from `commands::BINDINGS`. "All commands…" is the last row of a pane menu, and every row's action is also in the palette (tested), except an object's own rows, which act on the thing under the pointer and have direct controls too.
 
+### Controls
+- A **field** names what it holds and shows its value ("Qty 10 ▾", "Bracket 8/16 t ▾"): a quiet box on `panel` with an `axis_line` edge (the accent while its list is open). Its list opens under it in the menus' look: a check on the one in force, a box for a mode, shortcuts on the right, an editor ("Edit presets…") last.
+- **Primary** actions are solid in their meaning's color with text in `bg` (Buy in `up`, Sell in `down`); **secondary** ones are outlined in it on `bg` (Join bid, Join ask). The words always say the side.
+- **Exits** sit at the bottom under a divider, outlined in `axis_line`; **Flatten** is outlined in `warn` (2 px) and bold. Cancel all and Flatten never dim; BE and Reverse dim while there is nothing to act on.
+- Narrower, a control drops its least needed part first and is never cut: a price line before a size, a field's name before its value. A row goes whole.
+
+### Trade panel
+The DOM's trading panel (`trade_bar.rs`), top to bottom: PAPER, the account ▾ and the Trading switch (its words and a track, amber when on); the position card (▲/▼ size @ average, open P&L large; SL in `down`, TP in `order_target`, the day's P&L; or "Flat"); one status line; rule meters; Qty ▾ and Bracket ▾; Buy and Sell ("Buy 10" over "Market · 7572.00"); Join bid and Join ask (Settings › DOM hides them); BE, Reverse, Cancel all, Flatten. Its height depends only on the pane's size (§7). It lays out in 100 % units through `crate::zoom`, so it is one panel at every zoom, and fits from 165 px: narrowing, Buy and Sell lose the price line (never the size), the joins lose their prices and then hide (below 240), and BE and Reverse take the joins' row.
+
 ## 7. Reliability over cleverness
 - Prefer the simple, predictable layout over the adaptive one that moves things. Nothing the trader aims at should shift under the cursor (e.g. the DOM never re-centres while hovered).
 - UI degrades gracefully: missing data shows as missing (greyed, labelled), never as zero or a stale value presented as live.
