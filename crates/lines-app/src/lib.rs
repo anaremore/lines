@@ -140,6 +140,9 @@ enum SourceKind {
 #[derive(Default, Clone)]
 pub struct Extensions {
     sources: Vec<Arc<dyn SourceExtension>>,
+    /// The names of the sources [`Extensions::with_builtin_sources`] added (not the caller's):
+    /// these come after Coinbase and Kraken, and only when set up.
+    builtin: Vec<&'static str>,
     level_sources: Vec<Arc<dyn LevelSource>>,
     brokers: Vec<Arc<dyn BrokerExtension>>,
     strategies: Vec<Arc<dyn lines_strategy::StrategyExtension>>,
@@ -168,6 +171,7 @@ impl Extensions {
             self.sources.push(Arc::new(
                 lines_databento::live::DatabentoExtension::from_env(),
             ));
+            self.builtin.push(DATABENTO);
         }
         self
     }
@@ -1081,6 +1085,10 @@ fn run_sources(
             Source::Replay { .. } => "replay".to_owned(),
             _ => choice.name(),
         };
+        // `--source databento`: its key, looked up now (startup), never from the UI.
+        if name == DATABENTO {
+            let _ = databento_set_up();
+        }
         let mut out = vec![(name, first.clone())];
         for (i, path) in cli.also_replay.iter().enumerate() {
             let mut cfg = first.clone();
@@ -1122,12 +1130,18 @@ fn run_sources(
 /// The built-in Databento source's name (decision 0033).
 pub const DATABENTO: &str = "databento";
 
-/// Whether this run has a Databento key (`DATABENTO_API_KEY`, the OS keychain, or a key file):
-/// looked up once per run, never shown. Without one, Databento is "not set up" and makes no
-/// requests (decision 0033).
+/// Whether this run has a Databento key (`DATABENTO_API_KEY`, the OS keychain, or a key file),
+/// never shown. Without one, Databento is "not set up" and makes no requests (decision 0033).
+/// Looked up once, at startup, and only when the run may use it (switched on, or `--source
+/// databento`): the keychain read may start a process, never on the UI thread.
 pub fn databento_set_up() -> bool {
-    static SET_UP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SET_UP.get_or_init(|| lines_databento::key::ApiKey::load().is_ok())
+    lines_databento::key::status().is_ok()
+}
+
+/// [`databento_set_up`] if it was looked up (`None`: this run never needed it). The UI reads
+/// this: it never starts the lookup.
+pub fn databento_known() -> Option<bool> {
+    lines_databento::key::status_if_known().map(Result::is_ok)
 }
 
 /// The sources a run without `--source` has, in preference order (decision 0030): each
@@ -1139,7 +1153,8 @@ fn enabled_sources(
     set_up: impl Fn(&str) -> bool,
 ) -> Vec<SourceChoice> {
     let on = |name: &str| prefs.get(name).is_none_or(sources::SourcePrefs::on);
-    let builtin = |name: &str| name == DATABENTO;
+    // Only the built-in instances: a caller's own source of that name keeps its place.
+    let builtin = |name: &str| ext.builtin.contains(&name);
     let ext_choice =
         |e: &Arc<dyn SourceExtension>| SourceChoice::Extension(ExtensionSource(e.clone()));
     let mut choices: Vec<SourceChoice> = ext
@@ -2377,13 +2392,19 @@ mod tests {
             SourceChoice::parse("databento", &Extensions::new().with_builtin_sources()),
             Some(SourceChoice::Extension(_))
         ));
-        // A caller's own Databento (an official build) is used, never a second one.
+        // A caller's own Databento (an official build) is used, never a second one, and keeps
+        // its place with the extensions (first), not gated on the public key lookup.
         let own = Extensions::new()
             .with_source(Arc::new(
                 lines_databento::live::DatabentoExtension::from_env(),
             ))
             .with_builtin_sources();
         assert_eq!(own.sources().len(), 1);
+        let names_own: Vec<String> = enabled_sources(&own, &Default::default(), |_| false)
+            .iter()
+            .map(SourceChoice::name)
+            .collect();
+        assert_eq!(names_own, ["databento", "coinbase", "kraken"]);
         assert_eq!(names(&[("kraken", false)]), ["coinbase"]);
         assert_eq!(
             names(&[("coinbase", true), ("kraken", true)]),

@@ -10,7 +10,8 @@
 //! replayed by the same build: [`crate::Source::Replay`] looks the recording's provider up
 //! here when it isn't a built-in one.
 //!
-//! Nothing here names a vendor; the public `lines` binary registers none.
+//! Nothing here names a vendor. The public `lines` app registers one built-in source this way
+//! (Databento, decision 0033, from the `lines-databento` crate); official builds add theirs.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;

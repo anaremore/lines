@@ -1647,16 +1647,21 @@ fn table() -> Vec<Setting> {
             "data.databento_key",
             Sec::Data,
             "Databento key",
-            "Whether this run found your Databento API key. The key itself is never shown. Settings › Connections will take it.",
+            "Whether this run found your Databento API key (DATABENTO_API_KEY, or the OS keychain entry lines-databento; a key added later counts from the next start). The key itself is never shown.",
             Scope::ReadOnly,
             Normal,
             Info,
-            |_, _, _| {
-                Value::Text(if crate::databento_set_up() {
-                    "Set up".to_owned()
-                } else {
-                    "Not set up".to_owned()
-                })
+            |p, _, _| {
+                // The startup lookup's answer; never a lookup from here.
+                Value::Text(
+                    match (source_on(p, crate::DATABENTO), crate::databento_known()) {
+                        (false, _) => "Off",
+                        (true, Some(true)) => "Set up",
+                        (true, Some(false)) => "Not set up",
+                        (true, None) => "Checked at the next start",
+                    }
+                    .to_owned(),
+                )
             },
             None,
         ),

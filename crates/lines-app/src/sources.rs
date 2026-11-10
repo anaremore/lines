@@ -267,9 +267,13 @@ impl Pick {
 }
 
 /// Why a saved source isn't in this run. Databento without a key is "not set up" (decision
-/// 0033): it makes no requests until the key exists.
+/// 0033): it makes no requests until the key exists. Reads the startup lookup, never starts one.
 fn missing_reason(name: &str) -> String {
-    if name == crate::DATABENTO && !crate::databento_set_up() {
+    missing_reason_with(name, crate::databento_known())
+}
+
+fn missing_reason_with(name: &str, databento: Option<bool>) -> String {
+    if name == crate::DATABENTO && databento == Some(false) {
         return "Databento is not set up: no API key (see Settings › Data)".to_owned();
     }
     format!("{} is off or not in this build", source_label(name))
@@ -516,6 +520,19 @@ mod tests {
             .for_pane(Some("kraken"), Some(&doc(catalog::BTC_USD)))
             .unwrap_err();
         assert_eq!(err.0, "Kraken is off or not in this build");
+        // Databento without a key says so; switched off (never looked up) it is "off".
+        assert_eq!(
+            missing_reason_with("databento", Some(false)),
+            "Databento is not set up: no API key (see Settings › Data)"
+        );
+        assert_eq!(
+            missing_reason_with("databento", None),
+            "Databento is off or not in this build"
+        );
+        assert_eq!(
+            missing_reason_with("databento", Some(true)),
+            "Databento is off or not in this build"
+        );
         // A pane that shows no market (a journal) is never unavailable for its source.
         assert_eq!(s.for_pane(Some("kraken"), None).unwrap().name, "mock");
         // Nothing serves NQ here (the mock is ES only).

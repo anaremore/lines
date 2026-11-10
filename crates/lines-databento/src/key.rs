@@ -36,22 +36,34 @@ impl ApiKey {
         &self.0
     }
 
-    /// The environment first (an override), then the OS keychain, then a key file.
+    /// The environment first (an override), then the OS keychain, then a key file. The
+    /// keychain read starts a process on macOS and Linux: call this off the UI thread (the
+    /// app uses [`status`], looked up once at startup).
     pub fn load() -> Result<Self> {
-        if let Ok(k) = std::env::var(ENV)
-            && !k.trim().is_empty()
-        {
+        Self::load_from(
+            std::env::var(ENV).ok(),
+            || keychain::read(CREDENTIAL),
+            std::env::var(FILE_ENV).ok(),
+        )
+    }
+
+    /// [`ApiKey::load`] with its sources given: `env`, then `keychain`, then the key file
+    /// `file` names.
+    pub fn load_from(
+        env: Option<String>,
+        keychain: impl FnOnce() -> Result<Option<String>>,
+        file: Option<String>,
+    ) -> Result<Self> {
+        if let Some(k) = env.filter(|k| !k.trim().is_empty()) {
             return ApiKey::new(k);
         }
-        match keychain::read(CREDENTIAL) {
+        match keychain() {
             Ok(Some(k)) if !k.trim().is_empty() => return ApiKey::new(k),
             Ok(_) => {}
             // Never the key: the store and its error only.
             Err(e) => tracing::warn!("{} {CREDENTIAL:?}: {e}", keychain::NAME),
         }
-        if let Ok(path) = std::env::var(FILE_ENV)
-            && !path.trim().is_empty()
-        {
+        if let Some(path) = file.filter(|p| !p.trim().is_empty()) {
             return ApiKey::from_file(std::path::Path::new(path.trim()));
         }
         bail!(
@@ -89,9 +101,68 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 
+/// Whether a usable key exists (`Err`: why not, never the key), looked up once per process:
+/// the first call reads the environment, the keychain and the key file (the keychain may start
+/// a process, at most 5 s); every later call is a cached answer, cheap enough for the UI.
+pub fn status() -> &'static std::result::Result<(), String> {
+    STATUS.get_or_init(|| {
+        let key = ApiKey::load().map_err(|e| format!("{e:#}"))?;
+        // Databento keys are 32 characters.
+        if key.secret().len() != 32 {
+            return Err(format!(
+                "the Databento API key should be 32 characters ({})",
+                key.describe()
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// [`status`] if it was looked up already (`None`: not yet; nothing is read).
+pub fn status_if_known() -> Option<&'static std::result::Result<(), String>> {
+    STATUS.get()
+}
+
+static STATUS: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+
 /// The OS keychain's entry `target`: its password, `Ok(None)` when there is none.
 mod keychain {
     use anyhow::Result;
+
+    /// A keychain tool that hasn't answered in this long is given up (a locked keychain whose
+    /// prompt can't show): no key, said in the log.
+    #[cfg(not(windows))]
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Run `cmd` with no stdin, waiting at most [`TIMEOUT`]: (exit code, stdout).
+    #[cfg(not(windows))]
+    fn run(mut cmd: std::process::Command) -> std::io::Result<(Option<i32>, Vec<u8>)> {
+        use std::io::Read;
+        let mut child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let mut out = Vec::new();
+                if let Some(mut o) = child.stdout.take() {
+                    o.read_to_end(&mut out)?;
+                }
+                return Ok((status.code(), out));
+            }
+            if start.elapsed() >= TIMEOUT {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the keychain didn't answer in 5 s",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
     #[cfg(windows)]
     pub const NAME: &str = "Windows Credential Manager";
@@ -109,12 +180,11 @@ mod keychain {
     /// is "not found".
     #[cfg(target_os = "macos")]
     pub fn read(target: &str) -> Result<Option<String>> {
-        let out = std::process::Command::new("/usr/bin/security")
-            .args(["find-generic-password", "-s", target, "-w"])
-            .stdin(std::process::Stdio::null())
-            .output()?;
-        match out.status.code() {
-            Some(0) => Ok(Some(String::from_utf8(out.stdout)?)),
+        let mut cmd = std::process::Command::new("/usr/bin/security");
+        cmd.args(["find-generic-password", "-s", target, "-w"]);
+        let (code, out) = run(cmd)?;
+        match code {
+            Some(0) => Ok(Some(String::from_utf8(out)?)),
             Some(44) => Ok(None),
             code => anyhow::bail!("security exited with {code:?}"),
         }
@@ -124,19 +194,17 @@ mod keychain {
     /// no key.
     #[cfg(not(any(windows, target_os = "macos")))]
     pub fn read(target: &str) -> Result<Option<String>> {
-        let out = match std::process::Command::new("secret-tool")
-            .args(["lookup", "service", target])
-            .stdin(std::process::Stdio::null())
-            .output()
-        {
-            Ok(o) => o,
+        let mut cmd = std::process::Command::new("secret-tool");
+        cmd.args(["lookup", "service", target]);
+        let (code, out) = match run(cmd) {
+            Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        if !out.status.success() || out.stdout.is_empty() {
+        if code != Some(0) || out.is_empty() {
             return Ok(None);
         }
-        Ok(Some(String::from_utf8(out.stdout)?))
+        Ok(Some(String::from_utf8(out)?))
     }
 }
 
@@ -213,6 +281,36 @@ mod tests {
         assert!(!k.describe().contains("SECRET"));
         assert!(ApiKey::new("  ".into()).is_err());
         assert!(ApiKey::new("db-abc\u{7}".into()).is_err());
+    }
+
+    /// The environment overrides the keychain, which comes before the key file; an empty
+    /// value is no key; a keychain error falls through; with none, "not set up".
+    #[test]
+    fn the_key_sources_in_order() {
+        const ENV_KEY: &str = "db-ENVENVENVENVENVENVENVENVENVENV";
+        const CHAIN_KEY: &str = "db-CHAINCHAINCHAINCHAINCHAINCHAI";
+        let chain = || Ok(Some(CHAIN_KEY.to_owned()));
+        let k = ApiKey::load_from(Some(ENV_KEY.into()), chain, None).unwrap();
+        assert_eq!(k.secret(), ENV_KEY, "the environment overrides");
+        let k = ApiKey::load_from(Some("  ".into()), chain, None).unwrap();
+        assert_eq!(k.secret(), CHAIN_KEY, "an empty variable is no key");
+        let dir =
+            std::env::temp_dir().join(format!("lines-databento-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("key.txt");
+        std::fs::write(&p, "db-FILEKEYFILEKEYFILEKEYFILEKEYF").unwrap();
+        let file = Some(p.display().to_string());
+        let k = ApiKey::load_from(None, chain, file.clone()).unwrap();
+        assert_eq!(k.secret(), CHAIN_KEY, "the keychain before the file");
+        let k = ApiKey::load_from(None, || anyhow::bail!("locked"), file.clone()).unwrap();
+        assert_eq!(
+            k.secret(),
+            "db-FILEKEYFILEKEYFILEKEYFILEKEYF",
+            "a keychain error falls through"
+        );
+        let e = ApiKey::load_from(None, || Ok(None), None).unwrap_err();
+        assert!(format!("{e:#}").starts_with("not set up"), "{e:#}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

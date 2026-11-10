@@ -60,13 +60,13 @@ built-in source by the public `lines` app (decision 0033; off until the user's k
 
 ## Credentials stay out of recordings
 
-As with Rithmic, credentials only exist in the transport:
+As with other connectors, credentials only exist in the transport:
 - The session sends the auth line with a placeholder.
 - The transport replaces the placeholder with the real response to the challenge just before
   writing to the socket.
 - The public recorder records frames before `send`, so recordings contain the placeholder,
   never the key, its hash or its last 5 characters.
-- An offline check, like `lines-rithmic`'s `offline_checks`, scans a recording for the key.
+- An offline check scans a recording for the key.
 
 ## Recording and replay
 

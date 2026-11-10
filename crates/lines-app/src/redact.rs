@@ -109,8 +109,12 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-/// A token-looking word: long, mixing letters and digits (API keys, session ids, JWT parts).
+/// A token-looking word: long, mixing letters and digits (API keys, session ids, JWT parts),
+/// or a Databento key's shape (`db-` and 29 more, which may hold no digit).
 fn looks_like_token(w: &str) -> bool {
+    if w.len() == 32 && w.starts_with("db-") && w[3..].chars().all(|c| c.is_ascii_alphanumeric()) {
+        return true;
+    }
     w.len() >= 24
         && w.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-' | '.'))

@@ -228,15 +228,9 @@ impl SourceExtension for DatabentoExtension {
         lines_feed::catalog::ES
     }
     fn check(&self, _product: &Product) -> Result<(), String> {
+        // Looked up once (the UI calls this per keystroke): a cached answer after the first.
         // The error names where the key was looked for, never the key.
-        let key = ApiKey::load().map_err(|e| format!("{e:#}"))?;
-        if key.secret().len() != 32 {
-            return Err(format!(
-                "the Databento API key should be 32 characters ({})",
-                key.describe()
-            ));
-        }
-        Ok(())
+        crate::key::status().clone()
     }
     fn connect(
         &self,
