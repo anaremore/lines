@@ -278,7 +278,10 @@ mod tests {
         );
         let n = store.read().stats.trades_in;
         wait_until(|| store.read().stats.trades_in > n + 20);
-        assert_eq!(store.recording.stop(), Some(path.clone()));
+        assert_eq!(
+            store.recording.stop(),
+            crate::live_record::Stopped::Saved(path.clone())
+        );
         assert_eq!(store.recording.state(), RecState::Off);
         let n = store.read().stats.trades_in;
         wait_until(|| store.read().stats.trades_in > n);

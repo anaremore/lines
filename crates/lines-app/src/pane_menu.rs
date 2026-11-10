@@ -655,6 +655,8 @@ mod tests {
                 "Show hidden panes",
                 "Re-attach detached panes",
                 "---",
+                "Recording",
+                "---",
                 "New tab",
                 "Reopen closed tab",
                 "---",

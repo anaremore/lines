@@ -552,10 +552,14 @@ pub(crate) async fn live(
 ) {
     let batch = |frames: &[LevelFrame]| {
         let now = crate::now_utc();
-        if let Some(r) = rec.lock().as_mut() {
+        // Under the recorder's lock, so a recording starting now (`begin`) writes this batch
+        // either as its first or from here, never neither.
+        let mut slot = rec.lock();
+        if let Some(r) = slot.as_mut() {
             r.write(now, frames);
         }
         *last.lock() = Some((now, frames.to_vec()));
+        drop(slot);
         apply(&*source, &ctx, &*prices, &cell, frames, now);
     };
     let mut backoff = Duration::from_secs(1);

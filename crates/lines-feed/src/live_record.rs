@@ -39,12 +39,26 @@ pub enum RecState {
 
 #[derive(Default)]
 struct State {
-    /// The feed is live (not a replay): it can be recorded.
+    /// The feed is live (not a replay) and running: it can be recorded.
     recordable: bool,
     /// A start asked for, into this directory.
     pending: Option<PathBuf>,
+    /// The feed thread took the start and is creating the file; a stop meanwhile cancels it.
+    creating: bool,
+    cancelled: bool,
     active: Option<Active>,
     error: Option<String>,
+}
+
+/// What a stop did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// Not recording.
+    Nothing,
+    /// A start that hadn't begun yet was called off.
+    Cancelled,
+    /// This file is finished.
+    Saved(PathBuf),
 }
 
 struct Active {
@@ -71,7 +85,7 @@ impl RecordCtl {
     /// record (a replay) or it is already recording or starting.
     pub fn start(&self, dir: PathBuf) -> bool {
         let mut s = self.state.lock();
-        if !s.recordable || s.pending.is_some() || s.active.is_some() {
+        if !s.recordable || s.pending.is_some() || s.creating || s.active.is_some() {
             return false;
         }
         s.pending = Some(dir);
@@ -82,25 +96,39 @@ impl RecordCtl {
         true
     }
 
-    /// Stop recording: the file is finished now; the feed keeps running. Returns its path.
-    pub fn stop(&self) -> Option<PathBuf> {
+    /// Stop recording: the file is finished now; the feed keeps running. A start not begun
+    /// yet (the feed is reconnecting) is called off, also while its file is being created.
+    pub fn stop(&self) -> Stopped {
         let mut s = self.state.lock();
-        s.pending = None;
-        let a = s.active.take()?;
-        a.recorder.stop();
-        Some(a.path)
+        if let Some(a) = s.active.take() {
+            a.recorder.stop();
+            return Stopped::Saved(a.path);
+        }
+        if s.pending.take().is_some() {
+            return Stopped::Cancelled;
+        }
+        if s.creating {
+            s.cancelled = true;
+            return Stopped::Cancelled;
+        }
+        Stopped::Nothing
+    }
+
+    /// The last start's failure, once (the app shows it where the recording was started).
+    pub fn take_error(&self) -> Option<String> {
+        self.state.lock().error.take()
     }
 
     pub fn state(&self) -> RecState {
         let s = self.state.lock();
-        match (&s.active, &s.pending, &s.error) {
+        match (&s.active, s.pending.is_some() || s.creating, &s.error) {
             (Some(a), _, _) => RecState::On {
                 path: a.path.clone(),
                 since_ms: a.since_ms,
             },
-            (None, Some(_), _) => RecState::Starting,
-            (None, None, Some(e)) => RecState::Failed(e.clone()),
-            (None, None, None) => RecState::Off,
+            (None, true, _) => RecState::Starting,
+            (None, false, Some(e)) => RecState::Failed(e.clone()),
+            (None, false, None) => RecState::Off,
         }
     }
 
@@ -117,23 +145,50 @@ impl RecordCtl {
         self.state.lock().pending.is_some()
     }
 
-    /// The feed thread, at a connect: a start asked for.
+    /// The feed thread, at a connect: a start asked for (it is creating the file until
+    /// [`RecordCtl::set_active`] or [`RecordCtl::fail`]).
     pub(crate) fn take_pending(&self) -> Option<PathBuf> {
-        self.state.lock().pending.take()
+        let mut s = self.state.lock();
+        let p = s.pending.take();
+        s.creating = p.is_some();
+        s.cancelled = false;
+        p
     }
 
-    pub(crate) fn set_active(&self, path: PathBuf, since_ms: i64, recorder: Arc<Recorder>) {
+    /// The file is open. `false` when a stop came while it was being created: the recorder
+    /// is stopped and not used.
+    pub(crate) fn set_active(&self, path: PathBuf, since_ms: i64, recorder: Arc<Recorder>) -> bool {
         let mut s = self.state.lock();
+        s.creating = false;
+        if std::mem::take(&mut s.cancelled) {
+            recorder.stop();
+            return false;
+        }
         s.active = Some(Active {
             path,
             since_ms,
             recorder,
         });
         s.error = None;
+        true
     }
 
     pub(crate) fn fail(&self, e: String) {
-        self.state.lock().error = Some(e);
+        let mut s = self.state.lock();
+        s.creating = false;
+        s.cancelled = false;
+        s.error = Some(e);
+    }
+
+    /// The feed has stopped: nothing more can be recorded; a recording ends.
+    pub(crate) fn close(&self) {
+        let mut s = self.state.lock();
+        s.recordable = false;
+        s.pending = None;
+        s.creating = false;
+        if let Some(a) = s.active.take() {
+            a.recorder.stop();
+        }
     }
 
     /// The feed thread, at a roll: the recording ends (a file holds one contract).
@@ -234,8 +289,37 @@ mod tests {
         assert_eq!(c.state(), RecState::Starting);
         assert!(!c.start("d".into()));
         assert_eq!(c.take_pending(), Some(PathBuf::from("d")));
+        assert_eq!(c.state(), RecState::Starting, "creating the file");
         c.fail("disk full".into());
         assert_eq!(c.state(), RecState::Failed("disk full".into()));
-        assert_eq!(c.stop(), None);
+        assert_eq!(c.take_error().as_deref(), Some("disk full"), "shown once");
+        assert_eq!(c.take_error(), None);
+        assert_eq!(c.stop(), Stopped::Nothing);
+        // A stop before the feed took the start calls it off.
+        assert!(c.start("d".into()));
+        assert_eq!(c.stop(), Stopped::Cancelled);
+        assert_eq!(c.take_pending(), None);
+        // A feed that has stopped can't be recorded.
+        c.close();
+        assert!(!c.start("d".into()));
+    }
+
+    /// A stop while the feed thread creates the file: the recording never becomes active.
+    #[test]
+    fn a_stop_during_creation_wins() {
+        let dir = std::env::temp_dir().join(format!("lines-rec-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = RecordCtl::default();
+        c.set_recordable(true);
+        assert!(c.start(dir.clone()));
+        let d = c.take_pending().unwrap();
+        assert_eq!(c.stop(), Stopped::Cancelled);
+        let path = d.join("x.lfr");
+        let r = Arc::new(Recorder::create(&path, "cqg", "p", "ES", None).unwrap());
+        assert!(!c.set_active(path, 0, r.clone()));
+        assert!(r.is_stopped());
+        assert_eq!(c.state(), RecState::Off);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

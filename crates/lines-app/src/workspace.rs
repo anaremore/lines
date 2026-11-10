@@ -739,8 +739,8 @@ pub struct WindowView {
     /// Screenshot: a menu to open once its pane can show it (`--context-menu`).
     shot_menu: Option<crate::pane_menu::ShotMenu>,
     hover_tab: Option<usize>,
-    /// Recording (`crate::recording`), as of this render: the header bar shows, even with one
-    /// tab, so REC and Stop are always in view.
+    /// Recording (`crate::recording`), as of this render: the footer keeps REC and its Stop
+    /// in view.
     rec_shown: bool,
     /// A one-second re-render is scheduled (the REC time).
     rec_tick: bool,
@@ -1108,8 +1108,6 @@ impl WindowView {
         cx.notify();
     }
 
-    /// Report a refused action inline (docs/design.md: errors where they happened). It expires
-    /// on its own; the same refusal again replaces it with a count.
     /// "Start recording": every live feed into the data folder's `recordings/`
     /// (`crate::recording`). Never waits on a feed: each starts at its next connect.
     fn start_recording(&mut self, cx: &mut Context<Self>) {
@@ -1136,8 +1134,12 @@ impl WindowView {
 
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
         let stores = Feeds::registry(cx).stores();
-        let files = crate::recording::stop(&stores);
-        match files.as_slice() {
+        let r = crate::recording::stop(&stores);
+        match r.saved.as_slice() {
+            [] if r.cancelled > 0 => {
+                notice("Recording canceled before it began".to_owned(), cx);
+                cx.notify();
+            }
             [] => self.refuse("Not recording", cx),
             [one] => {
                 notice(format!("Recording saved: {}", one.display()), cx);
@@ -1158,9 +1160,9 @@ impl WindowView {
         }
     }
 
-    /// The window header's recording indicator: a red dot, "REC" and the elapsed time (never
-    /// the dot alone), and Stop one click away. While recording the window re-renders once a
-    /// second for the time (render, not paint: the bars and books paint as before).
+    /// The footer's recording indicator: a red dot, "REC" and the elapsed time (never the dot
+    /// alone), and "Stop recording" one click away. While recording the window re-renders once
+    /// a second for the time (render, not paint: the bars and books paint as before).
     fn recording_indicator(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let t = self.theme;
         let (status, now) = match crate::recording::fixture() {
@@ -1188,12 +1190,10 @@ impl WindowView {
         Some(
             div()
                 .id("recording")
-                .h_full()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .px_2()
                 .child(
                     div()
                         .size(crate::zoom::ui(8.0))
@@ -1210,13 +1210,12 @@ impl WindowView {
                     div()
                         .id("recording-stop")
                         .px_2()
-                        .py(crate::zoom::ui(2.0))
                         .rounded_sm()
                         .border_1()
                         .border_color(t.control_edge)
                         .text_color(t.text_main)
                         .hover(|s| s.bg(t.accent.opacity(0.16)))
-                        .child("Stop")
+                        .child("Stop recording")
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -1229,6 +1228,8 @@ impl WindowView {
         )
     }
 
+    /// Report a refused action inline (docs/design.md: errors where they happened). It expires
+    /// on its own; the same refusal again replaces it with a count.
     fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
         notice(why.to_owned(), cx);
         cx.notify();
@@ -1278,9 +1279,9 @@ impl WindowView {
         if self.shows_bar() { tab_bar_h() } else { 0.0 }
     }
 
-    /// The header bar: with two tabs or more, or while recording.
+    /// The header bar: with two tabs or more.
     fn shows_bar(&self) -> bool {
-        tabstate::shows_tab_bar(self.tabs.len()) || self.rec_shown
+        tabstate::shows_tab_bar(self.tabs.len())
     }
 
     /// The footer (key hints and workspace status) is shown unless the key hints are hidden
@@ -1293,7 +1294,12 @@ impl WindowView {
             !t.in_state(PaneState::is_hidden).is_empty()
                 || !t.in_state(|s| s == PaneState::Detached).is_empty()
         });
-        StudyVisibility::footer_shown(ws.hide_hints, ws.crosshair_sync || report || panes)
+        // Recording keeps it too (REC and its Stop live there). The footer is shown by default,
+        // so starting or stopping a recording moves no pane (docs/design.md §7).
+        StudyVisibility::footer_shown(
+            ws.hide_hints,
+            ws.crosshair_sync || report || panes || self.rec_shown,
+        )
     }
 
     fn content_area(&self, window: &Window, cx: &App) -> Rect {
@@ -2792,7 +2798,7 @@ impl WindowView {
 
     // ---- rendering --------------------------------------------------------------------------
 
-    fn tab_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let mut bar = div()
             .h(px(tab_bar_h()))
@@ -2898,19 +2904,13 @@ impl WindowView {
                     }),
                 ),
         );
-        // Recording: at the bar's right end, centered in it.
-        if let Some(rec) = self.recording_indicator(cx) {
-            bar = bar
-                .child(div().flex_1())
-                .child(div().h_full().flex().items_center().child(rec));
-        }
         bar
     }
 
     /// The workspace's status for the footer (always there, with or without a tab bar):
     /// an inline report, what this tab isn't showing (click to bring it back), crosshair
     /// sync, and the workspace's name (click to open another).
-    fn status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn status(&self, rec: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let ws = cx.global::<Workspace>();
         let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
@@ -3047,6 +3047,7 @@ impl WindowView {
                 ))
             })
             .when(sync, |d| d.child("crosshair sync"))
+            .children(rec)
             .child(
                 div()
                     .id("workspace-name")
@@ -3597,9 +3598,16 @@ impl Render for WindowView {
         // The UI zoom (`crate::zoom`): every rem-based size in the window follows it.
         window.set_rem_size(crate::zoom::rem());
         self.screen = screen_rect(window);
-        // Before the layout below reads `bar_h`.
-        self.rec_shown = crate::recording::fixture().is_some()
-            || crate::recording::status(&Feeds::registry(cx).stores()).active();
+        // Before the layout below reads `footer_shown`.
+        let (rec, failed) = match crate::recording::fixture() {
+            Some((st, _)) => (st, None),
+            None => crate::recording::upkeep(&Feeds::registry(cx).stores()),
+        };
+        self.rec_shown = rec.active();
+        if let Some(e) = failed {
+            // Shown where it was started from: a start that couldn't write is never silent.
+            notice(format!("Recording didn't start: {e}"), cx);
+        }
         if let Some(m) = self.shot_menu.clone()
             && self.open_shot_menu(&m, cx)
         {
@@ -3636,7 +3644,8 @@ impl Render for WindowView {
         let bar = self
             .shows_bar()
             .then(|| self.tab_bar(cx).into_any_element());
-        let status = self.status(cx).into_any_element();
+        let rec = self.recording_indicator(cx);
+        let status = self.status(rec, cx).into_any_element();
         // F1 / Clean chart hide the key hints; the footer stays while it has state to show.
         let (footer, hide_hints) = (self.footer_shown(cx), cx.global::<Workspace>().hide_hints);
         div()

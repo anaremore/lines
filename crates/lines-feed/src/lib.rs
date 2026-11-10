@@ -594,7 +594,8 @@ pub async fn run_feed(
             }
         }
     }
-    store.recording.end();
+    // The feed has stopped: nothing more to record here.
+    store.recording.close();
     if let Some(r) = recorder.and_then(|r| Arc::try_unwrap(r).ok())
         && let Err(e) = r.finish()
     {
@@ -609,7 +610,8 @@ pub async fn run_feed(
 }
 
 /// Create a recording asked for from the app in `dir`: `<source>-<symbol>-<UTC time>.lfr`, the
-/// provider (the source) in its header. A failure is shown in the app, never stops the feed.
+/// provider (the source) in its header. A failure is reported to the app
+/// (`RecordCtl::take_error`, shown inline there) and never stops the feed.
 fn start_recording(
     dir: &std::path::Path,
     plan: &Plan,
@@ -636,8 +638,11 @@ fn start_recording(
         Ok((path, r)) => {
             tracing::info!("recording raw frames to {}", path.display());
             let r = Arc::new(r);
-            store.recording.set_active(path, now, r.clone());
-            Some(r)
+            // A stop while the file was being created wins: no recording.
+            store
+                .recording
+                .set_active(path, now, r.clone())
+                .then_some(r)
         }
         Err(e) => {
             tracing::warn!("can't start a recording in {}: {e}", dir.display());
