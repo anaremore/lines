@@ -126,6 +126,11 @@ pub trait SourceExtension: Send + Sync + 'static {
     fn local_store(&self) -> bool {
         true
     }
+    /// Whole past trade dates this source can download into the local store ("Download
+    /// days…", decision 0030 §8; `crate::download`). `None`: it can't.
+    fn past_days(&self) -> Option<Arc<dyn crate::download::PastDays>> {
+        None
+    }
 }
 
 fn table() -> &'static RwLock<Vec<Arc<dyn SourceExtension>>> {
@@ -146,6 +151,16 @@ pub fn register(ext: Arc<dyn SourceExtension>) -> Result<()> {
     }
     if RESERVED_NAMES.contains(&name) {
         bail!("extension source name {name:?} is taken by a built-in source");
+    }
+    if let Some(days) = ext.past_days()
+        && days.api_version() != crate::download::API_VERSION
+    {
+        bail!(
+            "extension source {name:?} was built for download interface v{}; this Lines \
+             speaks v{}: rebuild it against this version",
+            days.api_version(),
+            crate::download::API_VERSION
+        );
     }
     let id = ext.provider().id();
     let mut t = table().write();

@@ -85,6 +85,10 @@ pub struct ContractWriter {
     counted: Vec<bool>,
     buf: Vec<u8>,
     last_save: Instant,
+    /// Opened mid-connection ([`ContractWriter::open_segments_only`]): stores trade segments
+    /// only, never the bar index or coverage (the chart doesn't hold the cached bars, so its
+    /// bars would overwrite the index, and the run claimed nothing it saw from the start).
+    segments_only: bool,
     _lock: File,
 }
 
@@ -108,6 +112,34 @@ impl ContractWriter {
         contract: Option<ContractKey>,
         store: Arc<ChartStore>,
     ) -> io::Result<(ContractWriter, Opened)> {
+        Self::open_with(cfg, product, contract, store, false)
+    }
+
+    /// Take the contract's lock mid-connection (it was held when the feed started): stores
+    /// the trade segments of this connection only. No torn-tail check or bar rebuild on the
+    /// feed thread (the segment writer cuts a torn tail of the file it appends to), and no bar
+    /// index or coverage is ever saved; the feed opens a full writer at its next connection.
+    pub fn open_segments_only(
+        cfg: &StoreConfig,
+        product: &Product,
+        contract: Option<ContractKey>,
+        store: Arc<ChartStore>,
+    ) -> io::Result<ContractWriter> {
+        Self::open_with(cfg, product, contract, store, true).map(|(w, _)| w)
+    }
+
+    /// Whether this writer stores segments only ([`ContractWriter::open_segments_only`]).
+    pub fn segments_only(&self) -> bool {
+        self.segments_only
+    }
+
+    fn open_with(
+        cfg: &StoreConfig,
+        product: &Product,
+        contract: Option<ContractKey>,
+        store: Arc<ChartStore>,
+        segments_only: bool,
+    ) -> io::Result<(ContractWriter, Opened)> {
         let dir = ContractDir::new(&cfg.root, &cfg.source, product, contract);
         std::fs::create_dir_all(&dir.path)?;
         let lock = File::create(dir.lock_path())?;
@@ -128,7 +160,11 @@ impl ContractWriter {
         let mut coverage = dir.coverage();
         let mut opened = Opened::default();
         // Torn tails: only the newest segments can have been open when the app last stopped.
-        let dates = dir.dates();
+        let dates = if segments_only {
+            Vec::new()
+        } else {
+            dir.dates()
+        };
         for &date in dates.iter().rev().take(CHECK_NEWEST) {
             let path = dir.segment_path(date);
             let header = segment_header(&dir, product, date);
@@ -157,6 +193,7 @@ impl ContractWriter {
             coverage.save(&dir.coverage_path())?;
         }
         match bars::load(&dir.bars_path(), period_ms) {
+            _ if segments_only => {}
             Some(b) => opened.bars = b,
             None if !dates.is_empty() => {
                 opened.bars = dir.rebuild_bars(period_ms, max_bars)?;
@@ -191,6 +228,7 @@ impl ContractWriter {
                 counted: Vec::new(),
                 buf: Vec::with_capacity(4096),
                 last_save: Instant::now(),
+                segments_only,
                 dir,
                 _lock: lock,
             },
@@ -214,6 +252,9 @@ impl ContractWriter {
 
     /// Fold the current run's claims into the coverage and save it.
     fn commit(&mut self) {
+        if self.segments_only {
+            return;
+        }
         let r = &self.run;
         if let (true, Some(head)) = (r.complete, r.head) {
             let mut bars = super::Ranges::default();
@@ -235,6 +276,9 @@ impl ContractWriter {
     }
 
     fn save_bars(&self) {
+        if self.segments_only {
+            return;
+        }
         let bars = self.store.read().series.bars().to_vec();
         self.send(Io::Bars(bars));
     }

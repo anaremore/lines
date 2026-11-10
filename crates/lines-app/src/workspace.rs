@@ -1457,6 +1457,7 @@ impl WindowView {
                 }
             }
             Command::ExportDiagnostics => crate::diagnostics::export(window, cx),
+            Command::DownloadDays => crate::download_view::open(Default::default(), cx),
             Command::ShowSourceHere => match self.tab().focused_handle().cloned() {
                 Some(h) if h.switchable(cx) => h.show_suggested(cx),
                 _ => self.refuse("this pane already shows data", cx),

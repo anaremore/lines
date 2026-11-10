@@ -11,6 +11,7 @@ pub mod coinbase;
 pub mod connection;
 pub mod cqg;
 pub mod disk;
+pub mod download;
 pub mod econ;
 pub mod extension;
 pub mod indicators;
@@ -27,6 +28,7 @@ pub mod registry;
 pub mod store;
 pub mod synth;
 pub mod synth_chain;
+pub mod synth_crypto;
 pub mod ticks;
 pub mod transport;
 
@@ -40,7 +42,7 @@ use lines_core::{CivilDate, ContractKey, Product, UtcMillis};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
-use connection::{ConnectionEnd, ConnectionError, ConnectionOptions, EventSink, NoSink};
+use connection::{ConnectionEnd, ConnectionError, ConnectionOptions, EventSink};
 use cqg::mock::{MockConfig, MockMarket, MockTransport};
 use provider::Provider;
 use recording::Recorder;
@@ -440,6 +442,13 @@ pub async fn run_feed(
         // Following a product: re-resolve the front month on every (re)connect. A roll only
         // moves the *chart* to the next contract (old bars retired, not mixed). Nothing here
         // touches positions; rolling a position is always an explicit pair of orders.
+        // A writer opened mid-connection stored segments only: now a full one (bar index,
+        // coverage), with the cached bars older than the chart's.
+        if writer.as_ref().is_some_and(|w| w.segments_only()) {
+            drop(writer.take());
+            let k = store.read().contract;
+            writer = full_writer(&config, &plan.product, k, &store, &mut tap);
+        }
         let current = store.read().contract;
         let contract = if plan.follow_front {
             let next = front_month(&plan.product, current).or(current);
@@ -483,12 +492,20 @@ pub async fn run_feed(
             recorder = start_recording(&dir, &plan, contract, &store);
         }
         let rec = recorder.as_deref();
-        let mut no_sink = NoSink;
-        let store_sink: &mut dyn EventSink = match writer.as_mut() {
-            Some(w) => w,
-            None => &mut no_sink,
+        // The contract's writer; without one (a past day of this contract being downloaded
+        // holds its lock) the sink tries again every so often, so this session is stored
+        // from then on.
+        let mut store_sink = StoreSink {
+            writer: &mut writer,
+            retry: config.store.as_ref().map(|cfg| Retry {
+                cfg,
+                product: &plan.product,
+                contract,
+                store: &store,
+                next: None,
+            }),
         };
-        let mut tee = indicators::Tee(store_sink, &mut tap);
+        let mut tee = indicators::Tee(&mut store_sink, &mut tap);
         // Listeners (e.g. the trading core's paper broker) get every batch too.
         let mut listen_tap = listen::ListenTap {
             feed: store.feed_id(),
@@ -686,7 +703,8 @@ async fn drive<T: Transport>(
 }
 
 /// Open the local store's writer for a contract and show its cached bars. Store problems
-/// never stop the feed: they are logged and the feed runs without the store.
+/// never stop the feed: they are logged and the feed runs without the store (a locked
+/// contract is tried again during the connection: `StoreSink`).
 fn open_writer(
     config: &FeedConfig,
     product: &Product,
@@ -717,6 +735,115 @@ fn open_writer(
         Err(e) => {
             tracing::warn!("local store unavailable: {e}");
             None
+        }
+    }
+}
+
+/// The full writer for a feed whose earlier connection stored segments only: the cached bars
+/// older than the chart's oldest go into the chart (newer ones would overwrite what this run
+/// built), so its bar index saves keep them; no stored order flow is replayed (this run
+/// counted those trades live).
+fn full_writer(
+    config: &FeedConfig,
+    product: &Product,
+    contract: Option<ContractKey>,
+    store: &Arc<ChartStore>,
+    tap: &mut indicators::EngineTap,
+) -> Option<disk::ContractWriter> {
+    let cfg = config.store.as_ref()?;
+    match disk::ContractWriter::open(cfg, product, contract, store.clone()) {
+        Ok((w, opened)) => {
+            let source = ticks::TickSource::Stored(w.dir().clone());
+            // Chosen outside the lock; put in front in one step (the lock is held for a copy).
+            let oldest = store.read().series.bars().first().map(|b| b.time);
+            let older: Vec<lines_core::Bar> = opened
+                .bars
+                .into_iter()
+                .filter(|b| oldest.is_none_or(|o| b.time < o))
+                .collect();
+            store.update(|d| {
+                d.series.prepend_older(&older);
+                d.tick_source = Some(source);
+            });
+            // The indicator engine's series gets them too, as at startup (`warm_start`).
+            tap.cached(older);
+            Some(w)
+        }
+        Err(e) => {
+            tracing::warn!("local store unavailable: {e}");
+            None
+        }
+    }
+}
+
+/// Feed time between tries to open a contract's writer that another holds.
+const RETRY_WRITER_MS: i64 = 10_000;
+
+/// Where to open a writer that wasn't available.
+struct Retry<'a> {
+    cfg: &'a disk::StoreConfig,
+    product: &'a Product,
+    contract: Option<ContractKey>,
+    store: &'a Arc<ChartStore>,
+    /// The next try (feed time); `None`: at the next frame.
+    next: Option<i64>,
+}
+
+/// The local store's sink for one connection: the contract's writer, or, while another
+/// writer holds it (a past day of this contract being downloaded, or another Lines), a try
+/// every [`RETRY_WRITER_MS`] of feed time. A writer opened mid-connection stores this
+/// connection's trade segments only: it never saves the bar index or claims coverage (the
+/// chart doesn't hold the cached bars, so its bars would overwrite the index, a downloaded
+/// day's included). At the next connection the feed opens a full writer
+/// ([`full_writer`]).
+struct StoreSink<'a> {
+    writer: &'a mut Option<disk::ContractWriter>,
+    retry: Option<Retry<'a>>,
+}
+
+impl EventSink for StoreSink<'_> {
+    fn begin(
+        &mut self,
+        newest_bar: Option<UtcMillis>,
+        window_start: UtcMillis,
+    ) -> Option<UtcMillis> {
+        match self.writer.as_mut() {
+            Some(w) => w.begin(newest_bar, window_start),
+            None => newest_bar,
+        }
+    }
+
+    fn frame(&mut self, events: &[provider::MarketEvent], now: UtcMillis) {
+        if self.writer.is_none()
+            && let Some(r) = self.retry.as_mut()
+            && r.next.is_none_or(|t| now.0 >= t)
+        {
+            r.next = Some(now.0 + RETRY_WRITER_MS);
+            match disk::ContractWriter::open_segments_only(
+                r.cfg,
+                r.product,
+                r.contract,
+                r.store.clone(),
+            ) {
+                Ok(mut w) => {
+                    tracing::info!(
+                        "local store {}: the contract is free again; storing from now",
+                        w.dir().path.display()
+                    );
+                    w.begin(None, now);
+                    *self.writer = Some(w);
+                }
+                Err(e) => tracing::debug!("local store still unavailable: {e}"),
+            }
+        }
+        if let Some(w) = self.writer.as_mut() {
+            w.frame(events, now);
+        }
+    }
+
+    fn end(&mut self, now: UtcMillis) {
+        if let Some(w) = self.writer.as_mut() {
+            w.end(now);
         }
     }
 }
@@ -784,5 +911,169 @@ pub fn stale_after(provider: &str) -> Duration {
     match provider {
         provider::CQG => Duration::from_secs(10),
         p => extension::by_provider(p).map_or(Duration::from_secs(5), |e| e.timing().stale_after),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A live feed that finds its contract locked by a day being downloaded stores again once
+    /// the lock frees, at its next try (feed time), not only after a reconnect.
+    #[test]
+    fn a_feed_stores_again_once_a_download_frees_the_contract() {
+        let root = std::env::temp_dir().join(format!("lines-late-writer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let es = catalog::get(catalog::ES).unwrap();
+        let k = ContractKey::monthly(es.id, 2026, lines_core::Month::new(12).unwrap());
+        let cfg = disk::StoreConfig::new(root.clone(), "test");
+        let store = Arc::new(ChartStore::new(
+            es.clone(),
+            Some(k),
+            lines_core::Capabilities::default(),
+            "test",
+            60_000,
+            1000,
+        ));
+        let dir = disk::ContractDir::new(&root, "test", &es, Some(k));
+        // A day downloaded earlier: its bars in the index, its session claimed.
+        let wed = lines_core::CivilDate::new(2026, 11, 4).unwrap();
+        let after = UtcMillis::parse_iso("2026-11-06T00:00:00Z").unwrap();
+        disk::bars::save(&dir.bars_path(), 60_000, &[]).unwrap();
+        let mut w = disk::day::DayWriter::begin(&root, "test", &es, Some(k), wed, after).unwrap();
+        let at = w.span().0.0 * 1000 + 60_000_000;
+        w.block(
+            at,
+            &[native::NativeEvent::Trade {
+                time_us: at,
+                price: lines_core::Price(600_000),
+                qty: lines_core::Qty(3),
+                aggressor: native::Aggressor::Buy,
+            }],
+        )
+        .unwrap();
+        w.commit().unwrap();
+        let bars_before = disk::bars::load(&dir.bars_path(), 60_000).unwrap();
+        let coverage_before = dir.coverage();
+        assert_eq!(bars_before.len(), 1);
+        // Another day downloading now: the feed finds the contract locked.
+        let thu = lines_core::CivilDate::new(2026, 11, 5).unwrap();
+        let day = disk::day::DayWriter::begin(&root, "test", &es, Some(k), thu, after).unwrap();
+        let mut writer = None;
+        let t0 = UtcMillis::parse_iso("2026-11-09T15:00:00Z").unwrap();
+        let trade = |t: UtcMillis| {
+            [provider::MarketEvent::Trade {
+                time: t,
+                price: lines_core::Price(600_000),
+                qty: lines_core::Qty(1),
+                aggressor: None,
+            }]
+        };
+        {
+            let mut sink = StoreSink {
+                writer: &mut writer,
+                retry: Some(Retry {
+                    cfg: &cfg,
+                    product: &es,
+                    contract: Some(k),
+                    store: &store,
+                    next: None,
+                }),
+            };
+            sink.frame(&trade(t0), t0);
+            assert!(sink.writer.is_none(), "locked by the download");
+            drop(day); // the download ends
+            let t1 = UtcMillis(t0.0 + RETRY_WRITER_MS - 1);
+            sink.frame(&trade(t1), t1);
+            assert!(sink.writer.is_none(), "not due yet");
+            let t2 = UtcMillis(t0.0 + RETRY_WRITER_MS);
+            sink.frame(&trade(t2), t2);
+            assert!(sink.writer.is_some(), "opened at the next try");
+            assert!(sink.writer.as_ref().unwrap().segments_only());
+            sink.end(t2);
+        }
+        drop(writer);
+        // The late writer saved neither the bar index nor coverage: the downloaded day stays.
+        assert_eq!(
+            disk::bars::load(&dir.bars_path(), 60_000).unwrap(),
+            bars_before
+        );
+        assert_eq!(dir.coverage(), coverage_before);
+        let date = disk::partition::trade_date(&es, t0);
+        assert!(
+            dir.segment_path(date).exists(),
+            "the trade at the try is stored"
+        );
+
+        // The next connection: a full writer, the cached bars older than the chart's in front;
+        // when it saves, the index and coverage still hold the downloaded day.
+        let mut config = FeedConfig::new(Source::Replay {
+            path: root.join("none.lfr"),
+            speed: 0.0,
+            stop_at: None,
+        });
+        config.store = Some(cfg.clone());
+        let info = indicators::FeedInfo {
+            feed: store.feed_id(),
+            product: es.id,
+            period_ms: 60_000,
+            max_bars: 1000,
+        };
+        let vwap = indicators::engine().acquire(
+            info,
+            lines_indicators::Spec::Vwap {
+                period_ms: 60_000,
+                vwap: lines_indicators::VwapSpec {
+                    reset: lines_indicators::Reset::Eth,
+                    bands: lines_indicators::Bands::NONE,
+                },
+            },
+        );
+        let mut tap = indicators::engine().tap(info, false, false);
+        // This run's own (live) bar, newer than the cached ones.
+        let live = lines_core::Bar::from_trade(
+            t0.floor_to(60_000),
+            lines_core::Price(600_100),
+            lines_core::Qty(1),
+        );
+        store.update(|d| d.series.upsert(live));
+        let mut full = full_writer(&config, &es, Some(k), &store, &mut tap).unwrap();
+        assert!(!full.segments_only());
+        let mut want = bars_before.clone();
+        want.push(live);
+        assert_eq!(
+            store.read().series.bars(),
+            &want[..],
+            "older bars in front of the live one"
+        );
+        // The indicator engine got the cached bars too.
+        indicators::engine().sync();
+        let cached_at = bars_before[0].time;
+        assert!(
+            vwap.cell()
+                .read()
+                .points
+                .iter()
+                .any(|p| p.time == cached_at),
+            "the engine's series has the cached bar"
+        );
+        let t3 = UtcMillis(t0.0 + RETRY_WRITER_MS + 60_000);
+        full.begin(None, t3);
+        full.frame(&trade(t3), t3);
+        full.end(t3);
+        drop(full);
+        let saved = disk::bars::load(&dir.bars_path(), 60_000).unwrap();
+        assert!(
+            bars_before.iter().all(|b| saved.contains(b)),
+            "the downloaded day's bars are kept"
+        );
+        let cov = dir.coverage();
+        for &(a, b) in coverage_before.trades.ranges() {
+            assert!(cov.trades.holes(a, b).is_empty(), "trade claims kept");
+        }
+        for &(a, b) in coverage_before.bars.ranges() {
+            assert!(cov.bars.holes(a, b).is_empty(), "bar claims kept");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
