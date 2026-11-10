@@ -307,7 +307,6 @@ fn a_fired_option_stop_with_no_bid_sells_when_the_bid_returns() {
     assert_eq!(r.core.triggers().count(), 0);
 }
 
-/// The CME's daily close ends a working remainder: nothing fills at the reopen's gap, live or on
 /// An option's Flatten with no bid ends at the regular session's close, never filling on the
 /// next morning's first quote.
 #[test]
@@ -632,9 +631,8 @@ fn a_marketable_limit_never_slips_past_its_limit() {
     assert_eq!(r.remaining(id), 2, "rests at its limit");
 }
 
-/// Splitting an order never slips less than sending it whole: ten 1-lot buys in a row on a 1-lot
-/// ask climb a tick each, as one 10-lot would (modelled ticks taken are remembered until the next
-/// book batch).
+/// Ten 1-lot buys in a row (no new quote between them) on a 1-lot ask climb a tick each, as one
+/// 10-lot would: modelled ticks taken are remembered within the batch.
 #[test]
 fn ten_one_lots_in_a_row_climb_like_one_ten_lot() {
     let mut r = Rig::new(CME_OPEN);

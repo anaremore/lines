@@ -550,8 +550,8 @@ impl PaperBroker {
                     Side::Sell => -tick,
                 };
                 // Modelled ticks taken are remembered like real levels (until a book batch no
-                // longer shows their price): orders sent one after another keep
-                // climbing, so splitting an order never slips less than sending it whole.
+                // longer shows their price): orders sent one after another in a batch keep
+                // climbing (across a new quote they're forgotten: a known gap).
                 // A stop's first modelled tick is no better than its print.
                 let mut p = match (side, from) {
                     (Side::Sell, Some(f)) => deepest.0.min(f.0 + tick),
