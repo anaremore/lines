@@ -159,6 +159,9 @@ pub struct Workspace {
     /// What's wrong with a trigger, if anything (`chain_lines::trigger_status`), kept fresh by
     /// `start_trigger_watch`: true when it can't fire.
     trigger_status: Option<(String, bool)>,
+    /// Open positions on every listed account, for the footer's `N open` (kept fresh by the
+    /// trigger watch, as a position changes with no window redrawing).
+    open_positions: Option<usize>,
     /// Problems and refusals shown inline in the footer (`crate::notice`: repeats counted,
     /// refusals expire, problems that need action stay until dismissed).
     pub notices: Notices,
@@ -188,6 +191,7 @@ impl Workspace {
             closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
             last_chart: None,
             trigger_status: None,
+            open_positions: None,
             notices: Notices::default(),
             show_perf_stats: false,
             show_latency_hud: false,
@@ -250,6 +254,7 @@ pub enum PaneHandle {
     Journal(Entity<JournalView>),
     Strategies(Entity<StrategyView>),
     Chain(Entity<ChainView>),
+    Positions(Entity<crate::positions_view::PositionsView>),
 }
 
 macro_rules! each {
@@ -261,6 +266,7 @@ macro_rules! each {
             PaneHandle::Journal($e) => $body,
             PaneHandle::Strategies($e) => $body,
             PaneHandle::Chain($e) => $body,
+            PaneHandle::Positions($e) => $body,
         }
     };
 }
@@ -289,6 +295,7 @@ impl PaneHandle {
             PaneHandle::Journal(_) => PaneKind::Journal,
             PaneHandle::Strategies(_) => PaneKind::Strategies,
             PaneHandle::Chain(_) => PaneKind::Chain,
+            PaneHandle::Positions(_) => PaneKind::Positions,
         }
     }
 
@@ -382,7 +389,10 @@ impl PaneHandle {
             PaneHandle::Dom(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Tape(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Journal(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
-            PaneHandle::Chart(_) | PaneHandle::Strategies(_) | PaneHandle::Chain(_) => {
+            PaneHandle::Chart(_)
+            | PaneHandle::Strategies(_)
+            | PaneHandle::Chain(_)
+            | PaneHandle::Positions(_) => {
                 Err("columns belong to a DOM, time & sales or the journal")
             }
         }
@@ -394,7 +404,10 @@ impl PaneHandle {
             PaneHandle::Dom(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Tape(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Journal(e) => Some(e.read(cx).columns().clone()),
-            PaneHandle::Chart(_) | PaneHandle::Strategies(_) | PaneHandle::Chain(_) => None,
+            PaneHandle::Chart(_)
+            | PaneHandle::Strategies(_)
+            | PaneHandle::Chain(_)
+            | PaneHandle::Positions(_) => None,
         }
     }
 
@@ -640,6 +653,9 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
                 v
             }))
         }
+        PaneKind::Positions => PaneHandle::Positions(
+            cx.new(|cx| crate::positions_view::PositionsView::new(feed, theme, cx)),
+        ),
         PaneKind::Strategies => {
             let frozen = env.frozen;
             PaneHandle::Strategies(cx.new(|cx| StrategyView::new(feed, theme, frozen, cx)))
@@ -985,6 +1001,11 @@ impl WindowView {
                     feed_changed(this, ev, cx)
                 })]
             }
+            PaneHandle::Positions(e) => {
+                vec![cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
+                    feed_changed(this, ev, cx)
+                })]
+            }
         }
     }
 
@@ -1208,6 +1229,7 @@ impl WindowView {
             }
             Command::OpenJournal => self.open_panel(PaneKind::Journal, window, cx),
             Command::OpenChain => self.open_panel(PaneKind::Chain, window, cx),
+            Command::OpenPositions => self.open_panel(PaneKind::Positions, window, cx),
             Command::ChainChart => match self.tab().focused_handle().cloned() {
                 Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_chart(cx)),
                 _ => self.refuse("The chart acts on the focused option chain", cx),
@@ -1617,6 +1639,7 @@ impl WindowView {
                         PaneKind::Chain => {
                             "the option chain is popped out: it is in its own window"
                         }
+                        PaneKind::Positions => "positions are popped out: in their own window",
                         _ => "the strategy panel is popped out: it is in its own window",
                     },
                     cx,
@@ -1637,6 +1660,8 @@ impl WindowView {
             self.tabs.get(self.active).and_then(|t| t.focused_handle()),
         ) {
             (PaneKind::Chain, Some(h)) => (h.feed(cx).target_doc, h.link(cx)),
+            // Positions in the focused pane's link group: a row's click shows it there.
+            (PaneKind::Positions, Some(h)) => (None, h.link(cx)),
             _ => (None, None),
         };
         let tab = Self::build_tab(
@@ -2688,6 +2713,7 @@ impl WindowView {
         let ws = cx.global::<Workspace>();
         let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
         let trigger_status = ws.trigger_status.clone();
+        let open = ws.open_positions.and_then(crate::positions::open_label);
         let is_first = ws.windows.first().map(|w| w.window_id());
         // What this tab isn't showing, as text that brings it back.
         let (hidden, detached) = match self.tabs.get(self.active) {
@@ -2703,6 +2729,7 @@ impl WindowView {
                                 PaneKind::Journal => "journal",
                                 PaneKind::Strategies => "strategy panel",
                                 PaneKind::Chain => "option chain",
+                                PaneKind::Positions => "positions",
                             };
                             if !v.contains(&l) {
                                 v.push(l);
@@ -2761,6 +2788,9 @@ impl WindowView {
                             }),
                         ),
                 )
+            })
+            .when_some(open, |d, text| {
+                d.child(link("positions-open", text, Command::OpenPositions))
             })
             .when_some(trigger_status, |d, (text, loud)| {
                 d.child(
@@ -3304,6 +3334,9 @@ impl Render for WindowView {
             Some(PaneHandle::Tape(_)) => "Time & sales: type a symbol or Ctrl+K: switch",
             Some(PaneHandle::Journal(_)) => {
                 "Journal: click or Up/Down to select, Enter: tags and note, Snapshot column: view, click the stats: today / all dates"
+            }
+            Some(PaneHandle::Positions(_)) => {
+                "Positions: click a row to show it in the linked chart and DOM"
             }
             Some(PaneHandle::Chain(_)) => {
                 "Option chain: click an ask to buy or a bid to sell, or Enter on the selected cell; Up/Down strike, Left/Right expiry, Tab calls / puts, Shift+Tab bid / ask, type a symbol or Ctrl+K: switch"
@@ -4119,9 +4152,13 @@ pub(crate) fn refresh_trigger_status(cx: &mut App) {
         |account, product| shown.iter().any(|(a, p)| a == account && *p == product),
     );
     drop(st);
+    let open = crate::positions_view::open_count(cx);
     let ws = cx.global_mut::<Workspace>();
-    if ws.trigger_status != status {
+    // Busy this instant: last time's count stands.
+    let open = open.or(ws.open_positions);
+    if ws.trigger_status != status || ws.open_positions != open {
         ws.trigger_status = status;
+        ws.open_positions = open;
         for w in ws.windows.clone() {
             let _ = w.update(cx, |_, _, cx| cx.notify());
         }

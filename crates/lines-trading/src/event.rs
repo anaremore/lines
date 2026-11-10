@@ -123,6 +123,14 @@ pub struct PositionView {
     /// Average open price, price units (display).
     pub avg_price: Option<f64>,
     pub unrealised: Money,
+    /// When the price `unrealised` was taken at was seen (`None`: no price yet). A feed that
+    /// stopped leaves it old, so a reader can say the P&L is stale rather than show it frozen.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::types::opt_time_serde"
+    )]
+    pub marked_at: Option<lines_core::UtcMillis>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

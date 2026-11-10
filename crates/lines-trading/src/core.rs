@@ -123,6 +123,14 @@ struct Mark {
     ask: Option<Price>,
     /// When an option's quote was stamped.
     quoted_at: Option<UtcMillis>,
+    /// When a bid or ask last came (a contract marked by its book alone).
+    book_at: Option<UtcMillis>,
+    /// When an option's price last changed source: a two-sided quote or a new last. A one-sided
+    /// quote with no last keeps the mark it had, and its time.
+    priced_at: Option<UtcMillis>,
+    /// An option's last sale as its quotes carry it, kept whatever else marks it: a quote that
+    /// repeats it isn't a new price.
+    last_sale: Option<Price>,
 }
 
 impl Mark {
@@ -2390,15 +2398,34 @@ impl TradingCore {
                     let held = m.price();
                     m.bid = b;
                     m.ask = a;
-                    m.last = if b.is_some() && a.is_some() {
+                    let two_sided = b.is_some() && a.is_some();
+                    // A last trade repeated on every quote isn't a new price.
+                    let new_last = last.is_some() && last != m.last_sale;
+                    if last.is_some() {
+                        m.last_sale = last;
+                    }
+                    // One-sided: a new sale marks it; a repeated one doesn't replace the newer
+                    // mark it had (its mid), which keeps its time too.
+                    m.last = if two_sided {
                         None
+                    } else if new_last {
+                        last
                     } else {
-                        last.or(held)
+                        held.or(last)
                     };
+                    if two_sided || new_last {
+                        m.priced_at = Some(time);
+                    }
                     m.quoted_at = Some(time);
                 }
-                MarketInput::Bid(p) => m.bid = Some(p),
-                MarketInput::Ask(p) => m.ask = Some(p),
+                MarketInput::Bid(p) => {
+                    m.bid = Some(p);
+                    m.book_at = Some(now);
+                }
+                MarketInput::Ask(p) => {
+                    m.ask = Some(p);
+                    m.book_at = Some(now);
+                }
                 _ => {}
             }
             self.broker.market(now, contract, i);
@@ -2457,12 +2484,21 @@ impl TradingCore {
             (Some(m), Some(s)) => s.money(p.unrealised(m), 1),
             _ => Money::ZERO,
         };
+        // The time of the price `mark` uses: the last trade's, else the quote's.
+        let marked_at = self.marks.get(&contract).and_then(|m| {
+            if contract.option_key().is_some() {
+                m.priced_at
+            } else {
+                m.last.and(m.last_at).or(m.book_at)
+            }
+        });
         self.events.push(Event::Position(PositionView {
             account: account.clone(),
             contract,
             qty: p.qty(),
             avg_price: p.avg_price(),
             unrealised,
+            marked_at,
         }));
     }
 

@@ -241,6 +241,7 @@ fn colliding_ids_on_load_are_kept_apart() {
             qty: 1,
             avg_price: Some(600_000.0),
             unrealised: Money::ZERO,
+            marked_at: None,
         }));
         feed(
             &mut k,
@@ -364,6 +365,7 @@ fn a_position_from_before_the_journal_is_seeded_and_marked() {
         qty: -2,
         avg_price: Some(600_050.0),
         unrealised: Money::ZERO,
+        marked_at: None,
     }));
     let t = feed(&mut j, &[fill("s1", 4, Side::Buy, 6000.00, 2, 0.0, 0)]);
     assert_eq!(t.len(), 1);
@@ -380,6 +382,7 @@ fn a_position_from_before_the_journal_is_seeded_and_marked() {
         qty: 1,
         avg_price: Some(500_000.0),
         unrealised: Money::ZERO,
+        marked_at: None,
     }));
     assert!(!j.open_trades().next().unwrap().incomplete);
 }
@@ -742,6 +745,7 @@ fn rebuilt_seeded_and_unasked_trades_take_no_shots() {
         qty: 1,
         avg_price: Some(600_000.0),
         unrealised: Money::ZERO,
+        marked_at: None,
     }));
     let t = feed(&mut seeded, &[fill("s", 1, Side::Sell, 6001.0, 1, 0.0, 30)]);
     assert!(t[0].incomplete);

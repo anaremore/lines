@@ -2463,3 +2463,30 @@ fn the_smaller_leg_filling_shrinks_the_larger_to_what_remains() {
     assert_eq!(r.state(sl), OrderState::Filled);
     assert_eq!(r.core.order(tp).unwrap().remaining(), Qty(1));
 }
+
+/// A position's view says when its price was seen (the last trade's time), so a reader can tell
+/// a P&L whose feed stopped from a live one.
+#[test]
+fn a_position_says_when_it_was_marked() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.00, 10)], &[(6000.25, 10)]);
+    let first = r.t + 1;
+    r.trade(6000.00, 1);
+    r.place(Side::Buy, 1, OrderKind::Market);
+    r.wait(LAT + 1);
+    let marked = |r: &Rig| {
+        r.events.iter().rev().find_map(|e| match e {
+            Event::Position(p) if p.contract == es() => Some(p.marked_at),
+            _ => None,
+        })
+    };
+    assert_eq!(marked(&r), Some(Some(UtcMillis(first))));
+    r.wait(5_000);
+    let second = r.t + 1;
+    r.trade(6001.00, 1);
+    assert_eq!(
+        marked(&r),
+        Some(Some(UtcMillis(second))),
+        "a new trade marks it again"
+    );
+}

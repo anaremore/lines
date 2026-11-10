@@ -581,6 +581,17 @@ impl TradeCache {
         }
     }
 
+    /// Every account's revision and the global one together (lock-free): changes whenever any
+    /// account's orders, positions or P&L did.
+    pub fn any_revision(&self) -> u64 {
+        self.revisions.values().fold(
+            self.global
+                .load(Ordering::Acquire)
+                .wrapping_mul(0x9e37_79b9),
+            |r, a| r.wrapping_mul(31).wrapping_add(a.load(Ordering::Acquire)),
+        )
+    }
+
     /// The account's revision (lock-free): changes whenever its orders, positions, P&L or
     /// rule state did.
     pub fn revision(&self, account: &AccountId) -> u64 {
@@ -1939,7 +1950,8 @@ pub enum Step {
 ///   only the trading core sees (resting orders fill, the journal's MAE/MFE move), for
 ///   round trips in a screenshot of a finished replay;
 /// - `strategy N` (add instance N on the account and contract, arm it, send what follows as
-///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss).
+///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss), `future SYM`
+///   (another product's front month from there on, to hold several at once).
 pub fn parse_script(
     s: &str,
     product: &lines_core::Product,
@@ -1950,6 +1962,7 @@ pub fn parse_script(
     use lines_trading::{BracketSpec, OrderSpec, Side};
     let mut account = first_account.clone();
     let mut contract = contract;
+    let mut product = product.clone();
     let mut out = Vec::new();
     let mut guards: HashMap<AccountId, Guardrails> = HashMap::new();
     for raw in s.split(';') {
@@ -1992,6 +2005,14 @@ pub fn parse_script(
                     .map_err(|_| anyhow!("wait {s:?}: seconds"))?
                     * 1000.0) as i64,
             )),
+            // Another product's front month from here on (a screenshot holding several).
+            ["future", sym] => {
+                let p = lines_feed::catalog::by_symbol(sym)
+                    .ok_or_else(|| anyhow!("future {sym:?}: not in the catalog"))?;
+                contract = lines_feed::front_month(&p, None)
+                    .ok_or_else(|| anyhow!("future {sym:?}: no front month"))?;
+                product = p;
+            }
             // The underlying of the option in hand, for a trigger to see.
             ["under", p] => out.push(Step::Print(
                 ContractKey::equity(contract.product),
@@ -3224,6 +3245,21 @@ mod tests {
         let es_product = catalog::get(catalog::ES).unwrap();
         let a = AccountId::new("paper");
         let open = parse_script("buy 1 mkt; ack", &es_product, es(), &a).unwrap();
+        // `future SYM` moves the rest of a script to that product's front month, priced on its
+        // own grid; an unknown symbol is refused.
+        let nq = catalog::get(catalog::NQ).unwrap();
+        let several = parse_script(
+            "future NQ; print 21000.25; buy 1 mkt",
+            &es_product,
+            es(),
+            &a,
+        )
+        .unwrap();
+        assert!(several.iter().any(|s| matches!(
+            s,
+            Step::Print(k, _, _) if Some(*k) == lines_feed::front_month(&nq, None)
+        )));
+        assert!(parse_script("future XX", &es_product, es(), &a).is_err());
         t.run_script(&open, start, 25);
         let opened = t.journal.revision();
         assert_eq!(t.journal.snapshot().unwrap().open, 1);

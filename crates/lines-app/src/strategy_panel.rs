@@ -681,6 +681,7 @@ mod tests {
             qty: -2,
             avg_price: Some(601_225.0),
             unrealised: Money::whole(-25),
+            marked_at: None,
         };
         let trades = [
             trade(Some(Source::Strategy(i.id)), 100),
@@ -710,6 +711,7 @@ mod tests {
             qty: 2,
             avg_price: Some(601_225.0),
             unrealised: Money::whole(-25),
+            marked_at: None,
         };
         let r = row(&i, &ctx(&[], Some(&pos), PnlDisplay::Both));
         assert_eq!((r.phase, r.position.as_str()), (Phase::Stopped, "Flat"));

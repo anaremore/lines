@@ -99,6 +99,8 @@ pub enum Command {
     OpenJournal,
     /// Show an option chain: focus one, else open one in a new tab (decision 0028).
     OpenChain,
+    /// Show the positions pane: focus one, else open one in a new tab.
+    OpenPositions,
     /// The focused chain's One-click switch: a click on a bid or ask sends a limit there.
     ChainOneClick,
     /// The focused option chain's chart beside it, on one price scale (decision 0029).
@@ -390,6 +392,8 @@ pub const BINDINGS: &[Binding] = &[
     b(Command::Palette, true, true, false, "p"),
     b(Command::SaveAs, true, true, false, "s"),
     b(Command::Open, true, false, false, "o"),
+    // Ctrl+Shift+J: every open position, on every account.
+    b(Command::OpenPositions, true, true, false, "j"),
     b(Command::ToggleStudyLabels, true, true, false, "l"),
     b(Command::ToggleStudies, true, true, false, "i"),
     b(Command::CleanChart, true, true, false, "m"),
@@ -684,6 +688,7 @@ pub fn label(c: Command) -> String {
         Command::Toggle(PaneKind::Journal) => "Hide/show journal".into(),
         Command::Toggle(PaneKind::Strategies) => "Hide/show strategies".into(),
         Command::Toggle(PaneKind::Chain) => "Hide/show option chain".into(),
+        Command::Toggle(PaneKind::Positions) => "Hide/show positions".into(),
         Command::ChartOnly => "Chart only (hide/restore linked DOM and T&S)".into(),
         Command::ShowHidden => "Show hidden panes".into(),
         Command::PopOut => "Pop out pane into its own window".into(),
@@ -728,6 +733,7 @@ pub fn label(c: Command) -> String {
         Command::DomTrailHalfLife => "DOM: price trail half-life (next)".into(),
         Command::OpenJournal => "Open journal".into(),
         Command::OpenChain => "Open option chain".into(),
+        Command::OpenPositions => "Open positions".into(),
         Command::ChainOneClick => "Option chain: One-click on/off".into(),
         Command::ChainChart => "Option chain: chart beside the chain on/off".into(),
         Command::ChainPnl => "Option chain: P&L to close on/off".into(),
@@ -850,6 +856,7 @@ pub fn palette() -> Vec<Command> {
             PaneKind::Journal,
             PaneKind::Strategies,
             PaneKind::Chain,
+            PaneKind::Positions,
         ]
         .map(Command::SetKind),
     );
@@ -871,6 +878,7 @@ pub fn palette() -> Vec<Command> {
         Command::DomTrailHalfLife,
         Command::OpenJournal,
         Command::OpenChain,
+        Command::OpenPositions,
         Command::ChainOneClick,
         Command::ChainChart,
         Command::ChainPnl,
@@ -1147,6 +1155,7 @@ mod tests {
         assert_eq!(cmd("shift-f10"), Some(Command::Menu));
         assert_eq!(c("shift-s"), Some(Command::SaveAs));
         assert_eq!(c("o"), Some(Command::Open));
+        assert_eq!(c("shift-j"), Some(Command::OpenPositions));
         assert_eq!(c("shift-d"), Some(Command::Toggle(PaneKind::Dom)));
         assert_eq!(c("shift-e"), Some(Command::Toggle(PaneKind::Tape)));
         assert_eq!(c("shift-c"), Some(Command::ChartOnly));

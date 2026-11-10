@@ -5,7 +5,7 @@
 //! source's default) and its view state. The market data *source* is not part of a workspace:
 //! it belongs to the run (`--source`), so one workspace works on mock, replay or live data.
 //!
-//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 7).
+//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 8).
 //! Version 2 adds each pane's `state` (shown, hidden, hidden by "chart only", detached) and a
 //! detached pane's `window` placement; version 1 files migrate (every pane shown). Version 3
 //! adds the `journal` pane kind (roadmap 8c); version 2 files read unchanged, and an older
@@ -14,7 +14,7 @@
 //! equity or a listed option; every version 4 file reads unchanged, and an older build
 //! reports a version 5 file as newer instead of misreading an option. Version 6 adds the `chain`
 //! pane kind (an underlying's option chain). Version 7 (decision 0029) adds the chain pane's
-//! option chart mode (`chain_chart`).
+//! option chart mode (`chain_chart`). Version 8 adds the `positions` pane kind.
 //! Product ids are the catalog's permanent ids; `symbol` is written beside them for people
 //! reading the file and ignored on load. A pane whose product this build doesn't know is kept
 //! as written and shown as unavailable, never dropped.
@@ -103,6 +103,12 @@ fn v6_to_v7(v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
+/// Version 8 added the `positions` pane kind: every version 7 file is a valid version 8 file
+/// (an older build reports a file with a positions pane as newer).
+fn v7_to_v8(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
 const MIGRATIONS: &[Migration] = &[
     v0_never_written,
     v1_to_v2,
@@ -111,11 +117,12 @@ const MIGRATIONS: &[Migration] = &[
     v4_to_v5,
     v5_to_v6,
     v6_to_v7,
+    v7_to_v8,
 ];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 7,
+    current: 8,
     migrations: MIGRATIONS,
 };
 
@@ -1247,7 +1254,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 7"#), "{text}");
+        assert!(text.contains(r#""version": 8"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1727,6 +1734,41 @@ mod tests {
         assert_eq!(leaves[1].kind, PaneKind::Strategies);
     }
 
+    /// Version 8: the `positions` pane kind, pinned; a version 7 file reads unchanged.
+    #[test]
+    fn a_version_8_file_with_a_positions_pane_reads() {
+        let v8 = br#"{
+          "version": 8,
+          "name": "positions",
+          "windows": [{
+            "tabs": [{
+              "focused": 0,
+              "layout": {"split": {"axis": "row", "ratio": 0.6,
+                "first": {"pane": {"kind": "chart", "link": 0, "state": "shown"}},
+                "second": {"pane": {"kind": "positions", "link": 0, "state": "shown"}}}}
+            }]
+          }]
+        }"#;
+        let Decoded::Ok {
+            value,
+            migrated_from: None,
+        } = decode::<WorkspaceDoc>(&FORMAT, v8)
+        else {
+            panic!("v8 no longer reads")
+        };
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        assert_eq!(leaves[1].kind, PaneKind::Positions);
+        let v7 = br#"{"version": 7, "name": "a", "windows": [{"tabs": [{"focused": 0,
+            "layout": {"pane": {"kind": "dom", "link": 0, "state": "shown"}}}]}]}"#;
+        assert!(matches!(
+            decode::<WorkspaceDoc>(&FORMAT, v7),
+            Decoded::Ok {
+                migrated_from: Some(7),
+                ..
+            }
+        ));
+    }
+
     /// Version 7 (decision 0029): the option chart mode, pinned; a version 6 chain stays plain,
     /// and a plain pane writes nothing new.
     #[test]
@@ -1831,7 +1873,7 @@ mod tests {
             Target::Contract(ContractKey::spot(catalog::BTC_USD))
         );
         let text = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
-        assert!(text.contains(r#""version": 7"#), "{text}");
+        assert!(text.contains(r#""version": 8"#), "{text}");
         assert!(
             text.contains(r#""monthly""#),
             "the futures shape is unchanged"
@@ -1871,8 +1913,8 @@ mod tests {
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 8, "windows": 7}"#),
-            Decoded::Newer { found: 8 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 9, "windows": 7}"#),
+            Decoded::Newer { found: 9 }
         );
     }
 

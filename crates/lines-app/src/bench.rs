@@ -284,7 +284,11 @@ fn spread_over_two_contracts(doc: &mut WorkspaceDoc) {
                 doms += 1;
                 doms * 3
             }
-            PaneKind::Tape | PaneKind::Journal | PaneKind::Strategies | PaneKind::Chain => 1,
+            PaneKind::Tape
+            | PaneKind::Journal
+            | PaneKind::Strategies
+            | PaneKind::Chain
+            | PaneKind::Positions => 1,
         };
         p.target = Some(if n <= 3 { a.clone() } else { b.clone() });
         p

@@ -454,6 +454,7 @@ mod tests {
             PaneKind::Journal,
             PaneKind::Strategies,
             PaneKind::Chain,
+            PaneKind::Positions,
         ] {
             for c in crate::pane::controls(kind, true) {
                 assert_eq!(command(c.cmd), Some(c.cmd), "{kind:?} {}", c.name);
