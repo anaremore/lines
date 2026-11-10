@@ -123,7 +123,7 @@ impl Custom {
         if self.opacity.is_none() {
             return Event::Nothing;
         }
-        self.opacity = Some(pct(x).max(1));
+        self.opacity = Some(pct(x).max(lines_core::style::MIN_OPACITY));
         Event::Changed
     }
 
@@ -183,7 +183,7 @@ impl Custom {
                     }
                     Zone::Opacity => match self.opacity {
                         Some(o) => {
-                            self.opacity = Some(add_pct(o, d).max(1));
+                            self.opacity = Some(add_pct(o, d).max(lines_core::style::MIN_OPACITY));
                             Event::Changed
                         }
                         None => Event::Nothing,
@@ -383,7 +383,11 @@ mod tests {
         assert_eq!(p.h, 180);
         assert_eq!(p.color(), rgb(0x00ffff));
         assert_eq!(p.set_opacity(0.0), Event::Changed);
-        assert_eq!(p.opacity, Some(1), "never fully transparent");
+        assert_eq!(
+            p.opacity,
+            Some(lines_core::style::MIN_OPACITY),
+            "never below the model's floor"
+        );
         // A gray taken whole keeps the hue slider where it was.
         p.set_color(rgb(0x404040));
         assert_eq!(p.h, 180);

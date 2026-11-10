@@ -1122,11 +1122,18 @@ impl ChartView {
             }
             Kind::Account => return crate::trade_bar::close_account_menu(self, cx),
             Kind::StyleEditor => {
+                // Closed by a click outside or another popover: the picker's color is kept.
+                if self.styling() {
+                    self.style_edit(|e| e.keep_custom(), cx);
+                }
                 let drawing = self.drawings.close_editor();
                 let study = self.study_style.take().is_some();
                 if !drawing && !study {
                     return;
                 }
+                // Its eyedropper goes with it (and the buffers it reserved).
+                crate::eyedropper::arm(false);
+                self.dropper_hover = None;
             }
             Kind::OrderGroup => {
                 if self.ct.group_menu.take().is_none() {
@@ -3437,9 +3444,21 @@ impl ChartView {
             // press on the plot takes it (and isn't a press outside the editor).
             let view = cx.entity().downgrade();
             let on_plot = self.plot;
+            // The editor itself (inside the plot) keeps its own presses: its controls, and the
+            // armed button that cancels.
+            let on_editor = |at: Point<Pixels>| {
+                popover::placed(popover::Panel::StyleEditor)
+                    .is_some_and(|r| r.contains(f32::from(at.x), f32::from(at.y)))
+            };
             window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                 if phase == gpui::DispatchPhase::Capture {
-                    let _ = view.update(cx, |v, cx| v.dropper_move(ev.position, cx));
+                    // Over the editor: no color under the pointer (what it covers isn't seen).
+                    let at = if on_editor(ev.position) {
+                        point(px(-1e4), px(-1e4))
+                    } else {
+                        ev.position
+                    };
+                    let _ = view.update(cx, |v, cx| v.dropper_move(at, cx));
                 }
             });
             let view = cx.entity().downgrade();
@@ -3447,6 +3466,7 @@ impl ChartView {
                 if phase == gpui::DispatchPhase::Capture
                     && ev.button == MouseButton::Left
                     && on_plot.contains(&ev.position)
+                    && !on_editor(ev.position)
                 {
                     cx.stop_propagation();
                     let _ = view.update(cx, |v, cx| v.dropper_take(ev.position, cx));
@@ -6809,6 +6829,19 @@ impl ChartView {
     /// placed beside its drawing (a study's under the study legend), inside the pane; its
     /// warnings checked in every theme and palette.
     fn style_editor_layer(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // The recent colors as drawn are the rows a click on this frame acts on (`style_edit`
+        // fills them the same way before each input).
+        let recent = recent_colors(cx);
+        let open = match self.study_style.as_mut() {
+            Some((_, e)) => Some(e),
+            None => self.drawings.editor_mut(),
+        };
+        if let Some(e) = open
+            && !e.recent_changed
+            && e.recent != recent
+        {
+            e.recent = recent;
+        }
         // A study's editor sits at the plot's left under the study legend, away from the
         // newest bars; a drawing's beside its drawing. Warnings name theme and palette.
         let (e, target, warnings) = match &self.study_style {

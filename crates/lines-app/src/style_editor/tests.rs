@@ -381,3 +381,47 @@ fn swatches_are_named_and_not_duplicated() {
     assert!(is_toggle(Control::TextBox) && is_toggle(Control::ExtendLeft));
     assert!(!is_toggle(Control::Width(2)));
 }
+
+/// Keeping a custom color adds a Recent row under Color; the click that kept it still lands on
+/// the control it was on (here "Dotted", in the row under Color as drawn), not the row that moved
+/// into its place.
+#[test]
+fn a_click_that_keeps_the_picker_lands_where_it_was_drawn() {
+    let mut e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert_eq!(e.custom_square(1.0, 0.0), Outcome::Preview);
+    let rows = e.rows();
+    let line = rows.iter().position(|r| r.label == "Line").unwrap();
+    assert!(rows.iter().all(|r| r.label != "Recent"));
+    let dotted = rows[line]
+        .controls
+        .iter()
+        .position(|(c, _)| *c == Control::LineType(LineType::Dotted))
+        .unwrap();
+    assert_eq!(e.click(line, dotted), Outcome::Changed);
+    assert!(
+        e.rows().iter().any(|r| r.label == "Recent"),
+        "kept: remembered"
+    );
+    assert_eq!(
+        e.drawing_style(&Style::DEFAULT).line.line,
+        LineType::Dotted,
+        "the clicked control, not the Recent swatch now in its row"
+    );
+    assert_ne!(
+        e.drawing_style(&Style::DEFAULT).line.color,
+        Style::DEFAULT.line.color
+    );
+}
+
+/// Tab keeps the picker's color (as Enter and a click elsewhere do), on a one-tab editor too.
+#[test]
+fn tab_keeps_the_picker_color() {
+    let mut e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert_eq!(e.custom_square(1.0, 0.0), Outcome::Preview);
+    let previewed = e.drawing_style(&Style::DEFAULT);
+    assert_eq!(e.key("tab", false, None), Outcome::Changed);
+    assert!(e.custom.is_none());
+    assert_eq!(e.drawing_style(&Style::DEFAULT), previewed);
+}

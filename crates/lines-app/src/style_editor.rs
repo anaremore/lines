@@ -686,14 +686,31 @@ impl StyleEditor {
 
     /// A click on control `col` of row `row`.
     pub fn click(&mut self, row: usize, col: usize) -> Outcome {
-        // A click anywhere else keeps the picker's color and closes it ("Custom…" opens it
-        // again).
-        let kept = self.close_custom(true);
+        // The control clicked, in the rows as drawn: keeping the picker's color may add a
+        // Recent row, which moves the rows under it.
         self.row = row;
         self.col = col;
         let rows = self.rows();
         self.clamp(&rows);
-        let out = match self.focused(&rows) {
+        let clicked = self.focused(&rows);
+        let label = rows.get(self.row).map(|r| r.label);
+        // A click anywhere else keeps the picker's color and closes it ("Custom…" opens it
+        // again).
+        let kept = self.close_custom(true);
+        let rows = self.rows();
+        if let Some(c) = clicked
+            && let Some((r, k)) = rows.iter().enumerate().find_map(|(r, row)| {
+                (Some(row.label) == label)
+                    .then(|| row.controls.iter().position(|(x, _)| *x == c))
+                    .flatten()
+                    .map(|k| (r, k))
+            })
+        {
+            self.row = r;
+            self.col = k;
+        }
+        self.clamp(&rows);
+        let out = match clicked {
             Some(c) => self.activate(c),
             None => Outcome::Nothing,
         };
@@ -798,6 +815,16 @@ impl StyleEditor {
         true
     }
 
+    /// The editor closes some other way than Esc (a click outside, another popover): the
+    /// picker's color is kept.
+    pub fn keep_custom(&mut self) -> Outcome {
+        if self.close_custom(true) {
+            Outcome::Changed
+        } else {
+            Outcome::Nothing
+        }
+    }
+
     /// The square at fractions `x` (saturation) and `y` (0 = bright) of its size.
     pub fn custom_square(&mut self, x: f32, y: f32) -> Outcome {
         self.custom_event(|p| p.set_square(x, y))
@@ -869,7 +896,13 @@ impl StyleEditor {
             return Outcome::Nothing;
         }
         if self.custom.is_some() {
-            return self.custom_event(|p| p.key(key, shift, text));
+            if key != "tab" {
+                return self.custom_event(|p| p.key(key, shift, text));
+            }
+            // Tab keeps the color: to the next tab, or (one tab) just closing the picker.
+            if self.parts.len() <= 1 {
+                return self.keep_custom();
+            }
         }
         let rows = self.rows();
         match key {

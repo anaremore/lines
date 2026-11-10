@@ -52,8 +52,31 @@ const SLIDER_H: f32 = 12.0;
 
 /// The custom color picker's height under its row: the square, the hue slider, the opacity
 /// slider (a part with an opacity), and the swatch, hex field and dropper row.
-fn picker_height(opacity: bool) -> f32 {
-    4.0 + SQUARE_H + 8.0 + SLIDER_H + 8.0 + if opacity { SLIDER_H + 8.0 } else { 0.0 } + 24.0 + 4.0
+/// That row wraps (gap 8) in `w`: the swatch, "#RRGGBB", the opacity and the dropper button,
+/// whose label is longer while armed.
+fn picker_height(opacity: bool, armed: bool, w: f32) -> f32 {
+    let text = |chars: usize| chars as f32 * 12.0 * 0.62;
+    let button = if armed {
+        "Picking… Esc cancels"
+    } else {
+        "Pick from chart"
+    };
+    // `wrapped_lines` counts a 4 px gap; this row's is 8.
+    let widths = [
+        Some(24.0),
+        Some(16.0 + text(7)),
+        opacity.then(|| text(4)),
+        Some(16.0 + text(button.chars().count())),
+    ];
+    let lines = wrapped_lines(widths.into_iter().flatten().map(|x| x + 4.0), w);
+    4.0 + SQUARE_H
+        + 8.0
+        + SLIDER_H
+        + 8.0
+        + if opacity { SLIDER_H + 8.0 } else { 0.0 }
+        + lines * 24.0
+        + (lines - 1.0) * 8.0
+        + 4.0
 }
 
 /// Where the editor goes, chart-local: its box is at most `h` tall.
@@ -401,7 +424,7 @@ pub fn content_height(
                 h += 4.0 + text_lines(note.chars().count(), 11.0, inner) * line_h(11.0);
             }
             if let Some(p) = e.custom.as_ref().filter(|p| p.fill != main) {
-                h += picker_height(p.opacity.is_some());
+                h += picker_height(p.opacity.is_some(), e.dropper, controls_w);
             }
             if main && !warnings.is_empty() {
                 // Inside the box: margins, border, padding, the bar and the marker.
@@ -640,8 +663,10 @@ fn picker(
                 .border_1()
                 .border_color(edge(p.zone == Zone::Dropper))
                 .when(e.dropper, |d| d.bg(t.accent).text_color(t.bg))
-                .when(!e.dropper, |d| d.text_color(t.text_main))
-                .hover(|s| s.bg(t.accent.opacity(0.12)))
+                .when(!e.dropper, |d| {
+                    d.text_color(t.text_main)
+                        .hover(|s| s.bg(t.accent.opacity(0.12)))
+                })
                 // Armed, the button says how out: the editor may cover any part of the plot,
                 // so the hint stays here rather than on a plot banner.
                 .child(if e.dropper {

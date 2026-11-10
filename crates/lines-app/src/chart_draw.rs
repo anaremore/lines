@@ -239,7 +239,7 @@ impl ChartDrawings {
             self.drag = None;
             self.dragged = None;
             self.confirm_clear = false;
-            self.editor = None;
+            self.close_editor();
         }
         self.hidden = hidden;
     }
@@ -383,8 +383,27 @@ impl ChartDrawings {
         true
     }
 
+    /// Close the editor. A color the picker still previews is kept (saved, one undo step):
+    /// closing it any way but Esc keeps the color. (The chart keeps it through the editor
+    /// first, so it is also remembered among the recent colors; this is the backstop.)
     pub fn close_editor(&mut self) -> bool {
+        // (The lock is released before the change takes it again.)
+        let saved = self
+            .restyled
+            .take()
+            .and_then(|r| Some((self.data.lock().get(r.id).cloned()?, r.style)));
+        if let Some((mut d, style)) = saved
+            && d.style != style
+        {
+            d.style = style;
+            self.data.change(|s| (s.edit(d), ()));
+        }
         self.editor.take().is_some()
+    }
+
+    /// The open editor, to update in place (the recent colors).
+    pub fn editor_mut(&mut self) -> Option<&mut StyleEditor> {
+        self.editor.as_mut().map(|(_, e)| e)
     }
 
     /// The open editor, kept in step with its drawing (an undo or another chart may change
@@ -404,6 +423,7 @@ impl ChartDrawings {
             }
             _ => {
                 self.editor = None;
+                self.restyled = None;
                 None
             }
         }
@@ -438,22 +458,28 @@ impl ChartDrawings {
             self.editor = None;
             return (Outcome::Close, None);
         };
+        let (style, picking) = match &self.editor {
+            Some((_, e)) => (e.drawing_style(&d.style), e.custom.is_some()),
+            None => (d.style, false),
+        };
+        if out == Outcome::Preview {
+            // Painted in place of the saved drawing until the color is kept.
+            d.style = style;
+            self.restyled = Some(d);
+            return (Outcome::Preview, None);
+        }
+        // With the picker closed the editor holds the style to keep, whatever the input was
+        // (a click on "Save as default" or another row keeps the previewed color first).
+        // Saved only when it differs: one undo step, none for a revert.
+        if !picking || out == Outcome::Changed {
+            self.restyled = None;
+            if style != d.style {
+                d.style = style;
+                let edited = d.clone();
+                self.data.change(|s| (s.edit(edited), ()));
+            }
+        }
         match out {
-            Outcome::Changed => {
-                self.restyled = None;
-                if let Some((_, e)) = &self.editor {
-                    d.style = e.drawing_style(&d.style);
-                }
-                self.data.change(|s| (s.edit(d), ()));
-                (Outcome::Changed, None)
-            }
-            Outcome::Preview => {
-                if let Some((_, e)) = &self.editor {
-                    d.style = e.drawing_style(&d.style);
-                }
-                self.restyled = Some(d);
-                (Outcome::Preview, None)
-            }
             Outcome::SaveDefault => {
                 self.defaults[tool_index(d.tool)] = d.style;
                 (Outcome::SaveDefault, Some((d.tool, d.style)))

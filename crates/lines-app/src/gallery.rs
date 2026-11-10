@@ -907,8 +907,18 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         e
     };
     v.push(picker("color-picker-dark", "dark", "", &[]));
-    v.push(picker("color-picker-light-cb-zoom", "light", " --palette cb", &["--ui-zoom", "150"]));
-    v.push(picker("color-picker-dropper-dark", "dark", "", &["--dropper", "706,600"]));
+    v.push(picker(
+        "color-picker-light-cb-zoom",
+        "light",
+        " --palette cb",
+        &["--ui-zoom", "150"],
+    ));
+    v.push(picker(
+        "color-picker-dropper-dark",
+        "dark",
+        "",
+        &["--dropper", "706,600"],
+    ));
     // The editor kept inside the plot: a line near the bottom edge (warnings and all), a
     // narrow short pane, and a chart tiled above a DOM.
     let edge = |name, size: &str, theme: &str, id: &str| {
