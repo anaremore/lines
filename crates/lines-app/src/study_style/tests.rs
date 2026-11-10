@@ -818,8 +818,8 @@ use lines_core::levels::{LabelMode, LevelType, TypeStyle};
 /// color and fill, a line type with a recommended text color, one keeping the levels' own.
 static TYPES: [LevelType; 3] = [
     LevelType::zone(
-        "zone-bull",
-        "Bull Zone",
+        "demand",
+        "Demand zone",
         "Zones",
         TypeStyle {
             shown: true,
@@ -833,12 +833,13 @@ static TYPES: [LevelType; 3] = [
                 color: Color::Palette(2),
                 opacity: 50,
             },
+            light: None,
         },
     ),
     LevelType::line(
-        "half-gap",
-        "Half Gap",
-        "Open / close",
+        "mid",
+        "Mid line",
+        "Session",
         TypeStyle {
             line: LineStyle {
                 color: Color::Text,
@@ -849,7 +850,7 @@ static TYPES: [LevelType; 3] = [
             ..TypeStyle::OWN
         },
     ),
-    LevelType::line("cat", "CAT", "Lines", TypeStyle::OWN),
+    LevelType::line("other", "Other", "Lines", TypeStyle::OWN),
 ];
 
 /// A type never styled (also one a source adds later) gets its recommended look; nothing is
@@ -959,10 +960,7 @@ fn a_saved_per_source_style_migrates() {
     let m = &set.styles.levels["demo"];
     assert_eq!(m["lines"], saved["lines"]);
     assert_eq!(m["zones"], saved["zones"]);
-    assert_eq!(
-        m["types"],
-        serde_json::json!({"half-gap": {"shown": false}})
-    );
+    assert_eq!(m["types"], serde_json::json!({"mid": {"shown": false}}));
     assert_eq!(m["label"], "name-price");
     // Round trip through JSON.
     let back: StudySet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
@@ -982,7 +980,7 @@ fn a_saved_per_source_style_migrates() {
 #[test]
 fn unknown_type_fields_are_kept() {
     let mut m: PartStyles = serde_json::from_str(
-        r##"{"types": {"zone-bull": {"glow": 2, "fill": {"color": "#f719cb", "hatch": 1},
+        r##"{"types": {"demand": {"glow": 2, "fill": {"color": "#f719cb", "hatch": 1},
                                      "line": "wavy"},
                        "future-kind": {"x": 1}},
              "label": "price-only", "halo": {"r": 1}}"##,
@@ -995,7 +993,7 @@ fn unknown_type_fields_are_kept() {
     assert_eq!(read_label(&m, LabelMode::NamePrice), LabelMode::NamePrice);
     set_line(&mut look, |l| l.width = 2);
     write_type(&mut m, t, &look);
-    let z = &m["types"]["zone-bull"];
+    let z = &m["types"]["demand"];
     assert_eq!(z["glow"], 2);
     assert_eq!(z["line"], "wavy", "not changed: left as saved");
     assert_eq!(z["width"], 2);
@@ -1011,7 +1009,7 @@ fn unknown_type_fields_are_kept() {
 #[test]
 fn the_level_editor_round_trips() {
     let mut styles: PartStyles = serde_json::from_str(
-        r##"{"types": {"half-gap": {"width": 2}, "zone-bull": {"fill": {"opacity": 75}}}}"##,
+        r##"{"types": {"mid": {"width": 2}, "demand": {"fill": {"opacity": 75}}}}"##,
     )
     .unwrap();
     let mut e = level_editor(
@@ -1028,9 +1026,9 @@ fn the_level_editor_round_trips() {
         vec![
             (Some(SOURCE_GROUP), "Lines"),
             (Some(SOURCE_GROUP), "Zones"),
-            (Some("Zones"), "Bull Zone"),
-            (Some("Open / close"), "Half Gap"),
-            (Some("Lines"), "CAT"),
+            (Some("Zones"), "Demand zone"),
+            (Some("Session"), "Mid line"),
+            (Some("Lines"), "Other"),
         ]
     );
     assert_eq!(e.options.label_price, Some(true));
@@ -1071,10 +1069,10 @@ fn the_level_editor_round_trips() {
     ss.set_level_style("demo", &edit);
     styles = ss.levels["demo"].clone();
     assert_eq!(
-        styles["types"]["zone-bull"],
+        styles["types"]["demand"],
         serde_json::json!({"shown": false, "fill": {"color": "p1", "opacity": 75}})
     );
-    assert_eq!(styles["types"]["half-gap"], serde_json::json!({"width": 2}));
+    assert_eq!(styles["types"]["mid"], serde_json::json!({"width": 2}));
     assert_eq!(styles["label"], "name");
     // Opened again: the same looks.
     let again = level_editor(
@@ -1119,4 +1117,129 @@ fn a_source_without_types_keeps_its_two_tabs() {
     assert_eq!(e.parts.len(), 2);
     assert!(e.parts.iter().all(|p| p.group.is_none()));
     assert_eq!(e.options.label_price, Some(false));
+}
+
+/// A source's Zones tab still warns when held back under the candles when the source has
+/// types (its editor has more parts than Lines and Zones).
+#[test]
+fn zones_warn_through_a_typed_sources_editor() {
+    let themes = Theme::all();
+    let mut e = level_editor(
+        "t".into(),
+        &PartStyles::new(),
+        &lines_feed::levels::demo::TYPES,
+        LabelMode::Name,
+        Some(Rgb::hex(0x3d7bf5)),
+        |_| None,
+    );
+    e.select_tab(LEVEL_ZONES);
+    let r = StudyRef::Levels("demo".into());
+    let chart = ChartCtx::default();
+    let quiet = warnings(&r, &e, &themes, &chart);
+    assert!(quiet.iter().all(|w| !w.text.contains("over the zones")));
+    // A heavy Zones color: held back, and said so.
+    let rows = e.rows();
+    let color = rows.iter().position(|r| r.label == "Color").unwrap();
+    let k = rows[color]
+        .controls
+        .iter()
+        .position(|(c, _)| *c == Control::Color(Color::Palette(0)))
+        .unwrap();
+    e.click(color, k);
+    let op = e.rows().iter().position(|r| r.label == "Opacity").unwrap();
+    e.click(op, 0); // 100 %
+    let w = warnings(&r, &e, &themes, &chart);
+    assert!(w.iter().any(|w| w.text.contains("over the zones")), "{w:?}");
+}
+
+/// A user-picked zone fill on a type's tab is checked like any picked color: a color with a
+/// meaning is named as the fill's, and a fill held back under the candles says so. Its
+/// recommended (own) color isn't checked.
+#[test]
+fn a_types_zone_fill_is_guarded() {
+    let themes = Theme::all();
+    let r = StudyRef::Levels("demo".into());
+    let chart = ChartCtx::default();
+    let mut e = level_editor(
+        "t".into(),
+        &PartStyles::new(),
+        &TYPES,
+        LabelMode::Name,
+        None,
+        |_| None,
+    );
+    e.select_tab(2); // the demand zone type
+    assert!(
+        warnings(&r, &e, &themes, &chart)
+            .iter()
+            .all(|w| !w.text.starts_with("Fill") && !w.text.contains("zone fill")),
+        "the recommended fill isn't checked"
+    );
+    let up = Theme::dark(crate::theme::Palette::Standard).meanings()[0].1;
+    let set_fill = |e: &mut crate::style_editor::StyleEditor, c: Color, opacity: u8| {
+        if let Some((f, _)) = e.parts[2].fill.as_mut() {
+            f.color = c;
+            f.opacity = opacity;
+        }
+    };
+    // The dark theme's up color, faint: looks like up.
+    set_fill(&mut e, Color::Custom(up), 25);
+    let w = warnings(&r, &e, &themes, &chart);
+    assert!(
+        w.iter()
+            .any(|w| w.text.starts_with("Fill: Looks like the up color")),
+        "{w:?}"
+    );
+    // Heavy white: held back under the candles, said of the fill.
+    set_fill(&mut e, Color::Custom(Rgb::hex(0xffffff)), 100);
+    let w = warnings(&r, &e, &themes, &chart);
+    assert!(
+        w.iter().any(|w| w.text.contains("over the zone fill")),
+        "{w:?}"
+    );
+}
+
+/// A type left at `TypeStyle::OWN` keeps the look before types (each level's own weight,
+/// dashes and edges); restyling its line ends that. A recommended color with a light-theme
+/// counterpart uses it on light themes only, and only while it is the type's own.
+#[test]
+fn own_types_keep_the_old_look_and_light_counterparts_apply() {
+    let src = Look::defaults(&LEVELS);
+    let own = &TYPES[2];
+    let mut ty = read_type(&PartStyles::new(), own);
+    assert!(resolve_type(own, &src, &ty).own_line);
+    set_line(&mut ty, |l| l.width = 2);
+    assert!(!resolve_type(own, &src, &ty).own_line);
+
+    let lit = LevelType::line(
+        "band",
+        "Upper band",
+        "Lines",
+        TypeStyle {
+            line: LineStyle {
+                color: Color::Custom(Rgb::hex(0x7ed957)),
+                ..TypeStyle::OWN.line
+            },
+            light: Some(Color::Custom(Rgb::hex(0x2e7d32))),
+            ..TypeStyle::OWN
+        },
+    );
+    let ty = read_type(&PartStyles::new(), &lit);
+    let r = resolve_type(&lit, &src, &ty);
+    assert!(!r.own_line);
+    assert_eq!(r.line_color(true), Color::Custom(Rgb::hex(0x7ed957)));
+    assert_eq!(r.line_color(false), Color::Custom(Rgb::hex(0x2e7d32)));
+    // Picked for the type, or for the whole source: the same in every theme.
+    let mut picked = ty;
+    set_line(&mut picked, |l| l.color = Color::Palette(1));
+    assert_eq!(
+        resolve_type(&lit, &src, &picked).line_color(false),
+        Color::Palette(1)
+    );
+    let mut s2 = src;
+    set_line(&mut s2[LEVEL_LINES], |l| l.color = Color::Custom(MAGENTA));
+    assert_eq!(
+        resolve_type(&lit, &s2, &ty).line_color(false),
+        Color::Custom(MAGENTA)
+    );
 }

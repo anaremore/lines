@@ -561,3 +561,31 @@ fn a_last_price_sweeping_the_levels_never_moves_a_label() {
         assert_eq!(frame(&mut layer), first, "last price {p}");
     }
 }
+
+/// A kind a source split from another (`LevelType::parent`): a chart that hid the parent
+/// keeps all its children hidden; showing one child from the menu shows only it (its
+/// siblings, and the parent while it is still a kind, stay hidden).
+#[test]
+fn a_hidden_parent_kind_hides_its_children() {
+    let mut c: LevelsConfig =
+        serde_json::from_str(r#"{"hidden-kinds": ["src/session", "src/band"]}"#).unwrap();
+    for child in ["open", "close", "mid"] {
+        assert!(
+            !c.kind_shown_under("src", child, Some("session")),
+            "{child}"
+        );
+    }
+    assert!(!c.kind_shown_under("src", "upper-band", Some("band")));
+    assert!(c.kind_shown_under("src", "pivot", None));
+    assert!(c.kind_shown_under("other", "open", Some("session")));
+    // Show "mid" alone: the parent's entry is replaced by its other children.
+    let others: Vec<String> = ["open", "close", "mid"].map(String::from).to_vec();
+    c.show_under("src", "mid", "session", &others);
+    assert!(c.kind_shown_under("src", "mid", Some("session")));
+    assert!(!c.kind_shown_under("src", "open", Some("session")));
+    assert!(!c.kind_shown_under("src", "close", Some("session")));
+    assert_eq!(
+        c.hidden_kinds,
+        ["src/band", "src/close", "src/open"].map(String::from)
+    );
+}

@@ -484,6 +484,9 @@ pub struct TypeStyle {
     /// A zone's fill: opacity scales a zone's own translucency (40 %: the default 25 % is the
     /// 10 % zones always had).
     pub fill: FillStyle,
+    /// The line's recommended color on the light themes, where it differs (a fixed color that
+    /// reads only on dark, given a light-theme counterpart; `None`: `line.color` everywhere).
+    pub light: Option<Color>,
 }
 
 impl TypeStyle {
@@ -501,22 +504,35 @@ impl TypeStyle {
             color: Color::Own,
             opacity: 25,
         },
+        light: None,
     };
+
+    /// Whether this is [`TypeStyle::OWN`]'s line: drawn as each level's own style says (its
+    /// weight in device pixels, its dashes, a zone's edges at 60 %).
+    pub fn own_line(&self) -> bool {
+        self.line.color == Color::Own
+            && self.line.line == LineType::Solid
+            && self.line.width == 1
+            && self.line.opacity == 100
+    }
 }
 
 /// A kind of level a source declares (`LevelSource::types`): the kind slug its levels carry
 /// ([`LevelMap::kinds`]), how the style editor lists it, and its recommended look.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LevelType {
-    /// The kind slug (`hp`, `zone-bull`).
+    /// The kind slug (`hp`, `demand`).
     pub id: &'static str,
-    /// The editor's name for it ("Dyn HP").
+    /// The editor's name for it ("Upper band").
     pub label: &'static str,
     /// The heading it's listed under ("Zones", "Lines").
     pub group: &'static str,
     /// Its levels include zones: the editor offers a fill.
     pub zone: bool,
     pub style: TypeStyle,
+    /// A kind it was split from (`None`: none): a chart that hid the parent kind hides this one
+    /// too, so splitting a kind never shows what a chart had hidden.
+    pub parent: Option<&'static str>,
 }
 
 impl LevelType {
@@ -532,6 +548,7 @@ impl LevelType {
             group,
             zone: false,
             style,
+            parent: None,
         }
     }
 
@@ -547,6 +564,15 @@ impl LevelType {
             group,
             zone: true,
             style,
+            parent: None,
+        }
+    }
+
+    /// This type, split from kind `parent` (see [`LevelType::parent`]).
+    pub const fn child_of(self, parent: &'static str) -> LevelType {
+        LevelType {
+            parent: Some(parent),
+            ..self
         }
     }
 }
@@ -554,10 +580,10 @@ impl LevelType {
 /// What a level's label says.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LabelMode {
-    /// Its name ("Bull Zone").
+    /// Its name ("Demand zone").
     #[default]
     Name,
-    /// Its name and price, `Bull Zone : 7556.25`, in the product's price format. A level that
+    /// Its name and price, `Demand zone : 7556.25`, in the product's price format. A level that
     /// moves with the VWAP keeps its name only (its price changes every bar).
     NamePrice,
 }
@@ -655,39 +681,54 @@ pub fn place(
 /// flickering.
 pub const LABEL_HYSTERESIS: f32 = 0.25;
 
+/// What a level's label did last frame ([`place_labels`]' hysteresis).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum LabelSeen {
+    /// Not placed yet (a new map, a level that just came on screen).
+    #[default]
+    New,
+    Shown,
+    Hidden,
+}
+
 /// Choose label positions: a label is anchored to its own level (a line's on its line, a
 /// zone's on its top edge), clamped into the plot, and never moved for anything else: the
 /// last price and the tags on the axis paint over it. Labels only give way to each other: a
 /// label overlapping one already placed is dropped (the level is still drawn). Levels at
 /// fixed prices are placed first, in map order, then those moving with the VWAP, so a moving
 /// band never reshuffles the others. The layout depends only on the levels and the viewport,
-/// never the price, and keeps last frame's decision near the threshold: `shown` (by level
-/// index, updated in place) says which labels showed last frame; a hidden one shows again
-/// only once it is clear of every shown label by [`LABEL_HYSTERESIS`] more. In place, no
-/// allocation.
+/// never the price, and keeps last frame's decision near the threshold: `seen` (by level
+/// index, updated in place) says what each label did last frame; one hidden then shows again
+/// only once it is clear of every shown label by [`LABEL_HYSTERESIS`] more (a new one needs
+/// only to be clear). `has_label(index)`: whether the level's label can be drawn at all (it
+/// has one, and it fits the plot's width): one that can't claims no room. A plot shorter
+/// than a label shows none. In place, no allocation.
 pub fn place_labels(
     placed: &mut [Placed],
-    map: &LevelMap,
     label_h: f32,
     plot_h: f32,
-    shown: &mut [bool],
+    seen: &mut [LabelSeen],
+    has_label: impl Fn(u32) -> bool,
 ) {
     let half = label_h * 0.5;
     for p in placed.iter_mut() {
         p.label_y = None;
     }
+    if plot_h < label_h {
+        return;
+    }
     for moving in [false, true] {
         for i in 0..placed.len() {
             let p = placed[i];
-            if p.vwap_relative != moving || map.levels[p.index as usize].label.is_none() {
+            if p.vwap_relative != moving || !has_label(p.index) {
                 continue;
             }
-            let was = shown.get(p.index as usize).copied().unwrap_or(false);
-            let y = p.top.clamp(half, (plot_h - half).max(half));
-            let need = if was {
-                label_h
-            } else {
+            let was = seen.get(p.index as usize).copied().unwrap_or_default();
+            let y = p.top.clamp(half, plot_h - half);
+            let need = if was == LabelSeen::Hidden {
                 label_h * (1.0 + LABEL_HYSTERESIS)
+            } else {
+                label_h
             };
             let clash = placed
                 .iter()
@@ -697,8 +738,14 @@ pub fn place_labels(
         }
     }
     for p in placed.iter() {
-        if let Some(s) = shown.get_mut(p.index as usize) {
-            *s = p.label_y.is_some();
+        if let Some(s) = seen.get_mut(p.index as usize)
+            && has_label(p.index)
+        {
+            *s = if p.label_y.is_some() {
+                LabelSeen::Shown
+            } else {
+                LabelSeen::Hidden
+            };
         }
     }
 }

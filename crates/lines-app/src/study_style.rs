@@ -553,7 +553,7 @@ const FILL_PART: &str = "fill";
 
 /// A type's default color as the editor offers it first: each level's own colors (`source`:
 /// the type's first one, for the swatch), else the type's recommended color.
-fn type_own(c: Color, source: Option<Rgb>) -> Own {
+fn type_own(c: Color, light: Option<Color>, source: Option<Rgb>) -> Own {
     match c {
         Color::Own => Own {
             name: "Source colors",
@@ -561,7 +561,7 @@ fn type_own(c: Color, source: Option<Rgb>) -> Own {
         },
         c => Own {
             name: "Recommended",
-            token: OwnToken::Is(c),
+            token: OwnToken::Is(c, light.unwrap_or(c)),
         },
     }
 }
@@ -581,7 +581,7 @@ fn type_defs(t: &LevelType) -> (PartDef, PartDef) {
             .normalised(),
         ),
         stroke: true,
-        own: Some(type_own(s.line.color, None)),
+        own: Some(type_own(s.line.color, s.light, None)),
         optional: false,
         note: None,
     };
@@ -596,7 +596,7 @@ fn type_defs(t: &LevelType) -> (PartDef, PartDef) {
             .normalised(),
         ),
         stroke: false,
-        own: Some(type_own(s.fill.color, None)),
+        own: Some(type_own(s.fill.color, None, None)),
         optional: false,
         note: None,
     };
@@ -724,6 +724,23 @@ pub struct TypeLook {
     pub line: LineStyle,
     /// A zone's fill (opacity scales `LEVEL_ZONE_ALPHA`).
     pub fill: FillStyle,
+    /// The line's color on the light themes when it is the type's recommended one and that
+    /// has a light-theme counterpart (`TypeStyle::light`).
+    pub light: Option<Color>,
+    /// Drawn as each level's own style says (`TypeStyle::OWN`'s line, not restyled for the
+    /// type): its weight in device pixels, its dashes, a zone's edges at 60 %, exactly the look
+    /// before types.
+    pub own_line: bool,
+}
+
+impl TypeLook {
+    /// The line's color in a theme (`dark`): the light-theme counterpart where there is one.
+    pub fn line_color(&self, dark: bool) -> Color {
+        match (dark, self.light) {
+            (false, Some(c)) => c,
+            _ => self.line.color,
+        }
+    }
 }
 
 /// Level type `t`'s look, field by field: the chart's override for the type (`ty`, as
@@ -766,8 +783,15 @@ pub fn resolve_type(t: &LevelType, source: &[Look; 2], ty: &Look) -> TypeLook {
             def
         }
     };
+    let recommended = l.color == Color::Own && sl.color() == Color::Own;
     TypeLook {
         shown: ty.shown,
+        light: d.light.filter(|_| recommended),
+        own_line: d.own_line()
+            && l == LineStyle {
+                color: Color::Own,
+                ..d.line
+            },
         line: LineStyle {
             color: color(l.color, sl.color(), d.line.color),
             line: l.line,
@@ -835,11 +859,13 @@ pub fn level_editor(
             title: t.label,
             style: look.style,
             stroke: true,
-            own: Some(type_own(t.style.line.color, kind)),
+            own: Some(type_own(t.style.line.color, t.style.light, kind)),
             shown: Some(look.shown),
             note: None,
             group: Some(t.group),
-            fill: look.fill.map(|f| (f, type_own(t.style.fill.color, kind))),
+            fill: look
+                .fill
+                .map(|f| (f, type_own(t.style.fill.color, None, kind))),
         });
     }
     e.options.label_price = Some(read_label(styles, label_default) == LabelMode::NamePrice);
@@ -1008,7 +1034,8 @@ pub fn zones_warning(
     themes: &[crate::theme::Theme],
     ctxs: &[crate::style_editor::ThemeCtx],
 ) -> Option<crate::style_editor::Warning> {
-    let looks: &[Look; 2] = looks.try_into().ok()?;
+    // A source's own Lines and Zones come first (a source with types has more parts).
+    let looks: &[Look; 2] = looks.get(..2)?.try_into().ok()?;
     let z = looks[LEVEL_ZONES];
     if z.style == LEVELS[LEVEL_ZONES].style {
         return None;
@@ -1039,6 +1066,46 @@ fn under_candles_warning(
         ),
         swatch: None,
     })
+}
+
+/// A level type's zone fill the user picked a color for (its own color is the source's or
+/// recommended: nothing to check): the guard's findings for its color as a fill (a color
+/// with a meaning it looks like), and the fill held back under the candles in some theme or
+/// palette. Each says it is about the fill.
+pub fn type_fill_warnings(
+    e: &StyleEditor,
+    themes: &[crate::theme::Theme],
+    ctxs: &[crate::style_editor::ThemeCtx],
+) -> Vec<crate::style_editor::Warning> {
+    let Some((f, _)) = e.parts.get(e.tab).and_then(|p| p.fill) else {
+        return Vec::new();
+    };
+    if f.color == Color::Own {
+        return Vec::new();
+    }
+    // The fill's color as the guard sees a fill part.
+    let mut as_fill = e.clone();
+    if let Some(p) = as_fill.parts.get_mut(e.tab) {
+        p.style = PartStyle::Fill(f);
+        p.fill = None;
+    }
+    let mut out: Vec<_> = as_fill
+        .warnings(ctxs)
+        .into_iter()
+        .map(|w| crate::style_editor::Warning {
+            text: format!("Fill: {}", w.text),
+            ..w
+        })
+        .collect();
+    let hit: Vec<bool> = themes
+        .iter()
+        .map(|t| {
+            let own = crate::theme::with_alpha(t.text_main, LEVEL_ZONE_ALPHA);
+            t.under_candles(t.part_color(f.color, own, f.opacity), 1).1
+        })
+        .collect();
+    out.extend(under_candles_warning("zone fill", ctxs, &hit));
+    out
 }
 
 /// The edited part (a line, shown) looks like another study's line in some theme or palette:
@@ -1099,6 +1166,7 @@ pub fn warnings(
     let ctxs: Vec<_> = themes.iter().map(crate::theme::Theme::study_ctx).collect();
     let mut out = e.warnings(&ctxs);
     out.extend(alike_warnings(e, &chart.others, themes, &ctxs));
+    out.extend(type_fill_warnings(e, themes, &ctxs));
     let looks = looks_of(e);
     match r {
         StudyRef::Footprint if e.tab == FP_CELLS => {

@@ -73,8 +73,9 @@ pub enum OwnToken {
     /// The colors a level source gives its levels (decision 0022); the first one, for the
     /// swatch.
     Source(Option<Rgb>),
-    /// This color (a level type's recommended one: a theme token or a fixed color).
-    Is(Color),
+    /// This color (a level type's recommended one: a theme token or a fixed color): on the
+    /// dark themes, then on the light ones.
+    Is(Color, Color),
 }
 
 /// A study part's own color: what [`Color::Own`] is called and shows.

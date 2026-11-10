@@ -89,6 +89,9 @@ pub enum StudyAction {
     ToggleProfileSplit,
     SetProfileGrouping(Option<u32>),
     ToggleLevelKind(String, String),
+    /// Show a kind its parent hid (source, kind, parent, the kinds to keep hidden in the
+    /// parent's place: `LevelsConfig::show_under`).
+    ShowLevelKindUnder(String, String, String, Vec<String>),
     ToggleLevelLabels(String),
     /// Restyle a study: every part's look, in its parts' order (`crate::study_style`).
     SetStyle(StudyRef, Vec<Look>),
@@ -259,6 +262,9 @@ impl StudySet {
             StudyAction::ToggleProfileSplit => self.profile.split = !self.profile.split,
             StudyAction::SetProfileGrouping(g) => self.profile.grouping = *g,
             StudyAction::ToggleLevelKind(id, kind) => self.levels.toggle_kind(id, kind),
+            StudyAction::ShowLevelKindUnder(id, kind, parent, others) => {
+                self.levels.show_under(id, kind, parent, others)
+            }
             StudyAction::ToggleLevelLabels(id) => self.levels.toggle_labels(id),
             StudyAction::SetStyle(r, looks) => match r {
                 StudyRef::Vwap(i) => {
@@ -312,6 +318,8 @@ pub struct SourceInfo {
     pub id: String,
     pub label: String,
     pub kinds: Vec<String>,
+    /// Each kind's parent kind (`LevelType::parent`), in `kinds` order (empty: none).
+    pub parents: Vec<Option<&'static str>>,
 }
 
 /// What the menu is built from.
@@ -728,14 +736,25 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             let Some(s) = input.sources.iter().find(|s| s.id == *id) else {
                 return;
             };
-            for k in &s.kinds {
-                c(
-                    "Kinds",
-                    k.clone(),
-                    input.set.levels.kind_shown(id, k),
-                    Swatch::None,
-                    set(StudyAction::ToggleLevelKind(id.clone(), k.clone())),
-                );
+            for (i, k) in s.kinds.iter().enumerate() {
+                let parent = s.parents.get(i).copied().flatten();
+                let shown = input.set.levels.kind_shown_under(id, k, parent);
+                // Hidden through its parent (a kind the source has split): showing it hides
+                // its siblings and the parent itself in the parent's place.
+                let action = match parent {
+                    Some(p) if !shown && input.set.levels.kind_shown(id, k) => {
+                        let others = s
+                            .kinds
+                            .iter()
+                            .zip(&s.parents)
+                            .filter(|(o, op)| *o == p || **op == Some(p))
+                            .map(|(o, _)| o.clone())
+                            .collect();
+                        StudyAction::ShowLevelKindUnder(id.clone(), k.clone(), p.to_owned(), others)
+                    }
+                    _ => StudyAction::ToggleLevelKind(id.clone(), k.clone()),
+                };
+                c("Kinds", k.clone(), shown, Swatch::None, set(action));
             }
             c(
                 "Labels",

@@ -32,8 +32,8 @@ use gpui::{
 };
 use lines_core::geometry::snap;
 use lines_core::levels::{
-    LabelMode, Level, LevelMap, LevelShape, LevelType, MAX_KINDS, MAX_LEVELS, Placed, label_text,
-    place, place_labels,
+    LabelMode, LabelSeen, Level, LevelMap, LevelShape, LevelType, MAX_KINDS, MAX_LEVELS, Placed,
+    label_text, place, place_labels,
 };
 use lines_core::style::DashPattern;
 use lines_core::{BarsView, PriceFormat, Product, UtcMillis, Viewport};
@@ -94,6 +94,29 @@ impl LevelsConfig {
         })
     }
 
+    /// A kind shown, given the kind it was split from (`LevelType::parent`): hiding the
+    /// parent hides it too, so a chart saved before a source split a kind keeps hiding what it
+    /// hid.
+    pub fn kind_shown_under(&self, source: &str, kind: &str, parent: Option<&str>) -> bool {
+        self.kind_shown(source, kind) && parent.is_none_or(|p| self.kind_shown(source, p))
+    }
+
+    /// Show `kind`, hidden through its `parent`: the parent's entry goes, and the kinds in
+    /// `others` (its siblings, and the parent if it is still a kind) are hidden in its place,
+    /// so only `kind` comes back.
+    pub fn show_under(&mut self, source: &str, kind: &str, parent: &str, others: &[String]) {
+        let entry = |k: &str| format!("{source}/{k}");
+        self.hidden_kinds
+            .retain(|k| *k != entry(parent) && *k != entry(kind));
+        for o in others {
+            let e = entry(o);
+            if o != kind && !self.hidden_kinds.contains(&e) {
+                self.hidden_kinds.push(e);
+            }
+        }
+        self.hidden_kinds.sort();
+    }
+
     fn toggle(list: &mut Vec<String>, item: String) {
         if let Some(i) = list.iter().position(|s| *s == item) {
             list.remove(i);
@@ -145,9 +168,12 @@ struct Slot {
     texts: Vec<Option<String>>,
     /// Bumped whenever the looks above change (the zone scale's cache key).
     rev: u64,
-    /// Which levels' labels showed last frame (by level index; `place_labels`' hysteresis),
+    /// What each level's label did last frame (by level index; `place_labels`' hysteresis),
     /// sized with the map.
-    shown_labels: Vec<bool>,
+    seen: Vec<LabelSeen>,
+    /// This frame's label chips: (top, bottom, left, right) in plot px, so the levels' lines
+    /// break around them (fixed capacity, cleared each frame).
+    chips: Vec<[f32; 4]>,
     /// What its zone fills are scaled by under the candles (`zone_scale`) for (theme, map,
     /// looks): computed when one of them changes, not every frame.
     zone_scale: Cell<Option<ZoneScale>>,
@@ -179,11 +205,11 @@ impl Slot {
     /// A line's (or, `edge`, a zone edge's) color, width (logical px) and dash at `dim`.
     fn stroke(&self, theme: &Theme, l: &Level, dim: f32, edge: bool, hair: f32) -> Stroke {
         match self.type_look(l) {
-            Some(t) => {
+            Some(t) if !t.own_line => {
                 let w = f32::from(t.line.width.clamp(1, 4));
                 Stroke {
                     color: theme.part_color(
-                        t.line.color,
+                        t.line_color(theme.is_dark()),
                         source_colour(l.style.rgba, dim),
                         t.line.opacity,
                     ),
@@ -191,7 +217,7 @@ impl Slot {
                     dash: drawing_dash(t.line.line, w),
                 }
             }
-            None => {
+            _ => {
                 let (color, weight) = if edge {
                     (
                         theme.level_zone_edge(&self.looks, l.style.rgba, 0.6 * dim),
@@ -429,7 +455,8 @@ impl LevelsLayer {
                     kind_looks: [None; MAX_KINDS],
                     texts: Vec::new(),
                     rev: 0,
-                    shown_labels: Vec::new(),
+                    seen: Vec::new(),
+                    chips: Vec::with_capacity(MAX_LEVELS),
                     handle,
                     label,
                     map: None,
@@ -457,6 +484,12 @@ impl LevelsLayer {
         for s in &mut self.slots {
             s.refresh(&self.styles, &price);
         }
+    }
+
+    /// The kind `kind` of source `id` was split from (`LevelType::parent`).
+    pub fn kind_parent(&self, id: &str, kind: &str) -> Option<&'static str> {
+        let s = self.slots.iter().find(|s| s.handle.source() == id)?;
+        s.types.iter().find(|t| t.id == kind)?.parent
     }
 
     /// The level types source `id` declares and its own label mode (its style editor).
@@ -546,8 +579,8 @@ impl LevelsLayer {
                 s.refresh(styles, &price);
                 // A new map: its levels' labels start from scratch.
                 let n = s.map.as_ref().map_or(0, |m| m.levels.len());
-                s.shown_labels.clear();
-                s.shown_labels.resize(n, false);
+                s.seen.clear();
+                s.seen.resize(n, LabelSeen::New);
             }
         }
     }
@@ -555,7 +588,7 @@ impl LevelsLayer {
     /// Under the store lock, after the viewport update. Draws from this frame's
     /// [`Self::snapshot`] (never re-reads the sources).
     pub fn prepare(&mut self, data: &ChartData, bars: BarsView<'_>, vp: &Viewport) {
-        let plot_h = vp.height as f32;
+        let (plot_w, plot_h) = (vp.width as f32, vp.height as f32);
         if data.market_time.is_some() {
             self.clock = data.market_time;
         }
@@ -603,20 +636,32 @@ impl LevelsLayer {
             }
             let mut mask = 0u64;
             for (i, k) in map.kinds.iter().enumerate().take(64) {
-                // Shown on this pane, and its type (if declared) drawn.
-                if self.config.kind_shown(source, k) && s.kind_looks[i].is_none_or(|t| t.shown) {
+                // Shown on this pane (its parent kind too), and its type (if declared) drawn.
+                let parent = s.types.iter().find(|t| t.id == k).and_then(|t| t.parent);
+                if self.config.kind_shown_under(source, k, parent)
+                    && s.kind_looks[i].is_none_or(|t| t.shown)
+                {
                     mask |= 1 << i;
                 }
             }
             s.kinds = mask;
+            s.chips.clear();
             place(map, vp, vwap_now, |k| mask & (1 << k) != 0, &mut s.placed);
-            place_labels(
-                &mut s.placed,
-                map,
-                LABEL_PX * 1.6,
-                plot_h,
-                &mut s.shown_labels,
-            );
+            // A label that can't be drawn (too wide for the plot even as its name, measured
+            // when it was last shaped) claims no room.
+            let (texts, shaped) = (&s.texts, &self.shaped);
+            let fits = |t: &str| {
+                shaped
+                    .get(t)
+                    .is_none_or(|l| f32::from(l.width) + LABEL_CHROME + 8.0 <= plot_w)
+            };
+            place_labels(&mut s.placed, LABEL_PX * 1.6, plot_h, &mut s.seen, |i| {
+                let Some(name) = map.levels[i as usize].label.as_deref() else {
+                    return false;
+                };
+                let full = texts.get(i as usize).and_then(|t| t.as_deref());
+                fits(name) || full.is_some_and(fits)
+            });
         }
     }
 
@@ -680,14 +725,33 @@ impl LevelsLayer {
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let pw = f32::from(plot.size.width);
+        // Where a label chip covers height `y`: (left, right), the union over every source's
+        // chips (they're all right-aligned at the plot's edge), or an empty span.
+        let gap = |y: f32| {
+            let mut span = (f32::INFINITY, f32::NEG_INFINITY);
+            for s in &self.slots {
+                for c in &s.chips {
+                    if y >= c[0] && y <= c[1] {
+                        span = (span.0.min(c[2]), span.1.max(c[3]));
+                    }
+                }
+            }
+            span
+        };
         let line = |window: &mut Window, y: f32, st: Stroke| {
             let w = st.width.max(hair);
+            let (g0, g1) = gap(y);
             let y = snap(f64::from(y - w * 0.5), scale);
             st.dash.segments(pw, |a, b| {
-                window.paint_quad(fill(
-                    Bounds::new(point(px(ox + a), px(oy + y)), size(px(b - a), px(w))),
-                    st.color,
-                ));
+                // Broken around the labels: they sit behind the bars, the lines above them.
+                for (a, b) in [(a, b.min(g0)), (a.max(g1), b)] {
+                    if b > a {
+                        window.paint_quad(fill(
+                            Bounds::new(point(px(ox + a), px(oy + y)), size(px(b - a), px(w))),
+                            st.color,
+                        ));
+                    }
+                }
             });
         };
         let ppu = self.px_per_unit;
@@ -700,7 +764,9 @@ impl LevelsLayer {
             let mut prev: Option<f32> = None;
             for (i, col) in cols.iter().enumerate() {
                 let y = col.y - dy;
-                if !(dashed && i % 2 == 1) {
+                let (g0, g1) = gap(y);
+                let under_label = col.right > g0 && col.left < g1;
+                if !(dashed && i % 2 == 1) && !under_label {
                     window.paint_quad(fill(
                         Bounds::new(
                             point(px(ox + col.left), px(oy + y - w * 0.5)),
@@ -790,6 +856,9 @@ impl LevelsLayer {
                 let line = &self.shaped[text];
                 let x = snap(f64::from((pw - w - 8.0).max(0.0)), scale);
                 let top = snap(f64::from(y - box_h * 0.5), scale);
+                if self.slots[si].chips.len() < self.slots[si].chips.capacity() {
+                    self.slots[si].chips.push([top, top + box_h, x, x + w]);
+                }
                 window.paint_quad(fill(
                     Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
                     theme.label_bg,

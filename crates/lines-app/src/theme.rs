@@ -323,7 +323,10 @@ impl Theme {
             T::Line => line,
             T::Source(Some(rgb)) => user_color(rgb, 100),
             T::Source(None) => self.text_dim,
-            T::Is(c) => self.part_color(c, self.text_dim, 100),
+            T::Is(dark, light) => {
+                let c = if self.is_dark() { dark } else { light };
+                self.part_color(c, self.text_dim, 100)
+            }
         };
         c.a = 1.0;
         c

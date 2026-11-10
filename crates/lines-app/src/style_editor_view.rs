@@ -308,6 +308,10 @@ pub struct EditorScroll {
     pub handle: ScrollHandle,
     follow: Follow,
     controls: Measured,
+    /// A level source's grouped tab strip (it scrolls on its own when capped), and the tab it
+    /// last brought into view: a tab the keys move to is scrolled into view.
+    tabs: ScrollHandle,
+    tab_shown: std::rc::Rc<std::cell::Cell<Option<usize>>>,
 }
 
 impl EditorScroll {
@@ -712,10 +716,19 @@ pub fn render(
                 .id("style-tabs")
                 .max_h(px(cap))
                 .overflow_y_scroll()
+                .track_scroll(&es.tabs)
                 .flex()
                 .flex_col()
                 .gap(px(2.0));
-            for (g, tabs) in tab_groups(e) {
+            let groups = tab_groups(e);
+            // The focused tab's group row in view (Tab / Shift+Tab move along the strip).
+            if es.tab_shown.get() != Some(e.tab)
+                && let Some(gi) = groups.iter().position(|(_, t)| t.contains(&e.tab))
+            {
+                es.tabs.scroll_to_item(gi);
+                es.tab_shown.set(Some(e.tab));
+            }
+            for (g, tabs) in groups {
                 let mut row = div()
                     .flex()
                     .flex_1()

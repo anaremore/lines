@@ -809,6 +809,10 @@ impl ChartView {
             .sources()
             .into_iter()
             .map(|(id, label, kinds)| SourceInfo {
+                parents: kinds
+                    .iter()
+                    .map(|k| self.levels.kind_parent(&id, k))
+                    .collect(),
                 id,
                 label: label.to_owned(),
                 kinds,
@@ -3843,7 +3847,8 @@ impl ChartView {
                 window.paint_quad(fill(rect(l.x, 0.0, hair, ph), t.grid));
             }
             // Paint order inside the plot: grid, volume profile, the levels' zones and VWAP
-            // band fills (behind the candles: a heavy fill never covers a bar), candles,
+            // band fills (behind the candles: a heavy fill never covers a bar), the levels'
+            // labels (behind the bars too), candles,
             // `layers`, indicator studies (VWAP lines and band edges), opaque footprint cells
             // over them, the levels' front lines, the profile's label, drawings, then the
             // last-price line (above every study fill and line), crosshair.
@@ -3855,6 +3860,12 @@ impl ChartView {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_back(plot, &t, window);
                 self.studies.paint_back((ox, oy), &t, window);
+                // Level labels sit behind the bars (and every study line, footprint cell and
+                // drawing): a label chip never hides price action where a bar crosses it.
+                // The levels' own lines break around their chips.
+                if labels {
+                    self.levels.paint_labels(plot, &t, window, cx);
+                }
             }
             // Tick charts: a faint dashed line where each session's bars begin, behind the
             // bars (dashed: never mistaken for the crosshair's solid line).
@@ -3962,7 +3973,6 @@ impl ChartView {
             // Strategy markers: above studies and drawings, under the crosshair.
             self.marks.paint(plot, &t, window, cx);
             if labels {
-                self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
             }
             if let Some((from, x)) = self.tick_from {
