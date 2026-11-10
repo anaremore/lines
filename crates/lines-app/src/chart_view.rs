@@ -3458,7 +3458,7 @@ impl ChartView {
             0.0
         };
         // Sized like the order tags (`tm`), so its handles (`order_tags::handles`) fit it.
-        let (x, h) = (ox + 4.0 * s, tm.tag_h);
+        let (x, h) = (ox + (4.0 * s).round(), tm.tag_h);
         let top = oy + y - h * 0.5;
         let w = w_head + w_money + tm.text_pad;
         window.paint_quad(fill(
@@ -3878,11 +3878,12 @@ impl ChartView {
             match MarkRole::of(&m) {
                 _ if mixed => {}
                 MarkRole::Target => {
-                    window.paint_quad(fill(rect(b.left, b.top - 2.0, 8.0 * s, 2.0), c))
+                    window.paint_quad(fill(rect(b.left, b.top - 2.0, (8.0 * s).round(), 2.0), c))
                 }
-                MarkRole::Stop => {
-                    window.paint_quad(fill(rect(b.left, b.top + order_tag_h, 8.0 * s, 2.0), c))
-                }
+                MarkRole::Stop => window.paint_quad(fill(
+                    rect(b.left, b.top + order_tag_h, (8.0 * s).round(), 2.0),
+                    c,
+                )),
                 MarkRole::Entry => {}
             }
             window.paint_quad(fill(rect(b.close_left, b.top, hair, order_tag_h), c));
@@ -3939,7 +3940,7 @@ impl ChartView {
                 .map(|b| b.id);
             window.refresh();
         }
-        // The hovered tag's − / size / +, left of it (a tag's height, each at least 20 px).
+        // The hovered tag's − / size / +, left of it (a tag's height, the size twice that; never under 100 %).
         // While its size is typed the field stays up, wherever the pointer is.
         let shown = self
             .trade
@@ -4044,7 +4045,10 @@ impl ChartView {
         // top left: inline and brief, never a dialog.
         if let Some(why) = self.trade.local_flash() {
             let w = self.pos_glyphs.width(why, t.on_warn, true, window) + tm.text_pad;
-            window.paint_quad(fill(rect(4.0 * s, 4.0 * s, w, order_tag_h), t.warn));
+            window.paint_quad(fill(
+                rect((4.0 * s).round(), (4.0 * s).round(), w, order_tag_h),
+                t.warn,
+            ));
             self.pos_glyphs.paint(
                 why,
                 ox + 10.0 * s,
