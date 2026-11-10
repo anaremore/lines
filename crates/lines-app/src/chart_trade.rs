@@ -842,7 +842,8 @@ pub const TARGET_BELOW: &str = "The target is below the entry: drag it above";
 pub const TARGET_ABOVE: &str = "The target is above the entry: drag it below";
 /// Place refused: a fill since staging made the entry reduce the position, and a bracket only
 /// goes on an order that opens or adds.
-pub const POSITION_CHANGED: &str = "The position changed: a bracket needs an order that opens or adds";
+pub const POSITION_CHANGED: &str =
+    "The position changed: a bracket needs an order that opens or adds";
 
 /// The menu row that stages its order: the plain row's words and " with bracket".
 pub const WITH_BRACKET: &str = " with bracket";
@@ -1130,6 +1131,7 @@ pub fn write_staged_entry(
 
 /// A staged leg's tag: `Target 2 @ 7518.00` in `text`, and its P&L there (`+32.0 t  +$800.00`)
 /// in `pnl` with its money for the tone (`None`: P&L off or no money per unit). No allocation.
+#[allow(clippy::too_many_arguments)]
 pub fn write_staged_leg(
     text: &mut impl Write,
     pnl: &mut impl Write,
@@ -1224,8 +1226,12 @@ pub fn parse_stage_spec(
     parse_price: impl Fn(&str) -> Option<Price>,
 ) -> Result<StageSpec, String> {
     let w: Vec<&str> = s.split_whitespace().collect();
-    let bad = || format!("--stage-order {s:?}: expected e.g. \"buy limit 6010.00 stop 6006.00 target 6018.00\"");
-    if w.len() < 3 || w.len() % 2 == 0 {
+    let bad = || {
+        format!(
+            "--stage-order {s:?}: expected e.g. \"buy limit 6010.00 stop 6006.00 target 6018.00\""
+        )
+    };
+    if w.len() < 3 || w.len().is_multiple_of(2) {
         return Err(bad());
     }
     let side = match w[0] {
@@ -2483,11 +2489,7 @@ mod tests {
     }
 
     /// Bid 6012.00, ask 6012.25; 2 lots; a 2/4 preset when `bracket`.
-    fn staged(
-        position: i64,
-        bracket: bool,
-        o: MenuOrder,
-    ) -> (Staged, crate::dom_trade::EntryCtx) {
+    fn staged(position: i64, bracket: bool, o: MenuOrder) -> (Staged, crate::dom_trade::EntryCtx) {
         let c = menu_ctx(position, bracket);
         (stage(o, Offer::of(&c), &c).unwrap(), c)
     }
@@ -2611,7 +2613,12 @@ mod tests {
         let Ok(TradeCommand::PlaceOrder(spec)) = staged_command(&s, &c) else {
             panic!("plain")
         };
-        assert_eq!(spec.kind, OrderKind::Stop { trigger: p(6014.00) });
+        assert_eq!(
+            spec.kind,
+            OrderKind::Stop {
+                trigger: p(6014.00)
+            }
+        );
     }
 
     /// Each refusal at Place, nothing built: the contract, size or account changed; the market
@@ -2643,7 +2650,11 @@ mod tests {
         wrong.stop = Some(p(6010.25));
         assert_eq!(staged_command(&wrong, &c), Err(Refusal(STOP_ABOVE)));
         wrong.stop = Some(p(6010.00));
-        assert_eq!(staged_command(&wrong, &c), Err(Refusal(STOP_ABOVE)), "at it");
+        assert_eq!(
+            staged_command(&wrong, &c),
+            Err(Refusal(STOP_ABOVE)),
+            "at it"
+        );
         let mut wrong = s;
         wrong.target = Some(p(6009.00));
         assert_eq!(staged_command(&wrong, &c), Err(Refusal(TARGET_BELOW)));
@@ -2687,9 +2698,8 @@ mod tests {
         );
         let leg = |part, mode| {
             let (mut text, mut pnl) = (String::new(), String::new());
-            let money =
-                write_staged_leg(&mut text, &mut pnl, &s, part, &e.price, e.qty, mpu, mode)
-                    .unwrap();
+            let money = write_staged_leg(&mut text, &mut pnl, &s, part, &e.price, e.qty, mpu, mode)
+                .unwrap();
             (text, pnl, money)
         };
         assert_eq!(
@@ -2765,14 +2775,20 @@ mod tests {
     fn nothing_is_sent_before_place() {
         let c = menu_ctx(0, true);
         let fresh = || stage(buy_at(6010.00), Offer::of(&c), &c).unwrap();
-        let mut st = ChartTradeState::default();
-        st.staged = Some(fresh());
+        let mut st = ChartTradeState {
+            staged: Some(fresh()),
+            ..ChartTradeState::default()
+        };
         if let Some(s) = st.staged.as_mut() {
             s.move_part(StagedPart::Stop, p(6008.00));
         }
         assert_eq!(st.discard(DISCARDED_HIDDEN), Some(DISCARDED_HIDDEN));
         assert_eq!(st.staged, None);
-        assert_eq!(st.discard(DISCARDED_HIDDEN), None, "nothing staged: no notice");
+        assert_eq!(
+            st.discard(DISCARDED_HIDDEN),
+            None,
+            "nothing staged: no notice"
+        );
         st.staged = Some(fresh());
         assert_eq!(st.staged_account(Some(&c.account)), None);
         assert_eq!(

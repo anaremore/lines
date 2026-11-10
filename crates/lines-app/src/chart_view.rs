@@ -2873,7 +2873,12 @@ impl ChartView {
             return true;
         }
         let n = self.ct.n_tags;
-        match staged_hit(&self.ct.tags[..n], self.ct.staged_buttons, x as f32, y as f32) {
+        match staged_hit(
+            &self.ct.tags[..n],
+            self.ct.staged_buttons,
+            x as f32,
+            y as f32,
+        ) {
             Some(StagedHit::Body(part)) => {
                 if let (Some(at), Some(p)) = (at, s.price(part)) {
                     self.ct.staged_drag = Some((part, p.0 - at.0, s));
@@ -3817,12 +3822,9 @@ impl ChartView {
                 scale.parse_decimal(x).ok().map(Price)
             })
             .and_then(|sp| {
-                let mut s = crate::chart_trade::stage(
-                    sp.order,
-                    crate::chart_trade::Offer::of(&ctx),
-                    &ctx,
-                )
-                .map_err(|crate::dom_trade::Refusal(why)| why.to_owned())?;
+                let mut s =
+                    crate::chart_trade::stage(sp.order, crate::chart_trade::Offer::of(&ctx), &ctx)
+                        .map_err(|crate::dom_trade::Refusal(why)| why.to_owned())?;
                 if sp.stop.is_some() || sp.target.is_some() {
                     (s.stop, s.target) = (sp.stop, sp.target);
                 }
@@ -4067,9 +4069,9 @@ impl ChartView {
                     )
                     .ok()
                     .flatten();
-                    let mut w = self
-                        .pos_glyphs
-                        .width(st_text[k].as_str(), t.text_main, true, window);
+                    let mut w =
+                        self.pos_glyphs
+                            .width(st_text[k].as_str(), t.text_main, true, window);
                     if st_money[k].is_some() {
                         w += 8.0 * s
                             + self
@@ -4239,8 +4241,7 @@ impl ChartView {
         // Tags.
         for k in 0..self.ct.n_tags {
             let b = self.ct.tags[k];
-            if let (Some(part), Some(st)) = (crate::chart_trade::StagedPart::of_id(b.id), staged)
-            {
+            if let (Some(part), Some(st)) = (crate::chart_trade::StagedPart::of_id(b.id), staged) {
                 let i = st.parts().position(|(p, _)| p == part).unwrap_or(0);
                 self.draw_staged_tag(
                     &b,
@@ -4543,23 +4544,14 @@ impl ChartView {
         window.paint_quad(fill(rect(b.left, b.top, 2.0, h), c));
         let notch = (8.0 * s).round();
         match part {
-            StagedPart::Target => {
-                window.paint_quad(fill(rect(b.left, b.top - 2.0, notch, 2.0), c))
-            }
+            StagedPart::Target => window.paint_quad(fill(rect(b.left, b.top - 2.0, notch, 2.0), c)),
             StagedPart::Stop => window.paint_quad(fill(rect(b.left, b.top + h, notch, 2.0), c)),
             StagedPart::Entry => {}
         }
         let text_x = ox + b.left + 6.0 * s;
-        let head_end = self.pos_glyphs.paint(
-            text,
-            text_x,
-            oy + b.top,
-            h,
-            t.text_main,
-            true,
-            window,
-            cx,
-        );
+        let head_end =
+            self.pos_glyphs
+                .paint(text, text_x, oy + b.top, h, t.text_main, true, window, cx);
         if let Some(m) = money {
             let tone = match crate::pnl::tone(m) {
                 crate::pnl::Tone::Up => t.up,

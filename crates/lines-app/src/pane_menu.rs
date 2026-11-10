@@ -269,14 +269,12 @@ pub fn order_items(o: &ChartOrders) -> Vec<MenuItem> {
 /// Whether a menu has a row that places an order: it opens with nothing highlighted, so a
 /// stray Enter never sends one (design.md §6 rule 5).
 pub fn places_orders(items: &[MenuItem]) -> bool {
-    items
-        .iter()
-        .any(|i| {
-            matches!(
-                i.cmd,
-                Some(Command::Order(OrderCmd::Place(..) | OrderCmd::Stage(..)))
-            )
-        })
+    items.iter().any(|i| {
+        matches!(
+            i.cmd,
+            Some(Command::Order(OrderCmd::Place(..) | OrderCmd::Stage(..)))
+        )
+    })
 }
 
 /// A pane's menu.

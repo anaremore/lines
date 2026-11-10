@@ -333,8 +333,16 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     for (name, quick, extra) in [
         ("chart-trading-style-dark", true, "--theme dark"),
         ("chart-trading-style-light", false, "--theme light"),
-        ("chart-trading-style-dark-150", false, "--theme dark --ui-zoom 150"),
-        ("chart-trading-style-light-150", false, "--theme light --ui-zoom 150"),
+        (
+            "chart-trading-style-dark-150",
+            false,
+            "--theme dark --ui-zoom 150",
+        ),
+        (
+            "chart-trading-style-light-150",
+            false,
+            "--theme light --ui-zoom 150",
+        ),
     ] {
         let mut a = args(&format!(
             "--layout trading --size 1600x900 --arm --order-strip {extra}"
@@ -349,6 +357,15 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         ]);
         v.push(s(name, quick, end, a));
     }
+    // Staged with no bracket preset: no legs, the entry's "+T" / "+S" handles instead.
+    let mut h = args("--layout trading --size 1600x900 --theme dark --arm");
+    h.extend([
+        "--paper".into(),
+        "buy 1 mkt; ack".into(),
+        "--stage-order".into(),
+        "buy limit 6011.00".into(),
+    ]);
+    v.push(s("chart-staged-handles", false, end, h));
     // The chart's right-click order section with its "…with bracket" rows (long 1: the buy
     // adds, so only it can be staged).
     let mut m = args("--layout trading --size 1600x900 --theme dark --arm");
