@@ -24,6 +24,8 @@ enum Answer {
     Refused,
     /// The symbol isn't there (an entitlement for one product, not the login).
     NoSymbol,
+    /// Refused before connecting (a session that knows its login can't work).
+    RefusedAtSession,
 }
 
 struct Refuser(Answer);
@@ -46,6 +48,12 @@ impl Provider for Refuser {
         _product: &Product,
         _contract: Option<ContractKey>,
     ) -> Result<Box<dyn ProviderSession>, SessionError> {
+        if let Answer::RefusedAtSession = self.0 {
+            return Err(SessionError::LogonRejected {
+                code: 13,
+                text: "permission denied".into(),
+            });
+        }
         Ok(Box::new(Session(self.0)))
     }
 }
@@ -69,7 +77,9 @@ impl ProviderSession for Session {
                 code: 13,
                 text: "permission denied".into(),
             },
-            Answer::NoSymbol => SessionError::Unavailable("symbol not found".into()),
+            Answer::NoSymbol | Answer::RefusedAtSession => {
+                SessionError::Unavailable("symbol not found".into())
+            }
         })
     }
 }
@@ -89,6 +99,9 @@ impl Transport for Server {
 struct Ext(Answer);
 
 impl SourceExtension for Ext {
+    fn api_version(&self) -> u32 {
+        lines_feed::extension::API_VERSION
+    }
     fn name(&self) -> &'static str {
         "refuser"
     }
@@ -133,6 +146,8 @@ async fn a_refused_login_marks_the_store() {
         store.read().status
     );
     assert!(store.logon_refused());
+    // Refused when the session is made, before any connection: the same.
+    assert!(run(Answer::RefusedAtSession).await.logon_refused());
 }
 
 #[tokio::test]

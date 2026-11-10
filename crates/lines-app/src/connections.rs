@@ -124,6 +124,17 @@ impl State {
 
 /// A source's state from its switch, whether this run has it, the first required setting
 /// with no value, and the state of each of its running feeds.
+/// A source's feed statuses with its refused login (`Sources::refusal`) as a failed feed,
+/// unless one of its feeds already says why.
+pub fn with_refusal(mut feeds: Vec<FeedStatus>, refusal: Option<String>) -> Vec<FeedStatus> {
+    if let Some(why) = refusal
+        && !feeds.iter().any(|s| matches!(s, FeedStatus::Failed(_)))
+    {
+        feeds.push(FeedStatus::Failed(why));
+    }
+    feeds
+}
+
 pub fn state(on: bool, in_run: bool, needs: Option<&'static str>, feeds: &[FeedStatus]) -> State {
     if !on {
         return State::Off { running: in_run };
@@ -451,6 +462,24 @@ impl extension::SourceExtension for Example {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A login refused this run reads as refused, with the provider's reason, after its panes
+    /// moved away (no feed left); a feed's own failure is never doubled.
+    #[test]
+    fn a_refused_login_stays_refused_after_its_panes_moved() {
+        let why = "logon rejected (code 13): permission denied";
+        let feeds = with_refusal(Vec::new(), Some(why.into()));
+        assert_eq!(state(true, true, None, &feeds), State::Refused(why.into()));
+        assert_eq!(
+            with_refusal(vec![FeedStatus::Live], None),
+            vec![FeedStatus::Live]
+        );
+        let own = FeedStatus::Failed("first".into());
+        assert_eq!(
+            with_refusal(vec![own.clone()], Some("second".into())),
+            vec![own]
+        );
+    }
 
     #[test]
     fn a_sources_state_reads_from_its_switch_setup_and_feeds() {
