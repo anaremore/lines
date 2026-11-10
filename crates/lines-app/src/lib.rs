@@ -26,7 +26,6 @@ mod dropdown;
 mod econ_layer;
 mod econ_ui;
 mod feeds;
-mod sources;
 mod footprint;
 #[cfg(feature = "screenshot")]
 mod gallery;
@@ -62,6 +61,7 @@ mod redact;
 mod screenshot;
 mod settings_schema;
 mod settings_view;
+mod sources;
 mod strategy_host;
 mod strategy_marks;
 mod strategy_panel;
@@ -328,6 +328,11 @@ struct Cli {
     /// screenshots, default to the mock.
     #[arg(long)]
     source: Option<String>,
+    /// Another recording as its own source beside `--replay` (repeatable; screenshots and
+    /// checks of several sources at once, decision 0030): each pane shows the recording that
+    /// serves its symbol.
+    #[arg(long, value_name = "FILE")]
+    also_replay: Vec<PathBuf>,
     /// Show this product (followed to its front month: ES, NQ, MES, MNQ, ZN, BTC/USD,
     /// ETH/USD, BTC/USD.KR, ETH/USD.KR, BTC-PERP.KR, ETH-PERP.KR) or contract (ESZ26, MNQH2027) in every pane, for this run only (the saved
     /// workspace is left alone).
@@ -1023,7 +1028,26 @@ fn run_sources(
     choice: &SourceChoice,
 ) -> Result<Vec<(String, FeedConfig)>> {
     if !cli.several_sources() {
-        return Ok(vec![(choice.name(), feed_config(cli, choice)?)]);
+        let first = feed_config(cli, choice)?;
+        // `--also-replay`: more recordings, each its own source, beside the first.
+        let mut out = vec![(choice.name(), first.clone())];
+        for (i, path) in cli.also_replay.iter().enumerate() {
+            let mut cfg = first.clone();
+            cfg.target = None;
+            cfg.record = None;
+            cfg.store = None;
+            cfg.source = Source::Replay {
+                path: path.clone(),
+                speed: match &first.source {
+                    Source::Replay { speed, .. } => *speed,
+                    _ => cli.speed,
+                },
+                // To its end: its own day may lie after `--at` (which cuts the first).
+                stop_at: None,
+            };
+            out.push((format!("replay-{}", i + 2), cfg));
+        }
+        return Ok(out);
     }
     let prefs = persist::config_dir()
         .map(|d| picker::Settings::load(&d.join("settings.json")).0.sources)
@@ -1551,7 +1575,10 @@ where
         })
         .collect::<Result<Vec<_>>>()?;
     let env = PaneEnv {
-        sources: sources::Sources::new(entries, !cli.several_sources()),
+        sources: sources::Sources::new(
+            entries,
+            !cli.several_sources() && cli.also_replay.is_empty(),
+        ),
         theme: std::cell::Cell::new(theme),
         look_flags: std::cell::Cell::new(look_flags),
         frozen,

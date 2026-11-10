@@ -583,7 +583,10 @@ impl Tab {
 fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
     let env = env(cx);
     let registry = Feeds::registry(cx);
-    let feed = match env.sources.for_pane(doc.source.as_deref(), doc.target.as_ref()) {
+    let feed = match env
+        .sources
+        .for_pane(doc.source.as_deref(), doc.target.as_ref())
+    {
         Ok(entry) => {
             let mut base = entry.base.clone();
             base.record = env.record.borrow().clone();

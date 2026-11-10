@@ -244,7 +244,13 @@ impl PaneFeed {
         let mut config = base.clone();
         config.record = None;
         let symbol = target.map_or_else(|| "default".to_owned(), symbol_of);
-        PaneFeed::unavailable(config, availability.clone(), target.cloned(), symbol, reason)
+        PaneFeed::unavailable(
+            config,
+            availability.clone(),
+            target.cloned(),
+            symbol,
+            reason,
+        )
     }
 
     fn unavailable(

@@ -1594,6 +1594,34 @@ fn table() -> Vec<Setting> {
             None,
         ),
         // Data.
+        with_default(
+            s(
+                "data.coinbase",
+                Sec::Data,
+                "Coinbase",
+                "Public crypto prices (BTC/USD, ETH/USD). Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, "coinbase")),
+                Some(|p, _, v| set_source(p, "coinbase", want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
+        with_default(
+            s(
+                "data.kraken",
+                Sec::Data,
+                "Kraken",
+                "Public crypto prices, spot and perpetuals. Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, "kraken")),
+                Some(|p, _, v| set_source(p, "kraken", want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
         s(
             "data.store",
             Sec::Data,
@@ -1931,6 +1959,29 @@ pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> 
         _ if now != shown => Some(format!("In force {} now", text(now))),
         _ => None,
     }
+}
+
+/// Whether a public source is on (absent: on; decision 0030).
+fn source_on(p: &Prefs, name: &str) -> bool {
+    p.app
+        .sources
+        .get(name)
+        .is_none_or(crate::sources::SourcePrefs::on)
+}
+
+/// Turn a public source on (the default: no entry) or off.
+fn set_source(p: &mut Prefs, name: &str, on: bool) -> Result<(), &'static str> {
+    if on {
+        p.app.sources.remove(name);
+    } else {
+        p.app.sources.insert(
+            name.to_owned(),
+            crate::sources::SourcePrefs {
+                enabled: Some(false),
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Settings › Accounts › Reset paper account (its buttons are the window's own).

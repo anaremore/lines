@@ -29,6 +29,14 @@ pub struct SourceEntry {
     pub fallback: Fallback,
 }
 
+impl std::fmt::Debug for SourceEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceEntry")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The run's sources, in preference order (extensions first, then Coinbase, then Kraken).
 #[derive(Clone)]
 pub struct Sources {
@@ -242,5 +250,140 @@ pub fn retarget(
     match sources.for_pick(own, &wanted) {
         Some(entry) if entry.name != own => feed.retarget_on(&registry, entry, target),
         _ => feed.retarget(&registry, target),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lines_feed::catalog;
+
+    fn entry(name: &str, source: lines_feed::Source) -> SourceEntry {
+        let base = FeedConfig::new(source);
+        SourceEntry {
+            name: name.to_owned(),
+            availability: lines_feed::availability::availability(&base.source).unwrap(),
+            fallback: Fallback::default(),
+            base,
+        }
+    }
+
+    /// The mock (ES only) and Coinbase (spot crypto): what each pane opens on.
+    fn two(limited: bool) -> Sources {
+        Sources::new(
+            vec![
+                entry(
+                    "mock",
+                    lines_feed::Source::CqgMock(lines_feed::cqg::mock::MockConfig::default()),
+                ),
+                entry(
+                    "coinbase",
+                    lines_feed::Source::Coinbase {
+                        url: lines_feed::coinbase::WS_URL.into(),
+                    },
+                ),
+            ],
+            limited,
+        )
+    }
+
+    fn doc(product: lines_core::ProductId) -> TargetDoc {
+        TargetDoc::from_target(&Target::Product(product))
+    }
+
+    #[test]
+    fn a_pane_opens_on_its_saved_source_else_the_one_serving_its_symbol() {
+        let s = two(false);
+        let es = doc(catalog::ES);
+        let btc = doc(catalog::BTC_USD);
+        assert_eq!(s.for_pane(None, Some(&es)).unwrap().name, "mock");
+        assert_eq!(s.for_pane(None, Some(&btc)).unwrap().name, "coinbase");
+        assert_eq!(
+            s.for_pane(Some("coinbase"), Some(&btc)).unwrap().name,
+            "coinbase"
+        );
+        // No target: the preferred source.
+        assert_eq!(s.for_pane(None, None).unwrap().name, "mock");
+    }
+
+    #[test]
+    fn a_saved_source_that_is_off_makes_only_that_pane_unavailable() {
+        let s = two(false);
+        let err = s
+            .for_pane(Some("kraken"), Some(&doc(catalog::BTC_USD)))
+            .unwrap_err();
+        assert_eq!(err.0, "kraken is off or not in this build");
+        // Nothing serves NQ here (the mock is ES only).
+        let err = s.for_pane(None, Some(&doc(catalog::NQ))).unwrap_err();
+        assert!(
+            err.0.starts_with("no enabled source serves NQ"),
+            "{}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn a_run_limited_by_source_puts_every_pane_on_it_as_before() {
+        let s = two(true);
+        let btc = doc(catalog::BTC_USD);
+        assert_eq!(
+            s.for_pane(Some("coinbase"), Some(&btc)).unwrap().name,
+            "mock"
+        );
+        assert_eq!(s.for_pane(None, Some(&btc)).unwrap().name, "mock");
+    }
+
+    #[test]
+    fn the_picker_offers_every_sources_symbols_and_tags_them() {
+        let s = two(false);
+        let mock = s.get("mock").unwrap();
+        let p = Pick {
+            own: mock.availability.clone(),
+            others: vec![(
+                "coinbase".into(),
+                s.get("coinbase").unwrap().availability.clone(),
+            )],
+            own_name: Some("mock".into()),
+        };
+        let btc = Target::Product(catalog::BTC_USD);
+        let es = Target::Product(catalog::ES);
+        assert!(p.check(&btc).is_ok(), "another source serves it");
+        assert_eq!(p.tag(&btc).as_deref(), Some("Coinbase"));
+        assert_eq!(p.tag(&es).as_deref(), Some("Mock"));
+        assert!(p.check(&Target::Product(catalog::NQ)).is_err());
+        assert_eq!(s.for_pick("mock", &btc).unwrap().name, "coinbase");
+        assert_eq!(s.for_pick("mock", &es).unwrap().name, "mock");
+        // One source: no tags, its own rules only.
+        let one = Pick::one(&mock.availability);
+        assert!(one.check(&btc).is_err());
+        assert_eq!(one.tag(&es), None);
+    }
+
+    #[test]
+    fn a_panes_source_and_the_source_switches_are_optional_saved_fields() {
+        let mut d = crate::wsdoc::PaneDoc::new(crate::layout::PaneKind::Chart, None, None);
+        let plain = serde_json::to_string(&d).unwrap();
+        assert!(!plain.contains("source"), "{plain}");
+        d.source = Some("coinbase".into());
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains(r#""source":"coinbase""#), "{json}");
+        let back: crate::wsdoc::PaneDoc = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source.as_deref(), Some("coinbase"));
+        // Settings: absent is on; off is saved.
+        let s: crate::picker::Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.sources.is_empty());
+        let mut s = s;
+        s.sources.insert(
+            "kraken".into(),
+            SourcePrefs {
+                enabled: Some(false),
+            },
+        );
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            json.contains(r#""sources":{"kraken":{"enabled":false}}"#),
+            "{json}"
+        );
+        assert!(!s.sources["kraken"].on());
     }
 }

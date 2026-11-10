@@ -2663,7 +2663,9 @@ impl ChainView {
         }
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
+            let outcome = self
+                .picker
+                .key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
             cx.stop_propagation();
             cx.notify();
@@ -2747,7 +2749,9 @@ impl ChainView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &crate::sources::pick(&self.feed, cx));
+        let outcome = self
+            .picker
+            .click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -5526,9 +5530,13 @@ impl Render for ChainView {
             self.exit_buttons(cx)
         };
         let today = pane::today(self.frozen, &self.store);
-        let overlay =
-            self.picker
-                .overlay(&t, &crate::sources::pick(&self.feed, cx), today, Self::picker_click, cx);
+        let overlay = self.picker.overlay(
+            &t,
+            &crate::sources::pick(&self.feed, cx),
+            today,
+            Self::picker_click,
+            cx,
+        );
         let offer = self.common.offer_switch;
         let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),

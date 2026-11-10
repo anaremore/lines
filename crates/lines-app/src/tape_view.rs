@@ -265,7 +265,9 @@ impl TapeView {
         let m = k.modifiers;
         if self.picker.is_open() {
             let today = pane::today(self.frozen, &self.store);
-            let outcome = self.picker.key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
+            let outcome = self
+                .picker
+                .key(ev, today, &crate::sources::pick(&self.feed, cx), cx);
             self.picked(outcome, cx);
         } else if m.control && !m.alt && k.key == "k" {
             self.picker.open("", cx);
@@ -286,7 +288,9 @@ impl TapeView {
 
     fn picker_click(&mut self, row: usize, cx: &mut Context<Self>) {
         let today = pane::today(self.frozen, &self.store);
-        let outcome = self.picker.click(row, today, &crate::sources::pick(&self.feed, cx));
+        let outcome = self
+            .picker
+            .click(row, today, &crate::sources::pick(&self.feed, cx));
         self.picked(outcome, cx);
     }
 
@@ -544,9 +548,13 @@ impl Render for TapeView {
         let entity = cx.entity();
         let t = self.theme;
         let today = pane::today(self.frozen, &self.store);
-        let overlay =
-            self.picker
-                .overlay(&t, &crate::sources::pick(&self.feed, cx), today, Self::picker_click, cx);
+        let overlay = self.picker.overlay(
+            &t,
+            &crate::sources::pick(&self.feed, cx),
+            today,
+            Self::picker_click,
+            cx,
+        );
         let offer = self.common.offer_switch;
         let body = match pane::unavailable_body(&self.feed, &t, offer, cx) {
             Some(b) => b.into_any_element(),

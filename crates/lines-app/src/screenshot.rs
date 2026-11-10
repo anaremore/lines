@@ -127,12 +127,20 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     lines_core::latency::set_enabled(shot.doc.show_latency_hud);
     let mut feeds = Vec::new();
     for pane in window.tabs.iter().flat_map(|t| t.layout.leaves()) {
+        // Each pane on its own source (several with `--also-replay`, decision 0030).
+        let Ok(entry) = ws
+            .env
+            .sources
+            .for_pane(pane.source.as_deref(), pane.target.as_ref())
+        else {
+            continue;
+        };
         let f = PaneFeed::open(
             &registry,
-            &ws.env.sources.primary().base,
-            &ws.env.sources.primary().availability,
+            &entry.base,
+            &entry.availability,
             pane.target.as_ref(),
-            &ws.env.sources.primary().fallback,
+            &entry.fallback,
         );
         if f.sub.is_some() {
             feeds.push(f);
@@ -240,7 +248,11 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         // Synthetic venue: its positions may be marked from the recording.
         setup.venue_marks_always = true;
     }
-    let mut trading = Trading::start(setup, registry.clone(), ws.env.sources.primary().base.clone());
+    let mut trading = Trading::start(
+        setup,
+        registry.clone(),
+        ws.env.sources.primary().base.clone(),
+    );
     trading.start_armed = arm;
     trading.start_hotkeys = hotkeys;
     trading.start_order_controls = order_controls;
