@@ -3,7 +3,7 @@
 //!
 //! Files: `<dir>/lines.log` (current), `lines.1.log` … `lines.<n-1>.log` (older); when the
 //! current file would pass the size limit it becomes `lines.1.log` and the oldest is deleted.
-//! Defaults: 5 files of 10 MB in `<data dir>/logs` (`lines_feed::disk::default_root`, i.e.
+//! Defaults: 5 files of 10 MB in `<data folder>/logs` (`crate::data_dir`; by default
 //! `%LOCALAPPDATA%\Lines\logs` on Windows). `LINES_LOG_DIR`, `LINES_LOG_FILES` (1–50) and
 //! `LINES_LOG_MB` (1–1000) override them; `RUST_LOG` filters as before.
 //!
@@ -40,7 +40,7 @@ impl LogConfig {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let dir = match var("LINES_LOG_DIR") {
             Some(d) => PathBuf::from(d),
-            None => lines_feed::disk::default_root()?.join("logs"),
+            None => crate::data_dir::root()?.join(crate::data_dir::LOGS),
         };
         let files = var("LINES_LOG_FILES")
             .and_then(|v| v.parse().ok())

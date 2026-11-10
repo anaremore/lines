@@ -1,6 +1,7 @@
 //! The Settings window (decision 0021, roadmap 6c): Ctrl+, opens one window with a search
 //! box and the sections down the left. Every row comes from `crate::settings_schema`: no
-//! setting has its own form. Changes apply at once (no OK button); Ctrl+Z undoes and ↺
+//! setting has its own form. Most changes apply at once (Data's after a restart; no OK
+//! button); Ctrl+Z undoes and ↺
 //! resets one setting. Settings that affect trading are marked; loosening a guardrail asks
 //! first and takes effect at the next trade date (the trading core's rule), tightening
 //! applies now.
@@ -8,7 +9,9 @@
 //! Keys: type to search (Esc clears it, then closes), ↑↓ settings, ←→ change a choice,
 //! Space or Enter toggles, Enter edits a number (Enter keeps it, Esc drops it), Tab and
 //! Shift+Tab move between sections, Alt+A and Alt+P step the account and the product,
-//! Ctrl+R resets, Ctrl+Z undoes; a loosening is confirmed with Y (Esc cancels).
+//! Ctrl+R resets, Ctrl+Z undoes; a loosening is confirmed with Y (Esc cancels). On Data ›
+//! Data folder, Enter opens Change… (or Cancel while a folder waits) and Alt+D uses the
+//! default folder; in its choice M moves, S starts empty (U uses the data already there).
 
 use std::time::Instant;
 
@@ -32,6 +35,21 @@ use crate::workspace::Workspace;
 #[derive(Default)]
 pub struct SettingsWindowGlobal(pub Option<WindowHandle<SettingsWindow>>);
 impl gpui::Global for SettingsWindowGlobal {}
+
+/// The fill of a value in force under a flag: the accent faded, under main text (AA, tested
+/// as `theme::locked_fill`).
+fn locked_fill(t: &Theme) -> gpui::Hsla {
+    crate::theme::locked_fill(t)
+}
+
+/// An error from the data folder's choices, worded as a failure.
+fn failed(e: String) -> String {
+    if crate::data_dir::is_problem(&e) {
+        e
+    } else {
+        format!("Failed: {e}")
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Tone {
@@ -168,6 +186,16 @@ pub struct SettingsWindow {
     editor_msg: Option<String>,
     /// The time zone's searchable list, while open (`crate::display_zone`).
     zone_pick: Option<display_zone::Pick>,
+    /// Data folder: the folder picked, waiting for "Move existing data" or "Start empty".
+    data_choice: Option<std::path::PathBuf>,
+    /// Why the picked folder can't take a move (it already holds Lines data).
+    data_holds: Option<String>,
+    /// Screenshots: a trade refusal shown as if a position and orders were open.
+    data_forced: Option<String>,
+    /// Depth recorded for: the product chip the keys move between.
+    chip: usize,
+    /// The data folder's revision last shown (a copy's progress repaints the window).
+    seen_data: u64,
     /// The settings list's scroll (keeps the selected row in view).
     scroll: gpui::ScrollHandle,
     /// Risk changes the trading core hasn't answered yet, oldest first.
@@ -219,6 +247,13 @@ fn parse_set(s: &str) -> Result<(usize, Value, bool), String> {
         (Kind::Number { .. }, n) => {
             Value::Number(schema::parse_number(n).map_err(|e| format!("{s:?}: {e}"))?)
         }
+        (Kind::Products, n) => Value::List(
+            n.split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
         _ => return Err(format!("--settings-set {s:?}: not settable this way")),
     };
     Ok((i, value, sure))
@@ -235,10 +270,9 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
     }
     // `account=NAME` picks the window's account (by name or id), `appearance.time_zone=list:Q`
     // opens the time zone's list with Q typed; the rest are settings.
-    for s in set
-        .iter()
-        .filter(|s| !s.starts_with("account=") && !s.starts_with(ZONE_LIST))
-    {
+    for s in set.iter().filter(|s| {
+        !s.starts_with("account=") && !s.starts_with(ZONE_LIST) && !s.starts_with(DATA_PICK)
+    }) {
         parse_set(s).map_err(anyhow::Error::msg)?;
     }
     Ok(())
@@ -247,6 +281,13 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
 /// `--settings-set` prefix: the time zone's list, open, with the rest typed in it.
 #[cfg(feature = "screenshot")]
 const ZONE_LIST: &str = "appearance.time_zone=list:";
+
+/// `--settings-set` prefix: the data folder picked (`data.folder=pick:PATH`, the Move existing
+/// data / Start empty question), picked and refused for an open trade
+/// (`data.folder=refused:PATH`), or picked and refused a move as it holds Lines data
+/// (`data.folder=held:PATH`). Nothing is written.
+#[cfg(feature = "screenshot")]
+const DATA_PICK: &str = "data.folder=";
 
 /// Screenshots: open the window (hidden) at `section`, with a search and changes made.
 #[cfg(feature = "screenshot")]
@@ -286,6 +327,23 @@ pub fn open_for_screenshot(
                             p.key("", Some(ch.encode_utf8(&mut [0; 4])));
                         }
                     }
+                }
+                continue;
+            }
+            if let Some(rest) = s.strip_prefix(DATA_PICK)
+                && let Some(i) = schema::index_of(schema::DATA_FOLDER_KEY)
+            {
+                v.select(i);
+                if let Some(p) = rest.strip_prefix("pick:") {
+                    v.data_choice = Some(p.into());
+                } else if let Some(p) = rest.strip_prefix("refused:") {
+                    v.data_choice = Some(p.into());
+                    v.data_forced = crate::data_dir::move_refusal(1, 2);
+                } else if let Some(p) = rest.strip_prefix("held:") {
+                    v.data_choice = Some(p.into());
+                    v.data_holds = Some(format!(
+                        "Refused: {p} already holds Lines data (its store) · moving never overwrites it"
+                    ));
                 }
                 continue;
             }
@@ -582,17 +640,11 @@ fn gather_facts(cx: &App) -> Facts {
 
 /// The facts as of now; with `wait` false (paint), `None` when the trading cache is busy.
 fn facts_now(cx: &App, wait: bool) -> Option<Facts> {
-    let mut f = Facts::default();
-    if let Some(ws) = cx.try_global::<Workspace>()
-        && let Some(st) = &ws.env.sources.primary().base.store
-    {
-        f.store_path = st.root.display().to_string();
-        f.store_budget_gb =
-            Some((st.budget_bytes as f64 / (1u64 << 30) as f64 * 10.0).round() / 10.0);
-        f.depth_products = st.depth_products.clone();
-    } else {
-        f.store_path = "Not recording (this source has no store)".to_owned();
-    }
+    let mut f = Facts {
+        folder: crate::data_dir::facts(),
+        ..Facts::default()
+    };
+    (f.store_start, f.store_flags) = crate::data_dir::store_at_start();
     f.version = env!("CARGO_PKG_VERSION").to_owned();
     f.can_update =
         crate::update::verify::PUBLIC_KEY.is_some() && crate::update::manifest::supported();
@@ -688,6 +740,11 @@ impl SettingsWindow {
             editor: None,
             editor_msg: None,
             zone_pick: None,
+            data_choice: None,
+            data_holds: None,
+            data_forced: None,
+            chip: 0,
+            seen_data: 0,
             scroll: gpui::ScrollHandle::new(),
             scrolled: None,
             awaiting: Vec::new(),
@@ -716,8 +773,10 @@ impl SettingsWindow {
                 let alive = this.update(cx, |v, cx| {
                     v.check_answers(cx);
                     let r = Self::trading_revision(cx);
-                    if r != v.seen_revision {
+                    let d = crate::data_dir::revision();
+                    if r != v.seen_revision || d != v.seen_data {
                         v.seen_revision = r;
+                        v.seen_data = d;
                         cx.notify();
                     }
                 });
@@ -786,6 +845,8 @@ impl SettingsWindow {
         self.editor = None;
         self.editor_msg = None;
         self.zone_pick = None;
+        self.data_choice = None;
+        self.data_holds = None;
     }
 
     /// Show setting `i`: its section, selected, the search cleared.
@@ -819,6 +880,10 @@ impl SettingsWindow {
     /// Set setting `i` to `v` (validated; a loosened guardrail asks first unless `sure`).
     fn set(&mut self, i: usize, v: Value, sure: bool, cx: &mut Context<Self>) {
         let st = &schema::all()[i];
+        // A flag rules it this run: shown dimmed, not changed here.
+        if schema::flag_value(st, &self.facts).is_some() {
+            return;
+        }
         let mut before = current_prefs(cx);
         // A prop-rule change on an account without a settings entry builds on its rules in
         // force (not saved unless the change is).
@@ -1179,6 +1244,23 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
+        if let (Some(_), Some(i)) = (&self.data_choice, sel) {
+            let plain = !m.control && !m.alt && !m.shift && !m.platform;
+            match key {
+                "m" if plain => self.data_choose(i, true, cx),
+                // Start empty, or (the folder already holds Lines data) Use its data.
+                "s" if plain && self.data_holds.is_none() => self.data_choose(i, false, cx),
+                "u" if plain && self.data_holds.is_some() => self.data_choose(i, false, cx),
+                "escape" => {
+                    self.data_choice = None;
+                    self.data_holds = None;
+                    self.note = None;
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if self.pending.is_some() {
             match key {
                 // Y, not Enter: an Enter typed out of habit after a number never says yes.
@@ -1197,6 +1279,15 @@ impl SettingsWindow {
                 }
             }
             ("a", false, false, true) => self.step_account(),
+            // Settings › Data › Data folder: Use the default folder (its button's key).
+            ("d", false, false, true) => {
+                let f = &self.facts.folder;
+                if let Some(i) = sel.filter(|&i| schema::all()[i].key == schema::DATA_FOLDER_KEY)
+                    && f.can_use_default()
+                {
+                    self.data_pick(i, true, cx);
+                }
+            }
             ("p", false, false, true) => self.step_product(),
             ("up", ..) => self.row = self.row.saturating_sub(1),
             ("down", ..) => self.row = (self.row + 1).min(rows.len().saturating_sub(1)),
@@ -1240,6 +1331,14 @@ impl SettingsWindow {
                         (Kind::Toggle, _) if !st.read_only() => {
                             self.set(i, Value::Bool(key == "right"), false, cx)
                         }
+                        (Kind::Products, Value::List(l)) => {
+                            let n = schema::depth_choices(&l).len();
+                            self.chip = if key == "left" {
+                                self.chip.saturating_sub(1)
+                            } else {
+                                (self.chip + 1).min(n.saturating_sub(1))
+                            };
+                        }
                         _ => {}
                     }
                 }
@@ -1273,7 +1372,9 @@ impl SettingsWindow {
     /// Enter or a click on a setting's control.
     fn activate(&mut self, i: usize, kind: Kind, cx: &mut Context<Self>) {
         let st = &schema::all()[i];
-        if st.read_only() && !matches!(kind, Kind::Editor) {
+        if (st.read_only() && !matches!(kind, Kind::Editor))
+            || schema::flag_value(st, &self.facts).is_some()
+        {
             return;
         }
         let cur = (st.get)(&current_prefs(cx), &self.target, &self.facts);
@@ -1287,9 +1388,408 @@ impl SettingsWindow {
             }
             (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_press(i, false, cx),
             (Kind::Editor, _) if st.key == schema::ROLLBACK_KEY => self.rollback_press(cx),
+            (Kind::Editor, _) if st.key == schema::DATA_FOLDER_KEY => {
+                if crate::data_dir::facts().pending() {
+                    self.data_cancel(i, cx);
+                } else {
+                    self.data_pick(i, false, cx);
+                }
+            }
             (Kind::Editor, _) => self.open_editor_for(i, cx),
+            (Kind::Products, Value::List(l)) => {
+                if let Some((sym, _)) = schema::depth_choices(&l).get(self.chip) {
+                    self.set(i, Value::List(schema::toggled(&l, sym)), false, cx);
+                }
+            }
             _ => {}
         }
+    }
+
+    // ---- the data folder ----------------------------------------------------------------
+
+    /// "Change…" (a folder dialog) or "Use the default folder" (`default`): the folder is
+    /// checked off the UI thread, then the row asks Move existing data / Start empty.
+    fn data_pick(&mut self, i: usize, default: bool, cx: &mut Context<Self>) {
+        let f = crate::data_dir::facts();
+        let (Some(in_use), true) = (f.in_use.clone(), f.changeable()) else {
+            return;
+        };
+        if f.pending() {
+            return;
+        }
+        self.data_choice = None;
+        self.data_holds = None;
+        self.note = None;
+        let os_default = f.os_default.clone();
+        let config = crate::persist::config_dir();
+        let chosen: Option<std::path::PathBuf> = if default { os_default.clone() } else { None };
+        let dialog = (!default).then(|| {
+            cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some("Use as data folder".into()),
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = match (chosen, dialog) {
+                (Some(d), _) => Ok(d),
+                (None, Some(rx)) => match rx.await {
+                    Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                        Some(p) => Ok(p),
+                        None => return,
+                    },
+                    Ok(Ok(None)) => return,
+                    _ => Err("No folder dialog on this system".to_owned()),
+                },
+                (None, None) => return,
+            };
+            let checked = match picked {
+                Ok(p) => {
+                    cx.background_executor()
+                        .spawn(async move {
+                            if default {
+                                std::fs::create_dir_all(&p)
+                                    .map_err(|e| format!("can't make {}: {e}", p.display()))?;
+                            }
+                            let holds = crate::data_dir::check_pick(
+                                &in_use,
+                                &p,
+                                config.as_deref(),
+                                os_default.as_deref(),
+                            )?;
+                            Ok::<_, String>((p, holds))
+                        })
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            let _ = this.update(cx, |v, cx| {
+                match checked {
+                    Ok((p, holds)) => {
+                        v.data_choice = Some(p);
+                        v.data_holds = holds;
+                    }
+                    Err(e) => v.note = Some((i, format!("Refused: {e}"), Tone::Problem)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Why nothing can be chosen now: a position or a working order is open.
+    fn trade_refusal(&self, cx: &App) -> Option<String> {
+        if let Some(r) = &self.data_forced {
+            return Some(r.clone());
+        }
+        // Busy this instant: no refusal shown; the press checks again.
+        crate::update::activity_now(cx)
+            .ok()
+            .and_then(|a| crate::data_dir::move_refusal(a.positions, a.orders))
+    }
+
+    /// The folder picked: with the data or empty. Refused (the box says why) while a position
+    /// or order is open, and a move into a folder that already holds Lines data.
+    fn data_choose(&mut self, i: usize, with_data: bool, cx: &mut Context<Self>) {
+        let Some(to) = self.data_choice.clone() else {
+            return;
+        };
+        if with_data && self.data_holds.is_some() {
+            return;
+        }
+        if self.data_forced.is_some() {
+            return;
+        }
+        match crate::update::activity_now(cx) {
+            Ok(a) if crate::data_dir::move_refusal(a.positions, a.orders).is_some() => {
+                cx.notify();
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                self.note = Some((i, format!("Refused: {e}"), Tone::Problem));
+                cx.notify();
+                return;
+            }
+        }
+        self.data_choice = None;
+        self.data_holds = None;
+        self.note = crate::data_dir::choose(to, with_data)
+            .err()
+            .map(|e| (i, failed(e), Tone::Problem));
+        cx.notify();
+    }
+
+    /// Cancel (or, after a failure, dismiss) a new folder or a move waiting for the restart.
+    fn data_cancel(&mut self, i: usize, cx: &mut Context<Self>) {
+        self.data_choice = None;
+        self.data_holds = None;
+        self.note = crate::data_dir::cancel()
+            .err()
+            .map(|e| (i, failed(e), Tone::Problem));
+        cx.notify();
+    }
+
+    /// The Data folder row's buttons: Change… and Use the default folder, or Cancel (Dismiss
+    /// after a failure) while a new folder waits for the restart. With `LINES_DATA_DIR`,
+    /// Change… shows disabled.
+    fn data_buttons(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        let f = &self.facts.folder;
+        let mut row = div().flex().flex_row().flex_wrap().gap_1().flex_none();
+        let button = |id: usize, label: &'static str, on: bool| {
+            div()
+                .id(("data-folder", i * 4 + id))
+                .flex_none()
+                .whitespace_nowrap()
+                .px_2()
+                .rounded_sm()
+                .border_1()
+                .border_color(t.control_edge)
+                .when(on, |d| d.cursor_pointer())
+                .when(!on, |d| d.text_color(t.text_dim).opacity(0.6))
+                .child(label)
+        };
+        if !f.changeable() {
+            if f.in_use.is_some() {
+                row = row.child(button(3, "Change…", false));
+            }
+            return row.into_any_element();
+        }
+        if f.pending() {
+            let label = if f.problem.is_some() {
+                "Dismiss"
+            } else {
+                "Cancel"
+            };
+            row = row.child(button(0, label, true).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, _, cx| {
+                    v.select(i);
+                    v.data_cancel(i, cx);
+                }),
+            ));
+            return row.into_any_element();
+        }
+        row = row.child(button(1, "Change…", true).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v, _, _, cx| {
+                v.select(i);
+                v.data_pick(i, false, cx);
+            }),
+        ));
+        if f.can_use_default() {
+            row = row.child(
+                button(2, "Use the default folder · Alt+D", true).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.select(i);
+                        v.data_pick(i, true, cx);
+                    }),
+                ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// Text that wraps between words but never inside one of `paths`.
+    fn words(&self, text: &str, color: gpui::Hsla, paths: &[String]) -> AnyElement {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_x_1()
+            .min_w_0()
+            .text_color(color);
+        for w in crate::data_dir::wrap_tokens(text, paths) {
+            row = row.child(div().flex_none().whitespace_nowrap().child(w));
+        }
+        row.into_any_element()
+    }
+
+    /// Paths a Data row may name.
+    fn data_paths(&self) -> Vec<String> {
+        let mut v = self.facts.folder.paths();
+        if let Some(c) = &self.data_choice {
+            v.push(c.display().to_string());
+        }
+        v.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        v
+    }
+
+    /// The folder picked, under its row: Move existing data · M, Start empty · S (Use its data
+    /// · U when it already holds Lines data), Cancel · Esc.
+    /// A refusal is said inside the box, and what it refuses is shown disabled.
+    fn data_choice_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.theme;
+        let to = self.data_choice.as_ref()?;
+        let i = schema::index_of(schema::DATA_FOLDER_KEY)?;
+        let trade = self.trade_refusal(cx);
+        let can_move = trade.is_none() && self.data_holds.is_none();
+        let can_empty = trade.is_none();
+        let button = |id: &'static str, label: &'static str, strong: bool, on: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .whitespace_nowrap()
+                .px_2()
+                .border_1()
+                .border_color(if strong && on {
+                    t.accent
+                } else {
+                    t.control_edge
+                })
+                .rounded_sm()
+                .when(strong && on, |d| d.font_weight(FontWeight::BOLD))
+                .when(on, |d| d.cursor_pointer())
+                .when(!on, |d| d.text_color(t.text_dim).opacity(0.6))
+                .child(label)
+        };
+        let paths = self.data_paths();
+        let mut boxed = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .mx_2()
+            .my_1()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(if trade.is_some() {
+                t.destructive
+            } else {
+                t.accent
+            })
+            .child(div().w_full().min_w_0().child(self.words(
+                &format!("Use {} after restart:", to.display()),
+                t.text_main,
+                &paths,
+            )));
+        for why in trade.iter().chain(self.data_holds.iter()) {
+            boxed = boxed.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_size(crate::zoom::ui(11.5))
+                    .child(self.words(why, t.destructive, &paths)),
+            );
+        }
+        let mut mv = button("data-move", "Move existing data · M", true, can_move);
+        if can_move {
+            mv = mv.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, _, cx| v.data_choose(i, true, cx)),
+            );
+        }
+        // A folder that already holds Lines data is used as it is: never "empty".
+        let label = if self.data_holds.is_some() {
+            "Use its data · U"
+        } else {
+            "Start empty · S"
+        };
+        let mut empty = button("data-empty", label, false, can_empty);
+        if can_empty {
+            empty = empty.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, _, cx| v.data_choose(i, false, cx)),
+            );
+        }
+        Some(
+            boxed
+                .child(mv)
+                .child(empty)
+                .child(
+                    button("data-no", "Cancel · Esc", false, true).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v, _, _, cx| {
+                            v.data_choice = None;
+                            v.data_holds = None;
+                            v.note = None;
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Depth recorded for: one chip per catalog product (a check and the fill when chosen),
+    /// then saved symbols this build doesn't know: dashed and muted, unavailable. `locked`: a
+    /// flag rules the row this run (dimmed, nothing reacts).
+    fn product_chips(
+        &self,
+        i: usize,
+        list: &[String],
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.theme;
+        let selected = self.selected() == Some(i);
+        let mut chips = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .min_w_0()
+            .max_w_full();
+        for (k, (sym, known)) in schema::depth_choices(list).into_iter().enumerate() {
+            let on = list.iter().any(|s| s.eq_ignore_ascii_case(&sym));
+            let focused = selected && k == self.chip && !locked;
+            // The check has its own fixed slot in every chip: checking one moves nothing.
+            let name = if known {
+                sym.clone()
+            } else {
+                format!("{sym} (unavailable)")
+            };
+            let fill = if locked { locked_fill(&t) } else { t.accent };
+            let text = if on && known && !locked {
+                t.bg
+            } else if known || on {
+                t.text_main
+            } else {
+                t.text_dim
+            };
+            let mut chip = div()
+                .id(("depth", i * 256 + k))
+                .flex()
+                .flex_row()
+                .flex_none()
+                .whitespace_nowrap()
+                .pr_1()
+                .rounded_sm()
+                .border_1()
+                // The keys' chip: a main-text border, seen on a chosen (filled) chip too; the
+                // rest a 3:1 control edge (dashed while a flag rules the row, or unknown).
+                .border_color(if focused { t.text_main } else { t.control_edge })
+                .when(locked || !known, |d| d.border_dashed())
+                .when(on && known, |d| d.bg(fill))
+                .text_color(text)
+                .child(
+                    div()
+                        .w(crate::zoom::ui(14.0))
+                        .flex()
+                        .justify_center()
+                        .child(if on { "✓" } else { "" }),
+                )
+                .child(name);
+            if !locked {
+                chip = chip.cursor_pointer().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.select(i);
+                        v.chip = k;
+                        v.activate(i, Kind::Products, cx);
+                        cx.notify();
+                    }),
+                );
+            }
+            chips = chips.child(chip);
+        }
+        chips.into_any_element()
     }
 
     // ---- rendering ----------------------------------------------------------------------
@@ -1354,6 +1854,8 @@ impl SettingsWindow {
         let t = self.theme;
         let st = &schema::all()[i];
         let selected = self.selected() == Some(i);
+        // A flag rules the row this run: its value in force, dimmed; nothing reacts (`set`).
+        let locked = schema::flag_value(st, &self.facts).is_some();
         match (st.kind, value) {
             (Kind::Choice(c), Value::Choice(k)) => {
                 // Wraps onto more lines when the row is narrower than its chips.
@@ -1395,15 +1897,19 @@ impl SettingsWindow {
                     .flex_none()
                     .border_1()
                     .border_color(t.axis_line)
-                    .rounded_sm();
+                    .rounded_sm()
+                    .when(locked, |d| d.border_dashed());
                 for (j, (name, val)) in [("Off", false), ("On", true)].into_iter().enumerate() {
                     let on = val == *b;
                     seg = seg.child(
                         div()
                             .id(("toggle", i * 2 + j))
                             .px_2()
-                            .cursor_pointer()
-                            .when(on, |d| d.bg(t.accent).text_color(t.bg))
+                            .when(!locked, |d| d.cursor_pointer())
+                            .when(on && !locked, |d| d.bg(t.accent).text_color(t.bg))
+                            .when(on && locked, |d| {
+                                d.bg(locked_fill(&t)).text_color(t.text_main)
+                            })
                             .child(name)
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1430,11 +1936,14 @@ impl SettingsWindow {
                     .px_2()
                     .rounded_sm()
                     .border_1()
-                    .cursor_pointer()
+                    .when(!locked, |d| d.cursor_pointer())
+                    .when(locked, |d| d.border_dashed())
                     .flex()
                     .justify_end()
                     .border_color(if editing { t.accent } else { t.axis_line });
-                if unit == "$" {
+                if let Some(text) = schema::flag_text(st, &self.facts).filter(|_| locked) {
+                    d = d.child(text);
+                } else if unit == "$" {
                     d = d.child(format!("${text}"));
                 } else {
                     d = d.child(text);
@@ -1454,6 +1963,13 @@ impl SettingsWindow {
             }
             (Kind::Editor, _) if schema::all()[i].key == schema::RESET_KEY => {
                 self.reset_buttons(i, cx)
+            }
+            (Kind::Editor, _) if schema::all()[i].key == schema::DATA_FOLDER_KEY => {
+                self.data_buttons(i, cx)
+            }
+            (Kind::Products, Value::List(l)) => {
+                let locked = schema::flag_value(st, &self.facts).is_some();
+                self.product_chips(i, l, locked, cx)
             }
             (Kind::Editor, _) if schema::all()[i].key == schema::ROLLBACK_KEY => {
                 match self.facts.rollback.clone() {
@@ -1642,9 +2158,23 @@ impl SettingsWindow {
     fn row_view(&self, i: usize, prefs: &Prefs, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme;
         let st = &schema::all()[i];
-        let value = (st.get)(prefs, &self.target, &self.facts);
+        // A flag ruling a Data row this run: its value in force, not the saved one.
+        let flagged = schema::flag_value(st, &self.facts);
+        let value = flagged
+            .clone()
+            .unwrap_or_else(|| (st.get)(prefs, &self.target, &self.facts));
         let selected = self.selected() == Some(i);
         let searching = !self.query.trim().is_empty();
+        let data = st.section == Section::Data;
+        let paths = if data { self.data_paths() } else { Vec::new() };
+        // A failure or refusal in the error color (its words say so too); the rest amber.
+        let tone_color = |line: &str| {
+            if crate::data_dir::is_problem(line) {
+                t.destructive
+            } else {
+                t.warn
+            }
+        };
         // Wraps in the label column (a search's section prefix, the name, the TRADING chip).
         let mut name = div().flex().flex_row().flex_wrap().items_center().gap_x_2();
         if searching {
@@ -1693,22 +2223,46 @@ impl SettingsWindow {
                     .child(s.clone()),
             );
         }
-        // What is in force now, when the core holds a looser value back.
-        if let Some(line) = schema::status(st, prefs, &self.target, &self.facts) {
-            left = left.child(
+        // The folder in use, dimmed (in an AA token) while LINES_DATA_DIR rules it.
+        let summary_color = if st.key == schema::DATA_FOLDER_KEY
+            && self.facts.folder.by == crate::data_dir::By::Env
+        {
+            t.text_dim
+        } else {
+            t.text_main
+        };
+        let summary = match (st.kind, &value) {
+            (Kind::Editor, Value::Text(s)) => Some(
                 div()
                     .text_size(crate::zoom::ui(11.5))
-                    .text_color(t.warn)
-                    .child(line),
-            );
-        }
-        if let (Kind::Editor, Value::Text(s)) = (st.kind, &value) {
-            left = left.child(
-                div()
-                    .text_size(crate::zoom::ui(11.5))
-                    .text_color(t.text_main)
-                    .child(s.clone()),
-            );
+                    .text_color(summary_color)
+                    .child(if data {
+                        self.words(s, summary_color, &paths)
+                    } else {
+                        div().child(s.clone()).into_any_element()
+                    }),
+            ),
+            _ => None,
+        };
+        // What is in force now, when the core holds a looser value back; a Data row's flag,
+        // restart, progress or failure line.
+        let status = schema::status(st, prefs, &self.target, &self.facts).map(|line| {
+            let color = tone_color(&line);
+            div()
+                .text_size(crate::zoom::ui(11.5))
+                .text_color(color)
+                .child(if data {
+                    self.words(&line, color, &paths)
+                } else {
+                    div().child(line).into_any_element()
+                })
+        });
+        // The data folder: the folder in use, then what waits; other editors: the status
+        // first, then their summary (as before).
+        if st.key == schema::DATA_FOLDER_KEY {
+            left = left.children(summary).children(status);
+        } else {
+            left = left.children(status).children(summary);
         }
         // A reset waiting for its second press says what that press will do.
         if st.key == schema::RESET_KEY
@@ -1725,17 +2279,22 @@ impl SettingsWindow {
         }
         if let Some((n, text, tone)) = self.note.as_ref().filter(|n| n.0 == i) {
             let _ = n;
+            let color = match tone {
+                Tone::Problem => tone_color(text),
+                Tone::Done => t.text_main,
+            };
             left = left.child(
                 div()
                     .text_size(crate::zoom::ui(11.5))
-                    .text_color(match tone {
-                        Tone::Problem => t.warn,
-                        Tone::Done => t.text_main,
-                    })
-                    .child(text.clone()),
+                    .text_color(color)
+                    .child(if data {
+                        self.words(text, color, &paths)
+                    } else {
+                        div().child(text.clone()).into_any_element()
+                    }),
             );
         }
-        let changed = st.changed(prefs, &self.target, &self.facts);
+        let changed = flagged.is_none() && st.changed(prefs, &self.target, &self.facts);
         let scope = match st.scope {
             Scope::Account | Scope::AccountProduct => {
                 let mut s = self
@@ -1853,6 +2412,16 @@ impl SettingsWindow {
                 }),
             )
             .into_any_element();
+        if st.key == schema::DATA_FOLDER_KEY
+            && let Some(choice) = self.data_choice_view(cx)
+        {
+            row = div()
+                .flex()
+                .flex_col()
+                .child(row)
+                .child(choice)
+                .into_any_element();
+        }
         if let Some(p) = self.pending.as_ref().filter(|p| p.index == i) {
             row = div()
                 .flex()
@@ -2289,7 +2858,7 @@ impl Render for SettingsWindow {
                         if self.section == Section::Risk && self.query.trim().is_empty() {
                             "Tighter applies at once · looser waits for the next session"
                         } else {
-                            "Changes apply at once · every setting is also a palette command"
+                            "Most changes apply at once · every setting is also a palette command"
                         },
                     )),
             )

@@ -437,7 +437,7 @@ fn default_folder() -> PathBuf {
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
     home.map(|h| h.join("Downloads"))
         .filter(|d| d.is_dir())
-        .or_else(lines_feed::disk::default_root)
+        .or_else(crate::data_dir::root)
         .unwrap_or_else(std::env::temp_dir)
 }
 
