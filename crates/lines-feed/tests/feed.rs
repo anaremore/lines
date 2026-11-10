@@ -212,7 +212,7 @@ async fn replay_stops_at_timestamp() {
     let mut times = Vec::new();
     while let Some(rec) = r.next_record().unwrap() {
         if rec.direction == lines_feed::recording::Direction::FromServer {
-            times.push(rec.wall_ms(&r.header));
+            times.push(rec.wall_ms);
         }
     }
     let cut = UtcMillis(times[times.len() / 2]);

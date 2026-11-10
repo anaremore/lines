@@ -27,7 +27,7 @@ impl Frames {
                 match r.next_record()? {
                     None => return Ok(None),
                     Some(rec) if rec.direction == Direction::FromServer => {
-                        return Ok(Some((UtcMillis(rec.wall_ms(&r.header)), rec.frame)));
+                        return Ok(Some((UtcMillis(rec.wall_ms), rec.frame)));
                     }
                     Some(_) => continue,
                 }
@@ -114,6 +114,15 @@ impl RecordedEvents {
     /// Frames the provider session refused so far.
     pub fn decode_errors(&self) -> u64 {
         self.decode_errors
+    }
+
+    /// Recorded frames refused so far because their time isn't representable (a `.lfr`
+    /// header or offset that overflows; `recording::wall_ms`).
+    pub fn unrepresentable(&self) -> u64 {
+        match &self.frames {
+            Frames::Recording(r) => r.unrepresentable(),
+            Frames::Stored(_) => 0,
+        }
     }
 
     /// The next frame's events and its recorded time; `None` at the end. Frames that decode
@@ -218,6 +227,38 @@ mod tests {
         }
         assert_eq!(got, vec![(0, 600_000), (500, 600_025), (1000, 600_050)]);
         assert_eq!(r.decode_errors(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A frame whose recorded time doesn't fit (a crafted header near `i64::MAX`) is skipped
+    /// and counted for the backtest's warning, never given a wrapped time.
+    #[test]
+    fn frames_with_unrepresentable_times_are_counted() {
+        let dir = std::env::temp_dir().join(format!("lines-recorded-ovf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.lfr");
+        let header = Header {
+            start_wall_ms: i64::MAX - 1_000,
+            provider: native::PROVIDER.into(),
+            protocol: native::PROTOCOL.into(),
+            product: "ES".into(),
+            contract: None,
+            version: FORMAT_VERSION,
+        };
+        let mut w = Writer::create(&path, &header).unwrap();
+        for ms in [0, 2_000, 3_000, 500] {
+            w.write(
+                Direction::FromServer,
+                Duration::from_millis(ms),
+                &Frame::binary(vec![0xff]),
+            )
+            .unwrap();
+        }
+        w.finish().unwrap();
+
+        let mut r = RecordedEvents::open(&path).unwrap();
+        while r.next_batch().unwrap().is_some() {}
+        assert_eq!(r.unrepresentable(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

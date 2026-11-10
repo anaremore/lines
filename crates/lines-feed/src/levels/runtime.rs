@@ -589,7 +589,12 @@ impl Recorder {
         }
         let mut buf = Vec::new();
         encode_batch(frames, &mut buf);
-        let since = Duration::from_millis((time.0 - self.header.start_wall_ms).max(0) as u64);
+        let since = Duration::from_millis(
+            time.0
+                .saturating_sub(self.header.start_wall_ms)
+                .max(0)
+                .unsigned_abs(),
+        );
         // Batches come about a second apart at most (a source's live push): flush each, so an
         // aborted task loses nothing.
         if let Some(w) = self.writer.as_mut()
@@ -724,8 +729,15 @@ pub fn read_recording(
     }
     let mut out = Vec::new();
     while let Some(rec) = r.next_record().map_err(|e| e.to_string())? {
-        let t = UtcMillis(h.start_wall_ms + rec.since_start.as_millis() as i64);
+        let t = UtcMillis(rec.wall_ms);
         out.push((t, decode_batch(&rec.frame.data)?));
+    }
+    if r.unrepresentable() > 0 {
+        tracing::warn!(
+            "{}: {} level batches had a time that doesn't fit and were skipped",
+            path.display(),
+            r.unrepresentable()
+        );
     }
     Ok(out)
 }

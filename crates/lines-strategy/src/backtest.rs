@@ -660,6 +660,12 @@ pub fn run(bt: &Backtest) -> Result<Report> {
         bail!("{r}");
     }
     warnings.extend(run.refused.iter().cloned());
+    if md.unrepresentable() > 0 {
+        warnings.push(format!(
+            "{} recorded frames had a time that doesn't fit and were skipped",
+            md.unrepresentable()
+        ));
+    }
     if md.decode_errors() > 0 {
         warnings.push(format!(
             "{} market frames didn't decode",
