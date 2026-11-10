@@ -251,6 +251,30 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         s(name, quick, end, a)
     };
     v.push(paper("orders-armed", true, ORDERS, "--arm"));
+    // In-app updates (decision 0031) on the status line: ready (Restart to update), held by a
+    // position, a discarded download, and the rollback offer after two failed starts.
+    v.push(s(
+        "update-ready",
+        true,
+        end,
+        args("--layout chart --size 1400x800 --theme dark --update-shot ready"),
+    ));
+    let mut held = args("--layout trading --size 1600x900 --theme dark --update-shot ready");
+    held.push("--paper".into());
+    held.push("buy 1 mkt; ack".into());
+    v.push(s("update-held", false, end, held));
+    v.push(s(
+        "update-rejected-light",
+        false,
+        end,
+        args("--layout chart --size 1400x800 --theme light --update-shot rejected"),
+    ));
+    v.push(s(
+        "update-rollback",
+        false,
+        end,
+        args("--layout chart --size 1400x800 --theme dark --update-shot rollback"),
+    ));
     // The grouped-order list in its floating panel.
     let mut g = args("--layout chart --size 1400x800 --theme dark --order-group-menu");
     g.push("--paper".into());

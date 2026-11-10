@@ -79,6 +79,7 @@ mod theme;
 mod tooltip;
 mod trade_bar;
 mod trading;
+mod update;
 mod versioned;
 mod workspace;
 mod wsdoc;
@@ -352,6 +353,14 @@ struct Cli {
     /// (0 = off). Default 2: the current and the previous session.
     #[arg(long, value_name = "N", default_value_t = lines_feed::disk::orderflow::DEFAULT_SESSIONS)]
     orderflow_sessions: u32,
+    /// Never check for updates this run (decision 0031). Tests, screenshots, bench, backtests
+    /// and headless runs never check anyway.
+    #[arg(long)]
+    no_update_check: bool,
+    /// Screenshot: the status line's word on updates as if the updater were in this state
+    /// (`ready`, `available`, `rejected`, `rollback`); no request is made.
+    #[arg(long, requires = "screenshot")]
+    update_shot: Option<String>,
     /// Run the feed without a window for N seconds and print stats (useful for recording).
     #[arg(long)]
     headless: Option<u64>,
@@ -1609,6 +1618,7 @@ where
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
                 context_menu: cli.context_menu.clone(),
+                update_shot: cli.update_shot.clone(),
                 ui_zoom: cli.ui_zoom,
                 prompt: cli.prompt.clone(),
                 panel_at: cli.panel_at,
@@ -1747,6 +1757,7 @@ where
     }
 
     let drawings = drawings_store::Drawings::new(dir.clone(), Some(writer.clone()));
+    let no_update_check = cli.no_update_check;
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
@@ -1765,10 +1776,21 @@ where
         workspace::start_autosave(cx);
         workspace::start_trigger_watch(cx);
         diagnostics::start_sampler(cx);
+        // In-app updates (decision 0031): interactive runs with a settings folder only;
+        // `--no-update-check` and Settings › General › Updates: Off make no request.
+        if !no_update_check && let Some(dir) = persist::config_dir() {
+            let mode = picker_view::settings(cx).updates;
+            update::start(dir, mode, cx);
+        }
         cx.activate(true);
     });
     writer.flush(Duration::from_secs(3));
     journal.flush(Duration::from_secs(3));
+    // A restart to update (or a rollback) applies and starts the new executable now that this
+    // one saved. `run` returning has dropped the app and its globals, so the `TradingService`s
+    // the `Trading` global held have joined the trading core after its last paper save:
+    // nothing writes over a rollback's restored files after this.
+    update::relaunch_if_requested();
     Ok(())
 }
 

@@ -36,6 +36,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# In-app updates (decision 0031): the release feed over HTTPS, SHA-256 and minisign checks.
+ureq.workspace = true
+sha2 = "0.10"
+minisign-verify = "0.2"
 # Symbol picker fuzzy matching (Helix's matcher). MPL-2.0, used unmodified.
 nucleo-matcher = "0.3.1"
 # Same major as GPUI's `image` so `RgbaImage` is one type. PNG only: decodes the window icon
@@ -68,6 +72,8 @@ required-features = ["screenshot"]
 embed-resource = "=3.0.12"
 
 [dev-dependencies]
+# Tests sign synthetic updates with a key generated at run time (never stored).
+minisign = "0.7"
 futures-util.workspace = true
 tokio.workspace = true
 # Tests use the synthetic level source.

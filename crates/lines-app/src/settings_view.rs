@@ -558,6 +558,9 @@ fn facts_now(cx: &App, wait: bool) -> Option<Facts> {
     } else {
         f.store_path = "Not recording (this source has no store)".to_owned();
     }
+    f.version = env!("CARGO_PKG_VERSION").to_owned();
+    f.can_update = crate::update::verify::PUBLIC_KEY.is_some();
+    f.rollback = crate::persist::config_dir().and_then(|d| crate::update::rollback_target(&d));
     f.config_dir = crate::persist::config_dir().map_or_else(
         || "None (nothing is saved)".to_owned(),
         |d| d.display().to_string(),
@@ -1247,6 +1250,7 @@ impl SettingsWindow {
                 self.edit = Some(n.map(|n| n.to_string()).unwrap_or_default());
             }
             (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_press(i, false, cx),
+            (Kind::Editor, _) if st.key == schema::ROLLBACK_KEY => self.rollback_press(cx),
             (Kind::Editor, _) => self.open_editor_for(i, cx),
             _ => {}
         }
@@ -1415,6 +1419,29 @@ impl SettingsWindow {
             (Kind::Editor, _) if schema::all()[i].key == schema::RESET_KEY => {
                 self.reset_buttons(i, cx)
             }
+            (Kind::Editor, _) if schema::all()[i].key == schema::ROLLBACK_KEY => {
+                match self.facts.rollback.clone() {
+                    None => div().into_any_element(),
+                    Some(v) => div()
+                        .id(("rollback", i))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .px_2()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(t.axis_line)
+                        .cursor_pointer()
+                        .child(format!("Roll back to v{v}"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |v, _, _, cx| {
+                                v.select(i);
+                                v.rollback_press(cx);
+                            }),
+                        )
+                        .into_any_element(),
+                }
+            }
             (Kind::Editor, _) => div()
                 .id(("editor", i))
                 .flex_none()
@@ -1514,6 +1541,17 @@ impl SettingsWindow {
             .into_iter()
             .find(|&j| t.reset_armed(&account, j))
             .map(|j| crate::paper_reset::confirm_text(&info.name, &t.source, info.start_balance, j))
+    }
+
+    /// Roll back to the version the last update replaced (Settings › About): held while
+    /// anything is trading, and said why.
+    fn rollback_press(&mut self, cx: &mut Context<Self>) {
+        if let Err(why) = crate::update::roll_back(cx)
+            && cx.has_global::<crate::workspace::Workspace>()
+        {
+            crate::workspace::notice(why, cx);
+        }
+        cx.notify();
     }
 
     /// A press of a reset button (or Enter on the row: the one keeping the journal).

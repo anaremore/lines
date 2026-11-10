@@ -20,3 +20,16 @@ Lines ships continuous **pre-alpha** builds. Releases are produced by the planni
 - Deleting branches, tags, releases or history; force-pushing `main`.
 - Changing accepted decisions (proposals are fine; acceptance is the owner's).
 - Manual UI checks are the owner's: UI-heavy milestones ship with screenshot evidence and are listed as "awaiting owner check" in the notes.
+
+## Update signing key (decision 0031; owner only)
+In-app updates run only what the project signed. Until the steps below are done, every build reports "this build doesn't update itself" and makes no update request.
+1. **Generate** the key pair on a machine you control: `minisign -G -p lines-update.pub -s lines-update.key` (choose a strong password). Never commit, paste or upload the secret key file.
+2. **CI secret:** add the secret key file's contents and its password as repository secrets (`UPDATE_SIGNING_KEY`, `UPDATE_SIGNING_PASSWORD`). The release workflow's signing step (a separate tier C change, drafted for your approval) signs `lines.exe` with the trusted comment `lines <version> public pre-release x86_64-pc-windows-msvc` (exactly; the app refuses a signature naming another release) and writes `update.json` (version, channel, edition, and per target the file's URL, SHA-256 and the `.minisig` text).
+3. **Public key:** commit the public key line (the second line of `lines-update.pub`) as `COMMITTED_KEY` in `crates/lines-app/src/update/verify.rs`. Builds from then on verify against it.
+4. **Custody:** keep the secret key and its password offline in two places (e.g. a password manager and an encrypted backup). Anyone holding both can ship code that every installed Lines will run.
+5. **Rotation** (a suspected leak, or a planned change):
+   1. Generate a new pair and replace the CI secrets.
+   2. Commit the new public key and release a version signed with the **old** key, so installed builds update to one that trusts the new key.
+   3. From the next release on, sign with the new key only, and delete the old secret everywhere.
+   4. After a leak, also say so in the next release's notes: builds older than the rotation release still trust the old key until they update.
+6. **Official build:** its feed (a private release feed or Settings-enabled connectors) is still to be chosen; until then only public builds update themselves.

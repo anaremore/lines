@@ -216,6 +216,10 @@ pub struct Settings {
         skip_serializing_if = "crate::chart_draw::MeasureShow::is_default"
     )]
     pub measure: crate::chart_draw::MeasureShow,
+    /// Settings › General › Updates (decision 0031): automatic, notify only or off. Optional:
+    /// absent is automatic.
+    #[serde(default, skip_serializing_if = "crate::update::UpdateMode::is_default")]
+    pub updates: crate::update::UpdateMode,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]

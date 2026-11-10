@@ -14,6 +14,7 @@ use crate::picker::Settings;
 /// The Settings window's sections, in order.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
+    General,
     Appearance,
     Charts,
     Dom,
@@ -23,10 +24,13 @@ pub enum Section {
     Data,
     Keys,
     Diagnostics,
+    /// The version, and rolling back an update (decision 0031).
+    About,
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 11] = [
+        Section::General,
         Section::Appearance,
         Section::Charts,
         Section::Dom,
@@ -36,10 +40,12 @@ impl Section {
         Section::Data,
         Section::Keys,
         Section::Diagnostics,
+        Section::About,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
+            Section::General => "General",
             Section::Appearance => "Appearance",
             Section::Charts => "Charts",
             Section::Dom => "DOM",
@@ -49,6 +55,7 @@ impl Section {
             Section::Data => "Data",
             Section::Keys => "Keys",
             Section::Diagnostics => "Diagnostics",
+            Section::About => "About",
         }
     }
 }
@@ -132,6 +139,12 @@ pub struct Facts {
     pub depth_products: Vec<String>,
     pub accounts: Vec<AccountFact>,
     pub config_dir: String,
+    /// This build's version.
+    pub version: String,
+    /// Whether this build can update itself (it has the project's update key).
+    pub can_update: bool,
+    /// The version a rollback returns to, if the last update kept one.
+    pub rollback: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -744,6 +757,24 @@ pub fn all() -> &'static [Setting] {
 #[allow(clippy::too_many_lines)]
 fn table() -> Vec<Setting> {
     vec![
+        with_default(
+            s(
+                "general.updates",
+                Sec::General,
+                "Updates",
+                "Automatic: download a newer release in the background and ask to restart (never during a trade). Notify only: say a newer release exists. Off: no request at all.",
+                Scope::App,
+                Normal,
+                Choice(&crate::update::UpdateMode::LABELS),
+                |p, _, _| Value::Choice(p.app.updates.index()),
+                Some(|p, _, v| {
+                    let i = want_choice(v, crate::update::UpdateMode::ALL.len())?;
+                    p.app.updates = crate::update::UpdateMode::ALL[i];
+                    Ok(())
+                }),
+            ),
+            Value::Choice(0),
+        ),
         // Appearance.
         with_default(
             s(
@@ -1571,6 +1602,39 @@ fn table() -> Vec<Setting> {
             |_, _, f| Value::Text(f.config_dir.clone()),
             None,
         ),
+        s(
+            "about.version",
+            Sec::About,
+            "Version",
+            "Updates are signed and checked before they run; this build updates itself only if it carries the project's update key.",
+            Scope::ReadOnly,
+            Normal,
+            Info,
+            |_, _, f| {
+                Value::Text(if f.can_update {
+                    format!("Lines v{}", f.version)
+                } else {
+                    format!("Lines v{} (this build doesn't update itself)", f.version)
+                })
+            },
+            None,
+        ),
+        s(
+            ROLLBACK_KEY,
+            Sec::About,
+            "Roll back",
+            "Go back to the version the last update replaced, with the settings, workspaces and trading files it had. Waits while anything is trading.",
+            Scope::ReadOnly,
+            Normal,
+            Editor,
+            |_, _, f| {
+                Value::Text(match &f.rollback {
+                    Some(v) => format!("v{v} is kept"),
+                    None => "No earlier version is kept".to_owned(),
+                })
+            },
+            None,
+        ),
     ]
 }
 
@@ -1794,6 +1858,8 @@ pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> 
 
 /// Settings › Accounts › Reset paper account (its buttons are the window's own).
 pub const RESET_KEY: &str = "accounts.reset";
+/// Settings › About › Roll back (a button, decision 0031).
+pub const ROLLBACK_KEY: &str = "about.rollback";
 
 /// Thousands separators: 1500 → "1,500".
 pub fn grouped(n: i64) -> String {
