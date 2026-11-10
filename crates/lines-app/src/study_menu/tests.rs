@@ -178,7 +178,7 @@ fn volume_is_a_study_with_its_options() {
     assert!(l.contains(&"  Length: 20 *".to_owned()), "{l:?}");
     assert!(l.contains(&"  Label: Show in legend *".to_owned()), "{l:?}");
     assert!(
-        l.contains(&"Volume · by candle · buy/sell · average 20 · overlay".to_owned()),
+        l.contains(&"Volume · buy/sell · average 20 · overlay".to_owned()),
         "{l:?}"
     );
     set.apply(&StudyAction::SetVolume(

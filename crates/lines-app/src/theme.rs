@@ -386,7 +386,7 @@ impl Theme {
     /// What the plot can show under text on the legend box (`label_bg`), as composited: the
     /// chart, the grid, candles, the last price, the profile's value area and POC, and the
     /// study colors. The label-box test and [`Theme::legend_text`] both check these.
-    pub fn chart_underlays(&self) -> [(&'static str, Rgb); 11] {
+    pub fn chart_underlays(&self) -> [(&'static str, Rgb); 12] {
         use lines_core::style::over;
         let pct = |a: f32| (a * 100.0).round() as u8;
         let bg = rgb_of(self.bg);
@@ -403,6 +403,8 @@ impl Theme {
             ("study1", rgb_of(self.study[1])),
             ("study2", rgb_of(self.study[2])),
             ("study3", rgb_of(self.study[3])),
+            // The Volume study's bars, under its pane title.
+            ("volume", rgb_of(self.volume)),
         ]
     }
 

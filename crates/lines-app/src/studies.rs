@@ -309,8 +309,8 @@ impl Studies {
     /// Two layers: [`Studies::paint_back`] (band fills, under the candles, so a heavy fill
     /// never covers a bar) and this (band edges and the line, over them).
     pub fn paint(&self, origin: (f32, f32), vp: &Viewport, theme: &Theme, window: &mut Window) {
+        let _ = vp; // the overlay paints entirely under the candles (`paint_back`)
         self.paint_layer(origin, theme, window, false);
-        self.paint_overlay(origin, vp, theme, window, false);
     }
 
     /// The band fills and Volume's overlay bars, painted before the candles (with the level
@@ -323,19 +323,12 @@ impl Studies {
         window: &mut Window,
     ) {
         self.paint_layer(origin, theme, window, true);
-        self.paint_overlay(origin, vp, theme, window, true);
+        self.paint_overlay(origin, vp, theme, window);
     }
 
     /// Volume as an overlay: short bars along the plot's bottom [`OVERLAY_SHARE`] (`back`:
     /// under the candles, translucent), its average line over the candles.
-    fn paint_overlay(
-        &self,
-        origin: (f32, f32),
-        vp: &Viewport,
-        theme: &Theme,
-        window: &mut Window,
-        back: bool,
-    ) {
+    fn paint_overlay(&self, origin: (f32, f32), vp: &Viewport, theme: &Theme, window: &mut Window) {
         for s in &self.list {
             let IndicatorConfig::Volume { spec, display, .. } = &s.config else {
                 continue;
@@ -350,7 +343,7 @@ impl Studies {
             // All of it under the candles: faint fills, with each bar's top edge and hollow
             // outlines in the opaque colors (3:1 on the chart), so the bars read as data
             // without competing with price; the average line under the candles too.
-            if back {
+            {
                 let cols = volume_colors(s, theme);
                 paint_volume(
                     s,
@@ -763,7 +756,15 @@ fn paint_volume(
         )
     };
     let snap = |v: f32| lines_core::geometry::snap(f64::from(v), dpi);
-    let half = lines_core::geometry::candle_half_width(vp.bar_px, dpi);
+    // Overlay bars (`edges`) are narrower than the candles over them, so a hollow volume bar
+    // never reads as a candle body: about 60 % of the body, an odd number of device pixels.
+    let body = lines_core::geometry::candle_half_width(vp.bar_px, dpi);
+    let half = if edges.is_some() {
+        let dev = ((body * 2.0 * dpi * 0.6).round() as i32 | 1).max(1);
+        dev as f32 / dpi * 0.5
+    } else {
+        body
+    };
     // A segment from value `lo` to `hi` (stacked), at least a device pixel when it has volume.
     let seg = |lo: i64, hi: i64| -> Option<(f32, f32)> {
         if hi <= lo {
@@ -780,7 +781,6 @@ fn paint_volume(
     };
     let draw = |window: &mut Window, x: f32, (top, bot): (f32, f32), col: Hsla, hollow: bool| {
         let (bx, bw, bh) = (x - half, half * 2.0, bot - top);
-        let e = edge(col);
         if hollow && bw >= 3.0 * hair && bh >= 3.0 * hair {
             for q in [
                 rect(bx, top, bw, hair),
@@ -788,13 +788,16 @@ fn paint_volume(
                 rect(bx, top, hair, bh),
                 rect(bx + bw - hair, top, hair, bh),
             ] {
-                window.paint_quad(gpui::fill(q, e));
+                window.paint_quad(gpui::fill(q, col));
             }
         } else {
             window.paint_quad(gpui::fill(rect(bx, top, bw, bh), col));
-            if e != col {
-                window.paint_quad(gpui::fill(rect(bx, top, bw, hair), e));
-            }
+        }
+        // The overlay: an opaque cap on each bar's top (3:1 on the chart), never a whole
+        // opaque outline that could pass for a candle body.
+        let e = edge(col);
+        if e != col {
+            window.paint_quad(gpui::fill(rect(bx, top, bw, hair), e));
         }
     };
     for v in &s.vol.bars {

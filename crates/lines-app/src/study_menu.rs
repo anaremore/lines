@@ -435,7 +435,7 @@ pub const VOLUME_LENGTHS: [u16; 5] = [10, 20, 50, 100, 200];
 /// Volume's row: its name and the options that are on.
 pub fn volume_label(v: &VolumeSpec) -> String {
     let mut s = "Volume".to_owned();
-    if v.color_by_candle {
+    if v.color_by_candle && !v.split {
         s.push_str(" · by candle");
     }
     if v.split {
@@ -625,13 +625,16 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 f(&mut n);
                 set(StudyAction::SetVolume(i, n))
             };
-            c(
-                "Color",
-                "By candle".into(),
-                v.color_by_candle,
-                Swatch::None,
-                with(&|n| n.color_by_candle = !n.color_by_candle),
-            );
+            // Split draws each side in its direction's shape and color: no candle colors then.
+            if !v.split {
+                c(
+                    "Color",
+                    "By candle".into(),
+                    v.color_by_candle,
+                    Swatch::None,
+                    with(&|n| n.color_by_candle = !n.color_by_candle),
+                );
+            }
             c(
                 "Average",
                 "Show".into(),
