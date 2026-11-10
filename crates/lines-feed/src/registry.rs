@@ -44,7 +44,8 @@ impl SubKey {
     }
 }
 
-fn source_key(source: &Source) -> String {
+/// What identifies a source's connection in a [`SubKey`] (its name and parameters).
+pub fn source_key(source: &Source) -> String {
     match source {
         // One mock exchange per subscription key: its parameters are part of the identity.
         Source::CqgMock(m) => format!(
@@ -175,6 +176,20 @@ impl FeedRegistry {
             .feeds
             .values()
             .filter_map(Weak::upgrade)
+            .collect();
+        held.iter().map(|s| s.store.clone()).collect()
+    }
+
+    /// The stores of the feeds running now on this source ([`source_key`]): Settings ›
+    /// Connections reads their state.
+    pub fn stores_of(&self, source_key: &str) -> Vec<Arc<crate::store::ChartStore>> {
+        let held: Vec<Arc<Shared>> = self
+            .inner
+            .lock()
+            .feeds
+            .iter()
+            .filter(|(k, _)| k.source == source_key)
+            .filter_map(|(_, w)| w.upgrade())
             .collect();
         held.iter().map(|s| s.store.clone()).collect()
     }

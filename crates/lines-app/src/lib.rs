@@ -70,6 +70,8 @@ mod series_pane;
 mod settings_schema;
 mod settings_view;
 mod sources;
+mod connections;
+mod connections_view;
 mod strategy_host;
 mod strategy_marks;
 mod strategy_panel;
@@ -1239,13 +1241,17 @@ fn enabled_sources(
 
 /// `settings.json`'s `sources` switches, read on their own before the settings load (which
 /// sets an unreadable file aside, once): anything unreadable reads as every source on.
-fn source_prefs(
-    path: &std::path::Path,
-) -> std::collections::BTreeMap<String, sources::SourcePrefs> {
+fn source_prefs(path: &std::path::Path) -> std::collections::BTreeMap<String, sources::SourcePrefs> {
+    settings_key(path, "sources")
+}
+
+/// One top-level key of `settings.json`, read on its own (as [`source_prefs`]): anything
+/// unreadable reads as the default.
+fn settings_key<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path, key: &str) -> T {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|mut v| v.get_mut("sources").map(serde_json::Value::take))
+        .and_then(|mut v| v.get_mut(key).map(serde_json::Value::take))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
 }
@@ -1705,6 +1711,19 @@ where
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source_name()))?;
     // The run's sources (decision 0030): every enabled one without `--source`, else that one.
     // `config` is the first (the run's when limited): what takes one source uses it.
+    // Sources' settings (Settings › Connections, decision 0030): plain values from
+    // `settings.json`, secrets from the OS keychain, read by each connector when it connects.
+    // Screenshots and the benchmark never read the user's keychain or settings.
+    if cli.screenshot.is_some() || cli.bench.is_some() {
+        connections::use_memory_keychain(&[]);
+        connections::install(&connections::Plain::new());
+    } else {
+        connections::install(
+            &persist::config_dir()
+                .map(|d| settings_key(&d.join("settings.json"), "connections"))
+                .unwrap_or_default(),
+        );
+    }
     let (mut run_sources, limited) = run_sources(&cli, &ext, &choice, &store_prefs)?;
     let config = run_sources[0].1.clone();
     // A market replay never runs a level source live (only its recorded batches, if any).
@@ -2374,6 +2393,9 @@ mod tests {
     fn extension_sources_join_the_cli() {
         struct Ext;
         impl SourceExtension for Ext {
+            fn api_version(&self) -> u32 {
+                lines_feed::extension::API_VERSION
+            }
             fn name(&self) -> &'static str {
                 "example-feed"
             }
