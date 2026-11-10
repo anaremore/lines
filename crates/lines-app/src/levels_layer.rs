@@ -409,6 +409,17 @@ pub struct LevelsLayer {
 /// Columns kept for the VWAP that VWAP-relative levels follow.
 const VWAP_COLUMNS: usize = 4096;
 
+/// A new map's label state: started over, unless only its series are new (its levels are the
+/// previous map's), when each label keeps its hysteresis.
+fn reset_seen(map: Option<&LevelMap>, seen: &mut Vec<LabelSeen>) {
+    let n = map.map_or(0, |m| m.levels.len());
+    if map.is_some_and(|m| m.series_update) && seen.len() == n {
+        return;
+    }
+    seen.clear();
+    seen.resize(n, LabelSeen::New);
+}
+
 impl LevelsLayer {
     pub fn new(config: LevelsConfig) -> LevelsLayer {
         LevelsLayer {
@@ -657,10 +668,10 @@ impl LevelsLayer {
             }
             if fresh {
                 s.refresh(styles, &price);
-                // A new map: its levels' labels start from scratch.
-                let n = s.map.as_ref().map_or(0, |m| m.levels.len());
-                s.seen.clear();
-                s.seen.resize(n, LabelSeen::New);
+                // A new map: its levels' labels start from scratch, unless only its series are
+                // new (a source's live push carries the previous map's levels), so a push
+                // never undoes the labels' hysteresis.
+                reset_seen(s.map.as_deref(), &mut s.seen);
             }
         }
     }

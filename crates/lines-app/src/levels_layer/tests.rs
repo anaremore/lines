@@ -985,3 +985,30 @@ fn a_one_letter_name_is_its_own_shortest() {
     );
     assert_eq!(super::shortest_cut("Mid", "Mid").as_deref(), Some("M…"));
 }
+
+/// A series-only push (its levels are the previous map's) keeps each label's hysteresis; a new
+/// map with levels, or a series push whose level count differs, starts them over.
+#[test]
+fn a_series_only_push_keeps_label_state() {
+    use lines_core::levels::{LevelStyle, LevelValue};
+    let build = |series_update: bool| {
+        let b = LevelMap::builder("demo", lines_core::ProductId(1), lines_core::UtcMillis(0)).line(
+            "pivot",
+            LevelValue::Tick(Price(600_000)),
+            Some("P"),
+            LevelStyle::default(),
+        );
+        let b = if series_update { b.series_update() } else { b };
+        b.build(25).unwrap()
+    };
+    let mut seen = vec![LabelSeen::Hidden];
+    reset_seen(Some(&build(true)), &mut seen);
+    assert_eq!(seen, vec![LabelSeen::Hidden], "a push keeps it");
+    reset_seen(Some(&build(false)), &mut seen);
+    assert_eq!(seen, vec![LabelSeen::New], "a whole refresh starts over");
+    let mut two = vec![LabelSeen::Hidden, LabelSeen::Shown];
+    reset_seen(Some(&build(true)), &mut two);
+    assert_eq!(two, vec![LabelSeen::New], "a different count starts over");
+    reset_seen(None, &mut two);
+    assert!(two.is_empty());
+}
