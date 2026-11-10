@@ -47,6 +47,7 @@ mod notice;
 mod option_estimate;
 mod order_group_view;
 mod order_resize;
+mod palette_rank;
 mod pane;
 mod pane_columns;
 mod pane_menu;

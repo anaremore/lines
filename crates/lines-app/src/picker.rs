@@ -193,6 +193,13 @@ pub struct Settings {
     /// name). Optional: a source absent is on. Read at startup.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub sources: std::collections::BTreeMap<String, crate::sources::SourcePrefs>,
+    /// The command palette's memory (`crate::palette_rank`): a use count per command and the
+    /// last ten queries. Optional: absent is none (no migration).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::palette_rank::PaletteHistory::is_empty"
+    )]
+    pub palette: crate::palette_rank::PaletteHistory,
     /// The display time zone (Settings › Appearance; `lines_core::display_tz`): absent is
     /// the exchange's (ET), "System" the OS zone, else an IANA name. Display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,6 +432,28 @@ impl Searcher {
                 _ => b.score.cmp(&a.score).then(a.index.cmp(&b.index)),
             })
         });
+    }
+}
+
+impl Searcher {
+    /// Each text's fuzzy score for `query`, as the symbol search scores (`None`: no match). An
+    /// empty query matches every text with score 0. Used by the command palette's ranking.
+    pub fn score_texts<'a>(
+        &mut self,
+        query: &str,
+        texts: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<Option<u32>> {
+        let query = query.trim();
+        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        texts
+            .into_iter()
+            .map(|t| {
+                if query.is_empty() {
+                    return Some(0);
+                }
+                pattern.score(Utf32Str::new(t, &mut self.buf), &mut self.matcher)
+            })
+            .collect()
     }
 }
 
