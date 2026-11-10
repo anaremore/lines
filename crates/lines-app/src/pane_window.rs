@@ -225,17 +225,35 @@ impl PaneWindow {
             PaneHandle::Chart(chart) => chart.update(cx, |c, _| c.take_menu_object()),
             _ => None,
         };
+        // The right click's price is taken by this menu: no later one offers orders at it.
+        let price = match &self.handle {
+            PaneHandle::Chart(chart) => chart.update(cx, |c, _| c.take_menu_price()),
+            _ => None,
+        };
         self.menu = Some(match object {
             Some(o) => Menu::new(at, runnable(crate::pane_menu::object_items(&o))).unselected(),
-            None => Menu::new(at, self.pane_items(cx)),
+            None => {
+                let menu = Menu::new(at, self.pane_items(price, cx));
+                // Never an order on a stray Enter (design.md §6 rule 5).
+                if crate::pane_menu::places_orders(&menu.items) {
+                    menu.unselected()
+                } else {
+                    menu
+                }
+            }
         });
         cx.notify();
     }
 
-    fn pane_items(&self, cx: &Context<Self>) -> Vec<MenuItem> {
+    fn pane_items(&self, price: Option<lines_core::Price>, cx: &Context<Self>) -> Vec<MenuItem> {
         let mut items = Vec::with_capacity(7);
         if let PaneHandle::Chart(chart) = &self.handle {
             let c = chart.read(cx);
+            // The order section first, as in the main window's chart menu.
+            let switches = crate::workspace::dom_switches(cx, None);
+            if let Some(o) = c.order_menu(price, crate::workspace::chart_trades(c, &switches), cx) {
+                items.extend(crate::pane_menu::order_items(&o));
+            }
             if c.drawing_selected() {
                 items.push(MenuItem::named(
                     "Drawing style…",

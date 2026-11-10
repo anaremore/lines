@@ -540,6 +540,11 @@ pub struct ChartView {
     /// What the last right click was on (an order's tag, a drawing): the pane menu opened by
     /// the same click is that object's (`crate::pane_menu`). Taken by the menu.
     menu_object: Option<crate::pane_menu::MenuObject>,
+    /// The price of the last right click on the plot (snapped as the crosshair draws it), for
+    /// the menu's order section; `None` off the plot, on an object, or with no bars there.
+    menu_price: Option<Price>,
+    /// The account the open menu's order rows were offered on.
+    menu_account: Option<lines_trading::AccountId>,
     /// The hovered bar was cut short by a session break.
     cross_partial: bool,
     /// The product's drawings on this chart (roadmap 11).
@@ -810,6 +815,8 @@ impl ChartView {
             tf_menu: fixture.timeframe_menu,
             tf_entry: None,
             menu_object: None,
+            menu_price: None,
+            menu_account: None,
             cross_partial: false,
             drawings,
             saved_styles,
@@ -2948,13 +2955,25 @@ impl ChartView {
         at: Option<Price>,
         cx: &mut Context<Self>,
     ) {
-        use crate::chart_trade::{ENABLE_TO_ORDER, LINK_TO_TRADE, strip_command};
+        self.send_entry(|ctx| crate::chart_trade::strip_command(o, at, ctx), cx);
+    }
+
+    /// Send an entry built from the chart's size and bracket (a strip order, a menu order):
+    /// through the window like an exit (a linked DOM's switch), or say why not.
+    fn send_entry(
+        &mut self,
+        build: impl FnOnce(
+            &crate::dom_trade::EntryCtx,
+        ) -> Result<lines_trading::Command, crate::dom_trade::Refusal>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::chart_trade::{ENABLE_TO_ORDER, LINK_TO_TRADE};
         let issued = std::time::Instant::now();
         let built = if self.common.link.is_none() {
             Err(LINK_TO_TRADE)
         } else {
             crate::trade_bar::entry_ctx(self, cx).and_then(|ctx| {
-                strip_command(o, at, &ctx)
+                build(&ctx)
                     .map(|c| (c, ctx))
                     .map_err(|crate::dom_trade::Refusal(why)| why)
             })
@@ -5565,18 +5584,22 @@ impl ChartView {
 
     /// A right click on the plot: an order's tag under it, else a drawing (which becomes the
     /// selection), is what the pane menu (opened by the workspace on the same click) is for.
-    fn on_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_object = None;
+        self.menu_price = None;
         if self.region(ev.position) != Some(Region::Plot) {
             return;
         }
         let (x, y) = self.local(ev.position);
+        // The order section's price, unless an object under the pointer gets its own menu.
+        self.menu_price = self.price_at(x, y, window).ok().flatten();
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
             .unwrap_or_default();
         if let Some(o) = self.order_object_at(x as f32, y as f32, mode) {
             self.menu_object = Some(o);
+            self.menu_price = None;
             return;
         }
         // The temporary measure, drawn over the drawings: its own menu.
@@ -5586,11 +5609,21 @@ impl ChartView {
                 show: s.measure,
                 pnl: s.pnl_display,
             });
+            self.menu_price = None;
             return;
+        }
+        // Anything else of the orders' under the pointer (a group's tag, a marker, a handle),
+        // or the order strip: no orders at its price.
+        let on_strip = self
+            .strip_box()
+            .is_some_and(|b| b.contains(x as f32, y as f32));
+        if on_strip || self.on_order_graphics(x as f32, y as f32) {
+            self.menu_price = None;
         }
         let before = self.drawings.selected;
         self.drawings.right_click(x as f32, y as f32);
         if let Some(tool) = self.drawings.selected_tool() {
+            self.menu_price = None;
             self.menu_object = Some(crate::pane_menu::MenuObject::Drawing {
                 title: crate::pane_menu::capitalized(tool.label()),
             });
@@ -5598,6 +5631,20 @@ impl ChartView {
         if self.drawings.selected != before {
             cx.notify();
         }
+    }
+
+    /// Whether any order graphic (a tag, a group's tag, a marker, a handle) is at plot-local
+    /// (`x`, `y`), last frame's layout.
+    fn on_order_graphics(&self, x: f32, y: f32) -> bool {
+        let n = self.ct.n_tags;
+        lines_core::geometry::order_tags::hit(
+            &self.ct.tags[..n],
+            &self.ct.markers,
+            &self.ct.handles,
+            x,
+            y,
+        )
+        .is_some()
     }
 
     /// The single order whose tag (or its ×) is at plot-local (`x`, `y`), last frame's layout:
@@ -5661,6 +5708,67 @@ impl ChartView {
         })
     }
 
+    /// The last right click's price, taken by the menu it opened (once): a later menu (the
+    /// menu key, the header's ⋯) never offers orders at an old price.
+    pub fn take_menu_price(&mut self) -> Option<Price> {
+        let p = self.menu_price.take();
+        // The account its rows are offered on (`OrderCmd::Place` checks it again).
+        self.menu_account = p.and(self.trade.account.clone());
+        p
+    }
+
+    /// The menu's order section for a right click at `at` (`trading_on`: a linked DOM on this
+    /// chart's account and contract has trading enabled; `chart_trade::order_section`).
+    pub fn order_menu(
+        &self,
+        at: Option<Price>,
+        trading_on: bool,
+        cx: &App,
+    ) -> Option<crate::pane_menu::ChartOrders> {
+        use crate::trade_bar::TradePane;
+        let option =
+            crate::trade_bar::contract_of(&self.store).is_some_and(|k| k.option_key().is_some());
+        // In no link group: no DOM's switch can send (the strip says the same).
+        if at.is_some() && !option && !self.trade_unavailable() && self.common.link.is_none() {
+            return Some(crate::pane_menu::ChartOrders::Note(
+                crate::chart_trade::LINK_TO_TRADE.to_owned(),
+            ));
+        }
+        crate::chart_trade::order_section(
+            at,
+            option,
+            self.trade_unavailable(),
+            trading_on && self.common.link.is_some(),
+            crate::trade_bar::entry_ctx(self, cx),
+            &self.instrument.price,
+            self.instrument.qty,
+        )
+    }
+
+    /// Screenshots (`--context-menu pane@X,Y`): the order section's price as a right click at
+    /// window point `pos` gives it (no object under it). `false`: not yet (the chart hasn't
+    /// laid out its plot, or has no price there yet): the screenshot asks again next frame.
+    pub fn set_menu_point(&mut self, pos: Point<Pixels>, window: &Window) -> bool {
+        if self.chart.size.width <= px(0.0) {
+            return false;
+        }
+        self.menu_price = if self.region(pos) == Some(Region::Plot) {
+            let (x, y) = self.local(pos);
+            match self.price_at(x, y, window) {
+                Ok(Some(p)) => Some(p),
+                _ => return false,
+            }
+        } else {
+            None
+        };
+        true
+    }
+
+    /// This chart's link group.
+    pub fn link_group(&self) -> crate::layout::LinkGroup {
+        self.common.link
+    }
+
     /// The object the last right click was on, for its menu (once).
     pub fn take_menu_object(&mut self) -> Option<crate::pane_menu::MenuObject> {
         self.menu_object.take()
@@ -5671,6 +5779,17 @@ impl ChartView {
         use crate::commands::OrderCmd;
         match c {
             OrderCmd::Cancel(id) => self.cancel_order(id, cx),
+            OrderCmd::Place(o, offer) => {
+                // The account it was offered on: a switch since refuses it, as a contract or a
+                // size does.
+                let offered = self.menu_account.take();
+                if !crate::chart_trade::same_account(offered.as_ref(), self.trade.account.as_ref())
+                {
+                    self.trade.flash(crate::chart_trade::CHART_CHANGED);
+                } else {
+                    self.send_entry(|ctx| crate::chart_trade::menu_command(o, offer, ctx), cx)
+                }
+            }
             OrderCmd::Resize(id) => {
                 crate::trade_bar::open_resize_field(self, lines_trading::OrderId(id));
             }

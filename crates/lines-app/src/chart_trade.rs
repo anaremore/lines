@@ -550,6 +550,253 @@ pub fn strip_command(
     }
 }
 
+/// An order from the chart's right-click menu: a limit or a stop at a price.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MenuOrder {
+    pub side: Side,
+    pub stop: bool,
+    pub price: Price,
+}
+
+/// What a menu row was offered with: its contract, size and bracket. A row chosen after any of
+/// them changed (a linked pane switched the chart, the size or the bracket was changed while
+/// the menu was open) is refused, never sent with what it didn't show (nor an entry without the
+/// protection it named).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Offer {
+    pub contract: ContractKey,
+    pub qty: Qty,
+    pub bracket: Option<crate::dom_trade::BracketPreset>,
+    /// The account's fingerprint ([`account_key`]): commands are `Copy`, an account id isn't.
+    pub account: u64,
+}
+
+impl Offer {
+    /// What a row built from `ctx` shows: its contract, size, bracket and account.
+    pub fn of(ctx: &crate::dom_trade::EntryCtx) -> Offer {
+        Offer {
+            contract: ctx.contract,
+            qty: ctx.qty,
+            bracket: ctx.bracket,
+            account: account_key(&ctx.account),
+        }
+    }
+}
+
+/// An account's fingerprint for an [`Offer`]: the same id always gives the same key in a run.
+pub fn account_key(a: &AccountId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    a.hash(&mut h);
+    h.finish()
+}
+
+/// Whether a menu row's account is still the chart's (the chart remembers the one it was
+/// offered on).
+pub fn same_account(offered: Option<&AccountId>, now: Option<&AccountId>) -> bool {
+    offered.is_some() && offered == now
+}
+
+/// The menu's dim row when the chart can't trade: no linked DOM has trading enabled.
+pub const TRADING_OFF_ROW: &str = "Trading is off · turn on in the trade panel";
+/// The menu's dim row with no market to place against (no feed, a stale one, no quote).
+pub const NO_PRICE_ROW: &str = "No live price";
+/// A menu order chosen after the market moved through its price (it would fill at once).
+pub const MARKET_MOVED: &str = "The market moved: right-click again";
+/// A menu order chosen after its chart moved to another contract, account or size.
+pub const CHART_CHANGED: &str = "The chart changed: right-click again";
+
+/// The two orders a right click at `at` offers, never one that fills at once. The market is
+/// the inside (bid and ask, either falling back to the last trade, as the trade panel does).
+/// - Below the bid: a buy limit and a sell stop at `at`.
+/// - Above the ask: a sell limit and a buy stop at `at`.
+/// - At the inside (from the bid to the ask, both included): a buy limit at the bid and a sell
+///   limit at the ask. Both rest; a stop there would trigger at once, and a limit at `at` would
+///   cross whenever `at` is the other side.
+///
+/// A row that would fill at once in a one-sided or crossed book is left out (the same test as
+/// when it is chosen, [`crosses`]). `None`: no market price.
+pub fn menu_orders(
+    at: Price,
+    bid: Option<Price>,
+    ask: Option<Price>,
+    last: Option<Price>,
+) -> Option<Vec<MenuOrder>> {
+    // The inside, low to high (a one-sided book's last trade can fall either side of it).
+    let (b, a) = (bid.or(last)?, ask.or(last)?);
+    let (lo, hi) = (b.min(a), b.max(a));
+    let o = |side, stop, price| MenuOrder { side, stop, price };
+    let two = if at.0 < lo.0 {
+        [o(Side::Buy, false, at), o(Side::Sell, true, at)]
+    } else if at.0 > hi.0 {
+        [o(Side::Sell, false, at), o(Side::Buy, true, at)]
+    } else {
+        [o(Side::Buy, false, lo), o(Side::Sell, false, hi)]
+    };
+    Some(
+        two.into_iter()
+            .filter(|m| !crosses(m, bid, ask, last))
+            .collect(),
+    )
+}
+
+/// Whether a menu order would fill (a limit) or trigger (a stop) at once against this market:
+/// a buy limit at or above the ask, a sell limit at or below the bid, a buy stop at or below
+/// the ask, a sell stop at or above the bid; with a side missing, against the last trade
+/// (a limit may rest at it, a stop may not).
+pub fn crosses(o: &MenuOrder, bid: Option<Price>, ask: Option<Price>, last: Option<Price>) -> bool {
+    let p = o.price.0;
+    match (o.side, o.stop) {
+        (Side::Buy, false) => match (ask, last) {
+            (Some(a), _) => p >= a.0,
+            (None, Some(l)) => p > l.0,
+            (None, None) => false,
+        },
+        (Side::Sell, false) => match (bid, last) {
+            (Some(b), _) => p <= b.0,
+            (None, Some(l)) => p < l.0,
+            (None, None) => false,
+        },
+        (Side::Buy, true) => ask.or(last).is_some_and(|m| p <= m.0),
+        (Side::Sell, true) => bid.or(last).is_some_and(|m| p >= m.0),
+    }
+}
+
+/// A menu order's row: "▲ Buy limit 2 @ 6012.25" (the glyph and the word both carry the side).
+pub fn menu_order_label(o: &MenuOrder, qty: &str, fmt: &PriceFormat) -> String {
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "{} {} {} {qty} @ ",
+        if o.side == Side::Buy { "▲" } else { "▼" },
+        if o.side == Side::Buy { "Buy" } else { "Sell" },
+        if o.stop { "stop" } else { "limit" },
+    );
+    let _ = fmt.write(o.price, &mut s);
+    s
+}
+
+/// The order section's header: "At 6012.25 · 2 contracts · bracket 8/16" (no bracket part
+/// without one; a quantity in its product's units says no "contracts").
+pub fn menu_header(
+    at: Price,
+    qty: &str,
+    whole: bool,
+    one: bool,
+    bracket: Option<crate::dom_trade::BracketPreset>,
+    fmt: &PriceFormat,
+) -> String {
+    let mut s = String::from("At ");
+    let _ = fmt.write(at, &mut s);
+    let _ = write!(s, " · {qty}");
+    if whole {
+        s.push_str(if one { " contract" } else { " contracts" });
+    }
+    if let Some(b) = bracket {
+        let _ = write!(s, " · bracket {}/{}", b.stop_ticks, b.target_ticks);
+    }
+    s
+}
+
+/// The chart menu's order section for a right click at `at` (`None`: the press wasn't on the
+/// plot's price, or it is gone: the section is taken with its menu). `option`: an option
+/// chart, which keeps its trigger flow (no section). `no_market`: the pane has no feed.
+/// `trading_on`: a linked DOM on this account and contract has trading enabled. `ctx`: the
+/// chart's entry context (`trade_bar::entry_ctx`).
+pub fn order_section(
+    at: Option<Price>,
+    option: bool,
+    no_market: bool,
+    trading_on: bool,
+    ctx: Result<crate::dom_trade::EntryCtx, &'static str>,
+    fmt: &PriceFormat,
+    qfmt: lines_core::QtyFormat,
+) -> Option<crate::pane_menu::ChartOrders> {
+    use crate::pane_menu::ChartOrders;
+    let note = |s: &str| Some(ChartOrders::Note(s.to_owned()));
+    let at = at?;
+    if option {
+        return None;
+    }
+    if no_market {
+        return note(NO_PRICE_ROW);
+    }
+    if !trading_on {
+        return note(TRADING_OFF_ROW);
+    }
+    let ctx = match ctx {
+        Ok(c) => c,
+        Err(why) if why == crate::trade_bar::FEED_STALE => return note(NO_PRICE_ROW),
+        Err(why) => return note(&crate::pane_menu::capitalized(why)),
+    };
+    let orders = match menu_orders(at, ctx.best_bid, ctx.best_ask, ctx.last) {
+        Some(v) if !v.is_empty() => v,
+        _ => return note(NO_PRICE_ROW),
+    };
+    let mut qty = String::new();
+    let _ = qfmt.write(ctx.qty, &mut qty);
+    let whole = qfmt.decimals == 0;
+    // The bracket goes on an order that opens or adds (as from the DOM): named in the header
+    // when flat (both rows get it), else on the row that would get it.
+    let flat = ctx.position == 0;
+    let rows = orders
+        .iter()
+        .map(|o| {
+            let mut label = menu_order_label(o, &qty, fmt);
+            if let Some(b) = ctx.bracket
+                && !flat
+                && crate::dom_trade::opens_or_adds(o.side, ctx.position)
+            {
+                let _ = write!(label, " · bracket {}/{}", b.stop_ticks, b.target_ticks);
+            }
+            (label, *o)
+        })
+        .collect();
+    Some(ChartOrders::Rows {
+        offer: Offer::of(&ctx),
+        header: menu_header(
+            at,
+            &qty,
+            whole,
+            ctx.qty.0 == 1,
+            ctx.bracket.filter(|_| flat),
+            fmt,
+        ),
+        rows,
+    })
+}
+
+/// The command for a menu order: the DOM's own click intent (a limit as a click in its bid or
+/// ask column, a stop as a Shift+click there, with its far-side check), with the chart's size
+/// and bracket. Sent like a strip order: only when a linked DOM has trading enabled.
+pub fn menu_command(
+    o: MenuOrder,
+    offered: Offer,
+    ctx: &crate::dom_trade::EntryCtx,
+) -> Result<TradeCommand, Refusal> {
+    use crate::dom_trade::{Arming, DomColumn, click};
+    // Its price belongs to the contract it was offered on (a linked pane can switch the chart
+    // while the menu is open): never sent on another.
+    if ctx.contract != offered.contract
+        || ctx.qty != offered.qty
+        || ctx.bracket != offered.bracket
+        || account_key(&ctx.account) != offered.account
+    {
+        return Err(Refusal(CHART_CHANGED));
+    }
+    // The market may have moved while the menu was open: an order that would now fill or
+    // trigger at once is refused, never sent.
+    if crosses(&o, ctx.best_bid, ctx.best_ask, ctx.last) {
+        return Err(Refusal(MARKET_MOVED));
+    }
+    let col = if o.side == Side::Buy {
+        DomColumn::Bid
+    } else {
+        DomColumn::Ask
+    };
+    click(col, o.price, o.stop, Arming::new(true), ctx)
+}
+
 /// Whether a press released `dx`, `dy` px from where it started was a click (a pick sends) or a
 /// drag (a pan: the pick stays armed), by the chart's click rule ([`DRAG_PX`]).
 pub fn is_click(dx: f32, dy: f32) -> bool {
@@ -790,6 +1037,401 @@ mod tests {
     use super::*;
     use lines_trading::OrderId;
     use lines_trading::order::Role;
+
+    fn p(x: f64) -> Price {
+        Price((x * 100.0).round() as i64)
+    }
+
+    fn es_contract() -> ContractKey {
+        ContractKey::monthly(
+            lines_feed::catalog::ES,
+            2026,
+            lines_core::Month::new(12).unwrap(),
+        )
+    }
+
+    /// Below the market: buy limit and sell stop; above: sell limit and buy stop; at the inside:
+    /// the two limits at the touch. None of them fills at once.
+    #[test]
+    fn a_right_click_offers_the_side_away_from_the_market() {
+        let (bid, ask) = (Some(p(6012.00)), Some(p(6012.25)));
+        let o = |side, stop, price| MenuOrder { side, stop, price };
+        assert_eq!(
+            menu_orders(p(6010.00), bid, ask, None),
+            Some(vec![
+                o(Side::Buy, false, p(6010.00)),
+                o(Side::Sell, true, p(6010.00))
+            ])
+        );
+        assert_eq!(
+            menu_orders(p(6014.00), bid, ask, None),
+            Some(vec![
+                o(Side::Sell, false, p(6014.00)),
+                o(Side::Buy, true, p(6014.00))
+            ])
+        );
+        let inside = Some(vec![
+            o(Side::Buy, false, p(6012.00)),
+            o(Side::Sell, false, p(6012.25)),
+        ]);
+        assert_eq!(
+            menu_orders(p(6012.00), bid, ask, None),
+            inside,
+            "at the bid"
+        );
+        assert_eq!(
+            menu_orders(p(6012.25), bid, ask, None),
+            inside,
+            "at the ask"
+        );
+        // No quote: the last trade stands in for both sides.
+        let last = Some(p(6012.00));
+        assert_eq!(
+            menu_orders(p(6011.75), None, None, last).map(|v| v[1].stop),
+            Some(true)
+        );
+        assert_eq!(
+            menu_orders(p(6012.00), None, None, last),
+            Some(vec![
+                o(Side::Buy, false, p(6012.00)),
+                o(Side::Sell, false, p(6012.00))
+            ])
+        );
+        assert_eq!(menu_orders(p(6012.00), None, None, None), None, "no price");
+        // One-sided: a bid of 6012.00, no ask, the last trade lower. A sell limit at the bid
+        // would fill: it is left out; the buy limit stays.
+        assert_eq!(
+            menu_orders(p(6012.00), Some(p(6012.00)), None, Some(p(6011.75))),
+            Some(vec![o(Side::Buy, false, p(6011.75))])
+        );
+        // Every offered row passes the same test as when it is chosen, at every price.
+        for at in [6011.50, 6011.75, 6012.00, 6012.25, 6012.50] {
+            for (b, a, l) in [
+                (bid, ask, None),
+                (Some(p(6012.00)), None, Some(p(6011.75))),
+                (None, Some(p(6012.25)), Some(p(6012.50))),
+                (Some(p(6012.25)), Some(p(6012.00)), None),
+            ] {
+                for m in menu_orders(p(at), b, a, l).unwrap_or_default() {
+                    assert!(!crosses(&m, b, a, l), "{at}: {m:?}");
+                }
+            }
+        }
+    }
+
+    /// Each offered order passes the DOM's own checks: a stop is always on the far side, so it
+    /// is never refused as one that would trigger at once.
+    #[test]
+    fn offered_orders_pass_the_doms_checks() {
+        let ctx = |bid, ask| crate::dom_trade::EntryCtx {
+            account: AccountId::new("paper"),
+            contract: es_contract(),
+            qty: Qty(2),
+            position: 0,
+            bracket: None,
+            tick: es().price.tick,
+            best_bid: Some(p(bid)),
+            best_ask: Some(p(ask)),
+            last: Some(p(bid)),
+        };
+        for at in [6000.00, 6011.75, 6012.00, 6012.25, 6012.50, 6030.00] {
+            let c = ctx(6012.00, 6012.25);
+            for o in menu_orders(p(at), c.best_bid, c.best_ask, c.last).unwrap() {
+                let cmd =
+                    menu_command(o, offer(&c), &c).unwrap_or_else(|e| panic!("{at}: {o:?}: {e:?}"));
+                let TradeCommand::PlaceOrder(spec) = cmd else {
+                    panic!("no bracket: a plain order")
+                };
+                assert_eq!((spec.side, spec.qty), (o.side, Qty(2)));
+                let want = if o.stop {
+                    OrderKind::Stop { trigger: o.price }
+                } else {
+                    OrderKind::Limit { price: o.price }
+                };
+                assert_eq!(spec.kind, want);
+            }
+        }
+    }
+
+    /// The size and bracket in the header and the rows are the chart's (the strip's).
+    #[test]
+    fn the_menu_names_size_and_bracket() {
+        let b = crate::dom_trade::BracketPreset {
+            stop_ticks: 2,
+            target_ticks: 4,
+        };
+        let f = es().price;
+        assert_eq!(
+            menu_header(p(6030.25), "2", true, false, Some(b), &f),
+            "At 6030.25 · 2 contracts · bracket 2/4"
+        );
+        assert_eq!(
+            menu_header(p(6030.25), "1", true, true, None, &f),
+            "At 6030.25 · 1 contract"
+        );
+        assert_eq!(
+            menu_header(p(6030.25), "0.5", false, false, None, &f),
+            "At 6030.25 · 0.5"
+        );
+        let o = MenuOrder {
+            side: Side::Sell,
+            stop: true,
+            price: p(6010.00),
+        };
+        assert_eq!(menu_order_label(&o, "2", &f), "▼ Sell stop 2 @ 6010.00");
+        // A bracket preset rides along as the DOM's would.
+        let mut c = crate::dom_trade::EntryCtx {
+            account: AccountId::new("paper"),
+            contract: es_contract(),
+            qty: Qty(2),
+            position: 0,
+            bracket: Some(b),
+            tick: f.tick,
+            best_bid: Some(p(6012.00)),
+            best_ask: Some(p(6012.25)),
+            last: None,
+        };
+        let buy = MenuOrder {
+            side: Side::Buy,
+            stop: false,
+            price: p(6010.00),
+        };
+        assert!(matches!(
+            menu_command(buy, offer(&c), &c),
+            Ok(TradeCommand::PlaceBracket(_))
+        ));
+        c.qty = Qty(0);
+        assert!(
+            menu_command(buy, offer(&c), &c).is_err(),
+            "no size: refused like the DOM"
+        );
+    }
+
+    fn menu_ctx(position: i64, bracket: bool) -> crate::dom_trade::EntryCtx {
+        crate::dom_trade::EntryCtx {
+            account: AccountId::new("paper"),
+            contract: es_contract(),
+            qty: Qty(2),
+            position,
+            bracket: bracket.then_some(crate::dom_trade::BracketPreset {
+                stop_ticks: 2,
+                target_ticks: 4,
+            }),
+            tick: 25,
+            best_bid: Some(p(6012.00)),
+            best_ask: Some(p(6012.25)),
+            last: Some(p(6012.00)),
+        }
+    }
+
+    /// The section's gating: none off the plot or on an option chart; one dim note with no
+    /// feed, trading off, a stale feed or no price; else the header and the rows.
+    #[test]
+    fn the_order_section_says_why_it_has_no_orders() {
+        use crate::pane_menu::ChartOrders;
+        let (f, q) = (es().price, es().qty);
+        let at = Some(p(6010.00));
+        let note = |s: &str| Some(ChartOrders::Note(s.to_owned()));
+        let sec = |at, option, no_market, on, c| order_section(at, option, no_market, on, c, &f, q);
+        assert_eq!(sec(None, false, false, true, Ok(menu_ctx(0, false))), None);
+        assert_eq!(
+            sec(at, true, false, true, Ok(menu_ctx(0, false))),
+            None,
+            "option chart"
+        );
+        assert_eq!(
+            sec(at, false, true, false, Ok(menu_ctx(0, false))),
+            note(NO_PRICE_ROW)
+        );
+        assert_eq!(
+            sec(at, false, false, false, Ok(menu_ctx(0, false))),
+            note(TRADING_OFF_ROW)
+        );
+        assert_eq!(
+            sec(at, false, false, true, Err(crate::trade_bar::FEED_STALE)),
+            note(NO_PRICE_ROW)
+        );
+        assert_eq!(
+            sec(at, false, false, true, Err("no account")),
+            note("No account")
+        );
+        let mut quiet = menu_ctx(0, false);
+        (quiet.best_bid, quiet.best_ask, quiet.last) = (None, None, None);
+        assert_eq!(sec(at, false, false, true, Ok(quiet)), note(NO_PRICE_ROW));
+        let Some(ChartOrders::Rows {
+            header,
+            rows,
+            offer: shown,
+        }) = sec(at, false, false, true, Ok(menu_ctx(0, true)))
+        else {
+            panic!("rows")
+        };
+        // The offer is what the rows show: the context's contract, size and bracket.
+        assert_eq!(shown, offer(&menu_ctx(0, true)));
+        assert_eq!(header, "At 6010.00 · 2 contracts · bracket 2/4");
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["▲ Buy limit 2 @ 6010.00", "▼ Sell stop 2 @ 6010.00"]
+        );
+    }
+
+    /// Not flat, the bracket rides only on the order that would add: named on that row, not in
+    /// the header (a closing order gets none, as from the DOM).
+    #[test]
+    fn the_bracket_is_named_where_it_goes() {
+        use crate::pane_menu::ChartOrders;
+        let (f, q) = (es().price, es().qty);
+        let Some(ChartOrders::Rows { header, rows, .. }) = order_section(
+            Some(p(6010.00)),
+            false,
+            false,
+            true,
+            Ok(menu_ctx(2, true)),
+            &f,
+            q,
+        ) else {
+            panic!("rows")
+        };
+        assert_eq!(header, "At 6010.00 · 2 contracts");
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            [
+                "▲ Buy limit 2 @ 6010.00 · bracket 2/4",
+                "▼ Sell stop 2 @ 6010.00"
+            ]
+        );
+    }
+
+    fn offer(c: &crate::dom_trade::EntryCtx) -> Offer {
+        Offer::of(c)
+    }
+
+    /// The size it was offered with, too: a size changed while the menu was open refuses it;
+    /// and the account must be the one it was offered on.
+    #[test]
+    fn a_menu_order_keeps_the_size_and_account_it_showed() {
+        let c = menu_ctx(0, false);
+        let o = MenuOrder {
+            side: Side::Buy,
+            stop: false,
+            price: p(6010.00),
+        };
+        let shown = Offer {
+            qty: Qty(3),
+            ..offer(&c)
+        };
+        assert_eq!(menu_command(o, shown, &c), Err(Refusal(CHART_CHANGED)));
+        // A bracket set since the menu opened (or one it named, gone): refused too.
+        let protected = Offer {
+            bracket: Some(crate::dom_trade::BracketPreset {
+                stop_ticks: 2,
+                target_ticks: 4,
+            }),
+            ..offer(&c)
+        };
+        assert_eq!(menu_command(o, protected, &c), Err(Refusal(CHART_CHANGED)));
+        let c2 = menu_ctx(0, true);
+        assert_eq!(menu_command(o, offer(&c), &c2), Err(Refusal(CHART_CHANGED)));
+        assert!(menu_command(o, offer(&c2), &c2).is_ok());
+        let (a, b) = (AccountId::new("paper"), AccountId::new("other"));
+        assert!(same_account(Some(&a), Some(&a)));
+        assert!(!same_account(Some(&a), Some(&b)));
+        assert!(!same_account(None, Some(&a)), "no offer open");
+        assert!(!same_account(None, None));
+    }
+
+    /// A row is sent only on the account it was offered on: the chart switched to another
+    /// account while the menu was open refuses it.
+    #[test]
+    fn a_menu_order_never_carries_to_another_account() {
+        let on_a = menu_ctx(0, false);
+        let o = MenuOrder {
+            side: Side::Buy,
+            stop: false,
+            price: p(6010.00),
+        };
+        let shown = Offer::of(&on_a);
+        assert!(menu_command(o, shown, &on_a).is_ok());
+        let on_b = crate::dom_trade::EntryCtx {
+            account: AccountId::new("other"),
+            ..menu_ctx(0, false)
+        };
+        assert_eq!(menu_command(o, shown, &on_b), Err(Refusal(CHART_CHANGED)));
+        assert_ne!(account_key(&on_a.account), account_key(&on_b.account));
+    }
+
+    /// A row is sent only on the contract it was offered on: a chart switched to another while
+    /// the menu was open refuses it.
+    #[test]
+    fn a_menu_order_never_carries_to_another_contract() {
+        let c = menu_ctx(0, false);
+        let o = MenuOrder {
+            side: Side::Buy,
+            stop: false,
+            price: p(6010.00),
+        };
+        assert!(menu_command(o, offer(&c), &c).is_ok());
+        let nq = ContractKey::monthly(
+            lines_feed::catalog::NQ,
+            2026,
+            lines_core::Month::new(12).unwrap(),
+        );
+        assert_eq!(
+            menu_command(
+                o,
+                Offer {
+                    contract: nq,
+                    ..offer(&c)
+                },
+                &c
+            ),
+            Err(Refusal(CHART_CHANGED))
+        );
+    }
+
+    /// Chosen after the market moved through it: a limit that would fill at once, or a stop
+    /// now on the near side, is refused, never sent.
+    #[test]
+    fn a_menu_order_the_market_moved_through_is_refused() {
+        let mut c = crate::dom_trade::EntryCtx {
+            account: AccountId::new("paper"),
+            contract: es_contract(),
+            qty: Qty(1),
+            position: 0,
+            bracket: None,
+            tick: 25,
+            best_bid: Some(p(6012.00)),
+            best_ask: Some(p(6012.25)),
+            last: Some(p(6012.00)),
+        };
+        let o = |side, stop, price| MenuOrder { side, stop, price };
+        let buy = o(Side::Buy, false, p(6010.00));
+        let stop = o(Side::Sell, true, p(6010.00));
+        assert!(
+            menu_command(buy, offer(&c), &c).is_ok() && menu_command(stop, offer(&c), &c).is_ok()
+        );
+        // The market fell through 6010.00.
+        c.best_bid = Some(p(6009.75));
+        c.best_ask = Some(p(6010.00));
+        assert_eq!(menu_command(buy, offer(&c), &c), Err(Refusal(MARKET_MOVED)));
+        assert_eq!(
+            menu_command(stop, offer(&c), &c),
+            Err(Refusal(MARKET_MOVED)),
+            "the stop is on the near side now"
+        );
+        let sell = o(Side::Sell, false, p(6009.75));
+        assert_eq!(
+            menu_command(sell, offer(&c), &c),
+            Err(Refusal(MARKET_MOVED))
+        );
+        // Last only: the inside's limits at the last trade still rest.
+        c.best_bid = None;
+        c.best_ask = None;
+        c.last = Some(p(6012.00));
+        assert!(menu_command(o(Side::Buy, false, p(6012.00)), offer(&c), &c).is_ok());
+        assert!(menu_command(o(Side::Sell, false, p(6012.00)), offer(&c), &c).is_ok());
+        assert!(menu_command(o(Side::Buy, false, p(6012.25)), offer(&c), &c).is_err());
+    }
 
     fn fmt() -> PriceFormat {
         es().price
