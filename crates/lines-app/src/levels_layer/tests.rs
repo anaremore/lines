@@ -1330,3 +1330,38 @@ fn a_parent_type_hidden_in_its_style_hides_its_children() {
     frame(&mut layer);
     assert!(placed(&layer, zone) && !placed(&layer, supply));
 }
+
+/// A legend row that doesn't fit the legend's width: a long title is cut with "…" at a whole
+/// character, within the room; stats that don't fit are dropped whole (never a number cut
+/// mid-glyph), leaving room for the closing "…"; a row that fits is left whole.
+#[test]
+fn a_long_legend_row_is_cut_whole() {
+    use super::fit_legend;
+    let mono = |t: &str| t.chars().count() as f32 * 7.0;
+    // Fits: whole.
+    let f = fit_legend(300.0, 70.0, Some("Map A"), &[50.0, 60.0], 12.0, mono);
+    assert_eq!(f.title.as_deref(), Some("Map A"));
+    assert_eq!((f.stats, f.more), (2, false));
+    // A title wider than its room: cut at a whole character, "…" last, within the room.
+    let long = "A very long legend title from a source";
+    let f = fit_legend(200.0, 70.0, Some(long), &[], 12.0, mono);
+    let t = f.title.unwrap();
+    assert!(t.ends_with('…') && mono(&t) <= 130.0, "{t}");
+    assert!(long.starts_with(t.trim_end_matches('…')), "{t}");
+    // Stats: as many whole as fit with the "…" after them.
+    let w = [80.0, 80.0, 80.0, 80.0];
+    let f = fit_legend(200.0, 70.0, None, &w, 12.0, mono);
+    assert_eq!((f.stats, f.more), (2, true));
+    assert!(80.0 * 2.0 + 12.0 + 12.0 + mono("…") <= 200.0);
+    // The last one fits without room for "…": all shown.
+    let f = fit_legend(80.0 * 2.0 + 12.0, 70.0, None, &w[..2], 12.0, mono);
+    assert_eq!((f.stats, f.more), (2, false));
+    // Not even one stat: none, and the "…".
+    let f = fit_legend(60.0, 70.0, None, &w, 12.0, mono);
+    assert_eq!((f.stats, f.more), (0, true));
+    // A title whose room can't hold even "…": no title.
+    assert_eq!(
+        fit_legend(70.0, 70.0, Some(long), &[], 12.0, mono).title,
+        None
+    );
+}
