@@ -545,6 +545,13 @@ fn commit(
                 },
             ));
         } else {
+            // Never saved for a broker account: nothing would enforce it.
+            let keys = [target.account_name.clone(), target.account.clone()];
+            crate::picker_view::update_settings(cx, |s| {
+                for k in keys.iter().flatten() {
+                    s.max_order_qty.remove(k);
+                }
+            });
             crate::workspace::notice(
                 "Largest order is for paper accounts: a broker account keeps the broker's limits"
                     .to_owned(),

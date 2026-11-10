@@ -972,7 +972,10 @@ impl TradingCore {
                     } else {
                         self.check_new(now, &added)?;
                     }
-                    if let Some(max) = self.accounts[&account].cfg.limits.max_order_qty
+                    // An exit grows only up to the position (checked above): the largest order
+                    // is an entry limit.
+                    if !o.reduce_only
+                        && let Some(max) = self.accounts[&account].cfg.limits.max_order_qty
                         && q.0 > max
                     {
                         return Err(Reject::new(
@@ -1670,7 +1673,7 @@ impl TradingCore {
                         ));
                     }
                     // A reducing order never adds exposure: the cap can't be crossed.
-                    return self.check_risk(now, spec, &cs);
+                    return self.check_risk(now, spec, &cs, false);
                 }
             }
             if let Some(max) = preset.max_micro_contracts {
@@ -1686,7 +1689,7 @@ impl TradingCore {
                 }
             }
         }
-        self.check_risk(now, spec, &cs)
+        self.check_risk(now, spec, &cs, false)
     }
 
     /// The checks for an exit added to the open position (`PlaceExit`, already on the closing
@@ -1756,7 +1759,7 @@ impl TradingCore {
         if self.triggers.exempt {
             return Ok(());
         }
-        self.check_risk(now, spec, &cs)
+        self.check_risk(now, spec, &cs, true)
     }
 
     /// The trader's guardrails (roadmap 8b) for a new order (or a quantity increase).
@@ -1900,11 +1903,15 @@ impl TradingCore {
 
     /// Pre-trade risk (decision 0006) for a new order. Counts it toward the submit rate when
     /// it passes.
+    /// `exit`: a reduce-only order closing the position (never larger than it): the largest
+    /// order (`max_order_qty`) doesn't apply, so a position bigger than it (built from orders
+    /// within it, or held when the limit was lowered) can always get its stop and target.
     fn check_risk(
         &mut self,
         now: UtcMillis,
         spec: &OrderSpec,
         cs: &ContractSpec,
+        exit: bool,
     ) -> Result<(), Reject> {
         let recent_submits = in_last_second(
             &mut self
@@ -1945,14 +1952,11 @@ impl TradingCore {
                 + self.accounts[&spec.account].guard.carried,
             recent_submits,
         };
-        risk::check(
-            &self.accounts[&spec.account].cfg.limits,
-            cs,
-            spec.side,
-            spec.qty,
-            &spec.kind,
-            &ctx,
-        )?;
+        let mut limits = self.accounts[&spec.account].cfg.limits.clone();
+        if exit {
+            limits.max_order_qty = None;
+        }
+        risk::check(&limits, cs, spec.side, spec.qty, &spec.kind, &ctx)?;
         if let Some(a) = self.accounts.get_mut(&spec.account) {
             a.submits.push_back(now);
         }

@@ -498,7 +498,7 @@ struct Cli {
     order_size: Option<u32>,
     /// Screenshot: the paper accounts' largest allowed order (risk limits): a larger size
     /// shows "max N".
-    #[arg(long, requires = "screenshot")]
+    #[arg(long, requires = "screenshot", value_parser = clap::value_parser!(i64).range(1..))]
     max_order_qty: Option<i64>,
     /// Screenshot: DOMs show bracket distances in ticks or points.
     #[arg(long, value_enum, requires = "screenshot")]

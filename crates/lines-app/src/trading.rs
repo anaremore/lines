@@ -1292,30 +1292,34 @@ impl Trading {
             );
             sent.push((id, name));
         }
-        // The largest order per account: `--max-order-qty` for every account this run, else
-        // the account's setting.
-        let wanted: Vec<(AccountId, i64)> = core
+        // The largest order per paper account: `--max-order-qty` for every account this run,
+        // else the account's setting; sent for every account, so the setting (none included)
+        // is what holds, never a value an earlier run left in the paper file.
+        let wanted: Vec<(AccountId, Option<i64>)> = core
             .accounts()
-            .filter_map(|(c, _)| {
-                wanted_max_order(
-                    setup.max_order_flag,
-                    &setup.max_order_qty,
-                    &c.name,
-                    c.id.0.as_str(),
+            .map(|(c, _)| {
+                (
+                    c.id.clone(),
+                    wanted_max_order(
+                        setup.max_order_flag,
+                        &setup.max_order_qty,
+                        &c.name,
+                        c.id.0.as_str(),
+                    ),
                 )
-                .map(|m| (c.id.clone(), m))
             })
             .collect();
         for (account, max) in wanted {
-            let name = format!("largest order for {account}");
+            let name = if setup.max_order_flag.is_some() {
+                format!("--max-order-qty for {account}")
+            } else {
+                format!("largest order for {account}")
+            };
             let id = core.submit(
                 at,
                 Source::Api,
                 Instant::now(),
-                TradeCommand::SetMaxOrderQty {
-                    account,
-                    max: Some(max),
-                },
+                TradeCommand::SetMaxOrderQty { account, max },
             );
             sent.push((id, name));
         }

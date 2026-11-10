@@ -516,8 +516,13 @@ impl Target {
     }
 }
 
-fn g_max_order(p: &Prefs, t: &Target, _: &Facts) -> Value {
-    Value::Number(t.max_order(p))
+fn g_max_order(p: &Prefs, t: &Target, f: &Facts) -> Value {
+    // Paper accounts only: a broker account shows none (the broker's limits are its own).
+    let broker = f
+        .accounts
+        .iter()
+        .any(|a| Some(&a.id) == t.account.as_ref() && !a.paper);
+    Value::Number(t.max_order(p).filter(|_| !broker))
 }
 
 fn s_max_order(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
@@ -1552,7 +1557,7 @@ fn table() -> Vec<Setting> {
             MAX_ORDER_KEY,
             Sec::Accounts,
             "Largest order",
-            "The most contracts one order (or a resize) may have on this paper account. The core refuses a larger one from every way in: DOM, chart, trade panel, keys, strategies. Empty: no limit.",
+            "The most contracts one new order (or a resize) may have on this paper account; the core refuses a larger one from every way in: DOM, chart, trade panel, keys, strategies. Exits that only close the position are never held to it. Empty: no limit. Paper accounts only.",
             Scope::Account,
             Trading,
             Number {

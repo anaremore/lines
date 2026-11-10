@@ -2583,3 +2583,49 @@ fn the_largest_order_setting_holds_on_every_way_in() {
     )));
     assert_eq!(set(&mut r, Some(0)).unwrap_err().code, RejectCode::Invalid);
 }
+
+/// The largest order is an entry limit: a position bigger than it (two orders within it, or a
+/// limit lowered after) still gets its stop for the whole position, and that exit may grow
+/// back to the position.
+#[test]
+fn the_largest_order_never_holds_back_an_exit() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 50)], &[(6000.25, 50)]);
+    r.trade(6000.00, 1);
+    r.cmd(Command::SetMaxOrderQty {
+        account: acct(),
+        max: Some(2),
+    })
+    .unwrap();
+    for _ in 0..2 {
+        r.place(Side::Buy, 2, OrderKind::Market);
+        r.wait(LAT);
+    }
+    let stop = r
+        .cmd(Command::PlaceExit(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Sell,
+            qty: Qty(4),
+            kind: OrderKind::Stop {
+                trigger: px(5990.00),
+            },
+        }))
+        .expect("a stop for the whole position of 4")[0];
+    r.wait(LAT);
+    // Shrunk and grown back to the position: still an exit, still allowed.
+    grow(&mut r, stop, 3).expect("shrink");
+    r.wait(LAT);
+    grow(&mut r, stop, 4).expect("back to the position");
+    // An entry over it is still refused.
+    let e = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(3),
+            kind: limit(5990.00),
+        }))
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Risk);
+}
