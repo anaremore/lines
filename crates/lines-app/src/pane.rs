@@ -315,6 +315,41 @@ pub fn link_chip(link: LinkGroup, theme: &Theme) -> Option<Div> {
     )
 }
 
+/// A market pane's link marker (chart, DOM, T&S, chain): its group, or, unlinked, a hollow
+/// swatch and "–" with a tooltip, so a pane that follows no other says so (a new tab with every
+/// group in use is unlinked, `layout::first_free_group`).
+pub fn market_link_chip(link: LinkGroup, theme: &Theme) -> gpui::AnyElement {
+    use gpui::IntoElement;
+    if let Some(chip) = link_chip(link, theme) {
+        return chip.into_any_element();
+    }
+    crate::tooltip::tip_div(
+        div().id("unlinked"),
+        "Unlinked: this pane follows no other",
+        None,
+        theme,
+    )
+    .flex()
+    .flex_row()
+    .items_center()
+    .gap_1()
+    .child(
+        div()
+            .w(crate::zoom::ui(8.0))
+            .h(crate::zoom::ui(8.0))
+            .rounded_sm()
+            .border_1()
+            .border_color(theme.text_dim),
+    )
+    .child(
+        div()
+            .text_color(theme.text_dim)
+            .font_weight(FontWeight::SEMIBOLD)
+            .child("–"),
+    )
+    .into_any_element()
+}
+
 /// The body of a pane whose target the source can't serve: the symbol and the reason, greyed,
 /// and (when `offer`) a one-click switch to the source's own symbol, also on Enter.
 pub fn unavailable_body<V: Pane>(

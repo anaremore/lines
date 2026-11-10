@@ -4280,7 +4280,7 @@ impl ChainView {
                         .flex_row()
                         .gap_2()
                         .items_center()
-                        .children(pane::link_chip(self.common.link, &t))
+                        .child(pane::market_link_chip(self.common.link, &t))
                         .child(div().flex_shrink_0().text_color(t.text_main).child(left))
                         .children(
                             word.map(|w| div().flex_shrink_0().text_color(t.text_main).child(w)),

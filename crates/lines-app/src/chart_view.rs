@@ -6568,7 +6568,7 @@ impl ChartView {
                 .border_color(t.axis_line)
                 .text_sm()
         };
-        let chip = pane::link_chip(self.common.link, &t);
+        let chip = Some(pane::market_link_chip(self.common.link, &t));
         if let Some(title) = pane::unavailable_title(&self.feed) {
             return bar().child(
                 pane::header_content().child(
@@ -6737,7 +6737,8 @@ impl ChartView {
         };
         let fit = pane::chart_header_fit(
             room,
-            self.common.link.is_some(),
+            // A market pane always shows its link marker (unlinked too).
+            true,
             &left,
             word,
             &pane::chip_text(self.timeframe, self.tick_continuous(), to_go),

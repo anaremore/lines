@@ -1457,7 +1457,7 @@ impl WindowView {
             Command::SetLink(l) => self.set_link(l, window.window_handle().window_id(), cx),
             Command::Preset(p) => self.apply_preset(p, window, cx),
             Command::NewTab => {
-                let tab = self.fresh_tab(cx);
+                let tab = self.fresh_tab(None, cx);
                 self.adopt(tab, cx);
                 let i = self.tabs.len() - 1;
                 self.activate_tab(i, window, cx);
@@ -1957,22 +1957,48 @@ impl WindowView {
         self.activate_tab(i, window, cx);
     }
 
-    /// A fresh trading tab on the focused pane's market, in its link group.
-    fn fresh_tab(&self, cx: &mut App) -> Tab {
-        let (target, link, source) =
-            match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
-                Some(h) => {
-                    let f = h.feed(cx);
-                    (f.target_doc, h.link(cx), f.source_doc)
-                }
-                None => (None, Some(0), None),
-            };
+    /// A fresh trading tab on the focused pane's market, in the first link group no other tab
+    /// uses. `replacing`: the tab it replaces (closing a window's last tab), not counted.
+    fn fresh_tab(&self, replacing: Option<usize>, cx: &mut App) -> Tab {
+        // The focused pane's market, in a link group of its own: the first no other tab of any
+        // window uses (`layout::first_free_group`), so a symbol change here never ripples into
+        // another tab; none (unlinked) when every group is taken.
+        let (target, source) = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
+            Some(h) => {
+                let f = h.feed(cx);
+                (f.target_doc, f.source_doc)
+            }
+            None => (None, None),
+        };
+        let link = crate::layout::free_group_for_new_tab(&self.groups_in_use(cx), replacing);
         let layout = trading_group(link, &mut |k, l| {
             let mut d = PaneDoc::new(k, l, target.clone());
             d.source = source.clone();
             d
         });
         Self::build_tab(&TabDoc::of(layout), cx)
+    }
+
+    /// Every link group a tab of any window uses (this window's tabs, then the others').
+    fn groups_in_use(&self, cx: &mut App) -> Vec<Vec<LinkGroup>> {
+        // This window's tabs first, by index (so `fresh_tab` can leave one out).
+        let mut tabs: Vec<Vec<PaneHandle>> = self
+            .tabs
+            .iter()
+            .map(|t| t.handles().cloned().collect())
+            .collect();
+        let me = self.window_id;
+        for w in cx.global::<Workspace>().windows.clone() {
+            if w.window_id() == me {
+                continue;
+            }
+            if let Ok(wv) = w.read(cx) {
+                tabs.extend(wv.tabs.iter().map(|t| t.handles().cloned().collect()));
+            }
+        }
+        tabs.iter()
+            .map(|hs| hs.iter().map(|h| h.link(cx)).collect())
+            .collect()
     }
 
     /// Reopen the most recently closed tab where it was (layout, panes and states as saved).
@@ -2175,7 +2201,7 @@ impl WindowView {
         match tabstate::close_tab(self.tabs.len(), windows, self.active, i) {
             tabstate::CloseTab::CloseWindow => window.remove_window(),
             tabstate::CloseTab::ReplaceWithFresh => {
-                let fresh = self.fresh_tab(cx);
+                let fresh = self.fresh_tab(Some(i), cx);
                 self.tabs.clear();
                 self.adopt(fresh, cx);
                 self.activate_tab(0, window, cx);
