@@ -50,6 +50,29 @@ pub enum LevelMode {
     NotRecorded,
 }
 
+impl LevelMode {
+    /// Live data (recorded or not): sources may ask their services what they serve. In a
+    /// replay they may not: what a replay shows must not depend on a service running now.
+    pub fn is_live(&self) -> bool {
+        matches!(self, LevelMode::Live | LevelMode::Record(_))
+    }
+
+    /// Replay with a batch file for `source` and `product` ([`replay_recorded`]).
+    pub fn recorded(&self, source: &str, product: &str) -> bool {
+        match self {
+            LevelMode::Replay(dir) => recording_path(dir, source, product).is_file(),
+            _ => false,
+        }
+    }
+}
+
+/// Whether this run's levels are live ([`LevelMode::is_live`]). A source whose
+/// `LevelSource::serves` depends on what its service lists answers from its baseline
+/// otherwise, and never asks the service.
+pub fn is_live() -> bool {
+    mode().read().is_live()
+}
+
 /// Why a source shows as missing in a replay that has no batches recorded for it.
 pub const NOT_RECORDED: &str = "not recorded for this replay";
 
@@ -236,6 +259,21 @@ impl LevelHandle {
     pub fn source(&self) -> &str {
         &self.entry.key.0
     }
+
+    /// The product and contract this handle's task serves.
+    pub fn market(&self) -> (ProductId, Option<ContractKey>) {
+        (self.entry.key.1, self.entry.key.2)
+    }
+}
+
+/// Whether this run replays recorded levels (`LevelMode::Replay`) and has a batch file for
+/// `source` and the chart's `product` (the [`recording_path`] the runtime would read, named
+/// by the chart's own symbol: an MES chart's is `-MES.lfr`). Sources whose `serves` depends
+/// on what a live service lists answer this in a replay, so a replay shows exactly what was
+/// recorded, with no service. A file check: fine from `serves` (when a chart attaches, and
+/// on the rare render after `serving_changed`), never per frame.
+pub fn replay_recorded(source: &str, product: &lines_core::Product) -> bool {
+    mode().read().recorded(source, product.symbol)
 }
 
 /// The `.lfr` path of a source's batches for a product in `dir`.
