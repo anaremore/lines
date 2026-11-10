@@ -211,6 +211,12 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             end,
             args("--layout chart --size 520x600 --theme dark --prompt palette"),
         ),
+        s(
+            "panel-studies-zoom-150",
+            false,
+            end,
+            args("--layout chart --size 1400x800 --theme dark --studies-menu open --ui-zoom 150"),
+        ),
         // Pop-out window, journal, footprint.
         s(
             "popout",
