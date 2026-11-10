@@ -60,8 +60,6 @@ pub enum IndicatorConfig {
         #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
         style: PartStyles,
     },
-    /// Traded volume per bar: summed from the chart's own bars (the same trades as the
-    /// candles), drawn in its own lower pane or along the plot's bottom. Needs no engine node.
     /// A level source's lower-pane line study (`ExternalSpec`).
     External {
         #[serde(flatten)]
@@ -72,6 +70,8 @@ pub enum IndicatorConfig {
         #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
         style: PartStyles,
     },
+    /// Traded volume per bar: summed from the chart's own bars (the same trades as the
+    /// candles), drawn in its own lower pane or along the plot's bottom. Needs no engine node.
     Volume {
         #[serde(flatten)]
         spec: VolumeSpec,

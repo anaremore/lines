@@ -57,6 +57,9 @@ struct Study {
     /// An external series study: its definition (from its source, `None` while the source
     /// isn't registered) and this frame's lines.
     ext_def: Option<&'static SeriesStudyDef>,
+    /// `levels::serving_generation()` when `ext_def` was last looked up (a missing source is
+    /// looked up again only when the registered sources change: never every frame).
+    ext_gen: u64,
     ext: ExtFrame,
     error: Option<String>,
     /// The band fill as drawn under the candles (`Theme::under_candles`) for (theme, fill as
@@ -184,6 +187,8 @@ pub enum LowerTitle {
         def: &'static SeriesStudyDef,
         values: [Option<f64>; crate::series_pane::MAX_LINES],
         status: ExtStatus,
+        /// Each line's look as styled (the title's samples and value colors follow it).
+        styles: [Option<lines_core::style::LineStyle>; crate::series_pane::MAX_LINES],
     },
 }
 
@@ -207,6 +212,7 @@ impl Studies {
                 .map(|config| Study {
                     looks: looks(&config),
                     ext_def: ext_def(&config),
+                    ext_gen: lines_feed::levels::serving_generation(),
                     config,
                     handle: None,
                     columns: Vec::new(),
@@ -293,8 +299,11 @@ impl Studies {
                 if display.hidden {
                     continue;
                 }
-                if s.ext_def.is_none() {
-                    // Registered after this chart was made (rare): look again.
+                let gen_now = lines_feed::levels::serving_generation();
+                if s.ext_def.is_none() && s.ext_gen != gen_now {
+                    // The registered sources changed (one registered after this chart was
+                    // made): look again, once per change.
+                    s.ext_gen = gen_now;
                     s.ext_def = ext_def(&s.config);
                     s.looks = looks(&s.config);
                 }
@@ -302,7 +311,7 @@ impl Studies {
                     s.ext.status = ExtStatus::Missing("source not available");
                     continue;
                 };
-                s.ext.reserve(def.lines.len(), max_columns * 2 + 64);
+                s.ext.reserve(def.lines.len(), max_columns * 4 + 64);
                 let axis = lines_core::drawings::TimeAxis::new(bars);
                 s.ext
                     .build(def, levels.source_view(&spec.source), &axis, vp);
@@ -578,10 +587,17 @@ impl Studies {
                 split: spec.split,
                 average: spec.average.then_some(spec.window() as u16),
             }),
-            IndicatorConfig::External { .. } => s.ext_def.map(|def| LowerTitle::Series {
-                def,
-                values: s.ext.values(def, hovered_time),
-                status: s.ext.status,
+            IndicatorConfig::External { .. } => s.ext_def.map(|def| {
+                let mut styles = [None; crate::series_pane::MAX_LINES];
+                for (i, l) in s.looks.iter().enumerate().take(styles.len()) {
+                    styles[i] = Some(l.line());
+                }
+                LowerTitle::Series {
+                    def,
+                    values: s.ext.values(def, hovered_time),
+                    status: s.ext.status,
+                    styles,
+                }
             }),
             IndicatorConfig::Vwap { .. } => None,
         }
@@ -641,23 +657,28 @@ impl Studies {
 
     /// Lower pane `k`'s range labels on its axis (top, bottom): the visible range's ends for
     /// cumulative delta; the tallest visible bar for Volume (zero is its bottom edge).
-    pub fn lower_marks(&self, k: usize, sc: &Scale) -> [Option<f64>; 2] {
+    /// (A study with a zero line also marks 0, so the dashed line is named.)
+    pub fn lower_marks(&self, k: usize, sc: &Scale) -> [Option<f64>; 3] {
         match self.lower().nth(k) {
             Some(s) if matches!(s.config, IndicatorConfig::Volume { .. }) => [
                 Some(round_down(s.vol.max))
                     .filter(|v| *v > 0)
                     .map(|v| v as f64),
                 None,
+                None,
             ],
-            Some(s) if matches!(s.config, IndicatorConfig::External { .. }) => s
-                .ext
-                .lo_hi
-                .map_or([None, None], |(lo, hi)| [Some(hi), Some(lo)]),
+            Some(s) if matches!(s.config, IndicatorConfig::External { .. }) => {
+                let zero = s.ext_def.is_some_and(|d| d.zero_line) && sc.contains(0.0);
+                s.ext.lo_hi.map_or([None, None, None], |(lo, hi)| {
+                    [Some(hi), Some(lo), zero.then_some(0.0)]
+                })
+            }
             Some(_) => [
                 Some((sc.hi - (sc.hi - sc.lo) * 0.08).round()),
                 Some((sc.lo + (sc.hi - sc.lo) * 0.08).round()),
+                None,
             ],
-            None => [None, None],
+            None => [None, None, None],
         }
     }
 
@@ -1360,6 +1381,7 @@ mod tests {
             def,
             values,
             status,
+            ..
         }) = st.lower_title(1, None, None)
         else {
             panic!("a series title")
@@ -1437,7 +1459,7 @@ mod tests {
         assert_eq!(st.lower_last(0), Some(69.0));
         let sc = st.lower_scale(0, 100.0, 0.0).unwrap();
         assert_eq!(sc.y(0.0), 100.0, "zero on the bottom edge");
-        assert_eq!(st.lower_marks(0, &sc), [Some(69.0), None]);
+        assert_eq!(st.lower_marks(0, &sc), [Some(69.0), None, None]);
         // Below the title box: the tallest bar's top clears it.
         let sc = st.lower_scale(0, 100.0, 30.0).unwrap();
         assert!(sc.y(69.0) >= 30.0, "{}", sc.y(69.0));

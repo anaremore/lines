@@ -1052,6 +1052,8 @@ mod tests {
             ("study_style.rs", include_str!("study_style.rs")),
             ("study_menu_view.rs", include_str!("study_menu_view.rs")),
             ("footprint.rs", include_str!("footprint.rs")),
+            ("series_pane.rs", include_str!("series_pane.rs")),
+            ("recording.rs", include_str!("recording.rs")),
         ] {
             for needle in ["rgb(", "rgba(", "hsla(", "Hsla {"] {
                 assert!(

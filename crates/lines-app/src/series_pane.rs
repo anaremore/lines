@@ -52,6 +52,8 @@ pub struct ExtFrame {
     pub lo_hi: Option<(f64, f64)>,
     pub map: Option<Arc<LevelMap>>,
     pub status: ExtStatus,
+    /// The source's clock at the last build: values and freshness are read at it.
+    pub now: UtcMillis,
 }
 
 impl Default for ExtFrame {
@@ -61,6 +63,7 @@ impl Default for ExtFrame {
             lo_hi: None,
             map: None,
             status: ExtStatus::Missing("waiting for data"),
+            now: UtcMillis(i64::MIN),
         }
     }
 }
@@ -100,6 +103,7 @@ impl ExtFrame {
         }
         self.lo_hi = None;
         let Some((map, level_status, now)) = view else {
+            self.now = UtcMillis(i64::MIN);
             self.map = None;
             self.status = ExtStatus::Missing("source not on this chart");
             return;
@@ -112,6 +116,7 @@ impl ExtFrame {
         if self.map.as_ref().is_none_or(|m| !Arc::ptr_eq(m, map)) {
             self.map = Some(map.clone());
         }
+        self.now = now;
         // The visible time window, a bar either side.
         let left = vp.x_to_index(0.0).floor() as i64 - 1;
         let right = vp.x_to_index(vp.width).ceil() as i64 + 1;
@@ -127,17 +132,26 @@ impl ExtFrame {
             let Some(s) = find(map, line.key) else {
                 continue;
             };
+            // Its newest report, never past the source's clock (a synthetic source's day runs
+            // ahead of a replay's).
             if let Some(last) = s.segments.last() {
-                newest = Some(newest.map_or(last.1, |n| n.max(last.1)));
+                let n = last.1.min(now);
+                newest = Some(newest.map_or(n, |m| m.max(n)));
             }
             let pts = &mut self.lines[i].pts;
+            // Two points per half pixel at most (the first and the latest), so a dense series
+            // on a long timeframe fits the buffer whole; the scale sees every value.
             let mut push = |xv: Option<f32>, v: f64, brk: bool| {
-                if let Some(xv) = xv
-                    && pts.len() < pts.capacity()
-                {
+                let Some(xv) = xv else { return };
+                lo = lo.min(v);
+                hi = hi.max(v);
+                let n = pts.len();
+                if !brk && n >= 2 && !pts[n - 1].2 && (xv - pts[n - 2].0).abs() < 0.5 {
+                    pts[n - 1] = (xv, v, false);
+                    return;
+                }
+                if n < pts.capacity() {
                     pts.push((xv, v, brk));
-                    lo = lo.min(v);
-                    hi = hi.max(v);
                 }
             };
             let first = s.segments.partition_point(|g| g.1 < t0);
@@ -177,12 +191,13 @@ impl ExtFrame {
         self.status = match (newest, level_status) {
             (None, _) => ExtStatus::Missing("no data"),
             (_, LevelStatus::Stale { .. }) => ExtStatus::Stale,
-            (Some(n), _) if now.0 - n.0 > stale_ms => ExtStatus::Stale,
+            (Some(n), _) if now.0.saturating_sub(n.0) > stale_ms => ExtStatus::Stale,
             _ => ExtStatus::Live,
         };
     }
 
-    /// Each line's value at `t` (the crosshair's time), else its newest value.
+    /// Each line's value at `t` (the crosshair's time), else its value now (on the source's
+    /// clock) while live.
     pub fn values(&self, def: &SeriesStudyDef, t: Option<UtcMillis>) -> [Option<f64>; MAX_LINES] {
         let mut out = [None; MAX_LINES];
         let Some(map) = &self.map else {
@@ -194,11 +209,8 @@ impl ExtFrame {
             };
             out[i] = match t {
                 Some(t) => s.value_at(t),
-                None => s
-                    .points
-                    .last()
-                    .filter(|_| self.status == ExtStatus::Live)
-                    .map(|p| p.1),
+                None if self.status == ExtStatus::Live => s.value_at(self.now),
+                None => None,
             };
         }
         out
@@ -270,6 +282,12 @@ pub fn paint(
         let st = look.line();
         let base = theme.series[series_index(line.color)];
         let color = theme.part_color(st.color, base, st.opacity);
+        // Stale is a state: the lines fade, so their end never reads as live.
+        let color = if frame.status == ExtStatus::Stale {
+            color.opacity(color.a * 0.5)
+        } else {
+            color
+        };
         let w = study_style::vwap_px(st.width);
         let d = crate::theme::drawing_dash(st.line, w);
         let seg: [gpui::Pixels; 4] = d.seg.map(px);
@@ -456,6 +474,51 @@ mod tests {
         assert!(f.lines[0].pts.is_empty() && f.lo_hi.is_none());
         f.build(&DEF, None, &axis, &vp());
         assert_eq!(f.status, ExtStatus::Missing("source not on this chart"));
+    }
+
+    /// A once-a-minute series on hourly bars: the whole visible span is drawn (decimated to
+    /// the pixel), never cut where a buffer filled; values and freshness are read at the
+    /// source's clock, never from points after it.
+    #[test]
+    fn dense_series_fit_and_nothing_reads_past_the_clock() {
+        let hourly: Vec<Bar> = (0..60)
+            .map(|i| Bar {
+                time: UtcMillis(i * 3_600_000),
+                ..bars()[0]
+            })
+            .collect();
+        let view = BarsView::fixed(&hourly, 3_600_000);
+        let axis = TimeAxis::new(view);
+        let minutes: Vec<(i64, f64)> = (0..60 * 60).map(|m| (m, (m % 7) as f64)).collect();
+        let m = map(&minutes, &[(0, 60 * 60 - 1)]);
+        let mut f = ExtFrame::default();
+        let mut v = vp();
+        v.bar_px = 10.0;
+        f.reserve(1, 600 * 4 + 64);
+        f.build(
+            &DEF,
+            Some((Some(&m), LevelStatus::Current, t(3600))),
+            &axis,
+            &v,
+        );
+        let pts = &f.lines[0].pts;
+        let last_x = pts.last().unwrap().0;
+        let end_x = axis.x_of(&v, t(3599)).unwrap();
+        assert!(
+            (last_x - end_x).abs() < 1.0,
+            "drawn to the end: {last_x} vs {end_x}"
+        );
+        assert!(pts.len() < 600 * 4, "decimated: {}", pts.len());
+        assert_eq!(f.lo_hi, Some((0.0, 6.0)), "every value scales");
+        // The clock at minute 100: the newest value is minute 100's, and the line ends there.
+        f.build(
+            &DEF,
+            Some((Some(&m), LevelStatus::Current, t(100))),
+            &axis,
+            &v,
+        );
+        assert_eq!(f.values(&DEF, None)[0], Some((100 % 7) as f64));
+        assert_eq!(f.status, ExtStatus::Live);
     }
 
     #[test]

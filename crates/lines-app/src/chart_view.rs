@@ -4647,9 +4647,10 @@ impl ChartView {
             def,
             values,
             status,
+            styles,
         }) = title
         {
-            self.draw_series_title(s, def, &values, status, (ox, oy), window, cx);
+            self.draw_series_title(k, s, def, &values, status, &styles, (ox, oy), window, cx);
         }
         if let Some(crate::studies::LowerTitle::Volume {
             bar,
@@ -4836,29 +4837,41 @@ impl ChartView {
     }
 
     /// An external series study's title at its pane's top-left, on the legend box: its name,
-    /// each line's label and value at the crosshair (else the newest) in its line's color where
-    /// that is AA on the box (else the theme's text), and STALE or why there is nothing.
-    /// Parts that don't fit are left out whole.
+    /// then per line a short sample in its line type and color (the key to which line is
+    /// which, never color alone) and its label and value at the crosshair (else now), in the
+    /// line's color where that is AA on the box (else the theme's text); STALE or why there is
+    /// nothing. Parts that don't fit are left out whole.
     #[allow(clippy::too_many_arguments)]
     fn draw_series_title(
         &mut self,
+        k: usize,
         s: crate::subpane::Split,
         def: &'static lines_feed::levels::SeriesStudyDef,
         values: &[Option<f64>; crate::series_pane::MAX_LINES],
         status: crate::series_pane::ExtStatus,
+        styles: &[Option<lines_core::style::LineStyle>; crate::series_pane::MAX_LINES],
         (ox, oy): (f32, f32),
         window: &mut Window,
         cx: &mut App,
     ) {
         use crate::series_pane::ExtStatus;
+        use lines_core::style::LineType;
         let t = self.theme;
-        // Keys: the study's name (by its address), each line's part by line and value.
+        // Label keys: the pane, then the line, then the value in hundredths, in separate bits
+        // (a study's text never meets another's in the cache).
+        let pane = (k as i64 & 0xff) << 52;
         let study = def as *const _ as usize as i64;
         let pw = f32::from(self.plot.size.width);
         let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
         let gap = 12.0;
+        const SAMPLE: f32 = 14.0;
         let room = pw - bx - 16.0 - CLOSE_BOX;
-        // (kind, key, color, width) of each part, in order; at most a name, 8 lines, a state.
+        // Each line's drawn color (as styled; its theme role by default).
+        let color_of = |i: usize| {
+            let base = t.series[crate::series_pane::series_index(def.lines[i].color)];
+            styles[i].map_or(base, |st| t.part_color(st.color, base, 100))
+        };
+        // (kind, key, text color, width incl. sample) of each part: a name, lines, a state.
         let mut parts: [(LabelKind, i64, Hsla, f32); 10] =
             [(LabelKind::SeriesName, 0, t.text_main, 0.0); 10];
         let mut n = 0;
@@ -4877,38 +4890,33 @@ impl ChartView {
                 crate::series_pane::write_value(v, b);
             }
         };
-        for (i, line) in def
-            .lines
-            .iter()
-            .enumerate()
-            .take(crate::series_pane::MAX_LINES)
-        {
-            let Some(v) = values[i] else { continue };
-            let base = t.series[crate::series_pane::series_index(line.color)];
-            let color = t.legend_text(base);
-            let key = study
-                .wrapping_mul(31)
-                .wrapping_add((v * 100.0).round() as i64);
+        let lines = def.lines.len().min(crate::series_pane::MAX_LINES);
+        for (i, v) in values.iter().enumerate().take(lines) {
+            let Some(v) = *v else { continue };
+            let text = t.legend_text(color_of(i));
+            let key = pane | ((i as i64) << 44) | (((v * 100.0).round() as i64) & 0xfff_ffff_ffff);
             let w = f32::from(
                 self.label(
                     LabelKind::SeriesValue(i as u8),
                     key,
-                    color,
+                    text,
                     window,
                     line_text(i, v),
                 )
                 .width,
             );
-            parts[n] = (LabelKind::SeriesValue(i as u8), key, color, w);
+            parts[n] = (LabelKind::SeriesValue(i as u8), key, text, SAMPLE + 4.0 + w);
             n += 1;
         }
         let state = match status {
             ExtStatus::Live => None,
-            ExtStatus::Stale => Some(("STALE", 1)),
-            ExtStatus::Missing(why) => Some((why, 2)),
+            ExtStatus::Stale => Some(("STALE", true)),
+            ExtStatus::Missing(why) => Some((why, false)),
         };
-        if let Some((text, key)) = state {
-            let c = if key == 1 { t.on_warn } else { t.text_dim };
+        if let Some((text, stale)) = state {
+            let c = if stale { t.on_warn } else { t.text_dim };
+            // Each reason its own key (statics: their addresses differ).
+            let key = text.as_ptr() as usize as i64;
             let w = f32::from(
                 self.label(LabelKind::SeriesState, key, c, window, move |b| {
                     let _ = b.write_str(text);
@@ -4937,31 +4945,70 @@ impl ChartView {
         window.paint_quad(fill(rect(bx, by, used + 16.0, bh), t.label_bg));
         let line_h = px(label_px() * 1.3);
         let ty = oy + by + bh * 0.5 - label_px() * 0.65;
+        let mid = by + bh * 0.5;
+        let hair = 1.0 / window.scale_factor();
         let mut x = bx + 8.0;
-        for (i, &(kind, key, c, w)) in parts[..shown].iter().enumerate() {
-            if kind == LabelKind::SeriesState && key == 1 {
-                // STALE on the warn token: a state, said in words and on its own chip.
-                window.paint_quad(fill(rect(x - 3.0, by + 2.0, w + 6.0, bh - 4.0), t.warn));
-            }
-            let at = point(px(ox + x), px(ty));
+        for (pi, &(kind, key, c, w)) in parts[..shown].iter().enumerate() {
             match kind {
                 LabelKind::SeriesName => {
-                    self.paint_label(kind, key, at, line_h, c, window, cx, name);
+                    self.paint_label(
+                        kind,
+                        key,
+                        point(px(ox + x), px(ty)),
+                        line_h,
+                        c,
+                        window,
+                        cx,
+                        name,
+                    );
                 }
                 LabelKind::SeriesValue(li) => {
                     let li = usize::from(li);
+                    // The sample: the line's own type, in its color.
+                    let lc = color_of(li);
+                    let th = (2.0 * hair).max(1.0);
+                    let lt = styles[li].map_or(def.lines[li].line, |st| st.line);
+                    match lt {
+                        LineType::Solid => {
+                            window.paint_quad(fill(rect(x, mid - th * 0.5, SAMPLE, th), lc));
+                        }
+                        LineType::Dashed => {
+                            for d in [0.0, 5.5, 11.0] {
+                                window.paint_quad(fill(rect(x + d, mid - th * 0.5, 3.0, th), lc));
+                            }
+                        }
+                        _ => {
+                            for d in [0.0, 4.0, 8.0, 12.0] {
+                                window.paint_quad(fill(rect(x + d, mid - 1.0, 2.0, 2.0), lc));
+                            }
+                        }
+                    }
                     if let Some(v) = values[li] {
+                        let at = point(px(ox + x + SAMPLE + 4.0), px(ty));
                         self.paint_label(kind, key, at, line_h, c, window, cx, line_text(li, v));
                     }
                 }
                 _ => {
+                    if state.is_some_and(|s| s.1) {
+                        // STALE on the warn token: a state, said in words, on its own chip.
+                        window.paint_quad(fill(rect(x - 3.0, by + 2.0, w + 6.0, bh - 4.0), t.warn));
+                    }
                     let text = state.map_or("", |s| s.0);
-                    self.paint_label(kind, key, at, line_h, c, window, cx, move |b| {
-                        let _ = b.write_str(text);
-                    });
+                    self.paint_label(
+                        kind,
+                        key,
+                        point(px(ox + x), px(ty)),
+                        line_h,
+                        c,
+                        window,
+                        cx,
+                        move |b| {
+                            let _ = b.write_str(text);
+                        },
+                    );
                 }
             }
-            x += w + if i + 1 < shown { gap } else { 0.0 };
+            x += w + if pi + 1 < shown { gap } else { 0.0 };
         }
     }
 
@@ -5025,7 +5072,7 @@ impl ChartView {
         let pw = f32::from(self.plot.size.width);
         let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
         let gap = 12.0;
-        let room = pw - bx - 16.0;
+        let room = pw - bx - 16.0 - CLOSE_BOX;
         // Widths first (shaping caches them), then the box, then the text.
         let mut widths = [0.0f32; 6];
         let mut used = 0.0;
