@@ -149,6 +149,8 @@ pub struct Workspace {
     /// trigger watch: armed DOMs, accounts and feeds change in other windows and tabs.
     safety: crate::footer::Safety,
     activity: Option<crate::footer::Activity>,
+    /// Each feed's last word, kept for a store busy at the next look (`footer::gather`).
+    feed_words: crate::footer::FeedWords,
     pub windows: Vec<WindowHandle<WindowView>>,
     /// Windows holding one detached pane each (the pane stays in its tab's layout).
     pub pane_windows: Vec<WindowHandle<PaneWindow>>,
@@ -191,6 +193,7 @@ impl Workspace {
             hidden_links: Vec::new(),
             safety: Default::default(),
             activity: None,
+            feed_words: Vec::new(),
             windows: Vec::new(),
             pane_windows: Vec::new(),
             closed_tabs: tabstate::ClosedTabs::new(CLOSED_TABS),
@@ -788,7 +791,6 @@ pub struct WindowView {
     hover_tab: Option<usize>,
     /// Recording (`crate::recording`), as of this render: the footer keeps REC and its Stop
     /// in view.
-    rec_shown: bool,
     /// A one-second re-render is scheduled (the REC time).
     rec_tick: bool,
     /// Rows the footer took last frame (1 unless an extreme width wrapped its safety zone).
@@ -840,7 +842,6 @@ impl WindowView {
             hover_pinned: false,
             shot_menu: None,
             hover_tab: None,
-            rec_shown: false,
             rec_tick: false,
             footer_rows: 1,
             menu: None,
@@ -3143,7 +3144,8 @@ impl WindowView {
             .flex_row()
             .items_center()
             .when(wrapped, |d| d.flex_1().flex_wrap())
-            .gap(crate::zoom::ui(footer::GAP));
+            .gap_x(crate::zoom::ui(footer::GAP))
+            .gap_y(px(0.0));
         for item in &items {
             let words = if fit.short_safety {
                 item.short.clone()
@@ -3226,10 +3228,11 @@ impl WindowView {
                     ),
                 SafetyKind::Notice => {
                     let had_reports = reports.is_some();
+                    let acts = had_reports || update_cmd.is_some();
                     item_box("footer-notice", &item.tip)
                         .bg(t.warn)
                         .text_color(t.on_warn)
-                        .cursor_pointer()
+                        .when(acts, |d| d.cursor_pointer())
                         .child(words)
                         .on_mouse_down(
                             MouseButton::Left,
@@ -3277,6 +3280,9 @@ impl WindowView {
                 div()
                     .id(("footer-link", i))
                     .flex_none()
+                    .min_h(crate::zoom::ui(20.0))
+                    .flex()
+                    .items_center()
                     .px_1()
                     .text_color(if kind == LinkKind::Layout {
                         t.text_main
@@ -3313,6 +3319,11 @@ impl WindowView {
             right = right.child(
                 crate::tooltip::tip_div(div().id("footer-more"), "More", None, &t)
                     .flex_none()
+                    .min_w(crate::zoom::ui(20.0))
+                    .min_h(crate::zoom::ui(20.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .px_1()
                     .text_color(t.text_main)
                     .cursor_pointer()
@@ -3974,12 +3985,11 @@ impl Render for WindowView {
         // The UI zoom (`crate::zoom`): every rem-based size in the window follows it.
         window.set_rem_size(crate::zoom::rem());
         self.screen = screen_rect(window);
-        // Before the layout below reads `footer_shown`.
-        let (rec, failed) = match crate::recording::fixture() {
+        // Recording's upkeep (the footer's REC item reads its status itself).
+        let (_, failed) = match crate::recording::fixture() {
             Some((st, _)) => (st, None),
             None => crate::recording::upkeep(&Feeds::registry(cx).stores()),
         };
-        self.rec_shown = rec.active();
         if let Some(e) = failed {
             // Shown where it was started from: a start that couldn't write is never silent.
             notice(format!("Recording didn't start: {e}"), cx);
@@ -4826,6 +4836,20 @@ fn autosave_write(doc: &WorkspaceDoc, cx: &mut App) {
 
 /// Look again at what's wrong with a trigger. Busy this instant: next time.
 pub(crate) fn refresh_trigger_status(cx: &mut App) {
+    // The footer's feeds and background work first: an unrelated busy lock never skips them.
+    let prev = cx.global::<Workspace>().feed_words.clone();
+    let (safety, activity, words) = crate::footer::gather(cx, &prev);
+    {
+        let ws = cx.global_mut::<Workspace>();
+        ws.feed_words = words;
+        if ws.safety != safety || ws.activity != activity {
+            ws.safety = safety;
+            ws.activity = activity;
+            for w in ws.windows.clone() {
+                let _ = w.update(cx, |_, _, cx| cx.notify());
+            }
+        }
+    }
     let Some(trading) = crate::trading::Trading::try_global(cx) else {
         return;
     };
@@ -4863,22 +4887,13 @@ pub(crate) fn refresh_trigger_status(cx: &mut App) {
     let mode = crate::picker_view::settings(cx).updates;
     crate::update::set_mode(mode, cx);
     let update = crate::update::status_label(cx);
-    let prev = cx.global::<Workspace>().safety.clone();
-    let (safety, activity) = crate::footer::gather(cx, &prev);
     let ws = cx.global_mut::<Workspace>();
     // Busy this instant: last time's count stands.
     let open = open.or(ws.open_positions);
-    if ws.trigger_status != status
-        || ws.open_positions != open
-        || ws.update_label != update
-        || ws.safety != safety
-        || ws.activity != activity
-    {
+    if ws.trigger_status != status || ws.open_positions != open || ws.update_label != update {
         ws.trigger_status = status;
         ws.open_positions = open;
         ws.update_label = update;
-        ws.safety = safety;
-        ws.activity = activity;
         for w in ws.windows.clone() {
             let _ = w.update(cx, |_, _, cx| cx.notify());
         }

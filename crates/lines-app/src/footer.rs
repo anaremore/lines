@@ -395,9 +395,6 @@ pub fn feed_word(stale: bool, status: &lines_feed::store::FeedStatus) -> Option<
     crate::pane::status_word(status).filter(|w| *w != "ended")
 }
 
-/// Gather the safety zone's accounts, armed DOMs and feeds (every window and tab, hidden
-/// panes included), and the activity line's background work. The rest (recording, restart,
-/// notices) comes from the workspace.
 /// The armed DOM count and the account word, from every DOM's switch (`dom_switches`). The
 /// word is the most real account among the armed DOMs, so an idle LIVE DOM beside an armed
 /// paper one never reads as live trading; with none armed, the most real of all.
@@ -425,39 +422,41 @@ pub(crate) fn accounts(
     (armed, account)
 }
 
+/// Each feed's last word (`ChartStore::feed_id`, then its label and word, `None` when live).
+pub type FeedWords = Vec<(u64, Option<(String, &'static str)>)>;
+
 /// Gather the safety zone's accounts, armed DOMs and feeds (every window and tab, hidden
 /// panes included), and the activity line's background work. Never waits on a feed: a store
-/// busy this instant keeps the words `prev` had (the UI never blocks on a feed). The rest
-/// (recording, restart, notices) comes from the workspace.
-pub(crate) fn gather(cx: &gpui::App, prev: &Safety) -> (Safety, Option<Activity>) {
+/// busy this instant keeps its own last word from `prev` (the UI never blocks on a feed).
+/// The rest (recording, restart, notices) comes from the workspace.
+pub(crate) fn gather(cx: &gpui::App, prev: &FeedWords) -> (Safety, Option<Activity>, FeedWords) {
     let mut safety = Safety::default();
     let doms = crate::workspace::dom_switches(cx, None);
     (safety.armed, safety.account) = accounts(&doms, cx);
-    let mut busy = false;
+    let mut words: FeedWords = Vec::new();
     for store in crate::feeds::Feeds::registry(cx).stores() {
+        let id = store.feed_id();
         let stale = store.stale_for().is_some();
-        let Some(d) = store.try_read() else {
-            busy = true;
-            continue;
-        };
-        let label = d
-            .contract_label()
-            .map(|l| l.as_str().to_owned())
-            .unwrap_or_else(|| d.product.symbol.to_owned());
-        let word = feed_word(stale, &d.status);
-        drop(d);
-        if let Some(word) = word
-            && !safety.feeds.iter().any(|(l, _)| *l == label)
-        {
-            safety.feeds.push((label, word));
-        }
-    }
-    if busy {
-        for f in &prev.feeds {
-            if !safety.feeds.iter().any(|(l, _)| *l == f.0) {
-                safety.feeds.push(f.clone());
+        let word = match store.try_read() {
+            Some(d) => {
+                let label = d
+                    .contract_label()
+                    .map(|l| l.as_str().to_owned())
+                    .unwrap_or_else(|| d.product.symbol.to_owned());
+                feed_word(stale, &d.status).map(|w| (label, w))
             }
+            // Busy this instant: its last word stands (none if never seen).
+            None => prev
+                .iter()
+                .find(|(p, _)| *p == id)
+                .and_then(|(_, w)| w.clone()),
+        };
+        if let Some((label, w)) = &word
+            && !safety.feeds.iter().any(|(l, _)| l == label)
+        {
+            safety.feeds.push((label.clone(), *w));
         }
+        words.push((id, word));
     }
     safety.feeds.sort();
     // Background work: a day download, then a data-folder copy.
@@ -479,7 +478,7 @@ pub(crate) fn gather(cx: &gpui::App, prev: &Safety) -> (Safety, Option<Activity>
             _ => None,
         },
     };
-    (safety, activity)
+    (safety, activity, words)
 }
 
 #[cfg(test)]
