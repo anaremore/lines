@@ -887,6 +887,28 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     let mut e = styled("style-editor-focus-light", "light", "");
     e.args.extend(["--style-editor".into(), "3:0:1".into()]);
     v.push(e);
+    // The color picker: a navy that fails on dark (its warnings live), with recent colors; on
+    // light colorblind at 150 % UI zoom; and the eyedropper over a candle.
+    let picker = |name, theme: &str, extra: &str, more: &[&str]| {
+        let mut e = styled(name, theme, extra);
+        e.args.extend(
+            [
+                "--style-editor",
+                "3",
+                "--color-picker",
+                "1d2a6b",
+                "--recent-colors",
+                "f2e05a,ff9f1a,5ac8fa",
+            ]
+            .iter()
+            .chain(more)
+            .map(|a| (*a).to_owned()),
+        );
+        e
+    };
+    v.push(picker("color-picker-dark", "dark", "", &[]));
+    v.push(picker("color-picker-light-cb-zoom", "light", " --palette cb", &["--ui-zoom", "150"]));
+    v.push(picker("color-picker-dropper-dark", "dark", "", &["--dropper", "706,600"]));
     // The editor kept inside the plot: a line near the bottom edge (warnings and all), a
     // narrow short pane, and a chart tiled above a DOM.
     let edge = |name, size: &str, theme: &str, id: &str| {

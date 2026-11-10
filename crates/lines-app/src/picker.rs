@@ -211,6 +211,9 @@ pub struct Settings {
         skip_serializing_if = "crate::palette_rank::PaletteHistory::is_empty"
     )]
     pub palette: crate::palette_rank::PaletteHistory,
+    /// The color picker's last ten custom colors, newest first (`#rrggbb`). Optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_colors: Vec<String>,
     /// Sources' plain settings from Settings › Connections (decision 0030 §3): source → field
     /// → value. Optional. Secrets are never here: they are in the OS keychain.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]

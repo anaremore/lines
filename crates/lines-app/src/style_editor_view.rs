@@ -46,8 +46,15 @@ const HIT: f32 = 20.0;
 /// The narrowest the editor gets for the price axis's sake: a pane that can't spare the axis
 /// and still give the editor this much lets it cover the axis.
 const MIN_BESIDE_AXIS: f32 = 280.0;
-/// The custom color entry's hint.
-const HEX_HINT: &str = "Type 6 hex digits · Enter applies · Esc cancels";
+/// The color picker's square and sliders (logical px).
+const SQUARE_H: f32 = 96.0;
+const SLIDER_H: f32 = 12.0;
+
+/// The custom color picker's height under its row: the square, the hue slider, the opacity
+/// slider (a part with an opacity), and the swatch, hex field and dropper row.
+fn picker_height(opacity: bool) -> f32 {
+    4.0 + SQUARE_H + 8.0 + SLIDER_H + 8.0 + if opacity { SLIDER_H + 8.0 } else { 0.0 } + 24.0 + 4.0
+}
 
 /// Where the editor goes, chart-local: its box is at most `h` tall.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -314,6 +321,9 @@ pub struct EditorScroll {
     /// last brought into view: a tab the keys move to is scrolled into view.
     tabs: ScrollHandle,
     tab_shown: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    /// The color picker's square, hue and opacity sliders as last painted (window px): where
+    /// a press or drag lands in them.
+    picker: Rc<RefCell<[gpui::Bounds<gpui::Pixels>; 3]>>,
 }
 
 impl EditorScroll {
@@ -390,18 +400,8 @@ pub fn content_height(
             if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
                 h += 4.0 + text_lines(note.chars().count(), 11.0, inner) * line_h(11.0);
             }
-            if e.hex.is_some() && e.hex_fill != main {
-                // The entry, then its hint beside it or below, wrapping on its own when it
-                // is wider than the row.
-                let hint_w = HEX_HINT.chars().count() as f32 * 12.0 * 0.62;
-                h += 8.0
-                    + if 80.0 + 8.0 + hint_w <= controls_w {
-                        line_h(12.0)
-                    } else {
-                        line_h(12.0)
-                            + 8.0
-                            + text_lines(HEX_HINT.chars().count(), 12.0, controls_w) * line_h(12.0)
-                    };
+            if let Some(p) = e.custom.as_ref().filter(|p| p.fill != main) {
+                h += picker_height(p.opacity.is_some());
             }
             if main && !warnings.is_empty() {
                 // Inside the box: margins, border, padding, the bar and the marker.
@@ -423,6 +423,241 @@ pub fn content_height(
 /// fill ("Fill").
 fn is_color_row(r: &Row) -> bool {
     r.label == "Color" || r.label == "Fill"
+}
+
+/// The custom color picker under its color row (`crate::color_picker`): the square
+/// (saturation across, brightness down), the hue and opacity sliders, then the color as it
+/// will be, its hex and the eyedropper. The keyboard's part has the accent ring.
+fn picker(
+    e: &StyleEditor,
+    p: &crate::color_picker::Custom,
+    t: &Theme,
+    es: &EditorScroll,
+    cx: &mut Context<ChartView>,
+) -> gpui::Div {
+    use crate::chart_view::PickerPart;
+    use crate::color_picker::{Zone, from_hsv};
+    use gpui::{MouseMoveEvent, canvas, linear_color_stop, linear_gradient, relative};
+    use lines_core::style::Rgb;
+    // The gradients are the colors being picked (user data, decision 0026), not the UI's.
+    let white = Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    let black = Rgb { r: 0, g: 0, b: 0 };
+    let rgb = p.color();
+    let edge = |on: bool| if on { t.accent } else { t.axis_line };
+    // Records where a part is painted, for the pointer.
+    let probe = |k: usize| {
+        let rects = es.picker.clone();
+        canvas(move |b, _, _| rects.borrow_mut()[k] = b, |_, _, _, _| {})
+            .absolute()
+            .size_full()
+    };
+    // A press or a drag (button down) on a part: its fractions.
+    let frac = |b: gpui::Bounds<gpui::Pixels>, at: gpui::Point<gpui::Pixels>| {
+        let w = f32::from(b.size.width).max(1.0);
+        let h = f32::from(b.size.height).max(1.0);
+        (
+            (f32::from(at.x - b.origin.x) / w).clamp(0.0, 1.0),
+            (f32::from(at.y - b.origin.y) / h).clamp(0.0, 1.0),
+        )
+    };
+    let pointer =
+        |el: gpui::Stateful<gpui::Div>, part: PickerPart, k: usize, cx: &mut Context<ChartView>| {
+            let (down, moved) = (es.picker.clone(), es.picker.clone());
+            el.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view: &mut ChartView, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let (x, y) = frac(down.borrow()[k], ev.position);
+                    view.picker_at(part, x, y, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(
+                move |view: &mut ChartView, ev: &MouseMoveEvent, _, cx| {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        let (x, y) = frac(moved.borrow()[k], ev.position);
+                        view.picker_at(part, x, y, cx);
+                    }
+                },
+            ))
+        };
+    let on_square = matches!(p.zone, Zone::Saturation | Zone::Brightness);
+    let square = div()
+        .id("picker-square")
+        .relative()
+        .w_full()
+        .h(crate::zoom::ui(SQUARE_H))
+        .rounded_sm()
+        .border_2()
+        .border_color(edge(on_square))
+        .bg(user_color(from_hsv(p.h, 100, 100), 100))
+        .child(div().absolute().size_full().bg(linear_gradient(
+            90.0,
+            linear_color_stop(user_color(white, 100), 0.0),
+            linear_color_stop(user_color(white, 0), 1.0),
+        )))
+        .child(div().absolute().size_full().bg(linear_gradient(
+            180.0,
+            linear_color_stop(user_color(black, 0), 0.0),
+            linear_color_stop(user_color(black, 100), 1.0),
+        )))
+        .child(
+            div()
+                .absolute()
+                .left(relative(f32::from(p.s) / 100.0))
+                .top(relative(1.0 - f32::from(p.v) / 100.0))
+                .ml(crate::zoom::ui(-6.0))
+                .mt(crate::zoom::ui(-6.0))
+                .size(crate::zoom::ui(12.0))
+                .rounded_full()
+                .border_2()
+                .border_color(t.text_main)
+                .bg(user_color(rgb, 100)),
+        )
+        .child(probe(0));
+    let square = pointer(square, PickerPart::Square, 0, cx);
+    // A slider: its track (any element), a thumb at fraction `at`.
+    let slider = |id: &'static str, track: gpui::Div, at: f32, on: bool| {
+        div()
+            .id(id)
+            .relative()
+            .w_full()
+            .h(crate::zoom::ui(SLIDER_H))
+            .rounded_sm()
+            .border_1()
+            .border_color(edge(on))
+            .child(track.absolute().size_full().rounded_sm())
+            .child(
+                div()
+                    .absolute()
+                    .left(relative(at))
+                    .ml(crate::zoom::ui(-3.0))
+                    .top(crate::zoom::ui(-3.0))
+                    .w(crate::zoom::ui(6.0))
+                    .h(crate::zoom::ui(SLIDER_H + 4.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(t.bg)
+                    .bg(t.text_main),
+            )
+    };
+    let mut hues = div().flex().flex_row();
+    for i in 0..6u16 {
+        hues = hues.child(div().flex_1().h_full().bg(linear_gradient(
+            90.0,
+            linear_color_stop(user_color(from_hsv(i * 60, 100, 100), 100), 0.0),
+            linear_color_stop(user_color(from_hsv((i + 1) * 60 % 360, 100, 100), 100), 1.0),
+        )));
+    }
+    let hue = slider(
+        "picker-hue",
+        hues,
+        f32::from(p.h) / 360.0,
+        p.zone == Zone::Hue,
+    )
+    .child(probe(1));
+    let hue = pointer(hue, PickerPart::Hue, 1, cx);
+    let mut col = div()
+        .pl(crate::zoom::ui(12.0 + LABEL_W))
+        .pr(crate::zoom::ui(12.0))
+        .pt(crate::zoom::ui(4.0))
+        .pb(crate::zoom::ui(4.0))
+        .flex()
+        .flex_col()
+        .gap(crate::zoom::ui(8.0))
+        .child(square)
+        .child(hue);
+    if let Some(o) = p.opacity {
+        let track = div().bg(linear_gradient(
+            90.0,
+            linear_color_stop(user_color(rgb, 0), 0.0),
+            linear_color_stop(user_color(rgb, 100), 1.0),
+        ));
+        let op = slider(
+            "picker-opacity",
+            track,
+            f32::from(o) / 100.0,
+            p.zone == Zone::Opacity,
+        )
+        .child(probe(2));
+        col = col.child(pointer(op, PickerPart::Opacity, 2, cx));
+    }
+    let hex = if p.typing {
+        format!("#{}▏", p.hex.to_ascii_uppercase())
+    } else {
+        format!("#{}", p.hex.to_ascii_uppercase())
+    };
+    let row = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(crate::zoom::ui(8.0))
+        .text_size(crate::zoom::ui(12.0))
+        .child(
+            div()
+                .size(crate::zoom::ui(24.0))
+                .rounded_sm()
+                .border_1()
+                .border_color(t.control_edge)
+                .bg(user_color(rgb, p.opacity.unwrap_or(100))),
+        )
+        .child(
+            div()
+                .id("picker-hex")
+                .h(crate::zoom::ui(24.0))
+                .px(crate::zoom::ui(8.0))
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(edge(p.zone == Zone::Hex))
+                .text_color(t.text_main)
+                .child(hex)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view: &mut ChartView, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        view.picker_zone(Zone::Hex, cx);
+                    }),
+                ),
+        )
+        .children(
+            p.opacity
+                .map(|o| div().text_color(t.text_dim).child(format!("{o}%"))),
+        )
+        .child(
+            div()
+                .id("picker-dropper")
+                .h(crate::zoom::ui(24.0))
+                .px(crate::zoom::ui(8.0))
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(edge(p.zone == Zone::Dropper))
+                .when(e.dropper, |d| d.bg(t.accent).text_color(t.bg))
+                .when(!e.dropper, |d| d.text_color(t.text_main))
+                .hover(|s| s.bg(t.accent.opacity(0.12)))
+                // Armed, the button says how out: the editor may cover any part of the plot,
+                // so the hint stays here rather than on a plot banner.
+                .child(if e.dropper {
+                    "Picking… Esc cancels"
+                } else {
+                    "Pick from chart"
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view: &mut ChartView, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        view.picker_zone(Zone::Dropper, cx);
+                    }),
+                ),
+        );
+    col.child(row)
 }
 
 /// The focus ring around a control: 2 px accent when focused, else the same space clear (so
@@ -916,29 +1151,8 @@ pub fn render(
                         .child(note),
                 );
             }
-            if let Some(hex) = e.hex.as_ref().filter(|_| e.hex_fill != main) {
-                group = group.child(
-                    div()
-                        .pl(crate::zoom::ui(12.0 + LABEL_W))
-                        .pr(crate::zoom::ui(12.0))
-                        .py(crate::zoom::ui(4.0))
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(crate::zoom::ui(8.0))
-                        .items_center()
-                        .text_size(crate::zoom::ui(12.0))
-                        .child(
-                            div()
-                                .px(crate::zoom::ui(8.0))
-                                .border_1()
-                                .border_color(t.accent)
-                                .rounded_sm()
-                                .text_color(t.text_main)
-                                .child(format!("#{hex}▏")),
-                        )
-                        .child(div().min_w(px(0.0)).text_color(t.text_dim).child(HEX_HINT)),
-                );
+            if let Some(p) = e.custom.as_ref().filter(|p| p.fill != main) {
+                group = group.child(picker(e, p, t, es, cx));
             }
             if main && !warnings.is_empty() {
                 group = group.child(warning_box(t, warnings));
@@ -1330,8 +1544,9 @@ mod tests {
         let mut e = StyleEditor::for_drawing(Tool::Rect, &Style::DEFAULT);
         let rows = e.rows();
         let custom = rows[0].controls.len() - 1;
-        e.click(0, custom); // the hex entry
-        assert!(e.hex.is_some());
+        e.click(0, custom);
+        e.open_custom(false, lines_core::style::Rgb::hex(0x808080)); // the picker
+        assert!(e.custom.is_some());
         let long = " in the dark theme, colorblind palette; the light theme, standard palette; and the light theme, colorblind palette";
         let mut w: Vec<Warning> = [
             "up",

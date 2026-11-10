@@ -106,6 +106,9 @@ pub struct ChartDrawings {
     pub defaults: ToolStyles,
     /// The style editor, open on a drawing.
     editor: Option<(DrawingId, StyleEditor)>,
+    /// The drawing as the color picker previews it (painted in place of the saved one; saved,
+    /// one undo step, when the color is kept).
+    restyled: Option<Drawing>,
     /// "Delete all for <product>" waiting for Enter.
     pub confirm_clear: bool,
     /// The pointer, plot-local (for previews and drags; set by the chart each frame).
@@ -139,6 +142,7 @@ impl ChartDrawings {
             note: None,
             defaults: [Style::DEFAULT; Tool::ALL.len()],
             editor: None,
+            restyled: None,
             confirm_clear: false,
             pointer: None,
             drawn: Vec::with_capacity(64),
@@ -390,8 +394,10 @@ impl ChartDrawings {
         let d = self.data.lock().get(*id).cloned();
         match d {
             Some(d) if !self.hidden => {
+                let previewing = self.restyled.is_some();
                 let (_, e) = self.editor.as_mut()?;
-                if e.drawing_style(&d.style) != d.style {
+                // (Not while the picker previews: the drawing is saved when it is kept.)
+                if !previewing && e.drawing_style(&d.style) != d.style {
                     e.sync_drawing(&d.style);
                 }
                 Some(&*e)
@@ -401,6 +407,11 @@ impl ChartDrawings {
                 None
             }
         }
+    }
+
+    /// The editor's eyedropper is armed.
+    pub fn dropping(&self) -> bool {
+        self.editor.as_ref().is_some_and(|(_, e)| e.dropper)
     }
 
     /// The drawing the editor is open on.
@@ -429,11 +440,19 @@ impl ChartDrawings {
         };
         match out {
             Outcome::Changed => {
+                self.restyled = None;
                 if let Some((_, e)) = &self.editor {
                     d.style = e.drawing_style(&d.style);
                 }
                 self.data.change(|s| (s.edit(d), ()));
                 (Outcome::Changed, None)
+            }
+            Outcome::Preview => {
+                if let Some((_, e)) = &self.editor {
+                    d.style = e.drawing_style(&d.style);
+                }
+                self.restyled = Some(d);
+                (Outcome::Preview, None)
             }
             Outcome::SaveDefault => {
                 self.defaults[tool_index(d.tool)] = d.style;
@@ -441,9 +460,10 @@ impl ChartDrawings {
             }
             Outcome::Close => {
                 self.editor = None;
+                self.restyled = None;
                 (Outcome::Close, None)
             }
-            Outcome::Nothing => (Outcome::Nothing, None),
+            o => (o, None),
         }
     }
 
@@ -902,8 +922,9 @@ impl ChartDrawings {
                 .collect();
         }
         for d in set.items() {
-            let d = match &self.dragged {
-                Some(x) if x.id == d.id => x,
+            let d = match (&self.dragged, &self.restyled) {
+                (Some(x), _) if x.id == d.id => x,
+                (_, Some(x)) if x.id == d.id => x,
                 _ => d,
             };
             if let Some(p) = project(d, axis, vp) {
@@ -1370,6 +1391,14 @@ fn paint_line(
         return;
     }
     let (ux, uy) = (dx / len, dy / len);
+    // The eyedropper sees the whole line, gaps of a dash included.
+    crate::eyedropper::segment(
+        (origin.0 + a.0, origin.1 + a.1),
+        (origin.0 + b.0, origin.1 + b.1),
+        width,
+        color,
+        "Drawing",
+    );
     if dy.abs() < 0.01 || dx.abs() < 0.01 {
         // Crisp at every DPI: a whole number of device pixels wide, on device-pixel edges.
         let horizontal = dy.abs() < 0.01;

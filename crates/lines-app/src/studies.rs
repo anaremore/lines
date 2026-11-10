@@ -508,14 +508,15 @@ impl Studies {
                         // Its edges, when shown (styled bands).
                         for edge in [true, false] {
                             let y = |c: &Column| if edge { c.up[kk] } else { c.down[kk] };
-                            let mut b = stroke(px(band_px), &band_dash);
+                            let mut b = crate::eyedropper::Stroke::new(
+                                stroke(px(band_px), &band_dash),
+                                band_px,
+                            );
                             b.move_to(at(xs(0, col(0)), y(col(0))));
                             for i in 1..n {
                                 b.line_to(at(xs(i, col(i)), y(col(i))));
                             }
-                            if let Ok(path) = b.build() {
-                                window.paint_path(path, band_color);
-                            }
+                            b.paint(window, band_color, "VWAP band");
                         }
                         continue;
                     }
@@ -542,14 +543,13 @@ impl Studies {
                 } else {
                     line_color
                 };
-                let mut b = stroke(thick, &line_dash);
+                let mut b =
+                    crate::eyedropper::Stroke::new(stroke(thick, &line_dash), f32::from(thick));
                 b.move_to(at(xs(0, col(0)), col(0).y));
                 for i in 1..n {
                     b.line_to(at(xs(i, col(i)), col(i).y));
                 }
-                if let Ok(path) = b.build() {
-                    window.paint_path(path, line);
-                }
+                b.paint(window, line, "VWAP");
                 start = end;
             }
         }

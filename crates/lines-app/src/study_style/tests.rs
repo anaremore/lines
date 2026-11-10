@@ -438,7 +438,9 @@ fn readability_warnings_per_part() {
             // The dark standard palette's up color, typed in.
             let row = e.rows().iter().position(|r| r.label == "Color").unwrap();
             let col = e.rows()[row].controls.len() - 1;
-            e.click(row, col);
+            assert_eq!(e.click(row, col), Outcome::OpenCustom { fill: false });
+            e.open_custom(false, lines_core::style::Rgb::hex(0x808080));
+            e.custom.as_mut().unwrap().zone = crate::color_picker::Zone::Hex;
             for ch in "3fcf9a".chars() {
                 e.key(&ch.to_string(), false, Some(&ch.to_string()));
             }
@@ -1103,8 +1105,10 @@ fn the_level_editor_round_trips() {
     let rows = e.rows();
     let fill = rows.iter().position(|r| r.label == "Fill").unwrap();
     let custom = rows[fill].controls.len() - 1;
-    e.click(fill, custom);
-    assert!(e.hex.is_some() && e.hex_fill);
+    assert_eq!(e.click(fill, custom), Outcome::OpenCustom { fill: true });
+    e.open_custom(true, lines_core::style::Rgb::hex(0x808080));
+    assert!(e.custom.as_ref().is_some_and(|c| c.fill));
+    e.custom.as_mut().unwrap().zone = crate::color_picker::Zone::Hex;
     for ch in ["f", "7", "1", "9", "c", "b"] {
         e.key(ch, false, Some(ch));
     }

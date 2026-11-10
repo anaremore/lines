@@ -14,7 +14,12 @@
 //! part's own translucency (`Theme::part_color`), so every part offers the line opacities.
 //!
 //! Keys: ↑↓ row, ←→ control, Enter or Space picks, Tab / Shift+Tab switch tabs, Esc closes (or
-//! leaves the custom color entry first). A custom color is typed as six hex digits.
+//! leaves the custom color picker first, putting back the color it opened with).
+//!
+//! Colors: the theme's swatches, then the last ten custom colors (Recent), then "Custom…",
+//! which opens the picker (`crate::color_picker`: a saturation-brightness square, hue and
+//! opacity sliders, a hex field and the eyedropper). The picker previews every change
+//! ([`Outcome::Preview`]); Enter or a click anywhere else keeps it ([`Outcome::Changed`]).
 //!
 //! The readability guard ([`StyleEditor::warnings`]) never blocks: it words what
 //! `lines_core::style::readability` found for the tab's color in each of the four theme and
@@ -176,13 +181,21 @@ pub enum Outcome {
     Nothing,
     /// A style changed: apply it.
     Changed,
+    /// The custom picker changed the color: show it, not yet kept (a drawing: no undo step
+    /// until it is, [`Outcome::Changed`]).
+    Preview,
+    /// "Custom…": the host opens the picker on the color as the theme shows it
+    /// ([`StyleEditor::open_custom`]).
+    OpenCustom {
+        fill: bool,
+    },
+    /// The picker's eyedropper: the host takes a color from the chart
+    /// ([`StyleEditor::take_color`]); Esc cancels it.
+    Dropper,
     /// "Save as default for …".
     SaveDefault,
     Close,
 }
-
-/// Longest hex entry: `rrggbb`.
-const HEX_LEN: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyleEditor {
@@ -197,10 +210,14 @@ pub struct StyleEditor {
     pub tab: usize,
     pub row: usize,
     pub col: usize,
-    /// A custom color being typed (hex digits so far).
-    pub hex: Option<String>,
-    /// The hex entry is for the tab's zone fill (not its color).
-    pub hex_fill: bool,
+    /// The custom color picker, while open.
+    pub custom: Option<crate::color_picker::Custom>,
+    /// The eyedropper is armed (the chart shows the color under the pointer).
+    pub dropper: bool,
+    /// The last ten custom colors, newest first (settings `recent_colors`).
+    pub recent: Vec<Rgb>,
+    /// `recent` changed since the host saved it.
+    pub recent_changed: bool,
     /// The current tab's style was just saved as the default (until the next change).
     pub saved: bool,
     /// A study's editor: theme colors are the study colors, every part offers the line
@@ -342,8 +359,10 @@ impl StyleEditor {
             tab: 0,
             row: 0,
             col: 0,
-            hex: None,
-            hex_fill: false,
+            custom: None,
+            dropper: false,
+            recent: Vec::new(),
+            recent_changed: false,
             saved: false,
             study: false,
         }
@@ -490,11 +509,14 @@ impl StyleEditor {
             let c = Color::Custom(Rgb::hex(hex));
             controls.push((chip(c), current == c));
         }
-        // A custom color not among the swatches shows as its own chip.
-        if matches!(current, Color::Custom(_)) && !controls.iter().any(|(_, on)| *on) {
+        // A custom color not among the swatches or the recent colors shows as its own chip.
+        if let Color::Custom(rgb) = current
+            && !controls.iter().any(|(_, on)| *on)
+            && !self.recent.contains(&rgb)
+        {
             controls.push((chip(current), true));
         }
-        let typing = self.hex.is_some() && self.hex_fill == fill;
+        let typing = self.custom.as_ref().is_some_and(|c| c.fill == fill);
         let custom = if fill {
             Control::FillCustom
         } else {
@@ -622,6 +644,28 @@ impl StyleEditor {
                 controls: vec![(Control::SaveDefault, self.saved)],
             });
         }
+        // The last custom colors, right under the theme's.
+        if !self.recent.is_empty()
+            && let Some(i) = rows.iter().position(|r| r.label == "Color")
+        {
+            let current = part.style.color();
+            rows.insert(
+                i + 1,
+                Row {
+                    label: "Recent",
+                    controls: self
+                        .recent
+                        .iter()
+                        .map(|&c| {
+                            (
+                                Control::Color(Color::Custom(c)),
+                                current == Color::Custom(c),
+                            )
+                        })
+                        .collect(),
+                },
+            );
+        }
         rows
     }
 
@@ -642,60 +686,190 @@ impl StyleEditor {
 
     /// A click on control `col` of row `row`.
     pub fn click(&mut self, row: usize, col: usize) -> Outcome {
-        // A click anywhere ends the hex entry (keys go back to the controls); "Custom…"
-        // opens it again.
-        self.hex = None;
-        self.hex_fill = false;
+        // A click anywhere else keeps the picker's color and closes it ("Custom…" opens it
+        // again).
+        let kept = self.close_custom(true);
         self.row = row;
         self.col = col;
         let rows = self.rows();
         self.clamp(&rows);
-        match self.focused(&rows) {
+        let out = match self.focused(&rows) {
             Some(c) => self.activate(c),
             None => Outcome::Nothing,
+        };
+        if kept && out == Outcome::Nothing {
+            Outcome::Changed
+        } else {
+            out
         }
     }
 
-    /// A click on tab `i`.
-    pub fn select_tab(&mut self, i: usize) {
+    /// A click on tab `i`. `true`: the picker was open and its color is kept (apply it).
+    pub fn select_tab(&mut self, i: usize) -> bool {
         if i < self.parts.len() && i != self.tab {
+            let kept = self.close_custom(true);
             self.tab = i;
-            self.hex = None;
             self.saved = false;
             self.focus_current();
+            return kept;
+        }
+        false
+    }
+
+    // ---- the custom color picker (crate::color_picker) -----------------------------------
+
+    fn tab_ix(&self) -> usize {
+        self.tab.min(self.parts.len().saturating_sub(1))
+    }
+
+    /// The tab's color (or its zone fill's), for the host to resolve when it opens the picker.
+    pub fn picked_color(&self, fill: bool) -> Option<Color> {
+        self.picked(fill).map(|(c, _)| c)
+    }
+
+    /// The color and opacity the picker edits: the tab's, or its zone fill's.
+    fn picked(&self, fill: bool) -> Option<(Color, Option<u8>)> {
+        let p = self.parts.get(self.tab_ix())?;
+        if fill {
+            return p.fill.map(|(f, _)| (f.color, Some(f.opacity)));
+        }
+        Some(match p.style {
+            PartStyle::Line(l) => (l.color, Some(l.opacity)),
+            PartStyle::Fill(f) => (f.color, Some(f.opacity)),
+            PartStyle::Text(t) => (t.color, None),
+        })
+    }
+
+    /// Open the picker on the tab's color (or zone fill's), `rgb` as the theme shows it.
+    pub fn open_custom(&mut self, fill: bool, rgb: Rgb) {
+        if let Some((c, o)) = self.picked(fill) {
+            self.custom = Some(crate::color_picker::Custom::open(fill, c, rgb, o));
+            self.dropper = false;
+        }
+    }
+
+    /// Put `c` and `opacity` on the tab (or its zone fill).
+    fn put(&mut self, fill: bool, c: Color, opacity: Option<u8>) {
+        if fill {
+            self.set_fill_color(c);
+        } else {
+            self.set_color(c);
+        }
+        let tab = self.tab_ix();
+        if let (Some(o), Some(p)) = (opacity, self.parts.get_mut(tab)) {
+            match (fill, &mut p.style, &mut p.fill) {
+                (true, _, Some((f, _))) => f.opacity = o,
+                (false, PartStyle::Line(l), _) => l.opacity = o,
+                (false, PartStyle::Fill(f), _) => f.opacity = o,
+                _ => {}
+            }
+        }
+        self.saved = false;
+    }
+
+    /// Apply what the picker holds now (a preview).
+    fn apply_custom(&mut self) -> Outcome {
+        let Some(p) = self.custom.as_ref() else {
+            return Outcome::Nothing;
+        };
+        let (fill, c, o) = (p.fill, Color::Custom(p.color()), p.opacity);
+        self.put(fill, c, o);
+        Outcome::Preview
+    }
+
+    /// Close the picker: keep its color (remembered among the recent ones) or put back the
+    /// one it opened with. `true` if it was open.
+    fn close_custom(&mut self, keep: bool) -> bool {
+        let Some(p) = self.custom.take() else {
+            return false;
+        };
+        self.dropper = false;
+        if keep {
+            if let Some((Color::Custom(rgb), _)) = self.picked(p.fill)
+                && (Color::Custom(rgb), p.opacity) != p.initial
+            {
+                crate::color_picker::remember(&mut self.recent, rgb);
+                self.recent_changed = true;
+            }
+        } else {
+            let (c, o) = p.initial;
+            self.put(p.fill, c, o);
+        }
+        true
+    }
+
+    /// The square at fractions `x` (saturation) and `y` (0 = bright) of its size.
+    pub fn custom_square(&mut self, x: f32, y: f32) -> Outcome {
+        self.custom_event(|p| p.set_square(x, y))
+    }
+
+    /// The hue slider at fraction `x`.
+    pub fn custom_hue(&mut self, x: f32) -> Outcome {
+        self.custom_event(|p| p.set_hue(x))
+    }
+
+    /// The opacity slider at fraction `x`.
+    pub fn custom_opacity(&mut self, x: f32) -> Outcome {
+        self.custom_event(|p| p.set_opacity(x))
+    }
+
+    /// Focus a zone of the picker (a click on it).
+    pub fn custom_zone(&mut self, z: crate::color_picker::Zone) -> Outcome {
+        if let Some(p) = self.custom.as_mut() {
+            p.zone = z;
+        }
+        Outcome::Nothing
+    }
+
+    /// The eyedropper's button (Esc while armed ends it: [`StyleEditor::key`]).
+    pub fn arm_dropper(&mut self) -> Outcome {
+        if self.custom.is_some() {
+            self.dropper = true;
+            return Outcome::Dropper;
+        }
+        Outcome::Nothing
+    }
+
+    /// The eyedropper took `rgb` from the chart: the picker shows it (a preview).
+    pub fn take_color(&mut self, rgb: Rgb) -> Outcome {
+        self.dropper = false;
+        self.custom_event(|p| p.set_color(rgb))
+    }
+
+    fn custom_event(
+        &mut self,
+        f: impl FnOnce(&mut crate::color_picker::Custom) -> crate::color_picker::Event,
+    ) -> Outcome {
+        use crate::color_picker::Event;
+        let Some(p) = self.custom.as_mut() else {
+            return Outcome::Nothing;
+        };
+        match f(p) {
+            Event::Nothing => Outcome::Nothing,
+            Event::Changed => self.apply_custom(),
+            Event::Keep => {
+                self.close_custom(true);
+                Outcome::Changed
+            }
+            Event::Revert => {
+                self.close_custom(false);
+                Outcome::Changed
+            }
+            Event::Dropper => self.arm_dropper(),
         }
     }
 
     /// A key. `text`: the typed character (no Ctrl/Alt/Cmd).
     pub fn key(&mut self, key: &str, shift: bool, text: Option<&str>) -> Outcome {
-        if let Some(hex) = self.hex.as_mut() {
-            match key {
-                "escape" => self.hex = None,
-                "backspace" => {
-                    hex.pop();
-                }
-                "enter" => {
-                    if let Some(rgb) = Rgb::parse(hex) {
-                        self.hex = None;
-                        let c = Color::Custom(rgb);
-                        return if std::mem::take(&mut self.hex_fill) {
-                            self.set_fill_color(c)
-                        } else {
-                            self.set_color(c)
-                        };
-                    }
-                }
-                _ => {
-                    if let Some(t) = text {
-                        for c in t.chars().filter(char::is_ascii_hexdigit) {
-                            if hex.len() < HEX_LEN {
-                                hex.push(c.to_ascii_lowercase());
-                            }
-                        }
-                    }
-                }
+        if self.dropper {
+            // Armed: Esc ends it (the chart takes the click that picks).
+            if key == "escape" {
+                self.dropper = false;
             }
             return Outcome::Nothing;
+        }
+        if self.custom.is_some() {
+            return self.custom_event(|p| p.key(key, shift, text));
         }
         let rows = self.rows();
         match key {
@@ -707,7 +881,9 @@ impl StyleEditor {
                 } else {
                     (self.tab + 1) % n
                 };
-                self.select_tab(next);
+                if self.select_tab(next) {
+                    return Outcome::Changed;
+                }
             }
             "up" => self.row = self.row.saturating_sub(1),
             "down" => self.row = (self.row + 1).min(rows.len().saturating_sub(1)),
@@ -732,24 +908,7 @@ impl StyleEditor {
         let changed = match c {
             Control::Color(c) => return self.set_color(c),
             Control::FillColor(c) => return self.set_fill_color(c),
-            Control::FillCustom => {
-                self.hex_fill = true;
-                self.hex = Some(match self.parts.get(tab).and_then(|p| p.fill) {
-                    Some((
-                        FillStyle {
-                            color: Color::Custom(rgb),
-                            ..
-                        },
-                        _,
-                    )) => {
-                        let mut s = String::new();
-                        let _ = rgb.write_hex(&mut s);
-                        s.trim_start_matches('#').to_owned()
-                    }
-                    _ => String::new(),
-                });
-                return Outcome::Nothing;
-            }
+            Control::FillCustom => return Outcome::OpenCustom { fill: true },
             Control::FillOpacity(o) => match self.parts.get_mut(tab) {
                 Some(Part {
                     fill: Some((f, _)), ..
@@ -760,18 +919,7 @@ impl StyleEditor {
                 _ => false,
             },
             Control::LabelPrice => flip(&mut self.options.label_price),
-            Control::Custom => {
-                self.hex_fill = false;
-                self.hex = Some(match self.parts.get(tab).map(|p| p.style.color()) {
-                    Some(Color::Custom(rgb)) => {
-                        let mut s = String::new();
-                        let _ = rgb.write_hex(&mut s);
-                        s.trim_start_matches('#').to_owned()
-                    }
-                    _ => String::new(),
-                });
-                return Outcome::Nothing;
-            }
+            Control::Custom => return Outcome::OpenCustom { fill: false },
             Control::SaveDefault => {
                 self.saved = true;
                 return Outcome::SaveDefault;

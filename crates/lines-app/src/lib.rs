@@ -12,6 +12,7 @@ mod chain_view;
 mod chart_draw;
 mod chart_trade;
 mod chart_view;
+mod color_picker;
 mod commands;
 mod connections;
 mod connections_view;
@@ -30,6 +31,7 @@ mod drawings_store;
 mod dropdown;
 mod econ_layer;
 mod econ_ui;
+mod eyedropper;
 mod feeds;
 mod fonts;
 mod footer;
@@ -831,6 +833,31 @@ struct Cli {
     /// (default 0, the first): `--style-editor 3`, `4:1`, `3:0:1` or `3:0:1:4`.
     #[arg(long, requires = "drawings", value_parser = parse_style_editor)]
     style_editor: Option<chart_view::StyleEditorAt>,
+    /// Screenshot: with --style-editor, the custom color picker open on its color, set to
+    /// this hex (a preview, the readability warnings live), e.g. `1d2a6b`.
+    #[arg(long, value_name = "HEX", requires = "style_editor")]
+    color_picker: Option<String>,
+    /// Screenshot: the color picker's recent colors (comma-separated hex), newest first.
+    #[arg(
+        long,
+        value_name = "HEX,…",
+        requires = "style_editor",
+        value_delimiter = ','
+    )]
+    recent_colors: Vec<String>,
+    /// Screenshot: with --color-picker, the eyedropper armed and the pointer at plot X,Y
+    /// (logical px), showing the color under it.
+    #[arg(long, value_name = "X,Y", requires = "color_picker", value_parser = parse_xy)]
+    dropper: Option<(f32, f32)>,
+}
+
+/// `X,Y` in logical px (`--dropper`).
+fn parse_xy(s: &str) -> Result<(f32, f32), String> {
+    let (x, y) = s.split_once(',').ok_or("X,Y")?;
+    Ok((
+        x.trim().parse().map_err(|_| format!("bad x {x:?}"))?,
+        y.trim().parse().map_err(|_| format!("bad y {y:?}"))?,
+    ))
 }
 
 /// `ID`, `ID:TAB`, `ID:TAB:COL` or `ID:TAB:COL:ROW` (`--style-editor`); the focus is (row, col).
@@ -1926,6 +1953,9 @@ where
             timeframe_menu: cli.timeframe_menu,
             order_group_menu: cli.order_group_menu,
             style_editor: cli.style_editor,
+            color_picker: cli.color_picker.clone(),
+            recent_colors: cli.recent_colors.clone(),
+            dropper: cli.dropper,
             tick_continuous: cli.tick_continuous,
             cursor: cli.cursor,
             drag_position: cli.drag_position,

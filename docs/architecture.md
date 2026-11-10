@@ -36,7 +36,9 @@ cargo test --release -p lines-indicators --test bench -- --ignored --nocapture  
 cargo test --release -p lines-trading --test session -- --ignored --nocapture   # perf: click->order-sent p50/p99 budget (< 1 ms), run alone
 cargo test --release -p lines-app --lib -- --ignored dom_click_latency_budget --nocapture   # perf: DOM click->order sent, run alone
 # Drawings (screenshots): --drawings FILE (a drawings file naming its product; screenshots never read saved drawings);
-#   --style-editor ID[:TAB[:COL[:ROW]]] (the first chart's style editor open on drawing ID of that file, on tab TAB, 0 = first, with the keyboard focus on control COL of row ROW, both 0 = first, ROW defaulting to the first row: `3`, `4:1`, `3:0:1`, `3:0:1:4`).
+#   --style-editor ID[:TAB[:COL[:ROW]]] (the first chart's style editor open on drawing ID of that file, on tab TAB, 0 = first, with the keyboard focus on control COL of row ROW, both 0 = first, ROW defaulting to the first row: `3`, `4:1`, `3:0:1`, `3:0:1:4`);
+#   --color-picker HEX (with --style-editor: its color picker open, previewing HEX), --recent-colors HEX,… (the picker's Recent row),
+#   --dropper X,Y (with --color-picker: the eyedropper armed, the pointer at plot X,Y logical px).
 #   In the app: Alt+H/T/Z/L/N/U, Alt+Shift+H/T, Esc, Delete, Enter (pin measure), Ctrl+Z / Ctrl+Y; palette "Drawings: …".
 # Timeframe: --timeframe 5m (1m 2m 3m 5m 10m 15m 30m 1h 2h 4h 1d 1w; or bars from counted trades: tick 500t (presets 100t 233t 500t
 #   1000t 2000t, any 1t-100000t), volume 500v (whole contracts, 1v-1000000v), range 10r (price ticks, 1r-10000r), seconds
