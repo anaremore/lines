@@ -2512,12 +2512,7 @@ impl SettingsWindow {
                             .text_color(t.text_main)
                             .child(crate::commands::label(b.cmd)),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(t.text_dim)
-                            .child(crate::commands::hint(b.cmd)),
-                    ),
+                    .children(crate::keycap::caps(b.cmd, &t)),
             );
         }
         list.into_any_element()

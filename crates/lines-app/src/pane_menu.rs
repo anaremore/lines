@@ -564,6 +564,7 @@ fn link(l: LinkGroup) -> MenuItem {
         let mut r = pick(&label, Command::SetLink(g), g == l);
         if g.is_none() {
             r.hint = crate::commands::hint(Command::CycleLink);
+            r.key = Some(Command::CycleLink);
         }
         sub.push(r);
     }

@@ -2859,7 +2859,7 @@ fn menu_row<V: TradePane>(
     id: (&'static str, u64),
     mark: Mark,
     label: String,
-    hint: String,
+    key: Option<TradeCmd>,
     t: &Theme,
     cx: &mut Context<V>,
     act: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
@@ -2895,7 +2895,7 @@ fn menu_row<V: TradePane>(
         .hover(move |s| s.bg(accent.opacity(0.16)).border_color(accent))
         .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
         .child(div().flex_1().text_color(t.text_main).child(label))
-        .child(div().flex_none().text_color(t.text_dim).child(hint))
+        .children(key.and_then(|k| crate::keycap::caps(crate::commands::Command::Trade(k), t)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |v: &mut V, _: &gpui::MouseDownEvent, window, cx| {
@@ -2905,11 +2905,6 @@ fn menu_row<V: TradePane>(
                 cx.notify();
             }),
         )
-}
-
-/// A trading command's key, as a list row shows it on the right.
-fn key_hint(cmd: TradeCmd) -> String {
-    crate::commands::hint(crate::commands::Command::Trade(cmd))
 }
 
 /// Open or close one of the panel's lists (the Qty or Bracket field).
@@ -4087,7 +4082,7 @@ fn controls<V: TradePane>(
                 ("qty-item", i as u64),
                 if on { Mark::Check } else { Mark::None },
                 q.to_string(),
-                key_hint(TradeCmd::QtyPreset(i as u8)),
+                Some(TradeCmd::QtyPreset(i as u8)),
                 t,
                 cx,
                 move |v, _, cx| set_size(v, q, cx),
@@ -4101,7 +4096,7 @@ fn controls<V: TradePane>(
             } else {
                 "Custom…".to_owned()
             },
-            key_hint(TradeCmd::TypeQty),
+            Some(TradeCmd::TypeQty),
             t,
             cx,
             |v, window, cx| {
@@ -4162,7 +4157,7 @@ fn controls<V: TradePane>(
                 Mark::None
             },
             "None".to_owned(),
-            String::new(),
+            None,
             t,
             cx,
             |v, _, cx| {
@@ -4189,7 +4184,7 @@ fn controls<V: TradePane>(
                 } else {
                     format!("{} · {}", p.name, crate::brackets::label(b, product, units))
                 },
-                String::new(),
+                None,
                 t,
                 cx,
                 move |v, _, _| v.trade().bracket = Some(b),
@@ -4201,7 +4196,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 98),
                 Mark::Check,
                 crate::brackets::label(c, product, units),
-                String::new(),
+                None,
                 t,
                 cx,
                 move |v, _, _| v.trade().bracket = Some(c),
@@ -4218,7 +4213,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 100),
                 Mark::Box(position),
                 pos_label.to_owned(),
-                key_hint(TradeCmd::BracketMode),
+                Some(TradeCmd::BracketMode),
                 t,
                 cx,
                 |v, _, cx| run_from(v, TradeCmd::BracketMode, Instant::now(), Source::Dom, cx),
@@ -4227,7 +4222,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 101),
                 Mark::Box(units == crate::brackets::BracketUnits::Points),
                 "Distances in points".to_owned(),
-                key_hint(TradeCmd::BracketUnits),
+                Some(TradeCmd::BracketUnits),
                 t,
                 cx,
                 |v, _, cx| run_from(v, TradeCmd::BracketUnits, Instant::now(), Source::Dom, cx),
@@ -4236,7 +4231,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 102),
                 Mark::None,
                 "Edit presets…".to_owned(),
-                key_hint(TradeCmd::EditBrackets),
+                Some(TradeCmd::EditBrackets),
                 t,
                 cx,
                 |v, _, cx| run_from(v, TradeCmd::EditBrackets, Instant::now(), Source::Dom, cx),

@@ -3513,7 +3513,7 @@ impl WindowView {
                     list = list.child(
                         row("palette-row", i, sel, cx)
                             .child(div().text_color(t.text_main).child(commands::label(*cmd)))
-                            .child(div().text_color(t.text_dim).child(commands::hint(*cmd))),
+                            .children(crate::keycap::caps(*cmd, &t)),
                     );
                 }
                 if shown.is_empty() {
