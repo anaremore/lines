@@ -1381,7 +1381,11 @@ mod tests {
         // unnamed and unpinned).
         let mut w = WorkspaceDoc::pair();
         let text = String::from_utf8(encode(&FORMAT, &w).unwrap()).unwrap();
-        assert!(!text.contains("\"name\":\"Trading\"") && !text.contains("pinned"), "{text}");
+        let tab = serde_json::to_value(&w.windows[0].tabs[0]).unwrap();
+        assert!(
+            tab.get("name").is_none() && tab.get("pinned").is_none(),
+            "{text}"
+        );
         w.windows[0].tabs[0].name = Some("Trading".into());
         w.windows[0].tabs[0].pinned = true;
         let bytes = encode(&FORMAT, &w).unwrap();

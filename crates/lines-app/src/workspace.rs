@@ -805,8 +805,8 @@ pub struct WindowView {
     /// How far the tab strip is scrolled (logical px; `tabstrip::Strip`).
     tab_scroll: f32,
     /// A tab was just closed with its ×: the × that slides under the pointer takes no press
-    /// until the pointer leaves the tab bar.
-    close_guard: bool,
+    /// until the pointer leaves the tab bar (`tabstate::CloseGuard`).
+    close_guard: tabstate::CloseGuard,
     pane_drag: Option<PaneDrag>,
     /// The pane and tab under the pointer, from geometry on mouse move: only they get hover
     /// controls, so a frame doesn't build (and lay out) controls for every pane.
@@ -865,7 +865,7 @@ impl WindowView {
             split_drag: None,
             tab_drag: None,
             tab_scroll: 0.0,
-            close_guard: false,
+            close_guard: tabstate::CloseGuard::default(),
             pane_drag: None,
             hover_pane: None,
             hover_pinned: false,
@@ -1357,16 +1357,36 @@ impl WindowView {
     }
 
     fn activate_tab(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab_scrolling(i, true, window, cx);
+    }
+
+    /// Activate tab `i`; `scroll_into_view` false for a click on it (the tab under the
+    /// pointer never moves at the press: docs/design.md §7).
+    fn activate_tab_scrolling(
+        &mut self,
+        i: usize,
+        scroll_into_view: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if i >= self.tabs.len() {
             return;
         }
         self.active = i;
-        let strip = self.tab_strip(f32::from(window.viewport_size().width));
-        self.tab_scroll = strip.keep_in_view(self.tab_scroll, i);
+        if scroll_into_view {
+            let strip = self.tab_strip(f32::from(window.viewport_size().width));
+            self.tab_scroll = strip.keep_in_view(self.strip_scroll(&strip), i);
+        }
         self.sync_visibility(cx);
         let f = self.tab().focused;
         self.focus_pane(f, window, cx);
         cx.notify();
+    }
+
+    /// The strip's scroll as drawn: clamped to the strip (a resize or a zoom change can leave
+    /// the stored value past the end), so hover, clicks and drops hit what is drawn.
+    fn strip_scroll(&self, strip: &crate::tabstrip::Strip) -> f32 {
+        strip.clamp(self.tab_scroll)
     }
 
     /// The tab strip's geometry for a window `width` wide (`crate::tabstrip`).
@@ -1381,19 +1401,31 @@ impl WindowView {
         )
     }
 
-    /// Close every tab but `keep` and the pinned ones.
+    /// Close every tab but `keep` and the pinned ones (`tabstate::close_others`). Never more
+    /// than Reopen closed tab can bring back: past that it says so and closes nothing.
     fn close_other_tabs(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut i = self.tabs.len();
-        let mut keep = keep;
-        while i > 0 {
-            i -= 1;
-            if i != keep && !self.tabs[i].pinned {
-                self.close_tab(i, window, cx);
-                if i < keep {
-                    keep -= 1;
-                }
-            }
+        let pinned: Vec<bool> = self.tabs.iter().map(|t| t.pinned).collect();
+        let close = tabstate::close_others(&pinned, keep);
+        if close.is_empty() {
+            self.refuse("No other unpinned tabs to close", cx);
+            return;
         }
+        if close.len() > CLOSED_TABS {
+            self.refuse(
+                &format!(
+                    "Close other tabs would close {} tabs; Reopen keeps {CLOSED_TABS}: close some first",
+                    close.len()
+                ),
+                cx,
+            );
+            return;
+        }
+        // The kept tab moves left by the tabs closed before it, and is active.
+        let kept = keep - close.iter().filter(|&&i| i < keep).count();
+        for i in close {
+            self.close_tab(i, window, cx);
+        }
+        self.activate_tab(kept, window, cx);
     }
 
     // ---- commands -------------------------------------------------------------------------
@@ -2364,9 +2396,9 @@ impl WindowView {
         let vs = window.viewport_size();
         let own = Rect::new(own.x, own.y, f32::from(vs.width), f32::from(vs.height));
         let bar = Rect::new(own.x, own.y, own.w, tab_bar_h());
-        let rights: Vec<f32> = self
-            .tab_strip(own.w)
-            .rights(self.tab_scroll)
+        let strip = self.tab_strip(own.w);
+        let rights: Vec<f32> = strip
+            .rights(self.strip_scroll(&strip))
             .into_iter()
             .map(|r| own.x + r)
             .collect();
@@ -2879,12 +2911,9 @@ impl WindowView {
         let bar = self.bar_h();
         let area = self.content_area(window, cx);
         let strip = self.tab_strip(f32::from(window.viewport_size().width));
-        let tab = (y < bar)
-            .then(|| strip.tab_at(x, self.tab_scroll))
-            .flatten();
-        if y >= bar && self.close_guard {
-            self.close_guard = false;
-        }
+        let scroll = self.strip_scroll(&strip);
+        let tab = (y < bar).then(|| strip.tab_at(x, scroll)).flatten();
+        self.close_guard.pointer(y < bar);
         let pane = self.tabs.get(self.active).and_then(|t| {
             let order = t.order();
             t.layout
@@ -2987,8 +3016,9 @@ impl WindowView {
     // ---- rendering --------------------------------------------------------------------------
 
     /// A background tab's state, as words (never color alone): trading on in one of its DOMs,
-    /// and a feed of its panes that isn't live (its symbol and word).
-    fn tab_alarm(tab: &Tab, cx: &App) -> (bool, Option<String>) {
+    /// and a feed of its panes that isn't live (`tabstate::tab_feed_badge`: the badge's word,
+    /// and its symbol and state for the tooltip).
+    fn tab_alarm(tab: &Tab, cx: &App) -> (bool, Option<(&'static str, String)>) {
         use crate::trade_bar::TradePane;
         let mut on = false;
         let mut feed = None;
@@ -3010,17 +3040,13 @@ impl WindowView {
             let stale = store.stale_for().is_some();
             // Busy this instant: no word this frame (the UI never waits on a feed).
             if let Some(d) = store.try_read() {
-                let word = if stale {
-                    Some("stale")
-                } else {
-                    crate::pane::status_word(&d.status).filter(|w| *w != "ended")
-                };
-                if let Some(w) = word {
+                let word = crate::pane::status_word(&d.status);
+                if let Some(badge) = tabstate::tab_feed_badge(stale, word) {
                     let label = d
                         .contract_label()
                         .map(|l| l.as_str().to_owned())
                         .unwrap_or_else(|| d.product.symbol.to_owned());
-                    feed = Some(format!("{label} {w}"));
+                    feed = Some((badge, format!("{label} {}", badge.to_lowercase())));
                 }
             }
         }
@@ -3036,7 +3062,7 @@ impl WindowView {
         let t = self.theme;
         let width = f32::from(window.viewport_size().width);
         let strip = self.tab_strip(width);
-        let scroll = strip.clamp(self.tab_scroll);
+        let scroll = self.strip_scroll(&strip);
         let hovered = self.hover_tab;
         let mut row = div()
             .relative()
@@ -3082,11 +3108,9 @@ impl WindowView {
                             cx.stop_propagation();
                             // The × that slid under the pointer after a close takes no press
                             // until the pointer leaves the tab bar.
-                            if this.close_guard {
-                                return;
+                            if this.close_guard.press() {
+                                this.close_tab(i, window, cx);
                             }
-                            this.close_guard = true;
-                            this.close_tab(i, window, cx);
                         }),
                     ),
                 )
@@ -3138,15 +3162,15 @@ impl WindowView {
                             "Trading is on in a DOM in this tab".to_owned(),
                         ))
                     })
-                    .when_some(feed, |d, f| {
-                        d.child(badge("tab-stale", "STALE", format!("Not live: {f}")))
+                    .when_some(feed, |d, (word, f)| {
+                        d.child(badge("tab-feed", word, format!("Not live: {f}")))
                     })
                     .child(slot)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.activate_tab(i, window, cx);
+                            this.activate_tab_scrolling(i, false, window, cx);
                             this.tab_drag = Some(TabDrag {
                                 index: i,
                                 start: ev.position,
@@ -3160,7 +3184,8 @@ impl WindowView {
                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             // A pinned tab stays.
-                            if !this.tabs.get(i).is_some_and(|t| t.pinned) {
+                            let pinned = this.tabs.get(i).is_some_and(|t| t.pinned);
+                            if tabstate::middle_click_closes(pinned) {
                                 this.close_tab(i, window, cx);
                             }
                         }),
@@ -3188,7 +3213,7 @@ impl WindowView {
             .id("tab-strip")
             .relative()
             .flex_none()
-            .w(px(strip.room))
+            .w(px(strip.room.min(self.tabs.len() as f32 * tab_w())))
             .h_full()
             .overflow_hidden()
             .child(row)
@@ -3198,7 +3223,7 @@ impl WindowView {
                     // A wheel turn (vertical) or a sideways swipe both move the strip.
                     let delta = -f32::from(if d.y.abs() > d.x.abs() { d.y } else { d.x });
                     let strip = this.tab_strip(f32::from(window.viewport_size().width));
-                    let next = strip.wheel(this.tab_scroll, delta);
+                    let next = strip.wheel(this.strip_scroll(&strip), delta);
                     if next != this.tab_scroll {
                         this.tab_scroll = next;
                         cx.notify();
@@ -4340,6 +4365,7 @@ impl Render for WindowView {
             // GPUI on Windows sends no exit event: the pointer left, so nothing is hovered.
             self.hover_pane = None;
             self.hover_tab = None;
+            self.close_guard.pointer(false);
         }
         // The footer first: its rows set the content's height this frame.
         let footer = self.footer_bar(window, cx);

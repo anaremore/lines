@@ -314,6 +314,59 @@ pub enum CloseTab {
 }
 
 /// Close tab `i` of `tabs` (with `active` active) in one of `windows` main windows.
+/// Close other tabs: the tabs to close, highest index first (so each index stays valid as
+/// the ones after it go): every tab but `keep` and the pinned ones.
+pub fn close_others(pinned: &[bool], keep: usize) -> Vec<usize> {
+    (0..pinned.len())
+        .rev()
+        .filter(|&i| i != keep && !pinned[i])
+        .collect()
+}
+
+/// A middle click closes a tab unless it is pinned.
+pub fn middle_click_closes(pinned: bool) -> bool {
+    !pinned
+}
+
+/// The × that slides under the pointer after a close takes no press until the pointer leaves
+/// the tab bar (or the window stops being hovered: Windows sends no exit event).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CloseGuard {
+    armed: bool,
+}
+
+impl CloseGuard {
+    /// A press on a ×: whether it closes. A close arms the guard.
+    pub fn press(&mut self) -> bool {
+        if self.armed {
+            return false;
+        }
+        self.armed = true;
+        true
+    }
+
+    /// The pointer moved: out of the tab bar (or the window), the guard ends.
+    pub fn pointer(&mut self, in_bar: bool) {
+        if !in_bar {
+            self.armed = false;
+        }
+    }
+}
+
+/// A background tab's feed badge: the word for a feed of its panes that isn't live (stale
+/// while its market is open, failed, stopped). Connecting and reconnecting are passing states
+/// and an ended replay isn't a problem: no badge (the footer still names them).
+pub fn tab_feed_badge(stale: bool, status_word: Option<&'static str>) -> Option<&'static str> {
+    if stale {
+        return Some("STALE");
+    }
+    match status_word {
+        Some("failed") => Some("FAILED"),
+        Some("stopped") => Some("STOPPED"),
+        _ => None,
+    }
+}
+
 pub fn close_tab(tabs: usize, windows: usize, active: usize, i: usize) -> CloseTab {
     if tabs <= 1 {
         return if windows > 1 {
@@ -761,5 +814,37 @@ mod tests {
         }
         assert_eq!(got.len(), 10);
         assert_eq!((got[0], got[9]), ("11", "2"), "the oldest two forgotten");
+    }
+
+    #[test]
+    fn close_others_skips_the_kept_and_pinned_tabs_highest_first() {
+        let pinned = [true, false, false, true, false];
+        assert_eq!(close_others(&pinned, 2), vec![4, 1]);
+        assert_eq!(close_others(&pinned, 0), vec![4, 2, 1]);
+        assert_eq!(close_others(&[false], 0), Vec::<usize>::new());
+        assert!(middle_click_closes(false) && !middle_click_closes(true));
+    }
+
+    #[test]
+    fn the_close_guard_holds_until_the_pointer_leaves_the_bar() {
+        let mut g = CloseGuard::default();
+        assert!(g.press(), "the first × closes");
+        assert!(!g.press(), "the × that slid under the pointer doesn't");
+        g.pointer(true);
+        assert!(!g.press(), "still in the bar");
+        g.pointer(false);
+        assert!(g.press(), "after leaving the bar, a × closes again");
+    }
+
+    #[test]
+    fn a_tab_badge_names_a_feed_that_isnt_live() {
+        assert_eq!(tab_feed_badge(true, None), Some("STALE"));
+        assert_eq!(tab_feed_badge(true, Some("failed")), Some("STALE"));
+        assert_eq!(tab_feed_badge(false, Some("failed")), Some("FAILED"));
+        assert_eq!(tab_feed_badge(false, Some("stopped")), Some("STOPPED"));
+        assert_eq!(tab_feed_badge(false, Some("reconnecting")), None);
+        assert_eq!(tab_feed_badge(false, Some("connecting")), None);
+        assert_eq!(tab_feed_badge(false, Some("ended")), None);
+        assert_eq!(tab_feed_badge(false, None), None);
     }
 }
