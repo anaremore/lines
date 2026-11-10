@@ -62,14 +62,15 @@ reads the key from, in order:
    - Windows: `cmdkey /generic:lines-databento /user:databento /pass` (it prompts for the
      key, so it never lands in your shell history).
    - macOS: `security add-generic-password -s lines-databento -a databento -w` (it prompts).
-   - Linux (Secret Service): `secret-tool store --label="Lines Databento" service lines-databento`.
+   - Linux (Secret Service): `secret-tool store --label="Lines Databento" service lines-databento
+     username databento`.
 3. A file named by `LINES_DATABENTO_KEY_FILE` (the key alone, outside any repository).
 
 With no key, the `databento` source is "not set up": Lines makes no Databento requests and
 leaves it out of the run's sources. The key is used only in the historical API's
 `Authorization` header and to answer the live gateway's challenge (SHA-256). It is never
-printed, logged, recorded, put in a URL or written to any file. Settings › Connections will
-take the key in the app (decision 0030).
+printed, logged, recorded, put in a URL or written to any file. The simplest way in is the app:
+Settings › Connections takes the key and keeps it in this same keychain entry (decision 0030).
 
 ### 2. Cost check (free)
 
@@ -134,7 +135,7 @@ lines --source replay --replay recordings/esz6-2026-11-09.lfr --speed 10
 ## Live market data
 
 With a key, `lines` has the `databento` source next to Coinbase and Kraken: a chart or DOM of a
-product in the table above opens on it (Settings › Data turns it off). `--source databento`
+product in the table above opens on it (Settings › Connections turns it off and takes its key). `--source databento`
 limits a run to it. Live data is billed by Databento; what it asks for per contract shown:
 - `definition` replayed from the start of the weekly session (one contract: small);
 - `trades` replayed from up to 24 hours back (the chart's back-fill), then live;

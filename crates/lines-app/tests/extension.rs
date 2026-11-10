@@ -139,6 +139,9 @@ impl Transport for DummyTransport {
 struct DummyExtension;
 
 impl SourceExtension for DummyExtension {
+    fn api_version(&self) -> u32 {
+        lines_feed::extension::API_VERSION
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -276,6 +279,9 @@ fn extension_availability_and_registration_rules() {
 
     struct Named(&'static str);
     impl SourceExtension for Named {
+        fn api_version(&self) -> u32 {
+            lines_feed::extension::API_VERSION
+        }
         fn name(&self) -> &'static str {
             self.0
         }
@@ -296,6 +302,38 @@ fn extension_availability_and_registration_rules() {
             Box::pin(async { anyhow::bail!("never connects") })
         }
     }
+    // Decision 0030 §10: a connector built for another interface version is refused.
+    struct Old;
+    impl SourceExtension for Old {
+        fn api_version(&self) -> u32 {
+            1
+        }
+        fn name(&self) -> &'static str {
+            "old-ext"
+        }
+        fn help(&self) -> &'static str {
+            ""
+        }
+        fn provider(&self) -> Arc<dyn Provider> {
+            Arc::new(DummyProvider)
+        }
+        fn default_product(&self) -> ProductId {
+            catalog::ES
+        }
+        fn connect(
+            &self,
+            _: &Product,
+            _: Option<ContractKey>,
+        ) -> BoxFuture<'static, Result<Box<dyn DynTransport>>> {
+            Box::pin(async { anyhow::bail!("never connects") })
+        }
+    }
+    let err = lines_feed::extension::register(Arc::new(Old)).unwrap_err();
+    assert!(
+        err.to_string().contains("built for extension interface 1"),
+        "{err}"
+    );
+    assert!(lines_feed::extension::by_name("old-ext").is_none());
     use lines_feed::extension::register;
     assert!(
         register(Arc::new(Named("kraken"))).is_err(),

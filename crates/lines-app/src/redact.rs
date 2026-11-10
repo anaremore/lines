@@ -43,7 +43,10 @@ const SENSITIVE: &[&str] = &[
 
 /// Keys that are sensitive only as a whole word (as fragments they'd match ordinary keys,
 /// "hotkey", "design"): URL signing parameters and API keys.
-const SENSITIVE_EXACT: &[&str] = &["key", "sig", "signature", "nonce"];
+///
+/// `connections`: Settings › Connections' values, under keys each connector names (an id, a
+/// gateway): public code can't tell which are identities, so the whole map goes.
+const SENSITIVE_EXACT: &[&str] = &["key", "sig", "signature", "nonce", "connections"];
 
 /// Endings that mark a signing or API-key name (`access_key`, `X-Amz-Signature`,
 /// `API-Sign`), and the ordinary words that share them.
@@ -324,6 +327,18 @@ mod tests {
         ] {
             assert!(!is_sensitive_key(k), "{k}");
         }
+    }
+
+    /// Decision 0030: sources' settings in `settings.json` leave in no diagnostics bundle.
+    #[test]
+    fn sources_connection_settings_are_redacted_whole() {
+        let v = serde_json::json!({
+            "connections": {"acme": {"gateway": "chicago-1", "user-id": "trader7"}},
+            "ui_zoom": 1.0
+        });
+        let r = json(&v).to_string();
+        assert!(!r.contains("chicago-1") && !r.contains("trader7"), "{r}");
+        assert!(r.contains("ui_zoom"));
     }
 
     #[test]

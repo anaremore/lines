@@ -202,8 +202,29 @@ impl DatabentoExtension {
 }
 
 impl SourceExtension for DatabentoExtension {
+    fn api_version(&self) -> u32 {
+        lines_feed::extension::API_VERSION
+    }
     fn name(&self) -> &'static str {
         "databento"
+    }
+    /// The API key, for Settings › Connections (decision 0030 §3): kept in the keychain entry
+    /// this source already reads (`lines-databento`); `DATABENTO_API_KEY` overrides it.
+    fn fields(&self) -> Vec<lines_feed::extension::Field> {
+        vec![lines_feed::extension::Field {
+            key: "api-key",
+            label: "API key",
+            kind: lines_feed::extension::FieldKind::Secret,
+            required: true,
+            env: Some(crate::key::ENV),
+            keychain: Some(crate::key::CREDENTIAL),
+        }]
+    }
+    fn plan(&self) -> Option<String> {
+        Some(
+            "Your own Databento account, billed by Databento: CME futures, trades and top of book"
+                .to_owned(),
+        )
     }
     fn help(&self) -> &'static str {
         "Databento live CME Globex (GLBX.MDP3): the catalog's CME Group futures (equity index, rates, energy, metals, FX, grains); trades, top of book, replay back-fill."
@@ -213,7 +234,7 @@ impl SourceExtension for DatabentoExtension {
             "Databento: products ES NQ YM RTY MES MNQ MYM M2K, ZT ZF ZN ZB, CL MCL NG, \
              GC MGC SI HG, 6E 6J 6B, ZC ZS ZW (--instrument CL follows the front month, CLZ26 is \
              one contract). Uses your own Databento API key: DATABENTO_API_KEY, else the OS \
-             keychain entry `lines-databento` (the key as its password), else the file named by \
+             keychain entry `lines-databento` (the key as its password, account `databento`; Settings › Connections saves it there), else the file named by \
              LINES_DATABENTO_KEY_FILE; with none it is not set up and makes no requests. Live data is billed by Databento. Each contract \
              shown is one connection (at most 8). LINES_DATABENTO_REPLAY_HOURS caps the trades \
              replay on connect (default 24, 0 = none); LINES_DATABENTO_GATEWAY overrides the \

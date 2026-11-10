@@ -200,6 +200,10 @@ pub struct Settings {
         skip_serializing_if = "crate::palette_rank::PaletteHistory::is_empty"
     )]
     pub palette: crate::palette_rank::PaletteHistory,
+    /// Sources' plain settings from Settings › Connections (decision 0030 §3): source → field
+    /// → value. Optional. Secrets are never here: they are in the OS keychain.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub connections: crate::connections::Plain,
     /// The display time zone (Settings › Appearance; `lines_core::display_tz`): absent is
     /// the exchange's (ET), "System" the OS zone, else an IANA name. Display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]

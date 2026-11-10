@@ -204,6 +204,9 @@ pub struct SettingsWindow {
     seen_revision: u64,
     /// The row last scrolled into view (only a new selection or search scrolls).
     scrolled: Option<(Section, usize, String)>,
+    /// Settings › Connections (decision 0030): secrets read off-thread, a field being typed,
+    /// a running Test.
+    pub(crate) conn: crate::connections_view::ConnPage,
 }
 
 /// The window's size (logical px).
@@ -749,6 +752,7 @@ impl SettingsWindow {
             scroll: gpui::ScrollHandle::new(),
             scrolled: None,
             awaiting: Vec::new(),
+            conn: Default::default(),
             seen_revision: 0,
         }
     }
@@ -773,6 +777,9 @@ impl SettingsWindow {
                     .await;
                 let alive = this.update(cx, |v, cx| {
                     v.check_answers(cx);
+                    if v.conn.tick() {
+                        cx.notify();
+                    }
                     let r = Self::trading_revision(cx);
                     let d = crate::data_dir::revision();
                     if r != v.seen_revision || d != v.seen_data {
@@ -841,6 +848,7 @@ impl SettingsWindow {
     /// Leave whatever is half done (a number being typed, a confirmation, the preset
     /// editor): the account, product or section changed under it.
     fn drop_unfinished(&mut self) {
+        self.conn.leave();
         self.edit = None;
         self.cancel_pending();
         self.editor = None;
@@ -867,6 +875,8 @@ impl SettingsWindow {
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| s.section == self.section)
+                // The sources' switches are drawn on their Connections cards.
+                .filter(|(_, s)| !schema::SOURCE_SWITCHES.contains(&s.key))
                 .map(|(i, _)| i)
                 .collect()
         } else {
@@ -1196,6 +1206,32 @@ impl SettingsWindow {
         cx.stop_propagation();
         if self.editor.is_some() {
             self.editor_key(ev, cx);
+            return;
+        }
+        // A source's field being typed takes every key (Enter saves, Esc cancels).
+        if self.conn.edit.is_some()
+            && self.section == Section::Connections
+            && self.query.trim().is_empty()
+        {
+            if let Some(c) = self.conn.key(ev, cx) {
+                self.conn_commit(c, cx);
+            }
+            cx.notify();
+            return;
+        }
+        // On Connections, ↑/↓ move between the cards' controls and Enter or Space press one
+        // (design.md §6: every action reachable from the keyboard).
+        if self.section == Section::Connections
+            && self.query.trim().is_empty()
+            && self.pending.is_none()
+            && !ev.keystroke.modifiers.control
+            && !ev.keystroke.modifiers.alt
+            && let Some(pressed) = self.conn.nav_key(ev.keystroke.key.as_str())
+        {
+            if let Some(a) = pressed {
+                self.conn_action(a, cx);
+            }
+            cx.notify();
             return;
         }
         if self.zone_pick.is_some() {
@@ -2485,6 +2521,94 @@ impl SettingsWindow {
         row
     }
 
+    /// A press on the Connections page (decision 0030).
+    pub(crate) fn conn_action(
+        &mut self,
+        a: crate::connections_view::Action,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::connections_view::Action;
+        match a {
+            Action::Switch(name, on) => update_settings(cx, |s| {
+                if on {
+                    s.sources.remove(&name);
+                } else {
+                    s.sources.insert(
+                        name,
+                        crate::sources::SourcePrefs {
+                            enabled: Some(false),
+                        },
+                    );
+                }
+            }),
+            Action::Edit(name, field) => {
+                let buf = match field.kind {
+                    // A secret is typed afresh (Replace); never put back in a field.
+                    lines_feed::extension::FieldKind::Secret => String::new(),
+                    _ => crate::connections::plain_value(&settings(cx).connections, &name, &field)
+                        .unwrap_or_default(),
+                };
+                self.conn.edit = Some(crate::connections_view::Edit {
+                    source: name,
+                    field,
+                    buf,
+                });
+            }
+            Action::Remove(name, key) => {
+                if self.conn.press_remove(&name, key) {
+                    self.conn.reload(Some(Box::new(move || {
+                        crate::connections::remove_secret(&name, key)
+                    })));
+                }
+            }
+            Action::Set(name, key, value) => {
+                self.conn_commit(crate::connections_view::Commit::Plain(name, key, value), cx)
+            }
+            Action::Test(name) => self.conn.start_test(&name, cx),
+            Action::Save => {
+                if let Some(c) = self.conn.finish() {
+                    self.conn_commit(c, cx);
+                }
+            }
+            Action::Cancel => self.conn.edit = None,
+        }
+        cx.notify();
+    }
+
+    /// Write a finished Connections field: a secret to the keychain (off-thread), a plain
+    /// value to `settings.json` (and to the feeds that read it).
+    fn conn_commit(&mut self, c: crate::connections_view::Commit, cx: &mut Context<Self>) {
+        use crate::connections_view::Commit;
+        match c {
+            Commit::Secret(name, key, value) => self.conn.reload(Some(Box::new(move || {
+                crate::connections::set_secret(&name, key, &value)
+            }))),
+            Commit::Plain(name, key, value) => {
+                update_settings(cx, |s| {
+                    s.connections
+                        .entry(name)
+                        .or_default()
+                        .insert(key.to_owned(), value);
+                });
+                crate::connections::sync_plain(&settings(cx).connections);
+                // Setup may have changed ("not set up").
+                self.conn.reload(None);
+            }
+            Commit::Clear(name, key) => {
+                update_settings(cx, |s| {
+                    if let Some(m) = s.connections.get_mut(&name) {
+                        m.remove(key);
+                        if m.is_empty() {
+                            s.connections.remove(&name);
+                        }
+                    }
+                });
+                crate::connections::sync_plain(&settings(cx).connections);
+                self.conn.reload(None);
+            }
+        }
+    }
+
     fn keys_list(&self) -> AnyElement {
         let t = self.theme;
         let mut list = div().flex().flex_col().mt_1();
@@ -2773,6 +2897,13 @@ impl Render for SettingsWindow {
             }
             if schema::all()[i].key == "keys.list" {
                 main = main.child(self.keys_list());
+                child += 1;
+            }
+            if schema::all()[i].key == schema::CONNECTIONS_LIST {
+                if !self.conn.started() {
+                    self.conn.reload(None);
+                }
+                main = main.child(crate::connections_view::list(&self.conn, &self.theme, cx));
                 child += 1;
             }
         }

@@ -22,6 +22,8 @@ pub enum Section {
     Risk,
     Accounts,
     Data,
+    /// Every data source: its state, plan, settings and secrets (decisions 0030 §3–4 and 0035).
+    Connections,
     Keys,
     Diagnostics,
     /// The version, and rolling back an update (decision 0031).
@@ -29,7 +31,7 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 11] = [
+    pub const ALL: [Section; 12] = [
         Section::General,
         Section::Appearance,
         Section::Charts,
@@ -38,6 +40,7 @@ impl Section {
         Section::Risk,
         Section::Accounts,
         Section::Data,
+        Section::Connections,
         Section::Keys,
         Section::Diagnostics,
         Section::About,
@@ -53,6 +56,7 @@ impl Section {
             Section::Risk => "Risk",
             Section::Accounts => "Accounts",
             Section::Data => "Data",
+            Section::Connections => "Connections",
             Section::Keys => "Keys",
             Section::Diagnostics => "Diagnostics",
             Section::About => "About",
@@ -89,6 +93,11 @@ impl Scope {
         }
     }
 }
+
+/// The Connections section's list of sources (`connections_view` draws it).
+pub const CONNECTIONS_LIST: &str = "connections.list";
+/// The public sources' switches: rows for search and the palette, drawn on their cards.
+pub const SOURCE_SWITCHES: [&str; 3] = ["data.coinbase", "data.kraken", "data.databento"];
 
 /// Trading-affecting settings are marked in the window and loosening them asks first
 /// (decision 0021).
@@ -1582,71 +1591,6 @@ fn table() -> Vec<Setting> {
             },
             None,
         ),
-        // Data.
-        with_default(
-            s(
-                "data.coinbase",
-                Sec::Data,
-                "Coinbase",
-                "Public crypto prices (BTC/USD, ETH/USD). Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
-                Scope::App,
-                Normal,
-                Toggle,
-                |p, _, _| Value::Bool(source_on(p, "coinbase")),
-                Some(|p, _, v| set_source(p, "coinbase", want_bool(v)?)),
-            ),
-            Value::Bool(true),
-        ),
-        with_default(
-            s(
-                "data.kraken",
-                Sec::Data,
-                "Kraken",
-                "Public crypto prices, spot and perpetuals. Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
-                Scope::App,
-                Normal,
-                Toggle,
-                |p, _, _| Value::Bool(source_on(p, "kraken")),
-                Some(|p, _, v| set_source(p, "kraken", want_bool(v)?)),
-            ),
-            Value::Bool(true),
-        ),
-        with_default(
-            s(
-                "data.databento",
-                Sec::Data,
-                "Databento",
-                "CME futures through your own Databento account, billed by Databento. Off until your API key is set up (DATABENTO_API_KEY, or the OS keychain entry lines-databento); without it Lines makes no Databento requests. Applies when Lines next starts.",
-                Scope::App,
-                Normal,
-                Toggle,
-                |p, _, _| Value::Bool(source_on(p, crate::DATABENTO)),
-                Some(|p, _, v| set_source(p, crate::DATABENTO, want_bool(v)?)),
-            ),
-            Value::Bool(true),
-        ),
-        s(
-            "data.databento_key",
-            Sec::Data,
-            "Databento key",
-            "Whether this run found your Databento API key (DATABENTO_API_KEY, or the OS keychain entry lines-databento; a key added later counts from the next start). The key itself is never shown.",
-            Scope::ReadOnly,
-            Normal,
-            Info,
-            |p, _, _| {
-                // The startup lookup's answer; never a lookup from here.
-                Value::Text(
-                    match (crate::databento_known(), source_on(p, crate::DATABENTO)) {
-                        (Some(true), _) => "Set up",
-                        (Some(false), _) => "Not set up",
-                        (None, false) => "Off",
-                        (None, true) => "Checked when a run uses Databento",
-                    }
-                    .to_owned(),
-                )
-            },
-            None,
-        ),
         s(
             DATA_FOLDER_KEY,
             Sec::Data,
@@ -1726,6 +1670,83 @@ fn table() -> Vec<Setting> {
                 }),
             ),
             Value::List(Vec::new()),
+        ),
+        // Connections: the sources (drawn as cards by `connections_view`, each with its switch;
+        // the two switches below stay rows for search and the palette).
+        s(
+            CONNECTIONS_LIST,
+            Sec::Connections,
+            "Data sources",
+            "Each source connects only when a pane shows one of its symbols. A source's switch applies when Lines restarts; its settings, the next time it connects. Secrets are kept in the system's keychain.",
+            Scope::App,
+            Normal,
+            Info,
+            |_, _, _| Value::Text(String::new()),
+            None,
+        ),
+        with_default(
+            s(
+                "data.coinbase",
+                Sec::Connections,
+                "Coinbase",
+                "Public crypto prices (BTC/USD, ETH/USD). Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, "coinbase")),
+                Some(|p, _, v| set_source(p, "coinbase", want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
+        with_default(
+            s(
+                "data.kraken",
+                Sec::Connections,
+                "Kraken",
+                "Public crypto prices, spot and perpetuals. Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, "kraken")),
+                Some(|p, _, v| set_source(p, "kraken", want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
+        with_default(
+            s(
+                "data.databento",
+                Sec::Connections,
+                "Databento",
+                "CME futures through your own Databento account, billed by Databento. Off until your API key is set up (DATABENTO_API_KEY, or the OS keychain entry lines-databento); without it Lines makes no Databento requests. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, crate::DATABENTO)),
+                Some(|p, _, v| set_source(p, crate::DATABENTO, want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
+        s(
+            "data.databento_key",
+            Sec::Connections,
+            "Databento key",
+            "Whether this run found your Databento API key (DATABENTO_API_KEY, or the OS keychain entry lines-databento; a key added later counts from the next start). The key itself is never shown.",
+            Scope::ReadOnly,
+            Normal,
+            Info,
+            |p, _, _| {
+                // The startup lookup's answer; never a lookup from here.
+                Value::Text(
+                    match (crate::databento_known(), source_on(p, crate::DATABENTO)) {
+                        (Some(true), _) => "Set up",
+                        (Some(false), _) => "Not set up",
+                        (None, false) => "Off",
+                        (None, true) => "Checked when a run uses Databento",
+                    }
+                    .to_owned(),
+                )
+            },
+            None,
         ),
         // Keys.
         s(

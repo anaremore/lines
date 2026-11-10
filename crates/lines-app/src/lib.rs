@@ -13,6 +13,8 @@ mod chart_draw;
 mod chart_trade;
 mod chart_view;
 mod commands;
+mod connections;
+mod connections_view;
 mod data_dir;
 #[cfg(feature = "screenshot")]
 mod demo_broker;
@@ -617,8 +619,9 @@ struct Cli {
     /// with this note in the DOM.
     #[arg(long, value_name = "TEXT", requires = "screenshot")]
     depth_note: Option<String>,
-    /// Screenshot: also render the Settings window at this section (appearance, charts, dom,
-    /// trading, accounts, data, keys, diagnostics) into `<out stem>-settings.png`.
+    /// Screenshot: also render the Settings window at this section (general, appearance,
+    /// charts, dom, trading, risk, accounts, data, connections, keys, diagnostics, about)
+    /// into `<out stem>-settings.png`.
     #[arg(long, requires = "screenshot")]
     settings: Option<String>,
     /// Screenshot: the Settings window's search text.
@@ -629,6 +632,11 @@ struct Cli {
     /// confirmation. Repeatable.
     #[arg(long, requires = "settings")]
     settings_set: Vec<String>,
+    /// Screenshot: register an example source that describes an API key and a choice
+    /// (Settings › Connections evidence); KEY is its saved key in this run's in-memory
+    /// keychain, `none` for none. Never the user's keychain.
+    #[arg(long, value_name = "KEY", requires = "settings")]
+    example_connection: Option<String>,
     /// Screenshot: the Settings window's size, WxH logical px (default 860x620; the window
     /// can't be made smaller than 640x420).
     #[arg(long, requires = "settings", value_parser = parse_size)]
@@ -1167,15 +1175,35 @@ fn run_sources(
     let prefs = persist::config_dir()
         .map(|d| source_prefs(&d.join("settings.json")))
         .unwrap_or_default();
-    let choices = enabled_sources(ext, &prefs, |name| name != DATABENTO || databento_set_up());
+    // A source missing a required setting (Settings › Connections shows "not set up") isn't
+    // started: its panes say so. Reads the keychain once, before any window opens.
+    let choices: Vec<SourceChoice> =
+        enabled_sources(ext, &prefs, |name| name != DATABENTO || databento_set_up())
+            .into_iter()
+            .filter(|c| match c {
+                // Databento has its own key gate above (it also reads a key file).
+                SourceChoice::Extension(e) if e.name() == DATABENTO => true,
+                SourceChoice::Extension(e) => match connections::needs(e.name(), &e.fields()) {
+                    None => true,
+                    Some(field) => {
+                        tracing::warn!("{} is not set up (needs {field}): not started", e.name());
+                        connections::mark_not_set_up(e.name(), field);
+                        false
+                    }
+                },
+                SourceChoice::Builtin(_) => true,
+            })
+            .collect();
     // A caller's own `databento` (not key-gated) too: its key looked up now, never from the UI.
     if choices.iter().any(|c| c.name() == DATABENTO) {
         let _ = databento_set_up();
     }
     if choices.is_empty() {
         // Every source off: the app still opens (on the mock, offline, as `--source mock`
-        // would), so Settings › Data can turn one back on.
-        tracing::warn!("every data source is off in Settings › Data: starting on the mock");
+        // would), so Settings › Connections can turn one back on.
+        tracing::warn!(
+            "every data source is off or not set up in Settings › Connections: starting on the mock"
+        );
         let mock = SourceChoice::Builtin(SourceKind::Mock);
         return Ok((vec![(mock.name(), feed_config(cli, &mock, store)?)], true));
     }
@@ -1242,10 +1270,16 @@ fn enabled_sources(
 fn source_prefs(
     path: &std::path::Path,
 ) -> std::collections::BTreeMap<String, sources::SourcePrefs> {
+    settings_key(path, "sources")
+}
+
+/// One top-level key of `settings.json`, read on its own (as [`source_prefs`]): anything
+/// unreadable reads as the default.
+fn settings_key<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path, key: &str) -> T {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|mut v| v.get_mut("sources").map(serde_json::Value::take))
+        .and_then(|mut v| v.get_mut(key).map(serde_json::Value::take))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
 }
@@ -1705,6 +1739,27 @@ where
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source_name()))?;
     // The run's sources (decision 0030): every enabled one without `--source`, else that one.
     // `config` is the first (the run's when limited): what takes one source uses it.
+    // Sources' settings (Settings › Connections, decision 0030): plain values from
+    // `settings.json`, secrets from the OS keychain, read by each connector when it connects.
+    // Screenshots and the benchmark never read the user's keychain or settings.
+    if cli.screenshot.is_some() || cli.bench.is_some() {
+        match cli.example_connection.as_deref() {
+            Some(key) if key != "none" => {
+                connections::use_memory_keychain(&[("example", "api-key", key)])
+            }
+            _ => connections::use_memory_keychain(&[]),
+        }
+        if cli.example_connection.is_some() {
+            lines_feed::extension::register(Arc::new(connections::Example))?;
+        }
+        connections::install(&connections::Plain::new());
+    } else {
+        connections::install(
+            &persist::config_dir()
+                .map(|d| settings_key(&d.join("settings.json"), "connections"))
+                .unwrap_or_default(),
+        );
+    }
     let (mut run_sources, limited) = run_sources(&cli, &ext, &choice, &store_prefs)?;
     let config = run_sources[0].1.clone();
     // A market replay never runs a level source live (only its recorded batches, if any).
@@ -2374,6 +2429,9 @@ mod tests {
     fn extension_sources_join_the_cli() {
         struct Ext;
         impl SourceExtension for Ext {
+            fn api_version(&self) -> u32 {
+                lines_feed::extension::API_VERSION
+            }
             fn name(&self) -> &'static str {
                 "example-feed"
             }

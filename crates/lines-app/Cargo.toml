@@ -55,6 +55,16 @@ crc32fast = "1.5"
 # Target-specific so no macOS build can leave it out; guarded by `tests/text_system.rs`.
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_platform = { workspace = true, features = ["font-kit"] }
+# The OS keychain for sources' secrets (decision 0030 §4): MIT/Apache, the platform's own
+# store on each OS (Windows Credential Manager, macOS Keychain, the Secret Service on Linux).
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pure Rust D-Bus (zbus), no libdbus to install.
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
 
 [[test]]
 name = "text_system"
