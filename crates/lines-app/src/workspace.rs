@@ -931,7 +931,7 @@ impl WindowView {
             state,
             focused: PaneId(0),
             pending_windows,
-            name: doc.name.as_deref().and_then(tabstate::tab_name),
+            name: tabstate::saved_name(doc.name.as_deref()),
             pinned: doc.pinned,
         };
         let order = tab.order();
@@ -2650,9 +2650,9 @@ impl WindowView {
                 Err(e) => *error = Some(e),
             },
             Some(Prompt::RenameTab { text, tab, .. }) => {
-                let (name, i) = (tabstate::tab_name(text), *tab);
-                if let Some(t) = self.tabs.get_mut(i) {
-                    t.name = name;
+                let name = tabstate::tab_name(text);
+                if let Some(i) = tabstate::rename_target(*tab, self.tabs.len()) {
+                    self.tabs[i].name = name;
                 }
                 self.prompt = None;
             }
@@ -3046,31 +3046,29 @@ impl WindowView {
         let mut on = false;
         let mut feed = None;
         for h in tab.handles() {
-            // An unavailable pane's store is a stand-in: it says nothing (the pane says why).
+            // An unavailable pane's store is a stand-in (`tabstate::tab_feed_badge` gives it no
+            // badge: the pane says why).
             let store = match h {
                 PaneHandle::Dom(d) => {
                     let v = d.read(cx);
                     on |= v.trade_ref().arming.is_armed();
-                    v.feed()
-                        .unavailable
-                        .is_none()
-                        .then(|| v.trade_store().clone())
+                    Some((v.trade_store().clone(), v.feed().unavailable.is_some()))
                 }
                 PaneHandle::Chart(c) => {
                     let v = c.read(cx);
-                    v.feed().unavailable.is_none().then(|| v.store().clone())
+                    Some((v.store().clone(), v.feed().unavailable.is_some()))
                 }
                 PaneHandle::Tape(t) => {
                     let v = t.read(cx);
-                    v.feed().unavailable.is_none().then(|| v.store().clone())
+                    Some((v.store().clone(), v.feed().unavailable.is_some()))
                 }
                 PaneHandle::Chain(c) => {
                     let v = c.read(cx);
-                    v.feed().unavailable.is_none().then(|| v.store().clone())
+                    Some((v.store().clone(), v.feed().unavailable.is_some()))
                 }
                 _ => continue,
             };
-            let Some(store) = store else {
+            let Some((store, unavailable)) = store else {
                 continue;
             };
             if feed.is_some() {
@@ -3079,7 +3077,7 @@ impl WindowView {
             let stale = store.stale_for().is_some();
             // Busy this instant: no word this frame (the UI never waits on a feed).
             if let Some(d) = store.try_read()
-                && let Some(badge) = tabstate::tab_feed_badge(stale, &d.status)
+                && let Some(badge) = tabstate::tab_feed_badge(unavailable, stale, &d.status)
             {
                 let label = d
                     .contract_label()

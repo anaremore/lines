@@ -335,6 +335,16 @@ pub fn tab_name(typed: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_owned())
 }
 
+/// A saved tab name as it loads: cleaned as Rename tab cleans it (blank: no name).
+pub fn saved_name(saved: Option<&str>) -> Option<String> {
+    saved.and_then(tab_name)
+}
+
+/// The tab a Rename tab prompt renames: the one it was opened for, if it is still there.
+pub fn rename_target(opened_for: usize, tabs: usize) -> Option<usize> {
+    (opened_for < tabs).then_some(opened_for)
+}
+
 /// A middle click closes a tab unless it is pinned.
 pub fn middle_click_closes(pinned: bool) -> bool {
     !pinned
@@ -376,8 +386,16 @@ impl CloseGuard {
 /// A background tab's feed badge: the word for a feed of its panes that isn't live (stale
 /// while its market is open, failed, stopped). Connecting and reconnecting are passing states
 /// and an ended replay isn't a problem: no badge (the footer still names them).
-pub fn tab_feed_badge(stale: bool, status: &lines_feed::store::FeedStatus) -> Option<&'static str> {
+pub fn tab_feed_badge(
+    unavailable: bool,
+    stale: bool,
+    status: &lines_feed::store::FeedStatus,
+) -> Option<&'static str> {
     use lines_feed::store::FeedStatus as S;
+    // An unavailable pane's store is a stand-in: no badge (the pane says why itself).
+    if unavailable {
+        return None;
+    }
     if stale {
         return Some("STALE");
     }
@@ -853,6 +871,13 @@ mod tests {
             None,
             "empty: named after its symbols again"
         );
+        // Saved names load cleaned; a blank one is no name.
+        assert_eq!(saved_name(Some(" Scalp ")), Some("Scalp".to_owned()));
+        assert_eq!(saved_name(Some("  ")), None);
+        assert_eq!(saved_name(None), None);
+        // Rename renames the tab it was opened for; nothing if that tab is gone.
+        assert_eq!(rename_target(2, 5), Some(2));
+        assert_eq!(rename_target(4, 4), None);
         assert!(middle_click_closes(false) && !middle_click_closes(true));
     }
 
@@ -871,15 +896,21 @@ mod tests {
     #[test]
     fn a_tab_badge_names_a_feed_that_isnt_live() {
         use lines_feed::store::FeedStatus as S;
-        assert_eq!(tab_feed_badge(true, &S::Live), Some("STALE"));
-        assert_eq!(tab_feed_badge(true, &S::Failed("x".into())), Some("STALE"));
+        assert_eq!(tab_feed_badge(false, true, &S::Live), Some("STALE"));
         assert_eq!(
-            tab_feed_badge(false, &S::Failed("x".into())),
+            tab_feed_badge(false, true, &S::Failed("x".into())),
+            Some("STALE")
+        );
+        assert_eq!(
+            tab_feed_badge(false, false, &S::Failed("x".into())),
             Some("FAILED")
         );
-        assert_eq!(tab_feed_badge(false, &S::Stopped), Some("STOPPED"));
-        assert_eq!(tab_feed_badge(false, &S::Connecting), None);
-        assert_eq!(tab_feed_badge(false, &S::ReplayFinished), None);
-        assert_eq!(tab_feed_badge(false, &S::Live), None);
+        assert_eq!(tab_feed_badge(false, false, &S::Stopped), Some("STOPPED"));
+        assert_eq!(tab_feed_badge(false, false, &S::Connecting), None);
+        assert_eq!(tab_feed_badge(false, false, &S::ReplayFinished), None);
+        assert_eq!(tab_feed_badge(false, false, &S::Live), None);
+        // An unavailable pane's stand-in store: no badge, whatever it says.
+        assert_eq!(tab_feed_badge(true, false, &S::Failed("x".into())), None);
+        assert_eq!(tab_feed_badge(true, true, &S::Live), None);
     }
 }
