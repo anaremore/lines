@@ -79,6 +79,8 @@ fn footer_h() -> f32 {
 const MIN_WINDOW_W: f32 = 240.0;
 const MIN_WINDOW_H: f32 = TAB_BAR_H_100 + FOOTER_H_100 + 2.0 * crate::trade_bar::MIN_DOM_PANE_H;
 const TAB_W_100: f32 = 168.0;
+/// The tab bar's new-tab button and ▾ list, each, at 100 %.
+const TAB_CONTROL_100: f32 = 28.0;
 /// [`TAB_W_100`] at the UI zoom (`crate::zoom`).
 #[inline]
 fn tab_w() -> f32 {
@@ -474,6 +476,10 @@ pub struct Tab {
     focused: PaneId,
     /// Detached panes whose windows open once the tab is in a window (restore, reopen).
     pending_windows: Vec<(PaneId, Option<Placement>)>,
+    /// The tab's own name (Rename…), else it is named after its symbols.
+    name: Option<String>,
+    /// Pinned: Close others and a middle click skip it.
+    pinned: bool,
 }
 
 impl Tab {
@@ -554,6 +560,9 @@ impl Tab {
     }
 
     fn title(&self, cx: &App) -> String {
+        if let Some(n) = &self.name {
+            return n.clone();
+        }
         let mut seen: Vec<String> = Vec::new();
         for id in self.layout.leaves() {
             if let Some(h) = self.handle(*id) {
@@ -585,6 +594,8 @@ impl Tab {
                 .unwrap_or_else(|| PaneDoc::new(PaneKind::Chart, None, None))
         });
         TabDoc {
+            name: self.name.clone(),
+            pinned: self.pinned,
             focused: self.layout.index_of(&self.focused).unwrap_or(0),
             layout,
         }
@@ -742,6 +753,11 @@ enum Prompt {
         text: String,
         error: Option<String>,
     },
+    /// Rename the active tab (empty: named after its symbols again).
+    RenameTab {
+        text: String,
+        error: Option<String>,
+    },
     Open {
         items: Vec<String>,
         selected: usize,
@@ -786,6 +802,11 @@ pub struct WindowView {
     screen: Rect,
     split_drag: Option<crate::layout::Divider>,
     tab_drag: Option<TabDrag>,
+    /// How far the tab strip is scrolled (logical px; `tabstrip::Strip`).
+    tab_scroll: f32,
+    /// A tab was just closed with its ×: the × that slides under the pointer takes no press
+    /// until the pointer leaves the tab bar.
+    close_guard: bool,
     pane_drag: Option<PaneDrag>,
     /// The pane and tab under the pointer, from geometry on mouse move: only they get hover
     /// controls, so a frame doesn't build (and lay out) controls for every pane.
@@ -843,6 +864,8 @@ impl WindowView {
             screen: screen_rect(window),
             split_drag: None,
             tab_drag: None,
+            tab_scroll: 0.0,
+            close_guard: false,
             pane_drag: None,
             hover_pane: None,
             hover_pinned: false,
@@ -906,6 +929,8 @@ impl WindowView {
             state,
             focused: PaneId(0),
             pending_windows,
+            name: doc.name.clone(),
+            pinned: doc.pinned,
         };
         let order = tab.order();
         let want = order[doc.focused.min(order.len() - 1)];
@@ -1336,10 +1361,39 @@ impl WindowView {
             return;
         }
         self.active = i;
+        let strip = self.tab_strip(f32::from(window.viewport_size().width));
+        self.tab_scroll = strip.keep_in_view(self.tab_scroll, i);
         self.sync_visibility(cx);
         let f = self.tab().focused;
         self.focus_pane(f, window, cx);
         cx.notify();
+    }
+
+    /// The tab strip's geometry for a window `width` wide (`crate::tabstrip`).
+    fn tab_strip(&self, width: f32) -> crate::tabstrip::Strip {
+        crate::tabstrip::Strip::new(
+            width,
+            tab_x0(),
+            tab_w(),
+            crate::zoom::f(TAB_CONTROL_100),
+            crate::zoom::f(TAB_CONTROL_100),
+            self.tabs.len(),
+        )
+    }
+
+    /// Close every tab but `keep` and the pinned ones.
+    fn close_other_tabs(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let mut i = self.tabs.len();
+        let mut keep = keep;
+        while i > 0 {
+            i -= 1;
+            if i != keep && !self.tabs[i].pinned {
+                self.close_tab(i, window, cx);
+                if i < keep {
+                    keep -= 1;
+                }
+            }
+        }
     }
 
     // ---- commands -------------------------------------------------------------------------
@@ -1708,6 +1762,15 @@ impl WindowView {
                 self.open_menu(at, cx);
             }
             Command::Replay(rc) => self.run_replay(rc, cx),
+            Command::RenameTab => {
+                let text = self.tab().name.clone().unwrap_or_default();
+                self.prompt = Some(Prompt::RenameTab { text, error: None });
+            }
+            Command::TogglePinTab => {
+                let tab = self.tab_mut();
+                tab.pinned = !tab.pinned;
+            }
+            Command::CloseOtherTabs => self.close_other_tabs(self.active, window, cx),
             Command::SaveAs => {
                 let name = cx.global::<Workspace>().name.clone();
                 self.prompt = Some(Prompt::SaveAs {
@@ -1839,6 +1902,8 @@ impl WindowView {
         pane.source = source;
         let tab = Self::build_tab(
             &TabDoc {
+                name: None,
+                pinned: false,
                 focused: 0,
                 layout: Layout::Pane(pane),
             },
@@ -1864,7 +1929,7 @@ impl WindowView {
             d.source = source.clone();
             d
         });
-        Self::build_tab(&TabDoc { focused: 0, layout }, cx)
+        Self::build_tab(&TabDoc::of(layout), cx)
     }
 
     /// Reopen the most recently closed tab where it was (layout, panes and states as saved).
@@ -2174,7 +2239,7 @@ impl WindowView {
             PaneDoc::new(k, l, t)
         });
         // New panes first (they share the running feeds), then the old ones go.
-        let mut tab = Self::build_tab(&TabDoc { focused: 0, layout }, cx);
+        let mut tab = Self::build_tab(&TabDoc::of(layout), cx);
         for (id, slot) in tab.panes.iter_mut() {
             slot._subs = self.subscribe(*id, &slot.handle, cx);
         }
@@ -2299,8 +2364,11 @@ impl WindowView {
         let vs = window.viewport_size();
         let own = Rect::new(own.x, own.y, f32::from(vs.width), f32::from(vs.height));
         let bar = Rect::new(own.x, own.y, own.w, tab_bar_h());
-        let rights: Vec<f32> = (0..self.tabs.len())
-            .map(|i| own.x + tab_x0() + (i as f32 + 1.0) * tab_w())
+        let rights: Vec<f32> = self
+            .tab_strip(own.w)
+            .rights(self.tab_scroll)
+            .into_iter()
+            .map(|r| own.x + r)
             .collect();
         let me = window.window_handle().window_id();
         let others: Vec<(WindowHandle<WindowView>, Rect)> = cx
@@ -2485,8 +2553,16 @@ impl WindowView {
     /// A tab's menu (`pane_menu::tab_items`): tab, layout and workspace actions.
     fn open_tab_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let ws = cx.global::<Workspace>();
+        let others = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| *i != self.active && !t.pinned)
+            .count();
         let m = crate::pane_menu::TabMenu {
             tabs: self.tabs.len(),
+            pinned: self.tabs.get(self.active).is_some_and(|t| t.pinned),
+            closable_others: others,
             closed_tabs: !ws.closed_tabs.is_empty(),
             crosshair_sync: ws.crosshair_sync,
             crosshair_sync_price: ws.crosshair_sync_price,
@@ -2522,6 +2598,11 @@ impl WindowView {
                 }
                 Err(e) => *error = Some(e),
             },
+            Some(Prompt::RenameTab { text, .. }) => {
+                let name = text.trim().to_owned();
+                self.tab_mut().name = (!name.is_empty()).then_some(name);
+                self.prompt = None;
+            }
             Some(Prompt::Open {
                 items,
                 selected,
@@ -2613,7 +2694,7 @@ impl WindowView {
             return;
         }
         match self.prompt.as_mut() {
-            Some(Prompt::SaveAs { text, error }) => match key {
+            Some(Prompt::SaveAs { text, error } | Prompt::RenameTab { text, error }) => match key {
                 "backspace" => {
                     text.pop();
                     *error = None;
@@ -2797,9 +2878,13 @@ impl WindowView {
         let (x, y) = (f32::from(pos.x), f32::from(pos.y));
         let bar = self.bar_h();
         let area = self.content_area(window, cx);
-        let tab = (y < bar && x >= tab_x0())
-            .then(|| ((x - tab_x0()) / tab_w()) as usize)
-            .filter(|i| *i < self.tabs.len());
+        let strip = self.tab_strip(f32::from(window.viewport_size().width));
+        let tab = (y < bar)
+            .then(|| strip.tab_at(x, self.tab_scroll))
+            .flatten();
+        if y >= bar && self.close_guard {
+            self.close_guard = false;
+        }
         let pane = self.tabs.get(self.active).and_then(|t| {
             let order = t.order();
             t.layout
@@ -2901,46 +2986,134 @@ impl WindowView {
 
     // ---- rendering --------------------------------------------------------------------------
 
-    fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A background tab's state, as words (never color alone): trading on in one of its DOMs,
+    /// and a feed of its panes that isn't live (its symbol and word).
+    fn tab_alarm(tab: &Tab, cx: &App) -> (bool, Option<String>) {
+        use crate::trade_bar::TradePane;
+        let mut on = false;
+        let mut feed = None;
+        for h in tab.handles() {
+            let store = match h {
+                PaneHandle::Dom(d) => {
+                    let v = d.read(cx);
+                    on |= v.trade_ref().arming.is_armed();
+                    v.trade_store().clone()
+                }
+                PaneHandle::Chart(c) => c.read(cx).store().clone(),
+                PaneHandle::Tape(t) => t.read(cx).store().clone(),
+                PaneHandle::Chain(c) => c.read(cx).store().clone(),
+                _ => continue,
+            };
+            if feed.is_some() {
+                continue;
+            }
+            let stale = store.stale_for().is_some();
+            // Busy this instant: no word this frame (the UI never waits on a feed).
+            if let Some(d) = store.try_read() {
+                let word = if stale {
+                    Some("stale")
+                } else {
+                    crate::pane::status_word(&d.status).filter(|w| *w != "ended")
+                };
+                if let Some(w) = word {
+                    let label = d
+                        .contract_label()
+                        .map(|l| l.as_str().to_owned())
+                        .unwrap_or_else(|| d.product.symbol.to_owned());
+                    feed = Some(format!("{label} {w}"));
+                }
+            }
+        }
+        (on, feed)
+    }
+
+    /// The tab bar: fixed-width tabs in a strip that scrolls with the wheel when they don't fit
+    /// (the active tab kept in view, a ▾ list of every tab); each tab's close slot is always
+    /// there (× on the active and hovered tab, a pin on a pinned one), so titles never shift
+    /// under the pointer; a background tab says "ON" or "STALE" when one of its DOMs trades or
+    /// a feed isn't live (words, with a tooltip).
+    fn tab_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let mut bar = div()
-            .h(px(tab_bar_h()))
-            .flex_none()
+        let width = f32::from(window.viewport_size().width);
+        let strip = self.tab_strip(width);
+        let scroll = strip.clamp(self.tab_scroll);
+        let hovered = self.hover_tab;
+        let mut row = div()
+            .relative()
+            .left(px(-scroll))
+            .h_full()
             .flex()
             .flex_row()
-            .items_end()
-            .pl(px(tab_x0()))
-            .bg(t.panel)
-            .border_b_1()
-            .border_color(t.axis_line)
-            .text_size(crate::zoom::ui(12.0));
-        let hovered = self.hover_tab;
+            .items_end();
         for (i, tab) in self.tabs.iter().enumerate() {
             let active = i == self.active;
             let title = tab.title(cx);
-            // Close: on the active tab, and on any tab while hovered.
-            let close = (active || hovered == Some(i)).then(|| {
-                // Named per tab for assistive technology; the key closes the active tab only.
-                crate::icons::button(
-                    ("tab-close", i),
-                    crate::icons::Icon::Close,
-                    &format!("Close {title}"),
-                    active.then_some(Command::CloseTab),
-                    false,
+            let pinned = tab.pinned;
+            // The close slot: always its width. A pinned tab shows its pin there.
+            let slot = div()
+                .flex_none()
+                .size(px(crate::icons::HIT))
+                .flex()
+                .items_center()
+                .justify_center();
+            let slot = if pinned {
+                slot.child(crate::tooltip::tip_div(
+                    div()
+                        .id(("tab-pin", i))
+                        .child(crate::icons::glyph(crate::icons::Icon::Pin, t.text_dim)),
+                    "Pinned: Close others and a middle click skip it",
+                    None,
                     &t,
+                ))
+            } else if active || hovered == Some(i) {
+                // Named per tab for assistive technology; the key closes the active tab only.
+                slot.child(
+                    crate::icons::button(
+                        ("tab-close", i),
+                        crate::icons::Icon::Close,
+                        &format!("Close {title}"),
+                        active.then_some(Command::CloseTab),
+                        false,
+                        &t,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            // The × that slid under the pointer after a close takes no press
+                            // until the pointer leaves the tab bar.
+                            if this.close_guard {
+                                return;
+                            }
+                            this.close_guard = true;
+                            this.close_tab(i, window, cx);
+                        }),
+                    ),
                 )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(i, window, cx);
-                    }),
-                )
-            });
-            bar = bar.child(
+            } else {
+                slot
+            };
+            let (on, feed) = if active {
+                (false, None)
+            } else {
+                Self::tab_alarm(tab, cx)
+            };
+            let badge = |id: &'static str, word: &'static str, tip: String| {
+                crate::tooltip::tip_div(div().id((id, i)), &tip, None, &t)
+                    .flex_none()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(t.warn)
+                    .text_color(t.on_warn)
+                    .text_size(crate::zoom::ui(10.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(word)
+            };
+            row = row.child(
                 div()
                     .id(("tab", i))
                     .w(px(tab_w()))
+                    .flex_none()
                     .h_full()
                     .flex()
                     .flex_row()
@@ -2958,7 +3131,17 @@ impl WindowView {
                     .text_color(if active { t.text_main } else { t.text_dim })
                     .when(active, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .child(div().flex_1().min_w_0().truncate().child(title))
-                    .children(close)
+                    .when(on, |d| {
+                        d.child(badge(
+                            "tab-on",
+                            "ON",
+                            "Trading is on in a DOM in this tab".to_owned(),
+                        ))
+                    })
+                    .when_some(feed, |d, f| {
+                        d.child(badge("tab-stale", "STALE", format!("Not live: {f}")))
+                    })
+                    .child(slot)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -2976,7 +3159,10 @@ impl WindowView {
                         MouseButton::Middle,
                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.close_tab(i, window, cx);
+                            // A pinned tab stays.
+                            if !this.tabs.get(i).is_some_and(|t| t.pinned) {
+                                this.close_tab(i, window, cx);
+                            }
                         }),
                     )
                     .on_mouse_down(
@@ -2989,25 +3175,108 @@ impl WindowView {
                     ),
             );
         }
-        bar = bar.child(
+        // While a tab is dragged over the strip: a 2 px marker where it would land.
+        let marker = self.tab_drag.as_ref().filter(|d| d.active).and_then(|d| {
+            let x = f32::from(d.now.x);
+            (f32::from(d.now.y) < tab_bar_h())
+                .then(|| strip.tab_at(x, scroll))
+                .flatten()
+                .filter(|to| *to != d.index)
+                .map(|to| strip.marker_x(d.index, to, scroll))
+        });
+        let tabs = div()
+            .id("tab-strip")
+            .relative()
+            .flex_none()
+            .w(px(strip.room))
+            .h_full()
+            .overflow_hidden()
+            .child(row)
+            .on_scroll(
+                cx.listener(move |this, ev: &gpui::ScrollEvent, window, cx| {
+                    let d = ev.delta.pixel_delta(px(crate::zoom::f(20.0)));
+                    // A wheel turn (vertical) or a sideways swipe both move the strip.
+                    let delta = -f32::from(if d.y.abs() > d.x.abs() { d.y } else { d.x });
+                    let strip = this.tab_strip(f32::from(window.viewport_size().width));
+                    let next = strip.wheel(this.tab_scroll, delta);
+                    if next != this.tab_scroll {
+                        this.tab_scroll = next;
+                        cx.notify();
+                    }
+                }),
+            );
+        let control = |id: &'static str, glyph: &'static str| {
             div()
-                .id("new-tab")
+                .id(id)
+                .flex_none()
+                .w(crate::zoom::ui(TAB_CONTROL_100))
                 .h_full()
-                .px_2()
                 .flex()
                 .items_center()
+                .justify_center()
                 .text_color(t.text_dim)
                 .hover(|s| s.text_color(t.text_main))
-                .child("+")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.run(Command::NewTab, window, cx);
-                    }),
-                ),
-        );
-        bar
+                .child(glyph)
+        };
+        let more = strip.overflows().then(|| {
+            crate::tooltip::tip_div(control("tab-list", "▾"), "All tabs", None, &t).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_tab_list(ev.position, cx);
+                }),
+            )
+        });
+        div()
+            .relative()
+            .h(px(tab_bar_h()))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_end()
+            .pl(px(tab_x0()))
+            .bg(t.panel)
+            .border_b_1()
+            .border_color(t.axis_line)
+            .text_size(crate::zoom::ui(12.0))
+            .child(tabs)
+            .children(more)
+            .child(control("new-tab", "+").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.run(Command::NewTab, window, cx);
+                }),
+            ))
+            .children(marker.map(|x| {
+                div()
+                    .absolute()
+                    .left(px(x - 1.0))
+                    .top_0()
+                    .w(px(2.0))
+                    .h(px(tab_bar_h()))
+                    .bg(t.accent)
+            }))
+    }
+
+    /// The ▾ list: every tab, the active one checked; a row activates its tab.
+    fn open_tab_list(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let items = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let mut row = crate::menu::MenuItem::named(
+                    &tab.title(cx),
+                    Command::SelectTab(i),
+                    i == self.active,
+                );
+                // Its position, not a key, beyond the ninth tab.
+                row.hint = if i < 9 { row.hint } else { String::new() };
+                row
+            })
+            .collect();
+        self.show_menu(Menu::new(at, items), cx);
     }
 
     /// The window footer (`crate::footer`): safety items on the left, in a fixed order and
@@ -3809,6 +4078,29 @@ impl WindowView {
                 )
         };
         let (panel, title, body, error) = match p {
+            Prompt::RenameTab { text, error } => (
+                crate::popover::Panel::RenameTab,
+                "Rename tab",
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .child(if text.is_empty() {
+                        div().text_color(t.text_dim).child("its symbols")
+                    } else {
+                        div().text_color(t.text_main).child(text.clone())
+                    })
+                    .child(
+                        div()
+                            .w(crate::zoom::ui(2.0))
+                            .h(crate::zoom::ui(15.0))
+                            .bg(t.accent),
+                    ),
+                error.clone(),
+            ),
             Prompt::SaveAs { text, error } => (
                 crate::popover::Panel::SaveAs,
                 "Save workspace as",
@@ -4060,7 +4352,7 @@ impl Render for WindowView {
         let menu = self.menu_overlay(window, cx);
         let bar = self
             .shows_bar()
-            .then(|| self.tab_bar(cx).into_any_element());
+            .then(|| self.tab_bar(window, cx).into_any_element());
         div()
             .size_full()
             .relative()

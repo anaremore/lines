@@ -352,6 +352,10 @@ pub fn settings_row(kind: PaneKind) -> MenuItem {
 #[derive(Clone, Debug)]
 pub struct TabMenu {
     pub tabs: usize,
+    /// The tab the menu is for is pinned.
+    pub pinned: bool,
+    /// Other tabs Close others would close (not pinned).
+    pub closable_others: usize,
     pub closed_tabs: bool,
     pub crosshair_sync: bool,
     pub crosshair_sync_price: bool,
@@ -361,7 +365,12 @@ pub struct TabMenu {
 
 /// A tab's menu: tab, layout and workspace actions; Close tab last.
 pub fn tab_items(m: &TabMenu) -> Vec<MenuItem> {
-    let mut v = vec![MenuItem::of(Command::NewTab, false)];
+    let mut v = vec![
+        MenuItem::of(Command::RenameTab, false),
+        toggle("Pin tab", Command::TogglePinTab, m.pinned),
+        MenuItem::sep(),
+        MenuItem::of(Command::NewTab, false),
+    ];
     if m.closed_tabs {
         v.push(MenuItem::of(Command::ReopenTab, false));
     }
@@ -402,13 +411,17 @@ pub fn tab_items(m: &TabMenu) -> Vec<MenuItem> {
         vec![
             MenuItem::of(Command::SaveAs, false),
             MenuItem::of(Command::Open, false),
+            MenuItem::sep(),
+            MenuItem::of(Command::ExportDiagnostics, false),
         ],
     ));
     v.push(MenuItem::sep());
-    v.push(MenuItem::of(Command::ExportDiagnostics, false));
     v.push(row("Settings…", Command::Settings));
     v.push(row("All commands…", Command::Palette));
     v.push(MenuItem::sep());
+    if m.closable_others > 0 {
+        v.push(MenuItem::of(Command::CloseOtherTabs, false).destructive());
+    }
     v.push(MenuItem::of(Command::CloseTab, false).destructive());
     v
 }
@@ -1004,6 +1017,8 @@ mod tests {
     fn the_tab_menu_keeps_the_rules() {
         let m = TabMenu {
             tabs: 2,
+            pinned: false,
+            closable_others: 1,
             closed_tabs: true,
             crosshair_sync: true,
             crosshair_sync_price: false,
@@ -1014,6 +1029,19 @@ mod tests {
         assert!(v.iter().filter(|i| !i.is_sep()).count() <= 12);
         let last = v.last().unwrap();
         assert!(last.destructive && last.cmd == Some(Command::CloseTab));
+        // Rename and Pin first; Close others, destructive, just before Close tab.
+        assert_eq!(v[0].cmd, Some(Command::RenameTab));
+        assert!(v[1].toggle && v[1].cmd == Some(Command::TogglePinTab) && !v[1].checked);
+        let others = &v[v.len() - 2];
+        assert!(others.destructive && others.cmd == Some(Command::CloseOtherTabs));
+        // Nothing to close: no Close others; a pinned tab's Pin is checked.
+        let v = tab_items(&TabMenu {
+            closable_others: 0,
+            pinned: true,
+            ..m
+        });
+        assert!(!v.iter().any(|i| i.cmd == Some(Command::CloseOtherTabs)));
+        assert!(v[1].checked);
         let palette = crate::commands::palette();
         for i in &v {
             for s in std::iter::once(i).chain(&i.sub) {

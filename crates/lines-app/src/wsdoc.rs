@@ -173,6 +173,25 @@ pub struct TabDoc {
     #[serde(default)]
     pub focused: usize,
     pub layout: Layout<PaneDoc>,
+    /// The tab's own name (Rename…); absent, the tab is named after its symbols. Optional:
+    /// written only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Pinned: Close others and a middle click skip it. Optional: written only when pinned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+}
+
+impl TabDoc {
+    /// A tab of `layout`, focused on its first pane, unnamed and unpinned.
+    pub fn of(layout: Layout<PaneDoc>) -> TabDoc {
+        TabDoc {
+            focused: 0,
+            layout,
+            name: None,
+            pinned: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -647,7 +666,7 @@ impl WorkspaceDoc {
             windows: vec![WindowDoc {
                 placement: None,
                 active_tab: 0,
-                tabs: vec![TabDoc { focused: 0, layout }],
+                tabs: vec![TabDoc::of(layout)],
             }],
         }
     }
@@ -1204,6 +1223,8 @@ mod tests {
             active_tab: 1,
             tabs: vec![
                 TabDoc {
+                    name: None,
+                    pinned: false,
                     focused: 0,
                     layout: Layout::Pane(PaneDoc {
                         chart: Some(ChartState {
@@ -1227,6 +1248,8 @@ mod tests {
                     }),
                 },
                 TabDoc {
+                    name: None,
+                    pinned: false,
                     focused: 1,
                     layout: Layout::split(
                         Axis::Column,
@@ -1354,6 +1377,19 @@ mod tests {
             panic!("round trip")
         };
         assert_eq!(value.hidden_footer_links, ["layout"]);
+        // A tab's name and pin: absent unless set, round-trip when set (an older file reads
+        // unnamed and unpinned).
+        let mut w = WorkspaceDoc::pair();
+        let text = String::from_utf8(encode(&FORMAT, &w).unwrap()).unwrap();
+        assert!(!text.contains("\"name\":\"Trading\"") && !text.contains("pinned"), "{text}");
+        w.windows[0].tabs[0].name = Some("Trading".into());
+        w.windows[0].tabs[0].pinned = true;
+        let bytes = encode(&FORMAT, &w).unwrap();
+        let Decoded::Ok { value: back, .. } = decode::<WorkspaceDoc>(&FORMAT, &bytes) else {
+            panic!("round trip")
+        };
+        assert_eq!(back.windows[0].tabs[0].name.as_deref(), Some("Trading"));
+        assert!(back.windows[0].tabs[0].pinned);
         // Performance stats: off unless saved on, written only when on.
         assert!(!value.show_perf_stats);
         assert!(
