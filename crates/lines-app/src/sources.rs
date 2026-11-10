@@ -107,7 +107,7 @@ impl Sources {
             // What's missing; the pane under it and the tab's banner give the way out
             // (Ctrl+K, a one-click switch to a symbol a source has).
             NoSource(format!(
-                "No source has {}",
+                "no source has {}",
                 lines_feed::catalog::get(match &t {
                     Target::Product(p) => *p,
                     Target::Contract(k) => k.product,
@@ -125,7 +125,8 @@ impl Sources {
 
     /// What a first run opens on (decision 0030): `None` for `pair` (NQ | ES) when a source
     /// in the run serves ES; else a product one serves (BTC, then ETH; Coinbase's before
-    /// Kraken's), else the primary source's own symbol. Never panes no source can show.
+    /// Kraken's), else the primary source's own symbol, else BTC/USD (a source serving none
+    /// of these and offering no symbol: its panes then say so).
     pub fn first_run_product(&self) -> Option<lines_core::ProductId> {
         use lines_feed::catalog;
         let serves = |p| {
@@ -515,7 +516,17 @@ mod tests {
         assert_eq!(s.for_pane(Some("kraken"), None).unwrap().name, "mock");
         // Nothing serves NQ here (the mock is ES only).
         let err = s.for_pane(None, Some(&doc(catalog::NQ))).unwrap_err();
-        assert_eq!(err.0, "No source has NQ");
+        assert_eq!(err.0, "no source has NQ");
+        // A contract is named as a contract.
+        let nqz = TargetDoc::from_target(&Target::Contract(lines_core::ContractKey::monthly(
+            catalog::NQ,
+            2026,
+            lines_core::Month::new(12).unwrap(),
+        )));
+        assert_eq!(
+            s.for_pane(None, Some(&nqz)).unwrap_err().0,
+            "no source has NQZ26"
+        );
     }
 
     #[test]

@@ -428,9 +428,10 @@ struct Cli {
     #[arg(long, value_enum)]
     layout: Option<LayoutKind>,
     /// Open a workspace: a saved one by name, or a built-in (`pair` = NQ and ES side by side,
-    /// `trading`, `chart`, `1x2`, `2x2`, `1+2`, `6c2d`). Screenshots take a built-in or a
-    /// workspace `.json` file (they never read user settings). Default: the autosaved
-    /// workspace (first run: `pair`).
+    /// `trading`, `chart`, `1x2`, `2x2`, `1+2`, `6c2d`). Screenshots take a built-in, a
+    /// workspace `.json` file (they never read user settings) or `first-run` (what a first run
+    /// opens with this run's sources). Default: the autosaved workspace (first run: `pair`
+    /// when a source serves futures, else BTC/USD chart, DOM and time & sales).
     #[arg(long)]
     workspace: Option<String>,
     /// Benchmark: open the workspace (default `6c2d`: 6 charts + 2 DOMs on two contracts)
