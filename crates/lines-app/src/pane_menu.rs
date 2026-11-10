@@ -1,7 +1,8 @@
 //! What a pane's context menu holds, by the menu rules (`docs/design.md`, "Menus";
 //! `crate::menu`): about 12 top-level rows; sets as submenus one level deep, each showing its
 //! value (Timeframe ›, Show ›, Drawings ›, Pane ›, Link ›); show/hide as checkmarks; never a
-//! row per instance; destructive rows last; "All commands…" at the end. An object under the
+//! row per instance; destructive rows last; "Settings…" (at the pane's own section) then "All
+//! commands…" at the end. An object under the
 //! pointer (an order's tag, a drawing) gets its own menu instead, its name and value as a
 //! header. Pure: the workspace and pane windows read the pane's state into [`PaneMenu`].
 
@@ -324,8 +325,25 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
     v.push(pane(m));
     v.push(link(m.link));
     v.push(MenuItem::sep());
+    v.push(settings_row(m.kind));
     v.push(row("All commands…", Command::Palette));
     v
+}
+
+/// The Settings section a pane's "Settings…" opens at: its own kind's settings.
+pub fn settings_section(kind: PaneKind) -> crate::settings_schema::Section {
+    use crate::settings_schema::Section;
+    match kind {
+        PaneKind::Chart => Section::Charts,
+        PaneKind::Dom | PaneKind::Tape => Section::Dom,
+        PaneKind::Positions => Section::Accounts,
+        PaneKind::Journal | PaneKind::Strategies | PaneKind::Chain => Section::Trading,
+    }
+}
+
+/// "Settings…" with Settings' key, opening at `kind`'s section (every pane menu, second to last).
+pub fn settings_row(kind: PaneKind) -> MenuItem {
+    row("Settings…", Command::SettingsAt(settings_section(kind)))
 }
 
 /// A tab's state, as its menu shows it.
@@ -724,6 +742,7 @@ mod tests {
                 "Pane",
                 "Link",
                 "---",
+                "Settings…",
                 "All commands…"
             ]
         );
@@ -780,6 +799,12 @@ mod tests {
             let top = v.iter().filter(|i| !i.is_sep()).count();
             assert!(top <= 12, "{kind:?}: {top} top-level rows");
             assert_eq!(v.last().map(|i| i.label.as_str()), Some("All commands…"));
+            // Settings… second to last, at this pane's own section, with Settings' key.
+            let s = &v[v.len() - 2];
+            assert_eq!(s.label, "Settings…", "{kind:?}");
+            assert_eq!(s.cmd, Some(Command::SettingsAt(settings_section(kind))));
+            assert_eq!(s.hint, crate::commands::hint(Command::Settings));
+            assert!(!s.hint.is_empty());
             for i in &v {
                 assert!(i.sub.iter().all(|s| s.sub.is_empty()), "one level deep");
                 // Destructive rows come last in their list.
@@ -822,6 +847,11 @@ mod tests {
                     if let Some(cmd) = s.cmd
                         && cmd != Command::Palette
                     {
+                        // Settings at a section is the palette's Settings… (same window).
+                        let cmd = match cmd {
+                            Command::SettingsAt(_) => Command::Settings,
+                            c => c,
+                        };
                         assert!(
                             palette.contains(&cmd),
                             "{kind:?}: {cmd:?} not in the palette"
