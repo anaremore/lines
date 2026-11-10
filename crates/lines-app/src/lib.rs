@@ -1030,7 +1030,12 @@ fn run_sources(
     if !cli.several_sources() {
         let first = feed_config(cli, choice)?;
         // `--also-replay`: more recordings, each its own source, beside the first.
-        let mut out = vec![(choice.name(), first.clone())];
+        // A replay (`--replay` without `--source`, too) is named for what it is.
+        let name = match first.source {
+            Source::Replay { .. } => "replay".to_owned(),
+            _ => choice.name(),
+        };
+        let mut out = vec![(name, first.clone())];
         for (i, path) in cli.also_replay.iter().enumerate() {
             let mut cfg = first.clone();
             cfg.target = None;
