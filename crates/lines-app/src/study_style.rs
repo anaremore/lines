@@ -2,7 +2,7 @@
 //! the style editor a study opens from the studies menu ("Style…").
 //!
 //! - **Parts** ([`PartDef`]): a VWAP's line, ±σ band edges and band fill; cumulative delta's
-//!   rising and falling candles; the volume profile's buy and sell rows, POC and value area;
+//!   rising and falling candles; Volume's bars, up/down colors and average; the volume profile's buy and sell rows, POC and value area;
 //!   the footprint's cells, imbalance marks and POC; a level source's lines and zones. Each
 //!   has a default that is exactly how it was drawn before styles: a part's own color
 //!   ([`Color::Own`]: its theme token, the VWAP's line color, a level source's colors) at 100 %
@@ -133,6 +133,45 @@ pub const DELTA: [PartDef; 2] = [
         fill(100),
         false,
         own("Theme down", OwnToken::Down),
+    ),
+];
+
+pub const VOLUME_BARS: usize = 0;
+pub const VOLUME_UP: usize = 1;
+pub const VOLUME_DOWN: usize = 2;
+pub const VOLUME_AVERAGE: usize = 3;
+/// The Volume study: its plain bars (one neutral theme color), the up and down colors (rising
+/// and falling bars when colored by candle; buy and sell volume when split) and the average
+/// line (the theme's text color: neutral in every palette). Direction never rests on these
+/// colors: bars take the candles' own hollow or filled shape.
+pub const VOLUME: [PartDef; 4] = [
+    part(
+        "bars",
+        "Bars",
+        fill(100),
+        false,
+        own("Theme", OwnToken::Volume),
+    ),
+    PartDef {
+        note: Some("Rising bars and buy volume, hollow or filled as the rising candles are."),
+        ..part("up", "Up", fill(100), false, own("Theme up", OwnToken::Up))
+    },
+    PartDef {
+        note: Some("Falling bars and sell volume, hollow or filled as the falling candles are."),
+        ..part(
+            "down",
+            "Down",
+            fill(100),
+            false,
+            own("Theme down", OwnToken::Down),
+        )
+    },
+    part(
+        "average",
+        "Average",
+        line(Color::Own, 2, 80),
+        true,
+        own("Theme", OwnToken::Text),
     ),
 ];
 

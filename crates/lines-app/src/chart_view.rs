@@ -145,6 +145,8 @@ enum LabelKind {
     SubNote,
     /// The crosshair's value tag on the sub-pane's axis.
     SubCross,
+    /// A part of Volume's title readout (`VOL_*`), keyed by its value.
+    Volume(u8),
     CrossTime,
     Indicator,
     /// A drawing's price tag on the axis, its text in the drawing's color (when AA on the
@@ -157,6 +159,15 @@ enum LabelKind {
     /// offset: an abbreviation changes with it).
     Zone,
 }
+
+/// Volume's title parts (`LabelKind::Volume`): its name alone, "Volume N", "avg N", "buy N",
+/// "sell N", "no side N".
+const VOL_NAME: u8 = 0;
+const VOL_TOTAL: u8 = 1;
+const VOL_AVG: u8 = 2;
+const VOL_BUY: u8 = 3;
+const VOL_SELL: u8 = 4;
+const VOL_NO_SIDE: u8 = 5;
 
 /// Drawing price tags on the axis considered per frame (labels they cover aren't drawn).
 const MAX_DRAWING_TAGS: usize = 8;
@@ -175,10 +186,10 @@ enum Region {
     /// The price axis column, including the corner below it.
     PriceAxis,
     TimeAxis,
-    /// A sub-pane below the plot (`crate::subpane`): drags pan time only.
+    /// A lower pane below the plot (`crate::subpane`): drags pan time only.
     Sub,
-    /// The divider between the plot and the sub-pane.
-    Divider,
+    /// The divider above lower pane `k`.
+    Divider(usize),
     /// The axis column beside the sub-pane: its scale fits itself, so nothing happens here
     /// (never the price axis's scaling).
     SubAxis,
@@ -269,10 +280,13 @@ enum Drag {
     /// Last pointer position; `time_only`: started in a sub-pane (no price pan).
     Pan(Point<Pixels>, bool),
     Scale(ScaleDrag),
-    /// The sub-pane divider: where the drag started (window y) and the ratio then.
+    /// Lower pane `k`'s divider: where the drag started (window y), the shown panes' count
+    /// and their ratios then.
     Divider {
         y: f32,
-        ratio: f32,
+        k: usize,
+        n: usize,
+        ratios: [f32; crate::subpane::MAX_PANES],
     },
 }
 
@@ -336,15 +350,16 @@ pub struct ChartView {
     /// The footprint chart mode (roadmap 10e), saved with the pane. Kept typed (it replaces
     /// candles bar by bar).
     footprint: crate::footprint::FootprintLayer,
-    /// The sub-pane's share of the height (`crate::subpane`), saved with the pane.
-    subpane_ratio: f32,
-    /// This frame's split between the plot and the sub-pane (`None`: no sub-pane).
-    split: Option<crate::subpane::Split>,
+    /// Each lower pane's share of the height (`crate::subpane`), top to bottom, saved with the
+    /// pane.
+    subpane_ratios: [f32; crate::subpane::MAX_PANES],
+    /// This frame's plot and lower panes (`None`: no lower pane).
+    split: Option<crate::subpane::Stack>,
     /// Height above the time axis this frame (the plot plus any sub-pane).
     above_axis: f32,
-    /// The pointer is in the sub-pane, this far below its top: the crosshair's vertical line
-    /// and time follow it; the horizontal line is in the sub-pane, with no price.
-    cross_in_sub: Option<f32>,
+    /// The pointer is in lower pane `k`, this far below its top: the crosshair's vertical
+    /// line and time follow it; the horizontal line is in that pane, with no price.
+    cross_in_sub: Option<(usize, f32)>,
     /// The legend and readout block at the plot's top-left (width, bottom; plot-local), as
     /// the last render built it: the footprint draws no cell number under it.
     legend_band: std::cell::Cell<(f32, f32)>,
@@ -643,7 +658,7 @@ impl ChartView {
             levels,
             seen_levels: u64::MAX,
             footprint: crate::footprint::FootprintLayer::new(Default::default()),
-            subpane_ratio: crate::subpane::DEFAULT_RATIO,
+            subpane_ratios: std::array::from_fn(crate::subpane::default_ratio),
             split: None,
             above_axis: 0.0,
             cross_in_sub: None,
@@ -925,6 +940,9 @@ impl ChartView {
                 ["delta", i, rest @ ..] => {
                     Some((StudyRef::Delta(i.parse().ok()?), n(rest.first())))
                 }
+                ["volume", i, rest @ ..] => {
+                    Some((StudyRef::Volume(i.parse().ok()?), n(rest.first())))
+                }
                 ["profile", rest @ ..] => Some((StudyRef::Profile, n(rest.first()))),
                 ["footprint", rest @ ..] => Some((StudyRef::Footprint, n(rest.first()))),
                 ["levels", id, rest @ ..] => {
@@ -1001,6 +1019,18 @@ impl ChartView {
                     "Cumulative delta".to_owned(),
                     &ss::DELTA,
                     ss::read(c.style(), &ss::DELTA).to_vec(),
+                    None,
+                )
+            }
+            StudyRef::Volume(i) => {
+                let c = set.indicators.get(*i)?;
+                let lines_indicators::IndicatorConfig::Volume { .. } = c else {
+                    return None;
+                };
+                (
+                    "Volume".to_owned(),
+                    &ss::VOLUME,
+                    ss::read(c.style(), &ss::VOLUME).to_vec(),
                     None,
                 )
             }
@@ -1298,10 +1328,9 @@ impl ChartView {
             && f32::from(pos.y - self.plot.origin.y) < self.above_axis
         {
             let y = f32::from(pos.y - self.plot.origin.y);
-            Some(if s.on_divider(y) {
-                Region::Divider
-            } else {
-                Region::Sub
+            Some(match s.divider_at(y) {
+                Some(k) => Region::Divider(k),
+                None => Region::Sub,
             })
         } else {
             Some(Region::TimeAxis)
@@ -1446,7 +1475,9 @@ impl ChartView {
                 Region::PriceAxis => self.vp.restore_auto_price(),
                 // Each axis resets only itself: time = bar width and the live edge.
                 Region::TimeAxis | Region::Sub => self.vp.reset_time(self.series_len),
-                Region::Divider => self.subpane_ratio = crate::subpane::DEFAULT_RATIO,
+                Region::Divider(_) => {
+                    self.subpane_ratios = std::array::from_fn(crate::subpane::default_ratio)
+                }
                 Region::SubAxis => return,
             }
             cx.notify();
@@ -1463,11 +1494,13 @@ impl ChartView {
             Region::Sub => Drag::Pan(ev.position, true),
             // From the split actually drawn (the minimums may have clamped the saved ratio),
             // so the divider follows the pointer from the first move.
-            Region::Divider => Drag::Divider {
+            Region::Divider(k) => Drag::Divider {
                 y: f32::from(ev.position.y),
-                ratio: self.split.map_or(self.subpane_ratio, |s| {
-                    s.sub_h / (self.above_axis - crate::subpane::DIVIDER_PX).max(1.0)
-                }),
+                k,
+                n: self.split.map_or(0, |s| s.panes().len()),
+                ratios: self
+                    .split
+                    .map_or(self.subpane_ratios, |s| s.ratios(self.above_axis)),
             },
             Region::SubAxis => return,
             Region::PriceAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Price, x, y)),
@@ -2128,9 +2161,7 @@ impl ChartView {
         if !state.styles.is_empty() {
             self.set_study_styles(&state.styles);
         }
-        if let Some(r) = state.subpane {
-            self.subpane_ratio = crate::subpane::clamp_ratio(r);
-        }
+        self.subpane_ratios = crate::subpane::restore(state.subpane, &state.subpanes);
         // Saved indicators, then any given on the command line (`--vwap`) not among them.
         let configs = merge_indicators(state.indicators.clone(), self.studies.configs());
         self.set_indicator_configs(configs);
@@ -2282,9 +2313,9 @@ impl ChartView {
     fn set_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let l = pos - self.plot.origin;
         let (x, y) = (f32::from(l.x), f32::from(l.y));
-        let in_sub = self
-            .split
-            .is_some_and(|s| s.in_sub(y) && x >= 0.0 && x < f32::from(self.plot.size.width));
+        let in_sub = self.split.is_some_and(|s| {
+            s.pane_at(y).is_some() && x >= 0.0 && x < f32::from(self.plot.size.width)
+        });
         let on_strip = self.strip_box().is_some_and(|b| b.contains(x, y));
         let hover = ((self.plot.contains(&pos) || in_sub) && !on_strip).then_some((x, y));
         if hover != self.hover {
@@ -2372,9 +2403,17 @@ impl ChartView {
                 self.vp.pan(f64::from(d.x), dy, len);
             }
             Some(Drag::Scale(drag)) => drag.update(&mut self.vp, x, y, len, tick),
-            Some(Drag::Divider { y: y0, ratio }) => {
+            Some(Drag::Divider {
+                y: y0,
+                k,
+                n,
+                ratios,
+            }) => {
                 let dy = f32::from(ev.position.y) - *y0;
-                self.subpane_ratio = crate::subpane::drag(self.above_axis, *ratio, dy);
+                let r = crate::subpane::drag_stack(self.above_axis, *n, *ratios, *k, dy);
+                // Only the panes the divider moves (the top one: pane 0; another: its two).
+                let moved = if *k == 0 { 0..1 } else { *k - 1..*k + 1 };
+                self.subpane_ratios[moved.clone()].copy_from_slice(&r[moved]);
             }
             None => return,
         }
@@ -2934,9 +2973,13 @@ impl ChartView {
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let plot_w = (w - axis_w()).max(10.0);
         let above_axis = (h - axis_h()).max(10.0);
-        // A sub-pane (cumulative delta) takes its share below the plot, above the time axis.
-        self.split = (self.visibility.draws_studies() && self.studies.has_subpane())
-            .then(|| crate::subpane::split_at_scale(above_axis, self.subpane_ratio, scale))
+        // Lower panes (cumulative delta, Volume) take their shares below the plot, above the
+        // time axis.
+        let lower = self.studies.lower_count().min(crate::subpane::MAX_PANES);
+        self.split = (self.visibility.draws_studies() && lower > 0)
+            .then(|| {
+                crate::subpane::stack_at_scale(above_axis, &self.subpane_ratios[..lower], scale)
+            })
             .flatten();
         self.above_axis = above_axis;
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
@@ -3075,9 +3118,11 @@ impl ChartView {
             }
             // Hit-test after the viewport update so the crosshair matches this frame. In the
             // sub-pane only the time follows the pointer (the plot's y is the top row).
-            self.cross_in_sub = self
-                .hover
-                .and_then(|(_, y)| self.split.filter(|s| s.in_sub(y)).map(|s| y - s.sub_top));
+            self.cross_in_sub = self.hover.and_then(|(_, y)| {
+                let s = self.split?;
+                let k = s.pane_at(y)?;
+                Some((k, y - s.panes()[k].sub_top))
+            });
             let in_sub = self.cross_in_sub.is_some();
             self.cross = self.hover.and_then(|(x, y)| {
                 crosshair(
@@ -3947,7 +3992,7 @@ impl ChartView {
             if studies {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_back(plot, &t, window);
-                self.studies.paint_back((ox, oy), &t, window);
+                self.studies.paint_back((ox, oy), &self.vp, &t, window);
             }
             // Tick charts: a faint dashed line where each session's bars begin, behind the
             // bars (dashed: never mistaken for the crosshair's solid line).
@@ -4042,7 +4087,7 @@ impl ChartView {
                 for l in &mut self.layers {
                     l.paint(plot, &self.vp, &t, window, cx);
                 }
-                self.studies.paint((ox, oy), &t, window);
+                self.studies.paint((ox, oy), &self.vp, &t, window);
                 self.footprint.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_front(plot, &t, window);
             }
@@ -4112,8 +4157,10 @@ impl ChartView {
                 }
             }
         });
-        if let Some(s) = self.split {
-            self.draw_subpane(s, bounds, window, cx);
+        if let Some(st) = self.split {
+            for (k, s) in st.panes().iter().enumerate() {
+                self.draw_subpane(k, *s, bounds, window, cx);
+            }
         }
 
         // Axis borders.
@@ -4370,12 +4417,13 @@ impl ChartView {
     }
 
     /// Price tag on the price axis and time tag on the time axis, drawn over the axis labels.
-    /// The sub-pane (`crate::subpane`) below the plot: background, the divider, the time grid
-    /// (shared with the plot), the studies drawn there (cumulative delta), their scale's zero
-    /// on the axis, and the crosshair's vertical line (and horizontal line when the pointer is
-    /// in it). Quads only.
+    /// Lower pane `k` (`crate::subpane`) below the plot: background, the divider, the time
+    /// grid (shared with the plot), its study (`Studies::paint_lower`), its scale's labels on
+    /// the axis, its title (with Volume's readout of the bar under the crosshair), and the
+    /// crosshair's vertical line (and horizontal line when the pointer is in it).
     fn draw_subpane(
         &mut self,
+        k: usize,
         s: crate::subpane::Split,
         bounds: Bounds<Pixels>,
         window: &mut Window,
@@ -4396,17 +4444,26 @@ impl ChartView {
         ));
         window.paint_quad(fill(rect(0.0, s.divider_mid(), pw, hair), t.axis_line));
         let sub = rect(0.0, s.sub_top, pw, s.sub_h);
-        let scale = self.studies.subpane_scale(s.sub_h);
+        // The title box (`draw_volume_title`, the delta's) from the pane's top.
+        let title_h =
+            if self.visibility.draws_labels() && self.studies.lower_title(k, None).is_some() {
+                4.0 + label_px() * 1.6 + 4.0
+            } else {
+                0.0
+            };
+        let scale = self.studies.lower_scale(k, s.sub_h, title_h);
+        let cross_in = self.cross_in_sub.filter(|(j, _)| *j == k).map(|(_, y)| y);
         window.with_content_mask(Some(ContentMask { bounds: sub }), |window| {
             for l in &self.scene.time_lines {
                 window.paint_quad(fill(rect(l.x, s.sub_top, hair, s.sub_h), t.grid));
             }
-            if let Some(sc) = scale.filter(|sc| sc.contains(0.0)) {
+            if let Some(sc) = scale.filter(|sc| self.studies.lower_zero_line(k) && sc.contains(0.0))
+            {
                 window.paint_quad(fill(rect(0.0, s.sub_top + sc.y(0.0), pw, hair), t.grid));
             }
             if let Some(sc) = &scale {
                 self.studies
-                    .paint_subpane((ox, oy + s.sub_top), sc, &self.vp, &t, window);
+                    .paint_lower(k, (ox, oy + s.sub_top), sc, &self.vp, &t, window);
             }
             let x = self.cross.map(|c| c.x).or(self.sync_marker.map(|(x, _)| x));
             if let Some(x) = x {
@@ -4415,14 +4472,25 @@ impl ChartView {
                     t.crosshair,
                 ));
             }
-            if let Some(y) = self.cross_in_sub {
+            if let Some(y) = cross_in {
                 window.paint_quad(fill(rect(0.0, s.sub_top + y, pw, hair), t.crosshair));
             }
         });
         // Its title at its own top-left, on the legend box (as the price plot's legends).
-        if self.visibility.draws_labels()
-            && let Some((reset, approx)) = self.studies.subpane_title()
+        let title = self
+            .visibility
+            .draws_labels()
+            .then(|| self.studies.lower_title(k, self.cross.and_then(|c| c.bar)))
+            .flatten();
+        if let Some(crate::studies::LowerTitle::Volume {
+            bar,
+            split,
+            average,
+        }) = title
         {
+            self.draw_volume_title(s, bar, split, average, (ox, oy), window, cx);
+        }
+        if let Some(crate::studies::LowerTitle::Delta(reset, approx)) = title {
             let key = reset as i64;
             let title = move |b: &mut FixedStr<32>| {
                 let _ = write!(b, "Cumulative delta · {}", reset.label());
@@ -4475,20 +4543,17 @@ impl ChartView {
         window.paint_quad(fill(rect(0.0, s.sub_top + s.sub_h, pw, hair), t.axis_line));
         let Some(sc) = scale else { return };
         let line_h = px(label_px() * 1.3);
-        // Cumulative delta is a quantity: printed in the product's quantity format.
+        // Cumulative delta and volume are quantities: printed in the product's quantity format.
         let qty = self.instrument.qty;
         let value = |v: i64| {
             move |b: &mut FixedStr<32>| {
                 let _ = qty.write(lines_core::Qty(v), b);
             }
         };
-        let (top, bottom) = (
-            (sc.hi - (sc.hi - sc.lo) * 0.08).round() as i64,
-            (sc.lo + (sc.hi - sc.lo) * 0.08).round() as i64,
-        );
+        let marks = self.studies.lower_marks(k, &sc);
         // The newest value's tag, and range labels only where it leaves them whole (as the
         // price axis: a half-covered number reads as another value).
-        let newest = self.studies.subpane_last().map(|last| {
+        let newest = self.studies.lower_last(k).map(|last| {
             let y = (s.sub_top + sc.y(last as f64)).clamp(
                 s.sub_top + tag_h() * 0.5,
                 s.sub_top + s.sub_h - tag_h() * 0.5,
@@ -4496,7 +4561,7 @@ impl ChartView {
             (last, y)
         });
         let tag = newest.map(|(_, y)| Span::around(y, tag_h() * 0.5));
-        for v in [top, bottom] {
+        for v in marks.into_iter().flatten() {
             let y = s.sub_top + sc.y(v as f64);
             if !label_clear_of_tags(Span::around(y, label_px() * 0.65), &[tag]) {
                 continue;
@@ -4532,7 +4597,7 @@ impl ChartView {
             );
         }
         // The pointer in the sub-pane: its value on the axis, in the crosshair tag's style.
-        if let Some(cy) = self.cross_in_sub {
+        if let Some(cy) = cross_in {
             let v = sc.value(cy).round() as i64;
             let y = (s.sub_top + cy).clamp(
                 s.sub_top + tag_h() * 0.5,
@@ -4553,6 +4618,110 @@ impl ChartView {
                 cx,
                 value(v),
             );
+        }
+    }
+
+    /// Volume's title at its pane's top-left, on the legend box: "Volume" and the bar under
+    /// the crosshair (else the newest): its total, average, and buy / sell / no-side volume
+    /// when split. Each part a cached label; parts that don't fit the pane's width are left
+    /// out whole (never a cut number).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_volume_title(
+        &mut self,
+        s: crate::subpane::Split,
+        bar: Option<lines_core::volume::VolumeBar>,
+        split: bool,
+        average: Option<u16>,
+        (ox, oy): (f32, f32),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let t = self.theme;
+        let qty = self.instrument.qty;
+        // Dimmer than the total, AA on the legend box in every theme (the line itself is the
+        // Average part's color).
+        let avg_color = t.text_dim;
+        // (part, value, color): the name and total first.
+        let mut parts = [(VOL_NAME, 0i64, t.text_main); 6];
+        let mut n = 1;
+        if let Some(b) = bar {
+            parts[0] = (VOL_TOTAL, b.total.0, t.text_main);
+            if let (Some(_), Some(a)) = (average, b.avg) {
+                parts[n] = (VOL_AVG, a.round() as i64, avg_color);
+                n += 1;
+            }
+            if split {
+                for (part, v) in [
+                    (VOL_BUY, b.buy.0),
+                    (VOL_SELL, b.sell.0),
+                    (VOL_NO_SIDE, b.no_side().0),
+                ] {
+                    if part != VOL_NO_SIDE || v > 0 {
+                        parts[n] = (part, v, t.text_main);
+                        n += 1;
+                    }
+                }
+            }
+        }
+        let text = |part: u8, v: i64| {
+            move |b: &mut FixedStr<32>| {
+                let _ = b.write_str(match part {
+                    VOL_NAME => "Volume",
+                    VOL_TOTAL => "Volume ",
+                    VOL_AVG => "avg ",
+                    VOL_BUY => "buy ",
+                    VOL_SELL => "sell ",
+                    _ => "no side ",
+                });
+                if part != VOL_NAME {
+                    let _ = qty.write(lines_core::Qty(v), b);
+                }
+            }
+        };
+        let pw = f32::from(self.plot.size.width);
+        let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
+        let gap = 12.0;
+        let room = pw - bx - 16.0;
+        // Widths first (shaping caches them), then the box, then the text.
+        let mut widths = [0.0f32; 6];
+        let mut used = 0.0;
+        let mut shown = 0;
+        for (i, &(part, v, c)) in parts[..n].iter().enumerate() {
+            let w = f32::from(
+                self.label(LabelKind::Volume(part), v, c, window, text(part, v))
+                    .width,
+            );
+            let next = used + if i == 0 { w } else { gap + w };
+            if next > room {
+                break;
+            }
+            widths[i] = w;
+            used = next;
+            shown += 1;
+        }
+        if shown == 0 {
+            return;
+        }
+        let rect = Bounds::new(
+            point(px(ox + bx), px(oy + by)),
+            size(px(used + 16.0), px(bh)),
+        );
+        window.paint_quad(fill(rect, t.label_bg));
+        let line_h = px(label_px() * 1.3);
+        let ty = oy + by + bh * 0.5 - label_px() * 0.65;
+        let mut x = ox + bx + 8.0;
+        for (i, &(part, v, c)) in parts[..shown].iter().enumerate() {
+            self.paint_label(
+                LabelKind::Volume(part),
+                v,
+                point(px(x), px(ty)),
+                line_h,
+                c,
+                window,
+                cx,
+                text(part, v),
+            );
+            x += widths[i] + gap;
         }
     }
 
@@ -6221,8 +6390,8 @@ impl Pane for ChartView {
             timeframe: crate::wsdoc::TimeframeDoc(self.timeframe),
             footprint: self.footprint.config(),
             styles: self.study_styles(),
-            subpane: (self.subpane_ratio != crate::subpane::DEFAULT_RATIO)
-                .then_some(self.subpane_ratio),
+            subpane: crate::subpane::saved(&self.subpane_ratios).0,
+            subpanes: crate::subpane::saved(&self.subpane_ratios).1,
         });
         doc.trade = self.trade.doc();
     }
@@ -6405,9 +6574,15 @@ fn merge_indicators(
     saved: Vec<lines_indicators::IndicatorConfig>,
     initial: Vec<lines_indicators::IndicatorConfig>,
 ) -> Vec<lines_indicators::IndicatorConfig> {
+    use lines_indicators::IndicatorConfig as C;
     let mut out = saved;
     for c in initial {
-        if !out.iter().any(|s| s.same_but_style(&c)) {
+        // One Volume per chart: a saved one wins over the command line's.
+        let volume = |x: &C| matches!(x, C::Volume { .. });
+        if !out
+            .iter()
+            .any(|s| s.same_but_style(&c) || volume(s) && volume(&c))
+        {
             out.push(c);
         }
     }
@@ -6485,7 +6660,7 @@ fn prepare_studies(
     for l in layers {
         l.prepare(d, bars, vp);
     }
-    studies.prepare(bars, vp, max_columns);
+    studies.prepare(bars, d.profiles.footprint(), vp, max_columns);
     let last_y = d.last_trade.map(|p| vp.price_to_y(p.0 as f64) as f32);
     levels.prepare(d, bars, vp, last_y);
 }
@@ -7043,6 +7218,19 @@ mod tests {
         assert_eq!(out, vec![recolored], "color and width are styles");
         let out = merge_indicators(vec![styled.clone()], vec![vwap(Reset::Rth)]);
         assert_eq!(out, vec![styled, vwap(Reset::Rth)]);
+        // One Volume per chart: a saved one wins over the command line's, whatever its options.
+        let volume = |color_by_candle| IndicatorConfig::Volume {
+            spec: lines_indicators::VolumeSpec {
+                color_by_candle,
+                ..Default::default()
+            },
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let out = merge_indicators(vec![volume(false)], vec![volume(true), vwap(Reset::Eth)]);
+        assert_eq!(out, vec![volume(false), vwap(Reset::Eth)]);
+        let out = merge_indicators(vec![], vec![volume(true)]);
+        assert_eq!(out, vec![volume(true)]);
     }
     use lines_core::{Aggressor, Capabilities, Month, Qty};
     use lines_feed::catalog;

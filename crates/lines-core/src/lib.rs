@@ -34,6 +34,7 @@ pub mod timeframe;
 pub mod trail;
 pub mod vap;
 pub mod viewport;
+pub mod volume;
 
 pub use bars::{Bar, BarSeries, Changed, TradeOutcome};
 pub use book::{Level, OrderBook, Side};

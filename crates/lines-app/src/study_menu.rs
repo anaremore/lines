@@ -1,5 +1,5 @@
 //! The studies menu (Ctrl+I, the chart's "Studies…", the palette): one place for everything
-//! drawn on a chart: VWAPs, cumulative delta, the footprint, the volume profile and external
+//! drawn on a chart: VWAPs, cumulative delta, Volume, the footprint, the volume profile and external
 //! level sources. Pure (no GPUI):
 //! the chart renders [`StudyMenu::items`] and feeds keys and clicks back as [`MenuCmd`]s.
 //!
@@ -15,7 +15,9 @@
 //! [`StudySet::apply`] (pure), so menus, keys and tests share one path.
 
 use lines_core::{Bar, Viewport};
-use lines_indicators::{Bands, DeltaReset, DeltaSpec, IndicatorConfig, Reset, VwapSpec};
+use lines_indicators::{
+    Bands, DeltaReset, DeltaSpec, IndicatorConfig, Reset, VolumeSpec, VwapSpec,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::footprint::{FootprintConfig, FootprintMode};
@@ -55,6 +57,8 @@ pub enum StudyRef {
     Vwap(usize),
     /// Cumulative delta at this index of the indicators.
     Delta(usize),
+    /// Volume at this index of the indicators.
+    Volume(usize),
     Footprint,
     Profile,
     Levels(String),
@@ -71,6 +75,10 @@ pub enum StudyAction {
     },
     AddProfile(ProfileMode),
     AddDelta(DeltaReset),
+    /// Add Volume (plain bars in its own pane); one per chart.
+    AddVolume,
+    /// Set Volume `index`'s options.
+    SetVolume(usize, VolumeSpec),
     SetDeltaReset(usize, DeltaReset),
     AddFootprint(FootprintMode),
     SetFootprintMode(FootprintMode),
@@ -102,7 +110,7 @@ fn next_color(set: &StudySet) -> u8 {
         .iter()
         .filter_map(|c| match c {
             IndicatorConfig::Vwap { color, .. } => Some(*color),
-            IndicatorConfig::CumDelta { .. } => None,
+            IndicatorConfig::CumDelta { .. } | IndicatorConfig::Volume { .. } => None,
         })
         .collect();
     (0..4u8).find(|c| !used.contains(c)).unwrap_or(0)
@@ -120,14 +128,14 @@ impl StudySet {
                 display,
                 ..
             } => Some((spec, color, display)),
-            IndicatorConfig::CumDelta { .. } => None,
+            IndicatorConfig::CumDelta { .. } | IndicatorConfig::Volume { .. } => None,
         }
     }
 
     fn delta(&mut self, i: usize) -> Option<&mut DeltaSpec> {
         match self.indicators.get_mut(i)? {
             IndicatorConfig::CumDelta { spec, .. } => Some(spec),
-            IndicatorConfig::Vwap { .. } => None,
+            IndicatorConfig::Vwap { .. } | IndicatorConfig::Volume { .. } => None,
         }
     }
 
@@ -162,13 +170,34 @@ impl StudySet {
                 self.profile.hidden = false;
             }
             StudyAction::AddDelta(reset) => {
-                // One cumulative delta per chart (one sub-pane): adding again replaces it.
-                self.indicators.retain(|c| !c.in_subpane());
+                // One cumulative delta per chart: adding again replaces it.
+                self.indicators
+                    .retain(|c| !matches!(c, IndicatorConfig::CumDelta { .. }));
                 self.indicators.push(IndicatorConfig::CumDelta {
                     spec: DeltaSpec { reset: *reset },
                     display: Default::default(),
                     style: Default::default(),
                 });
+            }
+            StudyAction::AddVolume => {
+                // One Volume per chart: adding again keeps the one there.
+                if !self
+                    .indicators
+                    .iter()
+                    .any(|c| matches!(c, IndicatorConfig::Volume { .. }))
+                {
+                    self.indicators.push(IndicatorConfig::Volume {
+                        spec: VolumeSpec::default(),
+                        display: Default::default(),
+                        style: Default::default(),
+                    });
+                }
+            }
+            StudyAction::SetVolume(i, v) => {
+                if let Some(IndicatorConfig::Volume { spec, .. }) = self.indicators.get_mut(*i) {
+                    *spec = *v;
+                    spec.average_len = spec.average_len.clamp(1, VolumeSpec::MAX_LEN);
+                }
             }
             StudyAction::SetDeltaReset(i, reset) => {
                 if let Some(spec) = self.delta(*i) {
@@ -183,7 +212,7 @@ impl StudySet {
             StudyAction::SetImbalanceMin(m) => self.footprint.imbalance_min = (*m).max(1),
             StudyAction::SetFootprintGrouping(g) => self.footprint.grouping = *g,
             StudyAction::ToggleHidden(r) => match r {
-                StudyRef::Vwap(i) | StudyRef::Delta(i) => {
+                StudyRef::Vwap(i) | StudyRef::Delta(i) | StudyRef::Volume(i) => {
                     if let Some(c) = self.indicators.get_mut(*i) {
                         let d = c.display_mut();
                         d.hidden = !d.hidden;
@@ -194,7 +223,7 @@ impl StudySet {
                 StudyRef::Levels(id) => self.levels.toggle_source(id),
             },
             StudyAction::Remove(r) => match r {
-                StudyRef::Vwap(i) | StudyRef::Delta(i) => {
+                StudyRef::Vwap(i) | StudyRef::Delta(i) | StudyRef::Volume(i) => {
                     if *i < self.indicators.len() {
                         self.indicators.remove(*i);
                     }
@@ -267,6 +296,11 @@ impl StudySet {
                     if let Some(c @ IndicatorConfig::CumDelta { .. }) = self.indicators.get_mut(*i)
                     {
                         study_style::write(c.style_mut(), &study_style::DELTA, looks);
+                    }
+                }
+                StudyRef::Volume(i) => {
+                    if let Some(c @ IndicatorConfig::Volume { .. }) = self.indicators.get_mut(*i) {
+                        study_style::write(c.style_mut(), &study_style::VOLUME, looks);
                     }
                 }
                 StudyRef::Profile => {
@@ -395,6 +429,27 @@ pub fn vwap_label(spec: &VwapSpec) -> String {
     s
 }
 
+/// The average lengths Volume's editor offers (20 is the default).
+pub const VOLUME_LENGTHS: [u16; 5] = [10, 20, 50, 100, 200];
+
+/// Volume's row: its name and the options that are on.
+pub fn volume_label(v: &VolumeSpec) -> String {
+    let mut s = "Volume".to_owned();
+    if v.color_by_candle && !v.split {
+        s.push_str(" · by candle");
+    }
+    if v.split {
+        s.push_str(" · buy/sell");
+    }
+    if v.average {
+        s.push_str(&format!(" · average {}", v.window()));
+    }
+    if v.overlay {
+        s.push_str(" · overlay");
+    }
+    s
+}
+
 /// The Add catalog: `(label, command)`.
 fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
     let set = |a| MenuCmd::Set(a);
@@ -420,7 +475,20 @@ fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
         "Anchored VWAP (click a bar)".into(),
         MenuCmd::BeginAnchor(None),
     ));
-    if !input.set.indicators.iter().any(|c| c.in_subpane()) {
+    if !input
+        .set
+        .indicators
+        .iter()
+        .any(|c| matches!(c, IndicatorConfig::Volume { .. }))
+    {
+        v.push(("Volume".into(), set(StudyAction::AddVolume)));
+    }
+    if !input
+        .set
+        .indicators
+        .iter()
+        .any(|c| matches!(c, IndicatorConfig::CumDelta { .. }))
+    {
         v.push((
             "Cumulative delta · ETH session".into(),
             set(StudyAction::AddDelta(DeltaReset::Eth)),
@@ -541,6 +609,74 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             c(
                 "Label",
                 "Show title".into(),
+                display.label,
+                Swatch::None,
+                set(StudyAction::ToggleLabel(i)),
+            );
+        }
+        StudyRef::Volume(i) => {
+            let Some(IndicatorConfig::Volume { spec, display, .. }) = input.set.indicators.get(*i)
+            else {
+                return;
+            };
+            let (i, v) = (*i, *spec);
+            let with = |f: &dyn Fn(&mut VolumeSpec)| {
+                let mut n = v;
+                f(&mut n);
+                set(StudyAction::SetVolume(i, n))
+            };
+            // Split draws each side in its direction's shape and color: no candle colors then.
+            if !v.split {
+                c(
+                    "Color",
+                    "By candle".into(),
+                    v.color_by_candle,
+                    Swatch::None,
+                    with(&|n| n.color_by_candle = !n.color_by_candle),
+                );
+            }
+            c(
+                "Average",
+                "Show".into(),
+                v.average,
+                Swatch::None,
+                with(&|n| n.average = !n.average),
+            );
+            if v.average {
+                for len in VOLUME_LENGTHS {
+                    c(
+                        "Length",
+                        format!("{len}"),
+                        v.average_len == len,
+                        Swatch::None,
+                        with(&|n| n.average_len = len),
+                    );
+                }
+            }
+            c(
+                "Split",
+                "Buy / sell".into(),
+                v.split,
+                Swatch::None,
+                with(&|n| n.split = !n.split),
+            );
+            for (overlay, name) in [(false, "Pane"), (true, "Overlay")] {
+                c(
+                    "Display",
+                    name.into(),
+                    v.overlay == overlay,
+                    Swatch::None,
+                    with(&|n| n.overlay = overlay),
+                );
+            }
+            c(
+                "Label",
+                if v.overlay {
+                    "Show in legend"
+                } else {
+                    "Show title"
+                }
+                .into(),
                 display.label,
                 Swatch::None,
                 set(StudyAction::ToggleLabel(i)),
@@ -760,6 +896,12 @@ impl StudyMenu {
                 IndicatorConfig::CumDelta { spec, display, .. } => studies.push((
                     StudyRef::Delta(i),
                     format!("Cumulative delta · {}", spec.reset.label()),
+                    Swatch::None,
+                    display.hidden,
+                )),
+                IndicatorConfig::Volume { spec, display, .. } => studies.push((
+                    StudyRef::Volume(i),
+                    volume_label(spec),
                     Swatch::None,
                     display.hidden,
                 )),

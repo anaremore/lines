@@ -49,6 +49,7 @@ fn defaults_are_todays_look_and_write_nothing() {
     for defs in [
         &VWAP[..],
         &DELTA[..],
+        &VOLUME[..],
         &PROFILE[..],
         &FOOTPRINT[..],
         &LEVELS[..],
@@ -407,6 +408,7 @@ fn readability_warnings_per_part() {
     for (defs, n) in [
         (&VWAP[..], 3),
         (&DELTA[..], 2),
+        (&VOLUME[..], 4),
         (&PROFILE[..], 4),
         (&FOOTPRINT[..], 3),
         (&LEVELS[..], 2),

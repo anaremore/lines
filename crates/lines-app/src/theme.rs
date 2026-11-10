@@ -92,6 +92,9 @@ pub struct Theme {
     pub inside_ask: Hsla,
     /// DOM: traded-volume bars.
     pub volume_bar: Hsla,
+    /// The chart's Volume study: its plain bars. Neutral (never up/down, the accent or a study
+    /// color), at least 3:1 on the chart background (tested): they are the data.
+    pub volume: Hsla,
     /// T&S: background of a large print (with bold text).
     pub large_print: Hsla,
     /// Link group swatches A..D (decision 0016). Always shown with the group's letter, so a
@@ -306,6 +309,7 @@ impl Theme {
             T::Up | T::UpDown => self.up,
             T::Down => self.down,
             T::Neutral => self.text_dim,
+            T::Volume => self.volume,
             T::Text => self.text_main,
             T::ProfileBuy => self.profile_buy,
             T::ProfileSell => self.profile_sell,
@@ -382,7 +386,7 @@ impl Theme {
     /// What the plot can show under text on the legend box (`label_bg`), as composited: the
     /// chart, the grid, candles, the last price, the profile's value area and POC, and the
     /// study colors. The label-box test and [`Theme::legend_text`] both check these.
-    pub fn chart_underlays(&self) -> [(&'static str, Rgb); 11] {
+    pub fn chart_underlays(&self) -> [(&'static str, Rgb); 12] {
         use lines_core::style::over;
         let pct = |a: f32| (a * 100.0).round() as u8;
         let bg = rgb_of(self.bg);
@@ -399,6 +403,8 @@ impl Theme {
             ("study1", rgb_of(self.study[1])),
             ("study2", rgb_of(self.study[2])),
             ("study3", rgb_of(self.study[3])),
+            // The Volume study's bars, under its pane title.
+            ("volume", rgb_of(self.volume)),
         ]
     }
 
@@ -532,6 +538,7 @@ impl Theme {
             inside_bid: c(up).opacity(0.30),
             inside_ask: c(down).opacity(0.30),
             volume_bar: c(0x9a9fb2).opacity(0.18),
+            volume: c(0x7d7d84),
             large_print: c(0x262b39),
             // amber, teal, orchid, slate
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
@@ -591,6 +598,7 @@ impl Theme {
             inside_bid: c(up).opacity(0.22),
             inside_ask: c(down).opacity(0.22),
             volume_bar: c(0x565b6e).opacity(0.14),
+            volume: c(0x84848b),
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
@@ -1019,6 +1027,27 @@ mod tests {
                 assert!(
                     !src.contains(needle),
                     "{file} contains a colour literal ({needle})"
+                );
+            }
+        }
+    }
+
+    /// The Volume study's neutral bars read as data on the chart (3:1, WCAG 1.4.11) and are
+    /// never mistaken for a direction or the accent.
+    #[test]
+    fn volume_bars_contrast_and_stay_neutral() {
+        for t in Theme::all() {
+            assert!(
+                contrast(t.volume, t.bg) >= 3.0,
+                "{}: {}",
+                t.name,
+                contrast(t.volume, t.bg)
+            );
+            for (name, c) in [("up", t.up), ("down", t.down), ("accent", t.accent)] {
+                assert!(
+                    delta_e_2000(t.volume, c) > 20.0,
+                    "{}: volume looks like {name}",
+                    t.name
                 );
             }
         }
