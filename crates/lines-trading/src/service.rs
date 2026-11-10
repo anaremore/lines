@@ -70,8 +70,16 @@ enum Msg {
     AddAccounts(Vec<crate::core::AccountConfig>),
     Latency(Sender<(Option<u64>, Option<u64>, usize)>),
     AdvanceTo(UtcMillis),
+    /// A market clock follows the replay bar's control (see [`TradingHandle::follow_replay`]).
+    FollowReplay(Arc<lines_feed::replay_control::ReplayControl>),
     /// The strategy host is alive (decision 0025).
     StrategyHeartbeat,
+    /// A followed replay's feed restarted after a jump back: its data from here on is the
+    /// replayed data (`lines_feed::listen::restarted`).
+    ReplayRestarted,
+    /// A feed's data starts fresh for the core (a new listener): nothing it sends is from
+    /// before a jump back.
+    ReplayFresh,
     Sync(Sender<()>),
     Shutdown,
 }
@@ -146,6 +154,24 @@ impl TradingHandle {
     /// rebuilds so they show the broker's state.
     pub fn add_accounts(&self, accounts: Vec<crate::core::AccountConfig>) {
         let _ = self.tx.send(Msg::AddAccounts(accounts));
+    }
+
+    /// [`Clock::Market`]: the core's clock is the replay bar's from now on: it stands still
+    /// while the replay is paused, runs at its speed, and goes back once per jump back, when
+    /// the paper broker cancels every working order (`Broker::rewound`). Only for a core whose
+    /// paper accounts trade the replay alone (a replay's setup: no trading file).
+    pub fn follow_replay(&self, control: Arc<lines_feed::replay_control::ReplayControl>) {
+        let _ = self.tx.send(Msg::FollowReplay(control));
+    }
+
+    /// The replay's feed restarted after a jump back (its listen marker, an empty batch).
+    pub fn replay_restarted(&self) {
+        let _ = self.tx.send(Msg::ReplayRestarted);
+    }
+
+    /// A new listener on a feed: its data starts fresh (never from before a jump back).
+    pub fn replay_fresh(&self) {
+        let _ = self.tx.send(Msg::ReplayFresh);
     }
 
     /// [`Clock::Manual`]: move time forward (never back).
@@ -281,17 +307,60 @@ pub fn trading_file(core: &TradingCore, paper: &PaperConfig) -> Option<TradingFi
     })
 }
 
+/// A followed replay's restarts still owed after its jumps back: one restart marker per jump
+/// (the feed restarts once per rewind). Market data before the last of them is from before a
+/// jump and is dropped.
+#[derive(Debug, Default)]
+struct Restarts {
+    owed: u64,
+}
+
+impl Restarts {
+    fn jumped(&mut self, jumps: u64) {
+        self.owed += jumps;
+    }
+
+    fn restarted(&mut self) {
+        self.owed = self.owed.saturating_sub(1);
+    }
+
+    fn holding(&self) -> bool {
+        self.owed > 0
+    }
+}
+
 /// The core's notion of now.
 struct Now {
     clock: Clock,
     /// Market/Manual: the newest time seen, and (Market) when it arrived.
     market: Option<(UtcMillis, Instant)>,
-    /// Never goes back.
+    /// Never goes back, except once per rewind of a followed replay.
     last: UtcMillis,
+    /// Market: the replay bar's control, whose clock this is (it stands still while the
+    /// replay is paused and runs at its speed).
+    replay: Option<Arc<lines_feed::replay_control::ReplayControl>>,
+    /// The replay's rewinds seen so far.
+    rewinds: u64,
+    /// The replay's rewinds the core has been told of ([`Now::rewound`]).
+    core_rewinds: u64,
 }
 
 impl Now {
     fn now(&mut self) -> UtcMillis {
+        if let (Clock::Market, Some(c)) = (self.clock, &self.replay) {
+            // A jump back lets the clock go back, once: to where the replay jumped to.
+            let r = c.rewinds();
+            if r != self.rewinds {
+                self.rewinds = r;
+                self.last = UtcMillis(i64::MIN);
+            }
+            if let Some(t) = c.clock() {
+                self.last = UtcMillis(self.last.0.max(t.0));
+            } else if self.last.0 == i64::MIN {
+                self.last = UtcMillis(0);
+            }
+            return self.last;
+        }
         let t = match (self.clock, self.market) {
             (Clock::Wall, _) => lines_feed::now_utc(),
             (Clock::Market, Some((t, at))) => {
@@ -302,6 +371,17 @@ impl Now {
         };
         self.last = UtcMillis(self.last.0.max(t.0));
         self.last
+    }
+
+    /// How many times the followed replay jumped back since the core was last told.
+    fn rewound(&mut self) -> u64 {
+        let Some(c) = &self.replay else {
+            return 0;
+        };
+        let r = c.rewinds();
+        let jumps = r.saturating_sub(self.core_rewinds);
+        self.core_rewinds = r;
+        jumps
     }
 
     /// Market data arrived: its newest trade time moves the market clocks.
@@ -358,8 +438,14 @@ fn run(
         clock,
         market: None,
         last: UtcMillis(0),
+        replay: None,
+        rewinds: 0,
+        core_rewinds: 0,
     };
     let mut syncs: Vec<Sender<()>> = Vec::new();
+    // A followed replay's restarts still to come (`Msg::ReplayRestarted`): market data before
+    // them is from before a jump back.
+    let mut restarts = Restarts::default();
     // The strategy host's last heartbeat (wall clock); `None` until one arrives.
     let mut last_beat: Option<Instant> = None;
     // Events of this batch so far: observers get them before each market batch (so a trade
@@ -372,12 +458,25 @@ fn run(
         let mut msg = rx.recv_timeout(wait);
         let mut stop = false;
         loop {
+            // A jump back: before anything else (the replayed data), the broker's waiting
+            // requests (the app's cancels) take effect.
+            let jumps = clock.rewound();
+            if jumps > 0 {
+                let now = clock.now();
+                core.replay_rewound(now);
+                restarts.jumped(jumps);
+            }
             match msg {
                 Ok(Msg::Command(env)) => {
                     let now = clock.now();
                     core.handle(now, *env);
                     dirty = true;
                 }
+                // After a jump back, data sent before it and still on its way would stamp the
+                // later clock's times again: dropped until the feed's restart marker.
+                Ok(Msg::Market(..)) if restarts.holding() => {}
+                Ok(Msg::ReplayRestarted) => restarts.restarted(),
+                Ok(Msg::ReplayFresh) => restarts = Restarts::default(),
                 Ok(Msg::Market(k, inputs)) => {
                     clock.saw(&inputs);
                     let now = clock.now();
@@ -401,6 +500,11 @@ fn run(
                 Ok(Msg::Latency(tx)) => {
                     let l = core.latency();
                     let _ = tx.send((l.percentile(50.0), l.percentile(99.0), l.count()));
+                }
+                Ok(Msg::FollowReplay(c)) => {
+                    clock.rewinds = c.rewinds();
+                    clock.core_rewinds = c.rewinds();
+                    clock.replay = Some(c);
                 }
                 Ok(Msg::AdvanceTo(t)) => {
                     clock.advance(t);
@@ -630,6 +734,11 @@ impl FeedBridge {
             .name("lines-trading-md".into())
             .spawn(move || {
                 for batch in rx {
+                    // A replay's restart marker (`lines_feed::listen::restarted`).
+                    if batch.is_empty() {
+                        h.replay_restarted();
+                        continue;
+                    }
                     h.market(contract, from_events(&batch));
                     for (k, q) in option_quotes(contract.product, &batch) {
                         h.market(k, vec![q]);
@@ -655,6 +764,8 @@ impl FeedBridge {
         }
         // Listen first, then snapshot: nothing between the two is lost.
         let rx = lines_feed::listen::listen(feed);
+        // A fresh feed's data isn't from before a jump back (a pane opened after one).
+        handle.replay_fresh();
         let (contract, seed, options, market_time) = {
             let d = store.read();
             (
@@ -683,6 +794,7 @@ impl FeedBridge {
                 let mut contract = contract;
                 loop {
                     match rx.recv_timeout(Duration::from_secs(1)) {
+                        Ok(batch) if batch.is_empty() => h.replay_restarted(),
                         Ok(batch) => {
                             for e in batch.iter() {
                                 if let MarketEvent::ContractChanged(k) = e {
@@ -729,4 +841,59 @@ fn seed_inputs(d: &lines_feed::ChartData) -> Vec<MarketInput> {
     v.extend(d.ask.map(MarketInput::Ask));
     v.extend(d.last_trade.map(MarketInput::Last));
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lines_feed::replay_control::ReplayControl;
+
+    /// A market clock that follows the replay bar reads the replay's clock (standing still
+    /// while it is paused), ignores trade times, and goes back once when the replay jumps
+    /// back.
+    #[test]
+    fn a_followed_replay_sets_the_market_clock() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let c = Arc::new(ReplayControl::new(1.0));
+        assert!(!c.seek(UtcMillis(1_000_000)));
+        rt.block_on(c.pace(1_000_000));
+        // The end of the file: paused at the seek's target, where the clock holds.
+        c.set_finished();
+        let mut now = Now {
+            clock: Clock::Market,
+            market: None,
+            last: UtcMillis(0),
+            replay: Some(c.clone()),
+            rewinds: c.rewinds(),
+            core_rewinds: c.rewinds(),
+        };
+        assert_eq!(now.now(), UtcMillis(1_000_000));
+        now.advance(UtcMillis(1_200_000));
+        assert_eq!(now.now(), UtcMillis(1_000_000), "trades don't move it");
+        assert!(c.seek(UtcMillis(900_000)));
+        assert_eq!(now.now(), UtcMillis(900_000), "a jump back goes back");
+        assert_eq!(now.rewound(), 1, "the core is told once");
+        assert_eq!(now.rewound(), 0);
+    }
+
+    /// Market data is held until every jump's restart came: two jumps, two markers; a fresh
+    /// feed clears what was owed.
+    #[test]
+    fn data_waits_for_every_restart() {
+        let mut r = Restarts::default();
+        assert!(!r.holding());
+        r.jumped(2);
+        r.restarted();
+        assert!(r.holding(), "one restart still to come");
+        r.restarted();
+        assert!(!r.holding());
+        r.restarted();
+        assert!(!r.holding(), "an extra marker owes nothing");
+        r.jumped(1);
+        r = Restarts::default();
+        assert!(!r.holding(), "a fresh feed");
+    }
 }

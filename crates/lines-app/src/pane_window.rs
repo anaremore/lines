@@ -68,6 +68,8 @@ fn command(cmd: Command) -> Option<Command> {
         Command::Order(_) => Some(cmd),
         // The UI zoom is app-wide: its keys work from every window.
         Command::ZoomIn | Command::ZoomOut | Command::ZoomReset => Some(cmd),
+        // The replay is app-wide too (Go to is the main window's prompt).
+        Command::Replay(r) if r != crate::commands::ReplayCmd::GoTo => Some(cmd),
         _ => None,
     }
 }
@@ -141,6 +143,15 @@ impl PaneWindow {
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
             Some(Command::SettingsAt(s)) => {
                 cx.defer(move |cx| crate::settings_view::open_section(s, cx));
+            }
+            // The replay bar from this window: steps by this chart's bars.
+            Some(Command::Replay(rc)) => {
+                let tf = match &self.handle {
+                    PaneHandle::Chart(c) => Some(c.read(cx).timeframe()),
+                    _ => None,
+                };
+                // A refusal (no replay) has nothing to show here; a jump's note reaches the bar.
+                let _ = crate::replay_bar::run(rc, crate::replay_bar::step_ms(tf), cx);
             }
             Some(c @ (Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)) => {
                 cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
@@ -305,6 +316,15 @@ impl PaneWindow {
             // plain and Alt keys, as in main windows.
             if self.handle.takes_text(cx) && !commands::runs_while_typing(&ev.keystroke, cmd) {
                 return;
+            }
+            // The replay's plain keys, by the main window's rule (`replay_bar::key_goes_to_pane`).
+            if let Command::Replay(rc) = cmd {
+                let replaying = cx.has_global::<crate::replay_bar::Replay>();
+                let typing = self.handle.takes_text(cx);
+                let chain = matches!(self.handle, PaneHandle::Chain(_));
+                if crate::replay_bar::key_goes_to_pane(rc, replaying, typing, chain) {
+                    return;
+                }
             }
             // A held key repeats only commands that may repeat: never an order or arming.
             if !ev.is_held || commands::repeats(cmd) {

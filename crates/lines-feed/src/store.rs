@@ -233,6 +233,9 @@ pub struct ChartData {
     /// Where tick bars are rebuilt from when a chart switches to one mid-feed (the replay's
     /// file, or the local store), if anywhere.
     pub tick_source: Option<TickSource>,
+    /// How many times a replay jumped back on this store (`ChartData::rewind`): panes that
+    /// keep their own copy of what the store showed (the DOM trail) start over when it moves.
+    pub rewinds: u64,
 }
 
 impl ChartData {
@@ -283,6 +286,7 @@ impl ChartData {
             stored: StoredReplay::default(),
             ticks: TickSet::default(),
             tick_source: None,
+            rewinds: 0,
         }
     }
 
@@ -654,6 +658,39 @@ impl ChartData {
         self.ticks.clear();
     }
 
+    /// A replay jumped back (`crate::replay_control`): everything the file delivered goes,
+    /// as at a roll but with nothing retired, and the file is delivered again from its start.
+    /// Tick-bar requests stay (their bars are rebuilt); status, counters and the tick source
+    /// stay.
+    pub fn rewind(&mut self) {
+        let mut fresh = ChartData::new(
+            self.product.clone(),
+            self.contract,
+            self.capabilities,
+            self.provider,
+            self.series.period_ms(),
+            self.series.max_len(),
+        );
+        fresh.retired = std::mem::take(&mut self.retired);
+        fresh.depth_note = self.depth_note.take();
+        fresh.status = self.status.clone();
+        fresh.stats = std::mem::take(&mut self.stats);
+        fresh.latency = self.latency.take();
+        fresh.tick_source = self.tick_source.take();
+        fresh.ticks = std::mem::take(&mut self.ticks);
+        fresh.ticks.clear();
+        fresh.chart_epoch = self.chart_epoch.wrapping_add(1);
+        fresh.rewinds = self.rewinds + 1;
+        // The series and the tape go on, emptied, not replaced: their revision and print count
+        // keep rising, so a chart's derived series (another timeframe) sees a change and
+        // rebuilds, and a counter of prints never mistakes the new ones for seen.
+        std::mem::swap(&mut fresh.series, &mut self.series);
+        fresh.series.clear();
+        std::mem::swap(&mut fresh.tape, &mut self.tape);
+        fresh.tape.clear();
+        *self = fresh;
+    }
+
     fn bump_time(&mut self, t: UtcMillis) {
         if self.market_time.is_none_or(|m| t > m) {
             self.market_time = Some(t);
@@ -692,6 +729,8 @@ pub struct ChartStore {
     feed_id: u64,
     /// Start / stop recording this feed (`live_record`).
     pub recording: crate::live_record::RecordCtl,
+    /// A replay the bar controls: its clock is this store's market clock.
+    replay: std::sync::OnceLock<std::sync::Arc<crate::replay_control::ReplayControl>>,
 }
 
 static NEXT_FEED_ID: AtomicU64 = AtomicU64::new(1);
@@ -738,7 +777,26 @@ impl ChartStore {
             last_chart_us: AtomicU64::new(0),
             live: AtomicBool::new(false),
             stale_after_ms: AtomicU64::new(5_000),
+            replay: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The replay control this store's feed plays by (set once, when the feed starts).
+    pub fn set_replay(&self, control: std::sync::Arc<crate::replay_control::ReplayControl>) {
+        let _ = self.replay.set(control);
+    }
+
+    /// The replay control this store's feed plays by, if the replay bar drives it.
+    pub fn replay(&self) -> Option<&std::sync::Arc<crate::replay_control::ReplayControl>> {
+        self.replay.get()
+    }
+
+    /// Feed side: a replay jumped back. The data goes ([`ChartData::rewind`]) and so do the
+    /// clocks, which otherwise never go back.
+    pub fn rewind(&self) {
+        self.update(|d| d.rewind());
+        self.market_ms.store(i64::MIN, Ordering::Release);
+        self.frame_ms.store(i64::MIN, Ordering::Release);
     }
 
     /// Identifies this store's feed to the indicator engine (`crate::indicators`).
@@ -759,6 +817,18 @@ impl ChartStore {
         let last = self.last_data.load(Ordering::Acquire);
         if last == 0 {
             return None;
+        }
+        // A replay's silence is on its own clock: it doesn't grow while paused.
+        if let Some(c) = self.replay.get() {
+            let frame = self
+                .frame_ms
+                .load(Ordering::Acquire)
+                .max(self.market_ms.load(Ordering::Acquire));
+            let quiet = match c.clock() {
+                Some(t) if frame != i64::MIN => t.0.saturating_sub(frame).max(0) as u64,
+                _ => 0,
+            };
+            return self.stale_after_quiet(Duration::from_millis(quiet));
         }
         self.stale_after_quiet(Duration::from_millis(mono_ms().saturating_sub(last)))
     }
@@ -798,6 +868,9 @@ impl ChartStore {
     /// since the last update while the feed is live. Frozen when it isn't (a finished replay,
     /// screenshots), so replays stay deterministic. `None` before any data.
     pub fn feed_clock(&self) -> Option<UtcMillis> {
+        if let Some(c) = self.replay.get() {
+            return c.clock();
+        }
         let t = self
             .frame_ms
             .load(Ordering::Acquire)
@@ -830,6 +903,10 @@ impl ChartStore {
     /// frame or market time plus the silence since the last update, live or not, so a
     /// finished replay's clock keeps running like the core's. `None` before any data.
     pub fn market_clock(&self) -> Option<UtcMillis> {
+        // The replay bar's clock: it stands still while paused.
+        if let Some(c) = self.replay.get() {
+            return c.clock();
+        }
         let last = self.last_data.load(Ordering::Acquire);
         let quiet = if last == 0 {
             0
@@ -1327,6 +1404,38 @@ mod tests {
         // A finished replay is not live.
         store.update(|d| d.status = FeedStatus::ReplayFinished);
         assert_eq!(store.stale_after_quiet(ms(10_000)), None);
+    }
+
+    /// A replay's jump back empties the store but keeps the series' revision and the tape's
+    /// print count rising (a derived series and the DOM trail see the change), and counts it.
+    #[test]
+    fn a_rewind_empties_but_counts_on() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, None, Capabilities::default(), "test", 60_000, 10);
+        let t = UtcMillis::parse_iso("2026-11-11T15:00:00Z").unwrap();
+        store.update(|d| {
+            d.apply(&[MarketEvent::Trade {
+                time: t,
+                price: Price(600_000),
+                qty: Qty(1),
+                aggressor: None,
+            }])
+        });
+        let (rev, pushed) = {
+            let d = store.read();
+            assert_eq!(d.series.len(), 1);
+            (d.series.revision(), d.tape.pushed())
+        };
+        store.rewind();
+        let d = store.read();
+        assert!(d.series.is_empty() && d.tape.is_empty());
+        assert!(
+            d.series.revision() > rev,
+            "a derived series sees the change"
+        );
+        assert_eq!(d.tape.pushed(), pushed, "the print count goes on");
+        assert_eq!(d.rewinds, 1);
+        assert_eq!(store.market_clock(), None, "the clocks go too");
     }
 
     /// The core's market clock keeps running after a replay finishes; so does the store's

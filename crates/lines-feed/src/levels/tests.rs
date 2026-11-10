@@ -20,6 +20,21 @@ struct Fixed {
     now: Option<UtcMillis>,
 }
 
+/// A chart whose clock a test moves (a replay the bar jumps back in).
+struct Moving {
+    bars: Vec<Bar>,
+    now: std::sync::Mutex<Option<UtcMillis>>,
+}
+
+impl ChartPrices for Moving {
+    fn price_at(&self, at: UtcMillis, tol: i64) -> Option<Price> {
+        super::price_at(&self.bars, at, tol)
+    }
+    fn now(&self) -> Option<UtcMillis> {
+        *self.now.lock().unwrap()
+    }
+}
+
 impl ChartPrices for Fixed {
     fn price_at(&self, at: UtcMillis, tol: i64) -> Option<Price> {
         // Through the public re-export adapters use.
@@ -550,6 +565,50 @@ fn recorded_levels_replay_to_the_same_map() {
             assert_eq!(s.status(recorded), LevelStatus::Current);
         }
     }
+
+    // The replay bar jumps back before the batch: its map goes; forward again, it is back.
+    let moving = Arc::new(Moving {
+        bars: bars(),
+        now: std::sync::Mutex::new(Some(recorded)),
+    });
+    let cell = Arc::new(LevelCell::for_test(&*src, true));
+    let (src2, ctx2, cell2, dir2, m2) = (
+        src.clone(),
+        ctx.clone(),
+        cell.clone(),
+        dir.clone(),
+        moving.clone(),
+    );
+    rt.block_on(async move {
+        let task = tokio::spawn(runtime::replay(
+            src2,
+            ctx2,
+            m2,
+            cell2.clone(),
+            Some(dir2),
+            Arc::new(AtomicI64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let until = |want: bool| {
+            let c = cell2.clone();
+            async move {
+                for _ in 0..200 {
+                    if c.read().map.is_some() == want {
+                        return true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                false
+            }
+        };
+        assert!(until(true).await, "applied at its time");
+        *moving.now.lock().unwrap() = Some(UtcMillis(recorded.0 - 1));
+        assert!(until(false).await, "gone after a jump back before it");
+        assert_eq!(cell2.read().received, None);
+        *moving.now.lock().unwrap() = Some(recorded);
+        assert!(until(true).await, "applied again");
+        task.abort();
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
 

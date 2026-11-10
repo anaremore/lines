@@ -735,6 +735,11 @@ enum Prompt {
         selected: usize,
         error: Option<String>,
     },
+    /// The replay bar's Go to: a time (and date) in the display time zone.
+    GoTo {
+        text: String,
+        error: Option<String>,
+    },
     /// Every command, filtered by what is typed (`commands::filter`).
     Palette {
         query: String,
@@ -782,6 +787,8 @@ pub struct WindowView {
     rec_tick: bool,
     menu: Option<Menu>,
     prompt: Option<Prompt>,
+    /// The replay bar, while a replay plays (`crate::replay_bar`).
+    replay_bar: Option<Entity<crate::replay_bar::ReplayBar>>,
     _window_subs: Vec<GpuiSubscription>,
 }
 
@@ -829,8 +836,15 @@ impl WindowView {
             rec_tick: false,
             menu: None,
             prompt: None,
+            replay_bar: None,
             _window_subs: subs,
         };
+        if cx.has_global::<crate::replay_bar::Replay>() {
+            let theme = this.theme;
+            this.replay_bar = Some(cx.new(|cx| {
+                crate::replay_bar::ReplayBar::new(theme, cx).expect("the replay global is set")
+            }));
+        }
         for tab in tabs {
             this.adopt(tab, cx);
         }
@@ -1227,6 +1241,37 @@ impl WindowView {
 
     /// Report a refused action inline (docs/design.md: errors where they happened). It expires
     /// on its own; the same refusal again replaces it with a count.
+    /// A replay bar command from a key, the palette or the bar's Go to.
+    fn run_replay(&mut self, rc: crate::commands::ReplayCmd, cx: &mut Context<Self>) {
+        if self.replay_bar.is_none() {
+            return self.refuse("no replay is playing", cx);
+        }
+        if rc == crate::commands::ReplayCmd::GoTo {
+            self.prompt = Some(Prompt::GoTo {
+                text: String::new(),
+                error: None,
+            });
+            cx.notify();
+            return;
+        }
+        // One bar of the focused chart, else a minute.
+        let chart = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
+            Some(PaneHandle::Chart(c)) => Some(c.read(cx).timeframe()),
+            _ => None,
+        };
+        match crate::replay_bar::run(rc, crate::replay_bar::step_ms(chart), cx) {
+            Ok(note) => self.replay_note(note, cx),
+            Err(why) => self.refuse(why, cx),
+        }
+    }
+
+    fn replay_note(&mut self, note: Option<String>, cx: &mut Context<Self>) {
+        if let Some(bar) = &self.replay_bar {
+            bar.update(cx, |b, cx| b.set_note(note, cx));
+        }
+        cx.notify();
+    }
+
     fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
         notice(why.to_owned(), cx);
         cx.notify();
@@ -1303,7 +1348,12 @@ impl WindowView {
         let vs = window.viewport_size();
         let (w, h) = (f32::from(vs.width), f32::from(vs.height));
         let foot = if self.footer_shown(cx) { hint_h() } else { 0.0 };
-        Rect::new(0.0, 0.0, w, (h - self.bar_h() - foot).max(0.0))
+        let replay = if self.replay_bar.is_some() {
+            crate::replay_bar::bar_h()
+        } else {
+            0.0
+        };
+        Rect::new(0.0, 0.0, w, (h - self.bar_h() - foot - replay).max(0.0))
     }
 
     fn focus_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1692,6 +1742,7 @@ impl WindowView {
                     });
                 self.open_menu(at, cx);
             }
+            Command::Replay(rc) => self.run_replay(rc, cx),
             Command::SaveAs => {
                 let name = cx.global::<Workspace>().name.clone();
                 self.prompt = Some(Prompt::SaveAs {
@@ -2534,6 +2585,22 @@ impl WindowView {
                     self.run(cmd, window, cx);
                 }
             }
+            // The replay bar's Go to: a time in the display time zone; jumps and pauses there.
+            Some(Prompt::GoTo { text, error }) => {
+                let now = cx
+                    .try_global::<crate::replay_bar::Replay>()
+                    .and_then(|r| r.control.clock())
+                    .unwrap_or(lines_core::UtcMillis(0));
+                let zone = lines_core::display_tz::current();
+                match crate::replay_bar::parse_go_to(text, now, &zone) {
+                    Ok(at) => {
+                        self.prompt = None;
+                        let note = crate::replay_bar::seek(at, cx);
+                        self.replay_note(note, cx);
+                    }
+                    Err(e) => *error = Some(e.to_owned()),
+                }
+            }
             None => {}
         }
     }
@@ -2600,6 +2667,21 @@ impl WindowView {
                 "down" => *selected = (*selected + 1) % items.len().max(1),
                 "up" => *selected = (*selected + items.len().max(1) - 1) % items.len().max(1),
                 _ => {}
+            },
+            Some(Prompt::GoTo { text, error }) => match key {
+                "backspace" => {
+                    text.pop();
+                    *error = None;
+                }
+                _ => {
+                    if let Some(c) = k.key_char.as_deref().filter(|_| {
+                        !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform
+                    }) && text.chars().count() < 24
+                    {
+                        text.push_str(c);
+                        *error = None;
+                    }
+                }
             },
             Some(Prompt::Palette {
                 query,
@@ -2702,11 +2784,15 @@ impl WindowView {
             cx.stop_propagation();
         } else if let Some(cmd) = commands::command_for(&ev.keystroke) {
             // A pane taking typed text (symbol search, a note) keeps its plain and Alt keys.
-            let typing = self
-                .tabs
-                .get(self.active)
-                .and_then(|t| t.focused_handle())
-                .is_some_and(|h| h.takes_text(cx));
+            let focused = self.tabs.get(self.active).and_then(|t| t.focused_handle());
+            let typing = focused.is_some_and(|h| h.takes_text(cx));
+            if let Command::Replay(rc) = cmd {
+                let chain = matches!(focused, Some(PaneHandle::Chain(_)));
+                let replaying = self.replay_bar.is_some();
+                if crate::replay_bar::key_goes_to_pane(rc, replaying, typing, chain) {
+                    return;
+                }
+            }
             if typing && !commands::runs_while_typing(&ev.keystroke, cmd) {
                 return;
             }
@@ -3471,6 +3557,31 @@ impl WindowView {
                     ),
                 error.clone(),
             ),
+            Prompt::GoTo { text, error } => (
+                crate::popover::Panel::GoTo,
+                "Go to (display time zone)",
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .child(if text.is_empty() {
+                        div()
+                            .text_color(t.text_dim)
+                            .child("10:30 or 2026-11-05 10:30")
+                    } else {
+                        div().text_color(t.text_main).child(text.clone())
+                    })
+                    .child(
+                        div()
+                            .w(crate::zoom::ui(2.0))
+                            .h(crate::zoom::ui(15.0))
+                            .bg(t.accent),
+                    ),
+                error.clone(),
+            ),
             Prompt::Open {
                 items,
                 selected,
@@ -3702,6 +3813,9 @@ impl Render for WindowView {
             .bg(t.bg)
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key_capture))
+            .on_action(cx.listener(|this, _: &crate::replay_bar::GoTo, _, cx| {
+                this.run_replay(crate::commands::ReplayCmd::GoTo, cx)
+            }))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -3715,6 +3829,9 @@ impl Render for WindowView {
                     .overflow_hidden()
                     .children(content),
             )
+            .children(self.replay_bar.clone().inspect(|b| {
+                b.update(cx, |b, _| b.theme = t);
+            }))
             .children(footer.then(|| {
                 div()
                     .h(px(hint_h()))
