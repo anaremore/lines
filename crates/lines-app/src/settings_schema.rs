@@ -1294,15 +1294,16 @@ fn table() -> Vec<Setting> {
                 "guard.max_position",
                 Sec::Accounts,
                 "Max position",
-                "Contracts per product, worst case (position plus open orders on one side). Empty: off.",
+                "Contracts per contract month (ES Dec and ES Mar are each capped), worst case: position plus open orders on one side. Empty: off.",
                 Scope::Account,
                 Trading,
                 Number {
                     min: 1,
                     max: 10_000,
                     optional: true,
-                    // A cap in each product, never an account total ("2 per product").
-                    unit: "per product",
+                    // A cap in each contract (the core's `Guardrails::max_position`, checked
+                    // per `ContractKey`), never an account total ("2 per contract").
+                    unit: "per contract",
                 },
                 g_pos,
                 Some(s_pos),
@@ -4019,12 +4020,13 @@ mod tests {
         assert_eq!(line_count(&[]), 0);
     }
 
-    /// Max position is a cap per product: its value says so ("2 per product"), never read
-    /// as an account total. The other Accounts limits are per account.
+    /// Max position is a cap per contract, as the core checks it (`ContractKey`: product and
+    /// month): its value says so ("2 per contract"), never read as an account total or a
+    /// product total. The other Accounts limits are per account.
     #[test]
-    fn max_position_says_per_product() {
+    fn max_position_says_per_contract() {
         let pos = by_key("guard.max_position").unwrap();
-        assert_eq!(pos.value_text(&Value::Number(Some(2))), "2 per product");
+        assert_eq!(pos.value_text(&Value::Number(Some(2))), "2 per contract");
         assert_eq!(pos.value_text(&Value::Number(None)), "Off");
     }
 

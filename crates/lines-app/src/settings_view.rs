@@ -461,7 +461,13 @@ pub fn run(c: schema::SettingCmd, cx: &mut App) -> Result<Option<String>, &'stat
     match c.value() {
         Some(v) => {
             let facts = gather_facts(cx);
-            let target = default_target(&facts);
+            // The account the change lands on: the open window's, else the first. The check
+            // for a loosening and the change itself use the same one.
+            let target = cx
+                .try_global::<SettingsWindowGlobal>()
+                .and_then(|g| g.0)
+                .and_then(|h| h.read(cx).ok().map(|w| w.target.clone()))
+                .unwrap_or_else(|| default_target(&facts));
             let before = current_prefs(cx);
             let mut before = before;
             if st.key.starts_with("prop.") {
@@ -3387,7 +3393,10 @@ impl Render for SettingsWindow {
                         // A page longer than the window fades into the bottom bar, so a row
                         // cut there reads as more below, not as a broken control.
                         div().relative().flex().flex_1().min_w_0().child(main).when(
-                            self.scroll.max_offset().y > px(0.0),
+                            // More below the visible part (the offset is negative, down to
+                            // -max_offset), not merely a page longer than the window.
+                            self.scroll.max_offset().y > px(0.0)
+                                && -self.scroll.offset().y < self.scroll.max_offset().y - px(1.0),
                             |d| {
                                 d.child(
                                     div()
@@ -3398,7 +3407,12 @@ impl Render for SettingsWindow {
                                         .h(crate::zoom::ui(FADE_H))
                                         .bg(gpui::linear_gradient(
                                             180.0,
-                                            gpui::linear_color_stop(t.bg.opacity(0.0), 0.0),
+                                            // The background, fully transparent: a
+                                            // scroll cue, not a UI state (no state token).
+                                            gpui::linear_color_stop(
+                                                gpui::Hsla { a: 0.0, ..t.bg },
+                                                0.0,
+                                            ),
                                             gpui::linear_color_stop(t.bg, 1.0),
                                         )),
                                 )
