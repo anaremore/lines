@@ -1,4 +1,4 @@
-//! The display time zone setting (Settings › Appearance › Time zone, `--time-zone`): applying
+//! The display time zone setting (Settings › General › Time zone, `--time-zone`): applying
 //! it, and the searchable zone list the Settings window shows. GPUI-free.
 //!
 //! The zone is display only (`lines_core::display_tz`): sessions, the VWAP reset, expiries,

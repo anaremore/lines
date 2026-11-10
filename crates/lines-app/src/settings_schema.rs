@@ -11,38 +11,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::picker::Settings;
 
-/// The Settings window's sections, in order.
+/// The Settings window's sections, in order, under the sidebar's groups ([`Section::group`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
+    /// App: updates, the time zone.
     General,
     Appearance,
+    Keys,
+    /// Panes.
     Charts,
     Dom,
-    Trading,
-    Risk,
+    /// Trading: app-wide order defaults (and the bracket presets, per account and product).
+    OrderEntry,
+    /// Everything about one account: guardrails, the news blackout, prop rules, reset.
     Accounts,
-    Data,
-    /// Every data source: its state, plan, settings and secrets (decisions 0030 §3–4 and 0035).
+    /// Data: the sources (decision 0030).
     Connections,
-    Keys,
-    Diagnostics,
-    /// The version, and rolling back an update (decision 0031).
+    DataFolder,
+    /// The version, rolling back an update (decision 0031) and diagnostics.
     About,
 }
 
 impl Section {
-    pub const ALL: [Section; 12] = [
+    pub const ALL: [Section; 10] = [
         Section::General,
         Section::Appearance,
+        Section::Keys,
         Section::Charts,
         Section::Dom,
-        Section::Trading,
-        Section::Risk,
+        Section::OrderEntry,
         Section::Accounts,
-        Section::Data,
         Section::Connections,
-        Section::Keys,
-        Section::Diagnostics,
+        Section::DataFolder,
         Section::About,
     ];
 
@@ -50,16 +50,55 @@ impl Section {
         match self {
             Section::General => "General",
             Section::Appearance => "Appearance",
+            Section::Keys => "Keys",
             Section::Charts => "Charts",
             Section::Dom => "DOM",
-            Section::Trading => "Trading",
-            Section::Risk => "Risk",
+            Section::OrderEntry => "Order entry",
             Section::Accounts => "Accounts",
-            Section::Data => "Data",
             Section::Connections => "Connections",
-            Section::Keys => "Keys",
-            Section::Diagnostics => "Diagnostics",
+            Section::DataFolder => "Data folder",
             Section::About => "About",
+        }
+    }
+
+    /// The sidebar group it sits under (About stands alone).
+    pub fn group(self) -> &'static str {
+        match self {
+            Section::General | Section::Appearance | Section::Keys => "APP",
+            Section::Charts | Section::Dom => "PANES",
+            Section::OrderEntry | Section::Accounts => "TRADING",
+            Section::Connections | Section::DataFolder => "DATA",
+            Section::About => "",
+        }
+    }
+
+    /// The name `--settings` takes: lowercase, words joined by '-' ("order-entry").
+    #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
+    pub fn slug(self) -> String {
+        self.name().to_lowercase().replace(' ', "-")
+    }
+
+    /// A section by its name or slug (case, spaces, '-' and '_' ignored), or by a name the
+    /// window had before its sections were regrouped: `risk` → Accounts, `trading` → Order
+    /// entry, `diagnostics` → About, `data` → Data folder.
+    #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
+    pub fn parse(s: &str) -> Option<Section> {
+        let norm = |x: &str| -> String {
+            x.chars()
+                .filter(|c| !matches!(c, ' ' | '-' | '_'))
+                .flat_map(char::to_lowercase)
+                .collect()
+        };
+        let want = norm(s);
+        if let Some(sec) = Section::ALL.into_iter().find(|x| norm(x.name()) == want) {
+            return Some(sec);
+        }
+        match want.as_str() {
+            "risk" => Some(Section::Accounts),
+            "trading" => Some(Section::OrderEntry),
+            "diagnostics" => Some(Section::About),
+            "data" => Some(Section::DataFolder),
+            _ => None,
         }
     }
 }
@@ -82,14 +121,15 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub fn label(self) -> &'static str {
+    /// The quiet word a row shows after its label where its value isn't app-wide (decision
+    /// 0021: no hidden inheritance). `None` for app-wide settings (the default), per-account
+    /// ones (the account picker above them says which account) and read-only facts (shown,
+    /// not set: nothing inherits them).
+    pub fn label(self) -> Option<&'static str> {
         match self {
-            Scope::App => "App",
-            Scope::Workspace => "Workspace",
-            Scope::NewPanes => "New panes",
-            Scope::Account => "Account",
-            Scope::AccountProduct => "Account · product",
-            Scope::ReadOnly => "Read-only",
+            Scope::App | Scope::Account | Scope::AccountProduct | Scope::ReadOnly => None,
+            Scope::Workspace => Some("This workspace"),
+            Scope::NewPanes => Some("New panes"),
         }
     }
 }
@@ -99,8 +139,8 @@ pub const CONNECTIONS_LIST: &str = "connections.list";
 /// The public sources' switches: rows for search and the palette, drawn on their cards.
 pub const SOURCE_SWITCHES: [&str; 3] = ["data.coinbase", "data.kraken", "data.databento"];
 
-/// Trading-affecting settings are marked in the window and loosening them asks first
-/// (decision 0021).
+/// Trading-affecting settings: loosening them asks first (decision 0021). The window shows it
+/// once, by their place (the sidebar's Trading group), not with a mark on every row.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Safety {
     Normal,
@@ -148,7 +188,7 @@ pub enum Kind {
 /// Facts the window shows but doesn't own, gathered when it opens.
 #[derive(Clone, Debug, Default)]
 pub struct Facts {
-    /// Settings › Data's folder (`crate::data_dir::facts`).
+    /// Settings › Data folder's folder (`crate::data_dir::facts`).
     pub folder: crate::data_dir::FolderFacts,
     /// The store settings this run started with, and the store flags given.
     pub store_start: crate::data_dir::StorePrefs,
@@ -161,6 +201,9 @@ pub struct Facts {
     pub can_update: bool,
     /// The version a rollback returns to, if the last update kept one.
     pub rollback: Option<String>,
+    /// This run's look flags (`--theme`, `--palette`, `--hollow`): a look row one rules shows
+    /// the flag's value and has no ● or ↺ (nothing is saved).
+    pub look_flags: Appearance,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -336,6 +379,15 @@ impl LookField {
     #[cfg_attr(not(test), allow(dead_code))]
     pub const ALL: [LookField; 3] = [LookField::Theme, LookField::Palette, LookField::Hollow];
 
+    /// Whether `a` sets this field.
+    pub fn set_in(self, a: &Appearance) -> bool {
+        match self {
+            LookField::Theme => a.theme.is_some(),
+            LookField::Palette => a.palette.is_some(),
+            LookField::Hollow => a.hollow.is_some(),
+        }
+    }
+
     /// The look field setting `key` sets, if it sets one.
     pub fn of(key: &str) -> Option<LookField> {
         match key {
@@ -411,8 +463,8 @@ pub struct PropRulesDoc {
 }
 
 /// The presets the Risk section offers, in `lines_trading::rules::presets` order, by a short
-/// name ("None" first).
-pub const PRESET_CHOICES: &[&str] = &["None", "50K intraday", "50K EOD", "100K funded"];
+/// name ("Off", no prop rules, first).
+pub const PRESET_CHOICES: &[&str] = &["Off", "50K intraday", "50K EOD", "100K funded"];
 
 impl PropRulesDoc {
     /// The rules this asks for: the preset with its overrides (`Ok(None)`: no prop rules).
@@ -694,6 +746,9 @@ guard_field!(g_pos, s_pos, max_position, i64);
 guard_field!(g_trades, s_trades, max_trades_per_day, u32);
 guard_field!(g_close, s_close, no_entries_before_close_min, u32);
 
+/// A new losing streak's cooldown, minutes (also what a reset of the cooldown gives).
+const COOLDOWN_MIN: i64 = 15;
+
 fn g_streak(p: &Prefs, t: &Target, _: &Facts) -> Value {
     Value::Number(
         guard(p, t)
@@ -708,7 +763,9 @@ fn s_streak(p: &mut Prefs, t: &Target, v: Value) -> Result<(), &'static str> {
     let g = guard_mut(p, t)?;
     g.losing_streak = n.map(|n| lines_trading::LosingStreak {
         losses: n as u32,
-        cooldown_min: g.losing_streak.map_or(15, |s| s.cooldown_min),
+        cooldown_min: g
+            .losing_streak
+            .map_or(COOLDOWN_MIN as u32, |s| s.cooldown_min),
     });
     drop_empty_guardrails(p, t);
     Ok(())
@@ -879,7 +936,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "appearance.hollow",
-                Sec::Appearance,
+                Sec::Charts,
                 "Hollow candles",
                 "Which direction's candle bodies are hollow (the other is filled), so direction never relies on color alone.",
                 Scope::App,
@@ -919,7 +976,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 crate::display_zone::KEY,
-                Sec::Appearance,
+                Sec::General,
                 "Time zone",
                 "Times in charts, time & sales, the journal and strategies. Sessions, the VWAP reset and expiries stay on the exchange's clock.",
                 Scope::App,
@@ -976,7 +1033,7 @@ fn table() -> Vec<Setting> {
                 Value::Text(if p.app.chart_defaults.is_some() {
                     "The saved default set".to_owned()
                 } else {
-                    "None".to_owned()
+                    "Off".to_owned()
                 })
             },
             None,
@@ -1052,7 +1109,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "trading.pnl",
-                Sec::Trading,
+                Sec::OrderEntry,
                 "P&L display",
                 "How positions and the trading panel show profit and loss.",
                 Scope::App,
@@ -1076,7 +1133,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "trading.disable_on_focus_loss",
-                Sec::Trading,
+                Sec::OrderEntry,
                 "Disable trading when a DOM loses focus",
                 "Off by default: the trading switch stays as you set it.",
                 Scope::App,
@@ -1093,7 +1150,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "trading.disable_on_account_change",
-                Sec::Trading,
+                Sec::OrderEntry,
                 "Disable trading on an account change",
                 "Off by default.",
                 Scope::App,
@@ -1110,7 +1167,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "trading.disable_on_contract_change",
-                Sec::Trading,
+                Sec::OrderEntry,
                 "Disable trading on a contract change",
                 "Off by default (a roll, a picker switch, a linked pane).",
                 Scope::App,
@@ -1127,7 +1184,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "trading.default_qty",
-                Sec::Trading,
+                Sec::OrderEntry,
                 "Default quantity",
                 "The order size of a product you haven't set one for, in every open pane.",
                 Scope::App,
@@ -1163,7 +1220,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "trading.bracket_units",
-                Sec::Trading,
+                Sec::OrderEntry,
                 "Bracket units",
                 "Show bracket distances in ticks or points (stored in ticks, exact).",
                 Scope::Account,
@@ -1190,7 +1247,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "trading.brackets",
-            Sec::Trading,
+            Sec::OrderEntry,
             "Bracket presets",
             "Stop and target pairs per account and product. The DOM panel's Edit… edits the same list in place.",
             Scope::AccountProduct,
@@ -1213,73 +1270,86 @@ fn table() -> Vec<Setting> {
             },
             None,
         ),
-        s(
-            "guard.max_daily_loss",
-            Sec::Risk,
-            "Daily loss limit",
-            "Your own limit per trade date, in whole dollars (realized and open, fees included). Empty: none.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 1_000_000,
-                optional: true,
-                unit: "$",
-            },
-            g_loss,
-            Some(s_loss),
+        with_default(
+            s(
+                "guard.max_daily_loss",
+                Sec::Accounts,
+                "Daily loss limit",
+                "Your own limit per trade date, in whole dollars (realized and open, fees included). Empty: off.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 1_000_000,
+                    optional: true,
+                    unit: "$",
+                },
+                g_loss,
+                Some(s_loss),
+            ),
+            Value::Number(None),
         ),
-        s(
-            "guard.max_position",
-            Sec::Risk,
-            "Max position",
-            "Contracts per product, worst case (position plus open orders on one side). Empty: none.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 10_000,
-                optional: true,
-                unit: "contracts",
-            },
-            g_pos,
-            Some(s_pos),
+        with_default(
+            s(
+                "guard.max_position",
+                Sec::Accounts,
+                "Max position",
+                "Contracts per product, worst case (position plus open orders on one side). Empty: off.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 10_000,
+                    optional: true,
+                    // A cap in each product, never an account total ("2 per product").
+                    unit: "per product",
+                },
+                g_pos,
+                Some(s_pos),
+            ),
+            Value::Number(None),
         ),
-        s(
-            "guard.max_trades",
-            Sec::Risk,
-            "Max trades per day",
-            "Round trips per trade date. Empty: none.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 10_000,
-                optional: true,
-                unit: "trades",
-            },
-            g_trades,
-            Some(s_trades),
+        with_default(
+            s(
+                "guard.max_trades",
+                Sec::Accounts,
+                "Max trades per day",
+                "Round trips per trade date. Empty: off.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 10_000,
+                    optional: true,
+                    unit: "trades",
+                },
+                g_trades,
+                Some(s_trades),
+            ),
+            Value::Number(None),
         ),
-        s(
-            "guard.losing_streak",
-            Sec::Risk,
-            "Cooldown after losses",
-            "Losing trades in a row that start a cooldown. Empty: none.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 100,
-                optional: true,
-                unit: "losses",
-            },
-            g_streak,
-            Some(s_streak),
+        with_default(
+            s(
+                "guard.losing_streak",
+                Sec::Accounts,
+                "Cooldown after losses",
+                "Losing trades in a row that start a cooldown. Empty: off.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 100,
+                    optional: true,
+                    unit: "losses",
+                },
+                g_streak,
+                Some(s_streak),
+            ),
+            Value::Number(None),
         ),
         s(
             "guard.cooldown",
-            Sec::Risk,
+            Sec::Accounts,
             "Cooldown length",
             "How long entries wait after the losing streak, in minutes.",
             Scope::Account,
@@ -1293,37 +1363,43 @@ fn table() -> Vec<Setting> {
             g_cool,
             Some(s_cool),
         ),
-        s(
-            "guard.no_entries_before_close",
-            Sec::Risk,
-            "No entries before the close",
-            "No new entries this many minutes before the session closes. Empty: none.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 600,
-                optional: true,
-                unit: "min",
-            },
-            g_close,
-            Some(s_close),
+        with_default(
+            s(
+                "guard.no_entries_before_close",
+                Sec::Accounts,
+                "No entries before the close",
+                "No new entries this many minutes before the session closes. Empty: off.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 600,
+                    optional: true,
+                    unit: "min",
+                },
+                g_close,
+                Some(s_close),
+            ),
+            Value::Number(None),
         ),
         // Risk: the news blackout (roadmap 8b) around scheduled economic releases.
-        s(
-            "guard.news",
-            Sec::Risk,
-            "News blackout",
-            "Around high-importance releases that move the account's product (CPI, the jobs report, FOMC; official schedules bundled with Lines): Warn shows it; Block refuses new entries; Flatten also closes positions in affected products when the window opens. Exits are never blocked. While the calendar can't answer (out of date), Block and Flatten refuse entries.",
-            Scope::Account,
-            Trading,
-            Choice(NEWS_CHOICES),
-            g_news,
-            Some(s_news),
+        with_default(
+            s(
+                "guard.news",
+                Sec::Accounts,
+                "News blackout",
+                "Around high-importance releases that move the account's product (CPI, the jobs report, FOMC; official schedules bundled with Lines): Warn shows it; Block refuses new entries; Flatten also closes positions in affected products when the window opens. Exits are never blocked. While the calendar can't answer (out of date), Block and Flatten refuse entries.",
+                Scope::Account,
+                Trading,
+                Choice(NEWS_CHOICES),
+                g_news,
+                Some(s_news),
+            ),
+            Value::Choice(0),
         ),
         s(
             "guard.news_before",
-            Sec::Risk,
+            Sec::Accounts,
             "News blackout: minutes before",
             "The blackout starts this many minutes before the release.",
             Scope::Account,
@@ -1339,7 +1415,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.news_after",
-            Sec::Risk,
+            Sec::Accounts,
             "News blackout: minutes after",
             "The blackout ends this many minutes after the release.",
             Scope::Account,
@@ -1355,7 +1431,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "guard.news_medium",
-            Sec::Risk,
+            Sec::Accounts,
             "News blackout: medium releases too",
             "The blackout also covers PPI, GDP and PCE (charts mark them either way).",
             Scope::Account,
@@ -1367,7 +1443,7 @@ fn table() -> Vec<Setting> {
         // Risk: lockouts and breaches, as the core reports them.
         s(
             "guard.status",
-            Sec::Risk,
+            Sec::Accounts,
             "Guardrail lockout",
             "While locked out you can tighten your guardrails; loosening waits until the session resets.",
             Scope::Account,
@@ -1383,7 +1459,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "prop.status",
-            Sec::Risk,
+            Sec::Accounts,
             "Prop rules",
             "Approximations, not a firm's official rules. During a breach rules can be tightened, not loosened, until the session resets.",
             Scope::Account,
@@ -1397,175 +1473,200 @@ fn table() -> Vec<Setting> {
             },
             None,
         ),
+        with_default(
+            s(
+                "prop.preset",
+                Sec::Accounts,
+                "Prop preset",
+                "The preset's rules for this account; the rows below override single values. The account size is fixed.",
+                Scope::Account,
+                Trading,
+                Choice(PRESET_CHOICES),
+                |p, t, f| {
+                    let name = match prop_doc(p, t) {
+                        Some(d) => d.preset.clone(),
+                        None => fact(f, t)
+                            .and_then(|a| a.rules_in_force.as_ref().map(|r| r.name.clone())),
+                    };
+                    let presets = lines_trading::rules::presets();
+                    Value::Choice(
+                        name.and_then(|n| presets.iter().position(|p| p.name == n))
+                            .map_or(0, |k| k + 1),
+                    )
+                },
+                Some(|p, t, v| {
+                    let i = want_choice(v, PRESET_CHOICES.len())?;
+                    let key = t
+                        .account_name
+                        .clone()
+                        .or(t.account.clone())
+                        .ok_or("choose an account first")?;
+                    let preset =
+                        (i > 0).then(|| lines_trading::rules::presets()[i - 1].name.clone());
+                    // A new preset starts from its own values (overrides belong to the old one).
+                    p.app.prop_rules.insert(
+                        key,
+                        PropRulesDoc {
+                            preset,
+                            ..Default::default()
+                        },
+                    );
+                    Ok(())
+                }),
+            ),
+            Value::Choice(0),
+        ),
+        // The overrides below are folded behind this row (the window's Override…).
         s(
-            "prop.preset",
-            Sec::Risk,
-            "Prop preset",
-            "The preset's rules for this account; the rows below override single values. The account size is fixed.",
+            PROP_OVERRIDES_KEY,
+            Sec::Accounts,
+            "Prop rule values",
+            "The preset's values in force: daily loss, trailing drawdown, max micros, profit target. Override… changes single values.",
             Scope::Account,
             Trading,
-            Choice(PRESET_CHOICES),
-            |p, t, f| {
-                let name = match prop_doc(p, t) {
-                    Some(d) => d.preset.clone(),
-                    None => {
-                        fact(f, t).and_then(|a| a.rules_in_force.as_ref().map(|r| r.name.clone()))
-                    }
-                };
-                let presets = lines_trading::rules::presets();
-                Value::Choice(
-                    name.and_then(|n| presets.iter().position(|p| p.name == n))
-                        .map_or(0, |k| k + 1),
-                )
-            },
-            Some(|p, t, v| {
-                let i = want_choice(v, PRESET_CHOICES.len())?;
-                let key = t
-                    .account_name
-                    .clone()
-                    .or(t.account.clone())
-                    .ok_or("choose an account first")?;
-                let preset = (i > 0).then(|| lines_trading::rules::presets()[i - 1].name.clone());
-                // A new preset starts from its own values (overrides belong to the old one).
-                p.app.prop_rules.insert(
-                    key,
-                    PropRulesDoc {
-                        preset,
-                        ..Default::default()
-                    },
-                );
-                Ok(())
-            }),
+            Editor,
+            |p, t, f| Value::Text(prop_values_text(prop_rules_shown(p, t, f).as_ref())),
+            None,
         ),
-        s(
-            "prop.daily_loss",
-            Sec::Risk,
-            "Prop daily loss limit",
-            "Whole dollars per trade date. Empty: the preset's.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 1_000_000,
-                optional: true,
-                unit: "$",
-            },
-            |p, t, f| {
-                Value::Number(
-                    prop_field("prop.daily_loss", prop_rules_shown(p, t, f).as_ref()).flatten(),
-                )
-            },
-            Some(|p, t, v| set_prop(p, t, "prop.daily_loss", v)),
+        with_default(
+            s(
+                "prop.daily_loss",
+                Sec::Accounts,
+                "Prop daily loss limit",
+                "Whole dollars per trade date. Empty: the preset's.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 1_000_000,
+                    optional: true,
+                    unit: "$",
+                },
+                |p, t, f| {
+                    Value::Number(
+                        prop_field("prop.daily_loss", prop_rules_shown(p, t, f).as_ref()).flatten(),
+                    )
+                },
+                Some(|p, t, v| set_prop(p, t, "prop.daily_loss", v)),
+            ),
+            Value::Number(None),
         ),
-        s(
-            "prop.drawdown",
-            Sec::Risk,
-            "Prop trailing drawdown",
-            "Whole dollars (the preset's mode stays). Empty: the preset's.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 1_000_000,
-                optional: true,
-                unit: "$",
-            },
-            |p, t, f| {
-                Value::Number(
-                    prop_field("prop.drawdown", prop_rules_shown(p, t, f).as_ref()).flatten(),
-                )
-            },
-            Some(|p, t, v| set_prop(p, t, "prop.drawdown", v)),
+        with_default(
+            s(
+                "prop.drawdown",
+                Sec::Accounts,
+                "Prop trailing drawdown",
+                "Whole dollars (the preset's mode stays). Empty: the preset's.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 1_000_000,
+                    optional: true,
+                    unit: "$",
+                },
+                |p, t, f| {
+                    Value::Number(
+                        prop_field("prop.drawdown", prop_rules_shown(p, t, f).as_ref()).flatten(),
+                    )
+                },
+                Some(|p, t, v| set_prop(p, t, "prop.drawdown", v)),
+            ),
+            Value::Number(None),
         ),
-        s(
-            "prop.max_micros",
-            Sec::Risk,
-            "Prop max micro contracts",
-            "One standard contract counts as 10. Empty: the preset's.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 100_000,
-                optional: true,
-                unit: "micros",
-            },
-            |p, t, f| {
-                Value::Number(
-                    prop_field("prop.max_micros", prop_rules_shown(p, t, f).as_ref()).flatten(),
-                )
-            },
-            Some(|p, t, v| set_prop(p, t, "prop.max_micros", v)),
+        with_default(
+            s(
+                "prop.max_micros",
+                Sec::Accounts,
+                "Prop max micro contracts",
+                "One standard contract counts as 10. Empty: the preset's.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 100_000,
+                    optional: true,
+                    unit: "micros",
+                },
+                |p, t, f| {
+                    Value::Number(
+                        prop_field("prop.max_micros", prop_rules_shown(p, t, f).as_ref()).flatten(),
+                    )
+                },
+                Some(|p, t, v| set_prop(p, t, "prop.max_micros", v)),
+            ),
+            Value::Number(None),
         ),
-        s(
-            "prop.profit_target",
-            Sec::Risk,
-            "Prop profit target",
-            "Whole dollars; shown in the DOM's rule meters, doesn't restrict orders. Empty: the preset's.",
-            Scope::Account,
-            Normal,
-            Number {
-                min: 1,
-                max: 10_000_000,
-                optional: true,
-                unit: "$",
-            },
-            |p, t, f| {
-                Value::Number(
-                    prop_field("prop.profit_target", prop_rules_shown(p, t, f).as_ref()).flatten(),
-                )
-            },
-            Some(|p, t, v| set_prop(p, t, "prop.profit_target", v)),
+        with_default(
+            s(
+                "prop.profit_target",
+                Sec::Accounts,
+                "Prop profit target",
+                "Whole dollars; shown in the DOM's rule meters, doesn't restrict orders. Empty: the preset's.",
+                Scope::Account,
+                Normal,
+                Number {
+                    min: 1,
+                    max: 10_000_000,
+                    optional: true,
+                    unit: "$",
+                },
+                |p, t, f| {
+                    Value::Number(
+                        prop_field("prop.profit_target", prop_rules_shown(p, t, f).as_ref())
+                            .flatten(),
+                    )
+                },
+                Some(|p, t, v| set_prop(p, t, "prop.profit_target", v)),
+            ),
+            Value::Number(None),
         ),
         // Accounts.
         s(
             "accounts.list",
             Sec::Accounts,
-            "Trading accounts",
-            "Paper accounts, plus each broker's (read-only while observed).",
+            "Account",
+            "The account the page shows (Alt+A or its picker steps through them): paper accounts, plus each broker's (read-only while observed), and its rules.",
             Scope::ReadOnly,
             Normal,
             Info,
-            |_, _, f| {
+            |p, t, f| {
                 Value::Text(if f.accounts.is_empty() {
                     "Trading is not running".to_owned()
                 } else {
-                    f.accounts
-                        .iter()
-                        .map(|a| {
-                            let mut s = a.name.clone();
-                            s.push_str(match a.kind {
-                                "PAPER" => " (paper)",
-                                "SIM" => " (sim)",
-                                _ => " (live)",
-                            });
-                            if let Some(r) = &a.rules {
-                                s.push_str(" · ");
-                                s.push_str(r);
-                            }
-                            s
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    match fact(f, t) {
+                        None => "Choose an account".to_owned(),
+                        // The rules as this page sets them (else as the core has them).
+                        Some(a) => match prop_rules_shown(p, t, f)
+                            .map(|r| r.name)
+                            .or_else(|| a.rules.clone())
+                        {
+                            Some(r) => format!("{} · {r}", a.name),
+                            None => format!("{} · no prop rules", a.name),
+                        },
+                    }
                 })
             },
             None,
         ),
-        s(
-            MAX_ORDER_KEY,
-            Sec::Accounts,
-            "Largest order",
-            "The most contracts one new order (or a resize) may have on this paper account; the core refuses a larger one from every way in: DOM, chart, trade panel, keys, strategies. Exits that only close the position are never held to it. Empty: no limit. Paper accounts only.",
-            Scope::Account,
-            Trading,
-            Number {
-                min: 1,
-                max: 100_000,
-                optional: true,
-                unit: "contracts",
-            },
-            g_max_order,
-            Some(s_max_order),
+        with_default(
+            s(
+                MAX_ORDER_KEY,
+                Sec::Accounts,
+                "Largest order",
+                "The most contracts one new order (or a resize) may have on this paper account; the core refuses a larger one from every way in: DOM, chart, trade panel, keys, strategies. Exits that only close the position are never held to it. Empty: no limit. Paper accounts only.",
+                Scope::Account,
+                Trading,
+                Number {
+                    min: 1,
+                    max: 100_000,
+                    optional: true,
+                    unit: "contracts",
+                },
+                g_max_order,
+                Some(s_max_order),
+            ),
+            Value::Number(None),
         ),
         s(
             RESET_KEY,
@@ -1593,7 +1694,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             DATA_FOLDER_KEY,
-            Sec::Data,
+            Sec::DataFolder,
             "Data folder",
             "Where the store, recordings, paper accounts, journal, logs and backups live. A new folder is used after restart; moving copies and checks everything, then removes the old copy. Not while a position or order is open.",
             Scope::App,
@@ -1605,7 +1706,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "data.store",
-                Sec::Data,
+                Sec::DataFolder,
                 "Local store",
                 "Keeps live feeds' trades and best bid/ask per contract in the data folder, for the bars at startup and replays.",
                 Scope::App,
@@ -1622,7 +1723,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "data.budget",
-                Sec::Data,
+                Sec::DataFolder,
                 "Store budget",
                 "Beyond it, the oldest trade dates are removed (after lowering it, at the next start).",
                 Scope::App,
@@ -1648,7 +1749,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "data.depth",
-                Sec::Data,
+                Sec::DataFolder,
                 "Depth recorded for",
                 "Products whose order book is stored too (large).",
                 Scope::App,
@@ -1764,7 +1865,7 @@ fn table() -> Vec<Setting> {
         with_default(
             s(
                 "diagnostics.latency_hud",
-                Sec::Diagnostics,
+                Sec::About,
                 "Latency HUD",
                 "Feed, paint, order and ack latency in chart headers.",
                 Scope::Workspace,
@@ -1780,7 +1881,7 @@ fn table() -> Vec<Setting> {
         ),
         s(
             "diagnostics.folder",
-            Sec::Diagnostics,
+            Sec::About,
             "Settings and logs folder",
             "Export diagnostics (palette) bundles the logs with secrets removed.",
             Scope::ReadOnly,
@@ -1850,11 +1951,37 @@ impl Setting {
         set(p, t, v)
     }
 
-    /// Whether this setting's value differs from its default (the window's ↺).
+    /// Whether this setting differs from its default (the window's ● on its row and its
+    /// section). A prop override differs while it is set (its default is the preset's value).
     pub fn changed(&self, p: &Prefs, t: &Target, f: &Facts) -> bool {
-        self.default
-            .as_ref()
-            .is_some_and(|d| *d != (self.get)(p, t, f))
+        match self.key {
+            // The summary line: nothing of its own to reset; each override has its ●.
+            PROP_OVERRIDES_KEY => false,
+            k if PROP_OVERRIDES.contains(&k) => prop_override(prop_doc(p, t), k).is_some(),
+            _ => self
+                .reset_value(p, t)
+                .is_some_and(|d| d != (self.get)(p, t, f)),
+        }
+    }
+
+    /// The value a reset (↺, Ctrl+R) gives now; `None`: nothing to reset to. Mostly the
+    /// default; a part of a guardrail that is off has none (the cooldown without a losing
+    /// streak, the news window without the blackout), and one that is on resets to the value
+    /// it starts with; a prop override resets to the preset's value while it is set.
+    pub fn reset_value(&self, p: &Prefs, t: &Target) -> Option<Value> {
+        let fresh = lines_trading::news::NewsBlackout::new(NEWS_ACTIONS[0]);
+        match self.key {
+            "guard.cooldown" => guard(p, t)
+                .and_then(|g| g.losing_streak)
+                .map(|_| Value::Number(Some(COOLDOWN_MIN))),
+            "guard.news_before" => news(p, t).map(|_| Value::Number(Some(fresh.before_min.into()))),
+            "guard.news_after" => news(p, t).map(|_| Value::Number(Some(fresh.after_min.into()))),
+            "guard.news_medium" => news(p, t).map(|_| Value::Bool(fresh.include_medium)),
+            k if PROP_OVERRIDES.contains(&k) => prop_override(prop_doc(p, t), k)
+                .is_some()
+                .then_some(Value::Number(None)),
+            _ => self.default.clone(),
+        }
     }
 
     /// The text a palette command or a search result shows for a value.
@@ -1870,7 +1997,7 @@ impl Setting {
                     u => format!("{n} {u}"),
                 }
             }
-            (_, Value::Number(None)) => "None".to_owned(),
+            (_, Value::Number(None)) => "Off".to_owned(),
             (_, Value::Text(t)) => t.clone(),
             (_, Value::List(l)) if l.is_empty() => "None".to_owned(),
             (_, Value::List(l)) => l.join(", "),
@@ -1882,7 +2009,7 @@ impl Setting {
 /// Whether changing setting `st` from `old` to `new` loosens trading risk (decision 0021:
 /// it needs an explicit yes): a guardrail made looser or removed (`g0` to `g1`, the
 /// account's guardrails before and after), an opt-in "disable trading" turned off, a larger
-/// default quantity.
+/// default quantity, a paper account's largest order raised or removed.
 pub fn loosening(
     st: &Setting,
     old: &Value,
@@ -1890,6 +2017,9 @@ pub fn loosening(
     g0: &lines_trading::Guardrails,
     g1: &lines_trading::Guardrails,
 ) -> bool {
+    if st.safety != Safety::Trading {
+        return false;
+    }
     match st.key {
         k if k.starts_with("guard.") => loosens(g0, g1),
         // Prop rows: the caller compares the resolved rules (`prop_loosens`).
@@ -1901,8 +2031,57 @@ pub fn loosening(
             (old, new),
             (Value::Number(Some(a)), Value::Number(Some(b))) if b > a
         ),
+        // A paper account's largest order raised or removed (decision 0021: raising max size).
+        MAX_ORDER_KEY => match (old, new) {
+            (Value::Number(Some(a)), Value::Number(Some(b))) => b > a,
+            (Value::Number(Some(_)), Value::Number(None)) => true,
+            _ => false,
+        },
         _ => false,
     }
+}
+
+/// A part of a guardrail shown while the guardrail is off: `None` hides it (the cooldown
+/// without a losing streak: its line reads just "Off"); `Some(n)` shows `n` muted, the value
+/// it starts with when turned on (the news window while the blackout is off).
+pub fn dormant(st: &Setting, p: &Prefs, t: &Target) -> Option<Option<i64>> {
+    let fresh = lines_trading::news::NewsBlackout::new(NEWS_ACTIONS[0]);
+    match st.key {
+        "guard.cooldown" if guard(p, t).and_then(|g| g.losing_streak).is_none() => Some(None),
+        "guard.news_before" if news(p, t).is_none() => Some(Some(fresh.before_min.into())),
+        "guard.news_after" if news(p, t).is_none() => Some(Some(fresh.after_min.into())),
+        _ => None,
+    }
+}
+
+/// Whether changing `st` from `before` to `after` (its value `old` to `new`) loosens trading
+/// risk for account `t`: the window's rows, a reset, an undo and the palette all ask through
+/// this, with the account's real guardrails and prop rules.
+pub fn change_loosens(
+    st: &Setting,
+    (old, new): (&Value, &Value),
+    (before, after): (&Prefs, &Prefs),
+    t: &Target,
+    f: &Facts,
+) -> bool {
+    loosening(st, old, new, &t.guardrails(before), &t.guardrails(after))
+        || (st.key.starts_with("prop.") && prop_loosens(before, after, t, f))
+}
+
+/// How many lines a search's matches fill (two matches on one line count once).
+pub fn line_count(hits: &[usize]) -> usize {
+    let mut firsts: Vec<&str> = hits
+        .iter()
+        .filter_map(|&i| places()[i].and_then(|p| p.line.keys().next()))
+        .collect();
+    firsts.dedup();
+    firsts.len()
+}
+
+/// The value setting `st` shows once `after` is in force, as words: what a confirmation or a
+/// note names as the new value (a prop override reset to `Off` is the preset's value).
+pub fn shown_after(st: &Setting, after: &Prefs, t: &Target, f: &Facts) -> String {
+    st.value_text(&(st.get)(after, t, f))
 }
 
 /// This account's prop-rule entry in settings (by name, else id), if any.
@@ -2007,11 +2186,59 @@ fn prop_field(key: &str, r: Option<&lines_trading::rules::RulePreset>) -> Option
     })
 }
 
+/// The prop overrides, folded behind the prop values row ([`PROP_OVERRIDES_KEY`]).
+pub const PROP_OVERRIDES: [&str; 4] = [
+    "prop.daily_loss",
+    "prop.drawdown",
+    "prop.max_micros",
+    "prop.profit_target",
+];
+/// Settings › Accounts › Prop rules: the preset's values, and Override… (the overrides).
+pub const PROP_OVERRIDES_KEY: &str = "prop.overrides";
+
+/// An override saved in the account's prop-rule entry (`None`: the preset's value).
+fn prop_override(doc: Option<&PropRulesDoc>, key: &str) -> Option<i64> {
+    let d = doc?;
+    match key {
+        "prop.daily_loss" => d.daily_loss_limit,
+        "prop.drawdown" => d.trailing_drawdown,
+        "prop.max_micros" => d.max_micro_contracts.map(i64::from),
+        "prop.profit_target" => d.profit_target,
+        _ => None,
+    }
+}
+
+/// The prop values row: "$1,000 · $2,000 EOD · 50 · $3,000" (daily loss, trailing drawdown
+/// and its mode, max micros, target; "Off" where the rules have none), or "No preset".
+fn prop_values_text(r: Option<&lines_trading::rules::RulePreset>) -> String {
+    let Some(r) = r else {
+        return "No preset".to_owned();
+    };
+    let money = |n: Option<i64>| n.map_or_else(|| "Off".to_owned(), |n| format!("${}", grouped(n)));
+    let dd = r.trailing_drawdown.as_ref().map_or_else(
+        || "Off".to_owned(),
+        |d| {
+            let mode = match d.mode {
+                lines_trading::rules::DrawdownMode::EndOfDay => " EOD",
+                lines_trading::rules::DrawdownMode::Intraday => " intraday",
+            };
+            format!("${}{mode}", grouped(d.amount))
+        },
+    );
+    format!(
+        "{} · {dd} · {} · {}",
+        money(r.daily_loss_limit),
+        r.max_micro_contracts
+            .map_or_else(|| "Off".to_owned(), |n| grouped(n.into())),
+        money(r.profit_target)
+    )
+}
+
 /// The row's line about what the trading core has in force, when it differs from the value
 /// shown: "In force $1,000 now · $1,500 from the next session" (a looser value waiting), or
 /// "In force 1 now" (set elsewhere, e.g. a script, or not sent yet). Nothing when they agree.
 pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> {
-    if st.section == Section::Data {
+    if matches!(st.section, Section::DataFolder | Section::Connections) {
         return data_status(st, p, f);
     }
     let a = fact(f, t)?;
@@ -2071,7 +2298,7 @@ fn set_source(p: &mut Prefs, name: &str, on: bool) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Settings › Data › Data folder (its buttons are the window's own).
+/// Settings › Data folder (its buttons are the window's own).
 pub const DATA_FOLDER_KEY: &str = "data.folder";
 
 /// The budget a row shows: whole GiB (a hand-edited fraction rounds; one that can't be used
@@ -2237,29 +2464,363 @@ pub fn index_of(key: &str) -> Option<usize> {
     all().iter().position(|s| s.key == key)
 }
 
-/// Settings matching a search, in table order: every word must appear in the name, the
-/// description or the section (case ignored). Empty: none.
+// ---- the pages ---------------------------------------------------------------------------
+
+/// One piece of a page's line: words between controls, or a setting's control (`true`: with
+/// its unit, "15 min"; `false`: the number alone, the words around it say what it counts).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Part {
+    Word(&'static str),
+    Field(&'static str, bool),
+}
+
+/// One line of a page: a label, then its parts. Most lines are one setting (its label is the
+/// setting's name unless given); a few combine two ("Cooldown after 3 losses, for 15 min").
+#[derive(Copy, Clone, Debug)]
+pub struct Line {
+    /// Empty: the first setting's name.
+    pub label: &'static str,
+    pub parts: &'static [Part],
+    /// Indented under the line above (it qualifies it: the news window under the blackout).
+    pub sub: bool,
+}
+
+/// A titled group of lines on a page ("LIMITS"); an empty title shows none.
+#[derive(Copy, Clone, Debug)]
+pub struct Group {
+    pub title: &'static str,
+    /// The group's settings are per account and product: its title carries both pickers.
+    pub product: bool,
+    pub lines: &'static [Line],
+}
+
+const fn one(key: &'static str) -> Part {
+    Part::Field(key, true)
+}
+
+macro_rules! line {
+    ($key:expr) => {
+        Line {
+            label: "",
+            parts: &[one($key)],
+            sub: false,
+        }
+    };
+    ($label:expr, $key:expr) => {
+        Line {
+            label: $label,
+            parts: &[one($key)],
+            sub: false,
+        }
+    };
+    (sub $label:expr, $key:expr) => {
+        Line {
+            label: $label,
+            parts: &[one($key)],
+            sub: true,
+        }
+    };
+}
+
+const fn group(title: &'static str, lines: &'static [Line]) -> Group {
+    Group {
+        title,
+        product: false,
+        lines,
+    }
+}
+
+const GENERAL: &[Group] = &[group(
+    "",
+    &[line!("general.updates"), line!(crate::display_zone::KEY)],
+)];
+const APPEARANCE: &[Group] = &[group(
+    "",
+    &[
+        line!("appearance.theme"),
+        line!("appearance.palette"),
+        line!("appearance.ui_zoom"),
+    ],
+)];
+const KEYS: &[Group] = &[group("", &[line!("keys.list")])];
+const CHARTS: &[Group] = &[group(
+    "",
+    &[
+        line!("charts.timeframe"),
+        line!("charts.studies"),
+        line!("appearance.hollow"),
+    ],
+)];
+const DOM: &[Group] = &[group(
+    "",
+    &[
+        line!("dom.grouping"),
+        line!("dom.trail"),
+        line!("dom.join_buttons"),
+        line!("dom.columns"),
+    ],
+)];
+const ORDER_ENTRY: &[Group] = &[
+    group(
+        "DEFAULTS",
+        &[line!("trading.default_qty"), line!("trading.pnl")],
+    ),
+    Group {
+        title: "BRACKETS",
+        product: true,
+        lines: &[
+            line!("Presets", "trading.brackets"),
+            line!("Units", "trading.bracket_units"),
+        ],
+    },
+    group(
+        "TURN TRADING OFF WHEN",
+        &[
+            line!("A DOM loses focus", "trading.disable_on_focus_loss"),
+            line!("The account changes", "trading.disable_on_account_change"),
+            line!("The contract changes", "trading.disable_on_contract_change"),
+        ],
+    ),
+];
+const ACCOUNTS: &[Group] = &[
+    group(
+        "LIMITS",
+        &[
+            line!("Lockout", "guard.status"),
+            line!("guard.max_daily_loss"),
+            line!("guard.max_position"),
+            line!(MAX_ORDER_KEY),
+            line!("guard.max_trades"),
+            Line {
+                label: "Cooldown",
+                parts: &[
+                    Part::Word("after"),
+                    Part::Field("guard.losing_streak", false),
+                    Part::Word("losses, for"),
+                    one("guard.cooldown"),
+                ],
+                sub: false,
+            },
+            line!("guard.no_entries_before_close"),
+        ],
+    ),
+    group(
+        "NEWS BLACKOUT",
+        &[
+            line!("During high-impact releases", "guard.news"),
+            Line {
+                label: "Window",
+                parts: &[
+                    one("guard.news_before"),
+                    Part::Word("before,"),
+                    one("guard.news_after"),
+                    Part::Word("after"),
+                ],
+                sub: true,
+            },
+            line!(sub "Medium releases too", "guard.news_medium"),
+        ],
+    ),
+    group(
+        "PROP RULES",
+        &[
+            line!("Breach", "prop.status"),
+            line!("Preset", "prop.preset"),
+            line!(sub "Daily loss · Drawdown · Max micros · Target", PROP_OVERRIDES_KEY),
+            line!(sub "", "prop.daily_loss"),
+            line!(sub "", "prop.drawdown"),
+            line!(sub "", "prop.max_micros"),
+            line!(sub "", "prop.profit_target"),
+        ],
+    ),
+    group("ACCOUNT", &[line!("accounts.list"), line!(RESET_KEY)]),
+];
+/// Decision 0030: the sources' cards (`connections_view`, drawn under the list's line). The
+/// switches are on their cards; their lines here only place them for search and the palette.
+const CONNECTIONS: &[Group] = &[group(
+    "",
+    &[
+        line!(CONNECTIONS_LIST),
+        line!("data.coinbase"),
+        line!("data.kraken"),
+        line!("data.databento"),
+        line!("data.databento_key"),
+    ],
+)];
+const DATA_FOLDER: &[Group] = &[group(
+    "",
+    &[
+        line!(DATA_FOLDER_KEY),
+        line!("data.store"),
+        line!("data.budget"),
+        line!("data.depth"),
+    ],
+)];
+const ABOUT: &[Group] = &[
+    group("", &[line!("about.version"), line!(ROLLBACK_KEY)]),
+    group(
+        "DIAGNOSTICS",
+        &[
+            line!("diagnostics.latency_hud"),
+            line!("diagnostics.folder"),
+        ],
+    ),
+];
+
+/// A section's page: its groups and lines, in order. Every setting is on exactly one line of
+/// its own section's page (tested).
+pub fn page(s: Section) -> &'static [Group] {
+    match s {
+        Section::General => GENERAL,
+        Section::Appearance => APPEARANCE,
+        Section::Keys => KEYS,
+        Section::Charts => CHARTS,
+        Section::Dom => DOM,
+        Section::OrderEntry => ORDER_ENTRY,
+        Section::Accounts => ACCOUNTS,
+        Section::Connections => CONNECTIONS,
+        Section::DataFolder => DATA_FOLDER,
+        Section::About => ABOUT,
+    }
+}
+
+impl Line {
+    /// The settings on this line, in order.
+    pub fn keys(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.parts.iter().filter_map(|p| match p {
+            Part::Field(k, _) => Some(*k),
+            Part::Word(_) => None,
+        })
+    }
+}
+
+/// Where a setting sits: its section, group title and line.
+#[derive(Copy, Clone, Debug)]
+pub struct Place {
+    pub section: Section,
+    pub group: &'static str,
+    pub line: Line,
+    /// Its position over every page, in window order.
+    pub order: usize,
+}
+
+/// Every setting's place, by table index (`None`: on no page; tested never to happen).
+pub fn places() -> &'static [Option<Place>] {
+    static PLACES: std::sync::OnceLock<Vec<Option<Place>>> = std::sync::OnceLock::new();
+    PLACES.get_or_init(|| {
+        let mut v = vec![None; all().len()];
+        let mut order = 0;
+        for section in Section::ALL {
+            for g in page(section) {
+                for line in g.lines {
+                    for k in line.keys() {
+                        if let Some(i) = index_of(k) {
+                            v[i] = Some(Place {
+                                section,
+                                group: g.title,
+                                line: *line,
+                                order,
+                            });
+                            order += 1;
+                        }
+                    }
+                }
+            }
+        }
+        v
+    })
+}
+
+/// The label a line shows: its own, else its first setting's name.
+pub fn line_label(line: &Line) -> &'static str {
+    if line.label.is_empty() {
+        line.keys().next().and_then(by_key).map_or("", |st| st.name)
+    } else {
+        line.label
+    }
+}
+
+/// Settings matching a search, in window order (section, then place on its page): every word
+/// must appear in the name, the label on its page, the description, the section or a choice
+/// (case ignored). Empty: off.
 pub fn search(query: &str) -> Vec<usize> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     if words.is_empty() {
         return Vec::new();
     }
-    all()
+    let mut hits: Vec<usize> = all()
         .iter()
         .enumerate()
-        .filter(|(_, s)| {
+        .filter(|(i, s)| {
+            let label = places()[*i].as_ref().map_or("", |p| p.line.label);
             let hay = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {} {}",
                 s.name,
+                label,
                 s.description,
                 s.section.name(),
+                old_name(s.section),
                 s.choices().join(" ")
             )
             .to_lowercase();
             words.iter().all(|w| hay.contains(w.as_str()))
         })
         .map(|(i, _)| i)
-        .collect()
+        .collect();
+    hits.sort_by_key(|&i| places()[i].map_or(usize::MAX, |p| p.order));
+    hits
+}
+
+/// The name a section's rows had before the regrouping (search still finds them by it).
+fn old_name(s: Section) -> &'static str {
+    match s {
+        Section::Accounts => "risk",
+        Section::OrderEntry => "trading",
+        Section::About => "diagnostics",
+        Section::Connections | Section::DataFolder => "data",
+        _ => "",
+    }
+}
+
+/// A search result's header: its section, and its group when it has one ("Accounts ›
+/// Limits"). Every result sits under the header of its place (`settings_view`).
+pub fn search_header(i: usize) -> String {
+    match places().get(i).copied().flatten() {
+        Some(p) if !p.group.is_empty() => {
+            let g = p.group.to_lowercase();
+            let mut c = g.chars();
+            let first = c.next().map(|x| x.to_ascii_uppercase());
+            format!(
+                "{} › {}{}",
+                p.section.name(),
+                first.map(String::from).unwrap_or_default(),
+                c.as_str()
+            )
+        }
+        Some(p) => p.section.name().to_owned(),
+        None => String::new(),
+    }
+}
+
+/// The marks on a row: ● (it differs from its default) and whether ↺ resets it (a reset
+/// value exists and differs). A row a flag rules this run (a Data folder flag, a look flag)
+/// has neither: it isn't changed here, and a reset would save over nothing.
+pub fn marks(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> (bool, bool) {
+    let look_flag = LookField::of(st.key).is_some_and(|l| l.set_in(&f.look_flags));
+    if look_flag || flag_value(st, f).is_some() || !st.changed(p, t, f) {
+        return (false, false);
+    }
+    let reset = st.reset_value(p, t).is_some_and(|d| d != (st.get)(p, t, f));
+    (true, reset)
+}
+
+/// Whether any setting in `s` differs from its default (the ● on its sidebar entry), for the
+/// account and product chosen.
+pub fn section_changed(s: Section, p: &Prefs, t: &Target, f: &Facts) -> bool {
+    all()
+        .iter()
+        .filter(|st| st.section == s)
+        .any(|st| marks(st, p, t, f).0)
 }
 
 /// A setting's palette command: a choice or toggle sets that value directly ("Appearance:
@@ -2360,12 +2921,289 @@ mod tests {
         for sec in Section::ALL {
             assert!(all().iter().any(|s| s.section == sec), "{sec:?}");
         }
-        // Table order is section order (the window walks it once).
-        let order: Vec<usize> = all()
+    }
+
+    /// Every setting is on exactly one line of exactly one page, its own section's: none is
+    /// dropped by the regrouping, none shows twice, and every key a page names exists.
+    #[test]
+    fn every_setting_is_on_one_page_line() {
+        let mut seen: Vec<&str> = Vec::new();
+        for sec in Section::ALL {
+            for g in page(sec) {
+                for line in g.lines {
+                    assert!(line.keys().count() >= 1);
+                    for k in line.keys() {
+                        let st = by_key(k).unwrap_or_else(|| panic!("{k} is on a page"));
+                        assert_eq!(st.section, sec, "{k}");
+                        assert!(!seen.contains(&k), "{k} shows twice");
+                        seen.push(k);
+                    }
+                }
+            }
+        }
+        assert_eq!(seen.len(), all().len(), "every setting has a line");
+        assert!(places().iter().all(Option::is_some));
+    }
+
+    /// Where every key of the window before the regrouping lands (keys never change; only
+    /// their section does).
+    #[test]
+    fn every_old_key_lands_in_its_new_section() {
+        use Section as S;
+        let want: &[(&str, Section)] = &[
+            ("general.updates", S::General),
+            ("appearance.time_zone", S::General),
+            ("appearance.theme", S::Appearance),
+            ("appearance.palette", S::Appearance),
+            ("appearance.ui_zoom", S::Appearance),
+            ("keys.list", S::Keys),
+            ("charts.timeframe", S::Charts),
+            ("charts.studies", S::Charts),
+            ("appearance.hollow", S::Charts),
+            ("dom.grouping", S::Dom),
+            ("dom.trail", S::Dom),
+            ("dom.join_buttons", S::Dom),
+            ("dom.columns", S::Dom),
+            ("trading.default_qty", S::OrderEntry),
+            ("trading.pnl", S::OrderEntry),
+            ("trading.brackets", S::OrderEntry),
+            ("trading.bracket_units", S::OrderEntry),
+            ("trading.disable_on_focus_loss", S::OrderEntry),
+            ("trading.disable_on_account_change", S::OrderEntry),
+            ("trading.disable_on_contract_change", S::OrderEntry),
+            ("guard.status", S::Accounts),
+            ("guard.max_daily_loss", S::Accounts),
+            ("guard.max_position", S::Accounts),
+            ("accounts.max_order", S::Accounts),
+            ("guard.max_trades", S::Accounts),
+            ("guard.losing_streak", S::Accounts),
+            ("guard.cooldown", S::Accounts),
+            ("guard.no_entries_before_close", S::Accounts),
+            ("guard.news", S::Accounts),
+            ("guard.news_before", S::Accounts),
+            ("guard.news_after", S::Accounts),
+            ("guard.news_medium", S::Accounts),
+            ("prop.status", S::Accounts),
+            ("prop.preset", S::Accounts),
+            ("prop.daily_loss", S::Accounts),
+            ("prop.drawdown", S::Accounts),
+            ("prop.max_micros", S::Accounts),
+            ("prop.profit_target", S::Accounts),
+            ("accounts.list", S::Accounts),
+            ("accounts.reset", S::Accounts),
+            ("connections.list", S::Connections),
+            ("data.coinbase", S::Connections),
+            ("data.kraken", S::Connections),
+            ("data.databento", S::Connections),
+            ("data.databento_key", S::Connections),
+            ("data.folder", S::DataFolder),
+            ("data.store", S::DataFolder),
+            ("data.budget", S::DataFolder),
+            ("data.depth", S::DataFolder),
+            ("diagnostics.latency_hud", S::About),
+            ("diagnostics.folder", S::About),
+            ("about.version", S::About),
+            ("about.rollback", S::About),
+        ];
+        for (k, sec) in want {
+            assert_eq!(by_key(k).map(|s| s.section), Some(*sec), "{k}");
+        }
+        // The only key the regrouping adds: the prop values line the overrides fold behind
+        // (a button, nothing saved).
+        let new: Vec<&str> = all()
             .iter()
-            .map(|s| Section::ALL.iter().position(|x| *x == s.section).unwrap())
+            .map(|s| s.key)
+            .filter(|k| !want.iter().any(|(w, _)| w == k))
             .collect();
-        assert!(order.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(new, [PROP_OVERRIDES_KEY]);
+        assert!(by_key(PROP_OVERRIDES_KEY).unwrap().read_only());
+    }
+
+    /// `--settings` takes every section by its name or slug, and the names the window had
+    /// before (risk, trading, diagnostics, data).
+    #[test]
+    fn sections_parse_by_name_slug_and_old_name() {
+        for s in Section::ALL {
+            assert_eq!(Section::parse(s.name()), Some(s));
+            assert_eq!(Section::parse(&s.slug()), Some(s));
+            assert_eq!(Section::parse(&s.slug().to_uppercase()), Some(s));
+        }
+        assert_eq!(Section::parse("order-entry"), Some(Section::OrderEntry));
+        assert_eq!(Section::parse("order entry"), Some(Section::OrderEntry));
+        assert_eq!(Section::parse("data-folder"), Some(Section::DataFolder));
+        assert_eq!(Section::parse("risk"), Some(Section::Accounts));
+        assert_eq!(Section::parse("trading"), Some(Section::OrderEntry));
+        assert_eq!(Section::parse("diagnostics"), Some(Section::About));
+        assert_eq!(Section::parse("data"), Some(Section::DataFolder));
+        assert_eq!(Section::parse("accounts"), Some(Section::Accounts));
+        assert_eq!(Section::parse("nope"), None);
+        // The sidebar's groups, in order, each run unbroken.
+        let groups: Vec<&str> = Section::ALL.iter().map(|s| s.group()).collect();
+        assert_eq!(
+            groups,
+            [
+                "APP", "APP", "APP", "PANES", "PANES", "TRADING", "TRADING", "DATA", "DATA", ""
+            ]
+        );
+    }
+
+    /// The Accounts page: one picker (the page's), groups Limits, News blackout, Prop rules,
+    /// Account; nothing on it is per product (the product picker shows only on Order entry's
+    /// Brackets group).
+    #[test]
+    fn the_accounts_page_has_four_groups_and_no_product_picker() {
+        let titles: Vec<&str> = page(Section::Accounts).iter().map(|g| g.title).collect();
+        assert_eq!(titles, ["LIMITS", "NEWS BLACKOUT", "PROP RULES", "ACCOUNT"]);
+        assert!(page(Section::Accounts).iter().all(|g| !g.product));
+        for g in page(Section::Accounts) {
+            for k in g.lines.iter().flat_map(|l| l.keys()) {
+                assert_ne!(by_key(k).unwrap().scope, Scope::AccountProduct, "{k}");
+            }
+        }
+        // Per-product rows have their pickers where they are, and only there.
+        for sec in Section::ALL {
+            for g in page(sec) {
+                let per_product = g
+                    .lines
+                    .iter()
+                    .flat_map(|l| l.keys())
+                    .any(|k| by_key(k).unwrap().scope == Scope::AccountProduct);
+                assert_eq!(g.product, per_product, "{sec:?} {}", g.title);
+            }
+        }
+    }
+
+    /// The cooldown and the news window are one line of two settings each: the line reads and
+    /// writes the same keys as before (the losing streak and its cooldown; minutes before and
+    /// after).
+    #[test]
+    fn combined_lines_read_and_write_the_same_keys() {
+        let line_of = |k: &str| places()[index_of(k).unwrap()].unwrap().line;
+        let cool = line_of("guard.losing_streak");
+        assert_eq!(
+            cool.keys().collect::<Vec<_>>(),
+            ["guard.losing_streak", "guard.cooldown"]
+        );
+        assert_eq!(line_label(&cool), "Cooldown");
+        let window = line_of("guard.news_before");
+        assert_eq!(
+            window.keys().collect::<Vec<_>>(),
+            ["guard.news_before", "guard.news_after"]
+        );
+        assert!(window.sub);
+        let t = acct();
+        let f = Facts::default();
+        let mut p = Prefs::default();
+        let set = |p: &mut Prefs, k: &str, v: Value| by_key(k).unwrap().apply(p, &t, v);
+        set(&mut p, "guard.losing_streak", Value::Number(Some(3))).unwrap();
+        set(&mut p, "guard.cooldown", Value::Number(Some(20))).unwrap();
+        let g = &p.app.guardrails["paper-eval"];
+        assert_eq!(
+            g.losing_streak,
+            Some(lines_trading::LosingStreak {
+                losses: 3,
+                cooldown_min: 20
+            })
+        );
+        set(&mut p, "guard.news", Value::Choice(2)).unwrap();
+        set(&mut p, "guard.news_before", Value::Number(Some(5))).unwrap();
+        set(&mut p, "guard.news_after", Value::Number(Some(10))).unwrap();
+        let n = p.app.guardrails["paper-eval"].news.unwrap();
+        assert_eq!((n.before_min, n.after_min), (5, 10));
+        for (k, v) in [
+            ("guard.losing_streak", 3),
+            ("guard.cooldown", 20),
+            ("guard.news_before", 5),
+            ("guard.news_after", 10),
+        ] {
+            assert_eq!(
+                (by_key(k).unwrap().get)(&p, &t, &f),
+                Value::Number(Some(v)),
+                "{k}"
+            );
+        }
+    }
+
+    /// ● and ↺ show exactly when a value differs from its default: a guardrail set, a part
+    /// of one changed from the value it starts with, a prop override set; and never on a row
+    /// a flag rules this run.
+    #[test]
+    fn the_changed_marks_follow_the_default() {
+        let t = acct();
+        let f = Facts::default();
+        let mut p = Prefs::default();
+        let marks_of = |p: &Prefs, k: &str| marks(by_key(k).unwrap(), p, &t, &f);
+        for st in all() {
+            assert_eq!(marks(st, &p, &t, &f), (false, false), "{}", st.key);
+        }
+        for s in Section::ALL {
+            assert!(!section_changed(s, &p, &t, &f), "{s:?}");
+        }
+        by_key("guard.max_daily_loss")
+            .unwrap()
+            .apply(&mut p, &t, Value::Number(Some(1_000)))
+            .unwrap();
+        assert_eq!(marks_of(&p, "guard.max_daily_loss"), (true, true));
+        assert!(section_changed(Section::Accounts, &p, &t, &f));
+        assert!(!section_changed(Section::OrderEntry, &p, &t, &f));
+        // Another account's rows are unmarked.
+        let other = Target {
+            account: Some("other".into()),
+            ..acct()
+        };
+        assert!(!section_changed(Section::Accounts, &p, &other, &f));
+        // A losing streak: its cooldown starts at 15 and is unmarked until changed.
+        let streak = by_key("guard.losing_streak").unwrap();
+        streak.apply(&mut p, &t, Value::Number(Some(3))).unwrap();
+        assert_eq!(marks_of(&p, "guard.cooldown"), (false, false));
+        let cool = by_key("guard.cooldown").unwrap();
+        cool.apply(&mut p, &t, Value::Number(Some(30))).unwrap();
+        assert_eq!(marks_of(&p, "guard.cooldown"), (true, true));
+        assert_eq!(
+            cool.reset_value(&p, &t),
+            Some(Value::Number(Some(COOLDOWN_MIN)))
+        );
+        // No reset for a part whose guardrail is off.
+        assert_eq!(
+            by_key("guard.news_before").unwrap().reset_value(&p, &t),
+            None
+        );
+        // A look change: marked, and the reset is its default.
+        let theme = by_key("appearance.theme").unwrap();
+        theme.apply(&mut p, &t, Value::Choice(1)).unwrap();
+        assert_eq!(marks_of(&p, "appearance.theme"), (true, true));
+        assert!(section_changed(Section::Appearance, &p, &t, &f));
+        // A prop override: marked while set (its default is the preset's value); the
+        // prop values line has no mark of its own.
+        by_key("prop.preset")
+            .unwrap()
+            .apply(&mut p, &t, Value::Choice(1))
+            .unwrap();
+        assert_eq!(marks_of(&p, "prop.daily_loss"), (false, false));
+        by_key("prop.daily_loss")
+            .unwrap()
+            .apply(&mut p, &t, Value::Number(Some(700)))
+            .unwrap();
+        assert_eq!(marks_of(&p, "prop.daily_loss"), (true, true));
+        assert_eq!(marks_of(&p, PROP_OVERRIDES_KEY), (false, false));
+        by_key("prop.daily_loss")
+            .unwrap()
+            .apply(&mut p, &t, Value::Number(None))
+            .unwrap();
+        assert_eq!(marks_of(&p, "prop.daily_loss"), (false, false));
+        // A flag rules a Data row this run: no marks, whatever is saved.
+        let mut q = Prefs::default();
+        by_key("data.store")
+            .unwrap()
+            .apply(&mut q, &t, Value::Bool(false))
+            .unwrap();
+        assert_eq!(marks_of(&q, "data.store"), (true, true));
+        let mut flagged = Facts::default();
+        flagged.store_flags.no_store = true;
+        assert_eq!(
+            marks(by_key("data.store").unwrap(), &q, &t, &flagged),
+            (false, false)
+        );
     }
 
     #[test]
@@ -2382,6 +3220,8 @@ mod tests {
         assert_eq!(labels.len(), cmds.len(), "labels are distinct");
         assert!(labels.contains("Appearance: Theme Light"));
         assert!(labels.contains("Charts: Bar period 15m"));
+        assert!(labels.contains("Charts: Hollow candles Down candles"));
+        assert!(labels.contains("Connections: Coinbase off"));
         assert!(labels.contains("Settings: Daily loss limit…"));
     }
 
@@ -2520,7 +3360,7 @@ mod tests {
     #[test]
     fn every_look_setting_undoes_its_own_field() {
         let mut seen = Vec::new();
-        for st in all().iter().filter(|s| s.section == Section::Appearance) {
+        for st in all().iter().filter(|s| s.key.starts_with("appearance.")) {
             if st.key == crate::display_zone::KEY || st.key == "appearance.ui_zoom" {
                 // Its own settings field (no CLI look flag to keep apart): a plain undo.
                 continue;
@@ -2685,7 +3525,7 @@ mod tests {
     fn preset_choices_match_the_presets() {
         let presets = lines_trading::rules::presets();
         assert_eq!(PRESET_CHOICES.len(), presets.len() + 1);
-        assert_eq!(PRESET_CHOICES[0], "None");
+        assert_eq!(PRESET_CHOICES[0], "Off");
         for (short, p) in PRESET_CHOICES[1..].iter().zip(&presets) {
             let size = &short[..short.find(' ').unwrap()];
             assert!(p.name.starts_with(size), "{short} vs {}", p.name);
@@ -2986,6 +3826,208 @@ mod tests {
         assert!(!none.contains("max_order_qty"), "optional: {none}");
     }
 
+    /// Raising or removing a paper account's largest order loosens (asks first, as the other
+    /// limits); lowering or setting one where there was none doesn't.
+    #[test]
+    fn the_largest_order_loosens_when_raised_or_removed() {
+        let row = by_key(MAX_ORDER_KEY).unwrap();
+        let g = lines_trading::Guardrails::default();
+        let n = |x: Option<i64>| Value::Number(x);
+        assert!(loosening(row, &n(Some(5)), &n(Some(10)), &g, &g));
+        assert!(
+            loosening(row, &n(Some(5)), &n(None), &g, &g),
+            "↺ removes it"
+        );
+        assert!(!loosening(row, &n(Some(10)), &n(Some(5)), &g, &g));
+        assert!(!loosening(row, &n(None), &n(Some(5)), &g, &g));
+        // Its reset is the removal: the one ↺ press asks.
+        assert_eq!(row.default, Some(n(None)));
+    }
+
+    /// A change's confirmation names the value the setting will show: a prop override reset
+    /// to the preset's (`Off` is stored) reads as the preset's value, not "Off".
+    #[test]
+    fn a_change_names_the_value_it_leaves() {
+        let t = acct();
+        let f = Facts::default();
+        let mut p = Prefs::default();
+        by_key("prop.preset")
+            .unwrap()
+            .apply(&mut p, &t, Value::Choice(1))
+            .unwrap();
+        // The preset's trailing drawdown (it has one; its daily loss may be off).
+        let daily = by_key("prop.drawdown").unwrap();
+        let preset = shown_after(daily, &p, &t, &f);
+        assert_ne!(preset, "Off");
+        daily.apply(&mut p, &t, Value::Number(Some(700))).unwrap();
+        assert_eq!(shown_after(daily, &p, &t, &f), "$700");
+        let mut after = p.clone();
+        daily
+            .apply(&mut after, &t, daily.reset_value(&p, &t).unwrap())
+            .unwrap();
+        assert_eq!(daily.reset_value(&p, &t), Some(Value::Number(None)));
+        assert_eq!(
+            shown_after(daily, &after, &t, &f),
+            preset,
+            "the preset's value"
+        );
+        // A guardrail removed reads as Off.
+        let loss = by_key("guard.max_daily_loss").unwrap();
+        let mut q = Prefs::default();
+        loss.apply(&mut q, &t, Value::Number(Some(1_000))).unwrap();
+        loss.apply(&mut q, &t, Value::Number(None)).unwrap();
+        assert_eq!(shown_after(loss, &q, &t, &f), "Off");
+    }
+
+    /// A look flag this run (`--theme light`) rules its row: the value shows, but no ● or ↺
+    /// (nothing is saved, and a reset would save the default over nothing).
+    #[test]
+    fn a_look_flag_has_no_marks() {
+        let t = acct();
+        let mut p = Prefs::default();
+        p.app.appearance.theme = Some(ThemeName::Light);
+        let theme = by_key("appearance.theme").unwrap();
+        assert_eq!(marks(theme, &p, &t, &Facts::default()), (true, true));
+        let flagged = Facts {
+            look_flags: Appearance {
+                theme: Some(ThemeName::Light),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(marks(theme, &p, &t, &flagged), (false, false));
+        assert!(!section_changed(Section::Appearance, &p, &t, &flagged));
+        // Another look field without a flag keeps its marks.
+        p.app.appearance.palette = Some(PaletteName::Colorblind);
+        let palette = by_key("appearance.palette").unwrap();
+        assert_eq!(marks(palette, &p, &t, &flagged), (true, true));
+    }
+
+    /// The section names before the regrouping still find their rows.
+    #[test]
+    fn old_section_names_still_search() {
+        let keys = |q: &str| -> Vec<&str> { search(q).iter().map(|&i| all()[i].key).collect() };
+        assert!(keys("risk").contains(&"guard.max_daily_loss"));
+        assert!(keys("risk").contains(&"prop.preset"));
+        assert!(keys("trading").contains(&"trading.bracket_units"));
+        assert!(keys("diagnostics").contains(&"diagnostics.latency_hud"));
+        assert!(keys("data").contains(&"data.budget"));
+        assert!(keys("data").contains(&"data.kraken"));
+    }
+
+    /// The page and search draw a setting on the same line, with the same label: the prop
+    /// overrides by their own names (never a second "Daily loss limit"), the cooldown as
+    /// "Cooldown".
+    #[test]
+    fn page_and_search_use_one_label() {
+        let label = |k: &str| line_label(&places()[index_of(k).unwrap()].unwrap().line);
+        assert_eq!(label("guard.max_daily_loss"), "Daily loss limit");
+        assert_eq!(label("prop.daily_loss"), "Prop daily loss limit");
+        assert_eq!(label("guard.cooldown"), "Cooldown");
+        let mut labels: Vec<&str> = Section::ALL
+            .iter()
+            .flat_map(|s| page(*s).iter())
+            .flat_map(|g| g.lines.iter())
+            .map(line_label)
+            .collect();
+        let n = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "every line's label is its own");
+    }
+
+    /// The palette's toggles loosen as the rows do: turning the news blackout's medium
+    /// releases off on an account that has them on asks first (it did not, with no
+    /// guardrails passed); turning it on doesn't.
+    #[test]
+    fn palette_changes_loosen_with_the_real_guardrails() {
+        let t = acct();
+        let f = Facts::default();
+        let mut before = Prefs::default();
+        by_key("guard.news")
+            .unwrap()
+            .apply(&mut before, &t, Value::Choice(2))
+            .unwrap();
+        let medium = by_key("guard.news_medium").unwrap();
+        medium.apply(&mut before, &t, Value::Bool(true)).unwrap();
+        let mut after = before.clone();
+        medium.apply(&mut after, &t, Value::Bool(false)).unwrap();
+        let (old, new) = (Value::Bool(true), Value::Bool(false));
+        assert!(change_loosens(
+            medium,
+            (&old, &new),
+            (&before, &after),
+            &t,
+            &f
+        ));
+        assert!(
+            !loosening(medium, &old, &new, &Default::default(), &Default::default()),
+            "the old palette path saw nothing to ask"
+        );
+        assert!(!change_loosens(
+            medium,
+            (&new, &old),
+            (&after, &before),
+            &t,
+            &f
+        ));
+        // A prop override raised asks too.
+        let mut p0 = Prefs::default();
+        by_key("prop.preset")
+            .unwrap()
+            .apply(&mut p0, &t, Value::Choice(1))
+            .unwrap();
+        let dd = by_key("prop.drawdown").unwrap();
+        let mut p1 = p0.clone();
+        dd.apply(&mut p1, &t, Value::Number(Some(99_999))).unwrap();
+        let (a, b) = ((dd.get)(&p0, &t, &f), (dd.get)(&p1, &t, &f));
+        assert!(change_loosens(dd, (&a, &b), (&p0, &p1), &t, &f));
+    }
+
+    /// While a guardrail is off its parts rest: the cooldown is hidden (its line reads just
+    /// "Off"), the news window shows the minutes it starts with; once on, both are live.
+    #[test]
+    fn parts_rest_while_their_guardrail_is_off() {
+        let t = acct();
+        let mut p = Prefs::default();
+        let cool = by_key("guard.cooldown").unwrap();
+        let before = by_key("guard.news_before").unwrap();
+        assert_eq!(dormant(cool, &p, &t), Some(None));
+        assert_eq!(dormant(before, &p, &t), Some(Some(2)));
+        by_key("guard.losing_streak")
+            .unwrap()
+            .apply(&mut p, &t, Value::Number(Some(3)))
+            .unwrap();
+        by_key("guard.news")
+            .unwrap()
+            .apply(&mut p, &t, Value::Choice(1))
+            .unwrap();
+        assert_eq!(dormant(cool, &p, &t), None);
+        assert_eq!(dormant(before, &p, &t), None);
+        assert_eq!(
+            dormant(by_key("guard.max_daily_loss").unwrap(), &p, &t),
+            None
+        );
+    }
+
+    /// A search counts lines, as the page shows them: the cooldown's two settings are one.
+    #[test]
+    fn search_counts_lines() {
+        let hits = search("cooldown");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(line_count(&hits), 1);
+        assert_eq!(line_count(&[]), 0);
+    }
+
+    /// Max position is a cap per product: its value says so ("2 per product"), never read
+    /// as an account total. The other Accounts limits are per account.
+    #[test]
+    fn max_position_says_per_product() {
+        let pos = by_key("guard.max_position").unwrap();
+        assert_eq!(pos.value_text(&Value::Number(Some(2))), "2 per product");
+        assert_eq!(pos.value_text(&Value::Number(None)), "Off");
+    }
+
     /// Guardrails saved under the account's id (as startup accepts) are read and edited there.
     #[test]
     fn guardrails_saved_by_id_are_found() {
@@ -3078,6 +4120,13 @@ mod tests {
         assert!(names("bracket").contains(&"trading.bracket_units"));
         assert!(names("colorblind").contains(&"appearance.palette"));
         assert!(names("dom grouping").contains(&"dom.grouping"));
+        // A page's own label finds its setting; results come in window order.
+        assert!(names("loses focus").contains(&"trading.disable_on_focus_loss"));
+        let order: Vec<usize> = names("a")
+            .iter()
+            .map(|k| places()[index_of(k).unwrap()].unwrap().order)
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]));
         assert!(names("").is_empty());
         assert!(names("zzz").is_empty());
     }
@@ -3124,7 +4173,7 @@ mod tests {
         assert_eq!(back.appearance.palette, Some(PaletteName::Colorblind));
     }
 
-    /// Settings › Data's store fields: absent by default, written only when changed, a depth
+    /// Settings › Data folder's store fields: absent by default, written only when changed, a depth
     /// symbol this build doesn't know kept through a load and a save.
     #[test]
     fn data_rows_save_optional_fields() {

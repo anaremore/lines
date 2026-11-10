@@ -401,16 +401,16 @@ struct Cli {
     #[arg(long, default_value = "WebAPITest")]
     client_app_id: String,
     /// Don't use the local market-data store this run. By default live feeds (Coinbase, CQG)
-    /// keep trades and best bid/ask per contract in the data folder (Settings › Data;
+    /// keep trades and best bid/ask per contract in the data folder (Settings › Data folder;
     /// `LINES_DATA_DIR` overrides), show the cached bars at startup and fill the rest from the
-    /// feed. Wins over Settings › Data › Local store for this run.
+    /// feed. Wins over Settings › Data folder › Local store for this run.
     #[arg(long)]
     no_store: bool,
     /// Also store order-book depth for these products this run (e.g. ES,NQ), instead of
-    /// Settings › Data › Depth recorded for (default none: large).
+    /// Settings › Data folder › Depth recorded for (default none: large).
     #[arg(long, value_delimiter = ',')]
     store_depth: Option<Vec<String>>,
-    /// Local store size budget in GiB this run, instead of Settings › Data › Store budget
+    /// Local store size budget in GiB this run, instead of Settings › Data folder › Store budget
     /// (default 4); the oldest trade dates are removed beyond it.
     #[arg(long)]
     store_budget_gb: Option<f64>,
@@ -445,11 +445,11 @@ struct Cli {
     #[arg(long, value_enum)]
     palette: Option<PaletteKind>,
     /// Which direction's candle bodies are hollow, the other filled (default: Settings ›
-    /// Appearance, else up).
+    /// Charts, else up).
     #[arg(long, value_enum)]
     hollow: Option<HollowKind>,
     /// The zone times show in: `exchange` (ET), `system`, `utc` or an IANA name like
-    /// `Europe/London` (default: Settings › Appearance, else exchange). For this run only.
+    /// `Europe/London` (default: Settings › General, else exchange). For this run only.
     #[arg(long, value_name = "ZONE")]
     time_zone: Option<String>,
     /// A one-tab layout for this run only (the saved workspace is left alone). Screenshots
@@ -620,9 +620,9 @@ struct Cli {
     /// with this note in the DOM.
     #[arg(long, value_name = "TEXT", requires = "screenshot")]
     depth_note: Option<String>,
-    /// Screenshot: also render the Settings window at this section (general, appearance,
-    /// charts, dom, trading, risk, accounts, data, connections, keys, diagnostics, about)
-    /// into `<out stem>-settings.png`.
+    /// Screenshot: also render the Settings window at this section (general, appearance, keys,
+    /// charts, dom, order-entry, accounts, connections, data-folder, about; the old names risk,
+    /// trading, diagnostics and data still work) into `<out stem>-settings.png`.
     #[arg(long, requires = "screenshot")]
     settings: Option<String>,
     /// Screenshot: the Settings window's search text.
@@ -650,7 +650,7 @@ struct Cli {
     /// least 400x340).
     #[arg(long, requires = "download_days", value_parser = parse_size)]
     download_size: Option<(f32, f32)>,
-    /// Screenshot: Settings › Data › Data folder in a state, nothing written: `pending:PATH`
+    /// Screenshot: Settings › Data folder in a state, nothing written: `pending:PATH`
     /// (a new folder that starts empty after restart), `moving:PATH:DONE_GB:TOTAL_GB` (a move's
     /// copy in progress), `copied:PATH:TOTAL_GB`, `failed:PATH` (last start's move failed).
     #[arg(long, value_name = "STATE", requires = "settings")]
@@ -1286,20 +1286,20 @@ fn settings_key<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path
 }
 
 /// Where "Download days…" stores days (decision 0030 §8): `--store-dir`, else the data
-/// folder (`data_dir::root`, Settings › Data), whatever this run's source; none with the store
-/// off (`--no-store`, or Settings › Data › Local store off).
+/// folder (`data_dir::root`, Settings › Data folder), whatever this run's source; none with the store
+/// off (`--no-store`, or Settings › Data folder › Local store off).
 fn download_root(cli: &Cli) -> Result<PathBuf, String> {
     if cli.no_store {
         return Err("The local store is off for this run (--no-store).".into());
     }
     let (prefs, flags) = data_dir::store_at_start();
     if !data_dir::store_run(&flags, &prefs).on {
-        return Err("The local store is off (Settings › Data › Local store).".into());
+        return Err("The local store is off (Settings › Data folder › Local store).".into());
     }
     if let Some(d) = &cli.store_dir {
         return Ok(d.clone());
     }
-    data_dir::root().ok_or_else(|| "No data folder: set one in Settings › Data.".into())
+    data_dir::root().ok_or_else(|| "No data folder: set one in Settings › Data folder.".into())
 }
 
 /// This run's store flags.
@@ -1315,7 +1315,7 @@ fn store_flags(cli: &Cli) -> data_dir::StoreFlags {
 
 /// The local store (decision 0019) for live sources: the mock invents a new market every
 /// run and replays and screenshots must not write, so those never store, unless `--store-dir`
-/// names a store for this run. On/off, budget and depth: Settings › Data (`prefs`), the flags
+/// names a store for this run. On/off, budget and depth: Settings › Data folder (`prefs`), the flags
 /// winning for their run.
 fn store_config(
     cli: &Cli,
@@ -1695,7 +1695,7 @@ where
         && cli.screenshot.is_none()
         && cli.bench.is_none()
         && cli.backtest.is_none();
-    // The data folder (Settings › Data), before anything opens a file in it: the interactive
+    // The data folder (Settings › Data folder), before anything opens a file in it: the interactive
     // app finishes a move chosen last run here. Screenshots, the bench and backtests read no
     // user files (`data_dir::run` falls back to LINES_DATA_DIR, else the OS default).
     let reads_user_files =
@@ -1799,7 +1799,8 @@ where
     // Taken by a screenshot's run (only with the `screenshot` feature).
     #[cfg_attr(not(feature = "screenshot"), allow(unused_mut))]
     let mut replay = replay_setup(&cli, &mut config, &mut run_sources);
-    // This run's look flags: over Settings › Appearance (the app reads it below), never saved.
+    // This run's look flags: over Settings › Appearance and Charts (the app reads them below),
+    // never saved.
     let look_flags = {
         use settings_schema::{HollowName, PaletteName, ThemeName};
         settings_schema::Appearance {
@@ -1819,7 +1820,7 @@ where
     };
     let theme =
         settings_schema::theme_for(&settings_schema::Appearance::default().with_flags(look_flags));
-    // The display time zone: `--time-zone` for this run, else (below) Settings › Appearance.
+    // The display time zone: `--time-zone` for this run, else (below) Settings › General.
     // Screenshots without the flag show the exchange's (ET).
     let zone_flag = cli
         .time_zone
@@ -2193,7 +2194,7 @@ where
     let no_update_check = cli.no_update_check;
     let download_env = download_view::DownloadEnv {
         root: download_root(&cli),
-        // The run's budget: the flag, else Settings › Data's, else the default.
+        // The run's budget: the flag, else Settings › Data folder's, else the default.
         budget: {
             let (prefs, flags) = data_dir::store_at_start();
             let gb = data_dir::store_run(&flags, &prefs).budget_gb;

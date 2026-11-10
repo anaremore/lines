@@ -871,11 +871,23 @@ mod tests {
             ("order_target", t.order_target, "panel", t.panel),
             // Menus: a destructive row (on the highlighted row: `state_tokens_carry_their_text`).
             ("destructive", t.destructive, "panel", t.panel),
-            // Settings › Data: a failure or refusal line (with "Failed:" / "Refused:") on a row
+            // Settings › Data folder: a failure or refusal line (with "Failed:" / "Refused:") on a row
             // and on the selected row (`panel`); pending, progress and flag lines in `warn`.
             ("destructive", t.destructive, "bg", t.bg),
             ("warn", t.warn, "bg", t.bg),
             ("warn", t.warn, "panel", t.panel),
+            // Settings: the ● of a changed setting on a row and on the selected row (`panel`)
+            // and the sidebar; the ↺, group headers, a line's words and the selected line's
+            // description (`settings_view`).
+            ("settings ●", t.accent, "settings row", t.bg),
+            ("settings ●", t.accent, "selected line / section", t.panel),
+            ("settings ↺", t.text_dim, "settings row", t.bg),
+            ("settings ↺", t.text_dim, "selected line", t.panel),
+            ("settings group header", t.text_dim, "settings window", t.bg),
+            ("settings description", t.text_dim, "selected line", t.panel),
+            ("settings Off value", t.text_dim, "selected line", t.panel),
+            // A choice's selected option: `bg` text (bold) on the accent fill.
+            ("settings selected option", t.bg, "accent fill", t.accent),
         ]
     }
 
