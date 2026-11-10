@@ -93,6 +93,7 @@ mod text;
 mod theme;
 mod tooltip;
 mod trade_bar;
+mod trade_marks;
 mod trading;
 mod update;
 mod versioned;

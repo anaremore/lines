@@ -804,6 +804,8 @@ pub struct WindowView {
     screen: Rect,
     split_drag: Option<crate::layout::Divider>,
     tab_drag: Option<TabDrag>,
+    /// A trade to open in the journal (a click on a chart's trade marker).
+    open_trade: Option<String>,
     /// How far the tab strip is scrolled (logical px; `tabstrip::Strip`).
     tab_scroll: f32,
     /// A tab was just closed with its ×: the × that slides under the pointer takes no press
@@ -866,6 +868,7 @@ impl WindowView {
             screen: screen_rect(window),
             split_drag: None,
             tab_drag: None,
+            open_trade: None,
             tab_scroll: 0.0,
             close_guard: tabstate::CloseGuard::default(),
             pane_drag: None,
@@ -1025,6 +1028,15 @@ impl WindowView {
                     e,
                     move |this, chart, ev: &crate::chart_view::ChartOrder, cx| {
                         this.chart_exit(id, chart, ev, cx)
+                    },
+                ),
+                // A click on a trade marker: the journal opens on that trade (next render: it
+                // needs the window).
+                cx.subscribe(
+                    e,
+                    move |this, _, ev: &crate::chart_view::OpenTradeInJournal, cx| {
+                        this.open_trade = Some(ev.0.clone());
+                        cx.notify();
                     },
                 ),
             ],
@@ -1482,6 +1494,17 @@ impl WindowView {
             Command::Strategy(StrategyCmd::Open) => {
                 self.open_panel(PaneKind::Strategies, window, cx)
             }
+            Command::ToggleTrades
+            | Command::ToggleTradeLines
+            | Command::ToggleTradeLabels
+            | Command::TradeAccounts(_)
+            | Command::TradePeriod(_) => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chart(chart)) => chart.update(cx, |c, cx| {
+                    let t = crate::trade_marks::apply(cmd, c.trades_config());
+                    c.set_trades(t, cx);
+                }),
+                _ => self.refuse("focus a chart first", cx),
+            },
             Command::Strategy(StrategyCmd::ToggleMarks) => {
                 match self.tab().focused_handle().cloned() {
                     Some(PaneHandle::Chart(chart)) => {
@@ -2547,6 +2570,7 @@ impl WindowView {
                     studies_shown: !v.hide_studies,
                     study_labels_shown: !v.hide_study_labels,
                     strategy_marks_shown: !c.strategy_marks_hidden(),
+                    trades: c.trades_config(),
                     clean: v.hide_study_labels,
                     order_strip: c.order_strip(),
                     magnet: c.magnet(),
@@ -4428,6 +4452,23 @@ impl Render for WindowView {
             self.hover_pane = None;
             self.hover_tab = None;
             self.close_guard.pointer(false);
+        }
+        // A trade to show in the journal (a chart marker's click): open it, then select it in
+        // whichever journal pane there is (one popped out is told it's in its own window).
+        if let Some(id) = self.open_trade.take() {
+            self.open_panel(PaneKind::Journal, window, cx);
+            let journals: Vec<_> = self
+                .tabs
+                .iter()
+                .flat_map(|t| t.handles())
+                .filter_map(|h| match h {
+                    PaneHandle::Journal(j) => Some(j.clone()),
+                    _ => None,
+                })
+                .collect();
+            for j in journals {
+                j.update(cx, |j, cx| j.select_trade(&id, cx));
+            }
         }
         // The footer first: its rows set the content's height this frame.
         let footer = self.footer_bar(window, cx);

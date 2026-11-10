@@ -433,6 +433,13 @@ pub struct ChartState {
     /// the chart keeps the mode it started with (`--tick-continuous`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_continuous: Option<bool>,
+    /// Trade history on the chart (`trade_marks::TradesConfig`): optional, written only when it
+    /// differs from the default (shown, today, this pane's account).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::trade_marks::TradesConfig::is_default"
+    )]
+    pub trades: crate::trade_marks::TradesConfig,
 }
 
 /// A chart timeframe in the workspace file, as its label (`"5m"`).
@@ -1057,6 +1064,7 @@ mod tests {
         let old: ChartState = serde_json::from_str(r#"{"bar_px": 7.0}"#).unwrap();
         assert!(old.indicators.is_empty());
         let state = ChartState {
+            trades: Default::default(),
             timeframe: Default::default(),
             hide_drawings: false,
             hide_strategy_marks: false,
@@ -1101,6 +1109,7 @@ mod tests {
             styles: Default::default(),
             subpane: None,
             subpanes: Vec::new(),
+            trades: Default::default(),
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -1243,6 +1252,7 @@ mod tests {
                             styles: Default::default(),
                             subpane: None,
                             subpanes: Vec::new(),
+                            trades: Default::default(),
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -1309,6 +1319,7 @@ mod tests {
         assert!(old.visibility.draws_studies() && old.visibility.draws_labels());
         // Set: flat keys, round-trip; unset: not written.
         let hidden = ChartState {
+            trades: Default::default(),
             timeframe: Default::default(),
             hide_drawings: false,
             hide_strategy_marks: false,
@@ -1468,6 +1479,7 @@ mod tests {
                 styles: Default::default(),
                 subpane: None,
                 subpanes: Vec::new(),
+                trades: Default::default(),
             }),
             ..PaneDoc::new(PaneKind::Chart, None, None)
         };
@@ -1509,6 +1521,7 @@ mod tests {
             styles: Default::default(),
             subpane: None,
             subpanes: Vec::new(),
+            trades: Default::default(),
         };
         let json = serde_json::to_string(&both).unwrap();
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
@@ -1587,6 +1600,7 @@ mod tests {
                 styles: Default::default(),
                 subpane: None,
                 subpanes: Vec::new(),
+                trades: Default::default(),
             })
         );
         assert_eq!(

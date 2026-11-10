@@ -31,6 +31,8 @@ pub const QUICK_TIMEFRAMES: [Timeframe; 9] = [
 #[derive(Clone, Debug)]
 pub struct ChartMenu {
     pub timeframe: Timeframe,
+    /// Trade history's options (`trade_marks::TradesConfig`).
+    pub trades: crate::trade_marks::TradesConfig,
     /// Trade-built bars (ticks, volume, range): their session switch shows.
     pub on_ticks: bool,
     pub tick_continuous: bool,
@@ -276,6 +278,7 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
         v.push(row("Studies…", Command::Studies));
         v.push(timeframe(c));
         v.push(chart_show(c));
+        v.push(chart_trades(c));
         v.push(MenuItem::sep());
         v.push(toggle(
             "Order strip",
@@ -473,6 +476,30 @@ fn chart_show(c: &ChartMenu) -> MenuItem {
     MenuItem::submenu("Show", "", sub)
 }
 
+/// Trade history on the chart (`trade_marks`): its switches, then whose trades and which
+/// period (submenus are one level deep, so they are rows here). Its value: the period, or off.
+fn chart_trades(c: &ChartMenu) -> MenuItem {
+    let t = c.trades;
+    let mut sub = vec![
+        toggle("Show trades", Command::ToggleTrades, !t.hidden),
+        toggle("Entry–exit lines", Command::ToggleTradeLines, !t.no_lines),
+        toggle("Labels", Command::ToggleTradeLabels, !t.no_labels),
+        MenuItem::header("Account"),
+        pick(
+            "This pane's account",
+            Command::TradeAccounts(false),
+            !t.all_accounts,
+        ),
+        pick("All accounts", Command::TradeAccounts(true), t.all_accounts),
+        MenuItem::header("Period"),
+    ];
+    for p in crate::trade_marks::Period::ALL {
+        sub.push(pick(p.label(), Command::TradePeriod(p), t.period == p));
+    }
+    let value = if t.hidden { "Off" } else { t.period.label() };
+    MenuItem::submenu("Trades", value, sub)
+}
+
 fn drawings(c: &ChartMenu) -> MenuItem {
     let mut sub = Vec::new();
     if c.drawing_selected {
@@ -602,6 +629,7 @@ mod tests {
 
     fn chart() -> ChartMenu {
         ChartMenu {
+            trades: Default::default(),
             timeframe: Timeframe::Minutes(5),
             on_ticks: false,
             tick_continuous: false,
@@ -760,6 +788,7 @@ mod tests {
                 "Studies…",
                 "Timeframe",
                 "Show",
+                "Trades",
                 "---",
                 "Order strip",
                 "Magnet crosshair",
@@ -774,8 +803,24 @@ mod tests {
             ]
         );
         assert_eq!(v[1].hint, "5m", "a submenu shows its value");
-        assert_eq!(v[10].hint, "A");
-        assert_eq!(v[9].hint, "Chart");
+        assert_eq!(v[11].hint, "A");
+        assert_eq!(v[10].hint, "Chart");
+        assert_eq!(v[3].hint, "Today", "trades show their period");
+        assert_eq!(
+            labels(&v[3].sub),
+            [
+                "Show trades",
+                "Entry–exit lines",
+                "Labels",
+                "Account",
+                "This pane's account",
+                "All accounts",
+                "Period",
+                "Today",
+                "This week",
+                "All dates"
+            ]
+        );
         let show = &v[2].sub;
         assert_eq!(
             labels(show),
@@ -791,7 +836,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            labels(&v[9].sub),
+            labels(&v[10].sub),
             [
                 "Split right",
                 "Split down",
