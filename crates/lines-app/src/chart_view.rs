@@ -6751,12 +6751,12 @@ impl ChartView {
             )
         };
         // The source tag shows only when everything else fits with it.
-        let with_tag = tag
-            .as_deref()
-            .map(|tg| fit_in(room - pane::source_tag_px(tg, &measure)))
-            .filter(|f| room <= 0.0 || (f.account && f.timeframe && f.status && f.link));
-        let tag = tag.filter(|_| with_tag.is_some());
-        let fit = with_tag.unwrap_or_else(|| fit_in(room));
+        let (fit, shows_tag) = pane::chart_fit_with_tag(
+            room,
+            tag.as_deref().map(|tg| pane::source_tag_px(tg, &measure)),
+            fit_in,
+        );
+        let tag = tag.filter(|_| shows_tag);
         let desc_w = measure(i.description).ceil() + 1.0;
         let account = crate::trade_bar::chart_chip(self, &t, fit.account, cx);
         let timeframe = fit.timeframe.then(|| {

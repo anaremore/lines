@@ -638,6 +638,28 @@ pub fn source_tag_px(tag: &str, tw: TextPx) -> f32 {
     HEADER_GAP + tw(tag)
 }
 
+/// The chart header's fit with its source tag (`tag_px`: the room it takes, `None`: no tag)
+/// and whether the tag shows: only when everything else fits whole beside it, so it is the
+/// first thing a narrow header drops. `room` 0 or less is "not laid out yet": all shown.
+pub fn chart_fit_with_tag(
+    room: f32,
+    tag_px: Option<f32>,
+    fit_in: impl Fn(f32) -> HeaderFit,
+) -> (HeaderFit, bool) {
+    if room <= 0.0 {
+        return (fit_in(room), tag_px.is_some());
+    }
+    if let Some(px) = tag_px
+        && room - px > 0.0
+    {
+        let f = fit_in(room - px);
+        if f.account && f.timeframe && f.status && f.link {
+            return (f, true);
+        }
+    }
+    (fit_in(room), false)
+}
+
 /// The source tag as a header shows it: in parentheses, in the secondary text color.
 pub fn source_tag(tag: &str) -> String {
     format!("({tag})")
@@ -726,6 +748,26 @@ mod tests {
             rest > tw7("ESZ26"),
             "the contract is in the rest, never dropped"
         );
+    }
+
+    /// A chart drops its source tag before anything else gives way, and never keeps it on
+    /// room the tag alone would fill (less than nothing left is not "not laid out").
+    #[test]
+    fn a_chart_drops_its_source_tag_first() {
+        let fit_at = |r: f32| fit(r, Some(("Paper", true)), false);
+        let all = need(Some(("Paper", true)), true, true);
+        let tag = tw7("(Coinbase)") + HEADER_GAP;
+        let (f, shown) = chart_fit_with_tag(all + tag, Some(tag), fit_at);
+        assert!(shown && f.account && f.timeframe && f.status && f.link);
+        let (f, shown) = chart_fit_with_tag(all + tag - 1.0, Some(tag), fit_at);
+        assert!(!shown, "the tag goes first");
+        assert!(f.account && f.timeframe && f.status && f.link);
+        // Narrower than the tag: never kept, whatever a negative room would report.
+        let (_, shown) = chart_fit_with_tag(tag - 5.0, Some(tag), fit_at);
+        assert!(!shown);
+        // Not laid out yet: shown; no tag: never.
+        assert!(chart_fit_with_tag(0.0, Some(tag), fit_at).1);
+        assert!(!chart_fit_with_tag(all + tag, None, fit_at).1);
     }
 
     fn fit(room: f32, account: Option<(&str, bool)>, menu_open: bool) -> HeaderFit {

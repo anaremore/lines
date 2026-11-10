@@ -198,6 +198,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
                 d.capabilities.depth = false;
                 d.capabilities.bbo = false;
                 d.apply(&[MarketEvent::BookClear]);
+                // No best bid or ask either: nothing reads the inside beside "No depth".
+                d.bid = None;
+                d.ask = None;
             });
         }
     }
