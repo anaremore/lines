@@ -276,6 +276,10 @@ pub trait Broker: Send {
     fn settle(&mut self, now: UtcMillis, order: Order, price: Price) {
         let _ = (now, order, price);
     }
+    /// A replay jumped back (the replay bar): the clock went back. Requests waiting on the old,
+    /// later clock (a cancel sent just before the jump) take effect at once, before any of the
+    /// replayed data. Only simulated brokers wait on the market clock; the default does nothing.
+    fn rewound(&mut self) {}
     /// Reset a simulated account (`Command::ResetPaper`): `balance`, no positions. Asked only
     /// once the account has nothing open. Only simulated brokers can; the default refuses.
     fn reset_account(&mut self, now: UtcMillis, account: &AccountId, balance: Money) -> bool {

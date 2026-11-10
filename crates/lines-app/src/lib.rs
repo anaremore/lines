@@ -60,6 +60,7 @@ mod positions_view;
 mod profile;
 mod recording;
 mod redact;
+mod replay_bar;
 #[cfg(feature = "screenshot")]
 mod screenshot;
 mod series_pane;
@@ -509,6 +510,13 @@ struct Cli {
     /// Requires building with `--features screenshot`.
     #[arg(long, requires = "replay")]
     screenshot: Option<PathBuf>,
+    /// Screenshot: show the replay bar, paused at --at (an interactive replay always shows
+    /// it).
+    #[arg(long, requires = "screenshot")]
+    replay_bar: bool,
+    /// Screenshot: the replay bar as it looks playing (play state shown; the time is --at).
+    #[arg(long, requires = "replay_bar")]
+    replay_playing: bool,
     /// Screenshot: required DPI scale. GPUI on Windows cannot override the monitor's DPI,
     /// so the run fails if the actual scale differs (rather than silently differing).
     #[arg(long)]
@@ -980,6 +988,53 @@ fn parse_point(s: &str) -> Result<(f32, f32), String> {
         return Err("X,Y must be finite".into());
     }
     Ok((x, y))
+}
+
+/// The replay bar's control for a replay this run plays in the window (`replay_bar`). A
+/// screenshot gets one only with `--replay-bar`: at full speed, paused at `--at`.
+fn replay_setup(
+    cli: &Cli,
+    config: &mut FeedConfig,
+    sources: &mut [(String, FeedConfig)],
+) -> Option<replay_bar::Replay> {
+    let Source::Replay { path, speed, .. } = &config.source else {
+        return None;
+    };
+    let shot = cli.screenshot.is_some();
+    if shot && !cli.replay_bar {
+        return None;
+    }
+    // A screenshot's source runs at full speed to --at; its bar shows the run's --speed (the
+    // seek to --at delivers at full speed whatever the speed).
+    let control = Arc::new(lines_feed::replay_control::ReplayControl::new(if shot {
+        cli.speed
+    } else {
+        *speed
+    }));
+    if shot && let Some(at) = cli.at {
+        control.seek(at);
+    }
+    if shot && cli.replay_playing {
+        control.show_playing();
+    }
+    let calendar = lines_feed::transport::read_header(path)
+        .ok()
+        .and_then(|h| catalog::by_symbol(&h.product))
+        .and_then(|p| catalog::sessions(p.id));
+    // The panes' feeds come from the run's source table (decision 0030): its entries for this
+    // recording play by the same control.
+    let recording = path.clone();
+    config.replay = Some(control.clone());
+    for (_, cfg) in sources.iter_mut() {
+        if matches!(&cfg.source, Source::Replay { path, .. } if *path == recording) {
+            cfg.replay = Some(control.clone());
+        }
+    }
+    Some(replay_bar::Replay {
+        control,
+        calendar,
+        note: None,
+    })
 }
 
 fn feed_config(
@@ -1650,7 +1705,7 @@ where
         .ok_or_else(|| anyhow!("unknown source {:?}", cli.source_name()))?;
     // The run's sources (decision 0030): every enabled one without `--source`, else that one.
     // `config` is the first (the run's when limited): what takes one source uses it.
-    let (run_sources, limited) = run_sources(&cli, &ext, &choice, &store_prefs)?;
+    let (mut run_sources, limited) = run_sources(&cli, &ext, &choice, &store_prefs)?;
     let config = run_sources[0].1.clone();
     // A market replay never runs a level source live (only its recorded batches, if any).
     let market_replay = matches!(config.source, lines_feed::Source::Replay { .. });
@@ -1684,6 +1739,10 @@ where
     if let Some(secs) = cli.headless {
         return run_headless(config, Duration::from_secs(secs));
     }
+    let mut config = config;
+    // Taken by a screenshot's run (only with the `screenshot` feature).
+    #[cfg_attr(not(feature = "screenshot"), allow(unused_mut))]
+    let mut replay = replay_setup(&cli, &mut config, &mut run_sources);
     // This run's look flags: over Settings › Appearance (the app reads it below), never saved.
     let look_flags = {
         use settings_schema::{HollowName, PaletteName, ThemeName};
@@ -1884,6 +1943,7 @@ where
                 None => None,
             };
             let shot = screenshot::Shot {
+                replay: replay.take(),
                 out,
                 size,
                 scale: cli.scale,
@@ -2041,6 +2101,9 @@ where
     // Broker extensions (decision 0020): each runs beside the paper core.
     setup.brokers = ext.brokers().to_vec();
     let trading = trading::Trading::start(setup, registry.clone(), config.clone());
+    if let Some(r) = &replay {
+        trading.handle().follow_replay(r.control.clone());
+    }
     // `--strategy`: the strategy host on the paper core (decision 0025).
     let strategies = match &cli.strategy {
         Some(name) => {
@@ -2086,6 +2149,9 @@ where
         cx.set_global(download_env);
         cx.set_global(Feeds(registry));
         cx.set_global(trading);
+        if let Some(r) = replay {
+            cx.set_global(r);
+        }
         if let Some(s) = strategies {
             cx.set_global(strategy_panel::Strategies(Arc::new(s)));
         }

@@ -1088,3 +1088,24 @@ fn a_repeated_last_sale_doesnt_freshen_an_options_mark() {
     let traded = quote(&mut r, None, Some(250), Some(120));
     assert_eq!(marked(&r), Some(Some(traded)), "a new last");
 }
+
+/// A replay jumped back 20 minutes, inside the session (the replay bar): the option's quote from the later clock goes,
+/// so the replayed quote is taken (never refused as older) and an order fills at it, not at the
+/// price from the future.
+#[test]
+fn a_jump_back_takes_the_replayed_quote() {
+    let mut r = Rig::new();
+    r.quote(Some(240), Some(242));
+    // 10:00 ET back to 09:40 (options fill only in the regular session).
+    r.t -= 20 * 60_000;
+    let at = r.now();
+    r.core.replay_rewound(at);
+    r.collect();
+    r.quote(Some(100), Some(102));
+    let buy = r.limit(Side::Buy, 1, 102);
+    assert_eq!(
+        r.fills(buy),
+        [(102, 1)],
+        "the replayed ask, not the later one"
+    );
+}

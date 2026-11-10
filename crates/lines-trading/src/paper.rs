@@ -163,6 +163,9 @@ pub struct PaperBroker {
     markets: HashMap<ContractKey, Market>,
     specs: HashMap<ContractKey, ContractSpec>,
     out: Vec<BrokerEvent>,
+    /// A replay jumped back: at the next tick, once the waiting requests are done, every
+    /// working order is canceled (they were placed later in the replay than it now is).
+    rewound: bool,
 }
 
 fn book_side(side: Side) -> BookSide {
@@ -182,6 +185,7 @@ impl PaperBroker {
             markets: HashMap::new(),
             specs: HashMap::new(),
             out: Vec::new(),
+            rewound: false,
         }
     }
 
@@ -1176,6 +1180,19 @@ impl Broker for PaperBroker {
         self.pending.push_back((due, req));
     }
 
+    fn rewound(&mut self) {
+        // Due on the old clock, hours ahead of the new one: due now, in their order; then every
+        // working order is canceled (at the tick `TradingCore::replay_rewound` runs at once,
+        // before any replayed data).
+        for (due, _) in &mut self.pending {
+            *due = UtcMillis(i64::MIN);
+        }
+        self.rewound = true;
+        // Books and quotes stamped on the later clock would refuse every replayed one as
+        // older: they go, and the replayed data builds them again.
+        self.markets.clear();
+    }
+
     fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput) {
         self.markets.entry(contract).or_default();
         self.expire_markets(now);
@@ -1237,7 +1254,15 @@ impl Broker for PaperBroker {
         }
         while self.pending.front().is_some_and(|(due, _)| *due <= now) {
             let (due, req) = self.pending.pop_front().expect("checked");
-            self.handle(due, req);
+            // A request made due by a jump back (`rewound`) happens now; others at their time.
+            let at = if due.0 == i64::MIN { now } else { due };
+            self.handle(at, req);
+        }
+        if std::mem::take(&mut self.rewound) {
+            let ids: Vec<OrderId> = self.orders.keys().copied().collect();
+            for id in ids {
+                self.cancel(now, id, "canceled: the replay jumped back");
+            }
         }
         self.expire_markets(now);
         out.append(&mut self.out);

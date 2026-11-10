@@ -61,6 +61,8 @@ pub struct DomTrail {
     model: Trail,
     /// The store's print counter already taken; `None`: catch up from the ring.
     seen: Option<u64>,
+    /// The store's rewinds when last read: a jump back starts the trail over.
+    rewinds: u64,
     /// The feed clock at the last paint.
     painted: Option<UtcMillis>,
     /// When the DOM last painted or the trail last asked for a frame (rate cap only; never
@@ -74,6 +76,7 @@ impl DomTrail {
             enabled: false,
             model: Trail::new(units, DEFAULT_HALF_LIFE_MS),
             seen: None,
+            rewinds: 0,
             painted: None,
             asked: None,
         }
@@ -129,6 +132,12 @@ impl DomTrail {
             return;
         }
         if units != self.model.units() {
+            self.model.clear(units);
+            self.seen = None;
+        }
+        // A replay jumped back: what it drew from after the target goes.
+        if d.rewinds != self.rewinds {
+            self.rewinds = d.rewinds;
             self.model.clear(units);
             self.seen = None;
         }

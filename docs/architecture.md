@@ -82,7 +82,7 @@ cargo run -p lines-app -- --source kraken --headless 60          # prints book c
 cargo run -p lines-app -- --source databento --instrument MNQ --headless 120   # LINES_DATABENTO_REPLAY_HOURS / _DEPTH / _GATEWAY
 cargo run -p lines-databento -- cost --symbols ESZ6 --start 2026-11-09 --end 2026-11-10        # free cost check; then download / import (crate README)
 cargo run -p lines-app -- --source mock --headless 5 --record recordings/x.lfr
-cargo run -p lines-app -- --source replay --replay recordings/x.lfr --speed 10   # 0 = max speed
+cargo run -p lines-app -- --source replay --replay recordings/x.lfr --speed 10   # 0 = max speed; the replay bar changes it
 cargo run -p lines-app -- --source replay --replay recordings/x.lfr --at 2026-11-06T14:05:00Z
 # Real CQG (never run: no credentials). Only with the off-by-default `vendor-cqg` feature;
 # public builds have no `--source cqg` at all. Defaults: demo server, label CQG, app id WebAPITest.
@@ -101,6 +101,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # --drag-position Y previews the position line dragged to plot-local Y (the stop or target it would set, with its P&L; nothing is placed).
 # --order-controls shows the first single-order mark's and tag's − / size / +, as if hovered.
 # --order-size N starts every symbol at that order size; --max-order-qty N sets the paper accounts' largest allowed order (a larger size shows "max N"), over Settings › Accounts › Largest order for that run.
+# --replay-bar shows the replay bar paused at --at (an interactive replay always has it); --replay-playing shows it as playing.
 # --order-strip shows the order strip on the first chart; --strip-pick buy|sell shows it with that limit's price pick armed.
 # --show-recording SECS shows the footer as if recording for SECS seconds (REC, the time, Stop recording; nothing is recorded).
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair; --magnet snaps it to OHLC.
