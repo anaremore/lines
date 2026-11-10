@@ -1716,7 +1716,7 @@ impl SettingsWindow {
         {
             left = left.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::zoom::ui(11.5))
                     .text_color(t.warn)
                     // Armed shows by weight too, not only by color.
                     .font_weight(FontWeight::BOLD)

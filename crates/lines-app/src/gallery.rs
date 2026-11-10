@@ -355,7 +355,11 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     st.push(
         "strategy 3; buy 10 mkt; ack; sell 10 stop 6018.75; ack; print 6018.75; ack; manual".into(),
     );
+    let mut zoomed = st.clone();
     v.push(s("strategies", true, end, st));
+    // At 150 % UI zoom: the panel's text and buttons zoom too.
+    zoomed.extend(["--ui-zoom".into(), "150".into()]);
+    v.push(s("strategies-zoom-150", false, end, zoomed));
     // The chart's strategy markers (decision 0025) beside the panel: #3's entry, its stop and a
     // skipped signal, from the same script.
     let mut mk = vec![
@@ -618,6 +622,14 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             three.as_str(),
         ),
         ("positions-flat", false, "1000x400", "--theme dark", ""),
+        // At 150 % UI zoom: the pane's header, titles, rows and buttons zoom with the rest.
+        (
+            "positions-zoom-150",
+            false,
+            "1400x600",
+            "--theme dark --ui-zoom 150",
+            three.as_str(),
+        ),
     ] {
         let mut a = vec![
             "--workspace".to_owned(),
