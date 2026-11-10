@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "lines-fonts"
-version = "0.3.17"
+version = "0.3.18"
 
 [[package]]
 name = "lines-fuzz"
