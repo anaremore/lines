@@ -1580,7 +1580,7 @@ impl SettingsWindow {
                 .border_color(t.control_edge)
                 .when(on, |d| d.cursor_pointer())
                 // Dimmed, not faded (design.md §6): a 2 px dashed muted edge and dim text, the
-                // extra pixel taken from the padding and the margin so it keeps its size and
+                // extra pixel taken from the padding and the margin so it keeps its layout size and
                 // center beside an enabled button.
                 .when(!on, |d| {
                     d.border_2()
@@ -1685,7 +1685,7 @@ impl SettingsWindow {
                 .when(strong && on, |d| d.font_weight(FontWeight::BOLD))
                 .when(on, |d| d.cursor_pointer())
                 // Dimmed, not faded (design.md §6): a 2 px dashed muted edge and dim text, the
-                // extra pixel taken from the padding and the margin so it keeps its size and
+                // extra pixel taken from the padding and the margin so it keeps its layout size and
                 // center beside an enabled button.
                 .when(!on, |d| {
                     d.border_2()

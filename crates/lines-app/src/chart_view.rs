@@ -2250,15 +2250,15 @@ impl ChartView {
             // Filled in the side's color, text in the background color (as the DOM's). Dimmed
             // (no link group: nothing can send): a dashed edge in the side's color and dim text,
             // unfilled, never faded (design.md §6). The edge stays 1 px here: the buttons are a
-            // fixed 96 px and a 5-digit size's label needs the room. An armed pick keeps its fill
-            // (unlinking doesn't drop it, and Esc must have something to cancel) and is dashed
-            // too, so it never looks like a live one.
-            let picked = pick == Some(o);
+            // fixed 96 px and a 5-digit size's label needs the room. An armed pick on a dimmed
+            // strip (unlinking doesn't drop it, and Esc must have something to cancel) is unfilled
+            // too, its label in the side's color: armed, but never solid like a live one.
             let el = if dim { el.border_dashed() } else { el };
             let el = match fill {
-                Some(c) if !dim || picked => el.bg(c).text_color(t.bg),
-                _ if dim => el.text_color(t.text_dim),
-                _ => el.text_color(t.text_main),
+                Some(c) if !dim => el.bg(c).text_color(t.bg),
+                Some(_) => el.text_color(line),
+                None if dim => el.text_color(t.text_dim),
+                None => el.text_color(t.text_main),
             };
             strip = strip.child(el.on_mouse_down(
                 MouseButton::Left,
