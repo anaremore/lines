@@ -1421,7 +1421,7 @@ impl WindowView {
             return;
         }
         // The kept tab moves left by the tabs closed before it, and is active.
-        let kept = keep - close.iter().filter(|&&i| i < keep).count();
+        let kept = tabstate::kept_after(keep, &close);
         for i in close {
             self.close_tab(i, window, cx);
         }
@@ -2276,6 +2276,9 @@ impl WindowView {
             slot._subs = self.subscribe(*id, &slot.handle, cx);
         }
         let i = self.active;
+        // The tab's own name and pin stay: a preset changes its panes, not the tab.
+        tab.name = self.tabs[i].name.take();
+        tab.pinned = self.tabs[i].pinned;
         self.tabs[i] = tab;
         self.activate_tab(i, window, cx);
         // The old tab's popped-out panes went with it.
@@ -2410,7 +2413,16 @@ impl WindowView {
             .filter(|w| w.window_id() != me)
             .filter_map(|w| w.read(cx).ok().map(|wv| (*w, wv.screen)))
             .collect();
-        let pointer = (own.x + f32::from(pos.x), own.y + f32::from(pos.y));
+        // Over the bar, a drop lands only where the strip shows tabs (where the marker is drawn):
+        // the pointer is held inside the strip, so the ▾, + or the left padding never pick a
+        // tab scrolled out of view.
+        let x = f32::from(pos.x).clamp(strip.x0, strip.x0 + strip.room - 1.0);
+        let x = if f32::from(pos.y) < tab_bar_h() {
+            x
+        } else {
+            f32::from(pos.x)
+        };
+        let pointer = (own.x + x, own.y + f32::from(pos.y));
         match wsdoc::tab_drop(pointer, own, bar, &rights, &others) {
             TabDrop::Reorder(j) => {
                 let j = j.min(self.tabs.len() - 1);
@@ -2631,8 +2643,8 @@ impl WindowView {
                 Err(e) => *error = Some(e),
             },
             Some(Prompt::RenameTab { text, .. }) => {
-                let name = text.trim().to_owned();
-                self.tab_mut().name = (!name.is_empty()).then_some(name);
+                let name = tabstate::tab_name(text);
+                self.tab_mut().name = name;
                 self.prompt = None;
             }
             Some(Prompt::Open {
@@ -3039,15 +3051,14 @@ impl WindowView {
             }
             let stale = store.stale_for().is_some();
             // Busy this instant: no word this frame (the UI never waits on a feed).
-            if let Some(d) = store.try_read() {
-                let word = crate::pane::status_word(&d.status);
-                if let Some(badge) = tabstate::tab_feed_badge(stale, word) {
-                    let label = d
-                        .contract_label()
-                        .map(|l| l.as_str().to_owned())
-                        .unwrap_or_else(|| d.product.symbol.to_owned());
-                    feed = Some((badge, format!("{label} {}", badge.to_lowercase())));
-                }
+            if let Some(d) = store.try_read()
+                && let Some(badge) = tabstate::tab_feed_badge(stale, &d.status)
+            {
+                let label = d
+                    .contract_label()
+                    .map(|l| l.as_str().to_owned())
+                    .unwrap_or_else(|| d.product.symbol.to_owned());
+                feed = Some((badge, format!("{label} {}", badge.to_lowercase())));
             }
         }
         (on, feed)
@@ -3108,7 +3119,7 @@ impl WindowView {
                             cx.stop_propagation();
                             // The × that slid under the pointer after a close takes no press
                             // until the pointer leaves the tab bar.
-                            if this.close_guard.press() {
+                            if this.close_guard.press(i) {
                                 this.close_tab(i, window, cx);
                             }
                         }),
@@ -3194,7 +3205,7 @@ impl WindowView {
                         MouseButton::Right,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.activate_tab(i, window, cx);
+                            this.activate_tab_scrolling(i, false, window, cx);
                             this.open_tab_menu(ev.position, cx);
                         }),
                     ),
