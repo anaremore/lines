@@ -366,6 +366,11 @@ pub fn open(at: Option<usize>, cx: &mut App) {
     open_sized(at, SIZE, cx);
 }
 
+/// [`open`] at a section's first setting (a pane menu's "Settings…").
+pub fn open_section(section: schema::Section, cx: &mut App) {
+    open(schema::all().iter().position(|s| s.section == section), cx);
+}
+
 /// [`open`] at a given size (screenshots; the app opens at [`SIZE`]).
 fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
     if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {

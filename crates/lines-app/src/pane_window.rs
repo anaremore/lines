@@ -43,7 +43,10 @@ pub struct PaneWindow {
 fn command(cmd: Command) -> Option<Command> {
     match cmd {
         Command::PopOut | Command::Reattach => Some(Command::Reattach),
-        Command::DockBesideChart | Command::Menu | Command::Settings => Some(cmd),
+        Command::DockBesideChart
+        | Command::Menu
+        | Command::Settings
+        | Command::SettingsAt(_) => Some(cmd),
         // A chart's drawing style editor, and deleting the selected drawing (its menu's
         // Delete; the rest of the drawing keys: main windows).
         Command::Draw(
@@ -136,6 +139,9 @@ impl PaneWindow {
             Some(Command::DockBesideChart) => cx.defer(move |cx| dock_beside_chart(id, cx)),
             Some(Command::Menu) => self.open_menu(point(px(24.0), px(24.0)), cx),
             Some(Command::Settings) => cx.defer(|cx| crate::settings_view::open(None, cx)),
+            Some(Command::SettingsAt(s)) => {
+                cx.defer(move |cx| crate::settings_view::open_section(s, cx));
+            }
             Some(c @ (Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)) => {
                 cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
             }
@@ -278,8 +284,8 @@ impl PaneWindow {
         ));
         items.push(MenuItem::of(Command::DockBesideChart, false));
         items.push(MenuItem::sep());
-        // This window has no command palette: Settings stays here.
-        items.push(MenuItem::named("Settings…", Command::Settings, false));
+        // This window has no command palette: Settings stays here, at the pane's own section.
+        items.push(crate::pane_menu::settings_row(self.handle.kind()));
         items
     }
 

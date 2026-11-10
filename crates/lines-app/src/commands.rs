@@ -137,6 +137,9 @@ pub enum Command {
     CyclePnl,
     /// The Settings window (decision 0021; Ctrl+,).
     Settings,
+    /// The Settings window at a section: a pane menu's "Settings…" (`pane_menu::settings_section`).
+    /// Menu only; its key hint is Settings' own.
+    SettingsAt(crate::settings_schema::Section),
     /// One setting from the schema (`crate::settings_schema`): set a value, or open the
     /// Settings window at it.
     Setting(crate::settings_schema::SettingCmd),
@@ -646,6 +649,8 @@ pub fn hint(c: Command) -> String {
     let mac = cfg!(target_os = "macos");
     match c {
         Command::Focus(_) => return if mac { "⌥arrows" } else { "Alt+arrows" }.into(),
+        // The same window at a section: Settings' key.
+        Command::SettingsAt(_) => return hint(Command::Settings),
         Command::SelectTab(i) if i < 9 => {
             return if mac {
                 format!("⌘{}", i + 1)
@@ -666,6 +671,8 @@ pub fn hint(c: Command) -> String {
         "pageup" => "PgUp".to_owned(),
         "up" => "↑".to_owned(),
         "space" => "Space".to_owned(),
+        // A lone comma reads as punctuation in a row's hint: named, as macOS shows "⌘,".
+        "," if !mac => "Comma".to_owned(),
         k => k.to_uppercase(),
     };
     if mac {
@@ -782,7 +789,7 @@ pub fn label(c: Command) -> String {
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
-        Command::Settings => "Settings…".into(),
+        Command::Settings | Command::SettingsAt(_) => "Settings…".into(),
         Command::ZoomIn => "Zoom in".into(),
         Command::ZoomOut => "Zoom out".into(),
         Command::ZoomReset => "Reset zoom".into(),
