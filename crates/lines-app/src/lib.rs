@@ -2021,7 +2021,12 @@ where
     let no_update_check = cli.no_update_check;
     let download_env = download_view::DownloadEnv {
         root: download_root(&cli),
-        budget: Some((cli.store_budget_gb.max(0.0) * (1u64 << 30) as f64) as u64),
+        // The run's budget: the flag, else Settings › Data's, else the default.
+        budget: {
+            let (prefs, flags) = data_dir::store_at_start();
+            let gb = data_dir::store_run(&flags, &prefs).budget_gb;
+            Some((gb.max(0.0) * (1u64 << 30) as f64) as u64)
+        },
     };
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_global(download_env);
