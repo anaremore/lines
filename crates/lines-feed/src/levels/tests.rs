@@ -345,7 +345,7 @@ fn a_recording_started_mid_session_begins_with_the_newest_batch() {
     });
     let src: Arc<dyn LevelSource> = Arc::new(DemoLevels);
     let cell = Arc::new(LevelCell::for_test(&*src, false));
-    let rec = runtime::recorder_slot(&*src, &ctx, None);
+    let rec = runtime::recorder_slot(&*src, &ctx, None, false);
     let last: runtime::Shared<(UtcMillis, Vec<LevelFrame>)> = Default::default();
     {
         let (src, ctx, prices, cell, rec, last) = (
@@ -375,6 +375,15 @@ fn a_recording_started_mid_session_begins_with_the_newest_batch() {
     assert_eq!(batches[0].1, frames());
     assert_eq!(Some(batches[0].0), received, "at the time it came");
     assert!(rec.lock().is_none(), "stopped");
+    // `--record-levels` from launch: the app's Start and Stop leave its recorder alone.
+    let pinned = runtime::recorder_slot(&*src, &ctx, Some(dir.join("cli")), true);
+    runtime::begin(&pinned, &last, None, "demo", &header);
+    assert!(pinned.lock().is_some(), "a stop doesn't end it");
+    runtime::begin(&pinned, &last, Some(&dir.join("app")), "demo", &header);
+    assert!(
+        !recording_path(&dir.join("app"), "demo", "ES").exists(),
+        "nor a start move it"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -403,7 +412,7 @@ fn recorded_levels_replay_to_the_same_map() {
             dir.clone(),
         );
         rt.block_on(async move {
-            let rec = runtime::recorder_slot(&*src, &ctx, Some(dir));
+            let rec = runtime::recorder_slot(&*src, &ctx, Some(dir), true);
             let task = tokio::spawn(runtime::live(
                 src,
                 ctx,

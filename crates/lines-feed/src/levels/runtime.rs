@@ -225,15 +225,18 @@ struct Entry {
 pub(crate) type Shared<T> = Arc<parking_lot::Mutex<Option<T>>>;
 
 /// A live source's recorder slot, recording into `dir` from its next batch (`None`: empty).
+/// `pinned`: `--record-levels` from launch, which the app's Start and Stop leave alone.
 pub(crate) fn recorder_slot(
     source: &dyn LevelSource,
     ctx: &LevelContext,
     dir: Option<PathBuf>,
+    pinned: bool,
 ) -> Shared<Recorder> {
     Arc::new(parking_lot::Mutex::new(dir.map(|d| Recorder {
         path: recording_path(&d, source.id(), ctx.product.symbol),
         header: header(source, ctx),
         writer: None,
+        pinned,
     })))
 }
 
@@ -247,11 +250,17 @@ pub(crate) fn begin(
     header: &Header,
 ) {
     let mut slot = rec.lock();
+    // `--record-levels` records from launch to its own folder: the app's recording never
+    // takes it over or ends it.
+    if slot.as_ref().is_some_and(|r| r.pinned) {
+        return;
+    }
     *slot = dir.map(|d| {
         let mut r = Recorder {
             path: recording_path(d, source_id, &header.product),
             header: header.clone(),
             writer: None,
+            pinned: false,
         };
         if let Some((t, frames)) = last.lock().as_ref() {
             r.write(*t, frames);
@@ -389,7 +398,7 @@ pub fn acquire(
         LevelMode::Live => record_dir().read().clone(),
         _ => None,
     };
-    let rec = recorder_slot(&*source, &ctx, dir);
+    let rec = recorder_slot(&*source, &ctx, dir, matches!(m, LevelMode::Record(_)));
     let last: Shared<(UtcMillis, Vec<LevelFrame>)> = Default::default();
     let source_id = source.id().to_owned();
     let next_due = Arc::new(AtomicI64::new(i64::MAX));
@@ -498,6 +507,8 @@ pub(crate) struct Recorder {
     path: PathBuf,
     header: Header,
     writer: Option<Writer<std::io::BufWriter<std::fs::File>>>,
+    /// `--record-levels` (see [`recorder_slot`]).
+    pinned: bool,
 }
 
 impl Recorder {

@@ -455,9 +455,11 @@ pub async fn run_feed(
                     warm_start(&config, w, &store, &mut tap);
                 }
                 // Recordings hold exactly one contract: stop rather than mix two.
-                if recorder.take().is_some() {
+                // Ended first, so this thread drops the last copy (and joins its writer).
+                if recorder.is_some() {
                     tracing::warn!("recording stopped at the roll (recordings hold one contract)");
                     store.recording.end();
+                    drop(recorder.take());
                 }
             }
             next

@@ -598,7 +598,7 @@ struct Cli {
     /// first). STUDY: `vwap:N`, `delta:N`, `volume:N`, `profile`, `footprint`, `levels:ID`.
     #[arg(long, requires = "screenshot")]
     studies_menu: Option<String>,
-    /// Screenshot: the window header as if recording for SECS seconds (REC, the time, Stop).
+    /// Screenshot: the footer as if recording for SECS seconds (REC, the time, Stop recording).
     /// Nothing is recorded: screenshots write no user files.
     #[arg(long, requires = "screenshot", value_name = "SECS")]
     show_recording: Option<u64>,

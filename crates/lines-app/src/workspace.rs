@@ -1209,6 +1209,10 @@ impl WindowView {
                 .child(
                     div()
                         .id("recording-stop")
+                        // At least the 20 px hit target (docs/design.md), within the footer.
+                        .min_h(crate::zoom::ui(20.0))
+                        .flex()
+                        .items_center()
                         .px_2()
                         .rounded_sm()
                         .border_1()

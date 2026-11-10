@@ -144,8 +144,8 @@ pub struct Theme {
     /// named for what they do, so the color is never the only cue. AA on `panel`, also under
     /// the selected row's tint. Not up/down, not the accent.
     pub destructive: Hsla,
-    /// The recording dot in the window header (beside "REC", which carries the meaning): at
-    /// least 3:1 on the header's panel in every theme and palette (tested).
+    /// The recording dot in the footer (beside "REC", which carries the meaning): at least 3:1
+    /// on the panel in every theme and palette (tested).
     pub recording: Hsla,
 }
 

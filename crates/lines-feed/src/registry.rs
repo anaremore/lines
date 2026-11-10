@@ -286,6 +286,12 @@ mod tests {
         let n = store.read().stats.trades_in;
         wait_until(|| store.read().stats.trades_in > n);
 
+        // Its writer closes it on its own thread: wait until it stops growing.
+        wait_until(|| {
+            let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+            std::thread::sleep(Duration::from_millis(300));
+            len > 0 && std::fs::metadata(&path).map_or(0, |m| m.len()) == len
+        });
         // The file: the source and contract in its header, a whole session that replays.
         let h = crate::transport::read_header(&path).unwrap();
         assert_eq!((h.provider.as_str(), h.contract), ("cqg", Some(front)));

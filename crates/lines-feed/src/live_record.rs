@@ -186,14 +186,18 @@ impl RecordCtl {
         s.recordable = false;
         s.pending = None;
         s.creating = false;
-        if let Some(a) = s.active.take() {
+        let a = s.active.take();
+        drop(s);
+        if let Some(a) = a {
             a.recorder.stop();
         }
     }
 
     /// The feed thread, at a roll: the recording ends (a file holds one contract).
     pub(crate) fn end(&self) {
-        if let Some(a) = self.state.lock().active.take() {
+        // Taken under the lock, stopped and dropped outside it (a drop may join the writer).
+        let a = self.state.lock().active.take();
+        if let Some(a) = a {
             a.recorder.stop();
         }
     }
@@ -228,18 +232,26 @@ pub fn file_name(source: &str, symbol: &str, now_ms: i64) -> String {
     format!("{}-{}-{stamp}Z.lfr", clean(source), clean(symbol))
 }
 
-/// Create `dir` and a fresh path in it (a numbered suffix if the name is taken).
+/// Create `dir` and claim a fresh file in it (a numbered suffix if the name is taken). The
+/// file is created here (`create_new`), so two feeds starting in the same second with the same
+/// name never share one file.
 pub(crate) fn fresh_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let p = dir.join(name);
-    if !p.exists() {
-        return Ok(p);
-    }
     let stem = name.trim_end_matches(".lfr");
-    for n in 2..1000 {
-        let p = dir.join(format!("{stem}-{n}.lfr"));
-        if !p.exists() {
-            return Ok(p);
+    for n in 1..1000 {
+        let p = if n == 1 {
+            dir.join(name)
+        } else {
+            dir.join(format!("{stem}-{n}.lfr"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+        {
+            Ok(_) => return Ok(p),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
     }
     Err(std::io::Error::other("no free recording name"))
@@ -272,9 +284,10 @@ mod tests {
     fn a_taken_name_gets_a_number() {
         let dir = std::env::temp_dir().join(format!("lines-rec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // Claimed at once: a second claim in the same instant gets the next name.
         let a = fresh_path(&dir, "x.lfr").unwrap();
-        std::fs::write(&a, b"").unwrap();
         let b = fresh_path(&dir, "x.lfr").unwrap();
+        assert_eq!(a.file_name().unwrap(), "x.lfr");
         assert_eq!(b.file_name().unwrap(), "x-2.lfr");
         let _ = std::fs::remove_dir_all(&dir);
     }
