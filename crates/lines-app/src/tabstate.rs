@@ -314,6 +314,98 @@ pub enum CloseTab {
 }
 
 /// Close tab `i` of `tabs` (with `active` active) in one of `windows` main windows.
+/// Close other tabs: the tabs to close, highest index first (so each index stays valid as
+/// the ones after it go): every tab but `keep` and the pinned ones.
+pub fn close_others(pinned: &[bool], keep: usize) -> Vec<usize> {
+    (0..pinned.len())
+        .rev()
+        .filter(|&i| i != keep && !pinned[i])
+        .collect()
+}
+
+/// Where the kept tab is once `closed` (any order) are gone: it moves left by the tabs closed
+/// before it.
+pub fn kept_after(keep: usize, closed: &[usize]) -> usize {
+    keep - closed.iter().filter(|&&i| i < keep).count()
+}
+
+/// A tab's name as typed into Rename tab: trimmed; empty gives the tab its symbols again.
+pub fn tab_name(typed: &str) -> Option<String> {
+    let t = typed.trim();
+    (!t.is_empty()).then(|| t.to_owned())
+}
+
+/// A saved tab name as it loads: cleaned as Rename tab cleans it (blank: no name).
+pub fn saved_name(saved: Option<&str>) -> Option<String> {
+    saved.and_then(tab_name)
+}
+
+/// The tab a Rename tab prompt renames: the one it was opened for, if it is still there.
+pub fn rename_target(opened_for: usize, tabs: usize) -> Option<usize> {
+    (opened_for < tabs).then_some(opened_for)
+}
+
+/// A middle click closes a tab unless it is pinned.
+pub fn middle_click_closes(pinned: bool) -> bool {
+    !pinned
+}
+
+/// The × that slides under the pointer after a close takes no press until the pointer leaves
+/// the tab bar (or the window stops being hovered: Windows sends no exit event).
+/// Only the × in the slot that was just closed is held: a deliberate press on another tab's ×
+/// closes it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CloseGuard {
+    /// The slot (tab index) a × closed, while the pointer stays in the bar.
+    slot: Option<usize>,
+}
+
+impl CloseGuard {
+    /// A press on the × in `slot`: whether it closes. A close holds that slot.
+    pub fn press(&mut self, slot: usize) -> bool {
+        if self.slot == Some(slot) {
+            return false;
+        }
+        self.slot = Some(slot);
+        true
+    }
+
+    /// A × just closed a tab and the pointer is still in the bar: the strip holds its scroll.
+    pub fn holding(&self) -> bool {
+        self.slot.is_some()
+    }
+
+    /// The pointer moved: out of the tab bar (or the window), the guard ends.
+    pub fn pointer(&mut self, in_bar: bool) {
+        if !in_bar {
+            self.slot = None;
+        }
+    }
+}
+
+/// A background tab's feed badge: the word for a feed of its panes that isn't live (stale
+/// while its market is open, failed, stopped). Connecting and reconnecting are passing states
+/// and an ended replay isn't a problem: no badge (the footer still names them).
+pub fn tab_feed_badge(
+    unavailable: bool,
+    stale: bool,
+    status: &lines_feed::store::FeedStatus,
+) -> Option<&'static str> {
+    use lines_feed::store::FeedStatus as S;
+    // An unavailable pane's store is a stand-in: no badge (the pane says why itself).
+    if unavailable {
+        return None;
+    }
+    if stale {
+        return Some("STALE");
+    }
+    match status {
+        S::Failed(_) => Some("FAILED"),
+        S::Stopped => Some("STOPPED"),
+        _ => None,
+    }
+}
+
 pub fn close_tab(tabs: usize, windows: usize, active: usize, i: usize) -> CloseTab {
     if tabs <= 1 {
         return if windows > 1 {
@@ -761,5 +853,64 @@ mod tests {
         }
         assert_eq!(got.len(), 10);
         assert_eq!((got[0], got[9]), ("11", "2"), "the oldest two forgotten");
+    }
+
+    #[test]
+    fn close_others_skips_the_kept_and_pinned_tabs_highest_first() {
+        let pinned = [true, false, false, true, false];
+        assert_eq!(close_others(&pinned, 2), vec![4, 1]);
+        assert_eq!(close_others(&pinned, 0), vec![4, 2, 1]);
+        assert_eq!(close_others(&[false], 0), Vec::<usize>::new());
+        // The kept tab moves left by the tabs closed before it.
+        assert_eq!(kept_after(2, &[4, 1]), 1);
+        assert_eq!(kept_after(0, &[4, 2, 1]), 0);
+        assert_eq!(kept_after(3, &[2, 1, 0]), 0);
+        assert_eq!(tab_name("  Scalp "), Some("Scalp".to_owned()));
+        assert_eq!(
+            tab_name("   "),
+            None,
+            "empty: named after its symbols again"
+        );
+        // Saved names load cleaned; a blank one is no name.
+        assert_eq!(saved_name(Some(" Scalp ")), Some("Scalp".to_owned()));
+        assert_eq!(saved_name(Some("  ")), None);
+        assert_eq!(saved_name(None), None);
+        // Rename renames the tab it was opened for; nothing if that tab is gone.
+        assert_eq!(rename_target(2, 5), Some(2));
+        assert_eq!(rename_target(4, 4), None);
+        assert!(middle_click_closes(false) && !middle_click_closes(true));
+    }
+
+    #[test]
+    fn the_close_guard_holds_until_the_pointer_leaves_the_bar() {
+        let mut g = CloseGuard::default();
+        assert!(g.press(2), "the first × closes");
+        assert!(!g.press(2), "the × that slid under the pointer doesn't");
+        g.pointer(true);
+        assert!(!g.press(2), "still in the bar");
+        assert!(g.press(0), "another tab's ×, aimed at, closes");
+        g.pointer(false);
+        assert!(g.press(0), "after leaving the bar, a × closes again");
+    }
+
+    #[test]
+    fn a_tab_badge_names_a_feed_that_isnt_live() {
+        use lines_feed::store::FeedStatus as S;
+        assert_eq!(tab_feed_badge(false, true, &S::Live), Some("STALE"));
+        assert_eq!(
+            tab_feed_badge(false, true, &S::Failed("x".into())),
+            Some("STALE")
+        );
+        assert_eq!(
+            tab_feed_badge(false, false, &S::Failed("x".into())),
+            Some("FAILED")
+        );
+        assert_eq!(tab_feed_badge(false, false, &S::Stopped), Some("STOPPED"));
+        assert_eq!(tab_feed_badge(false, false, &S::Connecting), None);
+        assert_eq!(tab_feed_badge(false, false, &S::ReplayFinished), None);
+        assert_eq!(tab_feed_badge(false, false, &S::Live), None);
+        // An unavailable pane's stand-in store: no badge, whatever it says.
+        assert_eq!(tab_feed_badge(true, false, &S::Failed("x".into())), None);
+        assert_eq!(tab_feed_badge(true, true, &S::Live), None);
     }
 }

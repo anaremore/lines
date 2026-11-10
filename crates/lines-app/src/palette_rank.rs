@@ -78,6 +78,7 @@ pub fn never_boosted(c: Command) -> bool {
             | Command::Strategy(S::StopAll | S::StopAllKeep | S::Start | S::Stop)
             | Command::ChainOneClick
             | Command::ClosePane
+            | Command::CloseOtherTabs
             | Command::RestartToUpdate
             | Command::RollBackUpdate
     )

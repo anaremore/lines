@@ -33,6 +33,8 @@ pub enum Icon {
     Menu,
     /// ×: close.
     Close,
+    /// A pushpin: a pinned tab (in the tab's close slot).
+    Pin,
     /// A triangle pointing right: play (the replay bar).
     Play,
     /// Two bars: pause.
@@ -45,7 +47,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 11] = [
+    pub const ALL: [Icon; 12] = [
         Icon::Play,
         Icon::Pause,
         Icon::SkipBack,
@@ -57,6 +59,7 @@ impl Icon {
         Icon::ChartOnly,
         Icon::Menu,
         Icon::Close,
+        Icon::Pin,
     ];
 
     /// The polylines, in grid units (0..=16, y down).
@@ -132,6 +135,14 @@ impl Icon {
                 ],
             ],
             Icon::Close => &[&[(4.0, 4.0), (12.0, 12.0)], &[(12.0, 4.0), (4.0, 12.0)]],
+            Icon::Pin => &[
+                // The head, the body and the base, then the needle.
+                &[(5.0, 2.0), (11.0, 2.0)],
+                &[(6.0, 2.0), (6.0, 8.0)],
+                &[(10.0, 2.0), (10.0, 8.0)],
+                &[(4.0, 9.0), (12.0, 9.0)],
+                &[(8.0, 9.0), (8.0, 14.0)],
+            ],
             Icon::Play => &[&[(5.0, 3.0), (13.0, 8.0), (5.0, 13.0), (5.0, 3.0)]],
             Icon::Pause => &[&[(5.0, 3.0), (5.0, 13.0)], &[(11.0, 3.0), (11.0, 13.0)]],
             Icon::SkipBack => &[
@@ -197,6 +208,17 @@ pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Windo
             window.paint_path(path, color);
         }
     }
+}
+
+/// An icon that is only shown (a pinned tab's pin): [`HIT`] px square, in `color`.
+pub fn glyph(icon: Icon, color: Hsla) -> Div {
+    div().flex_none().w(px(HIT)).h(px(HIT)).child(
+        canvas(
+            |_, _, _| (),
+            move |b, (), window, _| paint(icon, b, color, window),
+        )
+        .size_full(),
+    )
 }
 
 /// A clickable icon: [`HIT`] px square, `text_dim` at rest, `text_main` under the pointer,

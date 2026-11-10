@@ -85,6 +85,7 @@ mod style_editor;
 mod style_editor_view;
 mod subpane;
 mod tabstate;
+mod tabstrip;
 mod tape_view;
 mod text;
 mod theme;

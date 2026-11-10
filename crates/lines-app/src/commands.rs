@@ -42,6 +42,12 @@ pub enum Command {
     DockBesideChart,
     NewTab,
     CloseTab,
+    /// Name the active tab (empty: named after its symbols again).
+    RenameTab,
+    /// Pin or unpin the active tab: Close others and a middle click skip a pinned tab.
+    TogglePinTab,
+    /// Close every tab of the window but the active one and the pinned ones.
+    CloseOtherTabs,
     /// Reopen the most recently closed tab.
     ReopenTab,
     NextTab,
@@ -812,6 +818,9 @@ pub fn label(c: Command) -> String {
         Command::DockBesideChart => "Dock beside focused chart".into(),
         Command::NewTab => "New tab".into(),
         Command::CloseTab => "Close tab".into(),
+        Command::RenameTab => "Rename tab…".into(),
+        Command::TogglePinTab => "Pin tab".into(),
+        Command::CloseOtherTabs => "Close other tabs".into(),
         Command::ReopenTab => "Reopen closed tab".into(),
         Command::NextTab => "Next tab".into(),
         Command::PrevTab => "Previous tab".into(),
@@ -980,6 +989,9 @@ pub fn palette() -> Vec<Command> {
         Command::Reattach,
         Command::NewTab,
         Command::CloseTab,
+        Command::RenameTab,
+        Command::TogglePinTab,
+        Command::CloseOtherTabs,
         Command::ReopenTab,
         Command::NextTab,
         Command::PrevTab,

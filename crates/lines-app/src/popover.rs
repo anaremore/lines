@@ -468,12 +468,14 @@ pub enum Panel {
     OrderGroup,
     /// The replay bar's Go to (`crate::replay_bar`).
     GoTo,
+    /// Rename tab.
+    RenameTab,
 }
 
 impl Panel {
     /// Every kind (screenshots' `--panel-at`, tests).
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
-    pub const ALL: [Panel; 8] = [
+    pub const ALL: [Panel; 9] = [
         Panel::Palette,
         Panel::Picker,
         Panel::OpenWorkspace,
@@ -482,6 +484,7 @@ impl Panel {
         Panel::StyleEditor,
         Panel::OrderGroup,
         Panel::GoTo,
+        Panel::RenameTab,
     ];
 
     /// Its key in `Settings::panel_places`.
@@ -495,6 +498,7 @@ impl Panel {
             Panel::StyleEditor => "style_editor",
             Panel::OrderGroup => "order_group",
             Panel::GoTo => "go_to",
+            Panel::RenameTab => "rename_tab",
         }
     }
 }
