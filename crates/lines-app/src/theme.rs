@@ -761,6 +761,7 @@ mod tests {
         vec![
             ("text_main", t.text_main, "bg", t.bg),
             ("text_main", t.text_main, "panel", t.panel),
+            // Also a shortcut's keycap (`keycap::cap`).
             ("text_dim", t.text_dim, "bg", t.bg),
             ("text_dim", t.text_dim, "panel", t.panel),
             ("up", t.up, "bg", t.bg),

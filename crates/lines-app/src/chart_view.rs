@@ -6228,13 +6228,7 @@ impl ChartView {
     fn drawing_banner(&self, t: &Theme) -> Option<AnyElement> {
         let d = &self.drawings;
         let text = if d.confirm_clear {
-            let n = d.count();
-            let plural = if n == 1 { "" } else { "s" };
-            format!(
-                "Delete all {n} drawing{plural} for {}?  Enter: delete  ·  Esc: keep  ({} undoes)",
-                crate::commands::hint(Command::Draw(DrawCmd::Undo)),
-                self.instrument.symbol
-            )
+            clear_drawings_question(d.count(), self.instrument.symbol)
         } else if let Some(tool) = d.tool() {
             let how = if tool.anchors() == 2 {
                 "click two points (or drag)"
@@ -7248,6 +7242,15 @@ impl Pane for ChartView {
     }
 }
 
+/// The delete-all confirmation: how many, for which symbol, and the key that undoes it.
+fn clear_drawings_question(n: usize, symbol: &str) -> String {
+    let plural = if n == 1 { "" } else { "s" };
+    format!(
+        "Delete all {n} drawing{plural} for {symbol}?  Enter: delete  ·  Esc: keep  ({} undoes)",
+        crate::commands::hint(Command::Draw(DrawCmd::Undo))
+    )
+}
+
 /// Centre of a drawing's axis tag for its line at plot-local `y`: inside the plot, and moved
 /// one tag off the last-price tag (centre `last`) when that would cover it, to the line's side
 /// if there is room, else the other.
@@ -8046,6 +8049,17 @@ mod tests {
         cache.insert(key, (dark.text_dim, ()));
         assert!(!needs_shaping(&cache, key, dark.text_dim));
         assert!(needs_shaping(&cache, key, light.text_dim));
+    }
+
+    /// The question names the symbol and then the undo key (they were once swapped: "for
+    /// Ctrl+Z? … (ES undoes)").
+    #[test]
+    fn the_delete_all_question_names_the_symbol_then_the_undo_key() {
+        let q = clear_drawings_question(3, "ES");
+        let undo = crate::commands::hint(Command::Draw(DrawCmd::Undo));
+        assert!(q.starts_with("Delete all 3 drawings for ES?"), "{q}");
+        assert!(q.ends_with(&format!("({undo} undoes)")), "{q}");
+        assert!(clear_drawings_question(1, "NQ").starts_with("Delete all 1 drawing for NQ?"));
     }
 
     /// N4: a restored chart keeps a saved styled study and doesn't add the same study from

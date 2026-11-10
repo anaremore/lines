@@ -38,6 +38,7 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 
 ## 6. Keyboard-first, mouse-excellent
 - Every action is reachable from the keyboard and the command palette; hotkeys are remappable.
+- A shortcut shows as keycaps, one per key (`Ctrl` `Shift` `F`; `⇧` `⌘` `F` on macOS), beside the action's name in tooltips, menus, lists, the palette and Settings › Keys (`keycap.rs`, from `commands::keys`, sized with the UI zoom). Inside a sentence it stays text ("Ctrl+Z undoes").
 - Direct manipulation for spatial things: drag to pan or scale, drag orders to modify. Hover reveals detail (crosshair readout) without clicks.
 - Destructive or financial actions (send, cancel all, flatten) have clear hotkeys and can't fire from an accidental hover or scroll.
 
