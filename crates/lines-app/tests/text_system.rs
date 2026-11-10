@@ -28,7 +28,8 @@ fn width(ts: &dyn PlatformTextSystem, f: &Font, text: &str) -> f32 {
     f32::from(line.width)
 }
 
-/// The design width of the glyph "l" (its stem) in `f`.
+/// The design width of the glyph "l" (its stem) in `f` (not on Linux: there it's the advance).
+#[cfg(not(target_os = "linux"))]
 fn stem(ts: &dyn PlatformTextSystem, f: &Font) -> f32 {
     width(ts, f, "l");
     let id = ts.font_id(f).expect("font");
@@ -69,18 +70,37 @@ fn main() {
             names.iter().any(|n| n == family),
             "{family} isn't listed after loading"
         );
+        let weights =
+            [FontWeight::NORMAL, FontWeight::MEDIUM, FontWeight::SEMIBOLD].map(|weight| {
+                let mut f = font(family);
+                f.weight = weight;
+                f
+            });
         // Each weight is its own file, not the regular one synthesized: its design bounds
         // of "l" (the stem) are wider at each step (a simulation leaves design bounds alone).
         // Advances can't tell: Plex Mono's are one width at every weight.
-        let w = [FontWeight::NORMAL, FontWeight::MEDIUM, FontWeight::SEMIBOLD].map(|weight| {
-            let mut f = font(family);
-            f.weight = weight;
-            stem(ts.as_ref(), &f)
-        });
-        assert!(
-            w[0] < w[1] && w[1] < w[2],
-            "{family}: stem widths by weight {w:?}"
-        );
+        #[cfg(not(target_os = "linux"))]
+        {
+            let w = weights.each_ref().map(|f| stem(ts.as_ref(), f));
+            assert!(
+                w[0] < w[1] && w[1] < w[2],
+                "{family}: stem widths by weight {w:?}"
+            );
+        }
+        // Linux (cosmic-text): its glyph bounds are the advance, so the stem can't tell for
+        // Plex Mono. There each loaded face is its own font id and a weight picks the nearest
+        // face, so three ids mean three files (a missing weight would reuse another's id).
+        #[cfg(target_os = "linux")]
+        {
+            let ids = weights.each_ref().map(|f| {
+                width(ts.as_ref(), f, "l");
+                ts.font_id(f).expect("font")
+            });
+            assert!(
+                ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2],
+                "{family}: one face serves several weights {ids:?}"
+            );
+        }
     }
     // Plex Mono: every digit (and the separators prices use) is one width.
     let mono = font(lines_fonts::MONO);
