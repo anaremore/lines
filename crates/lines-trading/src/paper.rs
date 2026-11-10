@@ -20,18 +20,19 @@
 //!   grows past it or goes (a quote or rebuild showing the same size is the same liquidity).
 //!   With no book on that side they fill at the last trade price; with neither a market
 //!   order is cancelled (nothing would ever show it a price).
-//! - **A market order's remainder works on** (decision 0005: market orders walk the book, and a
-//!   one-level book, as a top-of-book feed gives, is only the first step of the walk): what the
-//!   book couldn't fill stays Working, visible with its remaining quantity, and takes later
-//!   liquidity at its price, first in line: the book on its side after each batch, each trade at or
-//!   beyond the inside on its side (up to the traded quantity, at the trade's price: a print at
-//!   the bid never fills a buy, which would pay less than any real market order), each option
-//!   quote. Until done, cancelled, or its session closes (a day order: it never fills at the
-//!   next session's open). A reduce-only one still shrinks with the position; a plain one that
-//!   closes the position (no larger than what closing market orders already working leave of it)
-//!   turns reduce-only, so it never reverses it; a Reverse's opening, sent beside its close, stays
-//!   an entry. Limit
-//!   orders are unchanged.
+//! - **Past the visible book, slippage is modelled** (issue #94): a market order or triggered
+//!   stop on a future or equity that takes every visible level goes on one tick at a time past
+//!   the deepest ([`SLIPPAGE_TICKS`]), so it always fills whole at once: a Flatten never leaves a
+//!   remainder, and a stop shows slippage instead of filling at its trigger print.
+//! - **An option's market order works on** (decision 0028: a missing side or a stale quote never
+//!   fills): it stays Working, visible with its remaining quantity, and takes later liquidity at
+//!   its price, first in line: the book on its side after each batch, each fresh quote. Until
+//!   done, cancelled, or its session closes (a day order: it never fills at the next session's
+//!   open). A reduce-only one still shrinks with the position; a plain one that closes the
+//!   position (no larger than what closing market orders already working leave of it) turns
+//!   reduce-only, so it never reverses it; a Reverse's opening, sent beside its close, stays an
+//!   entry. A remainder saved by an earlier version on a future works on the same way, also
+//!   taking trades at or beyond the inside on its side. Limit orders are unchanged.
 //! - **Stops trigger on trades** at or through the trigger.
 //! - **Fees** per contract (per quantity unit), per side, from the account's balance.
 //! - **Options** (decision 0028) trade on their own quote, never the underlying's price:
@@ -88,6 +89,12 @@ pub struct PaperConfig {
     /// Reject orders while the product's market is closed (sessions calendar).
     pub check_sessions: bool,
 }
+
+/// Modelled depth past the book a feed shows (issue #94): a market order or triggered stop that
+/// takes every visible level goes on one tick at a time beyond the deepest, each tick holding as
+/// much as the thinnest visible level on that side; whatever is left after this many ticks fills
+/// at the last of them. So it always fills whole at once, never better than the book.
+pub const SLIPPAGE_TICKS: i64 = 20;
 
 /// A quote side's size in the one-level book: quotes carry none, so it never runs out.
 const QUOTE_SIZE: i64 = 1 << 40;
@@ -468,10 +475,14 @@ impl PaperBroker {
 
     /// Take liquidity from the book (opposite side) up to `limit` (`None`: any price).
     fn execute(&mut self, now: UtcMillis, id: OrderId, limit: Option<Price>) {
+        let Some(contract) = self.orders.get(&id).map(|p| p.order.contract) else {
+            return;
+        };
+        let tick = self.spec(contract).map(|s| s.product.price.tick);
         let Some(po) = self.orders.get(&id) else {
             return;
         };
-        let (contract, side) = (po.order.contract, po.order.side);
+        let side = po.order.side;
         if self.quote_stale(contract, now) {
             return; // it rests (a market order works on) until a fresh quote
         }
@@ -484,7 +495,7 @@ impl PaperBroker {
             let opp = book_side(side.opposite());
             let is_bid = opp == BookSide::Bid;
             let levels: Vec<(Price, i64)> = m.book.levels(opp).map(|(p, l)| (p, l.qty.0)).collect();
-            for (p, size) in levels {
+            for &(p, size) in &levels {
                 if left == 0 {
                     break;
                 }
@@ -505,6 +516,36 @@ impl PaperBroker {
                 *taken += q;
                 left -= q;
                 fills.push((p, q));
+            }
+            // Past what the book shows: a market order (or a triggered stop) never stops at the
+            // visible levels (`SLIPPAGE_TICKS`). Not an option: its quote has no size to run out.
+            if left > 0
+                && limit.is_none()
+                && contract.option_key().is_none()
+                && let (Some(tick), Some(&(deepest, _)), Some(thinnest)) = (
+                    tick,
+                    levels.last(),
+                    levels.iter().map(|l| l.1).filter(|q| *q > 0).min(),
+                )
+            {
+                let step = match side {
+                    Side::Buy => tick,
+                    Side::Sell => -tick,
+                };
+                let mut p = deepest.0;
+                for n in 1..=SLIPPAGE_TICKS {
+                    if left == 0 {
+                        break;
+                    }
+                    p += step;
+                    let q = if n == SLIPPAGE_TICKS {
+                        left
+                    } else {
+                        thinnest.min(left)
+                    };
+                    left -= q;
+                    fills.push((Price(p), q));
+                }
             }
             // No book on that side: fill at the last trade (market orders only; an option
             // never fills on a missing side).
@@ -858,8 +899,9 @@ impl PaperBroker {
             let (side, before) = (po.order.side, po.order.remaining().0);
             match po.order.kind {
                 OrderKind::Stop { .. } => {
-                    // With no book on its side it fills at the last trade, which is this print:
-                    // that share of the print is taken too.
+                    // With a book it walks it and goes on past it (`SLIPPAGE_TICKS`): filled
+                    // whole, with slippage, never at the trigger print. With no book on its side
+                    // it fills at the last trade, which is this print: that share is taken too.
                     let no_book = self
                         .markets
                         .get(&contract)
@@ -879,7 +921,8 @@ impl PaperBroker {
                         .filter(|p| p.order.is_open())
                         .map(|p| p.order.remaining().0)
                     {
-                        // No book: the triggering trade's price.
+                        // Only if nothing above could fill it (no spec for its tick): the
+                        // triggering trade's price, never left open.
                         self.fill(now, id, price, Qty(i64::MAX));
                         left -= rest;
                     }

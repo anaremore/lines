@@ -330,17 +330,10 @@ fn market_order_walks_a_thin_book() {
     );
     // Average: (2×600025 + 600050 + 2×600100) / 5 = 600060.
     assert_eq!(r.core.order(id).unwrap().avg_fill(), Some(600_060.0));
-    // A second market order doesn't reuse the liquidity just taken.
+    // A second market order doesn't reuse the liquidity just taken; past the book it goes on a
+    // tick at a time with the thinnest level's size (1), filled whole at once (issue #94).
     let id2 = r.place(Side::Buy, 4, OrderKind::Market);
     r.wait(LAT);
-    assert_eq!(r.fills(id2), vec![(px(6001.00), 3)]);
-    assert_eq!(
-        r.state(id2),
-        OrderState::PartiallyFilled,
-        "the book ran out: the rest works on"
-    );
-    // The level refills: the rest takes it, at its price.
-    r.book(&[(5999.75, 4)], &[(6001.25, 3)]);
     assert_eq!(r.fills(id2), vec![(px(6001.00), 3), (px(6001.25), 1)]);
     assert_eq!(r.state(id2), OrderState::Filled);
 }
