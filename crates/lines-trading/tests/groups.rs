@@ -176,7 +176,7 @@ impl Rig {
             .expect("groups published")
     }
 
-    /// The `GroupCommand` event for the newest command from outside the internal range.
+    /// The newest `GroupCommand` event's group and results.
     fn group_results(&self) -> (String, Vec<MemberResult>) {
         self.events
             .iter()
@@ -394,6 +394,16 @@ fn a_group_flatten_closes_every_member_and_nothing_else() {
     }
     assert_eq!(sent, named);
     assert!(!sent.is_empty());
+    // In order: each member's own result, then the group's results, then the group's answer.
+    let at = |f: &dyn Fn(&Event) -> bool| r.events.iter().position(|e| f(e)).unwrap();
+    let members: Vec<usize> = results
+        .iter()
+        .map(|m| at(&|e| matches!(e, Event::Command { id, .. } if *id == m.command)))
+        .collect();
+    let listed = at(&|e| matches!(e, Event::GroupCommand { .. }));
+    let answered = at(&|e| matches!(e, Event::Command { result: Ok(o), .. } if *o == sent));
+    assert!(members.windows(2).all(|w| w[0] < w[1]));
+    assert!(members.iter().all(|m| *m < listed) && listed < answered);
 
     r.wait(LAT);
     r.market(es(), 5997.75, 5998.25, 5998.00);
@@ -487,6 +497,24 @@ fn one_members_refusal_doesnt_stop_the_others() {
         Vec::<OrderId>::new()
     );
     assert!(r.group_results().1.is_empty());
+
+    // Every member refused: the group command is refused too, never "done".
+    r.core
+        .restore_groups(vec![group("Ghosts", &["ghost", "phantom"])]);
+    r.collect();
+    let e = r
+        .cmd(Command::GroupFlatten {
+            group: "Ghosts".into(),
+            contract: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::UnknownAccount);
+    assert!(e.message.contains("ghost"), "{}", e.message);
+    assert_eq!(
+        r.group_results().1.len(),
+        2,
+        "each member's reason is still listed"
+    );
 }
 
 /// Groups are saved in the trading file and come back as they were, in order.

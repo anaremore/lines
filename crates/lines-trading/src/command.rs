@@ -227,6 +227,7 @@ pub enum Command {
     /// strategy.
     SetGroupMembers {
         group: String,
+        #[serde(default)]
         members: Vec<AccountId>,
     },
     /// [`Command::CancelAll`] on every member of a group, as one member command each (its own

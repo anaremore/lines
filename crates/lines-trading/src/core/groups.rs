@@ -8,7 +8,9 @@
 //! the member; the same resends and Flatten bookkeeping). Each gets its own `Event::Command`;
 //! then `Event::GroupCommand` lists them, one result per member, and the group command answers
 //! with every order id they name. A member refused (an account not known, a Flatten refused
-//! while the broker is disconnected) doesn't stop the others.
+//! while the broker is disconnected) doesn't stop the others; with every member refused the
+//! group command is refused too (the first member's code and reason), so a way out never
+//! reads as done when nothing was.
 
 use lines_core::UtcMillis;
 
@@ -190,11 +192,27 @@ impl TradingCore {
                 result,
             });
         }
+        // A way out must never read as done when nothing was: with every member refused the
+        // group command is refused too (each member's reason is in the results).
+        let refused = results
+            .iter()
+            .filter_map(|m| m.result.as_ref().err().map(|r| (&m.account, r)))
+            .collect::<Vec<_>>();
+        let all_refused = (!results.is_empty() && refused.len() == results.len()).then(|| {
+            let (account, first) = refused[0];
+            Reject::new(
+                first.code,
+                format!("no account in {name} acted ({account}: {})", first.message),
+            )
+        });
         self.events.push(Event::GroupCommand {
             id: env.id,
             group: name,
             results,
         });
-        Ok(ids)
+        match all_refused {
+            Some(r) => Err(r),
+            None => Ok(ids),
+        }
     }
 }

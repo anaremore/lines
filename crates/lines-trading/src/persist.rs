@@ -554,6 +554,7 @@ mod tests {
         let mut v: Value = serde_json::from_str(V2).unwrap();
         v["version"] = json!(5);
         let account = v["accounts"][0].clone();
+        let long = format!("{} tail", "x".repeat(crate::group::MAX_NAME_CHARS - 1));
         let mut accounts = Vec::new();
         for (id, group) in [
             ("a", Some("Evals")),
@@ -562,6 +563,15 @@ mod tests {
             // v6 counts these as "Evals" (case, spaces): merged, never dropped.
             ("d", Some("evals ")),
             ("e", Some("  ")),
+            // Kept, not dropped: a control character becomes a space, a long name is cut.
+            (
+                "f",
+                Some(
+                    "a
+b",
+                ),
+            ),
+            ("g", Some(&long)),
         ] {
             let mut a = account.clone();
             a["config"]["id"] = json!(id);
@@ -582,7 +592,9 @@ mod tests {
             vec![
                 g("Evals", &["a", "d"]),
                 g("Funded", &["c"]),
-                g("Group", &["e"])
+                g("Group", &["e"]),
+                g("a b", &["f"]),
+                g(&"x".repeat(crate::group::MAX_NAME_CHARS - 1), &["g"]),
             ]
         );
         // What loads is what the core keeps: nothing for `restore_groups` to drop.
