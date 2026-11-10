@@ -34,9 +34,11 @@ use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};
 use lines_indicators::render::{Column, DeltaCandle, build_columns, build_delta_candles};
 use lines_indicators::{Bands, IndicatorConfig, Reset};
 
+use crate::series_pane::{ExtFrame, ExtStatus};
 use crate::study_style::{self, Look};
 use crate::subpane::Scale;
 use crate::theme::Theme;
+use lines_feed::levels::SeriesStudyDef;
 
 struct Study {
     config: IndicatorConfig,
@@ -52,6 +54,10 @@ struct Study {
     approx: bool,
     /// Volume: this frame's bars.
     vol: VolumeFrame,
+    /// An external series study: its definition (from its source, `None` while the source
+    /// isn't registered) and this frame's lines.
+    ext_def: Option<&'static SeriesStudyDef>,
+    ext: ExtFrame,
     error: Option<String>,
     /// The band fill as drawn under the candles (`Theme::under_candles`) for (theme, fill as
     /// styled, nested bands): computed when one of them changes, not every frame.
@@ -133,7 +139,32 @@ fn looks(c: &IndicatorConfig) -> Vec<Look> {
         IndicatorConfig::Volume { style, .. } => {
             study_style::read(style, &study_style::VOLUME).to_vec()
         }
+        IndicatorConfig::External { style, .. } => match ext_def(c) {
+            Some(def) => study_style::read_slice(style, crate::series_pane::part_defs(def)),
+            None => Vec::new(),
+        },
     }
+}
+
+/// An external series study's definition, from its registered source (`None`: the source
+/// isn't registered in this build, or no longer offers it).
+pub fn ext_def(c: &IndicatorConfig) -> Option<&'static SeriesStudyDef> {
+    let IndicatorConfig::External { spec, .. } = c else {
+        return None;
+    };
+    lines_feed::levels::registered()
+        .into_iter()
+        .find(|s| s.id() == spec.source)?
+        .series_studies()
+        .iter()
+        .find(|d| d.id == spec.study)
+}
+
+/// How a lower pane's values print: quantities in the product's format, or plain numbers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ValueFormat {
+    Qty,
+    Number,
 }
 
 /// What a lower pane's title shows.
@@ -147,6 +178,13 @@ pub enum LowerTitle {
         split: bool,
         average: Option<u16>,
     },
+    /// An external series study: its lines' values at the crosshair (else the newest), and
+    /// whether its data is live, stale or missing.
+    Series {
+        def: &'static SeriesStudyDef,
+        values: [Option<f64>; crate::series_pane::MAX_LINES],
+        status: ExtStatus,
+    },
 }
 
 /// A VWAP's line: its study color index and its style's line color (`Theme::study_line`
@@ -154,7 +192,9 @@ pub enum LowerTitle {
 fn vwap_line(c: &IndicatorConfig, looks: &[Look]) -> (u8, Color) {
     let index = match c {
         IndicatorConfig::Vwap { color, .. } => *color,
-        IndicatorConfig::CumDelta { .. } | IndicatorConfig::Volume { .. } => 0,
+        IndicatorConfig::CumDelta { .. }
+        | IndicatorConfig::Volume { .. }
+        | IndicatorConfig::External { .. } => 0,
     };
     (index, looks[study_style::VWAP_LINE].color())
 }
@@ -166,6 +206,7 @@ impl Studies {
                 .into_iter()
                 .map(|config| Study {
                     looks: looks(&config),
+                    ext_def: ext_def(&config),
                     config,
                     handle: None,
                     columns: Vec::new(),
@@ -174,6 +215,7 @@ impl Studies {
                     newest: None,
                     approx: false,
                     vol: VolumeFrame::default(),
+                    ext: ExtFrame::default(),
                     error: None,
                     fill_cap: Cell::new(None),
                     overlay_cap: Cell::new(None),
@@ -242,10 +284,30 @@ impl Studies {
         &mut self,
         bars: BarsView<'_>,
         fp: &Footprint,
+        levels: &crate::levels_layer::LevelsLayer,
         vp: &Viewport,
         max_columns: usize,
     ) {
         for s in &mut self.list {
+            if let IndicatorConfig::External { spec, display, .. } = &s.config {
+                if display.hidden {
+                    continue;
+                }
+                if s.ext_def.is_none() {
+                    // Registered after this chart was made (rare): look again.
+                    s.ext_def = ext_def(&s.config);
+                    s.looks = looks(&s.config);
+                }
+                let Some(def) = s.ext_def else {
+                    s.ext.status = ExtStatus::Missing("source not available");
+                    continue;
+                };
+                s.ext.reserve(def.lines.len(), max_columns * 2 + 64);
+                let axis = lines_core::drawings::TimeAxis::new(bars);
+                s.ext
+                    .build(def, levels.source_view(&spec.source), &axis, vp);
+                continue;
+            }
             if let IndicatorConfig::Volume { spec, display, .. } = &s.config {
                 // A hidden Volume does no work (its buffer included).
                 if display.hidden {
@@ -289,7 +351,7 @@ impl Studies {
                     s.newest = out.candles.last().map(|p| p.close);
                     s.approx = s.candles.iter().any(|c| c.approx);
                 }
-                IndicatorConfig::Volume { .. } => {} // built above, from the bars
+                IndicatorConfig::Volume { .. } | IndicatorConfig::External { .. } => {} // above
             }
             if s.error.is_none()
                 && let Some(e) = &out.error
@@ -499,7 +561,12 @@ impl Studies {
 
     /// Lower pane `k`'s title (`None`: its study's label is off). `hovered`: the bar under
     /// the crosshair (Volume reads that bar, else the newest).
-    pub fn lower_title(&self, k: usize, hovered: Option<usize>) -> Option<LowerTitle> {
+    pub fn lower_title(
+        &self,
+        k: usize,
+        hovered: Option<usize>,
+        hovered_time: Option<lines_core::UtcMillis>,
+    ) -> Option<LowerTitle> {
         let s = self.lower().nth(k)?;
         if !s.config.display().label {
             return None;
@@ -511,7 +578,31 @@ impl Studies {
                 split: spec.split,
                 average: spec.average.then_some(spec.window() as u16),
             }),
+            IndicatorConfig::External { .. } => s.ext_def.map(|def| LowerTitle::Series {
+                def,
+                values: s.ext.values(def, hovered_time),
+                status: s.ext.status,
+            }),
             IndicatorConfig::Vwap { .. } => None,
+        }
+    }
+
+    /// Lower pane `k`'s study: its index among the chart's studies and its configuration (the
+    /// pane's × removes it).
+    pub fn lower_study(&self, k: usize) -> Option<(usize, &IndicatorConfig)> {
+        self.list
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.config.in_subpane() && !s.config.display().hidden)
+            .nth(k)
+            .map(|(i, s)| (i, &s.config))
+    }
+
+    /// How lower pane `k`'s values print.
+    pub fn lower_format(&self, k: usize) -> ValueFormat {
+        match self.lower().nth(k).map(|s| &s.config) {
+            Some(IndicatorConfig::External { .. }) => ValueFormat::Number,
+            _ => ValueFormat::Qty,
         }
     }
 
@@ -520,7 +611,7 @@ impl Studies {
     /// `label_px`: the chart's label text size. The chart uses this one value for the one scale
     /// its bars, range labels, newest tag and crosshair value all read.
     pub fn lower_title_h(&self, k: usize, labels: bool, label_px: f32) -> f32 {
-        if labels && self.lower_title(k, None).is_some() {
+        if labels && self.lower_title(k, None, None).is_some() {
             4.0 + label_px * 1.6 + 4.0
         } else {
             0.0
@@ -537,6 +628,10 @@ impl Studies {
             IndicatorConfig::Volume { .. } => {
                 (!s.vol.bars.is_empty()).then(|| Scale::from_zero_below(s.vol.max, height, title_h))
             }
+            IndicatorConfig::External { .. } => {
+                let (lo, hi) = s.ext.lo_hi?;
+                Some(Scale::fit_below(lo, hi, height, title_h))
+            }
             _ => {
                 let (lo, hi) = s.extent?;
                 Some(Scale::fit(lo, hi, height))
@@ -546,14 +641,21 @@ impl Studies {
 
     /// Lower pane `k`'s range labels on its axis (top, bottom): the visible range's ends for
     /// cumulative delta; the tallest visible bar for Volume (zero is its bottom edge).
-    pub fn lower_marks(&self, k: usize, sc: &Scale) -> [Option<i64>; 2] {
+    pub fn lower_marks(&self, k: usize, sc: &Scale) -> [Option<f64>; 2] {
         match self.lower().nth(k) {
-            Some(s) if matches!(s.config, IndicatorConfig::Volume { .. }) => {
-                [Some(round_down(s.vol.max)).filter(|v| *v > 0), None]
-            }
+            Some(s) if matches!(s.config, IndicatorConfig::Volume { .. }) => [
+                Some(round_down(s.vol.max))
+                    .filter(|v| *v > 0)
+                    .map(|v| v as f64),
+                None,
+            ],
+            Some(s) if matches!(s.config, IndicatorConfig::External { .. }) => s
+                .ext
+                .lo_hi
+                .map_or([None, None], |(lo, hi)| [Some(hi), Some(lo)]),
             Some(_) => [
-                Some((sc.hi - (sc.hi - sc.lo) * 0.08).round() as i64),
-                Some((sc.lo + (sc.hi - sc.lo) * 0.08).round() as i64),
+                Some((sc.hi - (sc.hi - sc.lo) * 0.08).round()),
+                Some((sc.lo + (sc.hi - sc.lo) * 0.08).round()),
             ],
             None => [None, None],
         }
@@ -569,11 +671,13 @@ impl Studies {
     }
 
     /// Lower pane `k`'s newest value (wherever the view is), for its axis tag.
-    pub fn lower_last(&self, k: usize) -> Option<i64> {
+    pub fn lower_last(&self, k: usize) -> Option<f64> {
         let s = self.lower().nth(k)?;
         match &s.config {
-            IndicatorConfig::Volume { .. } => s.vol.newest.map(|v| v.total.0),
-            _ => s.newest,
+            IndicatorConfig::Volume { .. } => s.vol.newest.map(|v| v.total.0 as f64),
+            // Several lines: their values are in the title, not one tag.
+            IndicatorConfig::External { .. } => None,
+            _ => s.newest.map(|v| v as f64),
         }
     }
 
@@ -605,6 +709,20 @@ impl Studies {
                     window,
                 );
                 paint_average(s, spec, origin, scale, vp, theme, window);
+            }
+            IndicatorConfig::External { .. } => {
+                if let Some(def) = s.ext_def {
+                    crate::series_pane::paint(
+                        &s.ext,
+                        def,
+                        &s.looks,
+                        origin,
+                        scale,
+                        vp.width as f32,
+                        theme,
+                        window,
+                    );
+                }
             }
             _ => paint_delta(s, origin, scale, vp, theme, window),
         }
@@ -1115,7 +1233,13 @@ mod tests {
         let fp = Footprint::new(60_000, 10);
         let vp = viewport();
         let mut st = Studies::new(vec![volume(false)]);
-        st.prepare(view, &fp, &vp, 200);
+        st.prepare(
+            view,
+            &fp,
+            &crate::levels_layer::LevelsLayer::new(Default::default()),
+            &vp,
+            200,
+        );
         let label_px = 12.0;
         assert_eq!(st.lower_title_h(0, false, label_px), 0.0, "labels hidden");
         let on = st.lower_title_h(0, true, label_px);
@@ -1123,7 +1247,13 @@ mod tests {
         let mut unlabeled = volume(false);
         unlabeled.display_mut().label = false;
         let mut st2 = Studies::new(vec![unlabeled]);
-        st2.prepare(view, &fp, &vp, 200);
+        st2.prepare(
+            view,
+            &fp,
+            &crate::levels_layer::LevelsLayer::new(Default::default()),
+            &vp,
+            200,
+        );
         assert_eq!(
             st2.lower_title_h(0, true, label_px),
             0.0,
@@ -1144,6 +1274,108 @@ mod tests {
         }
     }
 
+    /// An external series study takes a lower pane like the others; with its source not on
+    /// the chart it says so (never zeros), and a source's study resolves from the registry.
+    #[test]
+    fn external_series_studies_take_a_lower_pane() {
+        use lines_feed::levels::{
+            BoxFuture, ChartPrices, LevelContext, LevelFrame, LevelMap, LevelSource,
+            LevelTransport, RefreshMode, SeriesColor, SeriesLineDef,
+        };
+        struct TestSource;
+        const LINE: SeriesLineDef = SeriesLineDef {
+            key: "osc.a",
+            label: "A",
+            color: SeriesColor::Foreground,
+            line: lines_core::style::LineType::Solid,
+        };
+        const STUDIES: &[SeriesStudyDef] = &[
+            SeriesStudyDef {
+                id: "osc",
+                name: "Osc",
+                lines: &[LINE, LINE, LINE],
+                zero_line: false,
+                stale_after_secs: 300,
+            },
+            SeriesStudyDef {
+                id: "speed",
+                name: "Speed",
+                lines: &[LINE],
+                zero_line: true,
+                stale_after_secs: 300,
+            },
+        ];
+        impl LevelSource for TestSource {
+            fn id(&self) -> &'static str {
+                "series-test"
+            }
+            fn label(&self) -> &'static str {
+                "Series test"
+            }
+            fn serves(&self, _: &Product) -> bool {
+                false
+            }
+            fn refresh(&self) -> RefreshMode {
+                RefreshMode::OneShot
+            }
+            fn stale_after(&self) -> std::time::Duration {
+                std::time::Duration::from_secs(60)
+            }
+            fn series_studies(&self) -> &'static [SeriesStudyDef] {
+                STUDIES
+            }
+            fn connect(
+                &self,
+                _: &LevelContext,
+            ) -> BoxFuture<'static, anyhow::Result<Box<dyn LevelTransport>>> {
+                Box::pin(async { Err(anyhow::anyhow!("test source")) })
+            }
+            fn decode(
+                &self,
+                _: &LevelContext,
+                _: &dyn ChartPrices,
+                _: Option<&LevelMap>,
+                _: &[LevelFrame],
+            ) -> Result<Option<LevelMap>, String> {
+                Ok(None)
+            }
+        }
+        let _ = lines_feed::levels::register(std::sync::Arc::new(TestSource));
+        let ext = |study: &str| IndicatorConfig::External {
+            spec: lines_indicators::ExternalSpec {
+                source: "series-test".into(),
+                study: study.into(),
+            },
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let mut st = Studies::new(vec![volume(false), ext("osc"), ext("speed")]);
+        assert_eq!(st.lower_count(), 3);
+        assert_eq!(st.list[1].looks.len(), 3, "a part per line");
+        let b = bars();
+        let fp = Footprint::new(60_000, 10);
+        let none = crate::levels_layer::LevelsLayer::new(Default::default());
+        st.prepare(BarsView::fixed(&b, 60_000), &fp, &none, &viewport(), 200);
+        let Some(LowerTitle::Series {
+            def,
+            values,
+            status,
+        }) = st.lower_title(1, None, None)
+        else {
+            panic!("a series title")
+        };
+        assert_eq!((def.id, def.lines.len()), ("osc", 3));
+        assert_eq!(status, ExtStatus::Missing("source not on this chart"));
+        assert!(values.iter().all(Option::is_none), "no values, never zeros");
+        assert_eq!(st.lower_scale(1, 100.0, 0.0), None, "nothing to scale");
+        assert_eq!(st.lower_format(1), ValueFormat::Number);
+        assert_eq!(st.lower_format(0), ValueFormat::Qty);
+        assert_eq!(st.lower_study(2).map(|(i, _)| i), Some(2));
+        // An unknown study of a known source: no definition, and it says so.
+        let st = Studies::new(vec![ext("nope")]);
+        assert!(st.list[0].ext_def.is_none());
+    }
+
     /// The lower-pane mechanism: every shown study that declares `in_subpane` gets a pane,
     /// in the studies' order; an overlay or hidden study gets none.
     #[test]
@@ -1151,18 +1383,18 @@ mod tests {
         let st = Studies::new(vec![vwap(Reset::Eth, 0), volume(false), delta()]);
         assert_eq!(st.lower_count(), 2);
         assert!(matches!(
-            st.lower_title(0, None),
+            st.lower_title(0, None, None),
             Some(LowerTitle::Volume { bar: None, .. })
         ));
         assert!(matches!(
-            st.lower_title(1, None),
+            st.lower_title(1, None, None),
             Some(LowerTitle::Delta(..))
         ));
         assert!(st.lower_zero_line(1) && !st.lower_zero_line(0));
         let st = Studies::new(vec![volume(true), delta()]);
         assert_eq!(st.lower_count(), 1, "an overlay draws in the price plot");
         assert!(matches!(
-            st.lower_title(0, None),
+            st.lower_title(0, None, None),
             Some(LowerTitle::Delta(..))
         ));
         let mut hidden = volume(false);
@@ -1179,27 +1411,33 @@ mod tests {
         let fp = Footprint::new(60_000, 10);
         let vp = viewport();
         let mut st = Studies::new(vec![volume(false)]);
-        st.prepare(view, &fp, &vp, 200);
+        st.prepare(
+            view,
+            &fp,
+            &crate::levels_layer::LevelsLayer::new(Default::default()),
+            &vp,
+            200,
+        );
         let Some(LowerTitle::Volume {
             bar: Some(newest),
             average: Some(20),
             ..
-        }) = st.lower_title(0, None)
+        }) = st.lower_title(0, None, None)
         else {
             panic!("a readout")
         };
         assert_eq!((newest.bar, newest.total), (59, lines_core::Qty(69)));
         let Some(LowerTitle::Volume {
             bar: Some(hovered), ..
-        }) = st.lower_title(0, Some(40))
+        }) = st.lower_title(0, Some(40), None)
         else {
             panic!("a readout")
         };
         assert_eq!(hovered.total, lines_core::Qty(50));
-        assert_eq!(st.lower_last(0), Some(69));
+        assert_eq!(st.lower_last(0), Some(69.0));
         let sc = st.lower_scale(0, 100.0, 0.0).unwrap();
         assert_eq!(sc.y(0.0), 100.0, "zero on the bottom edge");
-        assert_eq!(st.lower_marks(0, &sc), [Some(69), None]);
+        assert_eq!(st.lower_marks(0, &sc), [Some(69.0), None]);
         // Below the title box: the tallest bar's top clears it.
         let sc = st.lower_scale(0, 100.0, 30.0).unwrap();
         assert!(sc.y(69.0) >= 30.0, "{}", sc.y(69.0));
@@ -1209,7 +1447,13 @@ mod tests {
         let mut hidden = volume(false);
         hidden.display_mut().hidden = true;
         let mut st = Studies::new(vec![hidden]);
-        st.prepare(view, &fp, &vp, 200);
+        st.prepare(
+            view,
+            &fp,
+            &crate::levels_layer::LevelsLayer::new(Default::default()),
+            &vp,
+            200,
+        );
         assert!(st.list[0].vol.bars.is_empty() && st.list[0].vol.newest.is_none());
         assert_eq!(
             st.list[0].vol.bars.capacity(),

@@ -14,8 +14,76 @@ use serde::Deserialize;
 
 use super::{
     BoxFuture, ChartPrices, LevelContext, LevelFrame, LevelMap, LevelMeta, LevelSource, LevelStyle,
-    LevelTransport, LevelValue, RefreshMode,
+    LevelTransport, LevelValue, RefreshMode, Series, SeriesColor, SeriesLineDef, SeriesStudyDef,
 };
+use lines_core::style::LineType;
+
+/// Two synthetic lower-pane studies (decision 0010: synthetic): three lines around 20 and one
+/// line swinging around zero, a value a minute over the synthetic sessions, with a gap.
+pub const SERIES_STUDIES: &[SeriesStudyDef] = &[
+    SeriesStudyDef {
+        id: "osc",
+        name: "Demo oscillator",
+        lines: &[
+            SeriesLineDef {
+                key: "osc.a",
+                label: "A",
+                color: SeriesColor::Foreground,
+                line: LineType::Solid,
+            },
+            SeriesLineDef {
+                key: "osc.b",
+                label: "B",
+                color: SeriesColor::Orange,
+                line: LineType::Dashed,
+            },
+            SeriesLineDef {
+                key: "osc.c",
+                label: "C",
+                color: SeriesColor::Blue,
+                line: LineType::Dotted,
+            },
+        ],
+        zero_line: false,
+        stale_after_secs: 300,
+    },
+    SeriesStudyDef {
+        id: "speed",
+        name: "Demo speed",
+        lines: &[SeriesLineDef {
+            key: "speed",
+            label: "Speed",
+            color: SeriesColor::Amber,
+            line: LineType::Solid,
+        }],
+        zero_line: true,
+        stale_after_secs: 300,
+    },
+];
+
+/// The synthetic series: one point a minute from `from` to `to`, a gap of `gap` minutes
+/// starting `gap_at` minutes in. Deterministic.
+fn demo_series(key: &str, from: i64, to: i64, f: impl Fn(f64) -> f64) -> Series {
+    const MIN: i64 = 60_000;
+    let (gap_at, gap) = (from + 420 * MIN, 20 * MIN);
+    let mut points = Vec::new();
+    let mut t = from;
+    while t <= to {
+        if !(gap_at..gap_at + gap).contains(&t) {
+            let x = ((t - from) / MIN) as f64;
+            points.push((UtcMillis(t), (f(x) * 100.0).round() / 100.0));
+        }
+        t += MIN;
+    }
+    Series {
+        key: key.to_owned(),
+        points,
+        segments: vec![
+            (UtcMillis(from), UtcMillis(gap_at - MIN)),
+            (UtcMillis(gap_at + gap), UtcMillis(to)),
+        ],
+    }
+}
 
 pub const ID: &str = "demo";
 
@@ -106,6 +174,9 @@ impl LevelSource for DemoLevels {
     fn stale_after(&self) -> Duration {
         Duration::from_secs(24 * 3600)
     }
+    fn series_studies(&self) -> &'static [SeriesStudyDef] {
+        SERIES_STUDIES
+    }
     fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
         Box::pin(async { Ok(Box::new(DemoTransport) as Box<dyn LevelTransport>) })
     }
@@ -179,6 +250,23 @@ impl LevelSource for DemoLevels {
                     provenance: Some("chart open at anchor + offset".into()),
                 },
             );
+        }
+        // The synthetic series over the synthetic sessions (2026-11-05, 08:00-22:00 UTC).
+        let (from, to) = (
+            time("2026-11-05T08:00:00")?.0,
+            time("2026-11-05T22:00:00")?.0,
+        );
+        let sin = |x: f64, p: f64| (x / p).sin();
+        let series = [
+            demo_series("osc.a", from, to, |x| 22.0 + 3.0 * sin(x, 47.0)),
+            demo_series("osc.b", from, to, |x| 21.0 + 4.0 * sin(x + 30.0, 61.0)),
+            demo_series("osc.c", from, to, |x| 29.0 + 2.5 * sin(x, 83.0)),
+            demo_series("speed", from, to, |x| {
+                0.9 * sin(x, 37.0) + 0.3 * sin(x, 11.0)
+            }),
+        ];
+        for s in series {
+            b = b.series(std::sync::Arc::new(s));
         }
         b.build(ctx.product.price.tick)
             .map(Some)

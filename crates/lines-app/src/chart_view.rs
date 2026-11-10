@@ -181,6 +181,12 @@ enum LabelKind {
     SubCross,
     /// A part of Volume's title readout (`VOL_*`), keyed by its value.
     Volume(u8),
+    /// An external series pane's title: its name, a line's label and value, its state.
+    SeriesName,
+    SeriesValue(u8),
+    SeriesState,
+    /// A lower pane's close button (×).
+    PaneClose,
     CrossTime,
     Indicator,
     /// A drawing's price tag on the axis, its text in the drawing's color (when AA on the
@@ -193,6 +199,9 @@ enum LabelKind {
     /// offset: an abbreviation changes with it).
     Zone,
 }
+
+/// A lower pane's × (logical px square): its hit target.
+const CLOSE_BOX: f32 = 20.0;
 
 /// Volume's title parts (`LabelKind::Volume`): its name alone, "Volume N", "avg N", "buy N",
 /// "sell N", "no side N".
@@ -392,6 +401,8 @@ pub struct ChartView {
     subpane_ratios: [f32; crate::subpane::MAX_PANES],
     /// This frame's plot and lower panes (`None`: no lower pane).
     split: Option<crate::subpane::Stack>,
+    /// Each lower pane's × as last drawn (plot-local top-left; `CLOSE_BOX` square).
+    lower_close: [Option<(f32, f32)>; crate::subpane::MAX_PANES],
     /// Height above the time axis this frame (the plot plus any sub-pane).
     above_axis: f32,
     /// The pointer is in lower pane `k`, this far below its top: the crosshair's vertical
@@ -702,6 +713,7 @@ impl ChartView {
             footprint: crate::footprint::FootprintLayer::new(Default::default()),
             subpane_ratios: std::array::from_fn(crate::subpane::default_ratio),
             split: None,
+            lower_close: [None; crate::subpane::MAX_PANES],
             above_axis: 0.0,
             cross_in_sub: None,
             fp_seen: Default::default(),
@@ -902,6 +914,16 @@ impl ChartView {
             .sources()
             .into_iter()
             .map(|(id, label, kinds)| SourceInfo {
+                series: lines_feed::levels::registered()
+                    .iter()
+                    .find(|s| s.id() == id)
+                    .map(|s| {
+                        s.series_studies()
+                            .iter()
+                            .map(|d| (d.id.to_owned(), d.name.to_owned()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 id,
                 label: label.to_owned(),
                 kinds,
@@ -986,6 +1008,9 @@ impl ChartView {
                 }
                 ["volume", i, rest @ ..] => {
                     Some((StudyRef::Volume(i.parse().ok()?), n(rest.first())))
+                }
+                ["external", i, rest @ ..] => {
+                    Some((StudyRef::External(i.parse().ok()?), n(rest.first())))
                 }
                 ["profile", rest @ ..] => Some((StudyRef::Profile, n(rest.first()))),
                 ["footprint", rest @ ..] => Some((StudyRef::Footprint, n(rest.first()))),
@@ -1075,6 +1100,17 @@ impl ChartView {
                     "Volume".to_owned(),
                     &ss::VOLUME,
                     ss::read(c.style(), &ss::VOLUME).to_vec(),
+                    None,
+                )
+            }
+            StudyRef::External(i) => {
+                let c = set.indicators.get(*i)?;
+                let def = crate::studies::ext_def(c)?;
+                let defs = crate::series_pane::part_defs(def);
+                (
+                    def.name.to_owned(),
+                    defs,
+                    ss::read_slice(c.style(), defs),
                     None,
                 )
             }
@@ -1433,6 +1469,14 @@ impl ChartView {
         }
         self.end_drag();
         let (x, y) = self.local(ev.position);
+        // A lower pane's ×: its study goes (as Remove in the studies menu).
+        if region == Region::Sub
+            && let Some(k) = self.close_hit(x as f32, y as f32)
+        {
+            self.remove_lower(k);
+            cx.notify();
+            return;
+        }
         if self
             .strip_box()
             .is_some_and(|b| b.contains(x as f32, y as f32))
@@ -4221,6 +4265,7 @@ impl ChartView {
                 }
             }
         });
+        self.lower_close = [None; crate::subpane::MAX_PANES];
         if let Some(st) = self.split {
             for (k, s) in st.panes().iter().enumerate() {
                 self.draw_subpane(k, *s, bounds, window, cx);
@@ -4505,6 +4550,30 @@ impl ChartView {
     }
 
     /// Price tag on the price axis and time tag on the time axis, drawn over the axis labels.
+    /// Lower pane `k`'s × under plot-local (`x`, `y`), as last drawn.
+    fn close_hit(&self, x: f32, y: f32) -> Option<usize> {
+        self.lower_close.iter().position(|b| {
+            b.is_some_and(|(bx, by)| x >= bx && x < bx + CLOSE_BOX && y >= by && y < by + CLOSE_BOX)
+        })
+    }
+
+    /// Remove lower pane `k`'s study (its ×).
+    fn remove_lower(&mut self, k: usize) {
+        use lines_indicators::IndicatorConfig as C;
+        let Some((i, c)) = self.studies.lower_study(k) else {
+            return;
+        };
+        let r = match c {
+            C::CumDelta { .. } => StudyRef::Delta(i),
+            C::Volume { .. } => StudyRef::Volume(i),
+            C::External { .. } => StudyRef::External(i),
+            C::Vwap { .. } => return,
+        };
+        let mut s = self.study_set();
+        s.apply(&StudyAction::Remove(r));
+        self.set_study_set(s);
+    }
+
     /// Lower pane `k` (`crate::subpane`) below the plot: background, the divider, the time
     /// grid (shared with the plot), its study (`Studies::paint_lower`), its scale's labels on
     /// the axis, its title (with Volume's readout of the bar under the crosshair), and the
@@ -4566,8 +4635,22 @@ impl ChartView {
         let title = self
             .visibility
             .draws_labels()
-            .then(|| self.studies.lower_title(k, self.cross.and_then(|c| c.bar)))
+            .then(|| {
+                self.studies.lower_title(
+                    k,
+                    self.cross.and_then(|c| c.bar),
+                    self.cross.and_then(|c| c.time),
+                )
+            })
             .flatten();
+        if let Some(crate::studies::LowerTitle::Series {
+            def,
+            values,
+            status,
+        }) = title
+        {
+            self.draw_series_title(s, def, &values, status, (ox, oy), window, cx);
+        }
         if let Some(crate::studies::LowerTitle::Volume {
             bar,
             split,
@@ -4623,24 +4706,65 @@ impl ChartView {
                 );
             }
         }
+        // Its × at the top-right: removes the study (a 20 px target).
+        let (cbx, cby) = (pw - CLOSE_BOX - 2.0, s.sub_top + 2.0);
+        if cbx > 8.0 {
+            self.lower_close[k] = Some((cbx, cby));
+            let close = |b: &mut FixedStr<32>| {
+                let _ = b.write_str("×");
+            };
+            let w = f32::from(
+                self.label(LabelKind::PaneClose, 0, t.text_dim, window, close)
+                    .width,
+            );
+            let at = point(
+                px(ox + cbx + (CLOSE_BOX - w) * 0.5),
+                px(oy + cby + CLOSE_BOX * 0.5 - label_px() * 0.65),
+            );
+            self.paint_label(
+                LabelKind::PaneClose,
+                0,
+                at,
+                px(label_px() * 1.3),
+                t.text_dim,
+                window,
+                cx,
+                close,
+            );
+        }
         // The axis beside it and the time axis below: borders; the visible range's ends and the
         // newest value.
         window.paint_quad(fill(rect(pw, s.sub_top, hair, s.sub_h), t.axis_line));
         window.paint_quad(fill(rect(0.0, s.sub_top + s.sub_h, pw, hair), t.axis_line));
         let Some(sc) = scale else { return };
         let line_h = px(label_px() * 1.3);
-        // Cumulative delta and volume are quantities: printed in the product's quantity format.
+        // Cumulative delta and volume are quantities: printed in the product's quantity format;
+        // an external series' values are plain numbers. Cached by kind and `key` (a number's in
+        // hundredths, in its own range so it never meets a quantity's).
         let qty = self.instrument.qty;
-        let value = |v: i64| {
+        let fmt = self.studies.lower_format(k);
+        let number = fmt == crate::studies::ValueFormat::Number;
+        let key = move |v: f64| {
+            if number {
+                (v * 100.0).round() as i64 ^ (1 << 60)
+            } else {
+                v.round() as i64
+            }
+        };
+        let value = move |v: f64| {
             move |b: &mut FixedStr<32>| {
-                let _ = qty.write(lines_core::Qty(v), b);
+                if number {
+                    crate::series_pane::write_value(v, b);
+                } else {
+                    let _ = qty.write(lines_core::Qty(v.round() as i64), b);
+                }
             }
         };
         let marks = self.studies.lower_marks(k, &sc);
         // The newest value's tag, and range labels only where it leaves them whole (as the
         // price axis: a half-covered number reads as another value).
         let newest = self.studies.lower_last(k).map(|last| {
-            let y = (s.sub_top + sc.y(last as f64)).clamp(
+            let y = (s.sub_top + sc.y(last)).clamp(
                 s.sub_top + tag_h() * 0.5,
                 s.sub_top + s.sub_h - tag_h() * 0.5,
             );
@@ -4648,14 +4772,14 @@ impl ChartView {
         });
         let tag = newest.map(|(_, y)| Span::around(y, tag_h() * 0.5));
         for v in marks.into_iter().flatten() {
-            let y = s.sub_top + sc.y(v as f64);
+            let y = s.sub_top + sc.y(v);
             if !label_clear_of_tags(Span::around(y, label_px() * 0.65), &[tag]) {
                 continue;
             }
             let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubValue,
-                v,
+                key(v),
                 origin,
                 line_h,
                 t.text_dim,
@@ -4673,7 +4797,7 @@ impl ChartView {
             let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubLast,
-                last,
+                key(last),
                 origin,
                 line_h,
                 t.bg,
@@ -4684,7 +4808,11 @@ impl ChartView {
         }
         // The pointer in the sub-pane: its value on the axis, in the crosshair tag's style.
         if let Some(cy) = cross_in {
-            let v = sc.value(cy).round() as i64;
+            let v = if number {
+                (sc.value(cy) * 100.0).round() / 100.0
+            } else {
+                sc.value(cy).round()
+            };
             let y = (s.sub_top + cy).clamp(
                 s.sub_top + tag_h() * 0.5,
                 s.sub_top + s.sub_h - tag_h() * 0.5,
@@ -4696,7 +4824,7 @@ impl ChartView {
             let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubCross,
-                v,
+                key(v),
                 origin,
                 line_h,
                 t.on_cross_tag,
@@ -4704,6 +4832,136 @@ impl ChartView {
                 cx,
                 value(v),
             );
+        }
+    }
+
+    /// An external series study's title at its pane's top-left, on the legend box: its name,
+    /// each line's label and value at the crosshair (else the newest) in its line's color where
+    /// that is AA on the box (else the theme's text), and STALE or why there is nothing.
+    /// Parts that don't fit are left out whole.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_series_title(
+        &mut self,
+        s: crate::subpane::Split,
+        def: &'static lines_feed::levels::SeriesStudyDef,
+        values: &[Option<f64>; crate::series_pane::MAX_LINES],
+        status: crate::series_pane::ExtStatus,
+        (ox, oy): (f32, f32),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        use crate::series_pane::ExtStatus;
+        let t = self.theme;
+        // Keys: the study's name (by its address), each line's part by line and value.
+        let study = def as *const _ as usize as i64;
+        let pw = f32::from(self.plot.size.width);
+        let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
+        let gap = 12.0;
+        let room = pw - bx - 16.0 - CLOSE_BOX;
+        // (kind, key, color, width) of each part, in order; at most a name, 8 lines, a state.
+        let mut parts: [(LabelKind, i64, Hsla, f32); 10] =
+            [(LabelKind::SeriesName, 0, t.text_main, 0.0); 10];
+        let mut n = 0;
+        let name = move |b: &mut FixedStr<32>| {
+            let _ = b.write_str(def.name);
+        };
+        let w = f32::from(
+            self.label(LabelKind::SeriesName, study, t.text_main, window, name)
+                .width,
+        );
+        parts[n] = (LabelKind::SeriesName, study, t.text_main, w);
+        n += 1;
+        let line_text = move |i: usize, v: f64| {
+            move |b: &mut FixedStr<32>| {
+                let _ = write!(b, "{} ", def.lines[i].label);
+                crate::series_pane::write_value(v, b);
+            }
+        };
+        for (i, line) in def
+            .lines
+            .iter()
+            .enumerate()
+            .take(crate::series_pane::MAX_LINES)
+        {
+            let Some(v) = values[i] else { continue };
+            let base = t.series[crate::series_pane::series_index(line.color)];
+            let color = t.legend_text(base);
+            let key = study
+                .wrapping_mul(31)
+                .wrapping_add((v * 100.0).round() as i64);
+            let w = f32::from(
+                self.label(
+                    LabelKind::SeriesValue(i as u8),
+                    key,
+                    color,
+                    window,
+                    line_text(i, v),
+                )
+                .width,
+            );
+            parts[n] = (LabelKind::SeriesValue(i as u8), key, color, w);
+            n += 1;
+        }
+        let state = match status {
+            ExtStatus::Live => None,
+            ExtStatus::Stale => Some(("STALE", 1)),
+            ExtStatus::Missing(why) => Some((why, 2)),
+        };
+        if let Some((text, key)) = state {
+            let c = if key == 1 { t.on_warn } else { t.text_dim };
+            let w = f32::from(
+                self.label(LabelKind::SeriesState, key, c, window, move |b| {
+                    let _ = b.write_str(text);
+                })
+                .width,
+            );
+            parts[n] = (LabelKind::SeriesState, key, c, w);
+            n += 1;
+        }
+        let mut used = 0.0;
+        let mut shown = 0;
+        for (i, p) in parts[..n].iter().enumerate() {
+            let next = used + if i == 0 { p.3 } else { gap + p.3 };
+            if next > room {
+                break;
+            }
+            used = next;
+            shown += 1;
+        }
+        if shown == 0 {
+            return;
+        }
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
+        };
+        window.paint_quad(fill(rect(bx, by, used + 16.0, bh), t.label_bg));
+        let line_h = px(label_px() * 1.3);
+        let ty = oy + by + bh * 0.5 - label_px() * 0.65;
+        let mut x = bx + 8.0;
+        for (i, &(kind, key, c, w)) in parts[..shown].iter().enumerate() {
+            if kind == LabelKind::SeriesState && key == 1 {
+                // STALE on the warn token: a state, said in words and on its own chip.
+                window.paint_quad(fill(rect(x - 3.0, by + 2.0, w + 6.0, bh - 4.0), t.warn));
+            }
+            let at = point(px(ox + x), px(ty));
+            match kind {
+                LabelKind::SeriesName => {
+                    self.paint_label(kind, key, at, line_h, c, window, cx, name);
+                }
+                LabelKind::SeriesValue(li) => {
+                    let li = usize::from(li);
+                    if let Some(v) = values[li] {
+                        self.paint_label(kind, key, at, line_h, c, window, cx, line_text(li, v));
+                    }
+                }
+                _ => {
+                    let text = state.map_or("", |s| s.0);
+                    self.paint_label(kind, key, at, line_h, c, window, cx, move |b| {
+                        let _ = b.write_str(text);
+                    });
+                }
+            }
+            x += w + if i + 1 < shown { gap } else { 0.0 };
         }
     }
 
@@ -6774,7 +7032,7 @@ fn prepare_studies(
     for l in layers {
         l.prepare(d, bars, vp);
     }
-    studies.prepare(bars, d.profiles.footprint(), vp, max_columns);
+    studies.prepare(bars, d.profiles.footprint(), &*levels, vp, max_columns);
     let last_y = d.last_trade.map(|p| vp.price_to_y(p.0 as f64) as f32);
     levels.prepare(d, bars, vp, last_y);
 }

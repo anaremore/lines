@@ -95,6 +95,11 @@ pub struct Theme {
     /// The chart's Volume study: its plain bars. Neutral (never up/down, the accent or a study
     /// color), at least 3:1 on the chart background (tested): they are the data.
     pub volume: Hsla,
+    /// External lower-pane line series (`lines_feed::levels::SeriesColor`): the strongest
+    /// foreground (white on dark, near-black on light), orange, blue and amber. Each at least
+    /// 3:1 on the chart background in every theme and palette, the first three clearly apart
+    /// (tested); a study's lines also differ by line type, never by color alone.
+    pub series: [Hsla; 4],
     /// T&S: background of a large print (with bold text).
     pub large_print: Hsla,
     /// Link group swatches A..D (decision 0016). Always shown with the group's letter, so a
@@ -313,6 +318,7 @@ impl Theme {
             T::Down => self.down,
             T::Neutral => self.text_dim,
             T::Volume => self.volume,
+            T::Series(i) => self.series[usize::from(i) % self.series.len()],
             T::Text => self.text_main,
             T::ProfileBuy => self.profile_buy,
             T::ProfileSell => self.profile_sell,
@@ -542,6 +548,7 @@ impl Theme {
             inside_ask: c(down).opacity(0.30),
             volume_bar: c(0x9a9fb2).opacity(0.18),
             volume: c(0x7d7d84),
+            series: [c(0xffffff), c(0xff9a3c), c(0x5aa9ff), c(0xf2c14e)],
             large_print: c(0x262b39),
             // amber, teal, orchid, slate
             link: [c(0xe0a84a), c(0x3fb8c4), c(0xc77ddb), c(0xb8bccb)],
@@ -603,6 +610,7 @@ impl Theme {
             inside_ask: c(down).opacity(0.22),
             volume_bar: c(0x565b6e).opacity(0.14),
             volume: c(0x84848b),
+            series: [c(brand::INK), c(0xb35400), c(0x1f5fbf), c(0x8a6200)],
             large_print: c(brand::PAPER),
             link: [c(0x9a6a10), c(0x13808b), c(0x8d3fa3), c(0x5d6275)],
             study: [c(0x7a5c00), c(0x00666b), c(0x4a4f63), c(0x8f2f78)],
@@ -1056,6 +1064,26 @@ mod tests {
 
     /// The Volume study's neutral bars read as data on the chart (3:1, WCAG 1.4.11) and are
     /// never mistaken for a direction or the accent.
+    /// Series lines read as data (3:1 on the chart) in every theme and palette, and a
+    /// three-line study's colors stay clearly apart.
+    #[test]
+    fn series_colors_contrast_and_stay_apart() {
+        for t in Theme::all() {
+            for (i, c) in t.series.iter().enumerate() {
+                assert!(
+                    contrast(*c, t.bg) >= 3.0,
+                    "{}: series {i}: {}",
+                    t.name,
+                    contrast(*c, t.bg)
+                );
+            }
+            for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+                let de = delta_e_2000(t.series[i], t.series[j]);
+                assert!(de > 20.0, "{}: series {i} and {j}: {de}", t.name);
+            }
+        }
+    }
+
     #[test]
     fn volume_bars_contrast_and_stay_neutral() {
         for t in Theme::all() {

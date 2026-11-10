@@ -65,6 +65,8 @@ pub enum OwnToken {
     Neutral,
     /// The Volume study's neutral bars (`Theme::volume`).
     Volume,
+    /// An external series line's theme role (`Theme::series`, by index).
+    Series(u8),
     Text,
     ProfileBuy,
     ProfileSell,

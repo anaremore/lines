@@ -6,6 +6,7 @@ fn sources() -> Vec<SourceInfo> {
         id: "demo".into(),
         label: "Demo levels".into(),
         kinds: vec!["pivot".into(), "zone".into()],
+        series: Vec::new(),
     }]
 }
 
@@ -205,6 +206,59 @@ fn volume_is_a_study_with_its_options() {
     assert!(matches!(
         set.indicators.as_slice(),
         [IndicatorConfig::CumDelta { .. }]
+    ));
+}
+
+/// A level source's lower-pane series studies (decision 0022) are studies: each listed under
+/// its source on charts it serves, added once, named on the chart, and removed like the rest.
+#[test]
+fn a_sources_series_studies_are_offered_added_and_removed() {
+    use lines_indicators::IndicatorConfig;
+    let src = vec![SourceInfo {
+        id: "demo".into(),
+        label: "Demo levels".into(),
+        kinds: vec![],
+        series: vec![
+            ("osc".into(), "Demo oscillator".into()),
+            ("speed".into(), "Demo speed".into()),
+        ],
+    }];
+    let mut set = StudySet::default();
+    let l = labels(&StudyMenu::default().items(&input(&set, &src, &[])));
+    assert!(
+        l.contains(&"+ Demo oscillator · Demo levels".to_owned()),
+        "{l:?}"
+    );
+    assert!(
+        l.contains(&"+ Demo speed · Demo levels".to_owned()),
+        "{l:?}"
+    );
+    set.apply(&StudyAction::AddExternal("demo".into(), "osc".into()));
+    set.apply(&StudyAction::AddExternal("demo".into(), "osc".into()));
+    set.apply(&StudyAction::AddExternal("demo".into(), "speed".into()));
+    assert_eq!(set.indicators.len(), 2, "each once");
+    assert!(
+        set.indicators.iter().all(IndicatorConfig::in_subpane),
+        "own panes"
+    );
+    let l = labels(&StudyMenu::default().items(&input(&set, &src, &[])));
+    assert!(
+        l.contains(&"Demo oscillator · Demo levels".to_owned()),
+        "{l:?}"
+    );
+    assert!(
+        !l.iter().any(|x| x.starts_with("+ Demo")),
+        "not offered again: {l:?}"
+    );
+    // Without the source (another product), the study stays and is named by its ids.
+    let l = labels(&StudyMenu::default().items(&input(&set, &[], &[])));
+    assert!(l.contains(&"osc · demo".to_owned()), "{l:?}");
+    let back: StudySet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+    assert_eq!(back, set);
+    set.apply(&StudyAction::Remove(StudyRef::External(0)));
+    assert!(matches!(
+        set.indicators.as_slice(),
+        [IndicatorConfig::External { spec, .. }] if spec.study == "speed"
     ));
 }
 

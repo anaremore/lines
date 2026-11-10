@@ -402,6 +402,38 @@ pub fn read<const N: usize>(map: &PartStyles, defs: &[PartDef; N]) -> [Look; N] 
     defs.map(|d| read_part(map.get(d.key), &d))
 }
 
+/// [`read`] for parts known only at run time (an external series study's lines).
+pub fn read_slice(map: &PartStyles, defs: &[PartDef]) -> Vec<Look> {
+    defs.iter().map(|d| read_part(map.get(d.key), d)).collect()
+}
+
+/// An external series line's part (`crate::series_pane`): a line in its theme role's color
+/// (`Theme::series`) and the source's line type, 2 wide.
+pub fn series_part(
+    key: &'static str,
+    title: &'static str,
+    color: lines_feed::levels::SeriesColor,
+    line_type: LineType,
+) -> PartDef {
+    PartDef {
+        key,
+        title,
+        style: PartStyle::Line(LineStyle {
+            color: Color::Own,
+            line: line_type,
+            width: 2,
+            opacity: 100,
+        }),
+        stroke: true,
+        own: own(
+            "Theme",
+            OwnToken::Series(crate::series_pane::series_index(color) as u8),
+        ),
+        optional: false,
+        note: Some("Each line keeps its own line type, so lines never differ by color alone."),
+    }
+}
+
 fn set(o: &mut Map<String, Value>, key: &str, v: Option<Value>) {
     match v {
         Some(v) => {
