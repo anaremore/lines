@@ -1615,17 +1615,6 @@ where
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    // Whether a source in this run serves futures (ES): the first-run workspace is `pair`
-    // then, else BTC/USD (a public build's plain run, decision 0030).
-    let futures = run_sources
-        .iter()
-        .filter_map(|(_, cfg)| lines_feed::availability::availability(&cfg.source).ok())
-        .any(|a| {
-            a.check(&lines_feed::catalog::Target::Product(
-                lines_feed::catalog::ES,
-            ))
-            .is_ok()
-        });
     let env = PaneEnv {
         sources: sources::Sources::new(entries, limited),
         theme: std::cell::Cell::new(theme),
@@ -1715,12 +1704,15 @@ where
         })),
         default_size: cli.size,
     };
+    // What a first run opens on: `pair` with a futures source, else a symbol a source in
+    // this run serves (a public build's plain run: BTC/USD), decision 0030.
+    let first_run = env.sources.first_run_product();
     let registry = FeedRegistry::new();
 
     if frozen || bench {
         // Built-ins or explicit files only: these modes never read user settings.
         let mut doc = match (&cli.workspace, cli.layout) {
-            (Some(w), _) => fixed_workspace(w, futures)?,
+            (Some(w), _) => fixed_workspace(w, first_run)?,
             (None, Some(l)) => preset_doc(l),
             (None, None) if bench => WorkspaceDoc::bench(),
             (None, None) => preset_doc(LayoutKind::Trading),
@@ -1861,14 +1853,14 @@ where
                     autosave = false;
                 }
                 l.value
-                    .unwrap_or_else(|| WorkspaceDoc::first_run(futures))
+                    .unwrap_or_else(|| WorkspaceDoc::first_run(first_run))
             }
-            None => WorkspaceDoc::first_run(futures),
+            None => WorkspaceDoc::first_run(first_run),
         },
     };
     if let Err(e) = doc.normalise() {
         reports.push(format!("saved workspace: {e}; loaded the default"));
-        doc = WorkspaceDoc::first_run(futures);
+        doc = WorkspaceDoc::first_run(first_run);
     }
     if instrument.is_some() {
         doc.retarget_all(instrument);
@@ -1979,9 +1971,10 @@ fn preset_doc(l: LayoutKind) -> WorkspaceDoc {
 
 /// Screenshot/benchmark workspaces: a built-in, `first-run` (what a first run opens with
 /// this run's sources), or a workspace file given by path.
-fn fixed_workspace(w: &str, futures: bool) -> Result<WorkspaceDoc> {
-    if w.eq_ignore_ascii_case("first-run") {
-        return Ok(WorkspaceDoc::first_run(futures));
+fn fixed_workspace(w: &str, first_run: Option<lines_core::ProductId>) -> Result<WorkspaceDoc> {
+    // A file of that name wins: `first-run` is only the choice when no such file exists.
+    if w.eq_ignore_ascii_case("first-run") && !std::path::Path::new(w).exists() {
+        return Ok(WorkspaceDoc::first_run(first_run));
     }
     if let Some(doc) = wsdoc::builtin(w) {
         return Ok(doc);

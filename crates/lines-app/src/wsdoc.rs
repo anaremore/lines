@@ -681,17 +681,17 @@ impl WorkspaceDoc {
     }
 
     /// The workspace a first run opens (and a saved one that can't be read falls back to):
-    /// `pair` when a source in the run serves futures (ES); else BTC/USD (Coinbase) as chart,
-    /// DOM and time & sales in link group A, since a public build has no futures source and
-    /// a first run must never open on panes no source can show (decision 0030).
-    pub fn first_run(futures: bool) -> WorkspaceDoc {
-        if futures {
+    /// `pair` (`None`: a source in the run serves futures); else this product as chart, DOM
+    /// and time & sales in link group A (`Sources::first_run_product`: a public build has no
+    /// futures source, and a first run must never open on panes no source can show).
+    pub fn first_run(product: Option<ProductId>) -> WorkspaceDoc {
+        let Some(p) = product else {
             return WorkspaceDoc::pair();
-        }
+        };
         WorkspaceDoc::single(
             "default",
             trading_group(Some(0), &mut |k, l| {
-                PaneDoc::new(k, l, Some(TargetDoc::product(catalog::BTC_USD)))
+                PaneDoc::new(k, l, Some(TargetDoc::product(p)))
             }),
         )
     }
@@ -2199,8 +2199,8 @@ mod tests {
     /// futures source, else BTC/USD (Coinbase) as chart, DOM and time & sales.
     #[test]
     fn a_first_run_opens_on_what_its_sources_serve() {
-        assert_eq!(WorkspaceDoc::first_run(true), WorkspaceDoc::pair());
-        let w = WorkspaceDoc::first_run(false);
+        assert_eq!(WorkspaceDoc::first_run(None), WorkspaceDoc::pair());
+        let w = WorkspaceDoc::first_run(Some(catalog::BTC_USD));
         let panes = w.windows[0].tabs[0].layout.leaves();
         let kinds: Vec<PaneKind> = panes.iter().map(|p| p.kind).collect();
         assert!(kinds.contains(&PaneKind::Chart) && kinds.contains(&PaneKind::Dom));
