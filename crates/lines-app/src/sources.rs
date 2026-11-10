@@ -309,6 +309,26 @@ pub fn pick_if(open: bool, feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Pic
     }
 }
 
+/// The pane's source as its header names it after the contract ("ESZ26 (Replay)"), in a run
+/// with several sources (decision 0030); nothing when one source serves the run.
+pub fn header_tag(feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Option<String> {
+    let env = crate::workspace::try_env(cx)?;
+    let sources = &env.sources;
+    if sources.limited() || sources.all().len() < 2 {
+        return None;
+    }
+    Some(source_label(current(sources, feed)))
+}
+
+/// Append the header tag to a header's contract text.
+pub fn write_header_tag(out: &mut String, feed: &crate::feeds::PaneFeed, cx: &gpui::App) {
+    if let Some(tag) = header_tag(feed, cx) {
+        out.push_str(" (");
+        out.push_str(&tag);
+        out.push(')');
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,22 +519,3 @@ mod tests {
     }
 }
 
-/// The pane's source as its header names it after the contract ("ESZ26 (Replay)"), in a run
-/// with several sources (decision 0030); nothing when one source serves the run.
-pub fn header_tag(feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Option<String> {
-    let env = crate::workspace::try_env(cx)?;
-    let sources = &env.sources;
-    if sources.limited() || sources.all().len() < 2 {
-        return None;
-    }
-    Some(source_label(current(sources, feed)))
-}
-
-/// Append the header tag to a header's contract text.
-pub fn write_header_tag(out: &mut String, feed: &crate::feeds::PaneFeed, cx: &gpui::App) {
-    if let Some(tag) = header_tag(feed, cx) {
-        out.push_str(" (");
-        out.push_str(&tag);
-        out.push(')');
-    }
-}
