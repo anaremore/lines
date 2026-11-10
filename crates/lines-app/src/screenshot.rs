@@ -99,6 +99,9 @@ pub struct Shot {
     /// Show the replay's book as a source without depth would: only the inside, with this note
     /// (`--depth-note`).
     pub depth_note: Option<String>,
+    /// Show the replay as a source with no book at all would: no depth, no best bid/ask
+    /// (`--no-book`).
+    pub no_book: bool,
     /// Record the frame's layout and write the layout lint's findings beside each PNG
     /// (`<stem>.lint.txt`, empty when clean): `--layout-report`.
     pub layout_report: bool,
@@ -189,6 +192,18 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
             });
         }
     }
+    if shot.no_book {
+        for f in &feeds {
+            f.store().update_frame(|d| {
+                d.capabilities.depth = false;
+                d.capabilities.bbo = false;
+                d.apply(&[MarketEvent::BookClear]);
+                // No best bid or ask either: nothing reads the inside beside "No depth".
+                d.bid = None;
+                d.ask = None;
+            });
+        }
+    }
 
     // 2. Render one frame off-screen and read it back. Every outcome ends the process from
     // inside the app with its own exit code: quitting the app is not enough, because on
@@ -224,6 +239,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         panel_at,
         journal_dir,
         depth_note: _,
+        no_book: _,
         layout_report,
         settings: settings_shot,
         download,

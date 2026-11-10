@@ -56,6 +56,9 @@ pub fn entries(products: impl IntoIterator<Item = Product>) -> Vec<Entry> {
         .collect()
 }
 
+/// The heading over the symbols no enabled source serves (an empty query's list).
+pub const UNSERVED_HEADING: &str = "No source";
+
 /// The group heading shown above result `i` (Equity index, Rates, ...), if it starts one.
 /// Only with an empty query, where everything after the recents and favorites is in catalog
 /// order, which is group order; a search ranks by match, so headings would split it.
@@ -64,6 +67,14 @@ pub fn heading(entries: &[Entry], hits: &[Hit], query: &str, i: usize) -> Option
         return None;
     }
     let hit = hits.get(i)?;
+    if hit.group == Group::Unserved {
+        // One heading over the symbols no enabled source serves.
+        let starts = i
+            .checked_sub(1)
+            .and_then(|j| hits.get(j))
+            .is_none_or(|prev| prev.group != Group::Unserved);
+        return starts.then_some(UNSERVED_HEADING);
+    }
     if hit.group != Group::Other {
         return None;
     }
@@ -352,6 +363,8 @@ pub enum Group {
     Recent,
     Favourite,
     Other,
+    /// No enabled source serves it (decision 0030): after every symbol that can be shown.
+    Unserved,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -366,6 +379,9 @@ pub struct Hit {
 pub struct Searcher {
     matcher: Matcher,
     buf: Vec<char>,
+    /// Per entry: whether an enabled source serves it (empty: all are). Unserved entries rank
+    /// after every served one ([`Group::Unserved`]).
+    served: Vec<bool>,
 }
 
 impl Default for Searcher {
@@ -373,6 +389,7 @@ impl Default for Searcher {
         Searcher {
             matcher: Matcher::new(Config::DEFAULT),
             buf: Vec::new(),
+            served: Vec::new(),
         }
     }
 }
@@ -414,7 +431,9 @@ impl Searcher {
                 }
             };
             let id = e.product.id;
-            let group = if settings.recent_rank(id).is_some() {
+            let group = if !self.served.get(index).copied().unwrap_or(true) {
+                Group::Unserved
+            } else if settings.recent_rank(id).is_some() {
                 Group::Recent
             } else if settings.is_favourite(id) {
                 Group::Favourite
@@ -440,6 +459,16 @@ impl Searcher {
 }
 
 impl Searcher {
+    /// Which entries an enabled source serves (index-aligned; empty: all). `true` when it
+    /// changed (the caller searches again).
+    pub fn set_served(&mut self, served: Vec<bool>) -> bool {
+        if self.served == served {
+            return false;
+        }
+        self.served = served;
+        true
+    }
+
     /// Each text's fuzzy score for `query`, as the symbol search scores (`None`: no match). An
     /// empty query matches every text with score 0; each word is matched fuzzily, with no
     /// special characters (`!`, `^`, `$`, `'` are literal). Used by the command palette.
@@ -570,6 +599,21 @@ impl Picker {
                 self.selected = 0;
                 self.offset = 0;
             }
+        }
+    }
+
+    /// Which entries an enabled source serves (index-aligned with `entries`): unserved ones
+    /// rank last. Searches again when it changed, keeping the selected symbol while a source
+    /// still serves it (else the top: the picker never opens on, or slides to, a symbol no
+    /// source serves at the list's end).
+    pub fn set_served(&mut self, served: Vec<bool>, entries: &[Entry], settings: &Settings) {
+        if self.searcher.set_served(served) {
+            let keep = self
+                .hits
+                .get(self.selected)
+                .filter(|h| self.searcher.served.get(h.index).copied().unwrap_or(true))
+                .map(|h| entries[h.index].product.id);
+            self.research(entries, settings, keep);
         }
     }
 
@@ -1112,5 +1156,66 @@ mod tests {
         // Searching ranks by match, without headings.
         Searcher::default().search(&e, "nq", &none, &mut hits);
         assert!((0..hits.len()).all(|i| heading(&e, &hits, "nq", i).is_none()));
+    }
+
+    /// Symbols no enabled source serves rank after every served one, under one "No source"
+    /// heading (a recent or a favorite too); a search keeps that order, unheaded.
+    #[test]
+    fn unserved_symbols_rank_last() {
+        let e = all();
+        let off = |sym: &str| sym == "ES" || sym == "GC";
+        let served: Vec<bool> = e.iter().map(|x| !off(x.product.symbol)).collect();
+        let mut s = Settings::default();
+        s.push_recent(catalog::GC);
+        let mut searcher = Searcher::default();
+        assert!(searcher.set_served(served.clone()));
+        assert!(!searcher.set_served(served), "unchanged");
+        let mut hits = Vec::new();
+        searcher.search(&e, "", &s, &mut hits);
+        let n = hits.len();
+        let tail: Vec<_> = hits[n - 2..]
+            .iter()
+            .map(|h| e[h.index].product.symbol)
+            .collect();
+        assert_eq!(tail, ["ES", "GC"], "catalog order, the recent GC included");
+        assert!(hits[n - 2..].iter().all(|h| h.group == Group::Unserved));
+        assert!(hits[..n - 2].iter().all(|h| h.group != Group::Unserved));
+        assert_eq!(heading(&e, &hits, "", n - 2), Some(UNSERVED_HEADING));
+        assert_eq!(heading(&e, &hits, "", n - 1), None);
+        // The served equity index products keep their own heading.
+        assert_eq!(heading(&e, &hits, "", 0), Some("Equity index"));
+        // A search: every served match first.
+        searcher.search(&e, "es", &s, &mut hits);
+        let first_off = hits.iter().position(|h| off(e[h.index].product.symbol));
+        let first_off = first_off.expect("ES matches \"es\"");
+        assert!(
+            hits[first_off..]
+                .iter()
+                .all(|h| off(e[h.index].product.symbol))
+        );
+        assert!(first_off > 0, "a served match (MES) ranks above ES");
+        assert!((0..hits.len()).all(|i| heading(&e, &hits, "es", i).is_none()));
+    }
+
+    /// The picker opens before it knows what is served, on its first recent; when that symbol
+    /// turns out unserved, the selection goes to the top (a served symbol), never to the
+    /// "No source" tail. A served selection stays where it is.
+    #[test]
+    fn an_unserved_selection_goes_to_the_top() {
+        let e = all();
+        let mut s = Settings::default();
+        s.push_recent(catalog::ES);
+        let mut p = Picker::open("", &e, &s);
+        assert_eq!(p.selected_entry(&e).map(|x| x.product.symbol), Some("ES"));
+        let served: Vec<bool> = e.iter().map(|x| x.product.symbol != "ES").collect();
+        p.set_served(served, &e, &s);
+        assert_eq!(p.selected, 0);
+        assert_ne!(p.selected_entry(&e).map(|x| x.product.symbol), Some("ES"));
+        // A served selection is kept through a change.
+        p.selected = 3;
+        let kept = p.selected_entry(&e).map(|x| x.product.id);
+        let served: Vec<bool> = e.iter().map(|x| x.product.symbol != "GC").collect();
+        p.set_served(served, &e, &s);
+        assert_eq!(p.selected_entry(&e).map(|x| x.product.id), kept);
     }
 }

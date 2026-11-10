@@ -596,6 +596,107 @@ pub fn chart_header_fit(
     }
 }
 
+/// The width of a DOM or T&S header's parts, all but its source tag: the row's left padding,
+/// the link chip, the contract, the pane's word ("DOM"), the feed's status word, the STALE
+/// badge while stale, and the right group's text, each after a gap. The right padding is the
+/// controls' gutter, which the caller's room already leaves out.
+#[allow(clippy::too_many_arguments)]
+pub fn side_header_px(
+    linked: bool,
+    contract: &str,
+    pane_word: &str,
+    status: Option<&str>,
+    stale: bool,
+    right: &str,
+    tw: TextPx,
+) -> f32 {
+    // `header_base_px` counts the chart's px_3; these rows have px_2.
+    header_base_px(linked, contract, tw) - 4.0
+        + HEADER_GAP
+        + tw(pane_word)
+        + status.map_or(0.0, |s| HEADER_GAP + tw(s))
+        + if stale {
+            // "STALE · no data 99 s", bold, px_1 each side.
+            HEADER_GAP + tw("STALE · no data 99 s") * BOLD + 8.0
+        } else {
+            0.0
+        }
+        + HEADER_GAP
+        + tw(right)
+}
+
+/// Whether a pane header's source tag ("(Databento)") shows: it is the first thing a narrow
+/// header drops (the contract never is), so only when everything else (`rest` px) fits with
+/// it in `room` (the header's width less the controls' gutter; 0 or less: not laid out yet,
+/// shown).
+pub fn source_tag_fits(room: f32, rest: f32, tag: &str, tw: TextPx) -> bool {
+    room <= 0.0 || rest + HEADER_GAP + tw(tag) <= room
+}
+
+/// The room a source tag takes in a header: a gap and its text.
+pub fn source_tag_px(tag: &str, tw: TextPx) -> f32 {
+    HEADER_GAP + tw(tag)
+}
+
+/// The chart header's fit with its source tag (`tag_px`: the room it takes, `None`: no tag)
+/// and whether the tag shows: only when everything else fits whole beside it, so it is the
+/// first thing a narrow header drops. `room` 0 or less is "not laid out yet": all shown.
+pub fn chart_fit_with_tag(
+    room: f32,
+    tag_px: Option<f32>,
+    fit_in: impl Fn(f32) -> HeaderFit,
+) -> (HeaderFit, bool) {
+    if room <= 0.0 {
+        return (fit_in(room), tag_px.is_some());
+    }
+    if let Some(px) = tag_px
+        && room - px > 0.0
+    {
+        let f = fit_in(room - px);
+        if f.account && f.timeframe && f.status && f.link {
+            return (f, true);
+        }
+    }
+    (fit_in(room), false)
+}
+
+/// A pane whose own login was refused says so in its header at every width: its tag
+/// ("(Rithmic: login refused)") joins the contract text, in the main color, and is never
+/// dropped.
+pub fn keep_refused(contract: &mut String, tag: &mut Option<String>, refused: bool) {
+    if refused && let Some(t) = tag.take() {
+        contract.push(' ');
+        contract.push_str(&t);
+    }
+}
+
+/// The source tag as a header shows it: in parentheses, in the secondary text color.
+pub fn source_tag(tag: &str) -> String {
+    format!("({tag})")
+}
+
+/// A UI text's width in logical px at `size`, shaped as the header draws it.
+pub fn text_px(window: &gpui::Window, size: gpui::Pixels) -> impl Fn(&str) -> f32 + '_ {
+    let font = window.text_style().font();
+    move |s: &str| -> f32 {
+        let run = gpui::TextRun {
+            len: s.len(),
+            font: font.clone(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window.text_system().shape_line(
+            gpui::SharedString::from(s.to_owned()),
+            size,
+            &[run],
+            None,
+        );
+        f32::from(line.width)
+    }
+}
+
 /// The feed's state as one short word for the chart header, for every state but live. It
 /// never gives way: an ended or failed feed must not read as live at any width.
 pub fn status_word(s: &lines_feed::store::FeedStatus) -> Option<&'static str> {
@@ -620,6 +721,77 @@ mod tests {
 
     fn tw7(s: &str) -> f32 {
         s.chars().count() as f32 * HEADER_CHAR_PX
+    }
+
+    /// A DOM or T&S header drops its source tag first: it shows only when everything else
+    /// fits with it; the contract is never what gives way.
+    #[test]
+    fn the_source_tag_is_the_first_to_go() {
+        let rest = side_header_px(
+            true,
+            "ESZ26",
+            "DOM",
+            Some("ended"),
+            false,
+            "1 tick/row",
+            &tw7,
+        );
+        let stale = side_header_px(
+            true,
+            "ESZ26",
+            "DOM",
+            Some("ended"),
+            true,
+            "1 tick/row",
+            &tw7,
+        );
+        assert!(stale > rest, "the STALE badge counts");
+        let tag = source_tag("Databento");
+        let need = rest + HEADER_GAP + tw7(&tag);
+        assert!(source_tag_fits(need, rest, &tag, &tw7));
+        assert!(!source_tag_fits(need - 1.0, rest, &tag, &tw7));
+        assert!(
+            source_tag_fits(0.0, rest, &tag, &tw7),
+            "not laid out yet: shown"
+        );
+        assert!(
+            rest > tw7("ESZ26"),
+            "the contract is in the rest, never dropped"
+        );
+    }
+
+    /// A refused login's tag joins the contract (never dropped); any other stays a tag.
+    #[test]
+    fn a_refused_login_is_never_dropped() {
+        let mut c = "ESZ26".to_owned();
+        let mut tag = Some(source_tag("Rithmic: login refused"));
+        keep_refused(&mut c, &mut tag, true);
+        assert_eq!(c, "ESZ26 (Rithmic: login refused)");
+        assert_eq!(tag, None);
+        let mut c = "ESZ26".to_owned();
+        let mut tag = Some(source_tag("Databento"));
+        keep_refused(&mut c, &mut tag, false);
+        assert_eq!((c.as_str(), tag.as_deref()), ("ESZ26", Some("(Databento)")));
+    }
+
+    /// A chart drops its source tag before anything else gives way, and never keeps it on
+    /// room the tag alone would fill (less than nothing left is not "not laid out").
+    #[test]
+    fn a_chart_drops_its_source_tag_first() {
+        let fit_at = |r: f32| fit(r, Some(("Paper", true)), false);
+        let all = need(Some(("Paper", true)), true, true);
+        let tag = tw7("(Coinbase)") + HEADER_GAP;
+        let (f, shown) = chart_fit_with_tag(all + tag, Some(tag), fit_at);
+        assert!(shown && f.account && f.timeframe && f.status && f.link);
+        let (f, shown) = chart_fit_with_tag(all + tag - 1.0, Some(tag), fit_at);
+        assert!(!shown, "the tag goes first");
+        assert!(f.account && f.timeframe && f.status && f.link);
+        // Narrower than the tag: never kept, whatever a negative room would report.
+        let (_, shown) = chart_fit_with_tag(tag - 5.0, Some(tag), fit_at);
+        assert!(!shown);
+        // Not laid out yet: shown; no tag: never.
+        assert!(chart_fit_with_tag(0.0, Some(tag), fit_at).1);
+        assert!(!chart_fit_with_tag(all + tag, None, fit_at).1);
     }
 
     fn fit(room: f32, account: Option<(&str, bool)>, menu_open: bool) -> HeaderFit {
