@@ -507,38 +507,50 @@ pub fn wheel_steps(carry: &mut f32, dy: f32, line: f32) -> isize {
     -(n as isize)
 }
 
+/// What earlier small wheel deltas left over, kept apart per kind of delta: a pixel leftover
+/// is never read as lines (a touchpad, which reports pixels, then a smooth wheel, lines).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WheelCarry {
+    px: f32,
+    lines: f32,
+}
+
+impl WheelCarry {
+    /// A line-based event (`lines` > 0: up; a mouse wheel, smooth or not) as rows: a whole
+    /// notch (a line or more) is one row, whatever the system's lines per notch; smaller
+    /// deltas add up, a row per line.
+    pub fn lines(&mut self, lines: f32) -> isize {
+        self.px = 0.0;
+        if lines.abs() >= 1.0 {
+            self.lines = 0.0;
+            return if lines > 0.0 { -1 } else { 1 };
+        }
+        wheel_steps(&mut self.lines, lines, 1.0)
+    }
+
+    /// A pixel-based event (`dy` px, > 0: up; a precision touchpad) as rows, a row per `line`
+    /// px.
+    pub fn pixels(&mut self, dy: f32, line: f32) -> isize {
+        self.lines = 0.0;
+        wheel_steps(&mut self.px, dy, line)
+    }
+}
+
 thread_local! {
-    static WHEEL_CARRY: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+    static WHEEL_CARRY: std::cell::Cell<WheelCarry> =
+        const { std::cell::Cell::new(WheelCarry { px: 0.0, lines: 0.0 }) };
 }
 
-/// A line-based wheel event (`lines` > 0: up; Windows reports every wheel and touchpad
-/// event so) as rows: a whole notch (a line or more) is one row, whatever the system's lines
-/// per notch; smaller deltas (a touchpad, a smooth-scrolling wheel) add up in `carry`, a row
-/// per line.
-pub fn notch_rows(carry: &mut f32, lines: f32) -> isize {
-    if lines.abs() >= 1.0 {
-        *carry = 0.0;
-        return if lines > 0.0 { -1 } else { 1 };
-    }
-    wheel_steps(carry, lines, 1.0)
-}
-
-/// [`wheel_steps`] for a wheel event over a panel's list (a line-based one: [`notch_rows`]).
+/// A wheel event over a panel's list as rows ([`WheelCarry`]).
 pub fn wheel_rows(ev: &gpui::ScrollEvent, window: &Window) -> isize {
-    // A mouse wheel's notch is one row, however many lines the system scrolls per notch.
-    if let gpui::ScrollDelta::Lines(l) = ev.delta {
-        return WHEEL_CARRY.with(|c| {
-            let mut carry = c.get();
-            let n = notch_rows(&mut carry, l.y);
-            c.set(carry);
-            n
-        });
-    }
-    let line = window.line_height();
-    let dy = f32::from(ev.delta.pixel_delta(line).y);
     WHEEL_CARRY.with(|c| {
         let mut carry = c.get();
-        let n = wheel_steps(&mut carry, dy, f32::from(line));
+        let n = match ev.delta {
+            gpui::ScrollDelta::Lines(l) => carry.lines(l.y),
+            gpui::ScrollDelta::Pixels(p) => {
+                carry.pixels(f32::from(p.y), f32::from(window.line_height()))
+            }
+        };
         c.set(carry);
         n
     })
@@ -969,17 +981,32 @@ mod panel_tests {
     /// A notch is one row whatever the system's lines per notch.
     #[test]
     fn a_notch_is_one_row() {
-        let mut carry = 0.0;
-        assert_eq!(notch_rows(&mut carry, 3.0), -1);
-        assert_eq!(notch_rows(&mut carry, -3.0), 1);
-        assert_eq!(notch_rows(&mut carry, 0.0), 0);
-        // A touchpad's quarter lines: a row per four.
-        let steps: isize = (0..8).map(|_| notch_rows(&mut carry, -0.25)).sum();
+        let mut c = WheelCarry::default();
+        assert_eq!(c.lines(3.0), -1);
+        assert_eq!(c.lines(-3.0), 1);
+        assert_eq!(c.lines(0.0), 0);
+        // A smooth wheel's quarter lines: a row per four.
+        let steps: isize = (0..8).map(|_| c.lines(-0.25)).sum();
         assert_eq!(steps, 2);
         // A whole notch after a partial one: one row, the partial dropped.
-        notch_rows(&mut carry, -0.5);
-        assert_eq!(notch_rows(&mut carry, -1.0), 1);
-        assert_eq!(carry, 0.0);
+        c.lines(-0.5);
+        assert_eq!(c.lines(-1.0), 1);
+        assert_eq!(c, WheelCarry::default());
+    }
+
+    /// A touchpad's pixel leftover is never read as lines: a wheel step after it moves by its
+    /// own measure (not 14 rows the other way).
+    #[test]
+    fn pixel_and_line_leftovers_stay_apart() {
+        let mut c = WheelCarry::default();
+        assert_eq!(c.pixels(15.0, 20.0), 0, "under a row");
+        assert_eq!(c.lines(-0.125), 0);
+        assert_eq!(
+            c.pixels(-15.0, 20.0),
+            0,
+            "the line leftover isn't read as pixels"
+        );
+        assert_eq!(c.pixels(-25.0, 20.0), 2);
     }
 
     /// A drag follows the pointer by where it was grabbed; only one that moved keeps a place
