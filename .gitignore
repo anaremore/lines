@@ -16,3 +16,8 @@
 
 # Python bytecode (the agent guard hook)
 __pycache__/
+
+# Update-signing keys (decision 0031): the secret key is the owner's alone and never in a
+# repository; the public key is committed in code (`update/verify.rs`), not as a file.
+*.key
+lines-update.*

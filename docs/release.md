@@ -22,10 +22,10 @@ Lines ships continuous **pre-alpha** builds. Releases are produced by the planni
 - Manual UI checks are the owner's: UI-heavy milestones ship with screenshot evidence and are listed as "awaiting owner check" in the notes.
 
 ## Update signing key (decision 0031; owner only)
-In-app updates run only what the project signed. Until the steps below are done, every build reports "this build doesn't update itself" and makes no update request.
+In-app updates run only what the project signed. With the public key committed (step 3, done), Windows builds check the release feed; no release offers an update until the signing step (step 2, #123) is approved and a release is signed.
 1. **Generate** the key pair on a machine you control: `minisign -G -p lines-update.pub -s lines-update.key` (choose a strong password). Never commit, paste or upload the secret key file.
 2. **CI secret:** add the secret key file's contents and its password as repository secrets (`UPDATE_SIGNING_KEY`, `UPDATE_SIGNING_PASSWORD`). The release workflow's signing step (a separate tier C change, drafted for your approval) signs `lines.exe` with the trusted comment `lines <version> public pre-release x86_64-pc-windows-msvc` (exactly; the app refuses a signature naming another release) and writes `update.json` (version, channel, edition, and per target the file's URL, SHA-256 and the `.minisig` text).
-3. **Public key:** commit the public key line (the second line of `lines-update.pub`) as `COMMITTED_KEY` in `crates/lines-app/src/update/verify.rs`. Builds from then on verify against it.
+3. **Public key:** commit the public key line (the second line of `lines-update.pub`) as `COMMITTED_KEY` in `crates/lines-app/src/update/verify.rs`. Builds from then on verify against it. **Committed: key ID `B11DD18F53C6E999`** (`RWSZ6cZTj9EdseUxeD0r05R5bTJtFcgCpSlQoVC61g9ms1ts/9LnE+R2`); a test pins the ID. A rotation replaces both and is checked against the ID minisign prints for the new pair. A build compiled with `LINES_UPDATE_PUBLIC_KEY` set trusts that key instead: official release builds must not set it.
 4. **Custody:** keep the secret key and its password offline in two places (e.g. a password manager and an encrypted backup). Anyone holding both can ship code that every installed Lines will run.
 5. **Rotation** (a suspected leak, or a planned change):
    1. Generate a new pair and replace the CI secrets.

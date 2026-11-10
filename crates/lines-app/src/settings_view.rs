@@ -564,7 +564,8 @@ fn facts_now(cx: &App, wait: bool) -> Option<Facts> {
         f.store_path = "Not recording (this source has no store)".to_owned();
     }
     f.version = env!("CARGO_PKG_VERSION").to_owned();
-    f.can_update = crate::update::verify::PUBLIC_KEY.is_some();
+    f.can_update =
+        crate::update::verify::PUBLIC_KEY.is_some() && crate::update::manifest::supported();
     f.rollback = crate::persist::config_dir().and_then(|d| crate::update::rollback_target(&d));
     f.config_dir = crate::persist::config_dir().map_or_else(
         || "None (nothing is saved)".to_owned(),

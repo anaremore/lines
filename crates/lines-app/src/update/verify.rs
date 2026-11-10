@@ -18,8 +18,15 @@ pub const PUBLIC_KEY: Option<&str> = match option_env!("LINES_UPDATE_PUBLIC_KEY"
     None => COMMITTED_KEY,
 };
 
-/// The committed public key (none yet: the owner generates the key pair).
-const COMMITTED_KEY: Option<&str> = None;
+/// The committed public key: the base64 line of the owner's `lines-update.pub`, key ID
+/// `B11DD18F53C6E999` (`docs/release.md` "Update signing key"). The secret key is the owner's
+/// alone and is never in a repository.
+const COMMITTED_KEY: Option<&str> =
+    Some("RWSZ6cZTj9EdseUxeD0r05R5bTJtFcgCpSlQoVC61g9ms1ts/9LnE+R2");
+
+/// The committed key's ID, as minisign prints it (a rotation is checked against it).
+#[cfg(test)]
+const COMMITTED_KEY_ID: &str = "B11DD18F53C6E999";
 
 /// Why a download was discarded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,10 +217,37 @@ pub(crate) mod tests {
             check(data, &sha256_hex(data), "", None),
             Err(Rejected::NoKey)
         );
+    }
+
+    /// The committed key is the owner's (its ID as `docs/release.md` records it), parses as
+    /// `verify` reads it, and refuses a file signed by any other key.
+    #[test]
+    fn the_committed_key_is_the_owners_and_refuses_other_signatures() {
+        let key = COMMITTED_KEY.expect("the owner's public key is committed");
         assert!(
-            COMMITTED_KEY.is_none(),
-            "the owner commits the real key; tests never put one here"
+            minisign_verify::PublicKey::from_base64(key).is_ok(),
+            "parses"
         );
+        let boxed = minisign::PublicKey::from_base64(key)
+            .unwrap()
+            .to_box()
+            .unwrap()
+            .to_string();
+        // The comment line ends with the key's ID ("… minisign public key: <ID>").
+        let comment = boxed.lines().next().unwrap_or_default();
+        assert!(
+            comment.starts_with("untrusted comment: minisign public key")
+                && comment.ends_with(&format!(" {COMMITTED_KEY_ID}")),
+            "{boxed}"
+        );
+        // A file signed by another key (this test's own) for this very release: refused.
+        let other = TestKey::new();
+        let data = b"lines 0.3.12";
+        let sig = other.sign(data);
+        assert!(matches!(
+            check(data, &sha256_hex(data), &sig, Some(key)),
+            Err(Rejected::Signature(_))
+        ));
     }
 
     #[test]
