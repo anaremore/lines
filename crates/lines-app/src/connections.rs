@@ -524,7 +524,9 @@ mod tests {
     fn a_connectors_own_entry_is_where_its_reader_looks() {
         // Databento's entry and account, as its README has users store the key.
         let entry = lines_databento::key::CREDENTIAL;
-        let (target, service, user) = entry_spec(Some(entry), "databento", "x".into());
+        let name = lines_databento::live::DatabentoExtension::from_env();
+        let name = lines_feed::extension::SourceExtension::name(&name);
+        let (target, service, user) = entry_spec(Some(entry), name, "x".into());
         assert_eq!(service, entry);
         assert_eq!(
             user, "databento",

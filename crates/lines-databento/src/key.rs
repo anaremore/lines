@@ -3,10 +3,13 @@
 //!
 //! Source order:
 //! 1. `DATABENTO_API_KEY` (Databento's own convention): an override for this run.
-//! 2. The OS keychain, entry [`CREDENTIAL`] (`lines-databento`; the key is its password, any
-//!    user name): the Windows Credential Manager (a generic credential), the macOS Keychain (a
-//!    generic password, service `lines-databento`), or the Secret Service on Linux (attribute
-//!    `service` = `lines-databento`, through `secret-tool`).
+//! 2. The OS keychain, entry [`CREDENTIAL`] (`lines-databento`; the key is its password,
+//!    account `databento`, as Settings › Connections saves it): the Windows Credential
+//!    Manager (a generic credential), the macOS Keychain (a generic password, service
+//!    `lines-databento`), or the Secret Service on Linux (attributes `service` =
+//!    `lines-databento`, `username` = `databento`, through `secret-tool`). This reader looks
+//!    up by service alone, so an item under another account is read too, but Settings
+//!    replaces only the `databento` one.
 //! 3. The file named by `LINES_DATABENTO_KEY_FILE` (the key alone, surrounding whitespace
 //!    ignored; keep it outside any repository).
 //!
