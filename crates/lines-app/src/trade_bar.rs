@@ -857,7 +857,12 @@ pub fn card_stop<'a>(
     orders
         // A bracket's stop-loss leg stays the stop once a stop-limit has triggered (it rests as
         // a limit): BE won't move it, but it still protects.
-        .filter(|o| protects(o, position) || (live(o) && o.role == lines_trading::Role::StopLoss))
+        .filter(|o| {
+            protects(o, position)
+                || (live(o)
+                    && o.role == lines_trading::Role::StopLoss
+                    && o.side.sign() == -position.signum())
+        })
         .filter_map(dom_trade::order_mark)
         .map(|m| (m.price, m.qty.0 - m.filled.0))
         .min_by_key(|(pr, _)| (pr.0 - last.map_or(pr.0, |l| l.0)).abs())
@@ -7236,7 +7241,15 @@ mod tests {
             limit: Price(600_575),
         };
         leg.triggered = true;
-        assert!(card_stop([leg].iter(), 2, last).is_some());
+        // Triggered, it rests at its limit: that is the price shown.
+        assert_eq!(
+            card_stop([leg.clone()].iter(), 2, last),
+            Some((Price(600_575), 2))
+        );
+        // A stop-loss leg on the wrong side (left from an earlier short) protects nothing.
+        let mut wrong = leg;
+        wrong.side = Side::Buy;
+        assert_eq!(card_stop([wrong].iter(), 2, last), None);
         // A short's buy stop protects it.
         let short = [stop(8, Side::Buy, 601_400, 1, false)];
         assert_eq!(card_stop(short.iter(), -2, last), Some((Price(601_400), 1)));
