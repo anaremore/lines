@@ -45,8 +45,8 @@ pub const EXTERNAL_ORDER: OrderId = OrderId(0);
 mod cancels;
 mod flatten;
 mod position_bracket;
-mod reverse;
 mod reset;
+mod reverse;
 mod strategy_gate;
 mod trigger;
 
