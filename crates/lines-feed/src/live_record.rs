@@ -101,8 +101,15 @@ impl RecordCtl {
     pub fn stop(&self) -> Stopped {
         let mut s = self.state.lock();
         if let Some(a) = s.active.take() {
+            drop(s);
             a.recorder.stop();
-            return Stopped::Saved(a.path);
+            let path = a.path.clone();
+            // If the feed thread already let go of its copy, this is the last one, and dropping
+            // it joins the writer: never on the calling (UI) thread.
+            let _ = std::thread::Builder::new()
+                .name("lines-recording-stop".into())
+                .spawn(move || drop(a));
+            return Stopped::Saved(path);
         }
         if s.pending.take().is_some() {
             return Stopped::Cancelled;

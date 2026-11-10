@@ -167,13 +167,16 @@ impl FeedRegistry {
 
     /// The stores of the feeds running now (recording starts and stops on them).
     pub fn stores(&self) -> Vec<Arc<crate::store::ChartStore>> {
-        self.inner
+        // The feeds are upgraded under the lock and dropped after it: a last reference
+        // dropped here runs `Shared::drop`, which takes this same lock.
+        let held: Vec<Arc<Shared>> = self
+            .inner
             .lock()
             .feeds
             .values()
             .filter_map(Weak::upgrade)
-            .map(|s| s.store.clone())
-            .collect()
+            .collect();
+        held.iter().map(|s| s.store.clone()).collect()
     }
 
     /// Feeds currently running.
