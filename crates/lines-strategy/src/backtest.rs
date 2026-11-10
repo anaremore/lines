@@ -451,6 +451,7 @@ pub fn run(bt: &Backtest) -> Result<Report> {
             received: None,
             error: None,
             series_received: None,
+            levels_refused: false,
             stale_after: source.stale_after(),
             replay: true,
         };

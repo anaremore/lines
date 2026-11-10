@@ -141,6 +141,9 @@ pub struct LevelState {
     pub error: Option<String>,
     /// When a map was last accepted, also one whose levels were refused: its series' freshness.
     pub series_received: Option<UtcMillis>,
+    /// `error` is the map's own refusal of its levels (`LevelMap::levels_refused`), not a
+    /// failed refresh: the series stay current.
+    pub levels_refused: bool,
     pub stale_after: Duration,
     pub replay: bool,
 }
@@ -166,6 +169,7 @@ impl LevelState {
             // the series are current.
             Ok(Some(map)) if map.levels_refused.is_some() => {
                 self.error = map.levels_refused.clone();
+                self.levels_refused = true;
                 self.map = Some(Arc::new(map));
                 self.series_received = Some(time);
             }
@@ -174,15 +178,31 @@ impl LevelState {
                 self.received = Some(time);
                 self.series_received = Some(time);
                 self.error = None;
+                self.levels_refused = false;
             }
-            Ok(None) => {
-                if self.map.is_some() {
-                    self.received = Some(time);
+            // Unchanged: the map as it was, renewed; a map whose levels were refused stays
+            // so (its levels stale, the reason said again).
+            Ok(None) => match &self.map {
+                Some(m) => {
                     self.series_received = Some(time);
+                    self.levels_refused = m.levels_refused.is_some();
+                    match &m.levels_refused {
+                        Some(why) => self.error = Some(why.clone()),
+                        None => {
+                            self.received = Some(time);
+                            self.error = None;
+                        }
+                    }
                 }
-                self.error = None;
+                None => {
+                    self.error = None;
+                    self.levels_refused = false;
+                }
+            },
+            Err(e) => {
+                self.error = Some(e);
+                self.levels_refused = false;
             }
-            Err(e) => self.error = Some(e),
         }
     }
 
@@ -193,10 +213,7 @@ impl LevelState {
         let Some(received) = self.series_received.filter(|_| self.map.is_some()) else {
             return LevelStatus::Missing;
         };
-        let levels_only = matches!(
-            (&self.error, &self.map),
-            (Some(e), Some(m)) if m.levels_refused.as_ref() == Some(e)
-        );
+        let levels_only = self.levels_refused;
         let age_ms = (now.0 - received.0).max(0);
         if (self.error.is_some() && !levels_only) || age_ms > self.stale_after.as_millis() as i64 {
             LevelStatus::Stale { age_ms }
@@ -226,6 +243,7 @@ impl LevelCell {
                 received: None,
                 error: None,
                 series_received: None,
+                levels_refused: false,
                 stale_after: source.stale_after(),
                 replay,
             }),

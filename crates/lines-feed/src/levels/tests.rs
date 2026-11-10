@@ -175,6 +175,7 @@ fn status_is_missing_current_or_stale() {
         received: None,
         error: None,
         series_received: None,
+        levels_refused: false,
         stale_after: std::time::Duration::from_secs(60),
         replay: false,
     };
@@ -216,6 +217,7 @@ fn refused_levels_leave_the_series_current() {
         received: None,
         error: None,
         series_received: None,
+        levels_refused: false,
         stale_after: std::time::Duration::from_secs(60),
         replay: false,
     };
@@ -239,7 +241,13 @@ fn refused_levels_leave_the_series_current() {
     );
     assert_eq!(s.error.as_deref(), Some("capture is stale"));
     assert_eq!(s.series_status(now), LevelStatus::Current);
-    s.take(Err("timeout".into()), now);
+    // Unchanged next refresh: the levels stay refused and stale, the series current.
+    s.take(Ok(None), now);
+    assert!(matches!(s.status(now), LevelStatus::Stale { .. }));
+    assert_eq!(s.error.as_deref(), Some("capture is stale"));
+    assert_eq!(s.series_status(now), LevelStatus::Current);
+    // A failed refresh with the same words is still a failure: the series go stale too.
+    s.take(Err("capture is stale".into()), now);
     assert!(matches!(s.series_status(now), LevelStatus::Stale { .. }));
     // An empty state: missing for both.
     let fresh = runtime::LevelState {
