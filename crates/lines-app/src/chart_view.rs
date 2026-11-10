@@ -6288,7 +6288,7 @@ impl ChartView {
         let accent = t.accent;
         let mut list = div()
             .id("timeframe-list")
-            .occlude()
+            .block_mouse_except_scroll()
             .min_w(px(150.0))
             .flex()
             .flex_col()

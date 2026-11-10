@@ -832,6 +832,9 @@ pub struct Trading {
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
+    /// Screenshot fixture (`--panel-menu qty|bracket`): DOMs start with that trade panel list
+    /// open. Never set in the app.
+    pub start_panel_menu: Option<crate::trade_bar::PanelMenu>,
     /// Screenshot fixture: chain panes open this ticket (`--chain-ticket`).
     pub start_chain_ticket: Option<crate::chain_ticket::ShotTicket>,
     /// Screenshot fixture (`--bracket-editor`): DOMs open their bracket-preset editor.
@@ -1532,6 +1535,7 @@ impl Trading {
             start_hotkeys: false,
             start_order_controls: false,
             start_account_menu: false,
+            start_panel_menu: None,
             start_chain_ticket: None,
             start_editor: false,
             start_bracket_switch: false,

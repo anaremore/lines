@@ -64,6 +64,8 @@ pub struct Shot {
     pub strategies_demo: bool,
     /// Charts and DOMs start with the account list open (`--account-menu`).
     pub account_menu: bool,
+    /// DOMs start with this trade panel list open (`--panel-menu`).
+    pub panel_menu: Option<crate::trade_bar::PanelMenu>,
     /// Chain panes start with this ticket open (`--chain-ticket`).
     pub chain_ticket: Option<crate::chain_ticket::ShotTicket>,
     /// The P&L display (`--pnl`; default: the app's default).
@@ -199,6 +201,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         demo_broker,
         strategies_demo,
         account_menu,
+        panel_menu,
         chain_ticket,
         pnl,
         measure_parts,
@@ -261,6 +264,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         trading.start_account = Some(lines_trading::AccountId::new(crate::demo_broker::SIM));
     }
     trading.start_account_menu = account_menu;
+    trading.start_panel_menu = panel_menu;
     trading.start_chain_ticket = chain_ticket;
     trading.start_editor = bracket_editor;
     trading.start_bracket_switch = bracket_position == Some(crate::BracketPositionArg::Ask);

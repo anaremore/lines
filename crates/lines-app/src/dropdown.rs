@@ -1,10 +1,16 @@
-//! Dropdowns: a trigger (a header chip) and, while open, its list directly under it.
+//! Dropdowns: a trigger (a header chip, a panel field) and, while open, its list directly
+//! under it.
 //!
-//! The rule (docs/invariants.md, lines-app UI): the list's left edge lines up with the trigger's left edge and
-//! its top sits `GAP` px under the trigger's bottom. It moves only when it would leave the
-//! window: left just far enough to keep `MARGIN` from the right edge, and up above the trigger when
-//! there is no room below. `place` is that rule; [`dropdown`] applies it with the trigger's
-//! real bounds, in window coordinates, so a list escapes its pane's header and the pane itself.
+//! The rule (docs/invariants.md, lines-app UI): the list is as wide as its content, at least the
+//! trigger's width and at most the window's (less `MARGIN` each side); it is at most as tall as
+//! the larger room below or above the trigger, and scrolls past that. Its left edge lines up
+//! with the trigger's left edge and its top sits `GAP` px under the trigger's bottom. It moves
+//! only when it would leave the window: left just far enough to keep `MARGIN` from the right
+//! edge, and up above the trigger when there is no room below. [`fit`] is that rule; [`dropdown`]
+//! applies it with the trigger's real bounds, in window coordinates, so a list escapes its
+//! pane's header and the pane itself. Every dropdown is placed so, the trading panel's Qty and
+//! Bracket lists included (docs/design.md: a field's list opens under it, in the menus' look);
+//! those draw under Flatten and Cancel all ([`PANEL_PRIORITY`]), which stay one press (§3).
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, GlobalElementId, InspectorElementId,
@@ -24,8 +30,8 @@ pub const PRIORITY: usize = 4;
 /// under Flatten and Cancel all (`LIVE_PRIORITY`) and every list and menu.
 pub const BACKDROP_PRIORITY: usize = 1;
 /// Deferred-draw priority of a trading panel's own lists (Qty, Bracket): over the backdrops and
-/// the panes, under Flatten and Cancel all, which they open beside (docs/design.md §3: those
-/// stay one press and in view with any popover open).
+/// the panes, under Flatten and Cancel all, which a list opening under its field can reach
+/// (docs/design.md §3: those stay one press and in view with any popover open).
 pub const PANEL_PRIORITY: usize = 2;
 /// Deferred-draw priority of Flatten and Cancel all (`popover::always_live`): over the
 /// backdrops and the panel's lists, so they stay one press with a popover open; under the
@@ -57,22 +63,29 @@ pub fn place(trigger: Rect, popup: (f32, f32), window: (f32, f32)) -> (f32, f32)
     (x.max(0.0), y)
 }
 
-/// Where a trading panel's list opens (`Dropdown::in_panel`): above its field, never below it,
-/// so it never reaches the exits row under the field; at most `trigger.y - GAP` tall (it scrolls
-/// beyond that, [`panel_room`]). Left and right as [`place`].
-pub fn place_above(trigger: Rect, popup: (f32, f32), window: (f32, f32)) -> (f32, f32) {
-    let (x, _) = place(trigger, popup, window);
-    let h = popup.1.min(panel_room(trigger));
-    (x, (trigger.y - GAP - h).max(0.0))
+/// The room a list has below its trigger and above it (logical px, never negative).
+pub fn room(trigger: Rect, window: (f32, f32)) -> (f32, f32) {
+    let below = window.1 - (trigger.bottom() + GAP) - MARGIN;
+    let above = trigger.y - GAP - MARGIN;
+    (below.max(0.0), above.max(0.0))
 }
 
-/// The most a panel list may take above its field.
-pub fn panel_room(trigger: Rect) -> f32 {
-    (trigger.y - GAP).max(0.0)
+/// The bounds of a list whose content is `natural` (width, height) for a trigger at `trigger`, in
+/// a window `window` big, all logical px: at least the trigger's width, at most the window's,
+/// at most the larger room below or above (it scrolls past that), placed by [`place`].
+pub fn fit(trigger: Rect, natural: (f32, f32), window: (f32, f32)) -> Rect {
+    let w = natural
+        .0
+        .max(trigger.w)
+        .min((window.0 - 2.0 * MARGIN).max(0.0));
+    let (below, above) = room(trigger, window);
+    let h = natural.1.min(below.max(above));
+    let (x, y) = place(trigger, (w, h), window);
+    Rect::new(x, y, w, h)
 }
 
-/// `trigger`, with `popup` (when open) placed by [`place`] under it, drawn over everything
-/// else in the window and taking the pointer from what it covers.
+/// `trigger`, with `popup` (when open) sized and placed by [`fit`] under it, drawn over
+/// everything else in the window and taking the pointer from what it covers.
 pub fn dropdown(trigger: impl IntoElement, popup: Option<AnyElement>) -> Dropdown {
     Dropdown {
         trigger: trigger.into_any_element(),
@@ -90,9 +103,8 @@ pub struct Dropdown {
 }
 
 impl Dropdown {
-    /// A trading panel's list: opens above its field ([`place_above`]), scrolling where taller
-    /// than the room there, so it never covers the exits row; and drawn under Flatten and Cancel
-    /// all ([`PANEL_PRIORITY`]) all the same.
+    /// A trading panel's list (Qty, Bracket): placed as every list is ([`fit`]), drawn under
+    /// Flatten and Cancel all ([`PANEL_PRIORITY`]), which stay one press over it.
     pub fn in_panel(mut self) -> Self {
         self.priority = PANEL_PRIORITY;
         self
@@ -156,51 +168,47 @@ impl Element for Dropdown {
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
             return;
         }
-        // Its natural size, at most the window's width (a list's own `max_w` wraps its text). A
-        // panel's list is at most the room above its field, and scrolls.
+        // Its content's size, at least the trigger's width and at most the window's (a list's own
+        // `max_w` wraps its text), at most the larger room below or above (it scrolls past that):
+        // never stretched to the window ([`fit`]).
         let v = window.viewport_size();
-        let panel = self.priority == PANEL_PRIORITY;
-        let mut popup = if panel {
-            use gpui::StatefulInteractiveElement as _;
-            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
-            let room = panel_room(Rect::new(
-                f32::from(bounds.origin.x),
-                f32::from(bounds.origin.y),
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height),
-            ));
-            gpui::div()
-                .id("panel-list")
-                .max_h(px(room))
-                .overflow_y_scroll()
-                .child(popup)
-                .into_any_element()
-        } else {
-            popup
-        };
-        let s = popup.layout_as_root(
-            size(
-                AvailableSpace::Definite(v.width),
-                AvailableSpace::MaxContent,
-            ),
-            window,
-            cx,
-        );
+        let win = (f32::from(v.width), f32::from(v.height));
         let trigger = Rect::new(
             f32::from(bounds.origin.x),
             f32::from(bounds.origin.y),
             f32::from(bounds.size.width),
             f32::from(bounds.size.height),
         );
-        let (x, y) = (if panel { place_above } else { place })(
-            trigger,
-            (f32::from(s.width), f32::from(s.height)),
-            (f32::from(v.width), f32::from(v.height)),
+        let (below, above) = room(trigger, win);
+        let mut popup = {
+            use gpui::StatefulInteractiveElement as _;
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            // Its own id (from where its trigger is): two lists never share a scroll offset. It
+            // takes the wheel; the list inside blocks every other press but lets the wheel
+            // through (`block_mouse_except_scroll`), so a held-down list scrolls.
+            let key = ((trigger.x.max(0.0) as u64) << 32) | trigger.y.max(0.0) as u64;
+            gpui::div()
+                .id(("dropdown-list", key))
+                .occlude()
+                .flex()
+                .flex_col()
+                .min_w(bounds.size.width)
+                .max_w(px((win.0 - 2.0 * MARGIN).max(0.0)))
+                .max_h(px(below.max(above)))
+                .overflow_y_scroll()
+                .child(popup)
+                .into_any_element()
+        };
+        let s = popup.layout_as_root(
+            size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+            window,
+            cx,
         );
-        let (x, y) = (x.round(), y.round());
+        let at = fit(trigger, (f32::from(s.width), f32::from(s.height)), win);
+        let (x, y) = (at.x.round(), at.y.round());
         // Under the list, over everything else: a press outside closes it and does only that.
         if let Some(dismiss) = self.dismiss.take() {
-            let list = Rect::new(x, y, f32::from(s.width), f32::from(s.height));
+            let list = Rect::new(x, y, at.w, at.h);
             crate::popover::defer_backdrop(window, cx, BACKDROP_PRIORITY, &[list], dismiss);
         }
         // Deferred: drawn after (over) the rest of the window, and not clipped by the header
@@ -235,18 +243,62 @@ mod tests {
         h: 18.0,
     };
 
-    /// A panel's list opens above its field and never reaches below the field's top (the exits
-    /// row is under the field); taller than the room, it is held to it (and scrolls).
+    /// A list is anchored to its trigger and stays inside the window: as wide as its content,
+    /// never narrower than the trigger nor wider than the window; under the trigger, above it
+    /// when there's no room below; scrolling past the larger room. The trading panel's Qty list
+    /// (a field near the top right of a pane) opens under its field, not across the window.
     #[test]
-    fn a_panel_list_opens_above_and_never_below() {
-        let field = Rect::new(20.0, 300.0, 60.0, 28.0);
-        assert_eq!(place_above(field, (150.0, 171.0), WIN), (20.0, 127.0));
-        for h in [50.0, 171.0, 298.0, 400.0, 2000.0] {
-            let (_, y) = place_above(field, (150.0, h), WIN);
-            let shown = h.min(panel_room(field));
-            assert!(y >= 0.0 && y + shown <= field.y - GAP + 0.01, "{h}");
-        }
-        assert_eq!(panel_room(field), 298.0);
+    fn a_list_is_anchored_to_its_trigger_and_inside_the_window() {
+        let inside = |r: Rect, win: (f32, f32)| {
+            r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= win.0 + 0.01 && r.y + r.h <= win.1 + 0.01
+        };
+        // The panel's Qty field (the owner's screenshot): 1517,208, 66 x 24, window 1790 x 930.
+        let win = (1790.0, 930.0);
+        let qty = Rect::new(1517.0, 208.0, 66.0, 24.0);
+        let r = fit(qty, (200.0, 140.0), win);
+        assert_eq!((r.x, r.y), (1517.0, 234.0), "under the field, left-aligned");
+        assert_eq!(
+            (r.w, r.h),
+            (200.0, 140.0),
+            "its content's size, not the window's"
+        );
+        assert!(inside(r, win));
+        // Narrower content than the trigger: as wide as the trigger.
+        let wide = Rect::new(1590.0, 208.0, 190.0, 24.0);
+        let r = fit(wide, (120.0, 100.0), win);
+        assert_eq!(r.w, 190.0);
+        assert!(
+            r.x + r.w <= win.0 - MARGIN + 0.01,
+            "kept in from the right edge"
+        );
+        // No room below: above the trigger.
+        let low = Rect::new(400.0, 860.0, 60.0, 24.0);
+        let r = fit(low, (150.0, 200.0), win);
+        assert_eq!(
+            r.y + r.h + GAP,
+            low.y,
+            "above, its bottom at the trigger's top"
+        );
+        assert!(inside(r, win));
+        // Taller than either room: the larger room, and it scrolls.
+        let mid = Rect::new(400.0, 300.0, 60.0, 24.0);
+        let r = fit(mid, (150.0, 5000.0), win);
+        assert_eq!(r.h, room(mid, win).0.max(room(mid, win).1));
+        assert!(inside(r, win));
+        // A narrow window (a 165 px pane popped out, 200 px wide): inside, never wider.
+        let narrow = (200.0, 400.0);
+        let f = Rect::new(120.0, 40.0, 60.0, 24.0);
+        let r = fit(f, (300.0, 100.0), narrow);
+        assert!(inside(r, narrow), "{r:?}");
+        assert_eq!(r.w, narrow.0 - 2.0 * MARGIN);
+        // At 150 % UI zoom (everything 1.5 x): the same rule.
+        let z = Rect::new(qty.x, qty.y, qty.w * 1.5, qty.h * 1.5);
+        let r = fit(z, (300.0, 210.0), win);
+        assert_eq!(
+            (r.x, r.y),
+            (z.x.min(win.0 - MARGIN - 300.0), z.bottom() + GAP)
+        );
+        assert!(inside(r, win));
     }
 
     #[test]

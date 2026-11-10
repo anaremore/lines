@@ -155,7 +155,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # UI gallery (docs/design.md "Checking a UI change"): --gallery DIR [--gallery-full] renders the scene set from synthetic
 #   data into DIR and runs the layout lint on each (exit 1 on a finding); --layout-report (with --screenshot) writes
 #   the lint's findings beside the PNG as <stem>.lint.txt.
-# Header dropdowns open (screenshots): --order-group-menu (the first chart's first group tag's list of orders), --timeframe-menu (the first chart's timeframe list), --account-menu (every
+# Header dropdowns open (screenshots): --order-group-menu (the first chart's first group tag's list of orders), --timeframe-menu (the first chart's timeframe list), --panel-menu qty|bracket (DOMs open that trade panel list), --account-menu (every
 #   chart's and DOM's account list; needs an account chip, i.e. trading running, as in screenshot mode).
 # Studies menu (screenshots): --studies-menu open | edit:STUDY | style:STUDY[:TAB] (the style editor on its parts), STUDY = vwap:N | delta:N | profile | footprint | levels:ID; --study-set FILE (a StudySet JSON).
 # The chain's ticket (screenshots): --chain-ticket "buy|sell STRIKE call|put [at PRICE] [close] [one-click] [when LEVEL] [draft stop|target LEVEL] [drag stop|target|entry LEVEL] [restored] [pnl]", with
