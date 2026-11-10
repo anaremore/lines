@@ -849,7 +849,12 @@ impl StyleEditor {
     }
 
     /// The eyedropper's button (Esc while armed ends it: [`StyleEditor::key`]).
+    /// Pressed again while armed, it cancels (a way out by pointer as well as Esc).
     pub fn arm_dropper(&mut self) -> Outcome {
+        if self.dropper {
+            self.dropper = false;
+            return Outcome::Nothing;
+        }
         if self.custom.is_some() {
             self.dropper = true;
             return Outcome::Dropper;
@@ -868,6 +873,8 @@ impl StyleEditor {
         f: impl FnOnce(&mut crate::color_picker::Custom) -> crate::color_picker::Event,
     ) -> Outcome {
         use crate::color_picker::Event;
+        // Any other use of the picker ends the eyedropper.
+        self.dropper = false;
         let Some(p) = self.custom.as_mut() else {
             return Outcome::Nothing;
         };

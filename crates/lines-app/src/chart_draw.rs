@@ -157,6 +157,8 @@ impl ChartDrawings {
     /// Another product's drawings (the chart switched markets): anything in progress ends.
     pub fn set_data(&mut self, data: Arc<ProductDrawings>) {
         if !Arc::ptr_eq(&data, &self.data) {
+            // A color the picker previews is kept, on the product it was chosen for.
+            self.close_editor();
             *self = ChartDrawings {
                 hidden: self.hidden,
                 defaults: self.defaults,
@@ -809,6 +811,7 @@ impl ChartDrawings {
             return false;
         };
         self.editor = None;
+        self.restyled = None;
         self.drag = None;
         self.dragged = None;
         self.data.change(|s| {

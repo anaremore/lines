@@ -425,3 +425,18 @@ fn tab_keeps_the_picker_color() {
     assert!(e.custom.is_none());
     assert_eq!(e.drawing_style(&Style::DEFAULT), previewed);
 }
+
+/// The eyedropper has a pointer way out: its button pressed again cancels it, as does using
+/// any other part of the picker.
+#[test]
+fn the_dropper_button_toggles_and_the_picker_disarms_it() {
+    let mut e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert_eq!(e.arm_dropper(), Outcome::Dropper);
+    assert!(e.dropper);
+    assert_eq!(e.arm_dropper(), Outcome::Nothing);
+    assert!(!e.dropper, "pressed again: cancelled");
+    assert_eq!(e.arm_dropper(), Outcome::Dropper);
+    e.custom_hue(0.5);
+    assert!(!e.dropper, "the hue slider used: cancelled");
+}

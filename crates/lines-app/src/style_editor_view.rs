@@ -445,7 +445,7 @@ pub fn content_height(
 /// A row of color swatches with a name line: the tab's color ("Color") or a level type's zone
 /// fill ("Fill").
 fn is_color_row(r: &Row) -> bool {
-    r.label == "Color" || r.label == "Fill"
+    r.label == "Color" || r.label == "Fill" || r.label == "Recent"
 }
 
 /// The custom color picker under its color row (`crate::color_picker`): the square
@@ -527,6 +527,37 @@ fn picker(
             linear_color_stop(user_color(black, 0), 0.0),
             linear_color_stop(user_color(black, 100), 1.0),
         )))
+        // The keyboard's axis: a guide through the thumb along what ←→ change (saturation:
+        // across, a vertical guide moving sideways; brightness: a horizontal one moving down),
+        // ink on a background edge so it shows on any color (focus is never color alone).
+        .when(p.zone == Zone::Saturation, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(relative(f32::from(p.s) / 100.0))
+                    .ml(crate::zoom::ui(-2.0))
+                    .w(crate::zoom::ui(4.0))
+                    .h_full()
+                    .px(crate::zoom::ui(1.0))
+                    .bg(t.bg)
+                    .child(div().size_full().bg(t.text_main)),
+            )
+        })
+        .when(p.zone == Zone::Brightness, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(relative(1.0 - f32::from(p.v) / 100.0))
+                    .mt(crate::zoom::ui(-2.0))
+                    .h(crate::zoom::ui(4.0))
+                    .w_full()
+                    .py(crate::zoom::ui(1.0))
+                    .bg(t.bg)
+                    .child(div().size_full().bg(t.text_main)),
+            )
+        })
         .child(
             div()
                 .absolute()
@@ -550,7 +581,7 @@ fn picker(
             .w_full()
             .h(crate::zoom::ui(SLIDER_H))
             .rounded_sm()
-            .border_1()
+            .border_2()
             .border_color(edge(on))
             .child(track.absolute().size_full().rounded_sm())
             .child(
@@ -636,7 +667,7 @@ fn picker(
                 .flex()
                 .items_center()
                 .rounded_sm()
-                .border_1()
+                .border_2()
                 .border_color(edge(p.zone == Zone::Hex))
                 .text_color(t.text_main)
                 .child(hex)
@@ -660,7 +691,7 @@ fn picker(
                 .flex()
                 .items_center()
                 .rounded_sm()
-                .border_1()
+                .border_2()
                 .border_color(edge(p.zone == Zone::Dropper))
                 .when(e.dropper, |d| d.bg(t.accent).text_color(t.bg))
                 .when(!e.dropper, |d| {
@@ -1163,8 +1194,8 @@ pub fn render(
             );
         }
         if is_color {
-            // A study part's note (how its colors apply), the custom color entry, then the
-            // readability warnings, right under the colors.
+            // A study part's note (how its colors apply), the readability warnings, then the
+            // custom color picker, right under the colors.
             if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
                 group = group.child(
                     div()
@@ -1176,11 +1207,13 @@ pub fn render(
                         .child(note),
                 );
             }
-            if let Some(p) = e.custom.as_ref().filter(|p| p.fill != main) {
-                group = group.child(picker(e, p, t, es, cx));
-            }
+            // The warnings come before the picker: a tall picker (high UI zoom, a short pane)
+            // would scroll them out of view, and they follow its preview live.
             if main && !warnings.is_empty() {
                 group = group.child(warning_box(t, warnings));
+            }
+            if let Some(p) = e.custom.as_ref().filter(|p| p.fill != main) {
+                group = group.child(picker(e, p, t, es, cx));
             }
         }
         groups.push(group);
@@ -1298,6 +1331,30 @@ mod tests {
             color_row_name(&e, &rows[r], r, names).as_deref(),
             Some("Teal · selected: Theme")
         );
+    }
+
+    /// A current custom color that is also a recent one is named on the Recent row (which has
+    /// a name line like the color rows), and a focused recent swatch is named there too.
+    #[test]
+    fn the_recent_row_names_its_colors() {
+        use lines_core::drawings::{Style, Tool};
+        use lines_core::style::{Color, Rgb};
+        let t = crate::theme::Theme::dark(crate::theme::Palette::Standard);
+        let mut style = Style::DEFAULT;
+        style.line.color = Color::Custom(Rgb::hex(0x12abcd));
+        let mut e = StyleEditor::for_drawing(Tool::Trend, &style);
+        e.recent = vec![Rgb::hex(0x12abcd), Rgb::hex(0x808080)];
+        let names = names(&e, &t);
+        let rows = e.rows();
+        let r = rows.iter().position(|r| r.label == "Recent").unwrap();
+        assert!(is_color_row(&rows[r]));
+        let named = color_row_name(&e, &rows[r], r, names).unwrap();
+        assert!(named.to_uppercase().contains("12ABCD"), "{named}");
+        e.row = r;
+        e.col = 1;
+        let named = color_row_name(&e, &rows[r], r, names).unwrap();
+        assert!(named.to_uppercase().contains("808080"), "{named}");
+        assert!(named.contains("selected"), "{named}");
     }
 
     /// P2: a study's editor opens at the left under the legend, clear of the newest bars at
