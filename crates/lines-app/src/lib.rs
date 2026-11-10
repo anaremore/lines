@@ -620,6 +620,10 @@ struct Cli {
     /// with this note in the DOM.
     #[arg(long, value_name = "TEXT", requires = "screenshot")]
     depth_note: Option<String>,
+    /// Screenshot: show the replay as a source with no book would (no depth, no best
+    /// bid/ask): the DOM keeps its volume rows and says "No depth".
+    #[arg(long, requires = "screenshot", conflicts_with = "depth_note")]
+    no_book: bool,
     /// Screenshot: also render the Settings window at this section (general, appearance, keys,
     /// charts, dom, order-entry, accounts, connections, data-folder, about; the old names risk,
     /// trading, diagnostics and data still work) into `<out stem>-settings.png`.
@@ -2042,6 +2046,7 @@ where
                 panel_at: cli.panel_at,
                 journal_dir: cli.journal_dir.clone(),
                 depth_note: cli.depth_note.clone(),
+                no_book: cli.no_book,
                 layout_report: cli.layout_report,
                 settings: cli
                     .settings
