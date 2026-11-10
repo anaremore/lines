@@ -846,6 +846,21 @@ pub fn protects(o: &lines_trading::Order, position: i64) -> bool {
     live(o) && stop && exit && closes
 }
 
+/// The position card's stop: the nearest live stop that [`protects`] the position (a bracket's
+/// stop loss, an exit, or a plain stop on the closing side no larger than the position), its
+/// price and what is left of it.
+pub fn card_stop<'a>(
+    orders: impl Iterator<Item = &'a lines_trading::Order>,
+    position: i64,
+    last: Option<Price>,
+) -> Option<(Price, i64)> {
+    orders
+        .filter(|o| protects(o, position))
+        .filter_map(dom_trade::order_mark)
+        .map(|m| (m.price, m.qty.0 - m.filled.0))
+        .min_by_key(|(pr, _)| (pr.0 - last.map_or(pr.0, |l| l.0)).abs())
+}
+
 /// The stops that protect the position, as far as it goes: those that [`protects`] accepts,
 /// in the order the market reaches them (a long's highest sell stop first; at one price, a
 /// reduce-only stop after the others, since it shrinks itself), each while their quantities
@@ -1317,7 +1332,10 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
                         .map(|m| (m.price, m.qty.0 - m.filled.0))
                         .min_by_key(|(pr, _)| (pr.0 - last.map_or(pr.0, |l| l.0)).abs())
                 };
-                data.stop = near(dom_trade::MarkRole::Stop);
+                // The stop: any live stop that protects the position (`protects`, as BE
+                // decides), a plain one placed on the ladder included, so "No stop" is never
+                // said while one is working.
+                data.stop = card_stop(s.open_orders(account, k), p.qty, last);
                 data.target = near(dom_trade::MarkRole::Target);
             }
         }
@@ -2581,17 +2599,16 @@ pub fn flat_day_on_first_line(width: f32, day: &str) -> bool {
     text_w("Flat", 13.0) + 8.0 + text_w("Day ", 12.0) + text_w(day, 13.0) <= card_inner(width)
 }
 
-/// The trading switch's words below [`EXITS_ONE_ROW`]: the state in a word ("On", "Off", "On !"
-/// when orders would be denied), or with strategies armed their count (the track shows the state
-/// by its knob's place and fill), so PAPER and the switch fit the narrowest panel.
+/// The trading switch's words below [`EXITS_ONE_ROW`]: none (its track shows the state by the
+/// knob's place and fill, never color alone, and its tooltip names it), "!" when orders would be
+/// denied, or with strategies armed their count, so the account's name keeps its room.
 pub fn switch_text_tight(enabled: bool, blocker: Option<&str>, armed: usize) -> String {
     if armed > 0 {
         return format!("{armed} strat");
     }
     match (enabled, blocker) {
-        (true, Some(_)) => "On !".to_owned(),
-        (true, None) => "On".to_owned(),
-        (false, _) => "Off".to_owned(),
+        (true, Some(_)) => "!".to_owned(),
+        _ => String::new(),
     }
 }
 
@@ -2927,10 +2944,12 @@ pub fn dom_bar<V: TradePane>(
     let switch = {
         // Never cut: its words are the form that fits (`switch_words`), and the account chip gives
         // way to them.
-        let words = div()
-            .flex_shrink_0()
-            .text_size(crate::zoom::ui(switch_px(width)))
-            .child(switch_words.clone());
+        let words = (!switch_words.is_empty()).then(|| {
+            div()
+                .flex_shrink_0()
+                .text_size(crate::zoom::ui(switch_px(width)))
+                .child(switch_words.clone())
+        });
         let s = div()
             .id("trading-switch")
             .flex()
@@ -2950,7 +2969,7 @@ pub fn dom_bar<V: TradePane>(
                 t.text_dim
             })
             .when(enabled, |d| d.font_weight(FontWeight::BOLD))
-            .child(words)
+            .children(words)
             .child(track(enabled, t));
         let verb = if enabled {
             "Disable trading"
@@ -3600,14 +3619,16 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         false,
         CARD_KEEP,
     ));
-    if let Some(tk) = position
+    // Ticks (P&L both ways) sit under the open P&L on the right, never among the orders, where
+    // "SL 6006.00 0.0 t" would read as the stop's distance.
+    let ticks = position
         .and_then(|p| p.2)
         .filter(|_| mode.money() && mode.ticks())
-    {
-        let mut s = String::new();
-        let _ = crate::pnl::write_ticks(&mut s, tk);
-        items.push((s, t.text_dim, false, 0));
-    }
+        .map(|tk| {
+            let mut s = String::new();
+            let _ = crate::pnl::write_ticks(&mut s, tk);
+            s
+        });
     let unresolved = d.map_or(0, |d| d.unresolved);
     let day_on_line = day.filter(|_| day_below);
     let day_w = day_on_line.map_or(0.0, |m| {
@@ -3632,9 +3653,11 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
     let inner = card_inner(width);
     let lines = card_lines(width);
     // The day's P&L sits on the first lower line, or in a tight panel on the last.
-    let day_line = if is_tight(width) { lines - 1 } else { 0 };
+    // The day's P&L on the last line; the ticks under the open P&L, on the first.
+    let day_line = lines - 1;
+    let ticks_w = ticks.as_ref().map_or(0.0, |s| text_w(s, 11.0) + 8.0);
     let mut rooms = [inner; 4];
-    rooms[0] -= chip_w;
+    rooms[0] -= chip_w + ticks_w;
     rooms[day_line] -= day_w;
     let rooms = rooms.map(|r| r.max(0.0));
     let widths: Vec<(f32, u8)> = items
@@ -3698,6 +3721,12 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
             line(16.0)
                 .text_size(crate::zoom::ui(11.0))
                 .child(row)
+                .children(
+                    ticks
+                        .clone()
+                        .filter(|_| i == 0)
+                        .map(|s| div().flex_shrink_0().text_color(t.text_dim).child(s)),
+                )
                 .children(
                     day_on_line
                         .filter(|_| i == day_line)
@@ -6779,19 +6808,19 @@ mod tests {
         );
         assert_eq!(card_h(240.0), card_h(420.0));
         let w = |s: &str| text_w(s, 11.0);
-        // In the card's order: the stop, the target, the average (when not above), working, ticks.
+        // In the card's order: the stop, the target, the average (when not above), working. The
+        // ticks sit under the open P&L on the first line's right, the day's P&L on the last.
         let sl = (w("SL 6006.00") + 4.0, 5);
         let tp = (w("TP 6014.00") + 4.0, 5);
         let avg = (w("@ 6010.25"), 3);
         let working = (w("2 working"), CARD_KEEP);
-        let ticks = (w("+0.0 t"), 0);
-        let items = [sl, tp, avg, working, ticks];
+        let items = [sl, tp, avg, working];
         let rooms_at = |width: f32, day: &str| {
             let inner = card_inner(width);
             let lines = card_lines(width);
-            let day_line = if is_tight(width) { lines - 1 } else { 0 };
             let mut r = vec![inner; lines];
-            r[day_line] -= w("Day ") + w(day) + 12.0;
+            r[0] -= w("-12.5 t") + 8.0;
+            r[lines - 1] -= w("Day ") + w(day) + 12.0;
             r
         };
         for width in WIDTHS {
@@ -6815,8 +6844,8 @@ mod tests {
                     let used = on.iter().sum::<f32>() + 8.0 * on.len().saturating_sub(1) as f32;
                     assert!(used <= *room, "{width}: line {l} holds {used} in {room}");
                 }
-                // Left out in order: ticks, then the average, then the target, then the stop.
-                let order = [4, 2, 1, 0];
+                // Left out in order: the average, then the target, then the stop.
+                let order = [2, 1, 0];
                 let dropped: Vec<usize> =
                     order.into_iter().filter(|i| place[*i].is_none()).collect();
                 assert_eq!(dropped, order[..dropped.len()], "{width} {day}: in order");
@@ -6826,10 +6855,7 @@ mod tests {
         let place = card_place(&rooms_at(MIN_DOM_WIDTH, "$0.00"), &items);
         assert!(place.iter().all(Option::is_some), "{place:?}");
         // Nothing fits: the working count still shows, on the first line.
-        assert_eq!(
-            card_place(&[0.0], &items),
-            vec![None, None, None, Some(0), None]
-        );
+        assert_eq!(card_place(&[0.0], &items), vec![None, None, None, Some(0)]);
     }
 
     /// The card's side and P&L are never cut: the average goes first, then the large text steps
@@ -6974,10 +7000,11 @@ mod tests {
             assert!(confirm <= room, "confirmation buttons {confirm}");
         }
         // The tight switch says the state in a word, and the count with its noun.
-        assert_eq!(switch_words(false, None, 0, MIN_DOM_WIDTH), "Off");
+        assert_eq!(switch_words(false, None, 0, MIN_DOM_WIDTH), "");
+        assert_eq!(switch_words(true, None, 0, MIN_DOM_WIDTH), "");
         assert_eq!(
             switch_words(true, Some("market closed"), 0, MIN_DOM_WIDTH),
-            "On !"
+            "!"
         );
         assert_eq!(switch_words(true, None, 2, MIN_DOM_WIDTH), "2 strat");
         assert!(reason_below(true, Some("market closed"), 0, MIN_DOM_WIDTH));
@@ -7082,6 +7109,53 @@ mod tests {
         const { assert!(MIN_HIT >= 20.0) };
         assert!(is_narrow(MIN_DOM_WIDTH) && !is_narrow(NARROW_BELOW) && !is_narrow(0.0));
         assert!(is_tight(MIN_DOM_WIDTH) && !is_tight(EXITS_ONE_ROW) && !is_tight(0.0));
+    }
+
+    /// The card's stop is any live stop that protects the position, as BE decides: "No stop"
+    /// is never said while one is working.
+    #[test]
+    fn the_card_stop_is_any_stop_that_protects() {
+        use lines_core::{ContractKey, Month, UtcMillis};
+        use lines_trading::{Order, OrderId, OrderKind, OrderState, Role};
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let stop = |id: u64, side: Side, at: i64, qty: i64, reduce_only: bool| Order {
+            id: OrderId(id),
+            account: AccountId::new("paper-1"),
+            contract: k,
+            side,
+            qty: Qty(qty),
+            kind: OrderKind::Stop { trigger: Price(at) },
+            state: OrderState::Working,
+            filled: Qty(0),
+            fill_value: 0,
+            role: Role::Single,
+            parent: None,
+            oco: None,
+            triggered: false,
+            created: UtcMillis(0),
+            updated: UtcMillis(0),
+            reduce_only,
+            overfill: Qty(0),
+        };
+        let last = Some(Price(601_025));
+        // A plain sell stop placed on the ladder protects a long 2: the card names it.
+        let plain = [stop(1, Side::Sell, 600_600, 2, false)];
+        assert_eq!(card_stop(plain.iter(), 2, last), Some((Price(600_600), 2)));
+        // An exit (reduce-only) too.
+        let exit = [stop(2, Side::Sell, 600_600, 2, true)];
+        assert_eq!(card_stop(exit.iter(), 2, last), Some((Price(600_600), 2)));
+        // A buy stop adds to a long: no stop, so the card says "No stop".
+        let entry = [stop(3, Side::Buy, 601_200, 1, false)];
+        assert_eq!(card_stop(entry.iter(), 2, last), None);
+        // A plain stop larger than the position would flip it: not protection.
+        let flips = [stop(4, Side::Sell, 600_600, 5, false)];
+        assert_eq!(card_stop(flips.iter(), 2, last), None);
+        // The nearest of two.
+        let two = [
+            stop(5, Side::Sell, 600_000, 1, true),
+            stop(6, Side::Sell, 600_800, 1, true),
+        ];
+        assert_eq!(card_stop(two.iter(), 2, last), Some((Price(600_800), 1)));
     }
 
     /// A market order still working (a thin book's remainder) says so, with what is left.
