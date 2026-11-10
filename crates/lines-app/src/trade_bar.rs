@@ -2859,7 +2859,7 @@ fn menu_row<V: TradePane>(
     id: (&'static str, u64),
     mark: Mark,
     label: String,
-    hint: String,
+    key: Option<TradeCmd>,
     t: &Theme,
     cx: &mut Context<V>,
     act: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
@@ -2894,8 +2894,16 @@ fn menu_row<V: TradePane>(
         .cursor_pointer()
         .hover(move |s| s.bg(accent.opacity(0.16)).border_color(accent))
         .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
-        .child(div().flex_1().text_color(t.text_main).child(label))
-        .child(div().flex_none().text_color(t.text_dim).child(hint))
+        // A row with a key may cut its label before the caps (a narrow window); a row without
+        // one (a bracket preset: money-relevant) is named in full.
+        .child(
+            div()
+                .flex_1()
+                .when(key.is_some(), |d| d.min_w_0().truncate())
+                .text_color(t.text_main)
+                .child(label),
+        )
+        .children(key.and_then(|k| crate::keycap::caps(crate::commands::Command::Trade(k), t)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |v: &mut V, _: &gpui::MouseDownEvent, window, cx| {
@@ -2905,11 +2913,6 @@ fn menu_row<V: TradePane>(
                 cx.notify();
             }),
         )
-}
-
-/// A trading command's key, as a list row shows it on the right.
-fn key_hint(cmd: TradeCmd) -> String {
-    crate::commands::hint(crate::commands::Command::Trade(cmd))
 }
 
 /// Open or close one of the panel's lists (the Qty or Bracket field).
@@ -4087,7 +4090,7 @@ fn controls<V: TradePane>(
                 ("qty-item", i as u64),
                 if on { Mark::Check } else { Mark::None },
                 q.to_string(),
-                key_hint(TradeCmd::QtyPreset(i as u8)),
+                Some(TradeCmd::QtyPreset(i as u8)),
                 t,
                 cx,
                 move |v, _, cx| set_size(v, q, cx),
@@ -4101,7 +4104,7 @@ fn controls<V: TradePane>(
             } else {
                 "Custom…".to_owned()
             },
-            key_hint(TradeCmd::TypeQty),
+            Some(TradeCmd::TypeQty),
             t,
             cx,
             |v, window, cx| {
@@ -4162,7 +4165,7 @@ fn controls<V: TradePane>(
                 Mark::None
             },
             "None".to_owned(),
-            String::new(),
+            None,
             t,
             cx,
             |v, _, cx| {
@@ -4189,7 +4192,7 @@ fn controls<V: TradePane>(
                 } else {
                     format!("{} · {}", p.name, crate::brackets::label(b, product, units))
                 },
-                String::new(),
+                None,
                 t,
                 cx,
                 move |v, _, _| v.trade().bracket = Some(b),
@@ -4201,7 +4204,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 98),
                 Mark::Check,
                 crate::brackets::label(c, product, units),
-                String::new(),
+                None,
                 t,
                 cx,
                 move |v, _, _| v.trade().bracket = Some(c),
@@ -4218,7 +4221,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 100),
                 Mark::Box(position),
                 pos_label.to_owned(),
-                key_hint(TradeCmd::BracketMode),
+                Some(TradeCmd::BracketMode),
                 t,
                 cx,
                 |v, _, cx| run_from(v, TradeCmd::BracketMode, Instant::now(), Source::Dom, cx),
@@ -4227,7 +4230,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 101),
                 Mark::Box(units == crate::brackets::BracketUnits::Points),
                 "Distances in points".to_owned(),
-                key_hint(TradeCmd::BracketUnits),
+                Some(TradeCmd::BracketUnits),
                 t,
                 cx,
                 |v, _, cx| run_from(v, TradeCmd::BracketUnits, Instant::now(), Source::Dom, cx),
@@ -4236,7 +4239,7 @@ fn controls<V: TradePane>(
                 ("bracket-item", 102),
                 Mark::None,
                 "Edit presets…".to_owned(),
-                key_hint(TradeCmd::EditBrackets),
+                Some(TradeCmd::EditBrackets),
                 t,
                 cx,
                 |v, _, cx| run_from(v, TradeCmd::EditBrackets, Instant::now(), Source::Dom, cx),
@@ -4591,17 +4594,20 @@ fn editor_view<V: TradePane>(
     let action = |id: &'static str,
                   label: &'static str,
                   name: &'static str,
+                  keys: &[&str],
                   f: fn(&mut crate::brackets::Editor)| {
-        tip(cell(id, t).flex_shrink_0().child(label), name, None, t).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |v: &mut V, _, _, cx| {
-                cx.stop_propagation();
-                if let Some(e) = v.trade().editor.as_mut() {
-                    f(e);
-                }
-                cx.notify();
-            }),
-        )
+        let keys = keys.iter().map(|k| (*k).to_owned()).collect();
+        crate::tooltip::tip_keys(cell(id, t).flex_shrink_0().child(label), name, keys, t)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v: &mut V, _, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(e) = v.trade().editor.as_mut() {
+                        f(e);
+                    }
+                    cx.notify();
+                }),
+            )
     };
     let foot = div()
         .flex()
@@ -4641,22 +4647,29 @@ fn editor_view<V: TradePane>(
         .child(action(
             "bracket-add",
             "+",
-            "Add a preset (Insert)",
+            "Add a preset",
+            &["Insert"],
             crate::brackets::Editor::add,
         ))
         .child(action(
             "bracket-del",
             "−",
-            "Delete the preset (Delete)",
+            "Delete the preset",
+            &["Delete"],
             crate::brackets::Editor::delete,
         ))
-        .child(action("bracket-up", "↑", "Move up (Ctrl+Up)", |e| {
-            e.reorder(-1)
-        }))
+        .child(action(
+            "bracket-up",
+            "↑",
+            "Move up",
+            &["Ctrl", "↑"],
+            |e| e.reorder(-1),
+        ))
         .child(action(
             "bracket-down",
             "↓",
-            "Move down (Ctrl+Down)",
+            "Move down",
+            &["Ctrl", "↓"],
             |e| e.reorder(1),
         ));
     let (head, foot) = if tight {

@@ -35,6 +35,7 @@ mod gallery;
 mod icons;
 mod journal_shots;
 mod journal_view;
+mod keycap;
 mod latency_hud;
 mod layout;
 mod layout_rec;

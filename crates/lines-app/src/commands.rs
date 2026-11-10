@@ -719,24 +719,42 @@ pub fn repeats(cmd: Command) -> bool {
     )
 }
 
-/// The hint shown for a command in menus and the palette: its first binding.
-pub fn hint(c: Command) -> String {
-    let mac = cfg!(target_os = "macos");
+/// The keys of a command's first binding, one per cap (`keycap`): modifiers first, in the
+/// platform's order (macOS: ⌥ ⇧ ⌘; elsewhere Ctrl Alt Shift), then the key. Empty when the
+/// command has no key.
+pub fn keys(c: Command) -> Vec<String> {
+    keys_on(c, cfg!(target_os = "macos"))
+}
+
+fn keys_on(c: Command, mac: bool) -> Vec<String> {
+    let mods = |ctrl: bool, alt: bool, shift: bool| -> Vec<String> {
+        let all: [(bool, &str); 3] = if mac {
+            [(alt, "⌥"), (shift, "⇧"), (ctrl, "⌘")]
+        } else {
+            [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift")]
+        };
+        all.iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, k)| (*k).to_owned())
+            .collect()
+    };
     match c {
-        Command::Focus(_) => return if mac { "⌥arrows" } else { "Alt+arrows" }.into(),
+        Command::Focus(_) => {
+            let mut v = mods(false, true, false);
+            v.push("arrows".to_owned());
+            return v;
+        }
         // The same window at a section: Settings' key.
-        Command::SettingsAt(_) => return hint(Command::Settings),
+        Command::SettingsAt(_) => return keys_on(Command::Settings, mac),
         Command::SelectTab(i) if i < 9 => {
-            return if mac {
-                format!("⌘{}", i + 1)
-            } else {
-                format!("Ctrl+{}", i + 1)
-            };
+            let mut v = mods(true, false, false);
+            v.push((i + 1).to_string());
+            return v;
         }
         _ => {}
     }
     let Some(b) = BINDINGS.iter().find(|b| b.cmd == c) else {
-        return String::new();
+        return Vec::new();
     };
     let key = match b.key {
         "right" => "→".to_owned(),
@@ -751,31 +769,19 @@ pub fn hint(c: Command) -> String {
         "," if !mac => "Comma".to_owned(),
         k => k.to_uppercase(),
     };
-    if mac {
-        let mut s = String::new();
-        if b.alt {
-            s.push('⌥');
-        }
-        if b.shift {
-            s.push('⇧');
-        }
-        if b.ctrl {
-            s.push('⌘');
-        }
-        s + &key
-    } else {
-        let mut s = String::new();
-        if b.ctrl {
-            s.push_str("Ctrl+");
-        }
-        if b.alt {
-            s.push_str("Alt+");
-        }
-        if b.shift {
-            s.push_str("Shift+");
-        }
-        s + &key
-    }
+    let mut v = mods(b.ctrl, b.alt, b.shift);
+    v.push(key);
+    v
+}
+
+/// A command's key as text ("Ctrl+Shift+F", "⇧⌘F"): for sentences ("Ctrl+Z undoes") and
+/// search. Menus, tooltips, the palette and Settings › Keys draw [`keys`] as caps instead.
+pub fn hint(c: Command) -> String {
+    hint_on(c, cfg!(target_os = "macos"))
+}
+
+fn hint_on(c: Command, mac: bool) -> String {
+    keys_on(c, mac).join(if mac { "" } else { "+" })
 }
 
 /// What a command is called in menus and the palette.
@@ -1466,6 +1472,29 @@ mod tests {
         // Ctrl+I is the Studies command (it acts on the focused chart; decision 0018).
         assert_eq!(cmd(&format!("{}-i", ctrl())), Some(Command::Studies));
         assert_eq!(cmd("ctrl-alt-left"), None);
+    }
+
+    /// Keycaps: one key per cap, modifiers in the platform's order, the same keys as the text.
+    #[test]
+    fn keys_are_one_per_cap_in_the_platforms_order() {
+        let k = |c, mac| keys_on(c, mac);
+        assert_eq!(k(Command::Split(Axis::Row), false), ["Ctrl", "Shift", "→"]);
+        assert_eq!(k(Command::Split(Axis::Row), true), ["⇧", "⌘", "→"]);
+        assert_eq!(k(Command::Menu, false), ["Shift", "F10"]);
+        assert_eq!(k(Command::SelectTab(2), false), ["Ctrl", "3"]);
+        assert_eq!(k(Command::SelectTab(2), true), ["⌘", "3"]);
+        assert_eq!(k(Command::Focus(Direction::Up), false), ["Alt", "arrows"]);
+        assert_eq!(
+            k(Command::Strategy(StrategyCmd::Start), false),
+            Vec::<String>::new()
+        );
+        // The text form is the same keys joined.
+        assert_eq!(hint_on(Command::Split(Axis::Row), false), "Ctrl+Shift+→");
+        assert_eq!(hint_on(Command::Split(Axis::Row), true), "⇧⌘→");
+        assert_eq!(hint_on(Command::Focus(Direction::Up), true), "⌥arrows");
+        for b in BINDINGS {
+            assert!(!keys_on(b.cmd, false).is_empty(), "{:?}", b.cmd);
+        }
     }
 
     #[test]

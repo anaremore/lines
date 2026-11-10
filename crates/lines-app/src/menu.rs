@@ -61,8 +61,11 @@ fn edge() -> f32 {
 
 pub struct MenuItem {
     pub label: String,
-    /// Right side: the command's shortcut, or a submenu's current value.
+    /// Right side: the command's shortcut as text, or a submenu's current value. A row with a
+    /// [`MenuItem::key`] draws that as caps instead.
     pub hint: String,
+    /// The command whose shortcut the row shows as caps (`keycap`).
+    pub key: Option<Command>,
     /// `None` with no submenu: a separator, or a header.
     pub cmd: Option<Command>,
     pub checked: bool,
@@ -90,6 +93,7 @@ impl MenuItem {
         MenuItem {
             label: label.to_owned(),
             hint: commands::hint(cmd),
+            key: Some(cmd),
             cmd: Some(cmd),
             ..MenuItem::sep()
         }
@@ -100,6 +104,7 @@ impl MenuItem {
         MenuItem {
             label: String::new(),
             hint: String::new(),
+            key: None,
             cmd: None,
             checked: false,
             sub: Vec::new(),
@@ -539,7 +544,10 @@ fn rows<V: 'static>(
             .flex_row()
             .items_center()
             .gap_2()
-            .child(div().text_color(t.text_dim).child(item.hint.clone()))
+            .child(match item.key.and_then(|k| crate::keycap::caps(k, &t)) {
+                Some(caps) => caps,
+                None => div().text_color(t.text_dim).child(item.hint.clone()),
+            })
             .child(
                 div()
                     .w(crate::zoom::ui(8.0))

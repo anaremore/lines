@@ -294,7 +294,9 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
             vec![
                 toggle("Price trail", Command::DomTrail, d.trail),
                 MenuItem {
+                    // A value, not a key: never replaced by caps.
                     hint: format!("{:.1} s", f64::from(d.half_life_ms) / 1000.0),
+                    key: None,
                     ..row("Next trail half-life", Command::DomTrailHalfLife)
                 },
             ],
@@ -564,6 +566,7 @@ fn link(l: LinkGroup) -> MenuItem {
         let mut r = pick(&label, Command::SetLink(g), g == l);
         if g.is_none() {
             r.hint = crate::commands::hint(Command::CycleLink);
+            r.key = Some(Command::CycleLink);
         }
         sub.push(r);
     }
@@ -604,6 +607,19 @@ mod tests {
             orders: None,
             chart_only: false,
         }
+    }
+
+    /// The trail half-life row shows its value ("1.5 s"), never caps, whatever its command's
+    /// binding (keycaps replace a row's text only for a key).
+    #[test]
+    fn the_half_life_row_keeps_its_value() {
+        let rows = items(&pane_of(PaneKind::Dom));
+        let r = rows
+            .iter()
+            .flat_map(|r| std::iter::once(r).chain(r.sub.iter()))
+            .find(|r| r.label == "Next trail half-life")
+            .expect("half-life row");
+        assert_eq!((r.key, r.hint.as_str()), (None, "1.5 s"));
     }
 
     fn pane_of(kind: PaneKind) -> PaneMenu {
