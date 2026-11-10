@@ -75,14 +75,19 @@ pub struct Header {
 pub struct Record {
     pub direction: Direction,
     pub since_start: Duration,
+    /// Wall-clock time the frame was recorded: the header's start plus `since_start`, worked
+    /// out once by the reader, which refuses a record whose time doesn't fit
+    /// ([`wall_ms`]), so no caller adds the two again.
+    pub wall_ms: i64,
     pub frame: Frame,
 }
 
-impl Record {
-    /// Wall-clock time the frame was recorded.
-    pub fn wall_ms(&self, header: &Header) -> i64 {
-        header.start_wall_ms + self.since_start.as_millis() as i64
-    }
+/// A record's wall-clock time: `start_wall_ms + since_start`, or `None` when that isn't an
+/// `i64` (a crafted or corrupt header or offset). Never wraps or saturates.
+pub fn wall_ms(start_wall_ms: i64, since_start: Duration) -> Option<i64> {
+    i64::try_from(since_start.as_millis())
+        .ok()
+        .and_then(|ms| start_wall_ms.checked_add(ms))
 }
 
 fn kind_bits(k: FrameKind) -> u8 {
@@ -298,6 +303,8 @@ impl Drop for Recorder {
 pub struct Reader<R: Read> {
     r: R,
     pub header: Header,
+    /// Records refused because their wall-clock time isn't representable.
+    unrepresentable: u64,
 }
 
 impl Reader<BufReader<File>> {
@@ -334,6 +341,7 @@ impl<R: Read> Reader<R> {
         };
         Ok(Reader {
             r,
+            unrepresentable: 0,
             header: Header {
                 start_wall_ms,
                 provider,
@@ -345,9 +353,46 @@ impl<R: Read> Reader<R> {
         })
     }
 
+    /// Records refused so far because their wall-clock time isn't representable
+    /// ([`wall_ms`]): counted, never wrapped or rounded into a wrong time.
+    pub fn unrepresentable(&self) -> u64 {
+        self.unrepresentable
+    }
+
     /// Next record, `Ok(None)` at clean end of file. A truncated final record (e.g. the app
-    /// was killed mid-write) is treated as end of file.
+    /// was killed mid-write) is treated as end of file. A record whose wall-clock time doesn't
+    /// fit an `i64` is skipped and counted ([`Reader::unrepresentable`]).
     pub fn next_record(&mut self) -> io::Result<Option<Record>> {
+        loop {
+            let Some((direction, nanos, frame)) = self.next_raw()? else {
+                return Ok(None);
+            };
+            let since_start = Duration::from_nanos(nanos);
+            match wall_ms(self.header.start_wall_ms, since_start) {
+                Some(wall_ms) => {
+                    return Ok(Some(Record {
+                        direction,
+                        since_start,
+                        wall_ms,
+                        frame,
+                    }));
+                }
+                None => {
+                    self.unrepresentable += 1;
+                    if self.unrepresentable == 1 {
+                        tracing::warn!(
+                            "recording: a record's time doesn't fit (start {} ms + {since_start:?}); \
+                             skipping such records",
+                            self.header.start_wall_ms
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The next record as stored: direction, offset in nanoseconds and frame.
+    fn next_raw(&mut self) -> io::Result<Option<(Direction, u64, Frame)>> {
         let mut tag = [0u8; 1];
         match self.r.read_exact(&mut tag) {
             Ok(()) => {}
@@ -384,11 +429,7 @@ impl<R: Read> Reader<R> {
             Ok((nanos, Bytes::from(buf)))
         })();
         match rest {
-            Ok((nanos, data)) => Ok(Some(Record {
-                direction,
-                since_start: Duration::from_nanos(nanos),
-                frame: Frame { kind, data },
-            })),
+            Ok((nanos, data)) => Ok(Some((direction, nanos, Frame { kind, data }))),
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 tracing::warn!("recording ends with a truncated frame; ignoring it");
                 Ok(None)
@@ -611,6 +652,51 @@ mod tests {
         bytes.extend_from_slice(b"abc");
         let mut r = Reader::new(&bytes[..]).unwrap();
         assert_eq!(r.next_record().unwrap(), None);
+    }
+
+    /// Fuzz regression (`lines-fuzz` smoke `recording`, CI on #140): a header starting near
+    /// `i64::MAX` overflowed `start + offset` (a panic in debug builds, a wrapped time in
+    /// release). Such a record is refused and counted; the records around it still read.
+    #[test]
+    fn a_time_that_overflows_is_refused_and_counted_not_wrapped() {
+        assert_eq!(wall_ms(i64::MAX, Duration::from_millis(1)), None);
+        assert_eq!(wall_ms(i64::MAX, Duration::ZERO), Some(i64::MAX));
+        assert_eq!(
+            wall_ms(i64::MAX - 5, Duration::from_millis(5)),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            wall_ms(i64::MIN, Duration::from_nanos(u64::MAX)),
+            Some(i64::MIN + 18_446_744_073_709)
+        );
+        assert_eq!(
+            wall_ms(7, Duration::from_micros(2_500)),
+            Some(9),
+            "whole ms, as before"
+        );
+
+        let header = Header {
+            start_wall_ms: i64::MAX - 1_000,
+            provider: "lines".into(),
+            protocol: "lines-events-1".into(),
+            product: "NQ".into(),
+            contract: None,
+            version: FORMAT_VERSION,
+        };
+        let mut w = Writer::new(Vec::new(), &header).unwrap();
+        let f = Frame::binary(b"x".to_vec());
+        for ms in [0, 1_000, 1_001, u64::MAX / 1_000_000, 999] {
+            w.write(Direction::FromServer, Duration::from_millis(ms), &f)
+                .unwrap();
+        }
+        let bytes = w.finish().unwrap();
+        let mut r = Reader::new(&bytes[..]).unwrap();
+        let mut times = Vec::new();
+        while let Some(rec) = r.next_record().unwrap() {
+            times.push(rec.wall_ms);
+        }
+        assert_eq!(times, [i64::MAX - 1_000, i64::MAX, i64::MAX - 1]);
+        assert_eq!(r.unrepresentable(), 2);
     }
 
     #[test]

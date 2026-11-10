@@ -117,8 +117,11 @@ pub fn recording(data: &[u8]) {
     while frames.len() < MAX_RECORDS {
         match reader.next_record() {
             Ok(Some(r)) => {
-                // The recording's own clock must be usable without overflow.
-                let _ = r.wall_ms(&h);
+                // The reader worked the record's time out without overflow (or refused it).
+                assert_eq!(
+                    lines_feed::recording::wall_ms(h.start_wall_ms, r.since_start),
+                    Some(r.wall_ms)
+                );
                 if r.direction == lines_feed::recording::Direction::FromServer {
                     frames.push(r.frame);
                 }

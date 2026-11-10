@@ -229,7 +229,7 @@ impl ReplayTransport {
         let mut clock = Some(UtcMillis(reader.header.start_wall_ms));
         let mut pending = None;
         if let Some(first) = reader.next_record()? {
-            let wall = first.wall_ms(&reader.header);
+            let wall = first.wall_ms;
             clock = Some(UtcMillis(wall));
             if first.direction == Direction::FromServer && stop_at.is_none_or(|t| wall <= t.0) {
                 pending = Some((first.since_start, wall, first.frame));
@@ -271,9 +271,17 @@ impl Transport for ReplayTransport {
         if self.pending.is_none() {
             loop {
                 match self.reader.next_record()? {
-                    None => return Ok(None),
+                    None => {
+                        let n = self.reader.unrepresentable();
+                        if n > 0 {
+                            tracing::warn!(
+                                "replay: {n} recorded frames had a time that doesn't fit and were                                  skipped"
+                            );
+                        }
+                        return Ok(None);
+                    }
                     Some(r) if r.direction == Direction::FromServer => {
-                        let wall = r.wall_ms(&self.reader.header);
+                        let wall = r.wall_ms;
                         if self.stop_at.is_some_and(|t| wall > t.0) {
                             return Ok(None);
                         }

@@ -1,7 +1,11 @@
 //! Stable-Rust smoke fuzzing: every harness over its seeds and a few thousand deterministic
 //! mutations of them. Runs on every PR (the libFuzzer runs are nightly and scheduled). A
 //! failing input is written to `target/fuzz-smoke/<target>.bin` for `cargo fuzz run <target>
-//! <file>` reproduction.
+//! <file>` reproduction, and the failure message gives the run's seed, the mutation's number and
+//! the input in hex (CI keeps no files). The mutations are deterministic: a target's seed is
+//! fixed (`seed_for`), so the same seeds and iteration count give the same inputs on every
+//! machine. `LINES_FUZZ_SMOKE_SEED` (decimal or `0x` hex) replaces it, to explore further or
+//! replay a reported run.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -13,6 +17,29 @@ fn iterations() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1500)
+}
+
+/// The RNG seed for `target`: `LINES_FUZZ_SMOKE_SEED` if set, else fixed per target.
+fn seed_for(target: &str) -> u64 {
+    match std::env::var("LINES_FUZZ_SMOKE_SEED") {
+        Ok(v) => {
+            let v = v.trim();
+            let parsed = match v.strip_prefix("0x") {
+                Some(hex) => u64::from_str_radix(hex, 16),
+                None => v.parse(),
+            };
+            // Zero would stick the xorshift at zero.
+            parsed
+                .ok()
+                .filter(|&n| n != 0)
+                .unwrap_or_else(|| panic!("LINES_FUZZ_SMOKE_SEED={v:?} isn't a non-zero u64"))
+        }
+        Err(_) => 0x00f1_77ed_5eed ^ target.len() as u64,
+    }
+}
+
+fn hex(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 struct Rng(u64);
@@ -96,30 +123,37 @@ fn run_scaled(target: &str, f: fn(&[u8]), divisor: usize) {
         .filter(|s| s.target == target)
         .collect();
     assert!(!seeds.is_empty(), "no seeds for {target}");
-    let check = |input: &[u8]| {
+    let seed = seed_for(target);
+    let check = |input: &[u8], what: &str| {
         if catch_unwind(AssertUnwindSafe(|| f(input))).is_err() {
             let dir =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fuzz-smoke");
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join(format!("{target}.bin"));
             let _ = std::fs::write(&path, input);
-            panic!("{target} panicked; input saved to {}", path.display());
+            panic!(
+                "{target} panicked on {what} (LINES_FUZZ_SMOKE_SEED={seed:#x}, {} seeds); input                  saved to {}; {} bytes: {}",
+                seeds.len(),
+                path.display(),
+                input.len(),
+                hex(input)
+            );
         }
     };
-    for s in &seeds {
-        check(&s.data);
+    for (i, s) in seeds.iter().enumerate() {
+        check(&s.data, &format!("seed {i}"));
     }
-    let mut rng = Rng(0x00f1_77ed_5eed ^ target.len() as u64);
-    for _ in 0..iterations() / divisor {
+    let mut rng = Rng(seed);
+    for i in 0..iterations() / divisor {
         let a = &seeds[rng.below(seeds.len())].data;
         let b = &seeds[rng.below(seeds.len())].data;
-        check(&mutate(&mut rng, a, b));
+        check(&mutate(&mut rng, a, b), &format!("mutation {i}"));
     }
     // Plain noise and empty input.
-    check(&[]);
+    check(&[], "empty input");
     for n in [1, 7, 64, 4096] {
         let noise: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
-        check(&noise);
+        check(&noise, &format!("{n} bytes of noise"));
     }
 }
 
