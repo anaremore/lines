@@ -331,7 +331,7 @@ mod tests {
             Arc::new(crate::coinbase::CoinbaseProvider)
         }
         fn default_product(&self) -> ProductId {
-            lines_core::catalog::BTC_USD
+            crate::catalog::BTC_USD
         }
         fn connect(
             &self,

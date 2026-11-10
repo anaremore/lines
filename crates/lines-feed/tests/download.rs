@@ -424,6 +424,9 @@ fn another_interface_version_is_refused() {
     }
     struct Ext;
     impl lines_feed::extension::SourceExtension for Ext {
+        fn api_version(&self) -> u32 {
+            lines_feed::extension::API_VERSION
+        }
         fn name(&self) -> &'static str {
             "old-days"
         }
