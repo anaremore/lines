@@ -69,7 +69,8 @@ impl Safety {
                 full: a.to_owned(),
                 short: a.to_owned(),
                 tip: tip.to_owned(),
-                extra: 8.0,
+                // The badge's padding, and LIVE's border.
+                extra: if a == "LIVE" { 10.0 } else { 8.0 },
             });
         }
         if self.armed > 0 {
@@ -108,7 +109,7 @@ impl Safety {
             v.push(Item {
                 kind: SafetyKind::Recording,
                 // Its Stop button's words are measured with it ([`REC_STOP`]).
-                full: format!("● REC {t} {}", REC_STOP.0),
+                full: format!("● REC {t} {}", REC_STOP.0).replace("  ", " "),
                 short: format!("● REC {}", REC_STOP.1),
                 tip: format!("Recording the live feeds ({t})"),
                 // The Stop button's edges and padding.
@@ -403,19 +404,34 @@ pub(crate) fn accounts(
     cx: &gpui::App,
 ) -> (usize, Option<&'static str>) {
     let trading = crate::trading::Trading::try_global(cx);
-    let armed = doms.iter().filter(|d| d.3).count();
+    let switches: Vec<(Option<Option<&'static str>>, bool)> = doms
+        .iter()
+        .map(|(_, id, _, on)| {
+            let badge = id
+                .as_ref()
+                .map(|id| trading.and_then(|t| t.account(id)).map(|a| a.badge));
+            (badge, *on)
+        })
+        .collect();
+    armed_and_word(&switches)
+}
+
+/// [`accounts`] without the app: each DOM's account (`None`: none chosen; `Some(None)`: a
+/// broker's account not listed yet; `Some(Some(badge))`) and whether it is armed.
+pub fn armed_and_word(
+    doms: &[(Option<Option<&'static str>>, bool)],
+) -> (usize, Option<&'static str>) {
+    let armed = doms.iter().filter(|d| d.1).count();
     let mut account = None;
-    for (_, id, _, on) in doms {
+    for (badge, on) in doms {
         if armed > 0 && !on {
             continue;
         }
         // As the DOM's own badge reads: no account is paper; a broker's account not listed
         // yet is LIVE until it says otherwise (never shown as simulated).
-        let word = match id {
+        let word = match badge {
             None => "PAPER",
-            Some(id) => trading
-                .and_then(|t| t.account(id))
-                .map_or("LIVE", |a| a.badge),
+            Some(b) => b.unwrap_or("LIVE"),
         };
         account = Some(account.map_or(word, |w| more_real(w, word)));
     }
@@ -715,6 +731,41 @@ mod tests {
         );
         assert_eq!(feed_word(false, &S::Connecting), Some("connecting"));
         assert_eq!(feed_word(false, &S::Stopped), Some("stopped"));
+    }
+
+    /// The account word: from the armed DOMs when any is armed (an idle LIVE DOM never makes an
+    /// armed paper one read live, and an idle PAPER one never hides an armed LIVE one); a
+    /// broker account not listed yet is LIVE; no DOM, no word.
+    #[test]
+    fn the_account_word_follows_the_armed_doms() {
+        let (paper, live, sim) = (Some(Some("PAPER")), Some(Some("LIVE")), Some(Some("SIM")));
+        assert_eq!(
+            armed_and_word(&[(live, false), (paper, true)]),
+            (1, Some("PAPER"))
+        );
+        assert_eq!(
+            armed_and_word(&[(paper, false), (live, true)]),
+            (1, Some("LIVE"))
+        );
+        assert_eq!(
+            armed_and_word(&[(paper, false), (live, false)]),
+            (0, Some("LIVE"))
+        );
+        assert_eq!(
+            armed_and_word(&[(sim, true), (paper, true)]),
+            (2, Some("SIM"))
+        );
+        assert_eq!(
+            armed_and_word(&[(Some(None), true)]),
+            (1, Some("LIVE")),
+            "unlisted"
+        );
+        assert_eq!(
+            armed_and_word(&[(None, false)]),
+            (0, Some("PAPER")),
+            "no account"
+        );
+        assert_eq!(armed_and_word(&[]), (0, None));
     }
 
     #[test]

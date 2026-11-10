@@ -145,6 +145,8 @@ pub struct Workspace {
     pub crosshair_sync_price: bool,
     /// Footer links the trader hid (a right click; saved as `hidden_footer_links`).
     pub hidden_links: Vec<crate::footer::LinkKind>,
+    /// Hidden link names this build doesn't know (a newer one wrote them): saved back as read.
+    hidden_links_unknown: Vec<String>,
     /// The footer's safety zone and activity line (`crate::footer::gather`), kept fresh by the
     /// trigger watch: armed DOMs, accounts and feeds change in other windows and tabs.
     safety: crate::footer::Safety,
@@ -191,6 +193,7 @@ impl Workspace {
             crosshair_sync: false,
             crosshair_sync_price: false,
             hidden_links: Vec::new(),
+            hidden_links_unknown: Vec::new(),
             safety: Default::default(),
             activity: None,
             feed_words: Vec::new(),
@@ -3115,7 +3118,15 @@ impl WindowView {
         };
         // Each item's own padding counts as part of its text.
         let pad = crate::zoom::f(8.0);
-        let padded = |s: &str| measure(s) + pad;
+        let padded = |s: &str| {
+            let w = measure(s) + pad;
+            // ⋯ is drawn at least a 20 px target wide.
+            if s == footer::MORE {
+                w.max(crate::zoom::f(20.0))
+            } else {
+                w
+            }
+        };
         let width = f32::from(window.viewport_size().width) - crate::zoom::f(24.0);
         let texts: Vec<String> = links.iter().map(|(_, s, _)| s.clone()).collect();
         let fit = footer::fit(
@@ -4515,12 +4526,22 @@ fn hidden_links(doc: &WorkspaceDoc) -> Vec<crate::footer::LinkKind> {
         .collect()
 }
 
+/// The hidden link names this build doesn't know: kept, and saved back as read.
+fn unknown_links(doc: &WorkspaceDoc) -> Vec<String> {
+    doc.hidden_footer_links
+        .iter()
+        .filter(|k| crate::footer::LinkKind::from_key(k).is_none())
+        .cloned()
+        .collect()
+}
+
 /// Take a workspace's name and settings (not its windows).
 pub fn set_meta(doc: &WorkspaceDoc, cx: &mut App) {
     let ws = cx.global_mut::<Workspace>();
     ws.name = doc.name.clone();
     ws.crosshair_sync = doc.crosshair_sync;
     ws.hidden_links = hidden_links(doc);
+    ws.hidden_links_unknown = unknown_links(doc);
     ws.show_perf_stats = doc.show_perf_stats;
     set_show_latency_hud(doc.show_latency_hud, cx);
 }
@@ -4554,6 +4575,7 @@ fn switch_workspace(doc: WorkspaceDoc, keep: gpui::AnyWindowHandle, cx: &mut App
         ws.crosshair_sync = doc.crosshair_sync;
         ws.crosshair_sync_price = doc.crosshair_sync_price;
         ws.hidden_links = hidden_links(&doc);
+        ws.hidden_links_unknown = unknown_links(&doc);
         ws.show_perf_stats = doc.show_perf_stats;
     }
     set_show_latency_hud(doc.show_latency_hud, cx);
@@ -4750,7 +4772,11 @@ fn snapshot_with(
         ws.name.clone(),
         ws.crosshair_sync,
         ws.crosshair_sync_price,
-        ws.hidden_links.iter().map(|k| k.key().to_owned()).collect(),
+        ws.hidden_links
+            .iter()
+            .map(|k| k.key().to_owned())
+            .chain(ws.hidden_links_unknown.iter().cloned())
+            .collect::<Vec<String>>(),
         ws.show_perf_stats,
         ws.show_latency_hud,
         ws.windows.clone(),
@@ -4797,7 +4823,11 @@ pub fn snapshot(cx: &mut App) -> WorkspaceDoc {
         ws.name.clone(),
         ws.crosshair_sync,
         ws.crosshair_sync_price,
-        ws.hidden_links.iter().map(|k| k.key().to_owned()).collect(),
+        ws.hidden_links
+            .iter()
+            .map(|k| k.key().to_owned())
+            .chain(ws.hidden_links_unknown.iter().cloned())
+            .collect::<Vec<String>>(),
         ws.show_perf_stats,
         ws.show_latency_hud,
         ws.windows.clone(),
