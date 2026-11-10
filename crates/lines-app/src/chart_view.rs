@@ -60,6 +60,7 @@ use lines_core::geometry::{
     Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
     snap, write_ohlcv,
 };
+use lines_core::levels::StatTone;
 use lines_core::timeframe::{BarSource, bar_date};
 use lines_core::viewport::{MAX_BAR_PX, MIN_BAR_PX, ScaleDrag, ScaleMode};
 use lines_core::{
@@ -2606,7 +2607,10 @@ impl ChartView {
             usize::from(studies.is_some())
                 + usize::from(fp.is_some())
                 + usize::from(!rows.is_empty()),
-            self.studies.legend_rows() + usize::from(fp.is_some()) + rows.len(),
+            self.studies.legend_rows()
+                + usize::from(fp.is_some())
+                + rows.len()
+                + rows.iter().filter(|r| !r.stats.is_empty()).count(),
         );
         let row_h = crate::zoom::f(12.0 * 1.3 + 4.0);
         let bottom = crate::zoom::f(30.0 + boxes as f32 * 12.0 + 4.0) + text_rows as f32 * row_h;
@@ -2616,8 +2620,11 @@ impl ChartView {
             self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
             return None;
         }
-        // Level rows: the source's name, then its state; a long reason ends in an ellipsis at
-        // the legend's width, never running over the chart.
+        // Level rows: the source's name, its legend title, then its state (none while current);
+        // a long reason ends in an ellipsis at the legend's width, never running over the
+        // chart. A source's stats on a line under it: each name dim, its value in the up or
+        // down color where that is AA on the legend (`Theme::legend_text`, else text), the sign
+        // always written; a stale row all dim.
         let levels = (!rows.is_empty()).then(|| {
             div()
                 .flex()
@@ -2629,19 +2636,65 @@ impl ChartView {
                 .bg(t.label_bg)
                 .text_size(crate::zoom::ui(12.0))
                 .children(rows.into_iter().map(|r| {
-                    div()
+                    let head = div()
                         .flex()
                         .flex_row()
                         .gap_2()
                         .min_w_0()
-                        .child(div().flex_shrink_0().text_color(t.text_main).child(r.label))
                         .child(
                             div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(if r.warn { t.text_main } else { t.text_dim })
-                                .child(r.text),
+                                .flex_shrink_0()
+                                .text_color(if r.dim { t.text_dim } else { t.text_main })
+                                .child(r.label),
                         )
+                        .when_some(r.title, |d, title| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(t.text_dim)
+                                    .child(format!("· {title}")),
+                            )
+                        })
+                        .when(!r.text.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(if r.warn { t.text_main } else { t.text_dim })
+                                    .child(r.text),
+                            )
+                        });
+                    let dim = r.dim;
+                    let stats = (!r.stats.is_empty()).then(|| {
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_3()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .children(r.stats.into_iter().map(|s| {
+                                let value = match (dim, s.tone) {
+                                    (true, _) => t.text_dim,
+                                    (false, StatTone::Plain) => t.text_main,
+                                    (false, StatTone::Up) => t.legend_text(t.up),
+                                    (false, StatTone::Down) => t.legend_text(t.down),
+                                };
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .flex_shrink_0()
+                                    .child(div().text_color(t.text_dim).child(s.name))
+                                    .child(div().text_color(value).child(s.text))
+                            }))
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(head)
+                        .children(stats)
                 }))
         });
         Some(

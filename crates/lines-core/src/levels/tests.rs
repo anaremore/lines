@@ -493,7 +493,7 @@ fn label_text_is_name_and_price() {
     let texts: Vec<Option<String>> = m
         .levels
         .iter()
-        .map(|l| label_text(l, LabelMode::NamePrice, &f))
+        .map(|l| label_text(l, LabelMode::NamePrice, LabelAt::Own, &f))
         .collect();
     assert_eq!(
         texts,
@@ -506,7 +506,7 @@ fn label_text_is_name_and_price() {
         ]
     );
     assert_eq!(
-        label_text(&m.levels[0], LabelMode::Name, &f).as_deref(),
+        label_text(&m.levels[0], LabelMode::Name, LabelAt::Own, &f).as_deref(),
         Some("Demand zone")
     );
     for mode in [LabelMode::Name, LabelMode::NamePrice] {
@@ -849,4 +849,145 @@ fn the_gutter_plan_by_width() {
         let c = gutter_plan(150.0, 70.0, w as f32, 130.0).cap;
         assert_eq!(c % GUTTER_STEP, 0.0, "{w}: {c}");
     }
+}
+
+/// A type's label edge: just under a zone's low edge (with the low edge's price), just above
+/// its high edge, or on its own price (a zone's high edge, as before).
+#[test]
+fn zone_labels_sit_at_their_types_edge() {
+    let m = demo();
+    let mut out = Vec::with_capacity(8);
+    let half = 8.0;
+    for (at, want) in [
+        (LabelAt::Own, 250.0),
+        (LabelAt::High, 250.0 - half),
+        (LabelAt::Low, 300.0 + half),
+    ] {
+        place(&m, &vp(), None, |k| k == 1, &mut out);
+        out[0].anchor = at;
+        place_labels(&mut out, 16.0, 400.0, &mut [LabelSeen::New; 3], |_| true);
+        assert_eq!(out[0].label_y, Some(want), "{at:?}");
+    }
+    let f = es_format();
+    let z = &m.levels[1];
+    assert_eq!(
+        label_text(z, LabelMode::NamePrice, LabelAt::Low, &f).as_deref(),
+        Some("Z1 : 5995.00")
+    );
+    assert_eq!(
+        label_text(z, LabelMode::NamePrice, LabelAt::High, &f).as_deref(),
+        Some("Z1 : 5997.50")
+    );
+    for at in LabelAt::ALL {
+        assert_eq!(LabelAt::from_key(at.key()), Some(at));
+    }
+    for c in LabelColor::ALL {
+        assert_eq!(LabelColor::from_key(c.key()), Some(c));
+    }
+    assert_eq!(TypeStyle::OWN.label_at, LabelAt::Own);
+    assert_eq!(TypeStyle::OWN.label, LabelColor::Level);
+}
+
+/// A label that clashes gives way by being dropped, never by moving to the zone's other edge:
+/// a line placed first just under a zone's low edge takes the room, and the zone's label (low
+/// edge) shows nowhere, not at its high edge, where there is room; with hysteresis it comes
+/// back at the same edge once clear.
+#[test]
+fn a_clashing_edge_label_is_dropped_never_moved() {
+    // The line at 304 px (599_480) sits where the zone's low-edge label (308) would.
+    let m = LevelMap::builder("demo", ES, UtcMillis(0))
+        .line("a", LevelValue::Raw(599_480.0), Some("A"), style())
+        .zone(
+            "zone",
+            LevelValue::Tick(Price(599_500)),
+            LevelValue::Tick(Price(599_750)),
+            Some("Z"),
+            style(),
+        )
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(8);
+    let mut seen = [LabelSeen::New; 2];
+    place(&m, &vp(), None, |_| true, &mut out);
+    out[1].anchor = LabelAt::Low;
+    place_labels(&mut out, 16.0, 400.0, &mut seen, |_| true);
+    assert_eq!(out[0].label_y, Some(304.0));
+    assert_eq!(out[1].label_y, None, "dropped, not moved to the high edge");
+    assert_eq!(seen[1], LabelSeen::Hidden);
+    // The line moves away a little: still within the hysteresis band, still hidden.
+    let away = |price: f64| {
+        LevelMap::builder("demo", ES, UtcMillis(0))
+            .line("a", LevelValue::Raw(price), Some("A"), style())
+            .zone(
+                "zone",
+                LevelValue::Tick(Price(599_500)),
+                LevelValue::Tick(Price(599_750)),
+                Some("Z"),
+                style(),
+            )
+            .build(TICK)
+            .unwrap()
+    };
+    let m = away(599_400.0); // 320 px: 12 px from 308, under 16 × 1.25
+    place(&m, &vp(), None, |_| true, &mut out);
+    out[1].anchor = LabelAt::Low;
+    place_labels(&mut out, 16.0, 400.0, &mut seen, |_| true);
+    assert_eq!(out[1].label_y, None);
+    let m = away(599_300.0); // 340 px: clear by more than 20
+    place(&m, &vp(), None, |_| true, &mut out);
+    out[1].anchor = LabelAt::Low;
+    place_labels(&mut out, 16.0, 400.0, &mut seen, |_| true);
+    assert_eq!(out[1].label_y, Some(308.0), "back at its own edge");
+}
+
+/// A legend's title and stats are validated with the map: a signed tone needs its sign, and
+/// lengths and counts are bounded; a bad legend refuses the map like a bad level.
+#[test]
+fn legend_is_validated_with_the_map() {
+    let stat = |name: &str, text: &str, tone| LegendStat {
+        name: name.into(),
+        text: text.into(),
+        tone,
+    };
+    let b = |l: LevelLegend| {
+        LevelMap::builder("demo", ES, UtcMillis(0))
+            .legend(l)
+            .build(TICK)
+    };
+    let good = LevelLegend {
+        title: Some("Map A".into()),
+        stats: vec![
+            stat("RI", "72.25", StatTone::Plain),
+            stat("Res", "\u{2212}7.9", StatTone::Down),
+            stat("MRes", "-1", StatTone::Down),
+            stat("WRes", "+11.0", StatTone::Up),
+        ],
+    };
+    assert_eq!(b(good.clone()).unwrap().legend, Some(good));
+    for bad in [
+        vec![stat("Res", "7.9", StatTone::Down)],
+        vec![stat("Res", "-7.9", StatTone::Up)],
+        vec![stat("", "1", StatTone::Plain)],
+        vec![stat("R", "", StatTone::Plain)],
+        vec![stat("R", "1234567890123", StatTone::Plain)],
+        vec![stat("R", "1", StatTone::Plain); MAX_LEGEND_STATS + 1],
+    ] {
+        assert_eq!(
+            b(LevelLegend {
+                title: None,
+                stats: bad.clone()
+            }),
+            Err(LevelError::BadLegend),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        b(LevelLegend {
+            title: Some("x".repeat(MAX_LEGEND_TEXT + 1)),
+            stats: Vec::new()
+        }),
+        Err(LevelError::BadLegend)
+    );
+    // No legend: none.
+    assert_eq!(demo().legend, None);
 }

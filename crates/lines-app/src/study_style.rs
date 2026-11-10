@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use lines_core::levels::{LabelMode, LevelType};
+use lines_core::levels::{LabelAt, LabelColor, LabelMode, LevelType};
 use lines_core::style::{Color, FillStyle, LineStyle, LineType, MAX_WIDTH, MIN_WIDTH, Rgb};
 use lines_indicators::{IndicatorConfig, PartStyles};
 use serde::{Deserialize, Serialize};
@@ -612,6 +612,9 @@ pub fn set_level_style(levels: &mut BTreeMap<String, PartStyles>, id: &str, e: &
     for (t, l) in e.types.iter().zip(e.looks.iter().skip(LEVELS.len())) {
         write_type(m, t, l);
     }
+    for (t, l) in e.types.iter().zip(&e.labels) {
+        write_type_label(m, t, *l);
+    }
     write_label(m, e.label, e.label_default);
     if m.is_empty() {
         levels.remove(id);
@@ -772,7 +775,7 @@ fn type_defs(t: &LevelType) -> (PartDef, PartDef) {
             .normalised(),
         ),
         stroke: false,
-        own: Some(type_own(s.fill.color, None, None)),
+        own: Some(type_own(s.fill.color, s.fill_light, None)),
         optional: false,
         note: None,
     };
@@ -870,6 +873,85 @@ pub fn write_type(styles: &mut PartStyles, t: &LevelType, look: &Look) {
     }
 }
 
+/// A level type's label options (decision 0026): the text's color and where the label sits.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TypeLabel {
+    pub color: LabelColor,
+    pub at: LabelAt,
+}
+
+impl TypeLabel {
+    /// The type's own (recommended) label options.
+    pub fn of(t: &LevelType) -> TypeLabel {
+        TypeLabel {
+            color: t.style.label,
+            at: t.style.label_at,
+        }
+    }
+}
+
+/// Where a type's label options are saved in its `types.<id>` entry (each only while it differs
+/// from the type's own).
+const LABEL_COLOR_KEY: &str = "label-color";
+const LABEL_AT_KEY: &str = "label-at";
+
+/// Level type `t`'s label options as saved (missing or unreadable: the type's own).
+pub fn read_type_label(styles: &PartStyles, t: &LevelType) -> TypeLabel {
+    let o = styles.get(TYPES_KEY).and_then(|v| v.get(t.id));
+    let field = |k: &str| o.and_then(|o| o.get(k)).and_then(Value::as_str);
+    let own = TypeLabel::of(t);
+    TypeLabel {
+        color: field(LABEL_COLOR_KEY)
+            .and_then(LabelColor::from_key)
+            .unwrap_or(own.color),
+        at: field(LABEL_AT_KEY)
+            .and_then(LabelAt::from_key)
+            .unwrap_or(own.at),
+    }
+}
+
+/// Save type `t`'s label options: only a field that changed, removed when back at the type's
+/// own; an entry or `types` this build can't read is left as saved.
+pub fn write_type_label(styles: &mut PartStyles, t: &LevelType, label: TypeLabel) {
+    let was = read_type_label(styles, t);
+    if was == label {
+        return;
+    }
+    let own = TypeLabel::of(t);
+    let types = styles
+        .entry(TYPES_KEY.to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Value::Object(types) = types else {
+        return;
+    };
+    let entry = types
+        .entry(t.id.to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Value::Object(o) = entry else {
+        return;
+    };
+    if was.color != label.color {
+        set(
+            o,
+            LABEL_COLOR_KEY,
+            (label.color != own.color).then(|| Value::String(label.color.key().to_owned())),
+        );
+    }
+    if was.at != label.at {
+        set(
+            o,
+            LABEL_AT_KEY,
+            (label.at != own.at).then(|| Value::String(label.at.key().to_owned())),
+        );
+    }
+    if o.is_empty() {
+        types.remove(t.id);
+    }
+    if types.is_empty() {
+        styles.remove(TYPES_KEY);
+    }
+}
+
 /// A source's label mode as saved (else the source's own, `default`).
 pub fn read_label(styles: &PartStyles, default: LabelMode) -> LabelMode {
     styles
@@ -903,6 +985,11 @@ pub struct TypeLook {
     /// The line's color on the light themes when it is the type's recommended one and that
     /// has a light-theme counterpart (`TypeStyle::light`).
     pub light: Option<Color>,
+    /// The fill's color on the light themes when it is the type's recommended one and that
+    /// has a light-theme counterpart (`TypeStyle::fill_light`).
+    pub fill_light: Option<Color>,
+    /// Its labels' text color and where they sit.
+    pub label: TypeLabel,
     /// A zone's edges in the source's Zones color (at 60 %, decision 0026): the chart set a
     /// Zones color for the source and none for the type's line.
     pub edge: Option<Color>,
@@ -920,12 +1007,21 @@ impl TypeLook {
             _ => self.line.color,
         }
     }
+
+    /// The fill's color in a theme (`dark`): the light-theme counterpart where there is one.
+    pub fn fill_color(&self, dark: bool) -> Color {
+        match (dark, self.fill_light) {
+            (false, Some(c)) => c,
+            _ => self.fill.color,
+        }
+    }
 }
 
 /// Level type `t`'s look, field by field: the chart's override for the type (`ty`, as
 /// [`read_type`] gives it), else the chart's override for the whole source (`source`: its
 /// Lines and Zones color and opacity, decision 0026), else the type's recommended look (which
-/// may be each level's own color).
+/// may be each level's own color). Its label options are the type's own: the caller sets the
+/// saved ones ([`read_type_label`]).
 pub fn resolve_type(t: &LevelType, source: &[Look; 2], ty: &Look) -> TypeLook {
     let d = t.style;
     let l = match ty.style {
@@ -963,9 +1059,12 @@ pub fn resolve_type(t: &LevelType, source: &[Look; 2], ty: &Look) -> TypeLook {
         }
     };
     let recommended = l.color == Color::Own && sl.color() == Color::Own;
+    let fill_recommended = f.color == Color::Own && sz.color() == Color::Own;
     TypeLook {
         shown: ty.shown,
         light: d.light.filter(|_| recommended),
+        fill_light: d.fill_light.filter(|_| fill_recommended),
+        label: TypeLabel::of(t),
         edge: (l.color == Color::Own && sz.color() != Color::Own).then(|| sz.color()),
         own_line: d.own_line()
             && l == LineStyle {
@@ -991,6 +1090,8 @@ pub fn resolve_type(t: &LevelType, source: &[Look; 2], ty: &Look) -> TypeLook {
 pub struct LevelEdit {
     pub looks: Vec<Look>,
     pub types: &'static [LevelType],
+    /// Each type's label options, in `types` order.
+    pub labels: Vec<TypeLabel>,
     pub label: LabelMode,
     /// The source's own label mode (saved only when the chart's differs).
     pub label_default: LabelMode,
@@ -999,8 +1100,20 @@ pub struct LevelEdit {
 impl LevelEdit {
     /// The edit an editor shows (built by [`level_editor`] for this source).
     pub fn of(e: &StyleEditor, types: &'static [LevelType], label_default: LabelMode) -> LevelEdit {
+        let parts = e.parts.iter().skip(LEVELS.len());
         LevelEdit {
             looks: looks_of(e),
+            labels: types
+                .iter()
+                .zip(parts)
+                .map(|(t, p)| match p.label {
+                    Some((color, at)) => TypeLabel {
+                        color,
+                        at: at.unwrap_or(t.style.label_at),
+                    },
+                    None => TypeLabel::of(t),
+                })
+                .collect(),
             types,
             label: match e.options.label_price {
                 Some(true) => LabelMode::NamePrice,
@@ -1034,6 +1147,7 @@ pub fn level_editor(
     }
     for t in types {
         let look = read_type(styles, t);
+        let label = read_type_label(styles, t);
         let kind = color_of(t.id);
         e.parts.push(Part {
             title: t.label,
@@ -1045,7 +1159,9 @@ pub fn level_editor(
             group: Some(t.group),
             fill: look
                 .fill
-                .map(|f| (f, type_own(t.style.fill.color, None, kind))),
+                .map(|f| (f, type_own(t.style.fill.color, t.style.fill_light, kind))),
+            // A label's edge is offered for zones (a line has one price).
+            label: Some((label.color, t.zone.then_some(label.at))),
         });
     }
     e.options.label_price = Some(read_label(styles, label_default) == LabelMode::NamePrice);
@@ -1073,6 +1189,7 @@ pub fn editor(title: String, defs: &[PartDef], looks: &[Look], source: Option<Rg
             note: d.note,
             group: None,
             fill: None,
+            label: None,
         })
         .collect();
     StyleEditor::for_study(title, parts)

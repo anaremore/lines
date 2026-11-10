@@ -98,8 +98,9 @@ fn legend_and_levels_describe_the_same_frame() {
         &vp(),
     );
     assert_eq!(
-        rows[i].text, "as of 13:00 UTC",
-        "the legend sees the map drawn"
+        (rows[i].text.as_str(), rows[i].title.as_deref()),
+        ("", Some("Synthetic")),
+        "the legend sees the map drawn (no time while current)"
     );
     assert!(!rows[i].warn);
     assert!(layer.placed_per_source()[i] > 0);
@@ -120,7 +121,7 @@ fn legend_and_levels_describe_the_same_frame() {
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
     );
-    assert_eq!(layer.legend()[i].text, "as of 13:00 UTC");
+    assert_eq!(layer.legend()[i].text, "");
     assert!(layer.placed_per_source()[i] > 0);
 }
 
@@ -157,9 +158,23 @@ fn layer_places_filters_and_reports_freshness() {
         kinds,
         &["pivot", "resist", "support", "zone", "band", "anchor"]
     );
+    // Current: the source's title and stats, never the map's time.
     let rows = layer.legend();
-    assert_eq!(rows[i].text, "as of 13:00 UTC");
-    assert!(!rows[i].warn);
+    assert_eq!(rows[i].text, "");
+    assert!(!rows[i].warn && !rows[i].dim);
+    assert_eq!(rows[i].title.as_deref(), Some("Synthetic"));
+    assert_eq!(
+        rows[i]
+            .stats
+            .iter()
+            .map(|s| (s.name.as_str(), s.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Range", "12.50"),
+            ("Bias", "+1.5"),
+            ("Skew", "\u{2212}0.4")
+        ]
+    );
 
     // Kinds and sources hide; labels stay on their levels.
     layer.config.toggle_kind("demo", "zone");
@@ -183,11 +198,15 @@ fn layer_places_filters_and_reports_freshness() {
     layer.force_status(i, LevelStatus::Stale { age_ms: 300_000 });
     let rows = layer.legend();
     assert_eq!(
-        (rows[i].text.as_str(), rows[i].warn),
-        ("stale · 5 min", true)
+        (rows[i].text.as_str(), rows[i].warn, rows[i].dim),
+        ("stale · 5 min", false, true),
+        "stale: said in words, dimmed, never the map's time"
     );
+    assert!(!rows[i].stats.is_empty(), "its stats, dimmed with it");
     layer.force_status(i, LevelStatus::Missing);
-    assert_eq!(layer.legend()[i].text, "missing");
+    let rows = layer.legend();
+    assert_eq!(rows[i].text, "missing");
+    assert!(rows[i].stats.is_empty() && rows[i].title.is_none());
 }
 
 #[test]
@@ -1125,24 +1144,142 @@ fn demo_level_colors_read_and_stay_off_meanings() {
     }
 }
 
-/// A level label's swatch is drawn in its line's own type: each type's sample is its own,
-/// a full period of it inside the swatch.
+/// Labels are in each level's color where that is AA on the label (4.5:1 on its box over
+/// every underlay and the source's zone fills), else theme text for that label only: in every
+/// theme and palette, for the type's recommended color, a user's color and a type asking for
+/// text. The demo's zones sit at their low edge, with that edge's price.
 #[test]
-fn label_swatches_show_the_line_type() {
-    use lines_core::style::LineType;
-    let all = LineType::ALL.map(swatch_segments);
-    for (i, (segs, n)) in all.iter().enumerate() {
-        for &(x, w) in &segs[..*n] {
-            assert!(
-                x >= 0.0 && w > 0.0 && x + w <= SWATCH_W,
-                "{:?}",
-                LineType::ALL[i]
-            );
-        }
-        // A full period: a pattern shows at least two marks (solid is one bar).
-        assert!(*n >= 2 || LineType::ALL[i] == LineType::Solid);
-        for (j, other) in all.iter().enumerate().skip(i + 1) {
-            assert_ne!((segs, n), (&other.0, &other.1), "{i} and {j}");
+fn labels_take_the_level_color_where_it_reads_and_their_types_edge() {
+    use crate::theme::rgb_of;
+    use lines_core::levels::{LabelAt, LabelColor, LabelMode};
+    use lines_core::style::{Color, Rgb, contrast, over};
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+    };
+    frame(&mut layer);
+    // Every label color reads (AA) on its box over everything under it, or is the text.
+    let reads = |t: &Theme, c: Hsla| {
+        let pct = |a: f32| (a.clamp(0.0, 1.0) * 100.0).round() as u8;
+        let label = rgb_of(t.label_bg);
+        let k = |u: Rgb| contrast(rgb_of(c), over(label, pct(t.label_bg.a), u));
+        t.chart_underlays().iter().all(|(_, u)| k(*u) >= 4.5)
+    };
+    let mut colored = 0;
+    let mut fell_back = 0;
+    for t in Theme::all() {
+        for c in layer.label_colors_for(i, &t) {
+            if c == t.text_main {
+                fell_back += 1;
+            } else {
+                colored += 1;
+                assert!(reads(&t, c), "{}: {c:?}", t.name);
+            }
         }
     }
+    assert!(
+        colored > 0,
+        "the demo's labels take their colors where they read"
+    );
+    assert!(
+        fell_back > 0,
+        "and fall back where they don't (the light grays)"
+    );
+    // On dark, the pivot's label is the pivot's line color.
+    let themes = Theme::all();
+    let dark = &themes[0];
+    assert!(dark.is_dark());
+    let pivot = layer.label_colors_for(i, dark)[0];
+    assert_ne!(pivot, dark.text_main);
+
+    // A user's color that can't read (the chart's own background) falls back; a type asking
+    // for text gets text.
+    let (types, default) = layer.source_types("demo").unwrap();
+    let mut styles = BTreeMap::new();
+    let mut looks = Look::defaults(&study_style::LEVELS).to_vec();
+    for t in types {
+        looks.push(study_style::read_type(&PartStyles::new(), t));
+    }
+    let pivot_at = study_style::LEVELS.len();
+    if let crate::style_editor::PartStyle::Line(l) = &mut looks[pivot_at].style {
+        l.color = Color::Custom(rgb_of(dark.bg));
+    }
+    let mut labels: Vec<_> = types.iter().map(study_style::TypeLabel::of).collect();
+    let resist = types.iter().position(|t| t.id == "resist").unwrap();
+    labels[resist].color = LabelColor::Text;
+    study_style::set_level_style(
+        &mut styles,
+        "demo",
+        &study_style::LevelEdit {
+            looks,
+            types,
+            labels,
+            label: LabelMode::NamePrice,
+            label_default: default,
+        },
+    );
+    layer.set_styles(&styles);
+    frame(&mut layer);
+    let colors = layer.label_colors_for(i, dark);
+    assert_eq!(colors[0], dark.text_main, "a color that can't read: text");
+    let map = layer.map(i).unwrap().clone();
+    let resist_level = map
+        .levels
+        .iter()
+        .position(|l| map.kinds[usize::from(l.kind)] == "resist")
+        .unwrap();
+    assert_eq!(colors[resist_level], dark.text_main, "asked for text");
+    // Saved as the type's own field, only while it differs.
+    assert_eq!(
+        styles["demo"]["types"]["resist"]["label-color"],
+        serde_json::json!("text")
+    );
+    assert!(
+        styles["demo"]["types"]["pivot"]
+            .get("label-color")
+            .is_none()
+    );
+
+    // The demo's zones: labeled under their low edge, with the low edge's price.
+    let zone = map
+        .levels
+        .iter()
+        .position(|l| map.kinds[usize::from(l.kind)] == "zone")
+        .unwrap();
+    let placed = *layer
+        .placed(i)
+        .iter()
+        .find(|p| p.index as usize == zone)
+        .unwrap();
+    assert_eq!(placed.anchor, LabelAt::Low);
+    if let Some(y) = placed.label_y {
+        assert!(
+            y > placed.bottom,
+            "under its low edge: {y} vs {}",
+            placed.bottom
+        );
+    }
+    assert_eq!(
+        layer.label_texts(i)[zone].as_deref(),
+        Some("Supply : 6017.50"),
+        "the low edge's price"
+    );
 }

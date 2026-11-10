@@ -10,9 +10,7 @@
 //! - Up/down also differ by shape, not only colour: one direction's candle bodies are hollow
 //!   ([`HollowBodies`]), so the chart reads correctly in greyscale or with colour blindness.
 
-#[cfg(test)]
-use gpui::Rgba;
-use gpui::{Hsla, rgb};
+use gpui::{Hsla, Rgba, rgb};
 use lines_core::style::{Color, DashPattern, LineType, Rgb};
 
 /// Brand palette.
@@ -471,6 +469,22 @@ impl Theme {
         if reads { color } else { self.text_main }
     }
 
+    /// A level label's text for a level drawn in `color` (opaque): that color where it is AA
+    /// (4.5:1) on the label's box (`label_bg`, translucent) over everything under it (what
+    /// [`Theme::chart_underlays`] lists, and each of `fills`, the source's zone fills as drawn,
+    /// over the chart), else the theme's text for this label only (AA over any level color:
+    /// `level_labels_meet_aa_over_any_level_color`). A user's color, a source's and a type's
+    /// recommended one alike. No allocation.
+    pub fn level_label_text(&self, color: Hsla, fills: &[Hsla]) -> Hsla {
+        let reads = |under: Hsla| contrast(color, over(self.label_bg, under)) >= 4.5;
+        let reads_all = self
+            .chart_underlays()
+            .iter()
+            .all(|(_, u)| reads(user_color(*u, 100)))
+            && fills.iter().all(|f| reads(over(*f, self.bg)));
+        if reads_all { color } else { self.text_main }
+    }
+
     /// A lower pane's title text for a line drawn in `color` (an external series study's):
     /// that color where it is AA on the title's box (`label_bg`) over everything the pane can
     /// show under the box (its background, its grid, and each of its lines as drawn, `lines`),
@@ -746,7 +760,6 @@ pub fn source_colour(rgba: u32, alpha: f32) -> Hsla {
 }
 
 /// `top` (possibly translucent) composited over opaque `bottom`, as drawn.
-#[cfg(test)]
 pub fn over(top: Hsla, bottom: Hsla) -> Hsla {
     let (t, b) = (Rgba::from(top), Rgba::from(bottom));
     let a = t.a;
@@ -760,7 +773,6 @@ pub fn over(top: Hsla, bottom: Hsla) -> Hsla {
 }
 
 /// WCAG 2.x relative luminance.
-#[cfg(test)]
 pub fn luminance(c: Hsla) -> f64 {
     let Rgba { r, g, b, .. } = Rgba::from(c);
     let lin = |v: f32| {
@@ -775,7 +787,6 @@ pub fn luminance(c: Hsla) -> f64 {
 }
 
 /// WCAG contrast ratio (1..=21).
-#[cfg(test)]
 pub fn contrast(a: Hsla, b: Hsla) -> f64 {
     let (la, lb) = (luminance(a), luminance(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
@@ -991,6 +1002,52 @@ mod tests {
                 let r = contrast(t.text_main, over(t.label_bg, u));
                 assert!(r >= 4.5, "{}: over {:?}: {r:.2}", t.name, rgb_of(u));
             }
+        }
+    }
+
+    /// A level label is in its level's color only where that is AA (4.5:1) on its box over
+    /// everything under it (the chart's underlays and the source's zone fills as drawn), else
+    /// the theme's text, for that label only: any color a user, a source or a type picks (216
+    /// sampled), over zone fills of those colors, in every theme and palette. Not a blanket
+    /// fallback: the theme's text and bright colors on dark keep their color.
+    #[test]
+    fn level_label_text_meets_aa_or_falls_back() {
+        for t in Theme::all() {
+            let users: Vec<Hsla> = any_user_color().collect();
+            let fill_sets: [Vec<Hsla>; 3] = [
+                Vec::new(),
+                users.iter().step_by(17).map(|u| u.opacity(0.2)).collect(),
+                vec![t.text_dim.opacity(0.35), t.study[2].opacity(0.4)],
+            ];
+            let mut colored = 0;
+            for fills in &fill_sets {
+                for c in users.iter().chain([&t.text_main]) {
+                    let shown = t.level_label_text(*c, fills);
+                    if shown == *c {
+                        colored += 1;
+                    } else {
+                        assert_eq!(shown, t.text_main, "{}", t.name);
+                        continue;
+                    }
+                    let unders = t
+                        .chart_underlays()
+                        .map(|(_, u)| user_color(u, 100))
+                        .into_iter()
+                        .chain(fills.iter().map(|f| over(*f, t.bg)));
+                    for u in unders {
+                        let r = contrast(shown, over(t.label_bg, u));
+                        assert!(
+                            r >= 4.5,
+                            "{}: {:?} over {:?}: {r:.2}",
+                            t.name,
+                            rgb_of(*c),
+                            rgb_of(u)
+                        );
+                    }
+                }
+            }
+            assert!(colored > 0, "{}", t.name);
+            assert_eq!(t.level_label_text(t.bg, &[]), t.text_main, "{}", t.name);
         }
     }
 

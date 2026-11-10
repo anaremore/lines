@@ -26,6 +26,7 @@
 //! palette combinations (a custom color is the same in all of them; a theme token follows).
 
 use lines_core::drawings::{Style, Tool};
+use lines_core::levels::{LabelAt, LabelColor};
 use lines_core::style::{
     Color, FILL_OPACITIES, FillStyle, LINE_OPACITIES, LineStyle, LineType, MAX_WIDTH, MIN_WIDTH,
     Rgb, TextSize, TextStyle, readability,
@@ -113,6 +114,8 @@ pub struct Part {
     pub group: Option<&'static str>,
     /// A level type with zones: the fill between its edges, and the fill's own color.
     pub fill: Option<(FillStyle, Own)>,
+    /// A level type: its labels' text color, and (a zone type) where they sit.
+    pub label: Option<(LabelColor, Option<LabelAt>)>,
 }
 
 impl Part {
@@ -127,6 +130,7 @@ impl Part {
             note: None,
             group: None,
             fill: None,
+            label: None,
         }
     }
 }
@@ -164,6 +168,10 @@ pub enum Control {
     FillOpacity(u8),
     /// A level source's labels with the price (a checkbox).
     LabelPrice,
+    /// A level type's label text color.
+    LabelColor(LabelColor),
+    /// A level type's label edge (a zone type's).
+    LabelAt(LabelAt),
     SaveDefault,
 }
 
@@ -612,6 +620,24 @@ impl StyleEditor {
                     .collect(),
             });
         }
+        if let Some((color, at)) = part.label {
+            rows.push(Row {
+                label: "Label color",
+                controls: LabelColor::ALL
+                    .iter()
+                    .map(|&c| (Control::LabelColor(c), c == color))
+                    .collect(),
+            });
+            if let Some(at) = at {
+                rows.push(Row {
+                    label: "Label at",
+                    controls: LabelAt::ALL
+                        .iter()
+                        .map(|&a| (Control::LabelAt(a), a == at))
+                        .collect(),
+                });
+            }
+        }
         if self.tab == 0 {
             let o = self.options;
             let mut extend = Vec::with_capacity(2);
@@ -963,6 +989,26 @@ impl StyleEditor {
                 _ => false,
             },
             Control::LabelPrice => flip(&mut self.options.label_price),
+            Control::LabelColor(c) => match self.parts.get_mut(tab) {
+                Some(Part {
+                    label: Some((color, _)),
+                    ..
+                }) if *color != c => {
+                    *color = c;
+                    true
+                }
+                _ => false,
+            },
+            Control::LabelAt(a) => match self.parts.get_mut(tab) {
+                Some(Part {
+                    label: Some((_, Some(at))),
+                    ..
+                }) if *at != a => {
+                    *at = a;
+                    true
+                }
+                _ => false,
+            },
             Control::Custom => return Outcome::OpenCustom { fill: false },
             Control::SaveDefault => {
                 self.saved = true;
@@ -1200,6 +1246,8 @@ pub fn control_label(c: Control, names: &[&'static str]) -> String {
         Control::Custom | Control::FillCustom => "Custom…".to_owned(),
         Control::FillOpacity(o) => format!("{o}%"),
         Control::LabelPrice => "With the price".to_owned(),
+        Control::LabelColor(c) => c.label().to_owned(),
+        Control::LabelAt(a) => a.label().to_owned(),
         Control::LineType(t) => t.label().to_owned(),
         Control::Width(w) => format!("{w} px"),
         Control::Opacity(o) => format!("{o}%"),

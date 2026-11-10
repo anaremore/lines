@@ -178,8 +178,10 @@ const GRAY: (Color, Color) = (
 /// beside the colorblind orange down), so they are told apart by line type: pivot solid,
 /// support dashed, resistance dash-dot, the anchored line dotted, all 1 px (none louder than
 /// the last price). The zones: solid gray edges (drawn whole, 3:1 on both charts; a level's
-/// own look draws edges at 60 %) around a visible fill in each level's own color; the VWAP
-/// band's edges dotted.
+/// own look draws edges at 60 %) around a visible fill in each level's own color, each
+/// labeled just under its low edge (`LabelAt::Low`, with that edge's price); the VWAP band's
+/// edges dotted. Labels are in each level's color, or theme text where that isn't AA on the
+/// label (the light themes' grays and olive: the fallback).
 pub static TYPES: [LevelType; 6] = [
     LevelType::line(
         "pivot",
@@ -214,6 +216,7 @@ pub static TYPES: [LevelType; 6] = [
                 opacity: 40,
                 ..TypeStyle::OWN.fill
             },
+            label_at: lines_core::levels::LabelAt::Low,
             ..themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1)
         },
     ),
@@ -359,6 +362,20 @@ impl LevelSource for DemoLevels {
         for s in series {
             b = b.series(std::sync::Arc::new(s));
         }
+        // The legend: a title and signed stats (synthetic words and numbers).
+        let stat = |name: &str, text: &str, tone| lines_core::levels::LegendStat {
+            name: name.into(),
+            text: text.into(),
+            tone,
+        };
+        b = b.legend(lines_core::levels::LevelLegend {
+            title: Some("Synthetic".into()),
+            stats: vec![
+                stat("Range", "12.50", lines_core::levels::StatTone::Plain),
+                stat("Bias", "+1.5", lines_core::levels::StatTone::Up),
+                stat("Skew", "\u{2212}0.4", lines_core::levels::StatTone::Down),
+            ],
+        });
         b.build(ctx.product.price.tick)
             .map(Some)
             .map_err(|e| e.to_string())
