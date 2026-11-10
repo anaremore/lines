@@ -1323,8 +1323,8 @@ impl LevelsLayer {
             .iter()
             .filter(|s| self.config.source_shown(s.handle.source()))
             .map(|s| {
-                // A current map's time is never shown (it says nothing a trader acts on); a
-                // stale one says so, dimmed with its levels, and how long since.
+                // A map's time is never shown in the legend (it says nothing a trader acts on
+                // while current); a stale map says the word "stale", dimmed with its levels.
                 let (text, warn, dim) = match s.status {
                     LevelStatus::Missing => (
                         match &s.error {
@@ -1334,9 +1334,7 @@ impl LevelsLayer {
                         true,
                         false,
                     ),
-                    LevelStatus::Stale { age_ms } => {
-                        (format!("stale · {}", age(age_ms)), false, true)
-                    }
+                    LevelStatus::Stale { .. } => ("stale".to_owned(), false, true),
                     LevelStatus::Current => (String::new(), false, false),
                 };
                 // The source's own legend content, from a map it has drawn (not while missing).
@@ -1527,14 +1525,6 @@ pub fn without_name<'a>(label: &str, error: &'a str) -> &'a str {
             }
         }
         _ => error,
-    }
-}
-
-fn age(ms: i64) -> String {
-    match ms / 1000 {
-        s if s < 120 => format!("{s} s"),
-        s if s < 7200 => format!("{} min", s / 60),
-        s => format!("{} h", s / 3600),
     }
 }
 

@@ -199,7 +199,7 @@ fn layer_places_filters_and_reports_freshness() {
     let rows = layer.legend();
     assert_eq!(
         (rows[i].text.as_str(), rows[i].warn, rows[i].dim),
-        ("stale · 5 min", false, true),
+        ("stale", false, true),
         "stale: said in words, dimmed, never the map's time"
     );
     assert!(!rows[i].stats.is_empty(), "its stats, dimmed with it");
