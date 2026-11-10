@@ -53,6 +53,7 @@ Context menus follow these rules (`crates/lines-app/src/menu.rs`, `pane_menu.rs`
 ### Controls
 - A **field** names what it holds and shows its value ("Qty 10 ▾", "Bracket 8/16 t ▾"): a quiet box on `panel` with an `axis_line` edge (the accent while its list is open). Its list opens under it in the menus' look: a check on the one in force, a box for a mode, shortcuts on the right, an editor ("Edit presets…") last.
 - **Primary** actions are solid in their meaning's color with text in `bg` (Buy in `up`, Sell in `down`); **secondary** ones are outlined in it on `bg` (Join bid, Join ask). The words always say the side.
+- **Dimmed** (nothing it would do now: Buy and Sell while entries are locked, BE while flat, Reverse while flat or entries are locked) is a 2 px dashed edge with dim text and no fill, never faded: the words stay readable (a locked Buy or Sell says "Locked" under its size wherever that fits, in place of its price), and only a live primary action is solid.
 - **Exits** sit at the bottom under a divider, outlined in `axis_line`; **Flatten** is outlined in `warn` (2 px) and bold. Cancel all and Flatten never dim; BE and Reverse dim while there is nothing to act on.
 - Narrower, a control drops its least needed part first and is never cut: a price line before a size, a field's name before its value. A row goes whole.
 

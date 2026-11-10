@@ -482,7 +482,9 @@ pub struct ChartView {
     /// OHLCV readout (and whether the bar is partial; a tick bar's last trade and count),
     /// shaped once per distinct value.
     readout: Option<(Bar, bool, TickInfo, ShapedLine)>,
-    labels: HashMap<(LabelKind, i64), ShapedLine>,
+    /// Shaped labels and the color each was shaped in: a label asked for in another color (a
+    /// theme switch, a restyled study) is shaped again.
+    labels: HashMap<(LabelKind, i64), (Hsla, ShapedLine)>,
     /// The zone label's width this frame, when the corner has it (`corner_layout`: "manual"
     /// is placed beside it, or it yields).
     corner_zone_w: Option<f32>,
@@ -672,6 +674,16 @@ impl crate::trade_bar::TradePane for ChartView {
 impl ChartView {
     /// A new look (the Settings window's appearance).
     pub(crate) fn set_theme(&mut self, theme: Theme) {
+        if theme != self.theme {
+            // Text is shaped in its color: what was shaped in the old theme's goes (labels
+            // are also keyed by color; these caches are by text only).
+            self.readout = None;
+            self.note_lines.clear();
+            self.note_entry_line = None;
+            self.measure_lines.clear();
+            self.profile.theme_changed();
+            self.levels.theme_changed();
+        }
         self.theme = theme;
     }
     /// Restore the pane's trading choices (its account).
@@ -2324,7 +2336,8 @@ impl ChartView {
         let fp = self.footprint.legend();
         let fp = fp.map(|(label, note)| {
             // Capped at the legend's width (the clearance block assumes it), ending in "…".
-            // The note shrinks and truncates itself: an ellipsis shows the cut (the label stays).
+            // The note (a state: why bars are candles, side-less volume) shrinks and truncates
+            // itself: an ellipsis shows the cut (the label stays).
             div()
                 .max_w(px(LEGEND_MAX_W))
                 .whitespace_nowrap()
@@ -4185,8 +4198,8 @@ impl ChartView {
             }
             // Paint order inside the plot: grid, volume profile, the levels' zones and VWAP
             // band fills (behind the candles: a heavy fill never covers a bar), candles,
-            // `layers`, indicator studies (VWAP lines and band edges), opaque footprint cells
-            // over them, the levels' lines, the levels' labels (in their gutter right of the
+            // `layers`, footprint cell fills, indicator studies (VWAP lines and band edges),
+            // the levels' lines, the footprint's numbers on their cells' color, the levels' labels (in their gutter right of the
             // newest bar), drawings, strategy markers, the profile's label, then the
             // last-price line (above every study fill and line), crosshair.
             let (studies, labels) = (
@@ -4286,14 +4299,16 @@ impl ChartView {
                 }
             }
             if studies {
-                // The profile and study lines first: footprint cells are opaque on top of
-                // them, so a VWAP or profile line never runs through a cell's numbers.
+                // Footprint cells' fills, then the study and level lines over them (visible
+                // across the cells), then the cells' numbers on tight boxes of their cell's
+                // color: a line never runs through a digit.
                 for l in &mut self.layers {
                     l.paint(plot, &self.vp, &t, window, cx);
                 }
-                self.studies.paint((ox, oy), &self.vp, &t, window);
                 self.footprint.paint(plot, &self.vp, &t, window, cx);
+                self.studies.paint((ox, oy), &self.vp, &t, window);
                 self.levels.paint_front(plot, &t, window);
+                self.footprint.paint_numbers(plot, &self.vp, &t, window, cx);
                 // In the gutter right of the newest bar (no bar under a label), under the
                 // drawings and the strategy markers as study labels always were.
                 if labels {
@@ -5025,6 +5040,11 @@ impl ChartView {
             }
         };
         let lines = def.lines.len().min(crate::series_pane::MAX_LINES);
+        // The pane's lines as drawn: a title's color must read over each of them.
+        let mut drawn = [t.bg; crate::series_pane::MAX_LINES];
+        for (i, d) in drawn.iter_mut().enumerate().take(lines) {
+            *d = color_of(i);
+        }
         for (i, v) in values.iter().enumerate().take(lines) {
             // Stale with no value to show: the line's sample and name stay (the key to the
             // faded lines), without a number.
@@ -5032,7 +5052,7 @@ impl ChartView {
                 continue;
             }
             let v = *v;
-            let text = t.legend_text(color_of(i));
+            let text = t.pane_title_text(color_of(i), &drawn[..lines]);
             let key = value_key(i, text, v);
             let w = f32::from(
                 self.label(
@@ -6488,7 +6508,7 @@ impl ChartView {
         if self.labels.len() >= MAX_CACHED_LABELS && !self.labels.contains_key(&(kind, key)) {
             self.labels.clear();
         }
-        if !self.labels.contains_key(&(kind, key)) {
+        if needs_shaping(&self.labels, (kind, key), color) {
             let mut s = FixedStr::<32>::new();
             text(&mut s);
             // A drawing's tag sits in a box that doesn't zoom (`DRAWING_TAG_H`).
@@ -6498,9 +6518,9 @@ impl ChartView {
                 label_px()
             };
             let line = self.shape_sized(s.as_str(), color, size, window);
-            self.labels.insert((kind, key), line);
+            self.labels.insert((kind, key), (color, line));
         }
-        &self.labels[&(kind, key)]
+        &self.labels[&(kind, key)].1
     }
 
     /// Paint a cached label (see [`Self::label`]).
@@ -7998,9 +8018,38 @@ impl crate::picker_view::PickerHost for ChartView {
     }
 }
 
+/// Whether a cached label must be shaped (again): none is cached under `key`, or the one cached
+/// was shaped in another color (a theme switch, a restyled study: text keeps the color it was
+/// shaped in).
+fn needs_shaping<K: Eq + std::hash::Hash, T>(
+    cache: &HashMap<K, (Hsla, T)>,
+    key: K,
+    color: Hsla,
+) -> bool {
+    cache
+        .get(&key)
+        .is_none_or(|(shaped_in, _)| *shaped_in != color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A theme switch reshapes chart labels: a label cached in one theme's color is shaped
+    /// again when asked for in another theme's, and kept when the color is the same.
+    #[test]
+    fn labels_are_shaped_again_in_a_new_color() {
+        let (dark, light) = (
+            Theme::dark(crate::theme::Palette::Standard),
+            Theme::light(crate::theme::Palette::Standard),
+        );
+        let mut cache: HashMap<(LabelKind, i64), (Hsla, ())> = HashMap::new();
+        let key = (LabelKind::Price, 601_000);
+        assert!(needs_shaping(&cache, key, dark.text_dim));
+        cache.insert(key, (dark.text_dim, ()));
+        assert!(!needs_shaping(&cache, key, dark.text_dim));
+        assert!(needs_shaping(&cache, key, light.text_dim));
+    }
 
     /// N4: a restored chart keeps a saved styled study and doesn't add the same study from
     /// the command line again (styles aside); a different one is added.

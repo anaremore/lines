@@ -195,6 +195,11 @@ pub struct VolumeProfileLayer {
 }
 
 impl VolumeProfileLayer {
+    /// A new theme: the label is shaped again in its text color.
+    pub fn theme_changed(&mut self) {
+        self.shaped = None;
+    }
+
     pub fn new(config: ProfileConfig) -> Self {
         VolumeProfileLayer {
             style: PartStyles::new(),
@@ -610,6 +615,15 @@ pub fn sides_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A theme switch drops the label shaped in the old theme's text color.
+    #[test]
+    fn theme_change_drops_the_shaped_label() {
+        let mut layer = VolumeProfileLayer::new(ProfileConfig::default());
+        layer.shaped = Some((layer.label, gpui::ShapedLine::default()));
+        layer.theme_changed();
+        assert!(layer.shaped.is_none());
+    }
 
     /// P8: buy and sell rows styled alike are warned about, naming theme and palette;
     /// unstyled and clearly different rows aren't.

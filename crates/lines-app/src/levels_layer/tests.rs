@@ -446,7 +446,9 @@ fn types_resolve_hide_and_label_with_the_price() {
     };
     frame(&mut layer);
     let pivot = layer.kind_look(i, "pivot").expect("declared");
-    assert_eq!((pivot.line.color, pivot.line.width), (Color::Own, 2));
+    // The demo's lines recommend a color per theme (a theme token here); its zones keep
+    // their own colors.
+    assert!(pivot.line.color != Color::Own && pivot.line.width == 1);
     assert_eq!(
         layer.kind_look(i, "zone").unwrap().fill.color,
         Color::Own,
@@ -692,7 +694,8 @@ fn too_narrow_for_labels_no_labels_at_all() {
     let g = frame(&mut layer, 800.0);
     assert!(g > 0.0);
     assert!(layer.placed(i).iter().any(|p| p.label_y.is_some()));
-    // 40 % of 100 px (40) is under the shortest cut ("X…" and its chip, 48 in steps).
+    // 40 % of 100 px (40) is under the shortest cut ("X…" and its chip, `LABEL_CHROME` wide,
+    // in whole steps).
     let g = frame(&mut layer, 100.0);
     assert_eq!(g, 0.0, "no gutter");
     assert!(
@@ -1011,4 +1014,135 @@ fn a_series_only_push_keeps_label_state() {
     assert_eq!(two, vec![LabelSeen::New], "a different count starts over");
     reset_seen(None, &mut two);
     assert!(two.is_empty());
+}
+
+/// A theme switch drops the labels shaped in the old theme's text color; the cuts (texts and
+/// widths, the same in every theme) stay, so the gutter doesn't move.
+#[test]
+fn theme_change_drops_shaped_labels_only() {
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer
+        .shaped
+        .insert("Pivot 6010".into(), gpui::ShapedLine::default());
+    layer
+        .cuts
+        .insert("Pivot 6010".into(), (40.0, "P… 6010".into()));
+    layer.theme_changed();
+    assert!(layer.shaped.is_empty());
+    assert_eq!(layer.cuts.len(), 1);
+}
+
+/// The colors with a meaning a demo level's default color keeps clear of (CIEDE2000 >= 20,
+/// the drawing colors' rule): up and down in both palettes of the theme, the accent and the
+/// last price, warn, and the bracket target and stop.
+fn reserved(t: &crate::theme::Theme) -> Vec<(&'static str, lines_core::style::Rgb)> {
+    use crate::theme::{Palette, Theme, rgb_of};
+    let twins = if t.is_dark() {
+        [
+            Theme::dark(Palette::Standard),
+            Theme::dark(Palette::Colorblind),
+        ]
+    } else {
+        [
+            Theme::light(Palette::Standard),
+            Theme::light(Palette::Colorblind),
+        ]
+    };
+    let mut v = Vec::new();
+    for m in &twins {
+        v.push(("up", rgb_of(m.up)));
+        v.push(("down", rgb_of(m.down)));
+    }
+    for (n, c) in [
+        ("accent", t.accent),
+        ("last", t.last),
+        ("warn", t.warn),
+        ("order target", t.order_target),
+        ("order stop", t.order_stop),
+    ] {
+        v.push((n, rgb_of(c)));
+    }
+    v
+}
+
+/// Every demo level's default color, as the layer resolves it (`study_style::resolve_type`,
+/// then `TypeLook::line_color` for the theme; a type left at the level's own color draws the
+/// map's color, decision 0022): a line (3:1) on the chart of every theme and palette, and clear
+/// of every color with a meaning there.
+#[test]
+fn demo_level_colors_read_and_stay_off_meanings() {
+    use crate::theme::{Theme, rgb_of, source_colour};
+    use lines_core::style::{Color, contrast, delta_e_2000};
+    use lines_feed::levels::demo::{BODY, TYPES};
+    let doc: serde_json::Value = serde_json::from_str(BODY).unwrap();
+    let mut rows: Vec<(String, String)> = doc["levels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["kind"].as_str().unwrap().to_owned(),
+                r["color"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let a = &doc["anchor"];
+    rows.push(("anchor".into(), a["color"].as_str().unwrap().to_owned()));
+    assert_eq!(rows.len(), 7, "every level and the anchor");
+    // Support and the VWAP band's edges are told apart by their pattern.
+    let line_of = |id: &str| TYPES.iter().find(|t| t.id == id).unwrap().style.line.line;
+    assert_ne!(line_of("support"), line_of("band"));
+    let source = Look::defaults(&study_style::LEVELS);
+    let source = [source[0], source[1]];
+    for t in Theme::all() {
+        for (kind, hex) in &rows {
+            let ty = TYPES.iter().find(|ty| ty.id == kind).expect("declared");
+            let look = study_style::resolve_type(
+                ty,
+                &source,
+                &study_style::read_type(&PartStyles::new(), ty),
+            );
+            // Every demo stroke is drawn whole (a level's own look draws zone edges at 60 %,
+            // under 3:1 for a mid-tone): what's checked below is what's drawn.
+            assert!(!look.own_line, "{kind}: drawn in the level's own look");
+            let own = source_colour(u32::from_str_radix(hex, 16).unwrap(), 1.0);
+            let drawn = match look.line_color(t.is_dark()) {
+                Color::Own => own,
+                c => t.part_color(c, own, 100),
+            };
+            let c = rgb_of(drawn);
+            let r = contrast(c, rgb_of(t.bg));
+            assert!(r >= 3.0, "{}: {kind}: {r:.2}", t.name);
+            for (what, m) in reserved(&t) {
+                let de = delta_e_2000(c, m);
+                assert!(
+                    de >= 20.0,
+                    "{}: {kind} ({hex}) near {what}: {de:.1}",
+                    t.name
+                );
+            }
+        }
+    }
+}
+
+/// A level label's swatch is drawn in its line's own type: each type's sample is its own,
+/// a full period of it inside the swatch.
+#[test]
+fn label_swatches_show_the_line_type() {
+    use lines_core::style::LineType;
+    let all = LineType::ALL.map(swatch_segments);
+    for (i, (segs, n)) in all.iter().enumerate() {
+        for &(x, w) in &segs[..*n] {
+            assert!(
+                x >= 0.0 && w > 0.0 && x + w <= SWATCH_W,
+                "{:?}",
+                LineType::ALL[i]
+            );
+        }
+        // A full period: a pattern shows at least two marks (solid is one bar).
+        assert!(*n >= 2 || LineType::ALL[i] == LineType::Solid);
+        for (j, other) in all.iter().enumerate().skip(i + 1) {
+            assert_ne!((segs, n), (&other.0, &other.1), "{i} and {j}");
+        }
+    }
 }

@@ -12,7 +12,7 @@ use anyhow::Result;
 use lines_core::{Price, Product, UtcMillis};
 use serde::Deserialize;
 
-use lines_core::style::{LineStyle, LineType};
+use lines_core::style::{Color, FillStyle, LineStyle, LineType, Rgb};
 
 use super::{
     BoxFuture, ChartPrices, LevelContext, LevelFrame, LevelMap, LevelMeta, LevelSource, LevelStyle,
@@ -89,18 +89,22 @@ fn demo_series(key: &str, from: i64, to: i64, f: impl Fn(f64) -> f64) -> Series 
 
 pub const ID: &str = "demo";
 
-/// The demo map, in catalog price units (ES: hundredths of a point). Synthetic.
+/// The demo map, in catalog price units (ES: hundredths of a point). Synthetic. Its colors are
+/// its own (decision 0022), drawn as given in every theme, so each is a mid-tone that reads as a
+/// line (3:1) on both the dark and the light chart (tested in `lines-app`'s levels layer). Only
+/// the zones draw in them by default: the line kinds' types recommend a color per theme
+/// ([`TYPES`]).
 pub const BODY: &str = r#"{
   "as_of": "2026-11-05T13:00:00",
   "levels": [
-    {"kind": "pivot",  "line": 601000, "label": "Pivot 6010",  "color": "c4c8d6ff", "weight": 2},
-    {"kind": "resist", "line": 602500, "label": "R1 6025",     "color": "e0a84aff", "weight": 1},
-    {"kind": "support","line": 599750, "label": "S1 5997.50",  "color": "4cc4c9ff", "weight": 1, "dashed": true},
-    {"kind": "zone",   "lower": 601750, "upper": 602250, "label": "Supply", "color": "e0a84aff"},
-    {"kind": "zone",   "lower": 599000, "upper": 599500, "label": "Demand", "color": "4cc4c9ff"},
-    {"kind": "band",   "vwap_lower": -750, "vwap_upper": 750, "label": "VWAP ±7.50", "color": "b8bccbff", "dashed": true}
+    {"kind": "pivot",  "line": 601000, "label": "Pivot 6010",  "color": "838799ff", "weight": 2},
+    {"kind": "resist", "line": 602500, "label": "R1 6025",     "color": "a87719ff", "weight": 1},
+    {"kind": "support","line": 599750, "label": "S1 5997.50",  "color": "2a9196ff", "weight": 1, "dashed": true},
+    {"kind": "zone",   "lower": 601750, "upper": 602250, "label": "Supply", "color": "888800ff"},
+    {"kind": "zone",   "lower": 599000, "upper": 599500, "label": "Demand", "color": "868686ff"},
+    {"kind": "band",   "vwap_lower": -750, "vwap_upper": 750, "label": "VWAP ±7.50", "color": "7a7f91ff", "dashed": true}
   ],
-  "anchor": {"at": "2026-11-05T14:30:00", "offset": 750, "label": "Open +7.50", "color": "d98ac4ff"}
+  "anchor": {"at": "2026-11-05T14:30:00", "offset": 750, "label": "Open +7.50", "color": "b0619cff"}
 }"#;
 
 #[derive(Deserialize)]
@@ -139,28 +143,86 @@ struct Anchor {
     color: String,
 }
 
-/// Its own colors with the strokes its map gives each kind (pivot 2 px; support, the VWAP band
-/// and the anchor dashed).
-const fn own(line: LineType, width: u8) -> TypeStyle {
+/// A recommended color per theme (`TypeStyle::light`): a theme token follows the theme itself;
+/// a fixed color for dark has its darker counterpart for light. Strokes as the map gives them.
+const fn themed(dark: Color, light: Option<Color>, line: LineType, width: u8) -> TypeStyle {
     TypeStyle {
         line: LineStyle {
+            color: dark,
             line,
             width,
-            ..TypeStyle::OWN.line
+            opacity: 100,
         },
+        light,
         ..TypeStyle::OWN
     }
 }
 
-/// The demo's level types (`LevelSource::types`): every kind its map uses, in the levels'
-/// own colors.
+/// Resistance and the anchored line: olive, clear of every color with a meaning in both
+/// palettes (an amber would sit beside warn and the colorblind palette's orange down); deeper
+/// on the light themes.
+const OLIVE: (Color, Color) = (
+    Color::Custom(Rgb::hex(0xbbdd44)),
+    Color::Custom(Rgb::hex(0x777700)),
+);
+/// The pivot, support and the zones' and VWAP band's edges: a neutral gray, light on dark and deep on
+/// light (no blue in it: the colorblind palette's up is blue).
+const GRAY: (Color, Color) = (
+    Color::Custom(Rgb::hex(0xc8c8c8)),
+    Color::Custom(Rgb::hex(0x7a7a7a)),
+);
+
+/// The demo's level types (`LevelSource::types`): every kind its map uses. The lines in a
+/// color per theme, bright on dark and deep on light, each clear of up and down in both
+/// palettes (the theme's study teal and orchid sit beside the mint up and rose down, an amber
+/// beside the colorblind orange down), so they are told apart by line type: pivot solid,
+/// support dashed, resistance dash-dot, the anchored line dotted, all 1 px (none louder than
+/// the last price). The zones: solid gray edges (drawn whole, 3:1 on both charts; a level's
+/// own look draws edges at 60 %) around a visible fill in each level's own color; the VWAP
+/// band's edges dotted.
 pub static TYPES: [LevelType; 6] = [
-    LevelType::line("pivot", "Pivot", "Lines", own(LineType::Solid, 2)),
-    LevelType::line("resist", "Resistance", "Lines", own(LineType::Solid, 1)),
-    LevelType::line("support", "Support", "Lines", own(LineType::Dashed, 1)),
-    LevelType::line("anchor", "Anchored", "Lines", own(LineType::Dashed, 1)),
-    LevelType::zone("zone", "Zone", "Zones", own(LineType::Solid, 1)),
-    LevelType::zone("band", "VWAP band", "Zones", own(LineType::Dashed, 1)),
+    LevelType::line(
+        "pivot",
+        "Pivot",
+        "Lines",
+        themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "resist",
+        "Resistance",
+        "Lines",
+        themed(OLIVE.0, Some(OLIVE.1), LineType::DashDot, 1),
+    ),
+    LevelType::line(
+        "support",
+        "Support",
+        "Lines",
+        themed(GRAY.0, Some(GRAY.1), LineType::Dashed, 1),
+    ),
+    LevelType::line(
+        "anchor",
+        "Anchored",
+        "Lines",
+        themed(OLIVE.0, Some(OLIVE.1), LineType::Dotted, 1),
+    ),
+    LevelType::zone(
+        "zone",
+        "Zone",
+        "Zones",
+        TypeStyle {
+            fill: FillStyle {
+                opacity: 40,
+                ..TypeStyle::OWN.fill
+            },
+            ..themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1)
+        },
+    ),
+    LevelType::zone(
+        "band",
+        "VWAP band",
+        "Zones",
+        themed(GRAY.0, Some(GRAY.1), LineType::Dotted, 1),
+    ),
 ];
 
 pub struct DemoLevels;
