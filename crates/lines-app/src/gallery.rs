@@ -630,6 +630,14 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             "--theme dark --ui-zoom 150",
             three.as_str(),
         ),
+        // 1000 px at 150 %: columns drop by the zoomed width, never run past the edge.
+        (
+            "positions-zoom-150-narrow",
+            false,
+            "1000x450",
+            "--theme dark --ui-zoom 150",
+            three.as_str(),
+        ),
     ] {
         let mut a = vec![
             "--workspace".to_owned(),

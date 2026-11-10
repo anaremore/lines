@@ -1446,7 +1446,7 @@ impl JournalView {
             .flex()
             .flex_row()
             .flex_wrap()
-            .h(px(16.0))
+            .h(crate::zoom::ui(16.0))
             .overflow_hidden()
             .children(items.iter().enumerate().map(|(i, it)| {
                 let color = match it.tone {

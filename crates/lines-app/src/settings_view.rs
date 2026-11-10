@@ -1981,7 +1981,7 @@ impl SettingsWindow {
         for (r, row) in ed.rows.iter().enumerate() {
             let cell = |text: &str, on: bool, w: f32| {
                 div()
-                    .w(px(w))
+                    .w(crate::zoom::ui(w))
                     .px_1()
                     .rounded_sm()
                     .border_1()
