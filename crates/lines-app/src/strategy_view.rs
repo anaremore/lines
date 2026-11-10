@@ -341,8 +341,8 @@ impl StrategyView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .min_w(px(MIN_HIT))
-                .h(px(MIN_HIT))
+                .min_w(crate::zoom::hit(MIN_HIT))
+                .h(crate::zoom::hit(MIN_HIT))
                 .flex_shrink_0()
                 .px_2()
                 .rounded_sm()
@@ -379,7 +379,7 @@ impl StrategyView {
             .border_b_1()
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(
                 pane::header_content()
                     // The left group gives way (its note truncates) so Stop all always fits.
@@ -459,8 +459,8 @@ impl StrategyView {
             .flex()
             .items_center()
             .justify_center()
-            .min_w(px(MIN_HIT * 2.5))
-            .h(px(MIN_HIT + 2.0))
+            .min_w(crate::zoom::hit(MIN_HIT * 2.5))
+            .h(crate::zoom::hit(MIN_HIT + 2.0))
             .px_2()
             .rounded_sm()
             .border_1()
@@ -691,7 +691,7 @@ impl Render for StrategyView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(self.header(cx))
             // Its own line, so a narrow pane can't reduce it to "…": a DOM's trading switch
             // doesn't stop strategies, and nothing else on screen says so.

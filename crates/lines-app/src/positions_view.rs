@@ -335,8 +335,8 @@ impl PositionsView {
             .items_center()
             .justify_center()
             .flex_shrink_0()
-            .h(px(MIN_HIT))
-            .min_w(px(MIN_HIT))
+            .h(crate::zoom::hit(MIN_HIT))
+            .min_w(crate::zoom::hit(MIN_HIT))
             .px_1()
             .rounded_sm()
             .border_1()
@@ -468,7 +468,7 @@ impl PositionsView {
                 .border_1()
                 .border_color(t.control_edge)
                 .rounded_sm()
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .text_color(t.text_main)
                 .child(choice(
                     "positions-filter-all".into(),
@@ -520,7 +520,7 @@ impl PositionsView {
             .border_b_1()
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(
                 pane::header_content()
                     .child(
@@ -540,7 +540,7 @@ impl PositionsView {
                                     .rounded_sm()
                                     .border_1()
                                     .border_color(t.control_edge)
-                                    .text_size(px(10.0))
+                                    .text_size(crate::zoom::ui(10.0))
                                     .child(b)
                             }))
                             .child(self.filter_chip(cx))
@@ -559,7 +559,7 @@ impl PositionsView {
     fn cell(col: Col) -> gpui::Div {
         let d = div()
             .flex_shrink_0()
-            .w(px(col.width()))
+            .w(crate::zoom::ui(col.width()))
             .px_1()
             .overflow_hidden()
             .whitespace_nowrap();
@@ -575,7 +575,7 @@ impl PositionsView {
         let mut row = div()
             .flex()
             .flex_row()
-            .h(px(ROW_H))
+            .h(crate::zoom::ui(ROW_H))
             .items_center()
             .px_1()
             .text_color(t.text_dim)
@@ -676,7 +676,7 @@ impl PositionsView {
             .id(SharedString::from(format!("position-{n}")))
             .flex()
             .flex_row()
-            .h(px(ROW_H))
+            .h(crate::zoom::ui(ROW_H))
             .items_center()
             .px_1()
             .border_b_1()
@@ -779,7 +779,7 @@ impl PositionsView {
         let mut el = div()
             .flex()
             .flex_row()
-            .h(px(ROW_H))
+            .h(crate::zoom::ui(ROW_H))
             .items_center()
             .px_1()
             .border_t_1()
@@ -823,7 +823,8 @@ impl Render for PositionsView {
         }
         // Not measured yet (the first frame): every column, until the width is known.
         let cols = if self.width > 0.0 {
-            model::shown(self.width - 16.0)
+            // Fitted at the UI zoom (the columns are drawn at it).
+            model::shown_at(self.width, crate::zoom::get())
         } else {
             Col::ALL.to_vec()
         };
@@ -865,7 +866,8 @@ impl Render for PositionsView {
                             let before = v.width;
                             v.width = w;
                             if before <= 0.0
-                                || model::shown(before - 16.0) != model::shown(w - 16.0)
+                                || model::shown_at(before, crate::zoom::get())
+                                    != model::shown_at(w, crate::zoom::get())
                             {
                                 // Other columns fit: drawn again with them.
                                 v.seen_revision = u64::MAX;
@@ -886,7 +888,7 @@ impl Render for PositionsView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .text_color(t.text_main)
             .child(measure)
             .child(self.header(cx))

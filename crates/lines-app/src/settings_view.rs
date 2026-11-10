@@ -1716,7 +1716,7 @@ impl SettingsWindow {
         {
             left = left.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(crate::zoom::ui(11.5))
                     .text_color(t.warn)
                     // Armed shows by weight too, not only by color.
                     .font_weight(FontWeight::BOLD)
@@ -1981,7 +1981,7 @@ impl SettingsWindow {
         for (r, row) in ed.rows.iter().enumerate() {
             let cell = |text: &str, on: bool, w: f32| {
                 div()
-                    .w(px(w))
+                    .w(crate::zoom::ui(w))
                     .px_1()
                     .rounded_sm()
                     .border_1()
